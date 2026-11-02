@@ -295,6 +295,7 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 			}
 			m.publishEvent(agentproto.EventBacklogOrchestratorReplaced, backlog.OrchestratorEvent{RepoID: repoID, ID: d.Group,
 				SessionID: data.ID, Title: data.Title, Previous: d.SessionID})
+			m.revisitOrchTurnEnd(stop, repoID, data.ID)
 			return
 		}
 	}
@@ -384,6 +385,9 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 	}
 	m.publishEvent(agentproto.EventBacklogOrchestratorReplaced, backlog.OrchestratorEvent{RepoID: repoID, ID: d.Group,
 		SessionID: data.ID, Title: data.Title, Previous: d.SessionID})
+	// Its first turn may have ended before the bind, when it orchestrated no
+	// group yet (Codex P2 on #6614).
+	m.revisitOrchTurnEnd(stop, repoID, data.ID)
 }
 
 // bindReplacement binds next in place of d's session. A busy backlog is
@@ -426,11 +430,13 @@ func (m *Manager) orchDelivered(stop <-chan struct{}, repoID string, d backlog.O
 }
 
 // revisitOrchTurnEnd decides again on a turn of sessionID that ended while
-// this delivery's bookkeeping was pending, now that it is written: the turn end
-// saw the delivered events as unsent and kept the session live, and no later
-// idle edge comes to archive it (Codex P2 on #6614). Only that same turn, still
-// the latest and ended, is decided again: a turn a newer delivery opened ends
-// on its own edge. A turn that used up a --stay was never noted.
+// bookkeeping it depends on was pending, now that it is written: a delivery not
+// yet recorded (the turn end saw the delivered events as unsent), or a
+// replacement not yet bound (the turn end found the session orchestrating
+// nothing). Either way the turn end kept the session live, and no later idle
+// edge comes to archive it (Codex P2s on #6614). Only that same turn, still the
+// latest and ended, is decided again: a turn a newer delivery opened ends on
+// its own edge. A turn that used up a --stay was never noted.
 func (m *Manager) revisitOrchTurnEnd(stop <-chan struct{}, repoID, sessionID string) {
 	gen, ok := m.backlog.takeOrchTurnWaits(sessionID)
 	if !ok {

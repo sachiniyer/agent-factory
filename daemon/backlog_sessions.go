@@ -141,11 +141,12 @@ func (m *Manager) orchestratorTurnEnded(repoID string, inst *session.Instance, g
 			return nil, errBacklogNoChange
 		}
 		end = b.OrchTurnEnded(sessionID, svc.Now())
-		if end.Group != 0 && !end.Changed && !end.Archive {
+		if !end.Changed && !end.Archive {
 			// Kept live for events still pending, which may be the ones this turn
-			// was delivered while their bookkeeping is still being written: noted
-			// under the backlog lock, so orchDelivered, whose write is ordered
-			// after this one, sees it and decides again.
+			// was delivered while their bookkeeping is still being written, or the
+			// turn of a replacement not bound yet: noted under the backlog lock, so
+			// orchDelivered or the replacement's bind, whose write is ordered after
+			// this one, sees it and decides again (Codex P2s on #6614).
 			m.backlog.noteOrchTurnWaits(sessionID, gen)
 		}
 		if !end.Changed {

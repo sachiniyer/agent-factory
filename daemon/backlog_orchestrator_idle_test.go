@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"context"
 	"testing"
 	"time"
 
@@ -203,4 +204,43 @@ func TestOrchestratorTurnRevisitFencedByANewerTurn(t *testing.T) {
 	m.orchDelivered(nil, repoID, d)
 
 	require.Empty(t, *archived, "the revisit archived a session in a newer turn")
+}
+
+// A replacement's first turn (opened at its creation) can end before af binds
+// it, while it orchestrates no group yet: the turn end has nothing to decide.
+// Once it is bound, with the events its first prompt carried delivered, the
+// decision is made again and the idle replacement is archived (Codex P2 on
+// #6614).
+func TestOrchestratorReplacementWhoseFirstTurnEndedBeforeTheBindArchivesAfter(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.mu.Unlock()
+	stubExactResume(t, true, "")
+	archived := stubBacklogArchive(t)
+	prev := createBacklogSession
+	createBacklogSession = func(m *Manager, _ context.Context, req CreateSessionRequest) (session.InstanceData, error) {
+		require.True(t, req.OrchestratorTurn, "a replacement starts with its first turn open")
+		inst, err := session.NewInstance(session.InstanceOptions{ID: "n1", Title: "effort B-2 Effort", Path: t.TempDir(),
+			Program: "claude", OrchestratorTurn: true})
+		require.NoError(t, err)
+		inst.SetBackend(session.NewFakeBackend())
+		inst.SetStartedForTest(true)
+		m.mu.Lock()
+		m.instances[daemonInstanceKey(repoID, "effort B-2 Effort")] = inst
+		m.mu.Unlock()
+		// The first turn ends now, before the bind.
+		gen := inst.BacklogRunGeneration()
+		idleItemSession(t, inst)
+		m.orchestratorTurnEnded(repoID, inst, gen, nil)
+		return session.InstanceData{ID: "n1", Title: "effort B-2 Effort", CreatedAt: time.Now()}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID)
+	require.Empty(t, o.Events, "the first prompt carried the events")
+	require.Equal(t, []string{"n1"}, *archived)
 }
