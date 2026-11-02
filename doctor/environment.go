@@ -204,16 +204,12 @@ func checkTmuxEnvironment(report *Report) {
 func checkAgentBinaries(cfg *config.Config, report *Report) {
 	// Anchor relative program_overrides to the session's launch directory (the
 	// repo the doctor is inside), mirroring the daemon-side #5779 fix that
-	// passes repo.WorkspacePath() to preflight.LocalSessionPrereqsAt. The
-	// doctor used the cwd-fallback CheckCommand instead, so a relative
-	// override flipped between PASS and FAIL purely on where `af doctor` was
-	// invoked — a false failure outside the repo and a false pass against a
-	// decoy cwd. Outside any repo a relative override has no anchor and is
-	// reported advisory; absolute paths, tilde paths, and bare names are still
-	// checked directly. If the repo probe itself failed (not "not inside a git
-	// repository"), the doctor cannot tell whether it is inside the session's
-	// repo, so a relative override is reported incomplete (carrying the probe
-	// error) rather than downgraded to the outside-repo advisory.
+	// passes repo.WorkspacePath() to preflight.LocalSessionPrereqsAt. The doctor
+	// used the cwd-fallback CheckCommand instead, so a relative override flipped
+	// between PASS and FAIL purely on where `af doctor` was invoked. Outside any
+	// repo the launch directory cannot be determined, so today's CheckCommand is
+	// kept and any failure is reported with an honest message instead of
+	// install/reinstall guidance (#6487).
 	workspace, repoErr := currentRepoRoot()
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
@@ -223,30 +219,22 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 			command = config.ResolveProgram(cfg, agent)
 			configured = cfg.DefaultProgram == agent || strings.TrimSpace(cfg.ProgramOverrides[agent]) != ""
 		}
-		outcome := checkProgramCommand(workspace, repoErr, command)
-		switch {
-		case outcome.advisory:
-			header = append(header, agent+"=unverified")
-			report.Warn(sectionEnvironment, agent,
-				relativeOverrideNoAnchorDetail(command),
-				"run `af doctor` from inside the session's repo to verify a relative program_overrides path", false)
-		case outcome.incomplete:
-			header = append(header, agent+"=unverified")
-			report.Warn(sectionEnvironment, agent,
-				relativeOverrideProbeFailedDetail(command, outcome.probeErr),
-				"fix the repo probe (for example, run `af doctor` from inside the session's repo) and rerun", false)
-		case outcome.err == nil:
+		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
+		if err == nil {
 			header = append(header, agent+"=present")
-			report.Pass(sectionEnvironment, agent, fmt.Sprintf("%q resolves to %s", command, outcome.check.Path))
-		default:
-			header = append(header, agent+"=missing")
-			detail := fmt.Sprintf("%q is not runnable: %v", command, outcome.err)
-			remediation := preflight.ProgramError(agent, command, outcome.err).Error()
-			if configured {
-				report.Fail(sectionEnvironment, agent, detail, remediation)
-			} else {
-				report.Warn(sectionEnvironment, agent, detail, remediation, false)
-			}
+			report.Pass(sectionEnvironment, agent, fmt.Sprintf("%q resolves to %s", command, check.Path))
+			continue
+		}
+		header = append(header, agent+"=missing")
+		detail := fmt.Sprintf("%q is not runnable: %v", command, err)
+		remediation := preflight.ProgramError(agent, command, err).Error()
+		if outsideRepo {
+			remediation = noAnchorMessage(command)
+		}
+		if configured {
+			report.Fail(sectionEnvironment, agent, detail, remediation)
+		} else {
+			report.Warn(sectionEnvironment, agent, detail, remediation, false)
 		}
 	}
 	report.AddHeader("agents", strings.Join(header, ", "))
