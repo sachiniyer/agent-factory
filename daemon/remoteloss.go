@@ -359,6 +359,11 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// so the replacement still boots behind the gate and must prove its turn.
 	m.pausedMu.Lock()
 	delete(m.taskRunTurnWatches, key)
+	// A pending task-send re-verification belongs to the dead runtime's pane
+	// too (#6590): the verdict it guarded stays recorded, but the replacement
+	// can never feed its watch — the send's turn evidence, if it ever came,
+	// came on the dead pane.
+	delete(m.unverifiedSendWatches, key)
 	m.pausedMu.Unlock()
 	// If the replacement's ConfirmLive interrupted a still-in-flight task run
 	// (#4222), stamp the owning task's status here — the post-operation

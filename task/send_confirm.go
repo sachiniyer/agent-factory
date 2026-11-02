@@ -40,6 +40,7 @@ var (
 // changed, and a pane that could not be read.
 type SendConfirmation struct {
 	target   ReadinessTarget
+	agent    string
 	sentAt   time.Time
 	watch    *TurnWatch
 	eligible bool
@@ -47,6 +48,12 @@ type SendConfirmation struct {
 	// agents whose chrome carries no elapsed clock to bound a turn's start.
 	preAt     time.Time
 	clockless bool
+	// seedStale is set when the pre-send frame is too old to arm a clockless
+	// watch — the same miss that drops eligibility. Its ARMED state must not
+	// leak into the asynchronous re-verification either: a turn beginning
+	// between the stale capture and the attempt would pass as this send's
+	// (#6592 review). ReverifyWatch rebuilds instead.
+	seedStale bool
 }
 
 // clocklessSeedSlack bounds how long before the send's attempt instant the
@@ -64,6 +71,7 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendCon
 	sentAt := time.Now()
 	c := &SendConfirmation{target: target, sentAt: sentAt}
 	agent := target.ResolvedAgent()
+	c.agent = agent
 	if !turnSignaturedAgent(agent) {
 		return c
 	}
@@ -83,13 +91,20 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendCon
 // instant, the one the session records. The pre-send capture can lag it (a
 // remote preview), and a turn that began in that gap is not this prompt's.
 func (c *SendConfirmation) BindAttempt(attemptedAt time.Time) {
-	if c == nil || c.watch == nil || attemptedAt.IsZero() {
+	if c == nil || attemptedAt.IsZero() {
+		return
+	}
+	// sentAt tracks the attempt even when no watch was built — the busy-pane and
+	// unreadable-pane paths produce one lazily via ReverifyWatch, bound to this
+	// same instant (#6590).
+	c.sentAt = attemptedAt
+	if c.watch == nil {
 		return
 	}
 	if c.clockless && attemptedAt.Sub(c.preAt) > clocklessSeedSlack {
 		c.eligible = false
+		c.seedStale = true
 	}
-	c.sentAt = attemptedAt
 	c.watch.boundary = attemptedAt
 }
 
@@ -117,6 +132,31 @@ func (c *SendConfirmation) Confirm(ctx context.Context) bool {
 		case <-time.After(sendConfirmPoll):
 		}
 	}
+}
+
+// ReverifyWatch exposes the bound chrome watcher for the daemon's asynchronous
+// re-verification feed (#6590): a send that stays sent-unverified past the
+// bounded Confirm window — the pane was already mid-turn at the send, or the
+// turn simply started after the budget — keeps its evidence contract alive.
+// The daemon feeds the status poll's pane captures into this watch; it fires
+// only on the same evidence Confirm applies: for the timed agents a status row
+// ticking with its own elapsed inside the send's age, for the others scoped
+// chrome seen absent before it is present. A turn that was already running at
+// the send can never satisfy either contract, so nothing weaker is promoted.
+// Nil for an agent with no in-turn signature — there is nothing to prove.
+func (c *SendConfirmation) ReverifyWatch() *TurnWatch {
+	if c == nil || !turnSignaturedAgent(c.agent) {
+		return nil
+	}
+	if c.watch != nil && !c.seedStale {
+		return c.watch
+	}
+	// No pre-send frame seeded a watch (the pane was busy or unreadable at the
+	// send), or its seed went stale inside the clockless slack: build one bound
+	// to the attempt instant anyway. Its empty baseline needs no seed — a
+	// pre-boundary turn fails the timed agents' own clock and the scoped
+	// agents' absent-before-present contract on its own.
+	return NewTurnWatch(c.agent, c.sentAt)
 }
 
 // BeginInstanceSendConfirmation is BeginSendConfirmation for a live session.
