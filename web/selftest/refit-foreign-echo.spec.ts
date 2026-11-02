@@ -158,9 +158,18 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // the foreign one the probe writes (>60 rows, the #2347 desktop shape).
   await page.setViewportSize({ width: 1280, height: 2000 });
   // Land on the session list: the shell is live but no pane has attached, so
-  // the probe below is the tab's only subscriber when it seeds the grid.
+  // the probe below is the tab's only subscriber when it seeds the grid. Let
+  // the document's fonts finish first — the pane's FIRST fit must already be
+  // its final grid, or a font-metric change produces a second claim write
+  // whose echo re-contests the pane and masks the yield this spec pins.
   await page.goto("/");
   await page.locator("#app[data-af-resync-settled]").waitFor();
+  await page.evaluate(
+    () =>
+      document.fonts.ready.then(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+      ),
+  );
 
   // A raw subscriber on the agent tab's stream (?tab=0 binds the same broker
   // the pane's ?tab_id= attach lands on). It writes the foreign grid and then
@@ -229,17 +238,11 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // Now the pane attaches (in-page hash navigation keeps the probe's socket).
   // Its subscribe replay delivers the foreign grid — the contested sighting
   // that primes the yield on master — before the pane's claim is on the wire.
-  // (No af-session-first assertion: that class is the phone layout; at this
-  // desktop viewport the open session reads as data-term-status="open".)
   await page.evaluate((sessionId) => {
     window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
   }, selected.id);
   await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
   const rows = () => page.locator(".af-term-host .xterm-rows > div").count();
-  // The activation claims the host fit: the emulator renders the pane's own
-  // >60-row grid (on every branch — the claim is unconditional).
-  await expect.poll(rows, { timeout: 8000 }).toBeGreaterThan(60);
-  const grown = await rows();
 
   // The claim must be on the wire before the peer answers — a repeat that
   // lands while the pane's armed fit is still pending would be followed by
@@ -247,20 +250,32 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   // every broadcast in order: it waits for the pane's >60-row claim echo and
   // then, in the SAME round trip, writes the foreign grid once more — exactly
   // the peer's first post-claim answer, and always inside the primed window.
-  // A >60-row echo after the repeat can only be the pane's reclaim write: on
-  // master the yield window reads this repeat of the replayed grid as an
-  // insistent writer and stands down — the activation loses to the grid it
-  // was meant to take, and no such echo ever comes.
-  await page.evaluate(async ({ staleRows, staleCols }) => {
+  const grown = await page.evaluate(async ({ staleRows, staleCols }) => {
     const w = window as unknown as {
       __probe: WebSocket;
       __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
     };
     const at = await w.__waitRows((r) => r > 60, 0, ">60-row");
+    const claimed = document.querySelectorAll(".af-term-host .xterm-rows > div").length;
     w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
-    await w.__waitRows((r) => r > 60, at + 1, ">60-row reclaim");
+    // The repeat's own echo — it proves the pane has SEEN the answer, so what
+    // the emulator does next is its reply, not an echo still in flight.
+    await w.__waitRows((r) => r === staleRows, at + 1, `${staleRows}-row repeat`);
+    return claimed;
   }, { staleRows, staleCols });
+  expect(grown).toBeGreaterThan(60);
 
-  // And the emulator agrees: the re-asserted fit took the grid back.
-  await expect.poll(rows, { timeout: 8000 }).toBe(grown);
+  // The emulator's rows are the verdict. On master the yield window reads the
+  // repeat as an insistent writer and the pane stands down: its emulator
+  // STAYS on the foreign 34-row grid — the activation lost to the grid it was
+  // meant to take. On the fix the repeat is a fresh post-admission contest:
+  // one reclaim refit takes the host grid back. (A >60-row echo would be the
+  // same verdict on the wire, but the emulator is unambiguous about which
+  // writer won: an incidental second claim cannot mask it.)
+  await expect
+    .poll(rows, {
+      message: "the activation must re-assert its host fit against the peer's first real answer",
+      timeout: 10_000,
+    })
+    .toBe(grown);
 });
