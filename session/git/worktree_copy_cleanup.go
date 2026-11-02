@@ -542,7 +542,7 @@ func removeCopiedEntryWithRestore(
 		// name with no descriptor of its own. The name has just been verified
 		// to bind the node the caller intends, so granting access cannot widen
 		// a replacement.
-		if err := prepareDirectoryEntryRemoval(directory, entry.name); err != nil {
+		if err := prepareDirectoryEntryRemoval(directory, entry.name, entry.source); err != nil {
 			return err
 		}
 	}
