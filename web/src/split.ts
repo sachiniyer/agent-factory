@@ -735,6 +735,11 @@ export class SplitView {
 
   /** Takes the keyboard away from every pane (back to rail nav). */
   blur(): void {
+    // An explicit blur revokes a queued keyboard handoff (#6576): a detach,
+    // view switch, or rail exit issued while a refit frame is still pending
+    // must win over the deferred refocus — deferred focus never overrides a
+    // later user choice.
+    this.pendingRefocus = false;
     for (const pane of this.panes.values()) {
       pane.term?.blur();
     }
