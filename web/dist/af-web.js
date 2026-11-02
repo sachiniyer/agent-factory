@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1dd7c19ba786";
+var CLIENT_VERSION = "9bd33b884cbc";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14219,13 +14219,20 @@ function setRatio(root2, splitId, ratio) {
 var PANE_MIN_WIDTH_PX = 320;
 var PANE_MIN_HEIGHT_PX = 80;
 var PANE_DIVIDER_PX = 4;
-function minSubtreeSize(node, dir, leafMinPx, dividerPx) {
+function minSubtreeSize(node, dir, leafMinPx, dividerPx, visible) {
   if (node.kind === "leaf") {
-    return leafMinPx;
+    return visible !== void 0 && !visible.has(node.id) ? 0 : leafMinPx;
   }
-  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx);
-  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx);
-  return node.dir === dir ? a + dividerPx + b : Math.max(a, b);
+  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx, visible);
+  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx, visible);
+  if (node.dir !== dir) {
+    return Math.max(a, b);
+  }
+  if (a === 0 || b === 0) {
+    return Math.max(a, b);
+  }
+  const r = Math.min(Math.max(node.ratio, 0.01), 0.99);
+  return Math.max(a / r, b / (1 - r)) + dividerPx;
 }
 function leafSizes(root2, w, h2, dividerPx) {
   const out = /* @__PURE__ */ new Map();
@@ -15816,8 +15823,10 @@ var SplitView = class {
       document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
       const rect = parent.getBoundingClientRect();
       const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
-      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX);
-      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX);
+      const visibleRoot = this.displayTree ?? this.tree;
+      const visible = visibleRoot ? new Set(leaves(visibleRoot).map((l) => l.id)) : void 0;
+      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX, visible);
       const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
       const lo = minA / span;
       const hi = 1 - minB / span;

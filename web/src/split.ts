@@ -1926,8 +1926,14 @@ export class SplitView {
       // never into a sliver. The wrapper's own box is fixed for the drag's life
       // (flex moves its children, not it), so the rect captured here stays valid.
       const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
-      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX);
-      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX);
+      // The clamp prices only the leaves the fit leaves VISIBLE (#6573): the
+      // DOM is the retained tree since #6558, so node.a/node.b still carry
+      // fit-hidden leaves — pricing their floors in deadlocks the drag (four
+      // panes fit to two: each side's retained floor exceeds the whole span).
+      const visibleRoot = this.displayTree ?? this.tree;
+      const visible = visibleRoot ? new Set(leaves(visibleRoot).map((l) => l.id)) : undefined;
+      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX, visible);
       const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
       const lo = minA / span;
       const hi = 1 - minB / span;

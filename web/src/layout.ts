@@ -382,16 +382,41 @@ export const PANE_MIN_HEIGHT_PX = 80;
 export const PANE_DIVIDER_PX = 4;
 
 /** The smallest size `node` may take along `dir` while every leaf inside it still
- *  meets its floor. Along the split's own axis the two children must coexist, so
- *  their floors sum (plus the divider); across it they overlap, so the larger
- *  floor governs. */
-export function minSubtreeSize(node: LayoutNode, dir: SplitDir, leafMinPx: number, dividerPx: number): number {
+ *  meets its floor at the CURRENT ratios. Across the split's axis the children
+ *  overlap, so the larger floor governs. Along it the children coexist in
+ *  ratio shares of the content span: side a renders at ratio of the span, so
+ *  keeping it at its floor needs minA / ratio — a skewed split needs far more
+ *  room than the floors' naive sum, which is exactly the gap an ancestor
+ *  divider drag must respect (#6560).
+ *
+ * `visible`, when passed, is the set of leaf ids the fit left rendered: a leaf
+ *  outside it contributes 0, and a split side with nothing rendered takes no
+ *  flex share at all — its divider is hidden too — so the other side alone
+ *  governs. Without it every leaf counts, which is what made a drag clamp
+ *  deadlock on a fit-hidden layout (#6573). */
+export function minSubtreeSize(
+  node: LayoutNode,
+  dir: SplitDir,
+  leafMinPx: number,
+  dividerPx: number,
+  visible?: ReadonlySet<string>,
+): number {
   if (node.kind === "leaf") {
-    return leafMinPx;
+    return visible !== undefined && !visible.has(node.id) ? 0 : leafMinPx;
   }
-  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx);
-  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx);
-  return node.dir === dir ? a + dividerPx + b : Math.max(a, b);
+  const a = minSubtreeSize(node.a, dir, leafMinPx, dividerPx, visible);
+  const b = minSubtreeSize(node.b, dir, leafMinPx, dividerPx, visible);
+  if (node.dir !== dir) {
+    return Math.max(a, b);
+  }
+  if (a === 0 || b === 0) {
+    return Math.max(a, b);
+  }
+  // A degenerate ratio (0 or 1, reachable only by corrupt retained state)
+  // would make a side's demand infinite; clamping holds the drag legal rather
+  // than freezing it outright.
+  const r = Math.min(Math.max(node.ratio, 0.01), 0.99);
+  return Math.max(a / r, b / (1 - r)) + dividerPx;
 }
 
 /** The rendered size of every leaf if `root` were tiled into `w`×`h` px: splits
