@@ -10,7 +10,7 @@
 import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
-import { installFakeDom, type FakeElement } from "./backlog_fakedom.js";
+import { installFakeDom, type FakeElement } from "./fakedom.js";
 import { renderHostsSection, type HostActions, type HostAddDraft, type HostStatus, type HostsState } from "./hosts.js";
 import type { ConfigEntry, HostCheckResult } from "./types.js";
 
