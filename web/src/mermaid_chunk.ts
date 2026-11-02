@@ -36,8 +36,17 @@ async function renderNow(source: string, theme: Record<string, string>): Promise
     // dagre, not the v12 elk default: the elk layout chunk alone is ~1.5MB and
     // dagre is the classic look every mermaid doc on the web has.
     layout: "dagre",
+    // Labels as SVG <text>, never <foreignObject>: in v12 htmlLabels is a
+    // global key (the flowchart-scoped one is deprecated and the v2 renderer
+    // ignores it), and it rides the secure list so a %%{init}%% directive
+    // cannot turn HTML labels back on — same for markdownAutoWrap.
+    htmlLabels: false,
     flowchart: { htmlLabels: false },
     markdownAutoWrap: false,
+    secure: [
+      "secure", "securityLevel", "startOnLoad", "maxTextSize",
+      "suppressErrorRendering", "maxEdges", "htmlLabels", "markdownAutoWrap",
+    ],
     maxTextSize: 50_000,
     maxEdges: 500,
   });

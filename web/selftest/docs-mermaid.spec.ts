@@ -69,7 +69,7 @@ test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, i
   await expect(mermaid.locator("svg")).toBeVisible({ timeout: 30_000 });
   expect(mermaidLoads, "the mermaid chunk loads once, on demand").toHaveLength(1);
   await expect(mermaid.locator("svg text").filter({ hasText: "af daemon" })).toHaveCount(1);
-  await expect(mermaid.locator(".cm-md-mermaid-errtext")).toHaveCount(0);
+  await expect(pane.locator(".cm-md-mermaid-errtext:visible")).toHaveCount(0);
 
   // Cursor inside the fence shows its source, the way tables already behave.
   await mermaid.click();

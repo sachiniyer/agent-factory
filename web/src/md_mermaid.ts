@@ -60,7 +60,13 @@ function themeMode(): "light" | "dark" {
  *  the exotic per-type variables inherit from primary/secondary/tertiary. */
 function mermaidThemeVars(): Record<string, string> {
   const cs = getComputedStyle(document.documentElement);
-  const v = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
+  // A token's resolved value must be a color mermaid understands — a theme
+  // value it cannot parse throws mid-render, so odd values take the fallback.
+  const v = (name: string, fallback: string): string => {
+    const got = cs.getPropertyValue(name).trim();
+    return got && CSS.supports("color", got) ? got : fallback;
+  };
+  const s = (name: string, fallback: string): string => cs.getPropertyValue(name).trim() || fallback;
   // Fallbacks stay theme-resolved too (the document's computed text/background),
   // never literals — component colors must come out of the theme mechanism.
   const ink = v("--af-ink", cs.color);
@@ -70,7 +76,7 @@ function mermaidThemeVars(): Record<string, string> {
   const border = v("--af-border", ink);
   return {
     background: surface,
-    fontFamily: v("--af-font-ui", cs.fontFamily),
+    fontFamily: s("--af-font-ui", cs.fontFamily),
     fontSize: "14px",
     primaryColor: raised,
     primaryTextColor: ink,

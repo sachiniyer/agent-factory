@@ -5482,6 +5482,13 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   margin: 0 auto;
 }
 
+/* Mermaid ships edge-animation keyframes in every diagram's <style>; the spec
+   is no animation, so whatever survives the sanitizer still cannot move. */
+.af-docs-editor .cm-md-mermaid svg * {
+  animation: none !important;
+  transition: none !important;
+}
+
 .af-docs-editor .cm-md-mermaid-src {
   margin: 0;
   padding: var(--af-space-2);

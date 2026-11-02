@@ -4915,6 +4915,10 @@ textarea[class] {
   height: auto;
   margin: 0 auto;
 }
+.af-docs-editor .cm-md-mermaid svg * {
+  animation: none !important;
+  transition: none !important;
+}
 .af-docs-editor .cm-md-mermaid-src {
   margin: 0;
   padding: var(--af-space-2);
