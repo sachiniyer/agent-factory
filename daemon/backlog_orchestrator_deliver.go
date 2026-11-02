@@ -3,12 +3,14 @@ package daemon
 import (
 	"context"
 	"errors"
+	"strconv"
 	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // killOrchestratorSession kills a replacement session af could not bind. A
@@ -209,7 +211,7 @@ func (m *Manager) adoptableReplacement(repoID string, b *backlog.Backlog, r *bac
 	defer m.mu.Unlock()
 	var best *session.Instance
 	for key, inst := range m.instances {
-		if inst == nil || inst.BacklogItem != 0 || !strings.HasPrefix(inst.Title, r.TitleBase) || inst.CreatedAt.Before(r.Since) {
+		if inst == nil || inst.BacklogItem != 0 || !isReplacementTitle(inst.Title, r.TitleBase) || inst.CreatedAt.Before(r.Since) {
 			continue
 		}
 		if rid, _ := splitDaemonInstanceKey(key); rid != repoID {
@@ -226,6 +228,23 @@ func (m *Manager) adoptableReplacement(repoID string, b *backlog.Backlog, r *bac
 		return session.InstanceData{}, false
 	}
 	return session.InstanceData{ID: best.ID, Title: best.Title}, true
+}
+
+// isReplacementTitle is whether title is one CreateSession gives a session it
+// creates from base (nextAvailableTitleLocked): base itself, or base bounded
+// for disambiguation with a "-N" suffix. A long base is truncated before the
+// suffix, so a prefix match on the whole base would miss it, and a looser
+// match would adopt a session that merely starts with it (Codex P2 on #6571).
+func isReplacementTitle(title, base string) bool {
+	if title == base {
+		return true
+	}
+	rest, ok := strings.CutPrefix(title, git.BoundTitleForDisambiguation(base)+"-")
+	if !ok {
+		return false
+	}
+	n, err := strconv.Atoi(rest)
+	return err == nil && n >= 2 && strconv.Itoa(n) == rest
 }
 
 // orchSendRacedArchive is whether a failed send met an archive of the

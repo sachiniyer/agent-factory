@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/git"
 )
 
 // orchestratedGroup adds group B-2 with child B-3 to a registered project,
@@ -567,4 +568,62 @@ func TestOrchestratorReplacementWhoseCreateKeptATombstoneIsAFailure(t *testing.T
 	require.Len(t, o.Failures, 1)
 	require.Nil(t, o.Replacing, "the failed create clears the record, so a later pass may start another")
 	require.Len(t, o.Events, 1)
+}
+
+// TestOrchestratorAdoptsAReplacementWhoseLongTitleWasTruncated: a title base
+// too long to take a suffix is truncated before "-N" when its bare name is
+// taken, and adoption matches the allocator's candidates, not a prefix of the
+// whole base. A newer session that only starts with the base is not one of
+// them (Codex P2 on #6571).
+func TestOrchestratorAdoptsAReplacementWhoseLongTitleWasTruncated(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	svc := m.backlogService()
+	since := time.Now().Add(-time.Minute)
+	base := "effort B-2 " + strings.Repeat("x", 200)
+	_, err := svc.Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
+		return []int{2}, b.BeginOrchReplace(2, "o1", base, since)
+	})
+	require.NoError(t, err)
+	truncated := git.BoundTitleForDisambiguation(base) + "-2"
+	require.False(t, strings.HasPrefix(truncated, base), "precondition: the allocator truncated the base")
+	m.mu.Lock()
+	delete(m.instances, daemonInstanceKey(repoID, "planner"))
+	m.instances[daemonInstanceKey(repoID, truncated)] = &session.Instance{ID: "n1", Title: truncated, Program: "claude", CreatedAt: since.Add(time.Second)}
+	m.instances[daemonInstanceKey(repoID, base+" notes")] = &session.Instance{ID: "decoy", Title: base + " notes", Program: "claude", CreatedAt: since.Add(2 * time.Second)}
+	m.mu.Unlock()
+	prev := createBacklogSession
+	createBacklogSession = func(*Manager, context.Context, CreateSessionRequest) (session.InstanceData, error) {
+		t.Error("a second replacement was started")
+		return session.InstanceData{ID: "n2"}, nil
+	}
+	t.Cleanup(func() { createBacklogSession = prev })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+
+	o := orchOf(t, repoID)
+	require.Equal(t, "n1", o.SessionID, "the truncated replacement is adopted, not the newer decoy")
+	require.Nil(t, o.Replacing)
+}
+
+func TestIsReplacementTitle(t *testing.T) {
+	long := strings.Repeat("y", 200)
+	bounded := git.BoundTitleForDisambiguation(long)
+	for _, c := range []struct {
+		title, base string
+		want        bool
+	}{
+		{"effort B-2 Effort", "effort B-2 Effort", true},
+		{"effort B-2 Effort-2", "effort B-2 Effort", true},
+		{"effort B-2 Effort-17", "effort B-2 Effort", true},
+		{"effort B-2 Effort-1", "effort B-2 Effort", false},
+		{"effort B-2 Effort-02", "effort B-2 Effort", false},
+		{"effort B-2 Effort-", "effort B-2 Effort", false},
+		{"effort B-2 Effort notes", "effort B-2 Effort", false},
+		{"effort B-2 Effortless", "effort B-2 Effort", false},
+		{long, long, true},
+		{bounded + "-3", long, true},
+		{long + "-3", long, false},
+	} {
+		require.Equal(t, c.want, isReplacementTitle(c.title, c.base), "%q from %q", c.title, c.base)
+	}
 }
