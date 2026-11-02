@@ -490,3 +490,12 @@ func TestRulesExplainPushedEdits(t *testing.T) {
 		t.Fatalf("rule 2 must explain pushed edits:\n%s", r)
 	}
 }
+
+func TestRulesBindTheProposalParentWhenAskedToManage(t *testing.T) {
+	r := Rules("p", "/x/p")
+	for _, want := range []string{"10. When the user asks you to manage, run, own or drive this proposal's items", `bind its parent item (key "p")`, `add --orchestrate to "af backlog add --file -"`, `"af backlog orchestrate <parent id> --self"`, "Add --replace to either command", "you are now the orchestrator", "the user queues items, and af's runner starts them", "Bind only on that ask."} {
+		if !strings.Contains(r, want) {
+			t.Fatalf("rule 10 must say %s:\n%s", want, r)
+		}
+	}
+}
