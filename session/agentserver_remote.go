@@ -690,7 +690,9 @@ func (c *remoteAgentClient) previewGridReq(req agentPreviewReq) (PaneSnapshot, e
 		Screen:    []byte(resp.Grid),
 		CursorRow: resp.CursorRow, CursorCol: resp.CursorCol, HasCursor: resp.HasCursor,
 		Modes: resp.Modes, HasModes: resp.HasModes,
-		Rows: resp.Rows, Cols: resp.Cols, HasSize: resp.HasSize,
+		CursorVisible: resp.CursorVisible,
+		HasVisibility: resp.HasVisibility,
+		Rows:          resp.Rows, Cols: resp.Cols, HasSize: resp.HasSize,
 	}, nil
 }
 
@@ -903,6 +905,8 @@ type agentPreviewResp struct {
 	HasCursor       bool           `json:"has_cursor,omitempty"`
 	CursorRow       int            `json:"cursor_row,omitempty"`
 	CursorCol       int            `json:"cursor_col,omitempty"`
+	HasVisibility   bool           `json:"has_visibility,omitempty"`
+	CursorVisible   bool           `json:"cursor_visible,omitempty"`
 	HasSize         bool           `json:"has_size,omitempty"`
 	Rows            uint16         `json:"rows,omitempty"`
 	Cols            uint16         `json:"cols,omitempty"`
