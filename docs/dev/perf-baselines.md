@@ -82,7 +82,8 @@ The original P1 recording was measured on 2026-09-05; its layout-shift and TUI
 entries remain unchanged. The three web latency baselines were tightened on
 2026-09-06 for #3914 using the six after samples detailed below. Bundle baselines
 were refreshed on 2026-09-07 for #4050, on 2026-09-09 for #4018, on
-2026-10-01 for #5028, and on 2026-10-01 for #5057, each using
+2026-10-01 for #5028, on 2026-10-01 for #5057, and on
+2026-11-02 for #6622, each using
 three identical deterministic samples. Measurements use Linux amd64, Node/Chromium from the
 pinned Playwright 1.56.1 Noble image, Go 1.25.0 and a 4GiB container memory limit.
 The original warm end-to-end run took about three minutes.
@@ -96,8 +97,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1337886.000 | 1337886.000–1337886.000 | 0.000 | 1404780.300 |
-| gzip_bytes | 306713.000 | 306713.000–306713.000 | 0.000 | 322048.650 |
+| raw_bytes | 1364595.000 | 1364595.000–1364595.000 | 0.000 | 1432824.750 |
+| gzip_bytes | 312686.000 | 312686.000–312686.000 | 0.000 | 328320.300 |
 | lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
 | lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -134,6 +135,10 @@ only when a Docs tab first opens. The shell metrics exclude `lazy/`, and the two
 were computed with `bundleBytes` from `scripts/perf/check.mjs`, the function that
 `report.mjs` calls, over the committed `web/dist`. Bundle bytes are deterministic,
 so the three samples are identical. The same PR adds the Docs tab's loader, shell wiring and CSS to the shell, which then measures 1,149,376 raw and 260,459 gzip bytes over `web/dist` without `lazy/`. Both are inside the existing shell budgets (raw 1,182,374; gzip 268,549), so those baselines are not moved. Lazy bundle: 371,003 raw / 120,125 gzip.
+
+### Bundle refresh provenance (#6622)
+
+Master's committed bundle at `d3e02d1f8c` is 1,339,655 raw / 307,228 gzip over `web/dist/**.{js,css}` (gzip level 9). The web sandbox-hosts management port (Refs #5571, branch `siyer/surface-parity-gap-68`: the Hosts Config section — list, add, remove, make-default, check — plus the connection-lifecycle fencing from its Codex review and their CSS) takes it to 1,364,595 raw / 312,686 gzip, +24,940 raw / +5,458 gzip. The lazy Docs editor is unchanged (371,254 raw on both trees; its gzip sum moves 2 bytes, 120,177 → 120,175, inside the existing budget, so those entries are not moved). Comments do not ship (esbuild strips them), so the growth is feature code. Both shell entries are moved. Each is the deterministic byte sum from `bundleBytes` in `scripts/perf/check.mjs` (the function `report.mjs` calls) over the PR's rebuilt `web/dist`, three identical samples, margin baseline x 0.05. Every timing and layout-shift baseline is unchanged. Not recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6582)
 
