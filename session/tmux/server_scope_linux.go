@@ -99,7 +99,12 @@ func ensureDedicatedServer(home string) error {
 	if tmuxServerRunning() {
 		// Do not mutate a foreign or legacy server. Its ordinary exit-empty
 		// policy lets it retire after its last session, at which point a later
-		// spawn replaces it with the dedicated server below.
+		// spawn replaces it with the dedicated server below. The record must
+		// still be rewritten — this early return is how a restart that adopts
+		// an existing server used to leave the previous generation's record in
+		// place, letting doctor pin its reads to a socket the daemon no longer
+		// uses (#6339).
+		recordAdoptedServer(home)
 		return nil
 	}
 	// afhome.MkdirAll, not os.MkdirAll: the argument IS the AF home, so this is
@@ -292,6 +297,28 @@ func dedicatedServerReady(home, unit string) {
 	socket := DefaultSocketPath()
 	log.InfoLog.Printf("dedicated tmux server is running in systemd unit %s.scope on socket %s", unit, socket)
 	recordServerState(home, ServerState{Mode: ServerModeDedicated, Socket: socket, Unit: unit, At: time.Now()})
+}
+
+// recordAdoptedServer rewrites the server-state record when the daemon adopts
+// an already-running server instead of launching its own (#6339). Without this
+// write a restart that adopted a server returned from ensureDedicatedServer
+// leaving the PREVIOUS generation's record in place — stamped with a dead
+// pid's authorship and possibly naming a socket this daemon no longer uses,
+// which doctor then trusted as current when it armed process kills. The
+// record's socket always reflects the socket this daemon generation resolved;
+// when the adopted socket is still the one a previous generation dedicated,
+// the dedicated claim is preserved rather than rewritten as adopted, since
+// the running server is almost certainly that dedicated server — and the same
+// holds for a same-socket fallback decision, whose reason a rewrite to
+// "adopted" would hide from doctor while its bootstrap failure is still
+// unresolved.
+func recordAdoptedServer(home string) {
+	socket := DefaultSocketPath()
+	st := ServerState{Mode: ServerModeAdopted, Socket: socket, At: time.Now()}
+	if prev, ok, err := ReadServerState(home); err == nil && ok && prev.Socket == socket {
+		st.Mode, st.Unit, st.Reason = prev.Mode, prev.Unit, prev.Reason
+	}
+	recordServerState(home, st)
 }
 
 func replaceEnvironment(environ []string, name, value string) []string {

@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"sync"
 	"time"
@@ -26,6 +27,13 @@ const (
 	// session is started in its own systemd scope and the first of them becomes
 	// the server for the socket.
 	ServerModeFallback ServerMode = "fallback"
+	// ServerModeAdopted: the daemon found a tmux server already running on its
+	// socket and attached its sessions to it rather than launching a dedicated
+	// one (#6339). The server is not af-owned and keeps its own lifecycle —
+	// af never mutates it — but the socket is still where the daemon's
+	// sessions live, and recording it is what lets doctor pin its reads to
+	// the server this daemon generation actually uses.
+	ServerModeAdopted ServerMode = "adopted"
 )
 
 // ServerState is what the daemon last decided about its tmux server. The daemon
@@ -39,6 +47,36 @@ type ServerState struct {
 	Unit   string    `json:"unit,omitempty"`
 	Reason string    `json:"reason,omitempty"`
 	At     time.Time `json:"at"`
+	// DaemonPID is the pid of the daemon generation that wrote this record
+	// (#6339). Doctor can prove the record is CURRENT only when a daemon
+	// serving this home still runs under the stamped pid — a restart that
+	// adopts an already-running server stamps a new record, so a record
+	// carrying a dead or mismatched pid is one a previous generation left
+	// behind and may name a socket the live daemon no longer uses. A record
+	// written before this field existed carries zero and is trusted only when
+	// no daemon is live to contradict it.
+	DaemonPID int `json:"daemon_pid,omitempty"`
+	// PriorSockets lists every earlier socket this daemon lineage recorded,
+	// oldest first. A restart under a different TMUX_TMPDIR moves the daemon
+	// to a new socket while the previous server and its sessions can stay
+	// alive; the record must account for every socket generation the daemon
+	// has used before doctor may read a session's absence from the current
+	// one as death (#6339). A generation is added only when the socket path
+	// changes — an environment change; a same-environment restart reuses the
+	// socket — and entries are never pruned by inferred death: proving a
+	// socket generation dead is hard, and a dead server still answers
+	// "no server running" definitively, so retention costs doctor a bounded
+	// listing while dropping a live one hides its sessions. The list is
+	// capped at maxPriorSocketGenerations newest generations; exceeding the
+	// cap marks HistoryTruncated rather than silently losing coverage.
+	PriorSockets []string `json:"prior_sockets,omitempty"`
+	// HistoryTruncated records that the PriorSockets cap dropped a socket
+	// generation whose file still existed — one the record can therefore no
+	// longer account for. Once set it never clears: the dropped server may
+	// still host sessions, so every later record inherits the admission that
+	// its history is incomplete. Doctor refuses any destructive reading that
+	// needs complete socket coverage while this is set (#6339).
+	HistoryTruncated bool `json:"history_truncated,omitempty"`
 }
 
 // ServerDeath is the marker the dedicated server's wrapper leaves when tmux exits
@@ -101,18 +139,77 @@ var (
 )
 
 // recordServerState persists st under home, skipping the write when nothing but
-// the timestamp changed (the fallback path runs on every session spawn).
+// the timestamp changed (the fallback path runs on every session spawn). Every
+// record is stamped with this daemon's pid — the generation marker doctor uses
+// to prove the record is current — and carries forward every socket generation
+// the previous record knew about, so a restart that moves the daemon to a new
+// socket leaves the daemon's full socket history accountable (#6339).
 func recordServerState(home string, st ServerState) {
 	serverStateMu.Lock()
 	defer serverStateMu.Unlock()
+	st.DaemonPID = os.Getpid()
+	prev, ok, err := ReadServerState(home)
+	switch {
+	case err != nil:
+		// The previous record could not be read — the lineage's socket
+		// history is unrecoverable here, so admit incomplete coverage rather
+		// than write a record that claims none ever existed.
+		st.HistoryTruncated = true
+	case ok:
+		priors, truncated := priorSocketGenerations(prev, st.Socket)
+		st.PriorSockets = priors
+		st.HistoryTruncated = st.HistoryTruncated || prev.HistoryTruncated || truncated
+	}
 	if st.Mode == lastServerState.Mode && st.Unit == lastServerState.Unit &&
-		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason {
+		st.Socket == lastServerState.Socket && st.Reason == lastServerState.Reason &&
+		st.DaemonPID == lastServerState.DaemonPID &&
+		st.HistoryTruncated == lastServerState.HistoryTruncated &&
+		slices.Equal(st.PriorSockets, lastServerState.PriorSockets) {
 		return
 	}
 	if err := writeJSONFile(filepath.Join(home, serverStateFileName), st); err != nil {
 		return
 	}
 	lastServerState = st
+}
+
+// maxPriorSocketGenerations caps the socket history the record carries
+// (#6339). A generation is added only per socket move; without a bound a
+// daemon restarted under many different TMUX_TMPDIRs would grow the file
+// without limit. Eight still accounts for every socket a realistic lineage
+// leaves alive — and exceeding it sets HistoryTruncated on the record, which
+// blinds doctor's record-only death proofs rather than letting a dropped
+// generation read as accounted for.
+const maxPriorSocketGenerations = 8
+
+// priorSocketGenerations returns prev's socket lineage with prev's own socket
+// moved into history when the daemon has moved on to current — deduplicated
+// by path, oldest first, bounded. No generation is ever dropped by inferred
+// death: a dead server still answers "no server running" definitively, so
+// doctor lists it as an authoritative empty, while a wrong guess at death
+// would hide its live sessions entirely. When more than
+// maxPriorSocketGenerations generations accumulate, the oldest are dropped —
+// the newest are the sockets a live leftover server is most likely still
+// answering on — and the truncation is reported so doctor knows the history
+// it can account for is incomplete.
+func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
+	seen := map[string]bool{current: true}
+	var out []string
+	// prev.PriorSockets is already oldest-first; prev.Socket — the socket the
+	// previous record named — is the NEWEST generation and joins at the tail.
+	for _, s := range append(slices.Clone(prev.PriorSockets), prev.Socket) {
+		if s == "" || seen[s] {
+			continue
+		}
+		seen[s] = true
+		out = append(out, s)
+	}
+	truncated := false
+	if len(out) > maxPriorSocketGenerations {
+		out = out[len(out)-maxPriorSocketGenerations:]
+		truncated = true
+	}
+	return out, truncated
 }
 
 // ReadServerState returns the daemon's last recorded tmux server decision.
