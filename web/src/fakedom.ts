@@ -1,6 +1,6 @@
-// A small DOM for the Backlog view's unit tests; the web tests run in node with
-// no DOM library. It models what the view's focus handling depends on: removing
-// a node that holds focus blurs it, as a browser does.
+// A small DOM for unit tests; the web tests run in node with no DOM library.
+// It models what focus handling depends on: removing a node that holds focus
+// blurs it, as a browser does.
 
 type Listener = (e: FakeEvent) => void;
 

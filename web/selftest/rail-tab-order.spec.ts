@@ -3,7 +3,7 @@ import { expect, test, type Page } from "@playwright/test";
 // #6409: every rail row's actions button used to be its own Tab stop, so a
 // keyboard user paid one Tab press per session to cross the rail — hundreds at
 // fleet scale. The rail is now a roving tabindex: the SELECTED row is the stop,
-// its in-row controls (actions trigger, backlog chip) the rest, and j/k moves
+// its in-row actions trigger the rest, and j/k moves
 // both the selection and the DOM focus. Bounded stops however many rows there
 // are, and every row's menu is still reachable: select the row, Tab, Enter.
 
@@ -51,17 +51,13 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   // Exactly one row (the selected one) is a stop; its controls ride along.
   // Everything else in the rail leaves the order — except a never-selectable
   // (aria-disabled) row, whose controls are its only keyboard route.
-  const selectedChips = await page.locator(".af-rail-list .af-row.af-row-selected .af-backlog-session-chip").count();
-  const inertControls = await page.locator(".af-rail-list .af-row[aria-disabled='true'] :is(.af-term-more, .af-backlog-session-chip)").count();
   const inertTriggers = await page.locator(".af-rail-list .af-row[aria-disabled='true'] .af-row-actions .af-term-more").count();
   const tabbable = await page.locator(".af-rail-list").evaluate((list) => ({
     rows: [...list.querySelectorAll<HTMLElement>(".af-row")].filter((r) => r.tabIndex === 0).length,
     triggers: [...list.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more")].filter((t) => t.tabIndex === 0).length,
-    chips: [...list.querySelectorAll<HTMLElement>(".af-backlog-session-chip")].filter((c) => c.tabIndex === 0).length,
   }));
   expect(tabbable.rows, "one rail row is the Tab stop").toBe(1);
   expect(tabbable.triggers, "one selected-row trigger plus each never-selectable row's").toBe(1 + inertTriggers);
-  expect(tabbable.chips, "only the selected row's chips are stops").toBe(selectedChips);
 
   // The issue's repro: detach to navigation, then walk Tab from the top of the
   // page and count how many presses land inside the rail list.
@@ -88,7 +84,7 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   }
   expect(reachedPane, `Tab order never reached the pane chrome: ${stops.join(" | ")}`).toBe(true);
   expect(railStops, `${rowCount} rows must not each cost a Tab stop: ${stops.join(" | ")}`)
-    .toBeLessThanOrEqual(2 + selectedChips + inertControls);
+    .toBeLessThanOrEqual(2 + inertTriggers);
 
   // Focus follows the j/k selection, so Tab then Enter reaches the actions of
   // whatever row is selected — not just the first.
@@ -99,8 +95,7 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   const next = page.locator(".af-rail-list .af-row.af-row-selected");
   await expect(next.locator(".af-row-title"), "j moves the rail selection").not.toHaveText(before ?? "", { timeout: 5_000 });
   await expect(next, "DOM focus follows the selection").toBeFocused();
-  // In-row controls follow the row in DOM order: a backlog chip sits in the
-  // title before the actions button, so Tab may land on it first.
+  // In-row controls follow the row in DOM order.
   const trigger = next.getByRole("button", { name: /^Actions for / });
   for (let i = 0; i < 3 && !(await trigger.evaluate((el) => el === document.activeElement)); i++) {
     await page.keyboard.press("Tab");

@@ -85,9 +85,6 @@ import { sessionKey } from "./sessions.js";
 import { listToken, rebuildKeepingScroll } from "./scrollkeep.js";
 import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
-import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
-import type { BacklogData } from "./backlog_data.js";
-import { STATE_LABELS, type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -388,8 +385,6 @@ export interface AppState {
    *  every state but archived, is set by the rail's filter menu, and is persisted to
    *  localStorage (filter.ts) so the choice sticks per browser. */
   statusFilter: StatusFilter;
-  /** every project's backlog, for the Backlog view, item chips and the tab badge. */
-  backlog?: BacklogData;
 }
 
 /** Callbacks the shell invokes; index.ts owns the real behavior. */
@@ -557,8 +552,6 @@ export interface Actions {
   resetStatusFilter(): void;
   /** Reads the next page of the selected project's archive (#6178), or retries a failed read. */
   loadMoreArchived(): void;
-  /** The Backlog view's data and session routes; absent in harnesses. */
-  backlog?: BacklogHost;
   /** Opens the add-task modal (#1592 Phase 5 PR8). */
   addTask(): void;
   /** Opens the edit-task modal seeded from the task, submitting via UpdateTask (#1935). */
@@ -1079,17 +1072,6 @@ export class AppShell {
   private readonly appControls: ReturnType<typeof appbarControls>;
   private readonly sessionsBody: HTMLElement;
   private readonly tasksPane: TasksPane;
-  private readonly backlogPane: BacklogPane;
-  private readonly backlogBadge = h("span", { class: "af-viewtab-badge", hidden: true });
-  private sessionItemMap = new Map<string, SessionItem>();
-  private sessionItemSig = "[]";
-  private chipsChanged = false;
-  private lastBacklog: BacklogData | undefined;
-  /** Needs-you counts by project root. The Backlog tab badge shows the selected
-   *  project's; the project switcher shows each other project's. */
-  private needsYou = new Map<string, number>();
-  private needsYouSig = "";
-  private needsYouChanged = false;
   private readonly configPane: ConfigPane;
   private lastView: View | null = null;
   private lastTasks: TaskData[] | null = null;
@@ -1249,10 +1231,6 @@ export class AppShell {
     const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
-    tabs.get("backlog")?.append(this.backlogBadge);
-    tabs.get("backlog")?.addEventListener("click", () => {
-      if (!this.backlogBadge.hidden) this.backlogPane.showInbox();
-    });
 
     // The project switcher (redesign PR2): a button showing the current project and a
     // dropdown listing every project with counts. `margin-left:auto` (the wrap) pushes
@@ -1434,18 +1412,6 @@ export class AppShell {
       trigger: (task: TaskData) => this.actions.triggerTask(task),
       remove: (task: TaskData) => this.actions.removeTask(task),
     });
-    this.backlogPane = new BacklogPane(this.actions.backlog ?? {
-      token: () => null,
-      refresh: async () => true,
-      started: () => 0,
-      notify: () => {},
-      confirm: async () => false,
-      openSession: () => {},
-      archiveSession: () => {},
-      restoreSession: () => {},
-      loadSessions: async () => {},
-    });
-    this.backlogPane.el.hidden = true;
     this.configPane = new ConfigPane({
       save: (key: string, value: string) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
@@ -1462,7 +1428,7 @@ export class AppShell {
       setTheme: (choice: ThemeChoice) => this.actions.setTheme(choice),
       disconnect: () => this.actions.disconnect(),
     });
-    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.backlogPane.el, this.tasksPane.el, this.configPane.el);
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
 
     // A transient toast for failed tab ops: a fixed-position banner that fades in
     // only while `tabError` is set (index.ts clears it on a timer / selection change).
@@ -1621,7 +1587,6 @@ export class AppShell {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
       this.tasksPane.el.hidden = state.view !== "tasks";
-      this.backlogPane.el.hidden = state.view !== "backlog";
       this.configPane.el.hidden = state.view !== "config";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
@@ -1643,29 +1608,6 @@ export class AppShell {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-
-    if (state.backlog && state.backlog !== this.lastBacklog) {
-      this.lastBacklog = state.backlog;
-      const items = sessionItems(state.backlog.views);
-      const sig = sessionItemsSig(items);
-      if (sig !== this.sessionItemSig) {
-        this.sessionItemSig = sig;
-        this.sessionItemMap = items;
-        this.chipsChanged = true;
-      }
-      const needs = needsYouByRoot(state.backlog.views);
-      const needsSig = JSON.stringify([...needs]);
-      if (needsSig !== this.needsYouSig) {
-        this.needsYouSig = needsSig;
-        this.needsYou = needs;
-        this.needsYouChanged = true;
-      }
-    }
-    const questions = state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0;
-    setNeedsYouBadge(this.backlogBadge, questions);
-    const backlogTab = this.viewTabs.get("backlog");
-    if (backlogTab) backlogTab.title = questions > 0 ? `Backlog · ${questions === 1 ? "1 question" : `${questions} questions`} · Opens the inbox` : "";
-    if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
 
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
@@ -1702,10 +1644,8 @@ export class AppShell {
       this.lastProjectSessions !== state.sessions ||
       this.lastProjectTasks !== state.tasks ||
       this.lastRegisteredProjects !== state.registeredProjects ||
-      this.needsYouChanged ||
       projectChanged
     ) {
-      this.needsYouChanged = false;
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
       this.lastRegisteredProjects = state.registeredProjects;
@@ -1721,9 +1661,7 @@ export class AppShell {
     // the terminal host (it lives in the main pane), so events never blur it.
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    const chipsChanged = this.chipsChanged;
-    this.chipsChanged = false;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged || chipsChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       // Mount/bind a routed terminal before spending the first frame on the rail.
       // Further updates coalesce into that first paint; later gestures stay immediate.
       if (!this.railPainted && prioritizeTerminal) {
@@ -1860,9 +1798,7 @@ export class AppShell {
     const reopened: Array<ReturnType<typeof actionsDisclosure>> = [];
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
-      s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true,
-        this.sessionItemMap.get(s.id ?? "")?.id ?? 0, this.sessionItemMap.get(s.id ?? "")?.title ?? "", this.sessionItemMap.get(s.id ?? "")?.root ?? "",
-        this.sessionItemMap.get(s.id ?? "")?.state ?? ""]),
+      s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -1873,8 +1809,7 @@ export class AppShell {
         this.railMenus.delete(key);
         const row = sessionRow(s, s.id === state.selectedId,
           id => this.runRailExit(() => this.actions.open(id)),
-          target => this.rowActions(target, s.id === state.selectedId), previous,
-          this.itemChip(s.id ?? ""));
+          target => this.rowActions(target, s.id === state.selectedId), previous);
         const menu = wasOpen ? this.railMenus.get(key) : undefined;
         if (menu) { menu.open(); reopened.push(menu); }
         if (focusedName) restoreChangedFocus = () =>
@@ -1962,12 +1897,12 @@ export class AppShell {
       }
       hasStop ||= isSelected;
       // In-row controls rove with the row (#6409): the selected row's actions
-      // trigger and backlog chip are stops; other rows' leave the order. The
+      // trigger is a stop; other rows' leave the order. The
       // carve-out mirrors rowActions — a row that can never be selected (the
       // aria-disabled it carries: kill-only rows, the creating placeholder)
       // keeps its controls tabbable because they are its only keyboard route.
       const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
-      for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+      for (const ctrl of railRow.querySelectorAll<HTMLElement>(".af-row-actions .af-term-more")) {
         const wanted = reachable ? 0 : -1;
         if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
       }
@@ -2306,7 +2241,7 @@ export class AppShell {
     }
     for (const p of summaries) {
       const record = state.registeredProjects.find((r) => r.root === p.root);
-      children.push(this.projectItem(p, p.root === current, record, p.root === current ? 0 : this.needsYou.get(p.root) ?? 0));
+      children.push(this.projectItem(p, p.root === current, record));
     }
 
     // Footer actions. Add-project is ALWAYS present (#2456): it is the empty
@@ -2398,7 +2333,7 @@ export class AppShell {
    *  registration behind the row, when there is one — a registration whose
    *  recorded root is gone (path_exists=false) is marked missing, the state the
    *  footer Rebind action repairs. */
-  private projectItem(p: ProjectSummary, current: boolean, record: RegisteredProject | undefined, needsYou: number): HTMLElement {
+  private projectItem(p: ProjectSummary, current: boolean, record: RegisteredProject | undefined): HTMLElement {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...(current ? [icon("check")] : []));
     check.setAttribute("aria-hidden", "true");
@@ -2410,19 +2345,10 @@ export class AppShell {
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
     }
-    // The badge sits beside the name, not inside it: the name cuts a long project
-    // name short with an ellipsis, which would cut the badge off with it, and the
-    // name's text stays the project's name alone.
-    let title: HTMLElement = name;
-    if (needsYou > 0) {
-      const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
-      setNeedsYouBadge(badge, needsYou);
-      title = h("span", { class: "af-project-item-title" }, name, badge);
-    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      title,
+      name,
       h("span", { class: "af-project-item-path" }, p.path),
     );
     // The missing marker leads the glance: a dead checkout is the consequential
@@ -2519,22 +2445,6 @@ export class AppShell {
     // carried open when a phone user selects a terminal tab.
     if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
     else this.terminalChrome?.menu.dismiss();
-  }
-
-  /** The "B-12 · Working" chip of an item session; a click opens the item in the Backlog view. */
-  private itemChip(sessionId: string): HTMLElement | undefined {
-    const item = this.sessionItemMap.get(sessionId);
-    if (!item) return undefined;
-    const chip = h("button", { type: "button", class: "af-backlog-session-chip", title: `Open ${formatID(item.id)} ${item.title}` },
-      `${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
-    chip.setAttribute("aria-label", `Open item ${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
-    chip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.actions.switchProject(item.root);
-      this.backlogPane.select(item.id, item.root);
-      this.switchView("backlog");
-    });
-    return chip;
   }
 
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
@@ -3812,7 +3722,6 @@ export function sessionRow(
   openSession: (id: string) => void,
   buildActions: (session: ManagedSession) => HTMLElement,
   previous?: HTMLElement,
-  itemChip?: HTMLElement,
 ): HTMLElement {
   const status = rowStatus(s);
   const operator = operatorKind(s);
@@ -3821,7 +3730,7 @@ export function sessionRow(
   const killable = isKillableSession(s);
   const managed = isActionableSession(s) || killable;
 
-  const title = h("div", { class: "af-row-title" }, ...(itemChip ? [itemChip] : []), rowTitle(s));
+  const title = h("div", { class: "af-row-title" }, rowTitle(s));
   // The outage detail outranks the idle reason: it explains why every other
   // fact on the row may be stale, so it renders even on unselected rows — the
   // TUI keeps it for the same reason (#5571 W1.3).
@@ -3975,10 +3884,3 @@ export function refreshIdleReasonAges(root: ParentNode, now: Date = new Date()):
   }
 }
 
-/** Shows `n` needs-you items on a badge, or hides it at zero. */
-export function setNeedsYouBadge(el: HTMLElement, n: number): void {
-  el.hidden = n === 0;
-  if (el.textContent === String(n)) return;
-  el.textContent = String(n);
-  el.setAttribute("aria-label", needsYouLabel(n));
-}
