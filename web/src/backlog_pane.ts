@@ -86,6 +86,18 @@ function placeChildren(parent: HTMLElement, want: readonly HTMLElement[]): void 
   }
 }
 
+/** Scrolls an opened panel into view when it is off screen. The panel sits
+ *  beside the list, or wraps under all of it when the two do not fit side by
+ *  side; it then opens below a long list, and its focus does not scroll
+ *  (Codex P2 on #6582). Beside the list and full screen on a phone it is in
+ *  view, so nothing moves. */
+function revealPanel(el: HTMLElement): void {
+  const view = globalThis.innerHeight;
+  if (typeof view !== "number") return;
+  const r = el.getBoundingClientRect();
+  if (r.top >= view || r.top + r.height <= 0) el.scrollIntoView({ block: "start" });
+}
+
 /** Whether a started item still shows Starting: its request is out, or its
  *  run is starting, or its session has not reached the session list yet and
  *  the daemon still has the item starting or working. */
@@ -507,7 +519,10 @@ export class BacklogPane {
       this.closePanel();
     }
     this.el.classList.toggle("af-backlog-has-panel", this.selected !== null);
-    if (this.focusPanel && this.panel) this.panel.focus();
+    if (this.focusPanel && this.panel) {
+      this.panel.focus();
+      revealPanel(this.panel.el);
+    }
     else if (typing && this.focusId === null) {
       if (typing.isConnected && document.activeElement !== typing) typing.focus();
     }

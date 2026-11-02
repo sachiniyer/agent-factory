@@ -96,8 +96,8 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1337606.000 | 1337606.000–1337606.000 | 0.000 | 1404486.300 |
-| gzip_bytes | 306612.000 | 306612.000–306612.000 | 0.000 | 321942.600 |
+| raw_bytes | 1337886.000 | 1337886.000–1337886.000 | 0.000 | 1404780.300 |
+| gzip_bytes | 306713.000 | 306713.000–306713.000 | 0.000 | 322048.650 |
 | lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
 | lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
@@ -137,7 +137,7 @@ so the three samples are identical. The same PR adds the Docs tab's loader, shel
 
 ### Bundle refresh provenance (#6582)
 
-Master's committed bundle at `250fd7d06d` is 1,323,696 raw / 303,520 gzip over `web/dist/**.{js,css}` (gzip level 9). That is already within 2,259 gzip bytes of the 305,778.9 budget the #6298 refresh set, after the Backlog slices merged since. The effort cards port (Refs #6284, fork `f733c567f0`: group cards, progress and meta lines, New group and Add item, and the sticky item panel, with their CSS) takes it to 1,337,606 raw / 306,612 gzip, +13,910 raw / +3,092 gzip. The lazy Docs editor is unchanged (371,254 / 120,177 on both trees). Moving the Backlog view into the lazy chunk would not fit: that chunk has about 6 KB of gzip headroom, and the view is several times that. Comments do not ship (esbuild strips them), so the growth is feature code. Both shell entries are moved. Each is the deterministic byte sum from `bundleBytes` in `scripts/perf/check.mjs` (the function `report.mjs` calls) over the PR's rebuilt `web/dist`, three identical samples, margin baseline x 0.05. Every timing and layout-shift baseline is unchanged. Not recorded with `make perf-container`; the figure is byte-exact.
+Master's committed bundle at `250fd7d06d` is 1,323,696 raw / 303,520 gzip over `web/dist/**.{js,css}` (gzip level 9). That is already within 2,259 gzip bytes of the 305,778.9 budget the #6298 refresh set, after the Backlog slices merged since. The effort cards port (Refs #6284, fork `f733c567f0`: group cards, progress and meta lines, New group and Add item, and the sticky item panel, with their CSS, plus the one-pass card counts and the panel reveal from its review) takes it to 1,337,886 raw / 306,713 gzip, +14,190 raw / +3,193 gzip. The lazy Docs editor is unchanged (371,254 / 120,177 on both trees). Moving the Backlog view into the lazy chunk would not fit: that chunk has about 6 KB of gzip headroom, and the view is several times that. Comments do not ship (esbuild strips them), so the growth is feature code. Both shell entries are moved. Each is the deterministic byte sum from `bundleBytes` in `scripts/perf/check.mjs` (the function `report.mjs` calls) over the PR's rebuilt `web/dist`, three identical samples, margin baseline x 0.05. Every timing and layout-shift baseline is unchanged. Not recorded with `make perf-container`; the figure is byte-exact.
 
 ### Bundle refresh provenance (#6298)
 

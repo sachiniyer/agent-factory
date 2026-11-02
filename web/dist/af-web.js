@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5ac781c76a6d";
+var CLIENT_VERSION = "f7c05aa93d48";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -20634,6 +20634,12 @@ function placeChildren(parent, want) {
     else parent.insertBefore(el2, cur);
   }
 }
+function revealPanel(el2) {
+  const view = globalThis.innerHeight;
+  if (typeof view !== "number") return;
+  const r = el2.getBoundingClientRect();
+  if (r.top >= view || r.top + r.height <= 0) el2.scrollIntoView({ block: "start" });
+}
 function stillStarting(it, derived, inFlight, sessions) {
   if (inFlight) return true;
   if (derived !== void 0 && derived !== "starting" && derived !== "working") return false;
@@ -21034,8 +21040,10 @@ ${id}`;
       this.closePanel();
     }
     this.el.classList.toggle("af-backlog-has-panel", this.selected !== null);
-    if (this.focusPanel && this.panel) this.panel.focus();
-    else if (typing && this.focusId === null) {
+    if (this.focusPanel && this.panel) {
+      this.panel.focus();
+      revealPanel(this.panel.el);
+    } else if (typing && this.focusId === null) {
       if (typing.isConnected && document.activeElement !== typing) typing.focus();
     } else if (this.focusId !== null) {
       (this.rowEls.get(this.focusId) ?? (this.cursor !== null ? this.rowEls.get(this.cursor) : void 0))?.focus({ preventScroll: true });

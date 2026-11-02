@@ -325,3 +325,41 @@ test("arrow keys cross card edges in tree order", () => {
   assert.equal(doc.activeElement, row(7));
   assert.deepEqual(el(pane).querySelectorAll(".af-backlog-row").filter((r) => r.tabIndex === 0).map((r) => Number(r.dataset.itemId)), [7]);
 });
+
+// Codex P2 on #6582: between the phone breakpoint and the width that fits the
+// list and the panel side by side, the panel wraps under the whole list, so it
+// opens below the viewport and its focus does not scroll. Opening it then
+// scrolls it into view; a panel already on screen does not move.
+test("a panel that opens below the viewport scrolls into view; one on screen does not", () => {
+  const g = globalThis as { innerHeight?: number };
+  type Proto = {
+    getBoundingClientRect(): { top: number; height: number; left: number; width: number };
+    scrollIntoView?: (o: unknown) => void;
+  };
+  const proto = Object.getPrototypeOf(doc.body) as Proto;
+  const rect = proto.getBoundingClientRect;
+  let panelTop = 900;
+  const scrolled: unknown[] = [];
+  proto.getBoundingClientRect = function (this: FakeElement) {
+    return this.classList.contains("af-backlog-panel") ? { top: panelTop, height: 400, left: 0, width: 400 } : rect.call(this);
+  };
+  proto.scrollIntoView = function (this: FakeElement, o: unknown) {
+    if (this.classList.contains("af-backlog-panel")) scrolled.push(o);
+  };
+  g.innerHeight = 600;
+  try {
+    const pane = mount();
+    pane.update(data(view(tree(), states)), "/a", []);
+    pane.select(4);
+    assert.deepEqual(scrolled, [{ block: "start" }]);
+    panelTop = 100;
+    scrolled.length = 0;
+    pane.select(5);
+    pane.select(6);
+    assert.deepEqual(scrolled, []);
+  } finally {
+    proto.getBoundingClientRect = rect;
+    delete proto.scrollIntoView;
+    delete g.innerHeight;
+  }
+});
