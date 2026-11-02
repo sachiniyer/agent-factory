@@ -57,7 +57,9 @@ test("#6562: Alt+j onto a fit-hidden pane restores it WITH the keyboard", async 
   // second leaf is the one hidden.
   await page.locator(".af-pane-host .xterm").first().click();
   await expect(page.locator(".af-pane-focused .xterm-helper-textarea")).toBeFocused();
-  await page.setViewportSize({ width: 700, height: 800 });
+  // 900px keeps the desktop rail (the <768 breakpoint would collapse it and
+  // give the host the full width again): ~580px of host fits one 320px pane.
+  await page.setViewportSize({ width: 900, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
 
   // Alt+j cycles onto the hidden leaf: the refit un-hides it (highlight moves)
