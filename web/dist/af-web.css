@@ -1738,6 +1738,9 @@ body[data-project-color] [data-af-theme=dark] {
   gap: var(--af-space-1);
   color: var(--af-accent);
 }
+.af-webpane-fallback-link[hidden] {
+  display: none;
+}
 .af-webpane-dead {
   color: var(--af-ink);
 }
