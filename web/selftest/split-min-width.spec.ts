@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6429: web split panes had no minimum width — four panes at 1024px left a
 // 48px sliver, and a divider drag could squeeze a pane to almost nothing.
@@ -12,6 +13,10 @@ const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
 // A little under split.ts's 40-column floor, so subpixel layout never turns
 // a compliant pane into a failure.
 const PANE_FLOOR_PX = 300;
+
+// probe-a's roster is shared with the whole suite: the shells this test adds
+// must be closed on exit or every later spec inherits them (#4217).
+const roster = seededTabs();
 
 /** The issue's repro: drag tab index `tabIndex` onto `edge` of pane index `paneIndex`
  *  — the same shared-DataTransfer dispatch web-driver.spec.ts's dragTabToPane uses,
@@ -64,6 +69,7 @@ test("#6429: no pane renders under the floor; overflow degrades visibly, not to 
   expect(selected?.id).toBeTruthy();
   await page.goto(`/#/session/${encodeURIComponent(selected.id)}`);
   await page.locator("#app[data-af-resync-settled]").waitFor();
+  await roster.enter(page);
   // Wide enough that the nested four-pane layout below actually fits: splits
   // open at a fixed 0.5 ratio, so the (left|right) pair only ever gets half
   // the ~320px-rail-trimmed host, and its two leaves need 2*320+4 there —
