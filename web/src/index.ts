@@ -2692,6 +2692,11 @@ function doHostAdd(draft: HostAddDraft): void {
       // Refetch first — doHostCheck snapshots the table it probes against, and
       // the just-written entry must be in it or the verdict can never show.
       await refreshConfig();
+      if (!live()) {
+        // A disconnect parked here makes this the dead connection's add: its
+        // probe must not launch under the new connection's token.
+        return;
+      }
       doHostCheck(draft.name);
     } catch (err) {
       if (live()) {

@@ -24,6 +24,10 @@
 //  4. A successful retry must retire the check error its failed try left —
 //     same name, or every check error after a check-all — without touching an
 //     add/remove refusal that is not a check outcome.
+//  5. doHostAdd's post-save probe must re-check live() after the awaited
+//     refreshConfig: a disconnect parked in that await makes it the dead
+//     connection's add, and its probe must not launch under the new
+//     connection's token.
 
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
@@ -275,4 +279,43 @@ test("a check-all success retires every check error; a per-host success keeps ot
   doHostCheck("");
   await tick();
   assert.equal(s.hostsNow().status?.message, "the running daemon cannot apply a host-list edit");
+});
+
+test("a disconnect parked in the post-add refresh stops the probe reaching the new connection", async () => {
+  const s = stage(["doHostAdd", "setHostStatus"]);
+  s.context.hostsHealthNow = async () => ({ ok: true, config_hosts_edit: true });
+  s.context.editHosts = async () => ({});
+  s.context.hostsEditRefusal = () => "refused";
+  s.context.errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  s.context.setConfigValue = async () => ({});
+  const refresh = gate<unknown>();
+  s.context.refreshConfig = () => refresh.promise;
+  let probed = 0;
+  s.context.doHostCheck = () => { probed++; };
+  const doHostAdd = s.context.doHostAdd as (d: unknown) => void;
+  const simulateDisconnect = s.context.simulateDisconnect as () => void;
+  const simulateConnect = s.context.simulateConnect as (candidate: string) => void;
+  const draft = { name: "box2", host: "h", user: "", port: "", identityFile: "", workspaceRoot: "", hostKeyVerification: "", useSSHConfig: false, makeDefault: false };
+
+  doHostAdd(draft);
+  await tick(); // the continuation is now parked on refreshConfig
+  simulateDisconnect();
+  simulateConnect("tok");
+  refresh.resolve(undefined);
+  await tick();
+  assert.equal(probed, 0, "the dead connection's add must not probe under the new connection's token");
+
+  // Control: same flow without the disconnect still launches the probe.
+  const s2 = stage(["doHostAdd", "setHostStatus"]);
+  s2.context.hostsHealthNow = async () => ({ ok: true, config_hosts_edit: true });
+  s2.context.editHosts = async () => ({});
+  s2.context.hostsEditRefusal = () => "refused";
+  s2.context.errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
+  s2.context.setConfigValue = async () => ({});
+  s2.context.refreshConfig = async () => {};
+  let probed2 = 0;
+  s2.context.doHostCheck = () => { probed2++; };
+  (s2.context.doHostAdd as (d: unknown) => void)(draft);
+  await tick();
+  assert.equal(probed2, 1, "the post-add probe rides on a live connection");
 });

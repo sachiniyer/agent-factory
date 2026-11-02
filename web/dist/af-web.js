@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "dd542493da6a";
+var CLIENT_VERSION = "e83bfa9851b3";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -26284,6 +26284,9 @@ function doHostAdd(draft) {
         setHostStatus("", `saved host ${draft.name} (${desc})${madeDefault ? " as the default" : ""}`, false);
       }
       await refreshConfig();
+      if (!live()) {
+        return;
+      }
       doHostCheck(draft.name);
     } catch (err) {
       if (live()) {
