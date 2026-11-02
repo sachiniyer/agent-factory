@@ -91,6 +91,22 @@ export function findLeaf(node: LayoutNode, id: string): LeafNode | null {
   return findLeaf(node.a, id) ?? findLeaf(node.b, id);
 }
 
+/** The split node with the given id, or null. A divider drag re-resolves its node
+ *  from the CURRENT tree through this so the in-place `ratio` write lands on the live
+ *  tree object (which `builtTree` aliases after a reconcile) rather than on a stale
+ *  node captured before a prior drag's `setRatio` rebuilt the split nodes — which
+ *  would diverge `builtTree` from `tree` and flip the `sameLayout` gate mid-gesture,
+ *  rebuilding the split DOM during a drag (#6555). */
+export function findSplitById(node: LayoutNode, id: string): SplitNode | null {
+  if (node.kind === "leaf") {
+    return null;
+  }
+  if (node.id === id) {
+    return node;
+  }
+  return findSplitById(node.a, id) ?? findSplitById(node.b, id);
+}
+
 /** Returns a new tree with the leaf `id` replaced by `fn(leaf)` (which may be a
  *  leaf or a split); structure elsewhere is shared. */
 function mapLeaf(node: LayoutNode, id: string, fn: (leaf: LeafNode) => LayoutNode): LayoutNode {
