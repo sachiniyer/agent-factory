@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { seededTabs } from "./seeded-tabs.js";
 
 // #6562: Alt+j/k onto a pane the fit hid restores it HIGHLIGHTED but without
 // the keyboard. cyclePane calls focusPane(next) then refocus() synchronously;
@@ -8,6 +9,8 @@ import { expect, test, type Page } from "@playwright/test";
 // otherwise. The pending focus intent must survive to the post-refit refocus.
 
 const sessionA = process.env.AF_WEB_SESSION_A ?? "probe-a";
+// probe-a's roster is shared with the suite — close what this test adds (#4217).
+const roster = seededTabs();
 
 async function dragTabToPane(page: Page, tabIndex: number, paneIndex: number, edge: "left" | "right"): Promise<void> {
   await page.evaluate(
@@ -50,7 +53,7 @@ test("#6562: Alt+j onto a fit-hidden pane restores it WITH the keyboard", async 
   // in the pane while the FIRST is dragged — dragging a shown tab would hit
   // the dedupe/companion paths in applyTabDrop instead of a real split.
   const tabs = page.locator(".af-tabbar .af-tab");
-  const base = await tabs.count();
+  const base = await roster.enter(page);
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
   await expect(tabs).toHaveCount(base + 1);
   await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
