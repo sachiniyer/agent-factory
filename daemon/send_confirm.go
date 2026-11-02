@@ -64,6 +64,11 @@ type unverifiedSendWatch struct {
 	// signatures its rules cannot read.
 	agent string
 	watch *task.TurnWatch
+	// fired banks positive evidence: the send's verdict write follows the arm
+	// by the caller's delivery-settle latency, so a watch that fired before
+	// that write commits keeps retrying its promotion on later captures rather
+	// than losing the evidence (#6592 review).
+	fired bool
 }
 
 // armUnverifiedSendAfter keeps a sent-unverified TASK send's evidence contract
@@ -125,8 +130,8 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 	// two separately and never nest them, same as the run watcher.
 	agent := instance.ResolvedAgent()
 	now := nowFunc()
-	var fired []string
-	firedAt := map[string]time.Time{}
+	var retries []string
+	retryAt := map[string]time.Time{}
 	m.pausedMu.Lock()
 	byTask := m.unverifiedSendWatches[key]
 	for taskID, entry := range byTask {
@@ -136,27 +141,46 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 			delete(byTask, taskID)
 			continue
 		}
-		// A frame captured before the send cannot feed it — the same
-		// timestamp fence noteTaskRunTurnEvidence applies to its own watch.
-		if entry.attemptedAt.After(capturedAt) {
-			continue
+		if !entry.fired {
+			// A frame captured before the send cannot feed it — the same
+			// timestamp fence noteTaskRunTurnEvidence applies to its own watch.
+			if entry.attemptedAt.After(capturedAt) {
+				continue
+			}
+			if entry.agent != agent {
+				entry.agent = agent
+				entry.watch = task.NewTurnWatch(agent, entry.attemptedAt)
+			}
+			if !entry.watch.Observe(obs.Content, capturedAt) {
+				continue
+			}
+			// Bank the evidence rather than deleting the entry: the send's
+			// verdict may not be on the record yet — the arm precedes the
+			// caller's delivery-settle write — so a promotion refused now must
+			// retry on later captures, and the fired flag holds the evidence
+			// until it applies or the window closes (#6592 review).
+			entry.fired = true
 		}
-		if entry.agent != agent {
-			entry.agent = agent
-			entry.watch = task.NewTurnWatch(agent, entry.attemptedAt)
-		}
-		if entry.watch.Observe(obs.Content, capturedAt) {
-			fired = append(fired, taskID)
-			firedAt[taskID] = entry.attemptedAt
-			delete(byTask, taskID)
-		}
-	}
-	if len(byTask) == 0 {
-		delete(m.unverifiedSendWatches, key)
+		retries = append(retries, taskID)
+		retryAt[taskID] = entry.attemptedAt
 	}
 	m.pausedMu.Unlock()
-	for _, taskID := range fired {
-		m.promoteUnverifiedTaskSend(taskID, instance.Title, firedAt[taskID])
+	for _, taskID := range retries {
+		if !m.promoteUnverifiedTaskSend(taskID, instance.Title, retryAt[taskID]) {
+			continue
+		}
+		m.pausedMu.Lock()
+		// A re-send may have replaced the entry meanwhile — remove only the
+		// send this promotion belonged to.
+		if byTask := m.unverifiedSendWatches[key]; byTask != nil {
+			if e := byTask[taskID]; e != nil && e.fired && e.attemptedAt.Equal(retryAt[taskID]) {
+				delete(byTask, taskID)
+			}
+			if len(byTask) == 0 {
+				delete(m.unverifiedSendWatches, key)
+			}
+		}
+		m.pausedMu.Unlock()
 	}
 }
 
@@ -178,7 +202,7 @@ var unverifiedVerdictWriteSlack = 90 * time.Second
 // (#6590, #6592 review). last_run_at is passed nil: the promotion is not a new
 // occurrence, and rewriting the stamp would hide missed fires from the
 // overdue derivation.
-func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) {
+func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) bool {
 	_, applied, err := task.UpdateTaskStatusIf(taskID, nil, taskSendStatus(session.PromptDelivered), func(cur task.Task) bool {
 		if cur.LastRunStatus != TaskStatusSentUnverified || cur.LastRunAt == nil {
 			return false
@@ -188,11 +212,22 @@ func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt ti
 	})
 	if err != nil {
 		m.warn().Printf("task %s: could not promote its unverified delivery to %q: %v", taskID, title, err)
-		return
+		return false
 	}
 	if applied {
 		m.info().Printf("task %s: sent-unverified delivery to %q promoted to sent; the agent's turn began after the send (#6590)", taskID, title)
 	}
+	return applied
+}
+
+// unverifiedSendWatchPending reports whether the session has a task send still
+// re-verifying its recorded verdict — the paused backstop feeds it the way it
+// feeds an in-flight run, so an attached pane's turn cannot expire the watch
+// unanswered (#6592 review).
+func (m *Manager) unverifiedSendWatchPending(key string) bool {
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	return len(m.unverifiedSendWatches[key]) > 0
 }
 
 // sweepUnverifiedSendWatches drops re-verification watches whose session no
