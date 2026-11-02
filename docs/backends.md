@@ -805,8 +805,7 @@ run in the workspace.
    creating a tab.
 2. **Browse and edit files.** Open a VS Code tab — `af sessions tab-create <title>
    --kind vscode`. The editor runs on the host, rooted at the workspace, and the
-   daemon relays it, so a remote client reaches it through the same authenticated
-   origin as any other tab. The host needs `code-server` or `openvscode-server`;
+   daemon relays it. The host needs `code-server` or `openvscode-server`;
    af detects one and does not install it, and a missing one shows the install
    hint in the tab. See [VS Code tabs](web.md#vs-code-tabs).
 3. **Hand the agent a file.** Put the file in the workspace — drag it into the VS
