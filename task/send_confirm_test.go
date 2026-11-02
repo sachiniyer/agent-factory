@@ -190,6 +190,31 @@ func TestSendConfirmation_NeverTakenNeverFires(t *testing.T) {
 	}
 }
 
+// A clockless watch armed by a STALE pre-send frame must not carry that armed
+// state into re-verification: a turn beginning between the stale capture and
+// the attempt would otherwise pass as this send's. ReverifyWatch discards the
+// stale-seeded watch and hands back a fresh one that must see the absent edge
+// itself.
+func TestSendConfirmation_StaleClocklessSeedDoesNotCarryToReverify(t *testing.T) {
+	sentAt := time.Now()
+	busy := "› \n  esc to interrupt\n"
+	c := BeginSendConfirmation(context.Background(), &scriptedPane{agent: "codex", frames: []string{"› \n"}})
+	c.BindAttempt(sentAt.Add(30 * time.Second))
+	w := c.ReverifyWatch()
+	if w == nil {
+		t.Fatal("a signatured agent's send must yield a bound watch")
+	}
+	if w.Observe(busy, sentAt.Add(30*time.Second+time.Second)) {
+		t.Fatal("a turn running before the attempt must not fire through a stale-armed watch")
+	}
+	if w.Observe("› \n", sentAt.Add(32*time.Second)) {
+		t.Fatal("an idle frame is not evidence")
+	}
+	if !w.Observe(busy, sentAt.Add(33*time.Second)) {
+		t.Fatal("the absent-before-present edge after the attempt is the evidence")
+	}
+}
+
 // An agent with no in-turn signature has nothing the feed could prove — no
 // watch exists to feed.
 func TestSendConfirmation_UnsignaturedAgentHasNoReverifyWatch(t *testing.T) {

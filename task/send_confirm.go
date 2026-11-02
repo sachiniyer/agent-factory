@@ -48,6 +48,12 @@ type SendConfirmation struct {
 	// agents whose chrome carries no elapsed clock to bound a turn's start.
 	preAt     time.Time
 	clockless bool
+	// seedStale is set when the pre-send frame is too old to arm a clockless
+	// watch — the same miss that drops eligibility. Its ARMED state must not
+	// leak into the asynchronous re-verification either: a turn beginning
+	// between the stale capture and the attempt would pass as this send's
+	// (#6592 review). ReverifyWatch rebuilds instead.
+	seedStale bool
 }
 
 // clocklessSeedSlack bounds how long before the send's attempt instant the
@@ -97,6 +103,7 @@ func (c *SendConfirmation) BindAttempt(attemptedAt time.Time) {
 	}
 	if c.clockless && attemptedAt.Sub(c.preAt) > clocklessSeedSlack {
 		c.eligible = false
+		c.seedStale = true
 	}
 	c.watch.boundary = attemptedAt
 }
@@ -141,13 +148,14 @@ func (c *SendConfirmation) ReverifyWatch() *TurnWatch {
 	if c == nil || !turnSignaturedAgent(c.agent) {
 		return nil
 	}
-	if c.watch != nil {
+	if c.watch != nil && !c.seedStale {
 		return c.watch
 	}
 	// No pre-send frame seeded a watch (the pane was busy or unreadable at the
-	// send): build one bound to the attempt instant anyway. Its empty baseline
-	// needs no seed — a pre-boundary turn fails the timed agents' own clock and
-	// the scoped agents' absent-before-present contract on its own.
+	// send), or its seed went stale inside the clockless slack: build one bound
+	// to the attempt instant anyway. Its empty baseline needs no seed — a
+	// pre-boundary turn fails the timed agents' own clock and the scoped
+	// agents' absent-before-present contract on its own.
 	return NewTurnWatch(c.agent, c.sentAt)
 }
 

@@ -126,6 +126,7 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 	agent := instance.ResolvedAgent()
 	now := nowFunc()
 	var fired []string
+	firedAt := map[string]time.Time{}
 	m.pausedMu.Lock()
 	byTask := m.unverifiedSendWatches[key]
 	for taskID, entry := range byTask {
@@ -146,6 +147,7 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 		}
 		if entry.watch.Observe(obs.Content, capturedAt) {
 			fired = append(fired, taskID)
+			firedAt[taskID] = entry.attemptedAt
 			delete(byTask, taskID)
 		}
 	}
@@ -154,20 +156,35 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 	}
 	m.pausedMu.Unlock()
 	for _, taskID := range fired {
-		m.promoteUnverifiedTaskSend(taskID, instance.Title)
+		m.promoteUnverifiedTaskSend(taskID, instance.Title, firedAt[taskID])
 	}
 }
 
+// unverifiedVerdictWriteSlack bounds how far after a send's attempt instant
+// its recorded verdict may have landed. The watcher stamps last_run_at as the
+// delivery settles — the send's own duration plus the bounded Confirm window —
+// so a verdict inside this slack is plausibly this send's, and one outside it
+// belongs to another delivery.
+var unverifiedVerdictWriteSlack = 90 * time.Second
+
 // promoteUnverifiedTaskSend applies a fired re-verification watch: the task's
 // recorded sent-unverified verdict becomes sent. The compare-and-set IS the
-// safety property — it re-reads the row under the store lock, so a newer
-// outcome already on the record (another delivery's verdict, an error, a drop
-// count) is never clobbered by a stale fire, and a fire for a verdict that was
-// never recorded unverified promotes nothing (#6590).
-func (m *Manager) promoteUnverifiedTaskSend(taskID, title string) {
-	now := nowFunc()
-	_, applied, err := task.UpdateTaskStatusIf(taskID, &now, taskSendStatus(session.PromptDelivered), func(cur task.Task) bool {
-		return cur.LastRunStatus == TaskStatusSentUnverified
+// safety property — it re-reads the row under the store lock and promotes only
+// the verdict THIS send produced: the status still reads sent-unverified AND
+// last_run_at sits within the verdict-write slack of this send's attempt. A
+// newer outcome already on the row, a never-unverified verdict, and — when the
+// task was retargeted and a different session's delivery rewrote the record —
+// a verdict stamped outside the slack are all refused rather than clobbered
+// (#6590, #6592 review). last_run_at is passed nil: the promotion is not a new
+// occurrence, and rewriting the stamp would hide missed fires from the
+// overdue derivation.
+func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) {
+	_, applied, err := task.UpdateTaskStatusIf(taskID, nil, taskSendStatus(session.PromptDelivered), func(cur task.Task) bool {
+		if cur.LastRunStatus != TaskStatusSentUnverified || cur.LastRunAt == nil {
+			return false
+		}
+		return !cur.LastRunAt.Before(attemptedAt) &&
+			!cur.LastRunAt.After(attemptedAt.Add(unverifiedVerdictWriteSlack))
 	})
 	if err != nil {
 		m.warn().Printf("task %s: could not promote its unverified delivery to %q: %v", taskID, title, err)

@@ -111,9 +111,8 @@ func seedUnverifiedTask(t *testing.T, taskID string) {
 func TestUnverifiedSendPromotesOnPostSendTurn(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
-	seedUnverifiedTask(t, "feed6590")
-
 	attemptedAt := time.Now()
+	seedUnverifiedTask(t, "feed6590")
 	key := stableSessionKey(repoID, inst)
 	m.armUnverifiedSendWatch(key, inst, "feed6590", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
 
@@ -144,9 +143,8 @@ func TestUnverifiedSendPromotesOnPostSendTurn(t *testing.T) {
 func TestUnverifiedSendNeverTakenNeverPromotes(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
-	seedUnverifiedTask(t, "feed6591")
-
 	attemptedAt := time.Now()
+	seedUnverifiedTask(t, "feed6591")
 	key := stableSessionKey(repoID, inst)
 	m.armUnverifiedSendWatch(key, inst, "feed6591", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
 
@@ -161,13 +159,12 @@ func TestUnverifiedSendNeverTakenNeverPromotes(t *testing.T) {
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus)
 
 	// Past the re-verification window the watch retires: a turn beginning this
-	// late can no longer be attributed to the send.
-	old := sendReverifyWindow
-	sendReverifyWindow = 10 * time.Millisecond
-	t.Cleanup(func() { sendReverifyWindow = old })
-	m.armUnverifiedSendWatch(key, inst, "feed6591", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+	// late can no longer be attributed to the send. Arm at an instant already
+	// outside the window rather than racing the daemon clock.
+	expiredAttempt := attemptedAt.Add(-2 * sendReverifyWindow)
+	m.armUnverifiedSendWatch(key, inst, "feed6591", expiredAttempt, task.NewTurnWatch("claude", expiredAttempt))
 	m.noteUnverifiedSendEvidence(key, inst,
-		session.Observation{Content: "❯ \n", Captured: true}, attemptedAt.Add(time.Hour))
+		session.Observation{Content: "❯ \n", Captured: true}, time.Now())
 	m.pausedMu.Lock()
 	_, still := m.unverifiedSendWatches[key]
 	m.pausedMu.Unlock()
@@ -180,9 +177,8 @@ func TestUnverifiedSendNeverTakenNeverPromotes(t *testing.T) {
 func TestUnverifiedSendPromotionNeverClobbersNewerOutcome(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
-	seedUnverifiedTask(t, "feed6592")
-
 	attemptedAt := time.Now()
+	seedUnverifiedTask(t, "feed6592")
 	key := stableSessionKey(repoID, inst)
 	m.armUnverifiedSendWatch(key, inst, "feed6592", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
 
@@ -198,6 +194,33 @@ func TestUnverifiedSendPromotionNeverClobbersNewerOutcome(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, "errored: target gone", stored.LastRunStatus,
 		"a stale promotion must never overwrite a newer recorded outcome")
+}
+
+// The task was retargeted: this session's watch fires, but the verdict on the
+// row was written by a DIFFERENT session's later delivery — outside the
+// verdict-write slack. It is still unverified, and the stale fire must refuse
+// it rather than claim a delivery it cannot see.
+func TestUnverifiedSendNeverPromotesAnotherDelivery(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	attemptedAt := time.Now()
+	seedUnverifiedTask(t, "feed6596")
+	key := stableSessionKey(repoID, inst)
+	m.armUnverifiedSendWatch(key, inst, "feed6596", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+
+	// A different session's delivery rewrote the verdict well after this
+	// send's verdict-write slack.
+	newer := attemptedAt.Add(2 * unverifiedVerdictWriteSlack)
+	_, err := task.UpdateTaskStatus("feed6596", &newer, TaskStatusSentUnverified)
+	require.NoError(t, err)
+
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: "❯ \n", Captured: true}, attemptedAt.Add(time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("1s"), Captured: true}, attemptedAt.Add(2*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("2s"), Captured: true}, attemptedAt.Add(3*time.Second))
+	stored, err := task.GetTask("feed6596")
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
+		"a fire must never promote a verdict stamped outside its send's write window")
 }
 
 // A re-send re-bounds the watch: only the newest unverified send's evidence may
@@ -229,9 +252,8 @@ func TestUnverifiedSendReArmKeepsLatestBoundary(t *testing.T) {
 func TestUnverifiedSendEvidenceFencesPreSendAndUncaptured(t *testing.T) {
 	m, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
-	seedUnverifiedTask(t, "feed6594")
-
 	attemptedAt := time.Now()
+	seedUnverifiedTask(t, "feed6594")
 	key := stableSessionKey(repoID, inst)
 	m.armUnverifiedSendWatch(key, inst, "feed6594", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
 
