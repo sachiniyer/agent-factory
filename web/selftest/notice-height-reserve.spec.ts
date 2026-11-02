@@ -63,19 +63,22 @@ test("#6561: the notice's height is reserved before the fit", async ({ page, req
   expect(hostH, `host should sit in the repro band, got ${hostH}px`).toBeGreaterThan(325);
   expect(hostH, `host should sit in the repro band, got ${hostH}px`).toBeLessThan(370);
 
-  // Four tabs → nested column chain [a/(b/(c/d))]: each drop stacks a new pane
-  // under the last one. At this height the bottom pair slivers, so the fit
-  // hides a leaf and the notice mounts — then the survivors must still clear
-  // the floor in the space that remains.
+  // Four stacked panes → nested column chain [a/(b/(c/d))]: each drop stacks a
+  // new pane under the last one. At this height the bottom pair slivers, so
+  // the fit hides a leaf and the notice mounts — then the survivors must still
+  // clear the floor in the space that remains. probe-a's tab roster is shared
+  // with the suite — count relative to it.
+  const tabs = page.locator(".af-tabbar .af-tab");
+  const base = await tabs.count();
   for (let i = 0; i < 3; i++) {
     await page.locator(".af-term-new-shell").filter({ visible: true }).first().click();
   }
-  await expect(page.locator(".af-tabbar .af-tab")).toHaveCount(4);
-  await dragTabToPane(page, 1, 0, "bottom");
+  await expect(tabs).toHaveCount(base + 3);
+  await dragTabToPane(page, base, 0, "bottom");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(2);
-  await dragTabToPane(page, 2, 1, "bottom");
+  await dragTabToPane(page, base + 1, 1, "bottom");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
-  await dragTabToPane(page, 3, 2, "bottom");
+  await dragTabToPane(page, base + 2, 2, "bottom");
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(4);
   await expect(page.locator(".af-split-narrow")).toContainText("hidden");
 
