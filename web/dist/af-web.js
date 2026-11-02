@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a41112796362";
+var CLIENT_VERSION = "2abe2c513bbd";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15099,6 +15099,7 @@ var SplitView = class {
   }
   /** Takes the keyboard away from every pane (back to rail nav). */
   blur() {
+    this.pendingRefocus = false;
     for (const pane of this.panes.values()) {
       pane.term?.blur();
     }
