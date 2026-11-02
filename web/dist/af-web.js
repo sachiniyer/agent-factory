@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "9752484ef25e";
+var CLIENT_VERSION = "0c6a613bad94";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -11397,7 +11397,12 @@ var AttachTerminal = class {
     this.unsubscribeFontSizes = null;
     this.closeSocket();
     this.container.removeAttribute("title");
-    this.term.dispose();
+    const term = this.term;
+    term.element?.remove();
+    window.setTimeout(() => {
+      window.requestAnimationFrame(() => term.dispose());
+      window.setTimeout(() => term.dispose(), 200);
+    }, 0);
   }
   applicationOwnsMouse() {
     return this.term.modes.mouseTrackingMode !== "none";
