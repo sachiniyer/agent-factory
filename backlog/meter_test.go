@@ -156,3 +156,17 @@ func TestMeterRunCountsAResumedTranscriptsCopiesOnce(t *testing.T) {
 		t.Fatalf("cost %v, want 8: the copy of m1 counted again", again.Cost())
 	}
 }
+
+func TestMeterOrchestratorCountsFromBind(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
+	early := strings.Replace(transcriptLine("m0", "claude-opus-5-5", 1_000_000), "10:00:00", "09:00:00", 1)
+	writeFile(t, f, early, transcriptLine("m1", "claude-opus-5-5", 1_000_000))
+	o := Orchestrator{SessionID: "o", BoundAt: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)}
+	m := MeterOrchestrator(1, Where{}, o, []string{f}, map[string]int64{}, nil)
+	if !m.Changed || m.Unmeterable != "" || len(m.Entries) != 1 || math.Abs(m.Cost()-4) > 1e-9 {
+		t.Fatalf("%+v", m)
+	}
+	if m := MeterOrchestrator(1, Where{}, o, nil, nil, nil); m.Unmeterable != "" || m.Changed {
+		t.Fatalf("no conversation yet: %+v", m)
+	}
+}

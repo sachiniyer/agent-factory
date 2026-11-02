@@ -61,6 +61,9 @@ type ReadOptions struct {
 	// dir on an account handoff; those copied messages consumed the source
 	// account's plan, so they must not count again here.
 	Foreign func(key string) bool
+	// Since, when set, reads past the messages from before it without
+	// counting them.
+	Since time.Time
 }
 
 // ReadResult is what one read of a transcript found.
@@ -214,6 +217,16 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 				continue
 			}
 		}
+		at := l.Timestamp
+		if at.IsZero() {
+			at = info.ModTime()
+		}
+		// Read past a message from before Since without counting it, before its
+		// price is looked up: one that is not counted cannot stop the read.
+		if !opts.Since.IsZero() && at.Before(opts.Since) {
+			res.Mark.Offset = next
+			continue
+		}
 		pr, ok := priceForUsage(msg.Model, *msg.Usage, opts.Overrides)
 		if !ok {
 			if !opts.SkipUnpriced {
@@ -226,10 +239,6 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 			}
 			res.Mark.Offset = next
 			continue
-		}
-		at := l.Timestamp
-		if at.IsZero() {
-			at = info.ModTime()
 		}
 		res.Entries = append(res.Entries, Entry{At: at, Cost: msg.Usage.cost(pr)})
 		if key != "" {
@@ -278,6 +287,50 @@ func TranscriptFiles(projectDirs []string) []string {
 	}
 	sort.Strings(out)
 	return out
+}
+
+// ConversationFiles lists the transcripts of one conversation in Claude
+// project directories: <dir>/<id>.jsonl and its subagents' files. An id that
+// is not a plain file name lists nothing.
+func ConversationFiles(projectDirs []string, id string) []string {
+	if !conversationIDOK(id) {
+		return nil
+	}
+	var out []string
+	for _, dir := range projectDirs {
+		if dir == "" {
+			continue
+		}
+		matches, _ := filepath.Glob(filepath.Join(dir, id, "subagents", "*.jsonl"))
+		for _, m := range append([]string{filepath.Join(dir, id+".jsonl")}, matches...) {
+			if info, err := os.Stat(m); err == nil && info.Mode().IsRegular() {
+				out = append(out, m)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out
+}
+
+// ConversationPaths are the paths that hold one conversation's transcripts in
+// Claude project directories, for the backlog paths of a scan: each
+// conversation file and the directory of its subagents. Another session's
+// transcript in the same project directory is not under any of them.
+func ConversationPaths(projectDirs []string, id string) []string {
+	if !conversationIDOK(id) {
+		return nil
+	}
+	var out []string
+	for _, dir := range projectDirs {
+		if dir != "" {
+			out = append(out, filepath.Join(dir, id+".jsonl"), filepath.Join(dir, id))
+		}
+	}
+	return out
+}
+
+func conversationIDOK(id string) bool {
+	return id != "" && id != "." && id != ".." && !strings.ContainsAny(id, `/\*?[`)
 }
 
 // PruneSeen drops the keys of messages older than the weekly window and a day.

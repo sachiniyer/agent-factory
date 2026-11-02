@@ -435,3 +435,31 @@ func TestLoadsV3(t *testing.T) {
 		t.Fatalf("an unbound v3 file saves as v2: %s", raw)
 	}
 }
+
+func TestSetOrchestratorMeters(t *testing.T) {
+	b := mk(t, Item{ID: 1, Title: "g"}, Item{ID: 2, Parent: 1})
+	if err := b.BindOrchestrator(1, orch("o"), t0); err != nil {
+		t.Fatal(err)
+	}
+	m := map[string]Meter{"a.jsonl": {Offset: 10, Cost: 1.5}, "b.jsonl": {Offset: 4, Cost: 0.25}}
+	if b.SetOrchestratorMeters(map[string]map[string]Meter{"x": m}) {
+		t.Fatal("an unbound session changed the backlog")
+	}
+	if !b.SetOrchestratorMeters(map[string]map[string]Meter{"o": m}) {
+		t.Fatal("no change")
+	}
+	if b.SetOrchestratorMeters(map[string]map[string]Meter{"o": m}) {
+		t.Fatal("same meters changed the backlog")
+	}
+	m["a.jsonl"] = Meter{Offset: 99}
+	o := b.Item(1).Orchestrator
+	if o.Meter["a.jsonl"].Offset != 10 || o.Cost() != 1.75 {
+		t.Fatalf("%+v", o.Meter)
+	}
+	if err := b.BindOrchestrator(1, orch("o2"), t0); err != nil {
+		t.Fatal(err)
+	}
+	if b.Item(1).Orchestrator.Cost() != 1.75 {
+		t.Fatal("a replacement lost the meter")
+	}
+}

@@ -348,7 +348,9 @@ func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overr
 }
 
 // ScanAll meters every Claude Code transcript under each account's config dirs.
-// A file under one of backlogDirs also counts as backlog cost. A file untouched
+// A file that is one of backlogDirs, or under one of them, also counts as
+// backlog cost: an entry is a directory, or one orchestrator conversation's
+// transcript file. A file untouched
 // for longer than the weekly window is not read and keeps no mark, and a file
 // whose size and modification time match its mark is not opened.
 //
@@ -479,9 +481,14 @@ func anyPriced(models string, overrides map[string]Price) bool {
 	return false
 }
 
-func underAny(path string, dirs []string) bool {
-	for _, d := range dirs {
-		if d != "" && strings.HasPrefix(path, filepath.Clean(d)+string(filepath.Separator)) {
+// underAny is whether path is one of paths, or under one of them: a backlog
+// path is a directory of item-session transcripts, or one conversation's file.
+func underAny(path string, paths []string) bool {
+	for _, d := range paths {
+		if d == "" {
+			continue
+		}
+		if d = filepath.Clean(d); path == d || strings.HasPrefix(path, d+string(filepath.Separator)) {
 			return true
 		}
 	}

@@ -214,3 +214,63 @@ func TestMeterNeverFollowsASymlinkedTranscript(t *testing.T) {
 		t.Fatalf("files = %v", got)
 	}
 }
+
+func TestConversationFilesListsOnlyThatConversation(t *testing.T) {
+	project := filepath.Join(t.TempDir(), "projects", "-repo")
+	write(t, filepath.Join(project, "c1.jsonl"), user)
+	write(t, filepath.Join(project, "c1", "subagents", "agent-a.jsonl"), user)
+	write(t, filepath.Join(project, "c1", "tool-results", "x.jsonl"), user)
+	write(t, filepath.Join(project, "mine.jsonl"), user)
+	write(t, filepath.Join(project, "mine", "subagents", "agent-b.jsonl"), user)
+	want := []string{filepath.Join(project, "c1.jsonl"), filepath.Join(project, "c1", "subagents", "agent-a.jsonl")}
+	if got := ConversationFiles([]string{project}, "c1"); strings.Join(got, ",") != strings.Join(want, ",") {
+		t.Fatal(got)
+	}
+	for _, id := range []string{"", "..", "../mine", "*", "c?"} {
+		if got := ConversationFiles([]string{project}, id); got != nil {
+			t.Fatalf("%q: %v", id, got)
+		}
+	}
+	paths := ConversationPaths([]string{project}, "c1")
+	for _, f := range want {
+		if !underAny(f, paths) {
+			t.Fatalf("%s not under %v", f, paths)
+		}
+	}
+	for _, f := range []string{filepath.Join(project, "mine.jsonl"), filepath.Join(project, "mine", "subagents", "agent-b.jsonl"), filepath.Join(project, "c1.jsonl.bak")} {
+		if underAny(f, paths) {
+			t.Fatalf("%s counted as the conversation", f)
+		}
+	}
+}
+
+func TestReadTranscriptSinceSkipsEarlierMessages(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	early := `{"type":"assistant","timestamp":"2026-10-20T09:00:00Z","message":{"id":"m0","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	write(t, path, early, assistant("m1", "claude-opus-5-5", 1_000_000, 0))
+	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	info, _ := os.Stat(path)
+	if len(res.Entries) != 1 || !near(res.Cost(), 4) || res.Mark.Offset != info.Size() {
+		t.Fatalf("%+v", res)
+	}
+}
+
+// A message from before Since is read past before its price is looked up, so
+// an unpriced model there does not stop the read of what counts after it.
+func TestReadTranscriptSinceSkipsAnUnpricedEarlierMessage(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "s.jsonl")
+	early := `{"type":"assistant","timestamp":"2026-10-20T09:00:00Z","message":{"id":"m0","model":"claude-x-9","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	write(t, path, early, assistant("m1", "claude-opus-5-5", 1_000_000, 0))
+	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
+	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Since: since})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if res.Unpriced != "" || len(res.Entries) != 1 || !near(res.Cost(), 4) {
+		t.Fatalf("%+v", res)
+	}
+}

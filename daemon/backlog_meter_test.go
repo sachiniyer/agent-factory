@@ -611,3 +611,91 @@ func TestBacklogTestServerJoinsItsMeteringPass(t *testing.T) {
 	<-released
 	require.False(t, m.backlog.meter.inFlight.Load(), "the pass was joined before the test returned")
 }
+
+// An orchestrator's conversation counts as backlog spend, but only that
+// conversation: an orchestrator running in place shares its Claude project dir
+// with the user's own sessions, and those stay the user's (fork bcc47d30f8's
+// review fix). Its cost on the group is stored and shown. Counting only from the
+// bind is MeterOrchestrator's and ReadTranscript's to pin.
+func TestMeterPassCountsOnlyTheOrchestratorsConversationAsBacklog(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	line := func(id string, at time.Time) string {
+		return `{"type":"assistant","timestamp":"` + at.Format(time.RFC3339) +
+			`","message":{"id":"` + id + `","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	}
+	project := filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	// The orchestrator's conversation, and a subagent of it.
+	require.NoError(t, os.WriteFile(filepath.Join(project, "c1.jsonl"), []byte(line("m1", now.Add(-time.Minute))), 0o644))
+	sub := filepath.Join(project, "c1", "subagents", "agent-a.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sub), 0o755))
+	require.NoError(t, os.WriteFile(sub, []byte(line("m3", now.Add(-time.Minute))), 0o644))
+	// The user's own session in the same project dir.
+	require.NoError(t, os.WriteFile(filepath.Join(project, "mine.jsonl"), []byte(line("m2", now.Add(-time.Minute))), 0o644))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	const repoID = "meter-orch-repo"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		// Bound half an hour ago: BindOrchestrator stamps BoundAt with this time.
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"},
+			now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(*session.Instance) (string, string, []string, bool) {
+		return "c1", claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+
+	st := &m.backlog.meter
+	st.mu.Lock()
+	m.meterPassLocked(now)
+	st.mu.Unlock()
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, b.Item(1).Orchestrator.Cost(), 1e-9, "the conversation and its subagent")
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	five := env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	require.InDelta(t, 12.0, five["all_cost"], 1e-9, "every message is plan use")
+	// backlog is the backlog's part of the window's plan percent: the plan is at
+	// 30%, and $8 of the $12 metered in it is the orchestrator's, so 20. Counting
+	// the user's own session as well would make it all 30.
+	require.InDelta(t, 20.0, five["backlog"], 1e-9, "the orchestrator's conversation and subagent are the backlog's; the user's own session is not")
+	view, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, view.Orchestrators[1].Cost, 1e-9)
+}
+
+func TestMeterFindsOrchestrators(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	_, orchs, complete := m.startedItemRuns(home)
+
+	require.True(t, complete)
+	require.Len(t, orchs, 1)
+	require.Equal(t, repoID, orchs[0].repoID)
+	require.Equal(t, 2, orchs[0].group)
+	require.NotNil(t, orchs[0].inst)
+	require.Zero(t, m.backlogSlotsUsed(repoID), "an orchestrator takes no max_running slot")
+}
+
+func TestOrchestratorWithoutAConversationIsNotMetered(t *testing.T) {
+	_, _, _, ok := orchestratorConversation(&session.Instance{ID: "o1", Title: "planner", Program: "claude"})
+	require.False(t, ok, "with no conversation id af cannot tell its transcript from others in the dir")
+}

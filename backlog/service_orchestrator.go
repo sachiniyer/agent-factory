@@ -77,6 +77,10 @@ type OrchestratorView struct {
 	State     string    `json:"state"`
 	Pending   int       `json:"pending"`
 	Handoff   string    `json:"handoff,omitempty"`
+	// Cost is the metered cost, in USD at API prices, of the group's
+	// orchestrator conversations since each was bound. It counts as backlog
+	// spend.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // OrchestratorEvent is the payload of a backlog.orchestrator.bound or
@@ -98,7 +102,7 @@ func (s *Service) orchestratorView(repoID string, o *Orchestrator) *Orchestrator
 		state = info.State
 	}
 	return &OrchestratorView{SessionID: o.SessionID, Title: o.Title, Program: o.Program, BoundAt: o.BoundAt,
-		State: state, Pending: len(o.Events), Handoff: o.Handoff}
+		State: state, Pending: len(o.Events), Handoff: o.Handoff, Cost: o.Cost()}
 }
 
 func (s *Service) orchestratorViews(repoID string, b *Backlog) map[int]OrchestratorView {

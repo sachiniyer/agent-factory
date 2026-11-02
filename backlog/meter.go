@@ -37,13 +37,29 @@ func (m RunMeter) Cost() float64 { return RunRef{Meter: m.Meter}.Cost() }
 // once it has run for UnmeterableAfter. w names the item's project in the
 // reason, which the runner shows in every project.
 func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, overrides map[string]planusage.Price, now time.Time) RunMeter {
+	out := meterFiles(id, w, r, files, planusage.ReadOptions{Overrides: overrides, Seen: seen})
+	if len(files) == 0 && now.Sub(r.StartedAt) >= UnmeterableAfter {
+		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of the session of %s · %s", w.Item(id), w.Fix(id))
+	}
+	return out
+}
+
+// MeterOrchestrator reads the transcripts of group's orchestrator from their
+// stored offsets, like MeterRun, and counts only messages from after the
+// session was bound: an orchestrator can be a session that worked before it
+// took the group.
+func MeterOrchestrator(group int, w Where, o Orchestrator, files []string, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
+	return meterFiles(group, w, RunRef{Meter: o.Meter}, files, planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: o.BoundAt})
+}
+
+func meterFiles(id int, w Where, r RunRef, files []string, opts planusage.ReadOptions) RunMeter {
 	out := RunMeter{Meter: maps.Clone(r.Meter)}
 	if out.Meter == nil {
 		out.Meter = map[string]Meter{}
 	}
 	for _, f := range files {
 		old := out.Meter[f]
-		res, err := planusage.ReadTranscript(f, planusage.FileMark{Offset: old.Offset, Last: old.Last}, planusage.ReadOptions{Overrides: overrides, Seen: seen})
+		res, err := planusage.ReadTranscript(f, planusage.FileMark{Offset: old.Offset, Last: old.Last}, opts)
 		out.Entries = append(out.Entries, res.Entries...)
 		if len(res.Entries) > 0 {
 			if out.FileEntries == nil {
@@ -63,9 +79,6 @@ func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, 
 		case err != nil && out.Unmeterable == "" && res.Mark.Offset == old.Offset:
 			out.Unmeterable = fmt.Sprintf("af cannot read a transcript of the session of %s: %v", w.Item(id), err)
 		}
-	}
-	if len(files) == 0 && now.Sub(r.StartedAt) >= UnmeterableAfter {
-		out.Unmeterable = fmt.Sprintf("af cannot find the transcripts of the session of %s · %s", w.Item(id), w.Fix(id))
 	}
 	return out
 }
