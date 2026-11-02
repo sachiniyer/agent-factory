@@ -288,21 +288,35 @@ func (c *scanContext) recordedServerCurrent() bool {
 //
 // So the proof asks the process itself first: tmux stamps every pane process
 // with TMUX="socketPath,serverPID,sessionIdx", naming the server its session
-// lived on. When that server is dead (its pid gone or recycled — see
-// tmuxServerDead) the session died with it: proven. When it is alive, doctor
-// lists THAT socket — a present name means the session is live elsewhere (and
-// routes to the escaped-process arm), an absent one proves death on the very
-// server the session lived on, and a failed listing proves nothing. Only when
-// the process carries no usable TMUX env does the proof fall back to the
-// record: it corroborates a kill only when the record is current AND every
-// socket it names — recorded plus prior generations — listed the session
-// absent, which is exactly what absence from the union map means.
+// lived on, and lists THAT socket — a present name means the session is live
+// elsewhere (and routes to the escaped-process arm), an absent one proves
+// death on the very server the session lived on, and a failed listing proves
+// nothing. The serverPID half of the env value can only prove the named
+// server DEAD — a pid still present but no longer tmux's is a positively
+// recycled server — while an absent pid proves nothing: /proc read failures
+// and pid namespaces both hide live servers, so liveness never comes from the
+// snapshot alone. Only when the process carries no usable TMUX env does
+// the proof fall back to the record: it corroborates a kill only when the
+// record is current AND every socket it names — recorded plus prior
+// generations — listed the session absent, which is exactly what absence from
+// the union map means.
 func (c *scanContext) sessionDeathProof(p proctree.Process, name string) (sessionDeathVerdict, string) {
 	tmuxEnv, status := proctree.LookupEnv(p.PID, "TMUX")
 	if status == proctree.EnvFound && tmuxEnv != "" {
-		if tmuxServerDead(c, tmuxEnv) {
+		// Identity guard on the stamped server pid: a pid still present but
+		// no longer a tmux process has been recycled — the named server is
+		// positively dead and its session died with it. A pid ABSENT from the
+		// snapshot proves nothing: /proc read failures and pid-namespace
+		// distance both hide live servers, so that case still needs the
+		// socket's own answer below.
+		if tmuxServerReplaced(c, tmuxEnv) {
 			return deathProven, ""
 		}
+		// The process names the server its session lived on — corroborate
+		// against THAT socket rather than the process table: a snapshot
+		// missing the server pid is not proof of death (/proc read failures
+		// and pid-namespace distance both hide live servers), and a record
+		// can be stale. The socket's own answer is the evidence either way.
 		if procSocket, _, _ := strings.Cut(tmuxEnv, ","); strings.TrimSpace(procSocket) != "" {
 			procSocket = strings.TrimSpace(procSocket)
 			names, err := c.sessionNamesOnSocket(procSocket)
@@ -310,10 +324,15 @@ func (c *scanContext) sessionDeathProof(p proctree.Process, name string) (sessio
 				if slices.Contains(names, name) {
 					return deathLiveElsewhere, procSocket
 				}
+				// The server answered and the session is absent: proven dead
+				// — the listing only completes against a live server, and a
+				// definitively dead one answers "no server running" as an
+				// authoritative empty (NoServerRunning).
 				return deathProven, ""
 			}
 			// The process names a server doctor cannot list: no fallback can
-			// substitute for a listing of the socket its session lived on.
+			// substitute for a listing of the socket its session lived on —
+			// and a missing pid cannot substitute either.
 			return deathUnproven, ""
 		}
 	}

@@ -501,3 +501,49 @@ func TestSameNamedSession_TwoSockets_BothHomesClaimed(t *testing.T) {
 	require.True(t, homes[normalizeHome(claimedByCurrent)],
 		"the session copy on the current socket claims %s", claimedByCurrent)
 }
+
+// TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill pins the
+// corroboration rule for the per-process TMUX arm: the serverPID half of a
+// process's TMUX env value can only prove the named server dead when the pid
+// is present and no longer tmux's. A pid ABSENT from the snapshot — a live
+// server hidden by /proc read failures or a pid namespace looks identical —
+// is not death evidence, and when the socket the env value names cannot be
+// listed either, nothing is proven: report, never kill.
+func TestProcessTmuxSocketUnlistable_AbsentServerPid_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	wedged := testguard.SocketPath(t, "wedged")
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-hidden-server-session",
+		tmux.EnvMarkerHome:    home,
+		// The serverPID is absent from the snapshot — as a live server
+		// outside doctor's view would be — and its socket cannot be listed.
+		"TMUX": fmt.Sprintf("%s,%d,0", wedged, 1<<30),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID) // Fix: true
+	opts.Exec = cmd_test.MockCmdExec{
+		RunFunc: func(*exec.Cmd) error { return nil },
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) {
+			args := c.Args
+			if len(args) > 3 && args[1] == "-S" && args[3] == "ls" && args[2] == wedged {
+				return nil, fmt.Errorf("server on %s is wedged", wedged)
+			}
+			return []byte(""), nil
+		},
+	}
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose TMUX env named a server doctor could not "+
+			"reach and whose pid it could not observe — absence from the snapshot is not "+
+			"death evidence (#6339)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"an unobservable server pid plus an unlistable socket must not arm a kill: %s", f.Detail)
+		require.False(t, f.Fixed)
+	}
+}

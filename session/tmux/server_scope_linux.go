@@ -308,12 +308,14 @@ func dedicatedServerReady(home, unit string) {
 // record's socket always reflects the socket this daemon generation resolved;
 // when the adopted socket is still the one a previous generation dedicated,
 // the dedicated claim is preserved rather than rewritten as adopted, since
-// the running server is almost certainly that dedicated server.
+// the running server is almost certainly that dedicated server — and the same
+// holds for a same-socket fallback decision, whose reason a rewrite to
+// "adopted" would hide from doctor while its bootstrap failure is still
+// unresolved.
 func recordAdoptedServer(home string) {
 	socket := DefaultSocketPath()
 	st := ServerState{Mode: ServerModeAdopted, Socket: socket, At: time.Now()}
-	if prev, ok, err := ReadServerState(home); err == nil && ok &&
-		prev.Socket == socket && prev.Mode == ServerModeDedicated {
+	if prev, ok, err := ReadServerState(home); err == nil && ok && prev.Socket == socket {
 		st.Mode, st.Unit, st.Reason = prev.Mode, prev.Unit, prev.Reason
 	}
 	recordServerState(home, st)
