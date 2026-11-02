@@ -13417,7 +13417,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         // tabindex or CSS-only reordering would still leave assistive technology
         // jumping between rows, so walk the native DOM sequence end to end.
         await toggle.focus();
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < (await viewTabs.count()); i++) {
           await p.keyboard.press("Tab");
           await expect(viewTabs.nth(i), `view tab ${i + 1} follows the drawer toggle`).toBeFocused();
         }
