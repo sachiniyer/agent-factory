@@ -165,7 +165,12 @@ func TestCloneCopiesOrchestrator(t *testing.T) {
 	}
 }
 
-func TestMigratesV2Unchanged(t *testing.T) {
+// TestUnboundBacklogStaysV2 pins why this slice adds no schema bump: an
+// unbound file loads and saves as a plain version 2 file, which an af that
+// knows only version 2 reads and writes back without losing anything. The
+// slice that first writes a binding moves the schema to 3 and must assert the
+// bound file's version here.
+func TestUnboundBacklogStaysV2(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
 	writeRaw(t, path, `{"schema_version": 2, "next_id": 3, "items": [
@@ -175,25 +180,47 @@ func TestMigratesV2Unchanged(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if b.SchemaVersion != 3 || !b.Item(1).Paused || b.Item(1).Orchestrator != nil || b.Item(2).Status != StatusQueued {
+	if b.SchemaVersion != 2 || !b.Item(1).Paused || b.Item(1).Orchestrator != nil || b.Item(2).Status != StatusQueued {
 		t.Fatalf("%+v", b)
 	}
 	if _, err := Update(repoID, func(b *Backlog) error {
-		return b.BindOrchestrator(1, orch("s"), t0)
+		b.Item(2).Title = "child, renamed"
+		return nil
 	}); err != nil {
 		t.Fatal(err)
 	}
 	raw, _ := os.ReadFile(path)
-	var obj struct {
-		SchemaVersion int `json:"schema_version"`
-		Items         []struct {
-			Orchestrator *Orchestrator `json:"orchestrator"`
-		} `json:"items"`
-	}
+	var obj map[string]any
 	if err := json.Unmarshal(raw, &obj); err != nil {
 		t.Fatal(err)
 	}
-	if obj.SchemaVersion != 3 || obj.Items[0].Orchestrator == nil || obj.Items[0].Orchestrator.SessionID != "s" || obj.Items[1].Orchestrator != nil {
+	if obj["schema_version"] != float64(2) || strings.Contains(string(raw), `"orchestrator"`) {
+		t.Fatalf("an unbound save must stay a plain version 2 file: %s", raw)
+	}
+}
+
+// TestBoundOrchestratorRoundTrips: a binding survives a save and load, and
+// writes none of its empty parts.
+func TestBoundOrchestratorRoundTrips(t *testing.T) {
+	home(t)
+	if _, err := Update(repoID, func(b *Backlog) error {
+		if _, err := b.Add(NewItem{Title: "group"}, t0); err != nil {
+			return err
+		}
+		if _, err := b.Add(NewItem{Title: "child", Parent: 1}, t0); err != nil {
+			return err
+		}
+		return b.BindOrchestrator(1, orch("s"), t0)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	path, _ := BacklogPath(repoID)
+	raw, _ := os.ReadFile(path)
+	b, err := Load(repoID)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if o := b.Item(1).Orchestrator; o == nil || o.SessionID != "s" || b.Item(2).Orchestrator != nil {
 		t.Fatalf("%s", raw)
 	}
 	if strings.Contains(string(raw), `"handoff"`) || strings.Contains(string(raw), `"events"`) || strings.Contains(string(raw), `"meter"`) {

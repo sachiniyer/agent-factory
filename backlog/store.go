@@ -15,7 +15,7 @@ import (
 const (
 	BacklogFileName      = "backlog.json"
 	BudgetFileName       = "budget.json"
-	BacklogSchemaVersion = 3
+	BacklogSchemaVersion = 2
 	BudgetSchemaVersion  = 2
 )
 
@@ -127,10 +127,14 @@ var backlogStore = store[Backlog]{
 	empty:    New,
 	finish:   (*Backlog).normalize,
 	setStamp: func(b *Backlog, v int) { b.SchemaVersion = v },
-	// Versions 2 and 3 only add fields (2: paused and archived on items, then and
-	// handoff on messages; 3: an orchestrator on a group), so their migrators only
-	// stamp. Each bump stops an older af from saving the file and dropping them.
-	migrate: map[int]config.SchemaMigrator{1: stampVersion(2), 2: stampVersion(3)},
+	// Version 2 only adds fields (paused and archived on items, then and handoff
+	// on messages), so its migrator only stamps. The bump stops an older af from
+	// saving the file and dropping them. Item.Orchestrator needs no bump yet:
+	// nothing writes it, and an unset one is omitted, so an unbound file is a
+	// plain version 2 file. The slice that first writes a binding moves this to
+	// version 3 (stampVersion(3) from 2), so an older af refuses a file that
+	// holds one rather than dropping it.
+	migrate: map[int]config.SchemaMigrator{1: stampVersion(2)},
 }
 
 var budgetStore = store[Budget]{
