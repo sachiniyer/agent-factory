@@ -158,7 +158,10 @@ func TestAccountsLoginWithoutATerminalPrintsHowToAttach(t *testing.T) {
 	}
 	// Shell-quoted, because the line is meant to be pasted: an agent-factory home
 	// or socket dir with a space in it must still produce a command that runs.
-	want := "tmux -S '/tmp/tmux-1000/default' attach-session -t 'af_af-login-codex-work'"
+	// The target is the exact-match `=name` spelling: a bare name is a tmux
+	// PREFIX pattern, so once this login's session dies a pasted attach must
+	// fail cleanly instead of landing in a sibling account's pane.
+	want := "tmux -S '/tmp/tmux-1000/default' attach-session -t '=af_af-login-codex-work'"
 	if strings.TrimSpace(stdout) != want {
 		t.Fatalf("stdout = %q, want the bare attach command %q", stdout, want)
 	}
@@ -168,10 +171,55 @@ func TestAccountsLoginWithoutATerminalPrintsHowToAttach(t *testing.T) {
 }
 
 // With no socket resolved, the attach falls back to the default socket rather
-// than emitting `-S ` with nothing after it.
+// than emitting `-S ` with nothing after it. The target is the exact-match
+// `=name` spelling so a pasted attach never resolves to a prefix sibling.
 func TestAccountsLoginAttachCommandFallsBackToTheDefaultSocket(t *testing.T) {
-	if got := accountLoginAttachCommand("af_af-login-codex-work", ""); got != "tmux attach-session -t 'af_af-login-codex-work'" {
+	if got := accountLoginAttachCommand("af_af-login-codex-work", ""); got != "tmux attach-session -t '=af_af-login-codex-work'" {
 		t.Fatalf("attach command with no socket = %q", got)
+	}
+}
+
+// tmux resolves a bare `-t name` by exact match first and then PREFIX match, so
+// once a login's session has died a bare target silently attaches to a
+// surviving sibling whose name shares the prefix. Account names that yield
+// prefix-related session names are normal (`work` and `work2` hex-encode to a
+// strict prefix pair), and the daemon allows concurrent logins for different
+// accounts, so the attach target MUST be the exact-match `=name` spelling —
+// the same one the liveness probe uses — or an operator can be dropped into a
+// different account's in-flight login pane. This is the bug class #1006 and
+// #6506 fixed for `has-session`; the attach paths share it.
+func TestAccountsLoginAttachCommandUsesExactMatchToAvoidPrefixSiblings(t *testing.T) {
+	// `work` and `work2` produce session names where one is a strict prefix of
+	// the other: hex.EncodeToString("work") == "776f726b", hex("work2") ==
+	// "776f726b32". A bare target for the dead `work` session would resolve to
+	// the live `work2` session; the `=` spelling disables that fallback.
+	deadSession := "af_af-loginx-codex-776f726b"
+	liveSibling := "af_af-loginx-codex-776f726b32"
+	if !strings.HasPrefix(liveSibling, deadSession) {
+		t.Fatalf("fixture invariant: %q must be a prefix of %q", deadSession, liveSibling)
+	}
+	for _, tc := range []struct {
+		name       string
+		socket     string
+		wantSubstr string
+	}{
+		{"default socket", "", "tmux attach-session -t '=" + deadSession + "'"},
+		{"pinned socket", "/tmp/s/default",
+			"tmux -S '/tmp/s/default' attach-session -t '=" + deadSession + "'"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			got := accountLoginAttachCommand(deadSession, tc.socket)
+			if !strings.Contains(got, tc.wantSubstr) {
+				t.Fatalf("attach command = %q, want exact-match target %q", got, tc.wantSubstr)
+			}
+			// The bare name (without `=`) must never appear as the -t value:
+			// that is exactly the prefix-pattern form that resolves to the
+			// sibling. The `=`-prefixed form is the only safe spelling.
+			bareTarget := "attach-session -t '" + deadSession + "'"
+			if strings.Contains(got, bareTarget) {
+				t.Fatalf("attach command uses bare (prefix-pattern) target %q in %q", bareTarget, got)
+			}
+		})
 	}
 }
 
@@ -263,7 +311,7 @@ func TestAccountsLoginAttachFailureNamesTheWayBack(t *testing.T) {
 	if err == nil {
 		t.Fatal("a failed attach was reported as success")
 	}
-	if !strings.Contains(err.Error(), "tmux -S '/tmp/s/default' attach-session -t 'af_af-login-codex-work'") {
+	if !strings.Contains(err.Error(), "tmux -S '/tmp/s/default' attach-session -t '=af_af-login-codex-work'") {
 		t.Fatalf("attach failure does not say how to reach the pane: %v", err)
 	}
 }

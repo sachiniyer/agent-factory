@@ -241,11 +241,19 @@ func reportAccountLoginOutcome(cmd *cobra.Command, agent, name string) error {
 // socket is not something either side may assume (#2019). Empty means the daemon
 // could not resolve it, and the default socket is then the best available answer.
 func accountLoginAttachCommand(sessionName, socketPath string) string {
+	// Exact-match target (`=name`): tmux resolves a bare `-t name` by exact
+	// match first and then PREFIX match, so once this login's session has died
+	// a bare target silently resolves to a surviving sibling whose name shares
+	// the prefix (e.g. `…-work` → `…-work2`). The `=` spelling disables the
+	// fallback and makes an ended session fail cleanly instead of landing the
+	// operator in a different account's login pane. Same helper the liveness
+	// probe below uses; shell-quoted because the line is meant to be pasted.
+	target := tmux.ExactSessionTarget(sessionName)
 	if socketPath == "" {
-		return fmt.Sprintf("tmux attach-session -t %s", config.ShellQuotePath(sessionName))
+		return fmt.Sprintf("tmux attach-session -t %s", config.ShellQuotePath(target))
 	}
 	return fmt.Sprintf("tmux -S %s attach-session -t %s",
-		config.ShellQuotePath(socketPath), config.ShellQuotePath(sessionName))
+		config.ShellQuotePath(socketPath), config.ShellQuotePath(target))
 }
 
 // attachAccountLogin hands this terminal to the login pane and takes it back
@@ -264,7 +272,11 @@ var attachAccountLogin = func(sessionName, socketPath string) error {
 	if socketPath != "" {
 		args = append(args, "-S", socketPath)
 	}
-	args = append(args, "attach-session", "-t", sessionName)
+	// ExactSessionTarget (`=name`) disables tmux's prefix-fallback resolution:
+	// a bare `-t name` would attach to a surviving sibling whose name shares
+	// the prefix once this login's session has died, landing the operator in a
+	// different account's pane. Same spelling the liveness probe below uses.
+	args = append(args, "attach-session", "-t", tmux.ExactSessionTarget(sessionName))
 	attach := exec.Command("tmux", args...)
 	attach.Stdin, attach.Stdout, attach.Stderr = os.Stdin, os.Stdout, os.Stderr
 	attach.Env = accountLoginAttachEnv()
