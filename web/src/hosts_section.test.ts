@@ -11,7 +11,7 @@ import { afterEach, beforeEach, test } from "node:test";
 import assert from "node:assert/strict";
 
 import { installFakeDom, type FakeElement } from "./backlog_fakedom.js";
-import { renderHostsSection, type HostActions, type HostStatus, type HostsState } from "./hosts.js";
+import { renderHostsSection, type HostActions, type HostAddDraft, type HostStatus, type HostsState } from "./hosts.js";
 import type { ConfigEntry, HostCheckResult } from "./types.js";
 
 let dom: ReturnType<typeof installFakeDom>;
@@ -157,4 +157,37 @@ test("a verdict renders only while the saved entry is the one that was probed", 
     { open: false },
   ) as unknown as FakeElement;
   assert.equal(checkLines(section).length, 0, "an entry-less verdict stays hidden");
+});
+
+// A check-all probes every host: a per-host check that answered first would
+// be overwritten by the slower aggregate, and a remove mid-probe leaves a
+// verdict for a row that may not exist when the answer lands. The row verbs
+// rest for its span.
+test("a running check-all rests every row's verbs", () => {
+  const section = renderHostsSection(entries, state({ busy: [""] }), actions, { open: false }) as unknown as FakeElement;
+
+  assert.equal(section.querySelectorAll(".af-hosts-check").length, 1);
+  assert.equal(section.querySelectorAll(".af-hosts-check")[0].disabled, true, "box1's Check rests while check-all is in flight");
+  assert.equal(section.querySelectorAll(".af-hosts-remove")[0].disabled, true, "and its Remove rests with it");
+});
+
+// The port field stays type=text: a number input swallows text the browser
+// reads as invalid (validity.badInput makes .value ""), which would submit as
+// an OMITTED port. The typed text must reach doHostAdd's check so "1e" is
+// refused rather than saved as the default port.
+test("the port field preserves typed text for validation", () => {
+  const sent: HostAddDraft[] = [];
+  const capture: HostActions = { check: () => {}, add: (d) => { sent.push(d); }, remove: () => {} };
+  const section = renderHostsSection(entries, state(), capture, { open: true }) as unknown as FakeElement;
+  const field = (key: string) => section.querySelector(`input[data-host-input="${key}"]`) as unknown as { type: string; value: string };
+
+  const port = field("port");
+  assert.equal(port.type, "text", "not a number input — invalid text cannot be swallowed as an empty port");
+  field("name").value = "box2";
+  field("host").value = "gpu.tailnet.ts.net";
+  port.value = "1e";
+  section.querySelectorAll(".af-hosts-add")[0].click();
+
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].port, "1e", "the typed text reaches doHostAdd's port check verbatim");
 });

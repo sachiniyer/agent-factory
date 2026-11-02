@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "e83bfa9851b3";
+var CLIENT_VERSION = "3322ee684486";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8561,7 +8561,7 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
   const section3 = h("section", { class: "af-hosts" });
   section3.setAttribute("aria-label", "Hosts");
   const { rows, parseError } = hostRows(entries);
-  const busy = (name) => state.busy.includes(name);
+  const busy = (name) => state.busy.includes(name) || state.busy.includes("");
   const checkAllBtn = h(
     "button",
     { type: "button", class: "af-ghost af-hosts-check-all" },
@@ -8689,7 +8689,7 @@ function renderAddForm(entries, status, actions2) {
   const name = text("name", "Name", "what --host takes");
   const host = text("host", "Host", "hostname or address \u2014 no user@, no :port");
   const user = text("user", "User", "ssh login, optional");
-  const port = text("port", "Port", "22", "number");
+  const port = text("port", "Port", "22");
   const identityFile = text("identity_file", "Identity file", "absolute path, optional");
   const workspaceRoot = text("workspace_root", "Workspace root", "absolute path, optional");
   const postures = hostKeyPostures(entries);

@@ -277,7 +277,11 @@ export function renderHostsSection(
   section.setAttribute("aria-label", "Hosts");
 
   const { rows, parseError } = hostRows(entries);
-  const busy = (name: string) => state.busy.includes(name);
+  // A check-all probes every host, so the row verbs rest for its span too:
+  // a per-host check answered first would be overwritten by the slower
+  // aggregate, and a remove mid-probe leaves a verdict for a row that may
+  // not exist when the answer lands.
+  const busy = (name: string) => state.busy.includes(name) || state.busy.includes("");
 
   const checkAllBtn = h(
     "button",
@@ -448,7 +452,11 @@ function renderAddForm(
   const name = text("name", "Name", "what --host takes");
   const host = text("host", "Host", "hostname or address — no user@, no :port");
   const user = text("user", "User", "ssh login, optional");
-  const port = text("port", "Port", "22", "number");
+  // Deliberately type=text: a number input swallows text the browser reads
+  // as invalid (badInput makes .value ""), which would submit as an OMITTED
+  // port — the typed text must reach doHostAdd's check so "1e" is refused
+  // rather than saved as the default port.
+  const port = text("port", "Port", "22");
   const identityFile = text("identity_file", "Identity file", "absolute path, optional");
   const workspaceRoot = text("workspace_root", "Workspace root", "absolute path, optional");
 
