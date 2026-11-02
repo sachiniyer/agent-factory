@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f7c05aa93d48";
+var CLIENT_VERSION = "9752484ef25e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14075,6 +14075,15 @@ function findLeaf(node, id) {
   }
   return findLeaf(node.a, id) ?? findLeaf(node.b, id);
 }
+function findSplitById(node, id) {
+  if (node.kind === "leaf") {
+    return null;
+  }
+  if (node.id === id) {
+    return node;
+  }
+  return findSplitById(node.a, id) ?? findSplitById(node.b, id);
+}
 function mapLeaf(node, id, fn) {
   if (node.kind === "leaf") {
     return node.id === id ? fn(node) : node;
@@ -14863,9 +14872,13 @@ var SplitView = class {
   // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
   // divider drag produces a new root for a layout already on screen, and a
   // reference check would rebuild on the next resync — the same rewind, one
-  // gesture later. The stale nodes the live dividers still capture are harmless:
-  // a divider resolves its split by ID when it persists, and the only state it
-  // reads back (ratio) is what it wrote during that same drag.
+  // gesture later. The stale nodes the live dividers still capture are harmless
+  // because buildDivider re-resolves its split from the CURRENT tree on each
+  // pointerdown (findSplitById), so the in-place ratio write lands on the live
+  // node — and onUp aliases builtTree back to the post-setRatio tree, keeping
+  // sameLayout closed across consecutive drags. Without that, a second drag would
+  // mutate only the stale captured node, diverging builtTree from tree mid-gesture
+  // and flipping the very gate this field exists to guard (#6555).
   builtTree = null;
   // The tree after the pane-minimum fit (#6429): the layout the DOM is asked to
   // show, equal to `tree` minus whichever leaves the host cannot give
@@ -15827,22 +15840,24 @@ var SplitView = class {
       if (!parent) {
         return;
       }
+      const live = this.tree ? findSplitById(this.tree, node.id) : null;
+      const split = live ?? node;
       divider.setPointerCapture(e.pointerId);
-      document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
+      document.body.classList.add(split.dir === "row" ? "af-resizing-col" : "af-resizing-row");
       const rect = parent.getBoundingClientRect();
-      const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
+      const leafMin = split.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
       const visibleRoot = this.displayTree ?? this.tree;
       const visible = visibleRoot ? new Set(leaves(visibleRoot).map((l) => l.id)) : void 0;
-      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX, visible);
-      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX, visible);
-      const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
+      const minA = minSubtreeSize(split.a, split.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const minB = minSubtreeSize(split.b, split.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const span = Math.max(1, (split.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
       const lo = minA / span;
       const hi = 1 - minB / span;
       const onMove = (ev) => {
-        const pos = node.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
+        const pos = split.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
         const want = pos / span;
-        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : node.ratio;
-        node.ratio = clamped;
+        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : split.ratio;
+        split.ratio = clamped;
         aEl.style.flex = `${clamped} 1 0`;
         bEl.style.flex = `${1 - clamped} 1 0`;
       };
@@ -15850,9 +15865,11 @@ var SplitView = class {
         divider.releasePointerCapture(ev.pointerId);
         divider.removeEventListener("pointermove", onMove);
         divider.removeEventListener("pointerup", onUp);
+        divider.removeEventListener("pointercancel", onUp);
         document.body.classList.remove("af-resizing-col", "af-resizing-row");
         if (this.tree) {
-          this.tree = setRatio(this.tree, node.id, node.ratio);
+          this.tree = setRatio(this.tree, split.id, split.ratio);
+          this.builtTree = this.tree;
           if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
             this.proposalRatios.set(this.sessionId, this.tree.ratio);
           }
@@ -15863,6 +15880,7 @@ var SplitView = class {
       };
       divider.addEventListener("pointermove", onMove);
       divider.addEventListener("pointerup", onUp);
+      divider.addEventListener("pointercancel", onUp);
     });
     return divider;
   }
