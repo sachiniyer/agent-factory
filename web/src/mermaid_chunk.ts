@@ -42,15 +42,18 @@ async function renderNow(source: string, theme: Record<string, string>): Promise
     maxEdges: 500,
   });
   const id = `af-mmd-${++seq}`;
-  // A detached scratch element hosts the measuring div render() creates, so
-  // nothing of mermaid's ever lands on the page — and the finally below drops
-  // what it leaves behind on the error path.
+  // A scratch element hosts the measuring div render() creates. It must be
+  // ATTACHED — the diagram renderers look their svg up by document-wide
+  // getElementById — but parked two viewports off-screen so nothing of
+  // mermaid's is ever on the page. The finally drops whatever it leaves behind.
   const scratch = document.createElement("div");
+  scratch.style.cssText = "position:fixed;left:-200vw;top:-200vh";
+  document.body.appendChild(scratch);
   try {
     const { svg } = await mermaid.render(id, source, scratch);
     return svg;
   } finally {
-    scratch.replaceChildren();
+    scratch.remove();
     document.getElementById(`d${id}`)?.remove();
   }
 }

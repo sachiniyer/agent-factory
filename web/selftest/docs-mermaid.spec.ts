@@ -54,12 +54,13 @@ test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, i
   page.on("request", (r) => {
     if (r.url().includes("/lazy/mermaid.js")) mermaidLoads.push(r.url());
   });
-  // The strip order follows --docs order, so the no-diagram doc opens first.
+  // The strip orders non-template docs alphabetically, so a-plain opens first
+  // and the mermaid chunk must stay unfetched until the b-diagram tab is chosen.
   const pane = await openDocs(page, request, "mermaid-probe", "mermaid-plan", {
-    plain: "# Plain\n\nNo diagrams here — the mermaid chunk must stay unloaded.\n",
-    diagram: `# Diagram\n\nThe shape of the change:\n\n${fence(DIAGRAM)}\n\nShip it.\n`,
+    "a-plain": "# Plain\n\nNo diagrams here — the mermaid chunk must stay unloaded.\n",
+    "b-diagram": `# Diagram\n\nThe shape of the change:\n\n${fence(DIAGRAM)}\n\nShip it.\n`,
   });
-  await expect(pane.locator(".af-docs-tab")).toHaveText(["plain", "diagram"]);
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["a-plain", "b-diagram"]);
   await expect(pane.locator(".cm-content")).toContainText("No diagrams here");
   expect(mermaidLoads, "a doc without a mermaid block must not fetch the chunk").toHaveLength(0);
 
