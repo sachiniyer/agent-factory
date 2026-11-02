@@ -86,7 +86,7 @@ import { TasksPane } from "./tasks.js";
 import { type ThemeChoice, THEME_CHOICES, currentMode, themeSurfaces } from "./theme.js";
 import { BacklogPane, type BacklogHost } from "./backlog_pane.js";
 import type { BacklogData } from "./backlog_data.js";
-import { type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
+import { STATE_LABELS, type SessionItem, formatID, needsYouByRoot, needsYouLabel, sessionItems, sessionItemsSig } from "./backlog_model.js";
 import type { TerminalStatus } from "./terminal.js";
 import {
   type ConfigEntry,
@@ -1823,7 +1823,8 @@ export class AppShell {
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [], sessionKey,
       s => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true,
-        this.sessionItemMap.get(s.id ?? "")?.id ?? 0, this.sessionItemMap.get(s.id ?? "")?.title ?? "", this.sessionItemMap.get(s.id ?? "")?.root ?? ""]),
+        this.sessionItemMap.get(s.id ?? "")?.id ?? 0, this.sessionItemMap.get(s.id ?? "")?.title ?? "", this.sessionItemMap.get(s.id ?? "")?.root ?? "",
+        this.sessionItemMap.get(s.id ?? "")?.state ?? ""]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -2482,13 +2483,13 @@ export class AppShell {
     else this.terminalChrome?.menu.dismiss();
   }
 
-  /** The B-12 chip of an item session; a click opens the item in the Backlog view. */
+  /** The "B-12 · Working" chip of an item session; a click opens the item in the Backlog view. */
   private itemChip(sessionId: string): HTMLElement | undefined {
     const item = this.sessionItemMap.get(sessionId);
     if (!item) return undefined;
     const chip = h("button", { type: "button", class: "af-backlog-session-chip", title: `Open ${formatID(item.id)} ${item.title}` },
-      formatID(item.id));
-    chip.setAttribute("aria-label", `Open item ${formatID(item.id)}`);
+      `${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
+    chip.setAttribute("aria-label", `Open item ${formatID(item.id)} · ${STATE_LABELS[item.state]}`);
     chip.addEventListener("click", (e) => {
       e.stopPropagation();
       this.actions.switchProject(item.root);

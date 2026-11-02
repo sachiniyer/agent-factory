@@ -1,0 +1,212 @@
+// Session previews for the Backlog view (backlog v2 proposal, technical.md
+// "Session preview"): /v1/PreviewSession text, cached for 5 s, one request at a
+// time, and a hover popover on the state chip that waits 300 ms before it asks.
+
+import { af, errorText } from "./api.js";
+import { h } from "./dom.js";
+
+export const PREVIEW_DELAY_MS = 300;
+export const PREVIEW_TTL_MS = 5000;
+export const PREVIEW_LINES = 12;
+
+export interface Preview {
+  text: string;
+  error?: string;
+}
+
+export async function previewSession(id: string, lines: number, token: string): Promise<string> {
+  const resp = await af<{ text?: string }>("PreviewSession", { id, lines }, token);
+  return resp?.text ?? "";
+}
+
+interface Waiting {
+  id: string;
+  keep: boolean;
+  resolve: (p: Preview | null) => void;
+}
+
+/** Previews by session id, one request at a time; the rest wait in order. A
+ *  hover ask replaces a waiting hover ask, which then resolves null. A kept ask
+ *  (the panel's) is never replaced, and does not replace a hover ask either. */
+export class PreviewCache {
+  private readonly entries = new Map<string, { preview: Preview; at: number }>();
+  private busy = false;
+  private waiting: Waiting[] = [];
+
+  constructor(private readonly load: (id: string) => Promise<string>, private readonly now: () => number = Date.now) {}
+
+  cached(id: string): Preview | undefined {
+    const e = this.entries.get(id);
+    return e && this.now() - e.at < PREVIEW_TTL_MS ? e.preview : undefined;
+  }
+
+  get(id: string, keep = false): Promise<Preview | null> {
+    const hit = this.cached(id);
+    if (hit) return Promise.resolve(hit);
+    if (!this.busy) return this.run(id);
+    return new Promise((resolve) => {
+      const same = this.waiting.find((w) => w.id === id);
+      if (same) {
+        const prev = same.resolve;
+        same.resolve = (p) => { prev(p); resolve(p); };
+        same.keep ||= keep;
+        return;
+      }
+      if (!keep) {
+        for (const w of this.waiting.filter((x) => !x.keep)) w.resolve(null);
+        this.waiting = this.waiting.filter((x) => x.keep);
+      }
+      this.waiting.push({ id, keep, resolve });
+    });
+  }
+
+  private async run(id: string): Promise<Preview> {
+    this.busy = true;
+    let preview: Preview;
+    try {
+      preview = { text: await this.load(id) };
+    } catch (e) {
+      preview = { text: "", error: errorText(e) };
+    }
+    this.entries.set(id, { preview, at: this.now() });
+    this.busy = false;
+    this.drain();
+    return preview;
+  }
+
+  private drain(): void {
+    while (!this.busy && this.waiting.length > 0) {
+      const w = this.waiting.shift()!;
+      const hit = this.cached(w.id);
+      if (hit) w.resolve(hit);
+      else void this.run(w.id).then(w.resolve);
+    }
+  }
+}
+
+/** One floating preview for the list's state chips. */
+export class PreviewPopover {
+  readonly el: HTMLElement;
+  private readonly heading = h("div", { class: "af-backlog-preview-head" });
+  private readonly body = h("pre", { class: "af-backlog-preview-text" });
+  private timer: ReturnType<typeof setTimeout> | null = null;
+  private anchor: HTMLElement | null = null;
+  private sessionId = "";
+  // What opened the preview: the pointer on its chip, or keyboard focus on the chip's row.
+  private via: "hover" | "focus" = "hover";
+  // Each chip's focus owner (its row), so a rebuilt chip's row can be asked.
+  private readonly owners = new WeakMap<HTMLElement, HTMLElement>();
+
+  constructor(private readonly cache: PreviewCache) {
+    this.el = h("div", { class: "af-backlog-preview", role: "tooltip", hidden: true }, this.heading, this.body);
+    this.el.id = "af-backlog-preview";
+  }
+
+  /** Wires an anchor to show the session's preview on hover, and on focus of
+   *  focusEl (its row, for keyboard users). */
+  attach(anchor: HTMLElement, sessionId: string, heading: string, focusEl: HTMLElement = anchor): void {
+    anchor.dataset.previewSession = sessionId;
+    this.owners.set(anchor, focusEl);
+    const show = (via: "hover" | "focus"): void => this.schedule(anchor, sessionId, heading, via);
+    const hide = (): void => {
+      if (this.anchor === anchor) this.hide();
+    };
+    anchor.addEventListener("mouseenter", () => show("hover"));
+    focusEl.addEventListener("focus", () => show("focus"));
+    anchor.addEventListener("mouseleave", hide);
+    // A row removed by a rebuild may blur; rebind() decides for that one.
+    focusEl.addEventListener("blur", () => {
+      if (anchor.isConnected) hide();
+    });
+  }
+
+  /** After a list rebuild: follows the open preview to its new chip, or hides it. */
+  rebind(root: HTMLElement): void {
+    if (!this.anchor) return;
+    const next = [...root.querySelectorAll<HTMLElement>("[data-preview-session]")]
+      .find((el) => el.dataset.previewSession === this.sessionId);
+    if (!next) {
+      this.hide();
+      return;
+    }
+    this.anchor = next;
+    if (!this.el.hidden) next.setAttribute("aria-describedby", this.el.id);
+  }
+
+  /** After the list has settled its focus: a preview a row's focus opened stays
+   *  only while that row (rebuilt or not) still has focus, so it never floats over
+   *  the panel Enter moved focus into. A hover preview is the pointer's to end. */
+  settle(): void {
+    if (!this.anchor || this.via !== "focus") return;
+    const owner = this.owners.get(this.anchor) ?? this.anchor;
+    if (!owner.contains(document.activeElement)) this.hide();
+  }
+
+  hide(): void {
+    if (this.timer !== null) clearTimeout(this.timer);
+    this.timer = null;
+    this.anchor?.removeAttribute("aria-describedby");
+    this.anchor = null;
+    this.sessionId = "";
+    this.el.hidden = true;
+  }
+
+  private schedule(anchor: HTMLElement, sessionId: string, heading: string, via: "hover" | "focus"): void {
+    if (this.anchor === anchor) return;
+    this.hide();
+    this.anchor = anchor;
+    this.sessionId = sessionId;
+    this.via = via;
+    this.timer = setTimeout(() => {
+      this.timer = null;
+      void this.cache.get(sessionId).then((p) => {
+        if (!p || this.sessionId !== sessionId || !this.anchor?.isConnected) return;
+        this.show(this.anchor, heading, p);
+      });
+    }, PREVIEW_DELAY_MS);
+  }
+
+  private show(anchor: HTMLElement, heading: string, p: Preview): void {
+    this.heading.textContent = heading;
+    this.body.textContent = p.error ? `Preview unavailable · ${p.error}` : p.text || "No output yet";
+    this.body.classList.toggle("af-backlog-preview-error", Boolean(p.error));
+    const vw = typeof window === "undefined" ? 0 : window.innerWidth;
+    const vh = typeof window === "undefined" ? 0 : window.innerHeight;
+    Object.assign(this.el.style, previewPlacement(anchor.getBoundingClientRect(), vw, vh));
+    this.el.hidden = false;
+    // Taller than its room, the text is clipped: show the newest output, as a terminal does.
+    this.body.scrollTop = this.body.scrollHeight;
+    anchor.setAttribute("aria-describedby", this.el.id);
+  }
+}
+
+export interface PreviewPlacement {
+  top: string;
+  bottom: string;
+  left: string;
+  right: string;
+  maxWidth: string;
+  maxHeight: string;
+}
+
+/** Where the popover goes for an anchor in a vw × vh viewport (0 when unknown):
+ *  below the anchor when it sits in the top 60%, else above, with the room on
+ *  that side as its height cap, so wrapped output never runs off the viewport;
+ *  aligned to the anchor's nearer half, with the room on that side as its
+ *  width cap. */
+export function previewPlacement(r: { top: number; height: number; left: number; width: number }, vw: number, vh: number): PreviewPlacement {
+  const below = vh === 0 || r.top + r.height < vh * 0.6;
+  const tall = vh > 0 ? Math.max(0, below ? vh - (r.top + r.height) : r.top) : 0;
+  const left = Math.max(0, r.left);
+  const end = Math.min(vw || Infinity, r.left + r.width);
+  const fromRight = vw > 0 && end > vw / 2;
+  const wide = fromRight ? Math.max(0, end) : vw > 0 ? vw - left : 0;
+  return {
+    top: below ? `${r.top + r.height}px` : "auto",
+    bottom: below ? "auto" : `${vh - r.top}px`,
+    left: fromRight ? "auto" : `${left}px`,
+    right: fromRight ? `${Math.max(0, vw - end)}px` : "auto",
+    maxWidth: wide > 0 ? `min(calc(var(--af-space-4) * 36), ${wide}px)` : "",
+    maxHeight: tall > 0 ? `${tall}px` : "",
+  };
+}

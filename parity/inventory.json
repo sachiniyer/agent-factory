@@ -1075,7 +1075,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/terminal.ts (xterm renders the live stream)"
+        "pointer": "web/src/terminal.ts (xterm renders the live stream); web/src/backlog_preview.ts previewSession (backlog chip hover and session card)"
       },
       "cli": {
         "status": "yes",
@@ -2178,6 +2178,7 @@
     },
     "web_rpcs": {
       "GetBacklog": "backlog.items",
+      "PreviewSession": "session.preview",
       "AddBacklogItems": "backlog.items",
       "UpdateBacklogItem": "backlog.items",
       "MoveBacklogItem": "backlog.items",
