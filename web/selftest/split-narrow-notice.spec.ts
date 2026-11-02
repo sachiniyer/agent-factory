@@ -61,7 +61,11 @@ test("#6556: a split into an already-narrow host still names its hidden pane", a
 
   // The split happens — the new leaf is hidden immediately — and the layout
   // must SAY one pane is hidden rather than silently rendering the old tree.
+  // Two shells: the second stays selected (the pane keeps showing it) while
+  // the FIRST is dragged — an unshown tab, so the drop really splits rather
+  // than routing through companionTab's self-drop substitution.
   const base = await page.locator(".af-tabbar .af-tab").count();
+  await newShellTab(page);
   await newShellTab(page);
   await dragTabToPane(page, base, 0, "right");
   await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
@@ -76,8 +80,14 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   await page.locator("#app[data-af-resync-settled]").waitFor();
   await page.setViewportSize({ width: 1400, height: 800 });
 
-  // Three side-by-side panes, all fitting.
+  // Three side-by-side panes, all fitting. A new shell is SELECTED on create,
+  // so the last-created tab is always the one the focused pane shows — the
+  // THIRD shell is that shown tab and is never dragged. Dragging a shown tab
+  // onto a DIFFERENT pane would not split: the one-tab-one-pane dedupe moves
+  // it and closes its old leaf (split.ts applyTabDrop → dedupeExcept), which
+  // is exactly the no-leaf outcome an earlier draft of this test produced.
   const base = await page.locator(".af-tabbar .af-tab").count();
+  await newShellTab(page);
   await newShellTab(page);
   await newShellTab(page);
   await dragTabToPane(page, base, 0, "right");
@@ -86,8 +96,8 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   await expect(page.locator(".af-term-host .af-pane")).toHaveCount(3);
 
   // Pin focus on the LAST pane so the hidden set is deterministic: after the
-  // shrink the hidden leaves are exactly the two I did not focus — the
-  // original pane and the leaf bound to my first new shell (tab `base`).
+  // shrink the hidden leaves are exactly the two I did not focus — the left
+  // leaf (the third new shell, `base + 2`) and the middle leaf (tab `base`).
   await page.locator(".af-term-host .af-pane").nth(2).click();
   // 900px keeps the desktop rail AND the tab bar — under the 768px breakpoint
   // af-session-first hides .af-term-head, and the close affordance below
