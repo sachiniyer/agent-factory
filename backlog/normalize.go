@@ -51,6 +51,7 @@ func (b *Backlog) normalize() error {
 		}
 	}
 	b.cutWaitCycles()
+	b.normalizeOrchestrators()
 
 	s := &b.Settings
 	if s.MaxRunning < 1 {
