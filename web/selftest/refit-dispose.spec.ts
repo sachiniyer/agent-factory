@@ -30,6 +30,14 @@ async function openSession(page: Page, id: string): Promise<void> {
   await page.locator(".af-term-host .xterm").first().waitFor();
 }
 
+/** In-page session switch through the hash router — the same teardown a rail
+ *  click drives, without depending on the shared roster's rail state. */
+async function routeTo(page: Page, id: string): Promise<void> {
+  await page.evaluate((sid) => {
+    window.location.hash = `#/session/${sid}`;
+  }, id);
+}
+
 test("#6588: refit/dispose orderings produce no uncaught error", async ({ page, request }) => {
   expect(page.context().browser()?.browserType().name(), "this spec must run WebKit").toBe("webkit");
   const idA = await sessionId(request, sessionA);
@@ -50,14 +58,12 @@ test("#6588: refit/dispose orderings produce no uncaught error", async ({ page, 
     await expect(tabs).toHaveCount(have + 1);
   }
 
-  // 1. In-app session switching via the rail: each click tears down this
-  // session's terminals and mounts the other's inside the same page.
-  const rowA = page.locator(".af-rail-list .af-row", { hasText: sessionA }).first();
-  const rowB = page.locator(".af-rail-list .af-row", { hasText: sessionB }).first();
+  // 1. In-app session switching: each route change tears down this session's
+  // terminals and mounts the other's inside the same page.
   for (let i = 0; i < 8; i++) {
-    await rowB.click();
+    await routeTo(page, idB);
     await page.locator(".af-term-host .xterm").first().waitFor();
-    await rowA.click();
+    await routeTo(page, idA);
     await page.locator(".af-term-host .xterm").first().waitFor();
   }
 
@@ -81,18 +87,13 @@ test("#6588: refit/dispose orderings produce no uncaught error", async ({ page, 
   });
   await page.waitForTimeout(500);
 
-  // 4. The same churn against the rail: session A↔B with no settle between.
-  await page.evaluate(
-    ({ a, b }) => {
-      const rows = Array.from(document.querySelectorAll<HTMLElement>(".af-rail-list .af-row"));
-      const pick = (title: string) => rows.find((r) => r.textContent?.includes(title));
-      for (let i = 0; i < 10; i++) {
-        pick(b)?.click();
-        pick(a)?.click();
-      }
-    },
-    { a: sessionA, b: sessionB },
-  );
+  // 4. The same churn against the router: session A↔B with no settle between.
+  // A task between assignments keeps each flip a real navigation — two writes
+  // inside one task can coalesce into a single hashchange.
+  for (let i = 0; i < 10; i++) {
+    await routeTo(page, idB);
+    await routeTo(page, idA);
+  }
   await page.waitForTimeout(500);
 
   // 5. A band crossing DURING the churn: resize through 768 while activations
