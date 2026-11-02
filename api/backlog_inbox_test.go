@@ -49,7 +49,7 @@ func TestBacklogInbox(t *testing.T) {
 func TestFormatBacklogInboxStripsControls(t *testing.T) {
 	now := time.Now()
 	got := formatBacklogInbox([]backlog.InboxEntry{{ID: 1, Title: "a\x1b]0;pwned\x07",
-		Question: backlog.Message{Text: "q\x1b[2J\u009b?", At: now, Handoff: "x\r\ny\x1b[31m"}}}, now)
+		Question: backlog.Message{Text: "q\x1b[2J\u009b?", At: now, Handoff: "x\r\ny\x1b[31m"}}}, nil, now)
 	want := "B-1  a]0;pwned  · <1m ago\n  q[2J?\n  Notes from the agent:\n    x\n    y[31m\n"
 	if got != want {
 		t.Fatalf("got %q\nwant %q", got, want)
@@ -61,7 +61,7 @@ func TestFormatBacklogInbox(t *testing.T) {
 	got := formatBacklogInbox([]backlog.InboxEntry{
 		{ID: 3, Title: "web", Question: backlog.Message{Text: "which db?", At: now.Add(-3 * time.Hour), Handoff: "tried sqlite\nslow"}},
 		{ID: 5, Title: "cli", Question: backlog.Message{Text: "ship?", At: now.Add(-90 * time.Second)}},
-	}, now)
+	}, nil, now)
 	want := "B-3  web  · 3h ago\n  which db?\n  Notes from the agent:\n    tried sqlite\n    slow\n" +
 		"B-5  cli  · 1m ago\n  ship?\n"
 	if got != want {
@@ -101,5 +101,16 @@ func TestBacklogAskThen(t *testing.T) {
 	}
 	if strings.Join(got, ", ") != "which db?=archive, and the port?=wait" {
 		t.Fatalf("then on the questions: %v", got)
+	}
+}
+
+func TestFormatBacklogInboxNotes(t *testing.T) {
+	now := time.Date(2026, 10, 24, 12, 0, 0, 0, time.UTC)
+	got := formatBacklogInbox(nil, []backlog.InboxNote{
+		{ID: 4, Title: "api", Note: backlog.Message{Text: "The effort session marked this done · https://x/pull/1", At: now.Add(-2 * time.Minute)}},
+	}, now)
+	want := "No questions\n\nNotes\nB-4  api  · 2m ago\n  The effort session marked this done · https://x/pull/1\n"
+	if got != want {
+		t.Fatalf("got %q\nwant %q", got, want)
 	}
 }

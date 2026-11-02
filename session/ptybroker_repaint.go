@@ -33,6 +33,14 @@ type PaneSnapshot struct {
 	CursorRow int
 	CursorCol int
 	HasCursor bool
+	// CursorVisible is the pane's DECTCEM (?25) state — whether the application
+	// is showing the cursor. HasVisibility distinguishes a truthful "hidden"
+	// from a source that cannot report it (the remote REST preview's joined-
+	// content shape). A fresh subscriber did not observe the app's earlier
+	// ?25h/?25l, so the repaint restores it exactly as it restores the cursor
+	// position and ownership modes.
+	CursorVisible bool
+	HasVisibility bool
 	// Modes are the ownership-affecting terminal modes that were already active
 	// before this subscriber existed. HasModes distinguishes a truthful all-off
 	// primary-screen snapshot from a source that cannot report modes.
@@ -132,6 +140,17 @@ func buildRepaint(snap PaneSnapshot) []byte {
 		out = append(out, []byte(fmt.Sprintf("\x1b[%d;1H\x1b[K", i+1))...)
 		out = append(out, line...)
 	}
+	if snap.HasVisibility {
+		// Restore DECTCEM (?25) before positioning the cursor: a fresh
+		// subscriber did not observe the app's earlier ?25h/?25l, so without
+		// this the emulator keeps its default visible cursor even when the app
+		// hid it — a phantom overlay until the app's next visibility transition.
+		if snap.CursorVisible {
+			out = append(out, []byte("\x1b[?25h")...)
+		} else {
+			out = append(out, []byte("\x1b[?25l")...)
+		}
+	}
 	if snap.HasCursor {
 		out = append(out, []byte(fmt.Sprintf("\x1b[%d;%dH", snap.CursorRow+1, snap.CursorCol+1))...)
 	}
@@ -203,5 +222,5 @@ func deadPaneMarkerPresent(lines []string) bool {
 // because the grid is blank. A fresh primary-screen pane can have no printable
 // cells while its all-false mode snapshot is exactly what resolves ownership.
 func snapshotHasRepaintState(snap PaneSnapshot) bool {
-	return len(snap.Screen) > 0 || snap.HasCursor || snap.HasModes
+	return len(snap.Screen) > 0 || snap.HasCursor || snap.HasModes || snap.HasVisibility
 }

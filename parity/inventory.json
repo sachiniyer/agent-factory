@@ -1936,6 +1936,24 @@
       },
       "verdict": "deliberate",
       "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button and group panel row. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
+    },
+    {
+      "id": "backlog.escalate",
+      "title": "Escalate a question from a group's orchestrator to the user",
+      "tui": {
+        "status": "no",
+        "pointer": ""
+      },
+      "web": {
+        "status": "no",
+        "pointer": ""
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/backlog_orchestrate.go backlogEscalateCmd → POST /v1/EscalateBacklogQuestion (daemon/backlog_orchestrator.go)"
+      },
+      "verdict": "deliberate",
+      "notes": "Effort orchestrator PR 5. The orchestrator escalates; it is an agent in a session, so the verb is on the CLI. The user answers an escalated question in the Inbox like any other. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action."
     }
   ],
   "ledger": {
@@ -1952,6 +1970,7 @@
       "af backlog edit": "backlog.items",
       "af backlog move": "backlog.items",
       "af backlog orchestrate": "backlog.orchestrator",
+      "af backlog escalate": "backlog.escalate",
       "af backlog delete": "backlog.items",
       "af backlog note": "backlog.items",
       "af backlog ask": "backlog.questions",
@@ -2080,6 +2099,7 @@
       "POST /v1/RunBacklog": "backlog.runner",
       "POST /v1/SetBacklogOrchestrator": "backlog.orchestrator",
       "POST /v1/SetBacklogOrchestratorHandoff": "backlog.orchestrator",
+      "POST /v1/EscalateBacklogQuestion": "backlog.escalate",
       "GET /v1/health": "-",
       "POST /v1/AddProposalDoc": "proposal.docs",
       "POST /v1/RemoveProposalDoc": "proposal.docs",
@@ -2289,6 +2309,8 @@
       "af backlog orchestrate --self": "backlog.orchestrator",
       "af backlog orchestrate --clear": "backlog.orchestrator",
       "af backlog orchestrate --handoff-file": "backlog.orchestrator",
+      "af backlog escalate --help": "meta.discovery",
+      "af backlog escalate --note": "backlog.escalate",
       "af backlog inbox --help": "meta.discovery",
       "af backlog answer --question": "backlog.questions",
       "af backlog drop --help": "meta.discovery",
@@ -3225,6 +3247,9 @@
         },
         "pr": {
           "ok": "Set only by the agent's af backlog done --self --pr, which arrives with item sessions in backlog PR 4."
+        },
+        "caller_session_id": {
+          "ok": "Set only by af backlog done run inside a session, so an effort session that marks an item done leaves an Inbox note; the web has no session of its own."
         }
       },
       "StartBacklogItem": {

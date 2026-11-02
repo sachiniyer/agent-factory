@@ -34,6 +34,7 @@ import {
   type TabDropResult,
   type Edge,
   findLeaf,
+  findSplitById,
   fitToSize,
   focusSuccessorAfterDrop,
   type LayoutNode,
@@ -394,9 +395,13 @@ export class SplitView {
   // changed layout. setRatio rebuilds every SplitNode it walks, so persisting a
   // divider drag produces a new root for a layout already on screen, and a
   // reference check would rebuild on the next resync — the same rewind, one
-  // gesture later. The stale nodes the live dividers still capture are harmless:
-  // a divider resolves its split by ID when it persists, and the only state it
-  // reads back (ratio) is what it wrote during that same drag.
+  // gesture later. The stale nodes the live dividers still capture are harmless
+  // because buildDivider re-resolves its split from the CURRENT tree on each
+  // pointerdown (findSplitById), so the in-place ratio write lands on the live
+  // node — and onUp aliases builtTree back to the post-setRatio tree, keeping
+  // sameLayout closed across consecutive drags. Without that, a second drag would
+  // mutate only the stale captured node, diverging builtTree from tree mid-gesture
+  // and flipping the very gate this field exists to guard (#6555).
   private builtTree: LayoutNode | null = null;
 
   // The tree after the pane-minimum fit (#6429): the layout the DOM is asked to
@@ -1936,35 +1941,50 @@ export class SplitView {
       if (!parent) {
         return;
       }
+      // Re-resolve the split node from the CURRENT tree so the in-place ratio write
+      // stays on the live tree object. After a prior drag's setRatio rebuilt
+      // this.tree with fresh split nodes, the node this closure captured (from
+      // builtTree) is stale — mutating it would diverge builtTree from this.tree
+      // and flip the sameLayout gate mid-gesture, rebuilding the split DOM during a
+      // drag and detaching the divider (pointerup never fires, the ratio is not
+      // persisted, and the af-resizing-* body classes stay stuck). findSplitById
+      // returns null only when the split was closed out-of-band, in which case the
+      // divider is no longer in the DOM and pointerdown cannot reach it — but the
+      // fallback keeps the drag legal regardless.
+      const live = this.tree ? findSplitById(this.tree, node.id) : null;
+      const split = live ?? node;
       divider.setPointerCapture(e.pointerId);
-      document.body.classList.add(node.dir === "row" ? "af-resizing-col" : "af-resizing-row");
+      document.body.classList.add(split.dir === "row" ? "af-resizing-col" : "af-resizing-row");
       const rect = parent.getBoundingClientRect();
       // The floors are px, not fractions (#6429): a drag may shrink a side down
       // to its usable minimum — covering every leaf inside the subtree — but
       // never into a sliver. The wrapper's own box is fixed for the drag's life
       // (flex moves its children, not it), so the rect captured here stays valid.
-      const leafMin = node.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
+      const leafMin = split.dir === "row" ? PANE_MIN_WIDTH_PX : PANE_MIN_HEIGHT_PX;
       // The clamp prices only the leaves the fit leaves VISIBLE (#6573): the
-      // DOM is the retained tree since #6558, so node.a/node.b still carry
+      // DOM is the retained tree since #6558, so split.a/split.b still carry
       // fit-hidden leaves — pricing their floors in deadlocks the drag (four
       // panes fit to two: each side's retained floor exceeds the whole span).
       const visibleRoot = this.displayTree ?? this.tree;
       const visible = visibleRoot ? new Set(leaves(visibleRoot).map((l) => l.id)) : undefined;
-      const minA = minSubtreeSize(node.a, node.dir, leafMin, PANE_DIVIDER_PX, visible);
-      const minB = minSubtreeSize(node.b, node.dir, leafMin, PANE_DIVIDER_PX, visible);
-      const span = Math.max(1, (node.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
+      const minA = minSubtreeSize(split.a, split.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const minB = minSubtreeSize(split.b, split.dir, leafMin, PANE_DIVIDER_PX, visible);
+      const span = Math.max(1, (split.dir === "row" ? rect.width : rect.height) - PANE_DIVIDER_PX);
       const lo = minA / span;
       const hi = 1 - minB / span;
       const onMove = (ev: PointerEvent) => {
-        const pos = node.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
+        const pos = split.dir === "row" ? ev.clientX - rect.left : ev.clientY - rect.top;
         const want = pos / span;
         // When even the minimums cannot coexist (the host shrank mid-gesture),
         // the drag cannot go anywhere legal — hold the last valid ratio.
-        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : node.ratio;
-        // Mutate the live node's ratio (the tree is not in the store, so an in-place
-        // update is fine) and reflect it immediately; the terminals' ResizeObservers
-        // re-fit on their own as the flex basis changes.
-        node.ratio = clamped;
+        const clamped = lo <= hi ? Math.min(Math.min(hi, 0.9), Math.max(Math.max(lo, 0.1), want)) : split.ratio;
+        // Mutate the live node's ratio in place and reflect it immediately; the
+        // terminals' ResizeObservers re-fit on their own as the flex basis
+        // changes. Because `split` was re-resolved from this.tree (which builtTree
+        // aliases after a reconcile), the write lands on the same object both
+        // reference — so sameLayout(tree, builtTree) stays true mid-gesture and a
+        // reconcile cannot take the replaceChildren rebuild branch.
+        split.ratio = clamped;
         aEl.style.flex = `${clamped} 1 0`;
         bEl.style.flex = `${1 - clamped} 1 0`;
       };
@@ -1972,10 +1992,16 @@ export class SplitView {
         divider.releasePointerCapture(ev.pointerId);
         divider.removeEventListener("pointermove", onMove);
         divider.removeEventListener("pointerup", onUp);
+        divider.removeEventListener("pointercancel", onUp);
         document.body.classList.remove("af-resizing-col", "af-resizing-row");
-        // Persist the final ratio into the retained tree by id.
+        // Persist the final ratio into the retained tree by id. setRatio allocates
+        // fresh split nodes, so this.tree no longer shares identity with the node
+        // the drag just mutated — update builtTree to alias the new tree so the
+        // next drag's re-resolve finds a node that IS the builtTree's node, keeping
+        // sameLayout closed until a real layout change rebuilds the DOM.
         if (this.tree) {
-          this.tree = setRatio(this.tree, node.id, node.ratio);
+          this.tree = setRatio(this.tree, split.id, split.ratio);
+          this.builtTree = this.tree;
           if (this.sessionId && this.tree.kind === "split" && isProposalView(this.tree, this.tabKinds)) {
             this.proposalRatios.set(this.sessionId, this.tree.ratio);
           }
@@ -1986,6 +2012,11 @@ export class SplitView {
       };
       divider.addEventListener("pointermove", onMove);
       divider.addEventListener("pointerup", onUp);
+      // A pointercancel (the browser taking over the gesture, or an accessibility
+      // cancel) must run the same cleanup as pointerup: without it the body classes
+      // and the move/up listeners would leak, pinning cursor: col/row-resize and
+      // user-select: none over the entire app until another drag completed.
+      divider.addEventListener("pointercancel", onUp);
     });
     return divider;
   }

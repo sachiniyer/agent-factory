@@ -9,13 +9,18 @@ import (
 )
 
 // TerminalState is the part of a tmux pane snapshot capture-pane cannot carry:
-// the real cursor and the ownership-affecting terminal modes. Applications can
-// switch these modes without repainting them for a later subscriber, so the WS
-// stream snapshots them explicitly.
+// the real cursor, cursor visibility, and the ownership-affecting terminal
+// modes. Applications can switch these without repainting them for a later
+// subscriber, so the WS stream snapshots them explicitly.
 type TerminalState struct {
 	CursorRow int
 	CursorCol int
 	Modes     terminal.Modes
+	// CursorVisible is the pane's DECTCEM (?25) state — whether the application
+	// has the cursor shown. A fresh subscriber did not observe the app's earlier
+	// ?25h/?25l, so the repaint must restore it exactly as it already restores
+	// alternate-screen and mouse modes.
+	CursorVisible bool
 	// PaneWidth/PaneHeight are the pane's real dimensions — tmux's own
 	// #{pane_width}/#{pane_height}. They ride the same request because the WS
 	// stream's repaint path needs the pane's actual geometry: a pane nobody ever
@@ -26,11 +31,12 @@ type TerminalState struct {
 	PaneHeight int
 }
 
-const terminalStateFormat = "#{cursor_y} #{cursor_x} #{alternate_on} #{mouse_any_flag} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag} #{pane_width} #{pane_height}"
+const terminalStateFormat = "#{cursor_y} #{cursor_x} #{alternate_on} #{mouse_any_flag} #{mouse_standard_flag} #{mouse_button_flag} #{mouse_all_flag} #{mouse_utf8_flag} #{mouse_sgr_flag} #{pane_width} #{pane_height} #{?cursor_flag,1,0}"
 
-// ReadTerminalState reads cursor, alternate-screen, mouse tracking, and mouse
-// encoding in one bounded tmux request. One display-message keeps those fields
-// from describing different instants and avoids multiplying subscribe latency.
+// ReadTerminalState reads cursor, cursor visibility, alternate-screen, mouse
+// tracking, and mouse encoding in one bounded tmux request. One display-message
+// keeps those fields from describing different instants and avoids multiplying
+// subscribe latency.
 func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 	ctx, cancel := tmuxTimeoutContext()
 	defer cancel()
@@ -45,8 +51,8 @@ func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 	// A SHORT answer is a parse failure. A missing field means the producer and
 	// parser disagree on shape; silently defaulting it would fabricate a value not
 	// sent — the fabricated-negative class #3169 is about, one layer down.
-	if len(fields) != 11 {
-		return TerminalState{}, fmt.Errorf("failed to parse tmux terminal state %q: want 11 fields, got %d", string(output), len(fields))
+	if len(fields) != 12 {
+		return TerminalState{}, fmt.Errorf("failed to parse tmux terminal state %q: want 12 fields, got %d", string(output), len(fields))
 	}
 	values := make([]int, len(fields))
 	for i, field := range fields {
@@ -67,7 +73,8 @@ func (t *TmuxSession) ReadTerminalState() (TerminalState, error) {
 			MouseUTF8:       values[7] != 0,
 			MouseSGR:        values[8] != 0,
 		},
-		PaneWidth:  values[9],
-		PaneHeight: values[10],
+		CursorVisible: values[11] != 0,
+		PaneWidth:     values[9],
+		PaneHeight:    values[10],
 	}, nil
 }

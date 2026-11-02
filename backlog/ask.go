@@ -121,7 +121,8 @@ type InboxEntry struct {
 	Question Message `json:"question"`
 }
 
-// Inbox lists every open question of every item, oldest first. Items in an
+// Inbox lists every open question of every item that is with the user,
+// oldest first. Questions waiting for a group's orchestrator and items in an
 // archived group are left out.
 func (b *Backlog) Inbox() []InboxEntry {
 	out := []InboxEntry{}
@@ -131,9 +132,37 @@ func (b *Backlog) Inbox() []InboxEntry {
 			continue
 		}
 		for _, q := range it.openQuestions() {
-			out = append(out, InboxEntry{ID: it.ID, Title: it.Title, Question: *q})
+			if !b.withOrchestrator(it.ID, q) {
+				out = append(out, InboxEntry{ID: it.ID, Title: it.Title, Question: *q})
+			}
 		}
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Question.At.Before(out[j].Question.At) })
+	return out
+}
+
+// InboxNote is one note the Inbox shows; it needs no action.
+type InboxNote struct {
+	ID    int     `json:"id"`
+	Title string  `json:"title"`
+	Note  Message `json:"note"`
+}
+
+// InboxNotes lists the Inbox notes of every item, oldest first. Items in an
+// archived group are left out.
+func (b *Backlog) InboxNotes() []InboxNote {
+	out := []InboxNote{}
+	for i := range b.Items {
+		it := &b.Items[i]
+		if b.ArchivedBy(it.ID) != 0 {
+			continue
+		}
+		for _, m := range it.Thread {
+			if m.Kind == KindNote && m.Inbox {
+				out = append(out, InboxNote{ID: it.ID, Title: it.Title, Note: m})
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Note.At.Before(out[j].Note.At) })
 	return out
 }

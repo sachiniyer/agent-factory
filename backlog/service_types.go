@@ -98,6 +98,10 @@ type SetItemStatusRequest struct {
 	// SessionID marks the agent of that item session sending it to review.
 	SessionID string `json:"session_id,omitempty"`
 	PR        string `json:"pr,omitempty"`
+	// CallerSessionID is the af session the request comes from, if any. When
+	// it orchestrates the item's group, marking the item done adds an Inbox
+	// note for the user.
+	CallerSessionID string `json:"caller_session_id,omitempty"`
 }
 
 type DeleteItemRequest struct {

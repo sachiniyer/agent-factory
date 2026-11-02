@@ -150,6 +150,15 @@ func (s *Service) update(p *project, fn func(*Backlog) ([]int, error)) (*Backlog
 			return err
 		}
 		if prev != nil {
+			for _, id := range b.escalateStranded(prev, s.now()) {
+				if last := b.Item(id).lastRun(); last != nil && last.SessionID != "" {
+					qid, text := b.AttentionRef(id)
+					s.host.SetAttention(p.id, last.SessionID, qid, text)
+				}
+				if !slices.Contains(ids, id) {
+					ids = append(ids, id)
+				}
+			}
 			for _, g := range b.queueOrchChanges(prev, s.now()) {
 				if !slices.Contains(ids, g) {
 					ids = append(ids, g)
@@ -377,7 +386,7 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		asked = b.questionSessions()
 		askedRef = map[int]openQuestion{}
 		for id := range asked {
-			qid, text := b.OpenQuestionRef(id)
+			qid, text := b.AttentionRef(id)
 			askedRef[id] = openQuestion{qid, text}
 		}
 		by := ActorUser
@@ -389,12 +398,19 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 		} else if req.PR != "" {
 			return nil, errors.New("pr goes with session_id: only the agent's done sets it")
 		}
+		wasDone := false
+		if it := b.Item(req.ID); it != nil {
+			wasDone = it.Status == StatusDone
+		}
 		changed, err := b.SetStatus(req.ID, req.Status, by, runActive, s.now())
 		if err != nil {
 			return nil, err
 		}
 		if req.PR != "" {
 			b.Item(req.ID).PR = req.PR
+		}
+		if req.Status == StatusDone && !wasDone {
+			b.noteOrchestratorDone(req.ID, req.CallerSessionID, s.now())
 		}
 		still := b.questionSessions()
 		for id, sessionID := range asked {
@@ -405,7 +421,7 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 			// The oldest open question changed (send-to-review closed af's own
 			// question and left the agent's): the mirror and the remembered
 			// identity follow it, or a terminal answer fails the identity check.
-			if qid, text := b.OpenQuestionRef(id); (openQuestion{qid, text}) != askedRef[id] {
+			if qid, text := b.AttentionRef(id); (openQuestion{qid, text}) != askedRef[id] {
 				s.host.SetAttention(p.id, sessionID, qid, text)
 			}
 		}
@@ -417,7 +433,7 @@ func (s *Service) SetItemStatus(req SetItemStatusRequest) (*ItemResponse, error)
 	return &ItemResponse{Item: *b.Item(req.ID)}, nil
 }
 
-// openQuestion is the identity of an item's oldest open question.
+// openQuestion is what an item session's attention shows (Backlog.AttentionRef).
 type openQuestion struct {
 	id   int
 	text string

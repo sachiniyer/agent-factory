@@ -73,6 +73,7 @@ func stubBacklogDaemon(t *testing.T) *[]string {
 		"SetBacklogSettings":            backlogRoute(svc.SetSettings),
 		"SetBacklogOrchestrator":        backlogRoute(svc.SetOrchestrator),
 		"SetBacklogOrchestratorHandoff": backlogRoute(svc.SetOrchestratorHandoff),
+		"EscalateBacklogQuestion":       backlogRoute(svc.Escalate),
 		"GetBudget":                     backlogRoute(svc.GetBudget),
 		"SetBudget":                     backlogRoute(svc.SetBudget),
 		"MoveBacklogItem": backlogRoute(func(r daemon.MoveBacklogItemRequest) (any, error) {

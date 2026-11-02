@@ -22,7 +22,7 @@ func TestReadTerminalState_RefusesAShortAnswerRatherThanAssumingNoScrollback(t *
 	_, err := ts.ReadTerminalState()
 	require.Error(t, err,
 		"a short answer must surface the producer/parser disagreement, not silently default a missing field to zero")
-	require.Contains(t, err.Error(), "want 11 fields")
+	require.Contains(t, err.Error(), "want 12 fields")
 }
 
 // The ten-field shape an OLDER answer produced (before pane dimensions rode the
@@ -34,7 +34,18 @@ func TestReadTerminalState_RefusesThePreSizeFieldShape(t *testing.T) {
 
 	_, err := ts.ReadTerminalState()
 	require.Error(t, err)
-	require.Contains(t, err.Error(), "want 11 fields")
+	require.Contains(t, err.Error(), "want 12 fields")
+}
+
+// The eleven-field shape before cursor visibility rode the format is likewise a
+// parse failure: the producer and parser must agree on shape, and falling short
+// is the bug to surface, not a signal to fabricate a visibility value.
+func TestReadTerminalState_RefusesThePreVisibilityFieldShape(t *testing.T) {
+	ts := fakeTerminalStateTmux(t, "7 11 1 1 0 1 0 0 1 200 60")
+
+	_, err := ts.ReadTerminalState()
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "want 12 fields")
 }
 
 func fakeTerminalStateTmux(t *testing.T, fields string) *TmuxSession {

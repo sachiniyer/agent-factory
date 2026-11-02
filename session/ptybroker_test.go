@@ -36,8 +36,13 @@ type fakeClientlessChannel struct {
 	cursorRow int
 	cursorCol int
 	hasCursor bool
-	modes     terminal.Modes
-	hasModes  bool
+	// cursorVisible/hasVisibility are the canned DECTCEM (?25) state Snapshot
+	// reports; hasVisibility false (the default) means "channel can't report
+	// visibility", so the repaint omits the ?25 restore — the pre-fix behavior.
+	cursorVisible bool
+	hasVisibility bool
+	modes         terminal.Modes
+	hasModes      bool
 	// wClosed reports whether the CURRENT capture writer (f.w) has been closed by a
 	// StopCapture — the test proxy for "the pane pipe was disabled". Reset on each
 	// StartCapture. Used by the #1661 teardown-clobber regression test.
@@ -203,15 +208,17 @@ func (f *fakeClientlessChannel) Snapshot() (PaneSnapshot, error) {
 		return PaneSnapshot{}, f.snapshotErr
 	}
 	return PaneSnapshot{
-		Screen:    append([]byte(nil), f.snapshot...),
-		CursorRow: f.cursorRow,
-		CursorCol: f.cursorCol,
-		HasCursor: f.hasCursor,
-		Modes:     f.modes,
-		HasModes:  f.hasModes,
-		Rows:      f.snapshotRows,
-		Cols:      f.snapshotCols,
-		HasSize:   f.snapshotHasSize,
+		Screen:        append([]byte(nil), f.snapshot...),
+		CursorRow:     f.cursorRow,
+		CursorCol:     f.cursorCol,
+		HasCursor:     f.hasCursor,
+		Modes:         f.modes,
+		HasModes:      f.hasModes,
+		CursorVisible: f.cursorVisible,
+		HasVisibility: f.hasVisibility,
+		Rows:          f.snapshotRows,
+		Cols:          f.snapshotCols,
+		HasSize:       f.snapshotHasSize,
 	}, nil
 }
 
@@ -731,6 +738,248 @@ func TestPTYBrokerRepaintTrailingNewlineKeepsBottomRow(t *testing.T) {
 	// And the cursor is still on the bottom row where the pane program left it.
 	if pos := emu.CursorPosition(); pos.Y != curRow || pos.X != curCol {
 		t.Fatalf("post-repaint cursor = (row %d,col %d), want (row %d,col %d)", pos.Y, pos.X, curRow, curCol)
+	}
+}
+
+// TestPTYBrokerRepaintRestoresCursorVisibilityHidden is the phantom-cursor fix:
+// a fresh subscriber's repaint must emit \x1b[?25l when the pane application has
+// hidden the cursor (DECTCEM off). Without it the emulator keeps its default
+// visible cursor and overlays a phantom block on a screen the app intended
+// cursor-less — exactly the bug a fresh subscriber hits when the app only emits
+// ?25l on transitions (Claude's composer, Codex's pickers, vim between operations).
+func TestPTYBrokerRepaintRestoresCursorVisibilityHidden(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:      []byte("composer screen"),
+		hasCursor:     true,
+		cursorRow:     0,
+		cursorCol:     5,
+		hasVisibility: true,
+		cursorVisible: false,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+	if !strings.Contains(string(ev.Data), "\x1b[?25l") {
+		t.Fatalf("repaint must emit \\x1b[?25l to hide the cursor when CursorVisible=false; got %q", ev.Data)
+	}
+	if strings.Contains(string(ev.Data), "\x1b[?25h") {
+		t.Fatalf("repaint must NOT emit \\x1b[?25h when CursorVisible=false; got %q", ev.Data)
+	}
+}
+
+// TestPTYBrokerRepaintRestoresCursorVisibilityVisible pins the visible half: a
+// pane with the cursor shown must get \x1b[?25h so a fresh subscriber does not
+// lose a cursor the app intends visible.
+func TestPTYBrokerRepaintRestoresCursorVisibilityVisible(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:      []byte("prompt$ "),
+		hasCursor:     true,
+		cursorRow:     0,
+		cursorCol:     8,
+		hasVisibility: true,
+		cursorVisible: true,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+	if !strings.Contains(string(ev.Data), "\x1b[?25h") {
+		t.Fatalf("repaint must emit \\x1b[?25h to show the cursor when CursorVisible=true; got %q", ev.Data)
+	}
+	if strings.Contains(string(ev.Data), "\x1b[?25l") {
+		t.Fatalf("repaint must NOT emit \\x1b[?25l when CursorVisible=true; got %q", ev.Data)
+	}
+}
+
+// TestPTYBrokerRepaintOmitsCursorVisibilityWhenUnknown pins the graceful-degrade
+// path: a source that cannot report visibility (the remote REST joined-content
+// preview, or the cursor-only fallback) must leave the emulator's default
+// visibility untouched — no ?25 bytes at all. This is the pre-fix behavior for
+// sources that never carried visibility, and it must be preserved so a stale or
+// remote snapshot does not fabricate a visibility value.
+func TestPTYBrokerRepaintOmitsCursorVisibilityWhenUnknown(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:  []byte("screen"),
+		hasCursor: true,
+		cursorRow: 0, cursorCol: 3,
+		// hasVisibility is false (the default) — the channel cannot report it.
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+	if strings.Contains(string(ev.Data), "\x1b[?25") {
+		t.Fatalf("repaint must NOT emit any ?25 sequence when HasVisibility=false; got %q", ev.Data)
+	}
+}
+
+// TestPTYBrokerRepaintCursorVisibilityBeforePositioning pins the byte ordering:
+// the ?25 visibility sequence must precede the cursor-positioning CSI so the
+// emulator applies visibility before moving the cursor. The repaint's contract
+// is "restore everything the app controls about the cursor", and visibility is
+// part of that contract — emitting it after the position would still work (the
+// emulator applies bytes in order), but keeping it adjacent to the position
+// matches the design rationale: the cursor restore block is one unit.
+func TestPTYBrokerRepaintCursorVisibilityBeforePositioning(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:      []byte("screen"),
+		hasCursor:     true,
+		cursorRow:     2,
+		cursorCol:     7,
+		hasVisibility: true,
+		cursorVisible: false,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+	data := string(ev.Data)
+	visIdx := strings.Index(data, "\x1b[?25l")
+	posIdx := strings.Index(data, "\x1b[3;8H")
+	if visIdx < 0 {
+		t.Fatalf("repaint missing \\x1b[?25l: %q", data)
+	}
+	if posIdx < 0 {
+		t.Fatalf("repaint missing cursor positioning \\x1b[3;8H: %q", data)
+	}
+	if visIdx > posIdx {
+		t.Fatalf("visibility (idx %d) must precede cursor positioning (idx %d); got %q", visIdx, posIdx, data)
+	}
+}
+
+// TestPTYBrokerRepaintCursorVisibilityEndToEnd is the end-to-end phantom-cursor
+// gate: feeding the repaint bytes a fresh subscriber receives into a fresh
+// charmbracelet/x/vt emulator (the same emulator ui/termpane uses) must set the
+// cursor visibility to match the pane's real DECTCEM state. A hidden pane cursor
+// must leave the emulator cursor hidden; a visible one must leave it visible.
+// This is the deterministic form of the visual artifact: the emulator's
+// cursor-visible flag is the exact state a client renders from.
+func TestPTYBrokerRepaintCursorVisibilityEndToEnd(t *testing.T) {
+	const cols, rows = 40, 8
+	const screen = "composer"
+
+	repaintFor := func(visible bool) []byte {
+		ch := &fakeClientlessChannel{
+			snapshot:      []byte(screen),
+			hasCursor:     true,
+			cursorRow:     0,
+			cursorCol:     5,
+			hasVisibility: true,
+			cursorVisible: visible,
+		}
+		br := newPTYBroker(ch)
+		sub, err := br.subscribe(0)
+		if err != nil {
+			t.Fatalf("subscribe: %v", err)
+		}
+		ev, err := nextWithin(t, sub, 2*time.Second)
+		if err != nil {
+			t.Fatalf("repaint NextEvent: %v", err)
+		}
+		if ev.Kind != PTYRepaint {
+			t.Fatalf("first event = %+v, want PTYRepaint", ev)
+		}
+		return ev.Data
+	}
+
+	// Track cursor-visibility transitions as the emulator processes the repaint.
+	// The charmbracelet vt emulator starts with the cursor visible and its
+	// CursorVisibility callback fires only on STATE CHANGES, so the "visible"
+	// case pre-hides the cursor before feeding the repaint — that way ?25h in
+	// the repaint must flip it back to visible, proving the byte is present and
+	// effective. The "hidden" case starts from the default visible state, so
+	// ?25l in the repaint must flip it to hidden.
+	for _, tc := range []struct {
+		name    string
+		visible bool
+		want    bool
+	}{
+		{"hidden cursor stays hidden", false, false},
+		{"visible cursor stays visible", true, true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			emu := vt.NewEmulator(cols, rows)
+			var gotVisible bool
+			emu.SetCallbacks(vt.Callbacks{
+				CursorVisibility: func(visible bool) { gotVisible = visible },
+			})
+			if tc.visible {
+				// Pre-hide so the repaint's ?25h is a state change the
+				// callback observes. Without this the emulator starts
+				// visible and ?25h is a no-op — the callback never fires.
+				if _, err := emu.Write([]byte("\x1b[?25l")); err != nil {
+					t.Fatalf("pre-hide write: %v", err)
+				}
+			}
+			if _, err := emu.Write(repaintFor(tc.visible)); err != nil {
+				t.Fatalf("emulator write: %v", err)
+			}
+			if gotVisible != tc.want {
+				t.Fatalf("post-repaint DECTCEM = %v, want %v (the pane's real visibility)", gotVisible, tc.want)
+			}
+		})
+	}
+}
+
+// TestPTYBrokerRepaintVisibilityWithoutCursor pins that visibility is restored
+// even when the cursor position is unknown — the two are independent app-owned
+// states. A dead pane's ReadTerminalState may report visibility while the
+// snapshot path drops the cursor; the repaint must still set DECTCEM so the
+// emulator does not keep a phantom visible cursor over a dead pane.
+func TestPTYBrokerRepaintVisibilityWithoutCursor(t *testing.T) {
+	ch := &fakeClientlessChannel{
+		snapshot:      []byte("dead pane screen"),
+		hasCursor:     false,
+		hasVisibility: true,
+		cursorVisible: false,
+	}
+	br := newPTYBroker(ch)
+	sub, err := br.subscribe(0)
+	if err != nil {
+		t.Fatalf("subscribe: %v", err)
+	}
+	ev, err := nextWithin(t, sub, 2*time.Second)
+	if err != nil {
+		t.Fatalf("repaint NextEvent: %v", err)
+	}
+	if ev.Kind != PTYRepaint {
+		t.Fatalf("first event = %+v, want PTYRepaint", ev)
+	}
+	if !strings.Contains(string(ev.Data), "\x1b[?25l") {
+		t.Fatalf("repaint must emit \\x1b[?25l even without cursor position; got %q", ev.Data)
 	}
 }
 

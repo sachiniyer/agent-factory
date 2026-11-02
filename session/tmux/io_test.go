@@ -93,7 +93,7 @@ func TestReadPaneCursorStateCarriesVisibilityWithoutChangingTerminalModes(t *tes
 			require.NoError(t, err)
 			require.Equal(t, paneCursorState{Row: 7, Col: 11, Visible: tt.visible}, state)
 			require.Equal(t, paneCursorStateFormat, requestedFormat,
-				"cursor visibility must ride its own focused query, not alter terminalStateFormat")
+				"cursor visibility diagnostics must ride their own focused query (paneCursorStateFormat), not be re-routed through terminalStateFormat")
 		})
 	}
 }

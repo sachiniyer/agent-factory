@@ -112,7 +112,7 @@ func writeRaw(t *testing.T, path, s string) {
 func TestRefusesNewerSchema(t *testing.T) {
 	home(t)
 	path, _ := BacklogPath(repoID)
-	newer := `{"schema_version": 4, "next_id": 5, "items": [], "future": true}`
+	newer := fmt.Sprintf(`{"schema_version": %d, "next_id": 5, "items": [], "future": true}`, BacklogSchemaVersion+1)
 	writeRaw(t, path, newer)
 
 	var unsupported *config.UnsupportedSchemaVersionError

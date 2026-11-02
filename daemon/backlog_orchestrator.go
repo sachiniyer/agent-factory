@@ -95,3 +95,15 @@ func (s *controlServer) SetBacklogOrchestratorHandoff(req SetBacklogOrchestrator
 	*resp = *out
 	return nil
 }
+
+func (s *controlServer) EscalateBacklogQuestion(req EscalateBacklogQuestionRequest, resp *EscalateBacklogQuestionResponse) error {
+	if err := s.requireStateMutationAdmission(); err != nil {
+		return err
+	}
+	out, err := s.manager.backlogService().Escalate(req)
+	if err != nil {
+		return err
+	}
+	*resp = *out
+	return nil
+}
