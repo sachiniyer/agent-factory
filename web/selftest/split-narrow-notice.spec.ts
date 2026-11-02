@@ -89,7 +89,10 @@ test("#6556: a hidden-count change with the same visible tree rewrites the notic
   // shrink the hidden leaves are exactly the two I did not focus — the
   // original pane and the leaf bound to my first new shell (tab `base`).
   await page.locator(".af-term-host .af-pane").nth(2).click();
-  await page.setViewportSize({ width: 700, height: 800 });
+  // 900px keeps the desktop rail AND the tab bar — under the 768px breakpoint
+  // af-session-first hides .af-term-head, and the close affordance below
+  // would have no button to click. ~580px of host fits one 320px pane.
+  await page.setViewportSize({ width: 900, height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
 
