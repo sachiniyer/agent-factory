@@ -184,6 +184,9 @@ type Message struct {
 	// Route is where a question goes: RouteOrchestrator, RouteUser, or ""
 	// for the user.
 	Route string `json:"route,omitempty"`
+	// Inbox marks a note the Inbox shows, such as the one af adds when an
+	// orchestrator marks an item done.
+	Inbox bool `json:"inbox,omitempty"`
 }
 
 type Settings struct {

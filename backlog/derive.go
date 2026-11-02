@@ -136,12 +136,20 @@ func (d *deriver) derive(id int) Derived {
 }
 
 func (d *deriver) leaf(it *Item) Derived {
+	r := d.leafState(it)
+	if r.State == StateStopped && d.b.orchestratorQuestion(it) != nil {
+		r.Reason = WithEffortSessionReason
+	}
+	return r
+}
+
+func (d *deriver) leafState(it *Item) Derived {
 	switch {
 	case it.Status == StatusDone:
 		return Derived{State: StateDone}
 	case it.Status == StatusDropped:
 		return Derived{State: StateDropped}
-	case it.OpenQuestion() != nil && !it.AnswerStarting():
+	case d.b.userQuestion(it) != nil && !it.AnswerStarting():
 		return Derived{State: StateNeedsYou}
 	case it.Status == StatusReview:
 		return Derived{State: StateInReview}

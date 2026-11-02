@@ -285,7 +285,7 @@ func (m *Manager) sendBacklogAnswer(repoID string, inst *session.Instance, promp
 // that was just restored, under the backlog lock.
 func (m *Manager) syncBacklogAttention(repoID string, a backlog.PendingAnswer) {
 	_, err := m.backlogService().Apply(backlog.ProjectRef{ID: repoID}, func(b *backlog.Backlog) ([]int, error) {
-		if qid, text := b.OpenQuestionRef(a.ID); text != "" {
+		if qid, text := b.AttentionRef(a.ID); text != "" {
 			backlogHost{m: m}.SetAttention(repoID, a.SessionID, qid, text)
 		}
 		return []int{}, nil
@@ -391,7 +391,7 @@ func (m *Manager) noteBacklogSubmitted(instance *session.Instance, question seen
 			if id == 0 {
 				return []int{}, nil
 			}
-			nextID, nextText := b.OpenQuestionRef(id)
+			nextID, nextText := b.AttentionRef(id)
 			backlogHost{m: m}.SetAttention(repoID, sessionID, nextID, nextText)
 			// The answer typed in the pane is new work: an open item (in review after
 			// the agent asked, or queued or drafted since) goes back to running, counts
@@ -502,7 +502,7 @@ func backlogItemOfSession(repoID, sessionID string) int {
 // dismissed (Codex P2 on #6299).
 func (m *Manager) rebuildAskedQuestions(b *backlog.Backlog) {
 	for _, it := range b.Items {
-		qid, q := b.OpenQuestionRef(it.ID)
+		qid, q := b.AttentionRef(it.ID)
 		r := b.LatestRun(it.ID)
 		if q == "" || r == nil || r.SessionID == "" {
 			continue

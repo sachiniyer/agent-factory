@@ -327,7 +327,7 @@ func TestBacklogGuardRailsSurviveDroppedBacklogItem(t *testing.T) {
 	*methods = nil
 	for _, args := range [][]string{
 		{"queue", "1"}, {"draft", "1"}, {"review", "1"}, {"reopen", "1"}, {"start", "1"}, {"done", "1"}, {"drop", "1"}, {"delete", "1"},
-		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"},
+		{"answer", "1", "yes"}, {"note", "1", "text"}, {"run"}, {"escalate", "1"},
 		// Plan editing: an agent leaves a note instead (Codex P2 on #6294). It may
 		// add the work it found, as a draft with a title and --parent only
 		// (decision (3) on #6284).

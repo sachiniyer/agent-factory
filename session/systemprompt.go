@@ -190,7 +190,7 @@ const AfBacklogItemSessionAddForm = `From an item session, add takes only a titl
 // AfBacklogItemSessionRefusals is the sentence of afUsageBacklogInside that names
 // what an item session cannot run. It is exported only so the api package, which
 // owns those refusals, can pin it to them.
-const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, run, pause, unpause, archive, unarchive, and changing the runner or budget.`
+const AfBacklogItemSessionRefusals = `From an item session af refuses these, which are the user's: edit, move, queue, draft, review, reopen, start, done <id>, drop, delete, note <id>, answer, escalate, run, pause, unpause, archive, unarchive, and changing the runner or budget.`
 
 // afUsageProposalsInside names only the entry points; the working rules are
 // printed by af proposal start and attach, so they can change without a

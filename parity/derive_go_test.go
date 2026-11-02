@@ -134,6 +134,7 @@ var auditedRequests = map[string]reflect.Type{
 	"SetAttentionRequest":                  reflect.TypeOf(daemon.SetAttentionRequest{}),
 	"SetBacklogOrchestratorRequest":        reflect.TypeOf(daemon.SetBacklogOrchestratorRequest{}),
 	"SetBacklogOrchestratorHandoffRequest": reflect.TypeOf(daemon.SetBacklogOrchestratorHandoffRequest{}),
+	"EscalateBacklogQuestionRequest":       reflect.TypeOf(daemon.EscalateBacklogQuestionRequest{}),
 }
 
 // minGoLiterals guards against a vacuous pass: if the surfaces are refactored to
