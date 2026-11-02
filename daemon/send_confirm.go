@@ -172,6 +172,9 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 		retries = append(retries, taskID)
 		retryAt[taskID] = entry.attemptedAt
 	}
+	if len(byTask) == 0 {
+		delete(m.unverifiedSendWatches, key)
+	}
 	m.pausedMu.Unlock()
 	for _, taskID := range retries {
 		// A newer send for the task may have superseded this watch between
