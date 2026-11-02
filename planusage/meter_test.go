@@ -3,6 +3,7 @@ package planusage
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -365,5 +366,30 @@ func TestScanReadsAGrownFileWithAnUnchangedModTime(t *testing.T) {
 	all, _ := s.Accounts["acct"].costIn(now.Add(-5*time.Hour), now.Add(time.Hour))
 	if !near(all, 8) {
 		t.Fatalf("cost %v, want both messages (8)", all)
+	}
+}
+
+// A backlog path with a span counts as backlog only the messages in it: an
+// orchestrator's conversation from its bind until the group was bound to
+// another session (Codex P2s on #6616).
+func TestScanAllCountsBacklogOnlyInItsSpan(t *testing.T) {
+	home(t)
+	config := t.TempDir()
+	at := func(id, hhmm string) string {
+		return strings.Replace(assistant(id, opus, 1_000_000, 0), "T10:01:00Z", "T"+hhmm+":00Z", 1)
+	}
+	conv := filepath.Join(config, "projects", "-p", "c1.jsonl")
+	write(t, conv, at("m0", "09:00"), at("m1", "10:00"), at("m2", "11:00"))
+	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
+	s := NewMeterState()
+	s.ScanAll(map[string][]string{DefaultAccount: {config}}, []BacklogPath{{Path: conv, Within: []Span{{
+		From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC), Until: time.Date(2026, 10, 20, 10, 30, 0, 0, time.UTC)}}}}, nil, now)
+	all, backlog := 0.0, 0.0
+	for _, b := range s.Accounts[DefaultAccount].Buckets {
+		all += b.All
+		backlog += b.Backlog
+	}
+	if !near(all, 12) || !near(backlog, 4) {
+		t.Fatalf("all %v backlog %v: only m1, at 10:00, is in the span", all, backlog)
 	}
 }

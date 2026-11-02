@@ -113,8 +113,11 @@ type Item struct {
 	Archived bool `json:"archived,omitempty"`
 	// Orchestrator is set only on a top-level parent.
 	Orchestrator *Orchestrator `json:"orchestrator,omitempty"`
-	CreatedAt    time.Time     `json:"created_at"`
-	UpdatedAt    time.Time     `json:"updated_at"`
+	// OrchCleared is what a cleared binding left until a meter pass scans past
+	// it (see OrchCleared).
+	OrchCleared *OrchCleared `json:"orch_cleared,omitempty"`
+	CreatedAt   time.Time    `json:"created_at"`
+	UpdatedAt   time.Time    `json:"updated_at"`
 }
 
 type Source struct {
@@ -361,6 +364,10 @@ func (b *Backlog) clone() *Backlog {
 			it.Source = &s
 		}
 		it.Orchestrator = it.Orchestrator.clone()
+		if it.OrchCleared != nil {
+			cl := OrchCleared{At: it.OrchCleared.At, Conversations: cloneConversations(it.OrchCleared.Conversations)}
+			it.OrchCleared = &cl
+		}
 		c.Items[i] = it
 	}
 	return &c

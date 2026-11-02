@@ -291,38 +291,129 @@ type itemRun struct {
 	inst   *session.Instance
 }
 
-func (m *Manager) startedItemRuns(home string) ([]itemRun, bool) {
+// orchRun is a group's orchestrator, with its session when it still exists.
+type orchRun struct {
+	repoID string
+	group  int
+	orch   backlog.Orchestrator
+	inst   *session.Instance
+	// cleared marks what a cleared binding left (Item.OrchCleared): its
+	// conversations' last messages are classified, and nothing is metered.
+	cleared bool
+}
+
+// orchNote is the conversation of a group's live orchestrator session that a
+// pass records on the group.
+type orchNote struct {
+	group     int
+	sessionID string
+	mains     []string
+}
+
+// startedItemRuns returns every started item run and every bound orchestrator
+// across projects, and the projects whose backlog could not be read.
+func (m *Manager) startedItemRuns(home string) ([]itemRun, []orchRun, map[string]bool) {
 	paths, _ := filepath.Glob(filepath.Join(home, "repos", "*", backlog.BacklogFileName))
 	if len(paths) == 0 {
-		return nil, true
+		return nil, nil, nil
 	}
 	sessions := map[string]*session.Instance{}
 	m.mu.Lock()
 	for _, inst := range m.instances {
-		if inst != nil && inst.BacklogItem != 0 {
+		if inst != nil {
 			sessions[inst.ID] = inst
 		}
 	}
 	m.mu.Unlock()
 	var out []itemRun
-	complete := true
+	var orchs []orchRun
+	var unread map[string]bool
 	for _, p := range paths {
 		repoID := filepath.Base(filepath.Dir(p))
 		b, err := backlog.Load(repoID)
 		if err != nil {
 			m.warnBacklogUnreadable("plan meter: backlog", repoID, err)
-			complete = false
+			if unread == nil {
+				unread = map[string]bool{}
+			}
+			unread[repoID] = true
 			continue
 		}
 		for _, it := range b.Items {
+			if cl := it.OrchCleared; cl != nil {
+				orchs = append(orchs, orchRun{repoID: repoID, group: it.ID, orch: backlog.Orchestrator{Conversations: cl.Conversations}, cleared: true})
+			}
+			if o := it.Orchestrator; o != nil && o.SessionID != "" {
+				var inst *session.Instance
+				if s := sessions[o.SessionID]; s != nil && s.BacklogItem == 0 {
+					inst = s
+				}
+				orchs = append(orchs, orchRun{repoID: repoID, group: it.ID, orch: *o, inst: inst})
+			}
 			for _, r := range it.Runs {
 				if r.State == backlog.RunStarted && r.SessionID != "" {
-					out = append(out, itemRun{repoID: repoID, item: it, run: r, inst: sessions[r.SessionID]})
+					inst := sessions[r.SessionID]
+					if inst != nil && inst.BacklogItem == 0 {
+						inst = nil
+					}
+					out = append(out, itemRun{repoID: repoID, item: it, run: r, inst: inst})
 				}
 			}
 		}
 	}
-	return out, complete
+	return out, orchs, unread
+}
+
+// unconsumedIn is whether the account scan has not yet consumed one of c's
+// transcripts: it read past messages whose model had no price (a price added
+// later makes it read them again), or it has not read the file to its end, as
+// when the file could not be opened this pass (Codex P2s on #6616). A file
+// that does not exist holds nothing to read.
+func unconsumedIn(state *planusage.MeterState, c backlog.OrchConversation) bool {
+	for _, f := range planusage.ConversationTranscripts([]string{c.Main}) {
+		info, err := os.Stat(f)
+		if errors.Is(err, os.ErrNotExist) {
+			continue
+		}
+		if err != nil {
+			return true
+		}
+		consumed := false
+		for _, a := range state.Accounts {
+			if a == nil {
+				continue
+			}
+			if m, ok := a.Files[f]; ok && m.Skipped == "" && m.Offset >= info.Size() {
+				consumed = true
+				break
+			}
+		}
+		if !consumed {
+			return true
+		}
+	}
+	return false
+}
+
+// orchestratorConversationOf is orchestratorConversation; a package var so a
+// test can stand in for a Claude session's conversation and transcript dirs.
+var orchestratorConversationOf = orchestratorConversation
+
+// orchestratorConversation is the Claude conversation id of an orchestrator
+// session, its effective config dir, and the project dirs its transcripts are
+// in. Only that conversation is metered: the dirs also hold every other Claude
+// session started in the same directory, the user's own included when the
+// session runs in place.
+func orchestratorConversation(inst *session.Instance) (conv, configDir string, dirs []string, ok bool) {
+	c := inst.AgentConversation()
+	if !c.HasID() || c.Agent != tmux.ProgramClaude {
+		return "", "", nil, false
+	}
+	configDir, dirs, err := inst.ClaudeRunTranscriptDirs()
+	if err != nil || len(dirs) == 0 {
+		return "", "", nil, false
+	}
+	return strings.TrimSpace(c.ID), configDir, dirs, true
 }
 
 // meterPassLocked meters every item run and every Claude transcript, stores
@@ -355,7 +446,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	usage := planusage.Usage{Runs: map[string]float64{}, RunWindow: map[string]float64{}, Unmeterable: map[string]string{}, Accounts: map[string]planusage.AccountUsage{}}
 	runAccount := map[string]string{}
 	updates := map[string]map[string]map[string]backlog.Meter{}
-	var backlogDirs []string
+	var backlogPaths []planusage.BacklogPath
 	metered := map[string]bool{}
 	// runSnaps lets a run's dedupe keys and window buckets be put back if its
 	// cost cannot be committed to the backlog this pass; runConfigs are the
@@ -364,10 +455,11 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	// An item session whose start is not recorded yet (its transcript can appear
 	// before the link is committed) already counts as backlog spend: classify its
 	// directories now, since a message counted as plain spend is never reclassified.
-	backlogDirs = append(backlogDirs, m.itemSessionTranscriptDirs()...)
+	backlogPaths = append(backlogPaths, planusage.BacklogDirs(m.itemSessionTranscriptDirs())...)
 	runSnaps := map[string]planusage.RunSnapshot{}
 	runConfigs := map[string][]string{}
-	itemRuns, runsComplete := m.startedItemRuns(home)
+	itemRuns, orchRuns, unread := m.startedItemRuns(home)
+	runsComplete := len(unread) == 0
 	wheres := map[string]backlog.Where{}
 	for _, r := range itemRuns {
 		usage.Runs[r.run.SessionID] = r.run.Cost()
@@ -428,7 +520,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// The directories seen for this session before, too: archiving moves the
 		// worktree the directory is derived from, but not the transcripts.
 		dirs = state.RememberRunDirs(r.run.SessionID, dirs)
-		backlogDirs = append(backlogDirs, dirs...)
+		backlogPaths = append(backlogPaths, planusage.BacklogDirs(dirs)...)
 		metered[r.run.SessionID] = true
 		runSnaps[r.run.SessionID] = state.SnapshotRun(r.run.SessionID)
 		seen := state.RunSeenFor(r.run.SessionID)
@@ -472,6 +564,105 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			updates[r.repoID][r.run.SessionID] = rm.Meter
 		}
 	}
+	// Each orchestrator conversation's messages from the span in which it
+	// orchestrated, stored on the group for display. They count as backlog
+	// spend in the account scan, so the orchestrator's work closes the
+	// usd_limit gate like an item run's; it takes no max_running slot and no
+	// cap per run.
+	orchUpdates := map[string]map[string]map[string]backlog.Meter{}
+	orchNotes := map[string][]orchNote{}
+	orchBacklog := map[string][]planusage.BacklogPath{}
+	clearedRepos := map[string]bool{}
+	for _, o := range orchRuns {
+		if o.cleared {
+			// A binding cleared since: its conversations' last messages, up to the
+			// clear, are still backlog spend, so this pass classifies them and the
+			// store below drops the record (Codex P2 on #6616).
+			for _, c := range o.orch.Conversations {
+				for _, p := range planusage.ConversationPaths([]string{c.Main}) {
+					orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, Within: c.Spans})
+				}
+				// Its config root is scanned too: a custom CLAUDE_CONFIG_DIR that
+				// is no account's would otherwise not be (Codex P2 on #6616).
+				for _, f := range planusage.ConversationTranscripts([]string{c.Main}) {
+					if root := transcriptConfigRoot(f); root != "" {
+						account := accountOfRun(home, root)
+						if !containsDir(runConfigs[account], root) {
+							runConfigs[account] = append(runConfigs[account], root)
+						}
+					}
+				}
+			}
+			clearedRepos[o.repoID] = true
+			continue
+		}
+		// Every conversation the group recorded, each with its span: a session
+		// killed or replaced since the last pass is read to its end, and one
+		// replaced but still running is not charged for what it does next
+		// (Codex P2s on #6616). The live session's conversation is recorded from
+		// the first pass that sees it, before it writes anything.
+		orch := o.orch
+		if o.inst != nil {
+			if conv, configDir, dirs, ok := orchestratorConversationOf(o.inst); ok {
+				mains := planusage.ConversationMains(dirs, conv)
+				orch = orch.WithConversations(mains)
+				if !reflect.DeepEqual(orch.Conversations, o.orch.Conversations) {
+					orchNotes[o.repoID] = append(orchNotes[o.repoID], orchNote{group: o.group, sessionID: orch.SessionID, mains: mains})
+				}
+				if configDir != "" {
+					account := planusage.AccountForConfigDir(home, configDir)
+					if !containsDir(runConfigs[account], configDir) {
+						runConfigs[account] = append(runConfigs[account], configDir)
+					}
+				}
+			}
+		}
+		if len(orch.Conversations) == 0 {
+			continue
+		}
+		var mains []string
+		for _, c := range orch.Conversations {
+			mains = append(mains, c.Main)
+			for _, p := range planusage.ConversationPaths([]string{c.Main}) {
+				orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, Within: c.Spans})
+			}
+		}
+		sessionID := orch.SessionID
+		metered[sessionID] = true
+		runSnaps[sessionID] = state.SnapshotRun(sessionID)
+		rm := backlog.MeterOrchestrator(o.group, backlog.Where{}, orch, state.RunSeenFor(sessionID), overrides)
+		for _, f := range planusage.ConversationTranscripts(mains) {
+			if root := transcriptConfigRoot(f); root != "" {
+				account := accountOfRun(home, root)
+				if !containsDir(runConfigs[account], root) {
+					runConfigs[account] = append(runConfigs[account], root)
+				}
+			}
+		}
+		if rm.Changed {
+			if orchUpdates[o.repoID] == nil {
+				orchUpdates[o.repoID] = map[string]map[string]backlog.Meter{}
+			}
+			orchUpdates[o.repoID][sessionID] = rm.Meter
+		}
+	}
+	// A project whose backlog this pass read has its orchestrators' paths as
+	// they are now; one it could not read keeps what the last pass that read it
+	// saw, so their messages still count as backlog spend (Codex P2 on #6616).
+	if state.OrchBacklog == nil {
+		state.OrchBacklog = map[string][]planusage.BacklogPath{}
+	}
+	for repoID := range state.OrchBacklog {
+		if !unread[repoID] {
+			delete(state.OrchBacklog, repoID)
+		}
+	}
+	for repoID, paths := range orchBacklog {
+		state.OrchBacklog[repoID] = paths
+	}
+	for _, paths := range state.OrchBacklog {
+		backlogPaths = append(backlogPaths, paths...)
+	}
 	// A project whose backlog could not be read has runs this pass never saw:
 	// dropping their dedupe keys, buckets and directories now would lose them for
 	// good once it is readable again (Codex P2 on #6299).
@@ -489,11 +680,11 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		// those as backlog spend now, since a message counted as plain spend is never
 		// reclassified once the backlog is readable again (Codex P2 on #6300).
 		for _, dirs := range state.RunDirs {
-			backlogDirs = append(backlogDirs, dirs...)
+			backlogPaths = append(backlogPaths, planusage.BacklogDirs(dirs)...)
 		}
 	}
 	state.PruneRunBuckets(now)
-	m.meterAccounts(home, state, backlogDirs, runConfigs, overrides, now, &usage)
+	m.meterAccounts(home, state, backlogPaths, runConfigs, overrides, now, &usage)
 	// Every session in usage.Runs gets a run_window entry. A run with a
 	// resolved current config dir reports only that account's window cost —
 	// the documented "cost within its account's current 5-hour window", which
@@ -532,9 +723,30 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	}
 	st.clearPending(appliedDirs)
 	failed := false
-	for repoID, meters := range updates {
+	repos := map[string]bool{}
+	for repoID := range updates {
+		repos[repoID] = true
+	}
+	for repoID := range orchUpdates {
+		repos[repoID] = true
+	}
+	for repoID := range orchNotes {
+		repos[repoID] = true
+	}
+	for repoID := range clearedRepos {
+		repos[repoID] = true
+	}
+	for repoID := range repos {
+		meters, orchMeters := updates[repoID], orchUpdates[repoID]
 		if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
 			b.SetRunMeters(meters)
+			b.SetOrchestratorMeters(orchMeters)
+			for _, n := range orchNotes[repoID] {
+				b.NoteOrchConversations(n.group, n.sessionID, n.mains)
+			}
+			if clearedRepos[repoID] {
+				b.DropOrchCleared(now, func(c backlog.OrchConversation) bool { return unconsumedIn(state, c) })
+			}
 			return nil
 		}); err != nil {
 			m.warn().Printf("plan meter: storing run costs of project %s: %v", repoID, err)
@@ -542,6 +754,9 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			// must not be either: put those runs back and the next pass counts
 			// them again.
 			for sessionID := range meters {
+				state.RestoreRun(sessionID, runSnaps[sessionID])
+			}
+			for sessionID := range orchMeters {
 				state.RestoreRun(sessionID, runSnaps[sessionID])
 			}
 			failed = true
@@ -565,7 +780,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 // meterAccounts meters every transcript under each Claude account's config
 // dir and fills usage with each account's windows; the top-level windows are
 // the account with the newest reading.
-func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogDirs []string, runConfigs map[string][]string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
+func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlogPaths []planusage.BacklogPath, runConfigs map[string][]string, overrides map[string]planusage.Price, now time.Time, usage *planusage.Usage) {
 	registered := map[string]string{}
 	if names, err := agentaccount.List(home, tmux.ProgramClaude); err == nil {
 		for _, name := range names {
@@ -575,7 +790,7 @@ func (m *Manager) meterAccounts(home string, state *planusage.MeterState, backlo
 		}
 	}
 	sources := scanSources(home, registered, ambientClaudeConfigDir(), runConfigs)
-	state.ScanAll(sources, backlogDirs, overrides, now)
+	state.ScanAll(sources, backlogPaths, overrides, now)
 	for name := range sources {
 		r, err := planusage.LoadReading(name)
 		if err != nil {

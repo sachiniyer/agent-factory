@@ -90,6 +90,10 @@ type OrchestratorView struct {
 	Handoff   string    `json:"handoff,omitempty"`
 	// Stay is whether the session stays live after its current turn.
 	Stay bool `json:"stay,omitempty"`
+	// Cost is the metered cost, in USD at API prices, of the group's
+	// orchestrator conversations within the span each orchestrated. It counts as backlog
+	// spend.
+	Cost float64 `json:"cost,omitempty"`
 }
 
 // OrchestratorEvent is the payload of a backlog.orchestrator.bound or
@@ -111,7 +115,7 @@ func (s *Service) orchestratorView(repoID string, o *Orchestrator) *Orchestrator
 		state = info.State
 	}
 	return &OrchestratorView{SessionID: o.SessionID, Title: o.Title, Program: o.Program, BoundAt: o.BoundAt,
-		State: state, Pending: len(o.Events), Handoff: o.Handoff, Stay: o.Stay}
+		State: state, Pending: len(o.Events), Handoff: o.Handoff, Stay: o.Stay, Cost: o.Cost()}
 }
 
 func (s *Service) orchestratorViews(repoID string, b *Backlog) map[int]OrchestratorView {

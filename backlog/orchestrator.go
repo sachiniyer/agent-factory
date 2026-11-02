@@ -3,7 +3,9 @@ package backlog
 import (
 	"errors"
 	"fmt"
+	"github.com/sachiniyer/agent-factory/planusage"
 	"maps"
+	"slices"
 	"strings"
 	"time"
 )
@@ -27,6 +29,10 @@ type Orchestrator struct {
 	// Handoff is the latest notes for a session that replaces this one.
 	Handoff string           `json:"handoff,omitempty"`
 	Meter   map[string]Meter `json:"meter,omitempty"`
+	// Conversations are the agent conversations the group's orchestrators had,
+	// each with the span in which it orchestrated: only its messages from that
+	// span are the group's, and backlog spend.
+	Conversations []OrchConversation `json:"conversations,omitempty"`
 	// Events is the outbox of events not yet delivered, oldest first, so a
 	// daemon restart can finish delivery.
 	Events []OrchEvent `json:"events,omitempty"`
@@ -73,12 +79,55 @@ type OrchEvent struct {
 	At      time.Time `json:"at"`
 }
 
+// OrchConversation is one agent conversation a group's orchestrators had: its
+// main transcript file, and the spans in which it orchestrated, each from its
+// session's bind until the group was bound to another session or cleared (open
+// while it still orchestrates). A group bound back to a session that
+// orchestrated before adds a span.
+type OrchConversation struct {
+	Main  string           `json:"main"`
+	Spans []planusage.Span `json:"spans"`
+}
+
+// open is whether the conversation still orchestrates.
+func (c OrchConversation) open() bool {
+	return len(c.Spans) > 0 && c.Spans[len(c.Spans)-1].Until.IsZero()
+}
+
+// closeConversations ends the open spans of cs at now, in place.
+func closeConversations(cs []OrchConversation, now time.Time) {
+	for i := range cs {
+		if cs[i].open() {
+			cs[i].Spans = append([]planusage.Span(nil), cs[i].Spans...)
+			cs[i].Spans[len(cs[i].Spans)-1].Until = now
+		}
+	}
+}
+
+// cloneConversations is a deep copy of cs.
+func cloneConversations(cs []OrchConversation) []OrchConversation {
+	out := make([]OrchConversation, len(cs))
+	for i, c := range cs {
+		out[i] = OrchConversation{Main: c.Main, Spans: append([]planusage.Span(nil), c.Spans...)}
+	}
+	return out
+}
+
+// OrchCleared is what a cleared binding leaves on its group until a meter pass
+// has scanned past the clear: the conversations it had, their spans ended at
+// At, so their last messages before the clear still count as backlog spend.
+type OrchCleared struct {
+	At            time.Time          `json:"at"`
+	Conversations []OrchConversation `json:"conversations"`
+}
+
 func (o *Orchestrator) clone() *Orchestrator {
 	if o == nil {
 		return nil
 	}
 	c := *o
 	c.Meter = maps.Clone(o.Meter)
+	c.Conversations = cloneConversations(o.Conversations)
 	if o.Replacing != nil {
 		r := *o.Replacing
 		c.Replacing = &r
@@ -123,6 +172,12 @@ func (b *Backlog) BindOrchestrator(id int, o Orchestrator, now time.Time) error 
 	}
 	if prev := it.Orchestrator; prev != nil {
 		o.Handoff, o.Meter, o.Events = prev.Handoff, prev.Meter, prev.Events
+		o.Conversations = cloneConversations(prev.Conversations)
+		if prev.SessionID != o.SessionID {
+			// The previous session stops orchestrating now: what it writes from
+			// here on is not the group's (it may go on working for the user).
+			closeConversations(o.Conversations, now)
+		}
 	}
 	o.Failures, o.Sending = nil, 0
 	it.closeAFQuestions(ClosedRebound)
@@ -144,8 +199,37 @@ func (b *Backlog) ClearOrchestrator(id int, now time.Time) (*Orchestrator, error
 		it.Orchestrator = nil
 		it.closeAFQuestions(ClosedUnbound)
 		it.UpdatedAt = now
+		if len(prev.Conversations) > 0 {
+			// Its last messages before the clear are still the group's spend: the
+			// next meter pass classifies them (Codex P2 on #6616).
+			cs := cloneConversations(prev.Conversations)
+			closeConversations(cs, now)
+			if it.OrchCleared == nil {
+				it.OrchCleared = &OrchCleared{}
+			}
+			it.OrchCleared.At = now
+			it.OrchCleared.Conversations = append(it.OrchCleared.Conversations, cs...)
+		}
 	}
 	return prev, nil
+}
+
+// DropOrchCleared removes the cleared bindings' records that a meter pass
+// started at passStart has scanned past, keeping one while pending says the
+// scan has not yet consumed one of its conversations: messages it read past
+// unpriced, which a price added later makes it read again, or a transcript it
+// could not read. Those must still be classified within the cleared spans
+// (Codex P2s on #6616). It returns the items it changed.
+func (b *Backlog) DropOrchCleared(passStart time.Time, pending func(OrchConversation) bool) []int {
+	var ids []int
+	for i := range b.Items {
+		it := &b.Items[i]
+		if it.OrchCleared != nil && it.OrchCleared.At.Before(passStart) && !slices.ContainsFunc(it.OrchCleared.Conversations, pending) {
+			it.OrchCleared = nil
+			ids = append(ids, it.ID)
+		}
+	}
+	return ids
 }
 
 // checkOrchestrators refuses a tree where an orchestrated item is no longer

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 	"os"
 	"path/filepath"
@@ -610,4 +611,383 @@ func TestBacklogTestServerJoinsItsMeteringPass(t *testing.T) {
 	})
 	<-released
 	require.False(t, m.backlog.meter.inFlight.Load(), "the pass was joined before the test returned")
+}
+
+// An orchestrator's conversation counts as backlog spend, but only that
+// conversation: an orchestrator running in place shares its Claude project dir
+// with the user's own sessions, and those stay the user's (fork bcc47d30f8's
+// review fix). Its cost on the group is stored and shown. Counting only from the
+// bind is MeterOrchestrator's and ReadTranscript's to pin.
+func TestMeterPassCountsOnlyTheOrchestratorsConversationAsBacklog(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	line := func(id string, at time.Time) string {
+		return `{"type":"assistant","timestamp":"` + at.Format(time.RFC3339) +
+			`","message":{"id":"` + id + `","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	}
+	project := filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	// The orchestrator's conversation, and a subagent of it.
+	require.NoError(t, os.WriteFile(filepath.Join(project, "c1.jsonl"), []byte(line("m1", now.Add(-time.Minute))), 0o644))
+	sub := filepath.Join(project, "c1", "subagents", "agent-a.jsonl")
+	require.NoError(t, os.MkdirAll(filepath.Dir(sub), 0o755))
+	require.NoError(t, os.WriteFile(sub, []byte(line("m3", now.Add(-time.Minute))), 0o644))
+	// The user's own session in the same project dir.
+	require.NoError(t, os.WriteFile(filepath.Join(project, "mine.jsonl"), []byte(line("m2", now.Add(-time.Minute))), 0o644))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	const repoID = "meter-orch-repo"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		// Bound half an hour ago: BindOrchestrator stamps BoundAt with this time.
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"},
+			now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(*session.Instance) (string, string, []string, bool) {
+		return "c1", claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+
+	st := &m.backlog.meter
+	st.mu.Lock()
+	m.meterPassLocked(now)
+	st.mu.Unlock()
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, b.Item(1).Orchestrator.Cost(), 1e-9, "the conversation and its subagent")
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	five := env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	require.InDelta(t, 12.0, five["all_cost"], 1e-9, "every message is plan use")
+	// backlog is the backlog's part of the window's plan percent: the plan is at
+	// 30%, and $8 of the $12 metered in it is the orchestrator's, so 20. Counting
+	// the user's own session as well would make it all 30.
+	require.InDelta(t, 20.0, five["backlog"], 1e-9, "the orchestrator's conversation and subagent are the backlog's; the user's own session is not")
+	view, err := m.backlogService().Get(backlog.GetRequest{RepoID: repoID})
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, view.Orchestrators[1].Cost, 1e-9)
+}
+
+func TestMeterFindsOrchestrators(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	_, orchs, unread := m.startedItemRuns(home)
+
+	require.Empty(t, unread)
+	require.Len(t, orchs, 1)
+	require.Equal(t, repoID, orchs[0].repoID)
+	require.Equal(t, 2, orchs[0].group)
+	require.NotNil(t, orchs[0].inst)
+	require.Zero(t, m.backlogSlotsUsed(repoID), "an orchestrator takes no max_running slot")
+}
+
+func TestOrchestratorWithoutAConversationIsNotMetered(t *testing.T) {
+	_, _, _, ok := orchestratorConversation(&session.Instance{ID: "o1", Title: "planner", Program: "claude"})
+	require.False(t, ok, "with no conversation id af cannot tell its transcript from others in the dir")
+}
+
+// An orchestrator killed before the next meter pass, and replaced, still has
+// its conversation read to its end: the group's meter holds the conversation
+// from the pass that saw the session live, before it wrote anything. Its last
+// messages count in the group's cost and as backlog spend (Codex P2 on #6616).
+func TestMeterPassFinishesAKilledOrchestratorsConversation(t *testing.T) {
+	cs, _ := newBacklogTestServer(t)
+	m := cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now := time.Now().UTC()
+	project := filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	const repoID = "meter-orch-killed"
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"}, now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	pass := func(at time.Time) {
+		st := &m.backlog.meter
+		st.mu.Lock()
+		m.meterPassLocked(at)
+		st.mu.Unlock()
+	}
+	pass(now)
+
+	// The planner writes two messages, is killed, and a replacement is bound.
+	line := `{"type":"assistant","timestamp":"` + now.Format(time.RFC3339) +
+		`","message":{"id":"%s","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
+	require.NoError(t, os.WriteFile(filepath.Join(project, "conv-o1.jsonl"),
+		[]byte(fmt.Sprintf(line, "m1")+fmt.Sprintf(line, "m2")), 0o644))
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{}
+	m.mu.Unlock()
+	_, err = backlog.Update(repoID, func(b *backlog.Backlog) error {
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "n1", Title: "effort B-1 Effort", Program: "claude"}, now.Add(time.Minute))
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 8.0, b.Item(1).Orchestrator.Cost(), 1e-9, "the killed planner's last messages are the group's")
+	code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+	require.Equal(t, http.StatusOK, code, env)
+	five := env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	require.InDelta(t, 8.0, five["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, five["backlog"], 1e-9, "and backlog spend: all of the window's metered cost")
+}
+
+// orchMeterWorld is a project with group B-1 bound to a live planner o1 whose
+// Claude conversation is conv-o1 in project, plan usage on and a 30% reading.
+// pass runs a meter pass at a time; five reads the 5-hour window.
+func orchMeterWorld(t *testing.T, repoID string) (m *Manager, project string, now time.Time, pass func(time.Time), five func() map[string]any) {
+	t.Helper()
+	cs, _ := newBacklogTestServer(t)
+	m = cs.manager
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true}}
+	claudeDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeDir)
+	now = time.Now().UTC()
+	project = filepath.Join(claudeDir, "projects", "-home-me-x")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	reset := now.Add(2 * time.Hour).Truncate(time.Hour)
+	require.NoError(t, planusage.WriteReading(planusage.DefaultAccount, planusage.Reading{
+		FiveHour: &planusage.Limit{UsedPercentage: 30, ResetsAt: reset.Unix()}, ReadAt: now,
+	}))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		b.Items = append(b.Items, backlog.Item{ID: 1, Title: "Effort", Status: backlog.StatusDraft},
+			backlog.Item{ID: 2, Title: "step", Parent: 1, Status: backlog.StatusDraft})
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "o1", Title: "planner", Program: "claude"}, now.Add(-30*time.Minute))
+	})
+	require.NoError(t, err)
+	m.mu.Lock()
+	m.instances = map[string]*session.Instance{daemonInstanceKey(repoID, "planner"): {ID: "o1", Title: "planner", Program: "claude"}}
+	m.mu.Unlock()
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, claudeDir, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	pass = func(at time.Time) {
+		st := &m.backlog.meter
+		st.mu.Lock()
+		m.meterPassLocked(at)
+		st.mu.Unlock()
+	}
+	five = func() map[string]any {
+		code, env := postProposalRoute(t, cs, "GetBudget", GetBudgetRequest{})
+		require.Equal(t, http.StatusOK, code, env)
+		return env["data"].(map[string]any)["windows"].(map[string]any)["five_hour"].(map[string]any)
+	}
+	return m, project, now, pass, five
+}
+
+func orchMessage(t *testing.T, path, id string, at time.Time) {
+	t.Helper()
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(f, `{"type":"assistant","timestamp":"%s","message":{"id":"%s","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}`+"\n", at.Format(time.RFC3339), id)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+}
+
+// A planner replaced with --replace stays live for the user's own work: what it
+// writes after the replacement is not the group's cost and not backlog spend
+// (Codex P2 on #6616).
+func TestMeterPassDoesNotChargeAReplacedOrchestratorsLaterWork(t *testing.T) {
+	const repoID = "meter-orch-replaced"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		return b.BindOrchestrator(1, backlog.Orchestrator{SessionID: "n1", Title: "planner 2", Program: "claude"}, now.Add(time.Minute))
+	})
+	require.NoError(t, err)
+	// o1 is still live, now working for the user.
+	orchMessage(t, conv, "m2", now.Add(2*time.Minute))
+	pass(now.Add(3 * time.Minute))
+
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.InDelta(t, 4.0, b.Item(1).Orchestrator.Cost(), 1e-9, "only m1, from while o1 orchestrated")
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 15.0, w["backlog"], 1e-9, "the backlog's part of the 30% plan is m1's half")
+}
+
+// A pass that cannot read the project's backlog still counts the orchestrator's
+// new messages as backlog spend, from the paths the last readable pass saw: a
+// message counted as the user's is never reclassified (Codex P2 on #6616).
+func TestMeterPassKeepsOrchestratorSpendWhenTheBacklogIsUnreadable(t *testing.T) {
+	const repoID = "meter-orch-unreadable"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	path, err := backlog.BacklogPath(repoID)
+	require.NoError(t, err)
+	good, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, []byte("{not json"), 0o644))
+	orchMessage(t, conv, "m2", now.Add(time.Minute))
+	pass(now.Add(2 * time.Minute))
+	require.NoError(t, os.WriteFile(path, good, 0o644))
+
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, scanned while the backlog was unreadable, is still the backlog's")
+}
+
+// A binding cleared between passes leaves its conversations for the next pass:
+// what the planner wrote before the clear is still backlog spend, what it
+// wrote after is the user's, and the pass drops the record (Codex P2 on #6616).
+func TestMeterPassClassifiesAClearedOrchestratorsLastMessages(t *testing.T) {
+	const repoID = "meter-orch-cleared"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	orchMessage(t, conv, "m3", now.Add(90*time.Second))
+	pass(now.Add(2 * time.Minute))
+
+	w := five()
+	require.InDelta(t, 12.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 20.0, w["backlog"], 1e-9, "m1 and m2, from before the clear, are the backlog's; m3 is the user's")
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared, "the pass scanned past the clear and dropped its record")
+}
+
+// A cleared binding whose last message has a model with no price keeps its
+// record: the scan read that message past, and once a price is added it reads
+// it again and must still count it as backlog spend (Codex P2 on #6616).
+func TestMeterPassKeepsAClearedRecordWhileItsMessagesAreUnpriced(t *testing.T) {
+	const repoID = "meter-orch-unpriced"
+	m, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	f, err := os.OpenFile(conv, os.O_APPEND|os.O_WRONLY, 0o644)
+	require.NoError(t, err)
+	_, err = fmt.Fprintf(f, `{"type":"assistant","timestamp":"%s","message":{"id":"m2","model":"claude-x-9","usage":{"input_tokens":1000000,"output_tokens":0}}}`+"\n", now.Add(30*time.Second).Format(time.RFC3339))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	_, err = backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.NotNil(t, b.Item(1).OrchCleared, "m2 is unpriced: the record stays")
+
+	m.cfg = &config.Config{Backlog: config.BacklogConfig{PlanUsage: true,
+		Prices: map[string]config.ModelPrice{"claude-x-9": {Input: 4, Output: 4}}}}
+	pass(now.Add(3 * time.Minute))
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, priced now, is still the backlog's")
+	b, err = backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared, "priced and classified: the record goes")
+}
+
+// A cleared orchestrator whose conversation lives under a custom config root,
+// no registered account's and not the daemon's own, still has that root
+// scanned on the pass that finishes it (Codex P2 on #6616).
+func TestMeterPassScansAClearedOrchestratorsCustomConfigRoot(t *testing.T) {
+	const repoID = "meter-orch-custom-root"
+	_, _, now, pass, five := orchMeterWorld(t, repoID)
+	custom := t.TempDir()
+	project := filepath.Join(custom, "projects", "-home-me-y")
+	require.NoError(t, os.MkdirAll(project, 0o755))
+	prev := orchestratorConversationOf
+	orchestratorConversationOf = func(inst *session.Instance) (string, string, []string, bool) {
+		return "conv-" + inst.ID, custom, []string{project}, true
+	}
+	t.Cleanup(func() { orchestratorConversationOf = prev })
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	pass(now.Add(2 * time.Minute))
+
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9, "m2, under the custom root, was scanned")
+	require.InDelta(t, 30.0, w["backlog"], 1e-9)
+}
+
+// A cleared binding keeps its record while the scan cannot read one of its
+// transcripts: when the file is readable again, its last messages before the
+// clear are still backlog spend (Codex P2 on #6616).
+func TestMeterPassKeepsAClearedRecordWhileATranscriptIsUnreadable(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a file whatever its mode")
+	}
+	const repoID = "meter-orch-unreadable-file"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	require.NoError(t, os.Chmod(conv, 0))
+	pass(now.Add(2 * time.Minute))
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.NotNil(t, b.Item(1).OrchCleared, "the transcript could not be read: the record stays")
+
+	require.NoError(t, os.Chmod(conv, 0o644))
+	pass(now.Add(3 * time.Minute))
+	w := five()
+	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, read once the file was readable, is still the backlog's")
+	b, err = backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared)
 }
