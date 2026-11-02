@@ -91,6 +91,40 @@ func loopbackDialAddr(addr string) string {
 	return addr
 }
 
+// reportedAddrListener reports addr from Addr() while accepting on the wrapped
+// socket. The two-way swap seams bind real loopback sockets on anonymous ports
+// and report the contested endpoints through this wrapper, so no bind in the
+// release→rebind gap touches a real contested port — a third-party allocation
+// on the shared host (another package's test binary, another test's socket)
+// can never win the port the swap is racing for (#6549). Production still
+// binds for real; only the test's port claims are deterministic.
+type reportedAddrListener struct {
+	net.Listener
+	addr net.Addr
+}
+
+func (l *reportedAddrListener) Addr() net.Addr { return l.addr }
+
+// RealAddr is the wrapped socket's own bound address — what a client can
+// actually dial, as opposed to the contested endpoint Addr() reports.
+func (l *reportedAddrListener) RealAddr() net.Addr { return l.Listener.Addr() }
+
+// reportedAddrBind binds a real loopback socket on an anonymous port and wraps
+// it so Addr() reports address. The requested endpoint is claimed only in wl
+// state; the kernel is never asked for it.
+func reportedAddrBind(network, address string) (net.Listener, error) {
+	real, err := net.Listen(network, "127.0.0.1:0")
+	if err != nil {
+		return nil, err
+	}
+	resolved, err := net.ResolveTCPAddr(network, address)
+	if err != nil {
+		real.Close()
+		return nil, err
+	}
+	return &reportedAddrListener{Listener: real, addr: resolved}, nil
+}
+
 // getStatus issues a plain GET to http://addr/path and returns the status code.
 func getStatus(t *testing.T, addr, path string) int {
 	t.Helper()
@@ -577,11 +611,20 @@ func TestWebListenerSamePortRebindFailureRestoresOldListener(t *testing.T) {
 	newAddr := "0.0.0.0:" + port
 	// Deny ONLY the requested address, so the release-then-bind retry fails
 	// EADDRINUSE and the rollback re-bind of the old address must restore it.
+	// The rollback bind itself goes through reportedAddrBind: it reports
+	// oldAddr in wl state while the socket lives on an anonymous port, so the
+	// freed P can never be claimed by a third party in the release→rebind gap
+	// (#6549).
+	realBound := map[string]net.Addr{}
 	wl.listenTCP = func(network, address string) (net.Listener, error) {
 		if address == newAddr {
 			return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
 		}
-		return net.Listen(network, address)
+		l, err := reportedAddrBind(network, address)
+		if err == nil {
+			realBound[address] = l.(*reportedAddrListener).RealAddr()
+		}
+		return l, err
 	}
 
 	wl.mu.Lock()
@@ -598,7 +641,8 @@ func TestWebListenerSamePortRebindFailureRestoresOldListener(t *testing.T) {
 	require.Contains(t, rerr.Error(), "daemon still serving on the previous address")
 	require.Contains(t, failed, "network.listen_addr")
 
-	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"),
+	require.Equal(t, http.StatusOK,
+		getStatus(t, realBound[oldAddr].String(), "/v1/health"),
 		"the rollback re-bind must leave the old address serving")
 	require.Equal(t, oldAddr, m.lifecycle.snapshot().listeners.TCPBoundAddr,
 		"lifecycle must still report the old bound address after a rollback")
@@ -1004,20 +1048,37 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 	// path's coordinated release frees it first (allow, redirected to loopback
 	// so nothing depends on 127.0.0.2 being assignable).
 	webTarget := "127.0.0.2:" + port
+	previewTarget := "127.0.0.1:" + port
+	realBound := map[string]net.Addr{}
 	wl.listenTCP = func(network, address string) (net.Listener, error) {
-		if address == webTarget {
+		switch address {
+		case webTarget:
 			if probe, perr := net.Listen(network, previewRealAddr); perr == nil {
 				probe.Close()
-				return net.Listen(network, "127.0.0.1:0")
+			} else {
+				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
 			}
-			return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
+		case previewTarget:
+			// The preview's target IS the control listener's bound address —
+			// the mutual conflict this test exists for. Deny it while the
+			// control listener still claims that address so the first attempt
+			// declines like the real bind did and both sides enter
+			// swapWebPreviewLocked; after the coordinated release has moved
+			// the control claim to 127.0.0.2:P, the bind lands.
+			if wl.webBoundAddr == address {
+				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
+			}
 		}
-		return net.Listen(network, address)
+		l, err := reportedAddrBind(network, address)
+		if err == nil {
+			realBound[address] = l.(*reportedAddrListener).RealAddr()
+		}
+		return l, err
 	}
 
 	next := *m.Config()
 	next.ListenAddr = webTarget
-	next.PreviewListenAddr = "127.0.0.1:" + port // preview takes the control listener's home
+	next.PreviewListenAddr = previewTarget // preview takes the control listener's home
 	m.storeLivePosture(&next)
 
 	failed, rerr := wl.reconcile(&next)
@@ -1027,11 +1088,14 @@ func TestWebListenerTwoWaySwapAppliesLive(t *testing.T) {
 
 	wl.mu.Lock()
 	previewConfigAddr, previewBoundAddr := wl.previewConfigAddr, wl.previewBoundAddr
+	webHandle := wl.webHandle
 	wl.mu.Unlock()
 	require.Equal(t, "127.0.0.1:"+port, previewConfigAddr)
 	require.Equal(t, "127.0.0.1:"+port, previewBoundAddr)
-	require.Equal(t, http.StatusOK,
-		getStatus(t, m.lifecycle.snapshot().listeners.TCPBoundAddr, "/v1/health"))
+	require.NotNil(t, webHandle)
+	// The moved control listener reports the swap target's address through the
+	// seam's fake Addr(); dial the socket's real bound address instead.
+	require.Equal(t, http.StatusOK, getStatus(t, realBound[webTarget].String(), "/v1/health"))
 }
 
 // TestWebListenerTwoWaySwapRestoresPairWhenSecondHalfFails pins the failure
@@ -1055,27 +1119,31 @@ func TestWebListenerTwoWaySwapRestoresPairWhenSecondHalfFails(t *testing.T) {
 	// The seam models the squatter on wl state — safe, the listener mutex is
 	// held for the whole reconcile: a bind aimed at a contested address is
 	// denied while the OTHER claimant still holds a bound address, and allowed
-	// (as a plain loopback socket) once that claimant has been released. On
-	// the fixed path the preview rollback only reaches 127.0.0.2:P after the
-	// control move was undone; on the un-fixed path it meets a still-moved
-	// control claim and is denied, stranding the preview listener.
+	// once that claimant has been released. On the fixed path the preview
+	// rollback only reaches 127.0.0.2:P after the control move was undone; on
+	// the un-fixed path it meets a still-moved control claim and is denied,
+	// stranding the preview listener.
+	//
+	// Every bind resolves through reportedAddrBind: the real socket sits on an
+	// anonymous loopback port while Addr() reports the contested endpoint. The
+	// control rollback's re-bind of 127.0.0.1:P can therefore never lose the
+	// port it actually freed to a third-party allocation on the shared CI host
+	// — the flake this test hit as an unreproducible EADDRINUSE (#6549).
 	webTarget := "127.0.0.2:" + port
 	previewTarget := "127.0.0.1:" + port
+	realBound := map[string]net.Addr{}
 	wl.listenTCP = func(network, address string) (net.Listener, error) {
 		switch address {
-		case webTarget:
+		case webTarget, previewTarget:
 			if wl.webBoundAddr != "" {
 				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
 			}
-			// Stand in for the (possibly unassignable) 127.0.0.2 socket.
-			return net.Listen(network, "127.0.0.1:0")
-		case previewTarget:
-			if wl.webBoundAddr != "" {
-				return nil, fmt.Errorf("listen %s: %w", address, syscall.EADDRINUSE)
-			}
-			return net.Listen(network, address)
 		}
-		return net.Listen(network, address)
+		l, err := reportedAddrBind(network, address)
+		if err == nil {
+			realBound[address] = l.(*reportedAddrListener).RealAddr()
+		}
+		return l, err
 	}
 
 	next := *m.Config()
@@ -1098,7 +1166,10 @@ func TestWebListenerTwoWaySwapRestoresPairWhenSecondHalfFails(t *testing.T) {
 	require.Equal(t, oldAddr, webBoundAddr,
 		"the control listener must be restored to the address it was moved off")
 	require.NotNil(t, webHandle)
-	require.Equal(t, http.StatusOK, getStatus(t, oldAddr, "/v1/health"))
+	// The restored listener REPORTS oldAddr through the seam's fake Addr();
+	// dial the socket's real bound address to prove it serves.
+	require.Equal(t, http.StatusOK,
+		getStatus(t, realBound["127.0.0.1:"+port].String(), "/v1/health"))
 }
 
 // TestWebListenerMutualDeclineIsNotASwap pins the preflight on the swap path:
