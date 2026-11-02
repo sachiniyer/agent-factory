@@ -220,3 +220,32 @@ func TestCheckProgramCommand_AnchoredOutsideRepoFallsBackToCheckCommand(t *testi
 	_, _, outsideRepo = checkProgramCommand("", config.ErrRepoProbeUnanswered, "bin/claude")
 	require.False(t, outsideRepo, "a failed probe is not 'outside a repo'; keep today's classified remediation")
 }
+
+// TestCheckProgramCommand_OutsideRepo_CwdIndependentCommandKeepsClassifiedRemediation
+// pins the refinement to the codex finding on doctor/program_check.go: outside
+// a repo the honest no-anchor message is reserved for commands whose
+// resolution genuinely depends on the working directory. A bare name (resolved
+// through PATH) and an absolute path resolve the same way regardless of cwd, so
+// a failure there is a genuine install/permission problem and keeps today's
+// classified ProgramError remediation — the doctor must not send the user to
+// rerun from inside a repo just because a path didn't resolve from the doctor's
+// incidental cwd (#6487).
+func TestCheckProgramCommand_OutsideRepo_CwdIndependentCommandKeepsClassifiedRemediation(t *testing.T) {
+	t.Setenv("PATH", "/usr/bin"+string(os.PathListSeparator)+"/bin")
+
+	// Bare name on PATH: cwd-independent -> outsideRepo false even outside a repo.
+	_, _, outsideRepo := checkProgramCommand("", config.ErrNotGitRepository, "claude")
+	require.False(t, outsideRepo, "a bare name resolves through PATH regardless of cwd; keep classified remediation")
+
+	// Absolute path: cwd-independent -> outsideRepo false even outside a repo.
+	_, _, outsideRepo = checkProgramCommand("", config.ErrNotGitRepository, "/missing/codex")
+	require.False(t, outsideRepo, "an absolute path resolves regardless of cwd; keep classified remediation")
+
+	// Relative path: cwd-dependent -> outsideRepo true outside a repo (honest message).
+	_, _, outsideRepo = checkProgramCommand("", config.ErrNotGitRepository, "bin/claude")
+	require.True(t, outsideRepo, "a relative path is cwd-dependent; emit the honest message")
+
+	// A leading-./ relative path is also cwd-dependent.
+	_, _, outsideRepo = checkProgramCommand("", config.ErrNotGitRepository, "./venv/bin/claude")
+	require.True(t, outsideRepo, "a ./-prefixed relative path is cwd-dependent; emit the honest message")
+}
