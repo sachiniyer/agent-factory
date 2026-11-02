@@ -35,6 +35,8 @@ import { runInNewContext } from "node:vm";
 import test from "node:test";
 import ts from "typescript";
 
+import { effectiveHostKeyPosture } from "./hosts.js";
+
 function topLevelFunctions(source: string, names: Set<string>): string {
   const ast = ts.createSourceFile("index.ts", source, ts.ScriptTarget.Latest, true);
   return ast.statements
@@ -123,13 +125,16 @@ function tick(): Promise<void> {
 
 /** doHostCheck's collaborators as the shell would wire them: hostRows reads
  *  the last-known table (doHostCheck snapshots it at request time), checkHost
- *  is the POST, errorText the message extractor. */
+ *  is the POST, errorText the message extractor — and the posture snapshot is
+ *  computed by the REAL effectiveHostKeyPosture, the same collaborator the
+ *  production import wires. */
 function stageCheck(table: { name: string; entry: unknown }[]): {
   s: ReturnType<typeof stage>;
   doHostCheck(name: string): void;
 } {
   const s = stage(["doHostCheck", "setHostBusy", "setHostStatus"]);
   s.context.hostRows = () => ({ rows: table.map((r) => ({ name: r.name, entry: r.entry, isDefault: false })), defaultName: "", parseError: "" });
+  s.context.effectiveHostKeyPosture = effectiveHostKeyPosture;
   s.context.errorText = (e: unknown) => (e instanceof Error ? e.message : String(e));
   const doHostCheck = s.context.doHostCheck as (name: string) => void;
   return { s, doHostCheck };

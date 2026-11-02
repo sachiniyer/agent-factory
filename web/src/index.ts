@@ -85,7 +85,7 @@ import {
   terminalFontSizesFromConfig,
 } from "./terminal-font.js";
 import { emptyAccountsState } from "./accounts.js";
-import { emptyHostsState, hostRows, hostsEditRefusal, type HostAddDraft } from "./hosts.js";
+import { effectiveHostKeyPosture, emptyHostsState, hostRows, hostsEditRefusal, type HostAddDraft } from "./hosts.js";
 import { emptyQuotaState } from "./quota.js";
 import { accountSkewMessage } from "./account_scope.js";
 import { type AccountLoginController, loginWithoutPaneCopy, openAccountLogin } from "./account_login_overlay.js";
@@ -2528,14 +2528,18 @@ function doHostCheck(name: string): void {
     return;
   }
   const requestGeneration = connectionGeneration;
-  // The table the probe is being asked against, captured now: a verdict
-  // belongs to the entry it measured, not to the name it sits under, so the
-  // row shows it only while the saved entry still equals this snapshot. An
-  // edit between request and answer — or one the next refresh picks up —
-  // retires it rather than leaving an old verdict beside a new destination.
-  const probed: Record<string, HostEntry> = {};
-  for (const row of hostRows(store.get().config).rows) {
-    probed[row.name] = row.entry;
+  // The table and posture the probe is being asked under, captured now: a
+  // verdict belongs to the entry it measured and the effective host-key mode
+  // it ran with, not to the name it sits under, so the row shows it only
+  // while both still equal this snapshot. An edit between request and answer
+  // — or one the next refresh picks up — retires it rather than leaving an
+  // old verdict beside a new destination, and a saved global
+  // `ssh.host_key_verification` retires a verdict the old posture earned
+  // (#6632).
+  const config = store.get().config;
+  const probed: Record<string, { entry: HostEntry; posture: string }> = {};
+  for (const row of hostRows(config).rows) {
+    probed[row.name] = { entry: row.entry, posture: effectiveHostKeyPosture(row.entry, config) };
   }
   setHostBusy(name, true);
   void checkHost(name, tok)
@@ -2546,7 +2550,7 @@ function doHostCheck(name: string): void {
       const hosts = store.get().hosts;
       const checks = { ...hosts.checks };
       for (const r of resp.hosts ?? []) {
-        checks[r.name] = { entry: probed[r.name], result: r };
+        checks[r.name] = { entry: probed[r.name]?.entry, posture: probed[r.name]?.posture ?? "", result: r };
       }
       if ((resp.hosts ?? []).length === 0) {
         store.set({

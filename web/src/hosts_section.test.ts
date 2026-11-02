@@ -124,10 +124,11 @@ test("a verdict renders only while the saved entry is the one that was probed", 
   const probedEntry = { host: "box1.tailnet.ts.net", user: "ubuntu" };
   const checkLines = (section: FakeElement) => section.querySelectorAll(".af-hosts-check-lines");
 
-  // Unchanged entry: the verdict renders on the row.
+  // Unchanged entry: the verdict renders on the row. No ssh key in entries,
+  // so the probe ran under the manifest's strict default.
   let section = renderHostsSection(
     entries,
-    state({ checks: { box1: { entry: { ...probedEntry }, result: verdict } } }),
+    state({ checks: { box1: { entry: { ...probedEntry }, posture: "strict", result: verdict } } }),
     actions,
     { open: false },
   ) as unknown as FakeElement;
@@ -142,7 +143,7 @@ test("a verdict renders only while the saved entry is the one that was probed", 
   const edited = [hostsEntry('{"box1":{"host":"gpu.tailnet.ts.net","user":"ubuntu"}}')];
   section = renderHostsSection(
     edited,
-    state({ checks: { box1: { entry: probedEntry, result: verdict } } }),
+    state({ checks: { box1: { entry: probedEntry, posture: "strict", result: verdict } } }),
     actions,
     { open: false },
   ) as unknown as FakeElement;
@@ -152,7 +153,7 @@ test("a verdict renders only while the saved entry is the one that was probed", 
   // (entry undefined) must never render either.
   section = renderHostsSection(
     entries,
-    state({ checks: { box1: { entry: undefined, result: verdict } } }),
+    state({ checks: { box1: { entry: undefined, posture: "strict", result: verdict } } }),
     actions,
     { open: false },
   ) as unknown as FakeElement;
@@ -172,7 +173,7 @@ test("a verdict renders only while the posture it was probed under still holds",
   const checkLines = (section: FakeElement) => section.querySelectorAll(".af-hosts-check-lines");
 
   // Probed under global insecure; the global still reads insecure: renders.
-  const check = { entry: probedEntry, posture: "insecure", result: verdict } as HostsState["checks"][string];
+  const check = { entry: probedEntry, posture: "insecure", result: verdict };
   let section = renderHostsSection(
     [...entries, sshGlobal("insecure")],
     state({ checks: { box1: check } }),
@@ -198,7 +199,7 @@ test("a verdict renders only while the posture it was probed under still holds",
   for (const global of ["insecure", "strict"]) {
     section = renderHostsSection(
       [...overrideRows, sshGlobal(global)],
-      state({ checks: { box1: { entry: overrideEntry, posture: "insecure", result: verdict } as HostsState["checks"][string] } }),
+      state({ checks: { box1: { entry: overrideEntry, posture: "insecure", result: verdict } } }),
       actions,
       { open: false },
     ) as unknown as FakeElement;
@@ -212,7 +213,7 @@ test("a verdict renders only while the posture it was probed under still holds",
   const uscRows = [hostsEntry('{"box1":{"host":"box1.tailnet.ts.net","use_ssh_config":true}}')];
   section = renderHostsSection(
     [...uscRows, sshGlobal("strict")],
-    state({ checks: { box1: { entry: uscEntry, posture: "", result: verdict } as HostsState["checks"][string] } }),
+    state({ checks: { box1: { entry: uscEntry, posture: "", result: verdict } } }),
     actions,
     { open: false },
   ) as unknown as FakeElement;
