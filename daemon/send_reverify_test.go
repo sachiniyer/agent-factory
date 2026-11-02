@@ -62,6 +62,8 @@ func TestTaskSendArmsReverifyOnUnverified(t *testing.T) {
 	armed := m.unverifiedSendWatches[key]["feed6595"]
 	m.pausedMu.Unlock()
 	require.NotNil(t, armed, "an unverified task send must arm its re-verification watch")
+	require.True(t, m.unverifiedSendWatchPending(key),
+		"a pending watch must make the paused backstop observe the attached pane")
 	attemptedAt := armed.attemptedAt
 
 	// The send's own turn keeps ticking — never evidence — then ends, and the
@@ -221,6 +223,106 @@ func TestUnverifiedSendNeverPromotesAnotherDelivery(t *testing.T) {
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
 		"a fire must never promote a verdict stamped outside its send's write window")
+}
+
+// The arm lands before the caller's verdict write: evidence that fires in
+// that gap banks, not dies — the promotion retries once the send's own verdict
+// is on the record (#6592 review).
+func TestUnverifiedSendFiredEvidenceSurvivesLateVerdictWrite(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6597", Name: "captain-events", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: t.TempDir(), Enabled: true,
+	}))
+
+	attemptedAt := time.Now()
+	key := stableSessionKey(repoID, inst)
+	m.armUnverifiedSendWatch(key, inst, "feed6597", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+
+	captured := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
+	}
+	// The send's turn fires BEFORE the verdict is recorded — the CAS must
+	// refuse, and the evidence must bank for retry rather than be lost.
+	captured("❯ \n", attemptedAt.Add(time.Second))
+	captured(reverifyTurnRow("1s"), attemptedAt.Add(2*time.Second))
+	captured(reverifyTurnRow("2s"), attemptedAt.Add(3*time.Second))
+	stored, err := task.GetTask("feed6597")
+	require.NoError(t, err)
+	require.Empty(t, stored.LastRunStatus)
+
+	// The delivery's own verdict write lands late — the banked evidence
+	// promotes it on the next capture even though no new turn is visible.
+	now := time.Now()
+	_, err = task.UpdateTaskStatus("feed6597", &now, TaskStatusSentUnverified)
+	require.NoError(t, err)
+	captured("❯ \n", attemptedAt.Add(4*time.Second))
+	stored, err = task.GetTask("feed6597")
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"evidence banked before the verdict write must promote once it lands")
+}
+
+// A retargeted re-send supersedes the earlier send's pending watch on the OLD
+// session too: the verdict on the row now belongs to the newer delivery, and
+// the stale watch's banked evidence — timestamped inside the first send's
+// slack — must never reach it (#6592 review).
+func TestUnverifiedSendRetargetSupersedesEarlierWatch(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	instA := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	instB := registerStarted(t, m, repoID, repoPath, "work", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6598", Name: "captain-events", WatchCmd: "emit.sh",
+		TargetSession: "work", ProjectPath: t.TempDir(), Enabled: true,
+	}))
+
+	keyA := stableSessionKey(repoID, instA)
+	keyB := stableSessionKey(repoID, instB)
+	attemptedAt := time.Now()
+
+	// The first send's watch fires before its verdict is written — the
+	// refused CAS banks the evidence for retry.
+	m.armUnverifiedSendWatch(keyA, instA, "feed6598", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+	capturedA := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(keyA, instA, session.Observation{Content: content, Captured: true}, at)
+	}
+	capturedA("❯ \n", attemptedAt.Add(time.Second))
+	capturedA(reverifyTurnRow("1s"), attemptedAt.Add(2*time.Second))
+	capturedA(reverifyTurnRow("2s"), attemptedAt.Add(3*time.Second))
+
+	// The task is retargeted and re-sends unverified to the other session:
+	// its watch is the only one that may ever promote again.
+	later := attemptedAt.Add(4 * time.Second)
+	m.armUnverifiedSendWatch(keyB, instB, "feed6598", later, task.NewTurnWatch("claude", later))
+	m.pausedMu.Lock()
+	stale := m.unverifiedSendWatches[keyA]["feed6598"]
+	m.pausedMu.Unlock()
+	require.Nil(t, stale, "a retargeted re-send must supersede the earlier send's watch on the old session")
+
+	// The newer delivery's verdict lands inside the FIRST send's write
+	// slack — exactly where the stale banked evidence would fit — and a
+	// stale capture on the old session still must not promote it.
+	now := later.Add(time.Second)
+	_, err := task.UpdateTaskStatus("feed6598", &now, TaskStatusSentUnverified)
+	require.NoError(t, err)
+	capturedA("❯ \n", attemptedAt.Add(5*time.Second))
+	stored, err := task.GetTask("feed6598")
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
+		"banked evidence from a superseded delivery must never promote a newer verdict")
+
+	// The newer send's own evidence still promotes its own verdict.
+	capturedB := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(keyB, instB, session.Observation{Content: content, Captured: true}, at)
+	}
+	capturedB("❯ \n", later.Add(time.Second))
+	capturedB(reverifyTurnRow("1s"), later.Add(2*time.Second))
+	capturedB(reverifyTurnRow("2s"), later.Add(3*time.Second))
+	stored, err = task.GetTask("feed6598")
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"the latest send's own evidence must still promote its verdict")
 }
 
 // A re-send re-bounds the watch: only the newest unverified send's evidence may
