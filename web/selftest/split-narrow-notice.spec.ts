@@ -152,10 +152,18 @@ test("#6589: the notice counts every pane invisible in the session-first band", 
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(1);
   await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
 
-  // Outside the band the count does not leak: back at desktop width only
-  // fit-hidden panes are invisible, and the notice says so.
+  // Outside the band the count does not leak: at 1400px the rail leaves the
+  // host under the 968px three-pane floor, so the fit alone hides leaf2 and
+  // the notice counts exactly that one.
   await page.setViewportSize({ width: 1400, height: 800 });
   await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
+  await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(2);
+  await expect(page.locator(".af-split-narrow")).toContainText("1 pane hidden");
+
+  // And wide enough that nothing is invisible, the notice goes away. The
+  // nested split gives leaf2 a quarter of the host, so it takes ~1800px for
+  // that quarter to clear the 320px floor.
+  await page.setViewportSize({ width: 1800, height: 800 });
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(3);
   await expect(page.locator(".af-split-narrow")).toHaveCount(0);
 });

@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0c6a613bad94";
+var CLIENT_VERSION = "c762ff7fa1ba";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14074,6 +14074,18 @@ function leaves(node) {
 function leafCount(node) {
   return leaves(node).length;
 }
+function invisiblePaneCount(fitHidden, leafIds, focusedId, sessionFirstBand) {
+  if (!sessionFirstBand) {
+    return fitHidden.length;
+  }
+  const invisible = new Set(fitHidden);
+  for (const id of leafIds) {
+    if (id !== focusedId) {
+      invisible.add(id);
+    }
+  }
+  return invisible.size;
+}
 function findLeaf(node, id) {
   if (node.kind === "leaf") {
     return node.id === id ? node : null;
@@ -15343,20 +15355,32 @@ var SplitView = class {
     if (!this.host) {
       return;
     }
-    if (fit.hidden.length === 0) {
+    const hidden = this.invisiblePanes(fit);
+    if (hidden === 0) {
       this.narrowEl?.remove();
       return;
     }
     if (!this.narrowEl) {
       this.narrowEl = el("div", "af-split-narrow");
     }
-    const text = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden \u2014 too narrow; resize or close a pane`;
+    const text = `${hidden} pane${hidden === 1 ? "" : "s"} hidden \u2014 too narrow; resize or close a pane`;
     if (this.narrowEl.textContent !== text) {
       this.narrowEl.textContent = text;
     }
     if (this.narrowEl.parentElement !== this.host) {
       this.host.prepend(this.narrowEl);
     }
+  }
+  /** Panes invisible under the narrow-layout rules (#6589): the fit's dropped
+   *  leaves in every band, plus every non-focused leaf in the session-first
+   *  band, where the ≤768px CSS hides them outright. */
+  invisiblePanes(fit) {
+    return this.tree ? invisiblePaneCount(
+      fit.hidden,
+      leaves(this.tree).map((l) => l.id),
+      this.focusedId,
+      this.narrow()
+    ) : fit.hidden.length;
   }
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
    *  (re)creates terminals whose tab changed, rebuilds the split wrappers (reusing
@@ -15390,7 +15414,7 @@ var SplitView = class {
     const hostW = this.host ? this.host.clientWidth : 0;
     const hostH = this.host ? this.host.clientHeight : 0;
     let fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
-    if (fit.hidden.length > 0) {
+    if (this.invisiblePanes(fit) > 0) {
       this.syncNarrowNotice(fit);
       const noticeH = this.narrowEl?.offsetHeight ?? 0;
       if (noticeH > 0 && noticeH < hostH) {

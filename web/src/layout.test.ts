@@ -12,6 +12,7 @@ import {
   focusSuccessorAfterDrop,
   companionTab,
   findLeaf,
+  invisiblePaneCount,
   type LayoutNode,
   leafCount,
   leafSizes,
@@ -983,4 +984,21 @@ test("fitToSize: when every leaf clears the floor nothing is hidden", () => {
   const { tree: fit, hidden } = fitToSize(tree, 1200, 600, null);
   assert.equal(fit, tree);
   assert.deepEqual(hidden, []);
+});
+
+test("invisiblePaneCount: outside the session-first band only the fit hides panes", () => {
+  assert.equal(invisiblePaneCount(["a"], ["a", "b", "c"], "c", false), 1);
+  assert.equal(invisiblePaneCount([], ["a", "b"], "a", false), 0);
+});
+
+test("invisiblePaneCount: the band unions fit-hidden with every non-focused leaf (#6589)", () => {
+  // The ≤768px CSS hides the non-focused panes the fit kept — a second hiding
+  // mechanism the old fit-only count never saw.
+  assert.equal(invisiblePaneCount([], ["a", "b", "c"], "c", true), 2);
+  // A leaf hidden by BOTH mechanisms counts once — union, not sum.
+  assert.equal(invisiblePaneCount(["a"], ["a", "b", "c"], "c", true), 2);
+  // With nothing focused every leaf is invisible in the band.
+  assert.equal(invisiblePaneCount([], ["a", "b"], null, true), 2);
+  // A lone pane has no non-focused sibling to hide.
+  assert.equal(invisiblePaneCount([], ["a"], "a", true), 0);
 });

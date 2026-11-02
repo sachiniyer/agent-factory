@@ -37,6 +37,7 @@ import {
   findSplitById,
   fitToSize,
   focusSuccessorAfterDrop,
+  invisiblePaneCount,
   type LayoutNode,
   type LeafNode,
   leafCount,
@@ -1023,20 +1024,35 @@ export class SplitView {
     if (!this.host) {
       return;
     }
-    if (fit.hidden.length === 0) {
+    const hidden = this.invisiblePanes(fit);
+    if (hidden === 0) {
       this.narrowEl?.remove();
       return;
     }
     if (!this.narrowEl) {
       this.narrowEl = el("div", "af-split-narrow");
     }
-    const text = `${fit.hidden.length} pane${fit.hidden.length === 1 ? "" : "s"} hidden — too narrow; resize or close a pane`;
+    const text = `${hidden} pane${hidden === 1 ? "" : "s"} hidden — too narrow; resize or close a pane`;
     if (this.narrowEl.textContent !== text) {
       this.narrowEl.textContent = text;
     }
     if (this.narrowEl.parentElement !== this.host) {
       this.host.prepend(this.narrowEl);
     }
+  }
+
+  /** Panes invisible under the narrow-layout rules (#6589): the fit's dropped
+   *  leaves in every band, plus every non-focused leaf in the session-first
+   *  band, where the ≤768px CSS hides them outright. */
+  private invisiblePanes(fit: { hidden: string[] }): number {
+    return this.tree
+      ? invisiblePaneCount(
+          fit.hidden,
+          leaves(this.tree).map((l) => l.id),
+          this.focusedId,
+          this.narrow(),
+        )
+      : fit.hidden.length;
   }
 
   /** Brings the live panes + DOM in line with the current tree: disposes gone panes,
@@ -1114,7 +1130,7 @@ export class SplitView {
     // hide, mount/update the notice now — before the fit's result is applied —
     // measure its rendered height, and refit against what remains. Everything
     // stays inside this synchronous pass, so there is no paint and no flicker.
-    if (fit.hidden.length > 0) {
+    if (this.invisiblePanes(fit) > 0) {
       this.syncNarrowNotice(fit);
       const noticeH = this.narrowEl?.offsetHeight ?? 0;
       if (noticeH > 0 && noticeH < hostH) {
