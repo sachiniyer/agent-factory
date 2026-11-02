@@ -7042,7 +7042,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1db829d056fc";
+var CLIENT_VERSION = "1dd7c19ba786";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -15365,7 +15365,6 @@ var SplitView = class {
     const hostH = this.host ? this.host.clientHeight : 0;
     const fit = hostW > 0 && hostH > 0 ? fitToSize(this.tree, hostW, hostH, this.focusedId) : { tree: this.tree, hidden: [] };
     this.displayTree = fit.tree;
-    const visible = leaves(fit.tree);
     if (!sameLayout(this.tree, this.builtTree)) {
       const rootEl = this.buildNode(this.tree);
       rootEl.style.flex = "1 1 0";
@@ -15375,7 +15374,7 @@ var SplitView = class {
     }
     this.syncFitHidden(fit);
     this.syncNarrowNotice(fit);
-    const multi = visible.length > 1;
+    const multi = desired.length > 1;
     this.host.classList.toggle("af-split-multi", multi);
     let focusedRebuilt = false;
     for (const leaf of desired) {
@@ -16124,7 +16123,7 @@ var SplitView = class {
     const shownTabs = display ? leaves(display).map((l) => l.tab) : [];
     const openTabs = display ? leaves(display).filter((l) => this.panes.get(l.id)?.status === "open").map((l) => l.tab) : [];
     const focusedTab = this.focusedId ? findLeaf(this.tree ?? { kind: "leaf", id: "", tab: 0 }, this.focusedId)?.tab ?? 0 : 0;
-    const paneCount = shownTabs.length;
+    const paneCount = this.tree ? leaves(this.tree).length : 0;
     const shownKey = `${shownTabs.join(",")}|${openTabs.join(",")}`;
     if (focusedTab === this.lastFocusedTab && shownKey === this.lastShown && paneCount === this.lastPaneCount) {
       return;
@@ -23430,7 +23429,7 @@ var AppShell = class {
     applyTerminalTitle(this.headTitle, selected.title);
     if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
-      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+      this.terminalChrome.closePane.hidden = state.paneCount < 2;
     }
     this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
@@ -24054,6 +24053,7 @@ var store = new Store({
   activeTab: 0,
   shownTabs: [0],
   openTabs: [],
+  paneCount: 1,
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -24130,7 +24130,7 @@ var splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs })
+  onLayout: ({ focusedTab, shownTabs, openTabs, paneCount }) => store.set({ activeTab: focusedTab, shownTabs, openTabs, paneCount })
 });
 var root = null;
 function mount() {
@@ -24267,6 +24267,7 @@ async function connect(candidate) {
     activeTab: 0,
     shownTabs: [0],
     openTabs: [],
+    paneCount: 1,
     tabError: null,
     mutationError: void 0,
     tasks,
@@ -24328,6 +24329,7 @@ function disconnect(loginError = null, authRequired = store.get().authRequired) 
     activeTab: 0,
     shownTabs: [0],
     openTabs: [],
+    paneCount: 1,
     tabError: null,
     mutationError: void 0,
     tasks: [],

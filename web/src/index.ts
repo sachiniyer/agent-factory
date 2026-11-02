@@ -207,6 +207,7 @@ const store = new Store<AppState>({
   activeTab: 0,
   shownTabs: [0],
   openTabs: [],
+  paneCount: 1,
   tabError: null,
   tasks: [],
   registeredProjects: [],
@@ -366,7 +367,7 @@ const splitView = new SplitView(termHost, {
   // Mirror the layout into the store so the tab bar can highlight the focused pane's
   // tab (activeTab) and flag which tabs are shown across panes (shownTabs). Fired only
   // on a real change, so this write never loops back through rerender → syncSplit.
-  onLayout: ({ focusedTab, shownTabs, openTabs }) => store.set({ activeTab: focusedTab, shownTabs, openTabs }),
+  onLayout: ({ focusedTab, shownTabs, openTabs, paneCount }) => store.set({ activeTab: focusedTab, shownTabs, openTabs, paneCount }),
 });
 
 let root: HTMLElement | null = null;
@@ -569,6 +570,7 @@ async function connect(candidate: string): Promise<void> {
     activeTab: 0,
     shownTabs: [0],
     openTabs: [],
+    paneCount: 1,
     tabError: null,
     mutationError: undefined,
     tasks,
@@ -643,6 +645,7 @@ function disconnect(loginError: string | null = null, authRequired = store.get()
     activeTab: 0,
     shownTabs: [0],
     openTabs: [],
+    paneCount: 1,
     tabError: null,
     mutationError: undefined,
     tasks: [],

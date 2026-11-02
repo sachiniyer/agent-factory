@@ -324,6 +324,11 @@ export interface AppState {
    *  reconnecting pane shows its placeholder, not the tab's content, so attention
    *  acknowledgement waits for the agent tab to land here. */
   openTabs: number[];
+  /** how many panes the selected session's RETAINED layout holds — distinct
+   *  from shownTabs' length, which the fit can shrink to one while extra
+   *  leaves stay hidden (#6563): close affordances gate on this so a touch
+   *  user can still collapse a pane the layout is only hiding. */
+  paneCount: number;
   /** an actionable message shown as a transient toast when a tab op (create/close)
    *  or a task op (toggle/trigger/remove) fails, or null when there is none. These
    *  ops have no modal to surface an error in (unlike create/kill/archive), so the
@@ -3344,7 +3349,7 @@ export class AppShell {
     applyTerminalTitle(this.headTitle, selected.title);
     if (this.terminalChrome) applyTerminalPlacement(this.terminalChrome.placement, placementDetail(selected), selected.placement?.kind === "remote");
     if (this.terminalChrome) {
-      this.terminalChrome.closePane.hidden = state.shownTabs.length < 2;
+      this.terminalChrome.closePane.hidden = state.paneCount < 2;
     }
     this.attentionChip?.patch(hasAttention(selected), attentionReason(selected));
     const warningText = sessionWarningText(selected);
