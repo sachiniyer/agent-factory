@@ -263,7 +263,7 @@ func TestReadTranscriptSinceSkipsEarlierMessages(t *testing.T) {
 	early := `{"type":"assistant","timestamp":"2026-10-20T09:00:00Z","message":{"id":"m0","model":"claude-opus-5-5","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
 	write(t, path, early, assistant("m1", "claude-opus-5-5", 1_000_000, 0))
 	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Since: since})
+	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Within: []Span{{From: since}}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -280,7 +280,7 @@ func TestReadTranscriptSinceSkipsAnUnpricedEarlierMessage(t *testing.T) {
 	early := `{"type":"assistant","timestamp":"2026-10-20T09:00:00Z","message":{"id":"m0","model":"claude-x-9","usage":{"input_tokens":1000000,"output_tokens":0}}}` + "\n"
 	write(t, path, early, assistant("m1", "claude-opus-5-5", 1_000_000, 0))
 	since := time.Date(2026, 10, 20, 10, 0, 0, 0, time.UTC)
-	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Since: since})
+	res, err := ReadTranscript(path, FileMark{}, ReadOptions{Within: []Span{{From: since}}})
 	if err != nil {
 		t.Fatal(err)
 	}

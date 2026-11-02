@@ -1,6 +1,7 @@
 package backlog
 
 import (
+	"github.com/sachiniyer/agent-factory/planusage"
 	"maps"
 	"slices"
 )
@@ -28,10 +29,10 @@ func (b *Backlog) SetOrchestratorMeters(meters map[string]map[string]Meter) bool
 
 // WithConversations is o with mains, the main transcript files of its
 // session's conversation, recorded as conversations that orchestrate from its
-// bind. A main recorded already whose span ended is open again from this bind:
-// the group was bound back to a session that orchestrated it before.
+// bind. A main recorded already whose spans all ended gets a new span from this
+// bind: the group was bound back to a session that orchestrated it before.
 func (o Orchestrator) WithConversations(mains []string) Orchestrator {
-	o.Conversations = append([]OrchConversation(nil), o.Conversations...)
+	o.Conversations = cloneConversations(o.Conversations)
 	o.addConversations(mains)
 	return o
 }
@@ -42,10 +43,13 @@ func (o *Orchestrator) addConversations(mains []string) bool {
 		i := slices.IndexFunc(o.Conversations, func(c OrchConversation) bool { return c.Main == m })
 		switch {
 		case i < 0:
-			o.Conversations = append(o.Conversations, OrchConversation{Main: m, From: o.BoundAt})
+			o.Conversations = append(o.Conversations, OrchConversation{Main: m, Spans: []planusage.Span{{From: o.BoundAt}}})
 			changed = true
-		case !o.Conversations[i].Until.IsZero():
-			o.Conversations[i] = OrchConversation{Main: m, From: o.BoundAt}
+		case !o.Conversations[i].open():
+			// Bound back to a session that orchestrated before: a new span, and the
+			// earlier ones stay (Codex P2 on #6616).
+			c := &o.Conversations[i]
+			c.Spans = append(append([]planusage.Span(nil), c.Spans...), planusage.Span{From: o.BoundAt})
 			changed = true
 		}
 	}

@@ -297,6 +297,9 @@ type orchRun struct {
 	group  int
 	orch   backlog.Orchestrator
 	inst   *session.Instance
+	// cleared marks what a cleared binding left (Item.OrchCleared): its
+	// conversations' last messages are classified, and nothing is metered.
+	cleared bool
 }
 
 // orchNote is the conversation of a group's live orchestrator session that a
@@ -337,6 +340,9 @@ func (m *Manager) startedItemRuns(home string) ([]itemRun, []orchRun, map[string
 			continue
 		}
 		for _, it := range b.Items {
+			if cl := it.OrchCleared; cl != nil {
+				orchs = append(orchs, orchRun{repoID: repoID, group: it.ID, orch: backlog.Orchestrator{Conversations: cl.Conversations}, cleared: true})
+			}
 			if o := it.Orchestrator; o != nil && o.SessionID != "" {
 				var inst *session.Instance
 				if s := sessions[o.SessionID]; s != nil && s.BacklogItem == 0 {
@@ -535,7 +541,20 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	orchUpdates := map[string]map[string]map[string]backlog.Meter{}
 	orchNotes := map[string][]orchNote{}
 	orchBacklog := map[string][]planusage.BacklogPath{}
+	clearedRepos := map[string]bool{}
 	for _, o := range orchRuns {
+		if o.cleared {
+			// A binding cleared since: its conversations' last messages, up to the
+			// clear, are still backlog spend, so this pass classifies them and the
+			// store below drops the record (Codex P2 on #6616).
+			for _, c := range o.orch.Conversations {
+				for _, p := range planusage.ConversationPaths([]string{c.Main}) {
+					orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, Within: c.Spans})
+				}
+			}
+			clearedRepos[o.repoID] = true
+			continue
+		}
 		// Every conversation the group recorded, each with its span: a session
 		// killed or replaced since the last pass is read to its end, and one
 		// replaced but still running is not charged for what it does next
@@ -546,7 +565,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			if conv, configDir, dirs, ok := orchestratorConversationOf(o.inst); ok {
 				mains := planusage.ConversationMains(dirs, conv)
 				orch = orch.WithConversations(mains)
-				if !slices.Equal(orch.Conversations, o.orch.Conversations) {
+				if !reflect.DeepEqual(orch.Conversations, o.orch.Conversations) {
 					orchNotes[o.repoID] = append(orchNotes[o.repoID], orchNote{group: o.group, sessionID: orch.SessionID, mains: mains})
 				}
 				if configDir != "" {
@@ -564,7 +583,7 @@ func (m *Manager) meterPassLocked(now time.Time) {
 		for _, c := range orch.Conversations {
 			mains = append(mains, c.Main)
 			for _, p := range planusage.ConversationPaths([]string{c.Main}) {
-				orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, From: c.From, Until: c.Until})
+				orchBacklog[o.repoID] = append(orchBacklog[o.repoID], planusage.BacklogPath{Path: p, Within: c.Spans})
 			}
 		}
 		sessionID := orch.SessionID
@@ -673,6 +692,9 @@ func (m *Manager) meterPassLocked(now time.Time) {
 	for repoID := range orchNotes {
 		repos[repoID] = true
 	}
+	for repoID := range clearedRepos {
+		repos[repoID] = true
+	}
 	for repoID := range repos {
 		meters, orchMeters := updates[repoID], orchUpdates[repoID]
 		if _, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
@@ -680,6 +702,9 @@ func (m *Manager) meterPassLocked(now time.Time) {
 			b.SetOrchestratorMeters(orchMeters)
 			for _, n := range orchNotes[repoID] {
 				b.NoteOrchConversations(n.group, n.sessionID, n.mains)
+			}
+			if clearedRepos[repoID] {
+				b.DropOrchCleared(now)
 			}
 			return nil
 		}); err != nil {

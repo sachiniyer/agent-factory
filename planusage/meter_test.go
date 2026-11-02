@@ -382,8 +382,8 @@ func TestScanAllCountsBacklogOnlyInItsSpan(t *testing.T) {
 	write(t, conv, at("m0", "09:00"), at("m1", "10:00"), at("m2", "11:00"))
 	now := time.Date(2026, 10, 20, 12, 0, 0, 0, time.UTC)
 	s := NewMeterState()
-	s.ScanAll(map[string][]string{DefaultAccount: {config}}, []BacklogPath{{Path: conv,
-		From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC), Until: time.Date(2026, 10, 20, 10, 30, 0, 0, time.UTC)}}, nil, now)
+	s.ScanAll(map[string][]string{DefaultAccount: {config}}, []BacklogPath{{Path: conv, Within: []Span{{
+		From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC), Until: time.Date(2026, 10, 20, 10, 30, 0, 0, time.UTC)}}}}, nil, now)
 	all, backlog := 0.0, 0.0
 	for _, b := range s.Accounts[DefaultAccount].Buckets {
 		all += b.All

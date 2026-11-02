@@ -46,8 +46,8 @@ func MeterRun(id int, w Where, r RunRef, files []string, seen map[string]int64, 
 
 // MeterOrchestrator reads the transcripts of group's orchestrator
 // conversations from their stored offsets, like MeterRun: each one's main file
-// and its subagents' files, counting only its messages from the span in which it
-// orchestrated. Before it, the session worked for the user; after it, the group
+// and its subagents' files, counting only its messages from the spans in which
+// it orchestrated. Before it, the session worked for the user; after it, the group
 // was bound to another session and this one may go on working for the user.
 func MeterOrchestrator(group int, w Where, o Orchestrator, seen map[string]int64, overrides map[string]planusage.Price) RunMeter {
 	out := RunMeter{Meter: maps.Clone(o.Meter)}
@@ -57,7 +57,7 @@ func MeterOrchestrator(group int, w Where, o Orchestrator, seen map[string]int64
 	for _, c := range o.Conversations {
 		files := planusage.ConversationTranscripts([]string{c.Main})
 		part := meterFiles(group, w, RunRef{Meter: out.Meter}, files,
-			planusage.ReadOptions{Overrides: overrides, Seen: seen, Since: c.From, Until: c.Until})
+			planusage.ReadOptions{Overrides: overrides, Seen: seen, Within: c.Spans})
 		out.Meter = part.Meter
 		out.Changed = out.Changed || part.Changed
 		out.Entries = append(out.Entries, part.Entries...)

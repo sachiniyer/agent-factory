@@ -866,3 +866,29 @@ func TestMeterPassKeepsOrchestratorSpendWhenTheBacklogIsUnreadable(t *testing.T)
 	require.InDelta(t, 8.0, w["all_cost"], 1e-9)
 	require.InDelta(t, 30.0, w["backlog"], 1e-9, "m2, scanned while the backlog was unreadable, is still the backlog's")
 }
+
+// A binding cleared between passes leaves its conversations for the next pass:
+// what the planner wrote before the clear is still backlog spend, what it
+// wrote after is the user's, and the pass drops the record (Codex P2 on #6616).
+func TestMeterPassClassifiesAClearedOrchestratorsLastMessages(t *testing.T) {
+	const repoID = "meter-orch-cleared"
+	_, project, now, pass, five := orchMeterWorld(t, repoID)
+	conv := filepath.Join(project, "conv-o1.jsonl")
+	orchMessage(t, conv, "m1", now.Add(-time.Minute))
+	pass(now)
+	orchMessage(t, conv, "m2", now.Add(30*time.Second))
+	_, err := backlog.Update(repoID, func(b *backlog.Backlog) error {
+		_, err := b.ClearOrchestrator(1, now.Add(time.Minute))
+		return err
+	})
+	require.NoError(t, err)
+	orchMessage(t, conv, "m3", now.Add(90*time.Second))
+	pass(now.Add(2 * time.Minute))
+
+	w := five()
+	require.InDelta(t, 12.0, w["all_cost"], 1e-9)
+	require.InDelta(t, 20.0, w["backlog"], 1e-9, "m1 and m2, from before the clear, are the backlog's; m3 is the user's")
+	b, err := backlog.Load(repoID)
+	require.NoError(t, err)
+	require.Nil(t, b.Item(1).OrchCleared, "the pass scanned past the clear and dropped its record")
+}

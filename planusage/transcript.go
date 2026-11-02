@@ -61,10 +61,33 @@ type ReadOptions struct {
 	// dir on an account handoff; those copied messages consumed the source
 	// account's plan, so they must not count again here.
 	Foreign func(key string) bool
-	// Since and Until, when set, read past the messages from before Since and
-	// from Until on without counting them.
-	Since time.Time
-	Until time.Time
+	// Within, when set, reads past the messages outside every one of its spans
+	// without counting them.
+	Within []Span
+}
+
+// Span is a stretch of time, from From until Until; a zero bound is open.
+type Span struct {
+	From  time.Time `json:"from,omitzero"`
+	Until time.Time `json:"until,omitzero"`
+}
+
+// Holds is whether at falls in the span.
+func (s Span) Holds(at time.Time) bool {
+	return (s.From.IsZero() || !at.Before(s.From)) && (s.Until.IsZero() || at.Before(s.Until))
+}
+
+// within is whether at falls in one of spans; with none, every time does.
+func within(at time.Time, spans []Span) bool {
+	if len(spans) == 0 {
+		return true
+	}
+	for _, s := range spans {
+		if s.Holds(at) {
+			return true
+		}
+	}
+	return false
 }
 
 // ReadResult is what one read of a transcript found.
@@ -222,9 +245,9 @@ func ReadTranscript(path string, mark FileMark, opts ReadOptions) (ReadResult, e
 		if at.IsZero() {
 			at = info.ModTime()
 		}
-		// Read past a message outside [Since, Until) without counting it, before
-		// its price is looked up: one that is not counted cannot stop the read.
-		if (!opts.Since.IsZero() && at.Before(opts.Since)) || (!opts.Until.IsZero() && !at.Before(opts.Until)) {
+		// Read past a message outside Within without counting it, before its
+		// price is looked up: one that is not counted cannot stop the read.
+		if !within(at, opts.Within) {
 			res.Mark.Offset = next
 			continue
 		}

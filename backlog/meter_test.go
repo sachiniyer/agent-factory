@@ -161,7 +161,7 @@ func TestMeterOrchestratorCountsFromBind(t *testing.T) {
 	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
 	early := strings.Replace(transcriptLine("m0", "claude-opus-5-5", 1_000_000), "10:00:00", "09:00:00", 1)
 	writeFile(t, f, early, transcriptLine("m1", "claude-opus-5-5", 1_000_000))
-	o := Orchestrator{SessionID: "o", Conversations: []OrchConversation{{Main: f, From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)}}}
+	o := Orchestrator{SessionID: "o", Conversations: []OrchConversation{{Main: f, Spans: []planusage.Span{{From: time.Date(2026, 10, 20, 9, 30, 0, 0, time.UTC)}}}}}
 	m := MeterOrchestrator(1, Where{}, o, map[string]int64{}, nil)
 	if !m.Changed || len(m.Entries) != 1 || math.Abs(m.Cost()-4) > 1e-9 {
 		t.Fatalf("%+v", m)
@@ -186,11 +186,29 @@ func TestMeterOrchestratorCountsEachConversationInItsSpan(t *testing.T) {
 	writeFile(t, filepath.Join(dir, "c1", "subagents", "agent-x.jsonl"), at("a3", "10:00"))
 	writeFile(t, cur, at("b1", "11:00"))
 	o := Orchestrator{SessionID: "o2", BoundAt: day(10, 30), Conversations: []OrchConversation{
-		{Main: old, From: day(9, 0), Until: day(10, 30)}, {Main: cur, From: day(10, 30)}}}
+		{Main: old, Spans: []planusage.Span{{From: day(9, 0), Until: day(10, 30)}}}, {Main: cur, Spans: []planusage.Span{{From: day(10, 30)}}}}}
 	m := MeterOrchestrator(1, Where{}, o, map[string]int64{}, nil)
 	// a1 and the subagent's a3 are c1's while it orchestrated, b1 is c2's; a2,
 	// written by c1's session after the replacement, is not the group's.
 	if len(m.Entries) != 3 || math.Abs(m.Cost()-12) > 1e-9 {
 		t.Fatalf("%+v", m)
+	}
+}
+
+// A conversation bound, replaced and bound back between passes keeps both
+// spans: what it wrote in the first is still the group's, and what it wrote
+// while another session orchestrated is not (Codex P2 on #6616).
+func TestMeterOrchestratorCountsEveryOneOfAConversationsSpans(t *testing.T) {
+	f := filepath.Join(t.TempDir(), "projects", "-repo", "c1.jsonl")
+	at := func(id, hhmm string) string {
+		return strings.Replace(transcriptLine(id, "claude-opus-5-5", 1_000_000), "10:00:00", hhmm+":00", 1)
+	}
+	writeFile(t, f, at("a1", "09:10"), at("a2", "09:40"), at("a3", "10:10"))
+	day := func(h, m int) time.Time { return time.Date(2026, 10, 20, h, m, 0, 0, time.UTC) }
+	o := Orchestrator{SessionID: "o", Conversations: []OrchConversation{{Main: f,
+		Spans: []planusage.Span{{From: day(9, 0), Until: day(9, 30)}, {From: day(10, 0)}}}}}
+	m := MeterOrchestrator(1, Where{}, o, map[string]int64{}, nil)
+	if len(m.Entries) != 2 || math.Abs(m.Cost()-8) > 1e-9 {
+		t.Fatalf("a1 (first span) and a3 (second) count, a2 (between) does not: %+v", m)
 	}
 }

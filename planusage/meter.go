@@ -354,12 +354,11 @@ func (s *MeterState) Scan(account, configDir string, backlogDirs []string, overr
 
 // BacklogPath is a path whose transcripts count as backlog spend: a directory
 // of item-session transcripts, or an orchestrator conversation's main file or
-// subagent directory. From and Until, when set, bound the messages that count:
+// subagent directory. Within, when set, holds the spans whose messages count:
 // a conversation is the backlog's only while it orchestrates.
 type BacklogPath struct {
-	Path  string    `json:"path"`
-	From  time.Time `json:"from,omitzero"`
-	Until time.Time `json:"until,omitzero"`
+	Path   string `json:"path"`
+	Within []Span `json:"within,omitempty"`
 }
 
 // BacklogDirs is dirs as backlog paths with no time bound.
@@ -528,10 +527,10 @@ func backlogSpans(path string, backlog []BacklogPath) []BacklogPath {
 	return out
 }
 
-// inSpans is whether a message at at falls in one of spans.
-func inSpans(at time.Time, spans []BacklogPath) bool {
-	for _, p := range spans {
-		if (p.From.IsZero() || !at.Before(p.From)) && (p.Until.IsZero() || at.Before(p.Until)) {
+// inSpans is whether a message at at is backlog spend under one of paths.
+func inSpans(at time.Time, paths []BacklogPath) bool {
+	for _, p := range paths {
+		if within(at, p.Within) {
 			return true
 		}
 	}

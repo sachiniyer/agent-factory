@@ -466,8 +466,8 @@ func TestSetOrchestratorMeters(t *testing.T) {
 }
 
 // Binding the group to another session ends the span of the conversations it
-// had; binding it back to the session whose conversation that was opens it again
-// from the new bind (Codex P2 on #6616).
+// had; binding it back to the session whose conversation that was adds a span
+// from the new bind, and the earlier one stays (Codex P2s on #6616).
 func TestRebindEndsAndReopensConversationSpans(t *testing.T) {
 	b := mk(t, Item{ID: 1, Title: "g"}, Item{ID: 2, Parent: 1})
 	if err := b.BindOrchestrator(1, orch("a"), t0); err != nil {
@@ -484,7 +484,7 @@ func TestRebindEndsAndReopensConversationSpans(t *testing.T) {
 		t.Fatal(err)
 	}
 	c := b.Item(1).Orchestrator.Conversations
-	if len(c) != 1 || !c[0].From.Equal(t0) || !c[0].Until.Equal(later) {
+	if len(c) != 1 || len(c[0].Spans) != 1 || !c[0].Spans[0].From.Equal(t0) || !c[0].Spans[0].Until.Equal(later) {
 		t.Fatalf("%+v", c)
 	}
 	back := later.Add(time.Hour)
@@ -494,7 +494,34 @@ func TestRebindEndsAndReopensConversationSpans(t *testing.T) {
 	if !b.NoteOrchConversations(1, "a", []string{"/p/ca.jsonl"}) {
 		t.Fatal("the conversation did not open again")
 	}
-	if c := b.Item(1).Orchestrator.Conversations; len(c) != 1 || !c[0].From.Equal(back) || !c[0].Until.IsZero() {
+	c = b.Item(1).Orchestrator.Conversations
+	if len(c) != 1 || len(c[0].Spans) != 2 || !c[0].Spans[0].Until.Equal(later) || !c[0].Spans[1].From.Equal(back) || !c[0].Spans[1].Until.IsZero() {
 		t.Fatalf("%+v", c)
+	}
+}
+
+// Clearing a binding leaves its conversations, their spans ended at the clear,
+// for the next meter pass to classify; a pass that started after the clear
+// drops them (Codex P2 on #6616).
+func TestClearLeavesConversationsUntilAPassScansPastIt(t *testing.T) {
+	b := mk(t, Item{ID: 1, Title: "g"}, Item{ID: 2, Parent: 1})
+	if err := b.BindOrchestrator(1, orch("a"), t0); err != nil {
+		t.Fatal(err)
+	}
+	b.NoteOrchConversations(1, "a", []string{"/p/ca.jsonl"})
+	cleared := t0.Add(time.Hour)
+	if _, err := b.ClearOrchestrator(1, cleared); err != nil {
+		t.Fatal(err)
+	}
+	cl := b.Item(1).OrchCleared
+	if b.Item(1).Orchestrator != nil || cl == nil || !cl.At.Equal(cleared) || len(cl.Conversations) != 1 ||
+		!cl.Conversations[0].Spans[0].Until.Equal(cleared) {
+		t.Fatalf("%+v", cl)
+	}
+	if got := b.DropOrchCleared(cleared); got != nil {
+		t.Fatalf("a pass that started at the clear dropped it: %v", got)
+	}
+	if got := b.DropOrchCleared(cleared.Add(time.Second)); len(got) != 1 || b.Item(1).OrchCleared != nil {
+		t.Fatalf("%v %+v", got, b.Item(1).OrchCleared)
 	}
 }
