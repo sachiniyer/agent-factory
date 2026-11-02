@@ -35,16 +35,24 @@ type Orchestrator struct {
 	Failures []time.Time `json:"failures,omitempty"`
 	// Sending is how many of the first Events a delivery in flight carries.
 	Sending int `json:"sending,omitempty"`
-	// Unstarted marks a session af started as a replacement that has not had
-	// its start prompt (the instructions and the handoff): its first prompt was
-	// proven not delivered, or af adopted it after a restart. The next delivery
-	// sends the start prompt with the events, not bare events.
-	Unstarted bool `json:"unstarted,omitempty"`
+	// Unstarted marks a session that has not had its start prompt (the
+	// instructions and the handoff), and why: OrchUnstartedReplaced for a
+	// replacement af started whose first prompt was proven not delivered, or
+	// that af adopted after a restart; OrchUnstartedRestarted for a session af
+	// restored without its agent conversation. Every delivery sends the start
+	// prompt while it is set, and only a confirmed one clears it.
+	Unstarted string `json:"unstarted,omitempty"`
 	// Replacing records a replacement af began to start for the gone session,
 	// written before the create, so a daemon that stops before binding it
 	// adopts that session instead of starting a second one.
 	Replacing *OrchReplacing `json:"replacing,omitempty"`
 }
+
+// Why an orchestrator has not had its start prompt (Orchestrator.Unstarted).
+const (
+	OrchUnstartedReplaced  = "replaced"
+	OrchUnstartedRestarted = "restarted"
+)
 
 // OrchReplacing is a replacement af began to start: its session's title base,
 // and the time af began, which the new session's creation is not before.

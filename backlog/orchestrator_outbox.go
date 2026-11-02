@@ -23,7 +23,7 @@ type OrchDelivery struct {
 	Program   string
 	Events    []OrchEvent
 	// Unstarted is the orchestrator's Unstarted: send the start prompt.
-	Unstarted bool
+	Unstarted string
 	// Replacing is a replacement af began for this session, if any.
 	Replacing *OrchReplacing
 }
@@ -142,9 +142,25 @@ func (b *Backlog) OrchDelivered(group int, sessionID string, delivered []OrchEve
 		return false
 	}
 	o.dropEvents(delivered)
-	o.Failures, o.Sending, o.Unstarted = nil, 0, false
+	o.Failures, o.Sending, o.Unstarted = nil, 0, ""
 	b.Item(group).UpdatedAt = now
 	return true
+}
+
+// MarkOrchUnstarted records that group's sessionID has not had its start
+// prompt, for kind (an OrchUnstarted value), before af sends it one, so a send
+// that is held or not delivered is sent again in full. A mark already set keeps
+// its kind. It refuses when the group's orchestrator is no longer sessionID.
+func (b *Backlog) MarkOrchUnstarted(group int, sessionID, kind string, now time.Time) error {
+	o := b.orchestratorOf(group, sessionID)
+	if o == nil {
+		return fmt.Errorf("the orchestrator of %s changed while af restored session %q", FormatID(group), sessionID)
+	}
+	if o.Unstarted == "" {
+		o.Unstarted = kind
+		b.Item(group).UpdatedAt = now
+	}
+	return nil
 }
 
 // BeginOrchReplace records, before af creates it, a replacement named

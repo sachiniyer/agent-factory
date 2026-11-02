@@ -94,10 +94,10 @@ func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group
 	}
 	dir := proposalDir(repoID, b.Item(group))
 	prompt := b.OrchEventsPrompt(group, d.Events)
-	if d.Unstarted {
-		// A replacement that never had its start prompt (Codex P2 on #6571): send
-		// it now, with the instructions, the handoff and the events.
-		prompt = b.OrchStartPrompt(group, dir, true, d.Events)
+	if d.Unstarted != "" {
+		// A session that never had its start prompt (Codex P2s on #6571): send it
+		// now, with the instructions, the handoff and the events.
+		prompt = b.OrchStartPrompt(group, dir, d.Unstarted == backlog.OrchUnstartedReplaced, d.Events)
 	}
 	if backlogNeedsRestore(s) {
 		// A session the user unbound since the delivery began is not revived.
@@ -108,7 +108,21 @@ func (m *Manager) deliverOrchestrator(stop <-chan struct{}, repoID string, group
 		// comes back without its agent conversation gets the start prompt, with
 		// the handoff, instead of bare events.
 		if exact, _ := backlogExactResume(s.instance); !exact {
-			prompt = b.OrchStartPrompt(group, dir, d.Unstarted, d.Events)
+			kind := d.Unstarted
+			if kind == "" {
+				kind = backlog.OrchUnstartedRestarted
+			}
+			// Persisted before the restore, so a start prompt that is then held or
+			// not delivered is sent again in full on a later pass, not as bare events
+			// (Codex P2 on #6571).
+			svc := m.backlogService()
+			if err := m.applyRetrying(repoID, stop, func(b *backlog.Backlog) ([]int, error) {
+				return []int{group}, b.MarkOrchUnstarted(group, d.SessionID, kind, svc.Now())
+			}); err != nil {
+				m.warn().Printf("orchestrator delivery for %s: %v", backlog.FormatID(group), err)
+				return
+			}
+			prompt = b.OrchStartPrompt(group, dir, kind == backlog.OrchUnstartedReplaced, d.Events)
 		}
 		restored, err := restoreBacklogSession(m, RestoreSessionRequest{ID: d.SessionID, RepoID: repoID})
 		if err != nil {
@@ -237,7 +251,7 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 			// The daemon stopped after starting a replacement and before binding it
 			// (Codex P2 on #6571): bind that session rather than start a second. It
 			// may not have had its start prompt, so the next delivery sends it.
-			next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: true}
+			next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: backlog.OrchUnstartedReplaced}
 			if err := m.bindReplacement(stop, repoID, d, next, nil); err != nil {
 				m.warn().Printf("adopt replacement orchestrator %q for %s: %v", data.Title, backlog.FormatID(d.Group), err)
 				return
@@ -302,7 +316,10 @@ func (m *Manager) replaceOrchestrator(stop <-chan struct{}, repoID string, b *ba
 		// next pass sends to the now-live session.
 		delivered = nil
 	}
-	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program, Unstarted: delivered == nil}
+	next := backlog.Orchestrator{SessionID: data.ID, Title: data.Title, Program: d.Program}
+	if delivered == nil {
+		next.Unstarted = backlog.OrchUnstartedReplaced
+	}
 	if err := m.bindReplacement(stop, repoID, d, next, delivered); err != nil {
 		m.warn().Printf("bind replacement orchestrator %q to %s: %v", data.Title, backlog.FormatID(d.Group), err)
 		if errors.Is(err, backlog.ErrBusy) {

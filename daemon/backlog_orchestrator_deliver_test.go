@@ -376,7 +376,7 @@ func TestOrchestratorUnstartedReplacementGetsTheStartPromptNext(t *testing.T) {
 	runOrchDelivery(t, m, repoID, time.Now())
 	o := orchOf(t, repoID)
 	require.Equal(t, "n1", o.SessionID)
-	require.True(t, o.Unstarted)
+	require.Equal(t, backlog.OrchUnstartedReplaced, o.Unstarted)
 	require.Len(t, o.Events, 1)
 
 	sent := stubBacklogSend(t, m, repoID)
@@ -386,7 +386,7 @@ func TestOrchestratorUnstartedReplacementGetsTheStartPromptNext(t *testing.T) {
 		require.Contains(t, sent.reqs[0].Prompt, want)
 	}
 	o = orchOf(t, repoID)
-	require.False(t, o.Unstarted, "a confirmed start prompt clears it")
+	require.Empty(t, o.Unstarted, "a confirmed start prompt clears it")
 	require.Empty(t, o.Events)
 }
 
@@ -443,7 +443,7 @@ func TestOrchestratorAdoptsAReplacementStartedBeforeARestart(t *testing.T) {
 	o := orchOf(t, repoID)
 	require.Equal(t, "n1", o.SessionID, "the replacement started before the restart is bound")
 	require.Nil(t, o.Replacing)
-	require.True(t, o.Unstarted, "it may not have had its start prompt")
+	require.Equal(t, backlog.OrchUnstartedReplaced, o.Unstarted, "it may not have had its start prompt")
 	require.Len(t, o.Events, 1)
 }
 
@@ -473,4 +473,41 @@ func TestOrchestratorDeliveryAbandonedWhenTheGroupIsReboundMidDelivery(t *testin
 	require.Equal(t, "o2", o.SessionID)
 	require.Len(t, o.Events, 1, "the events stay for the new orchestrator")
 	require.Empty(t, o.Failures)
+}
+
+// TestOrchestratorRestoredWithoutItsConversationKeepsTheStartPromptPending: a
+// session restored without its conversation is marked unstarted before the
+// restore, so when its start prompt is held, the next pass sends the start
+// prompt again in full, not bare events (Codex P2 on #6571).
+func TestOrchestratorRestoredWithoutItsConversationKeepsTheStartPromptPending(t *testing.T) {
+	m, repoID := orchestratedGroup(t)
+	sent := stubBacklogSend(t, m, repoID)
+	sent.err = errBacklogTargetLimited // the first send meets a usage limit: held
+	prevNeeds, prevRestore := backlogNeedsRestore, restoreBacklogSession
+	needs := 1
+	backlogNeedsRestore = func(s itemSession) bool {
+		if s.instance.ID == "o1" && needs > 0 {
+			needs--
+			return true
+		}
+		return false
+	}
+	restoreBacklogSession = func(_ *Manager, req RestoreSessionRequest) (session.InstanceData, error) {
+		return session.InstanceData{ID: req.ID}, nil
+	}
+	t.Cleanup(func() { backlogNeedsRestore, restoreBacklogSession = prevNeeds, prevRestore })
+
+	runOrchDelivery(t, m, repoID, time.Now())
+	o := orchOf(t, repoID)
+	require.Equal(t, backlog.OrchUnstartedRestarted, o.Unstarted, "marked before the restore")
+	require.Len(t, o.Events, 1, "a held send keeps the events")
+
+	sent.err = nil
+	runOrchDelivery(t, m, repoID, time.Now())
+	require.Equal(t, 2, sent.count())
+	require.Contains(t, sent.reqs[1].Prompt, "restarted without its earlier conversation",
+		"the live session still gets the start prompt, not bare events")
+	o = orchOf(t, repoID)
+	require.Empty(t, o.Unstarted)
+	require.Empty(t, o.Events)
 }
