@@ -230,6 +230,23 @@ func priorSocketGenerations(prev ServerState, current string) ([]string, bool) {
 	return out, truncated
 }
 
+// RecordServerStateForTest invokes recordServerState so tests outside this
+// package (doctor's record-only death proof) can drive the daemon's real
+// record-write path — the only way to prove what the record says once the
+// in-memory lineage is gone (#6610).
+func RecordServerStateForTest(home string, st ServerState) {
+	recordServerState(home, st)
+}
+
+// ResetServerStateLineageForTest clears the in-memory lastServerState under
+// the mutex, replaying the "new process, empty lineage" state a restarted
+// daemon begins with.
+func ResetServerStateLineageForTest() {
+	serverStateMu.Lock()
+	lastServerState = ServerState{}
+	serverStateMu.Unlock()
+}
+
 // ReadServerState returns the daemon's last recorded tmux server decision.
 // ok is false when none has been recorded.
 func ReadServerState(home string) (ServerState, bool, error) {

@@ -976,3 +976,107 @@ func TestProcessTmuxProof_LiveServer_SocketUnlistable_RefusesKill(t *testing.T) 
 		require.False(t, f.Fixed)
 	}
 }
+
+// TestRecordDeletedAcrossRestart_RecordOnlyProof_RefusesKill stages #6610 end
+// to end — the residual of #6339 that lives across a daemon RESTART, not just
+// a live process. Generation 1 recorded socket A and persisted a session row
+// during its lifetime; the record file was deleted between generations; a
+// restarted generation — a fresh process whose in-memory lineage is empty —
+// records socket B. That write must ADMIT history_truncated rather than claim
+// the complete, empty history the fall-through produced, because the home
+// keeps the proof an earlier generation ran (the instance rows the deleted
+// record can no longer speak for). Without the admission, the record-only
+// death proof spends the false claim on a SIGKILL against a process whose
+// session survived the restart on socket A.
+//
+// The records are written through the daemon's REAL write path
+// (tmux.RecordServerStateForTest) — the assertion is on what the daemon
+// writes, not on a hand-staged file. This test process stands in for both
+// daemon generations: recordServerState stamps the writer's pid, and the
+// daemon-scan seams present this process as the live daemon serving the home,
+// so the record it writes is provably current and the refusal below comes
+// from the truncated admission, not the generation gate.
+func TestRecordDeletedAcrossRestart_RecordOnlyProof_RefusesKill(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	// A live tmux server on generation 1's socket, still hosting its session
+	// with this home's markers — the production shape of sessions that
+	// survive a daemon restart on a socket the restarted daemon never names.
+	sockPrior := testguard.SocketPath(t, "prior-live")
+	const liveName = "af_doctor-live-across-restart"
+	out, err := exec.Command("tmux", "-S", sockPrior, "new-session", "-d", "-s", liveName,
+		"-e", tmux.EnvMarkerSession+"="+liveName, "-e", tmux.EnvMarkerHome+"="+home,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on prior socket: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockPrior, "kill-server").Run() })
+
+	// This process plays the live daemon serving the home, so the records it
+	// writes stamp a daemon_pid doctor can prove current.
+	stubDaemonProcessArgv(t, func(pid int) []string {
+		if pid == os.Getpid() {
+			return []string{"af", "--daemon"}
+		}
+		return nil
+	})
+	stubProcessHomes(t, map[int]string{os.Getpid(): home})
+
+	// Generation 1 records socket A through the real write path — a fresh
+	// home's first record, honestly complete — and its lifetime persists a
+	// session row under the home.
+	tmux.ResetServerStateLineageForTest()
+	t.Cleanup(tmux.ResetServerStateLineageForTest)
+	tmux.RecordServerStateForTest(home, tmux.ServerState{
+		Mode: tmux.ServerModeDedicated, Socket: sockPrior, At: time.Now(),
+	})
+	repoDir := filepath.Join(home, "instances", "a1b2c3d4")
+	require.NoError(t, os.MkdirAll(repoDir, 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(repoDir, "instances.json"),
+		[]byte(fmt.Sprintf(`{"schema_version":1,"instances":[{"id":"i1","title":"s","tmux_name":%q}]}`, liveName)),
+		0o600))
+
+	// The record is deleted BETWEEN generations; the restarted generation
+	// holds no lineage in memory.
+	require.NoError(t, os.Remove(filepath.Join(home, "tmux-server-state.json")))
+	tmux.ResetServerStateLineageForTest()
+
+	// Generation 2 records a socket no server ever took — its listing answers
+	// tmux's definitive no-server empty, so the union covers it.
+	sockCurrent := testguard.SocketPath(t, "current-dead")
+	tmux.RecordServerStateForTest(home, tmux.ServerState{
+		Mode: tmux.ServerModeDedicated, Socket: sockCurrent, At: time.Now(),
+	})
+
+	// The record must ADMIT that its socket history is incomplete: the
+	// complete, empty history the fall-through wrote is exactly the shape
+	// that arms the kill below.
+	st, ok, rerr := tmux.ReadServerState(home)
+	require.NoError(t, rerr)
+	require.True(t, ok, "generation 2's record must exist")
+	require.True(t, st.HistoryTruncated,
+		"a restarted generation whose record vanished while the home shows an earlier "+
+			"generation must admit truncated socket history (#6610): %+v", st)
+
+	// A victim carrying the LIVE session's markers and this home, NO TMUX
+	// env — the record-only death-proof shape the fall-through armed.
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+	})
+
+	opts := testOptionsWithHome(t, home, true, os.Getpid(), victim.PID) // Fix: true
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose session is live on a socket the "+
+			"deleted record's rewrite failed to account for — a restarted generation may "+
+			"not claim complete socket history when the home shows an earlier one (#6610)")
+	for _, f := range findByCheck(report, "orphaned-process") {
+		require.Empty(t, f.FixAction,
+			"a truncated socket history must not arm a record-only kill: %s", f.Detail)
+		require.False(t, f.Fixed,
+			"a process unproven on a truncated history must not be fixed: %s", f.Detail)
+	}
+}
