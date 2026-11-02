@@ -126,3 +126,148 @@ test("#6215 a stale authoritative resize cannot strand the active terminal's gri
   // And the emulator shows it: the re-asserted fit has taken the grid back.
   await expect.poll(rows, { timeout: 8000 }).toBe(grown);
 });
+
+// #6635 (the #2347 flake's post-#6628 signature): activating a terminal while a
+// peer owns the shared PTY must leave the grid at the NEW host's fit. The yield
+// window exists to bound a genuinely insistent peer — one that re-writes its
+// grid AFTER the pane's claim is on the wire. The broker itself marks the one
+// echo that is NOT such a write: a fresh subscriber's first resize echo is a
+// replay of the current authority (ptybroker_sub.go — `resizeSeen = resizeGen
+// - 1`), the grid the world already had, not a contested answer to a claim the
+// pane had not yet made. Recording it as a contest lets the peer's FIRST real
+// answer masquerade as a repeat inside the yield window — the activation then
+// stands down to the grid it was meant to take. That is the real failure: the
+// second client stayed at the first's 34 rows while the spec polled for >60.
+//
+// This spec drives the strand deterministically. A raw subscriber seeds a
+// small foreign grid on the agent tab BEFORE the page's pane subscribes, so
+// the pane's subscribe replay carries exactly it — the priming. The pane's own
+// claim (>60 rows at this viewport) then lands, and the probe writes the
+// foreign grid once more — precisely the peer's first post-claim answer. A
+// >60-row echo afterwards can only be the pane re-asserting its host fit; on
+// master the pane has yielded and that echo never comes.
+test("#6635 an activation answers a peer's first real write — the subscribe replay is not a contest", async ({
+  page,
+  request,
+}) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
+  expect(selected?.id).toBeTruthy();
+
+  // A tall viewport so the pane's own fit claims a grid clearly distinct from
+  // the foreign one the probe writes (>60 rows, the #2347 desktop shape).
+  await page.setViewportSize({ width: 1280, height: 2000 });
+  // Land on the session list: the shell is live but no pane has attached, so
+  // the probe below is the tab's only subscriber when it seeds the grid.
+  await page.goto("/");
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+
+  // A raw subscriber on the agent tab's stream (?tab=0 binds the same broker
+  // the pane's ?tab_id= attach lands on). It writes the foreign grid and then
+  // serves as the ordering probe: every resize the broker applies is broadcast
+  // back to it, in broker order — the same probe trick the #6215 spec uses.
+  const staleRows = 24;
+  const staleCols = 80;
+  await page.evaluate(
+    async ({ sessionId, staleRows, staleCols }) => {
+      const w = window as unknown as {
+        __echoes: number[];
+        __probe: WebSocket;
+        __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+      };
+      w.__echoes = [];
+      const ws = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
+          `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
+      );
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = (ev) => {
+        if (typeof ev.data !== "string") {
+          return;
+        }
+        try {
+          const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
+          if (msg.type === "resize" && typeof msg.rows === "number") {
+            w.__echoes.push(msg.rows);
+          }
+        } catch {
+          // not a control frame
+        }
+      };
+      w.__waitRows = (pred, after, label) =>
+        new Promise<number>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(new Error(`no ${label} resize echo within 10s (saw ${w.__echoes.join(",")})`)),
+            10_000,
+          );
+          const poll = setInterval(() => {
+            const at = w.__echoes.findIndex((r, i) => i >= after && pred(r));
+            if (at >= 0) {
+              clearTimeout(timer);
+              clearInterval(poll);
+              resolve(at);
+            }
+          }, 20);
+        });
+      w.__probe = ws;
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("probe stream failed to open"));
+      });
+      // OpResize 0x02 + rows,cols as big-endian uint16s — the foreign grid, in
+      // place before the pane can possibly subscribe.
+      ws.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+      await w.__waitRows((r) => r === staleRows, 0, `${staleRows}-row`);
+    },
+    { sessionId: selected.id, staleRows, staleCols },
+  );
+
+  // Now the pane attaches (in-page hash navigation keeps the probe's socket).
+  // Its subscribe replay delivers the foreign grid — the contested sighting
+  // that primes the yield on master — before the pane's claim is on the wire.
+  await page.evaluate((sessionId) => {
+    window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+  }, selected.id);
+  await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open");
+  const rows = () => page.locator(".af-term-host .xterm-rows > div").count();
+  // The activation claims the host fit: the emulator renders the pane's own
+  // >60-row grid (on every branch — the claim is unconditional).
+  await expect.poll(rows, { timeout: 8000 }).toBeGreaterThan(60);
+  const grown = await rows();
+
+  // The claim must be on the wire before the peer answers — a repeat that
+  // lands while the pane's armed fit is still pending would be followed by
+  // that fit's own write either way and would prove nothing. The probe sees
+  // every broadcast in order, so a >60-row echo here is the pane's claim.
+  const after = await page.evaluate(async () => {
+    const w = window as unknown as {
+      __echoes: number[];
+      __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+    };
+    await w.__waitRows((r) => r > 60, 0, ">60-row");
+    return w.__echoes.length;
+  });
+  await page.evaluate(
+    ({ staleRows, staleCols }) => {
+      const w = window as unknown as { __probe: WebSocket };
+      w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+    },
+    { staleRows, staleCols },
+  );
+
+  // The peer's FIRST answer to the claim. A >60-row echo after it can only be
+  // the pane's reclaim write: on master the yield window reads this repeat of
+  // the replayed grid as an insistent writer and stands down — the activation
+  // loses to the grid it was meant to take, and no such echo ever comes.
+  await page.evaluate(async ({ after }) => {
+    const w = window as unknown as {
+      __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+    };
+    await w.__waitRows((r) => r > 60, after, ">60-row reclaim");
+  }, { after });
+
+  // And the emulator agrees: the re-asserted fit took the grid back.
+  await expect.poll(rows, { timeout: 8000 }).toBe(grown);
+});
