@@ -16,6 +16,7 @@ import { afterEach, test } from "node:test";
 import { checkHost, daemonHealth, editHosts } from "./api.js";
 import {
   describeHost,
+  effectiveHostKeyPosture,
   emptyHostsState,
   hostCheckLines,
   hostKeyPostures,
@@ -232,6 +233,28 @@ test("hostKeyPostures comes from the manifest's own enum, never a local copy", (
   ];
   assert.deepEqual(hostKeyPostures(entries), ["strict", "accept-new", "insecure"]);
   assert.deepEqual(hostKeyPostures([entry()]), [], "a manifest predating the enum falls back to a text field");
+});
+
+test("effectiveHostKeyPosture mirrors the daemon's hostPosture fallback", () => {
+  const ssh = (value: string) => entry({ key: "ssh.host_key_verification", value });
+  const bare = { host: "box" };
+
+  // No override anywhere: the global as served, else the manifest's strict
+  // default — config.LoadConfig composes the same "" -> strict.
+  assert.equal(effectiveHostKeyPosture(bare, [ssh("insecure")]), "insecure");
+  assert.equal(effectiveHostKeyPosture(bare, []), "strict", "an absent key is the manifest default");
+  assert.equal(effectiveHostKeyPosture(bare, [ssh("")]), "strict", "an empty served value is too");
+
+  // The entry's own override wins over any global, and an override that
+  // matches the global is still the override — indistinguishable by design.
+  const overridden = { host: "box", host_key_verification: "accept-new" };
+  assert.equal(effectiveHostKeyPosture(overridden, [ssh("insecure")]), "accept-new");
+  assert.equal(effectiveHostKeyPosture(overridden, [ssh("accept-new")]), "accept-new");
+
+  // use_ssh_config composes no host-key options at all: posture is not an
+  // input to that probe, so it answers "" — a global move must not retire
+  // a verdict the global never informed (#6632).
+  assert.equal(effectiveHostKeyPosture({ host: "box", use_ssh_config: true }, [ssh("insecure")]), "");
 });
 
 test("emptyHostsState starts unproven: the edit send stays refused until the bit lands", () => {

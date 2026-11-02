@@ -96,14 +96,22 @@ export interface HostStatus {
   check?: boolean;
 }
 
-/** One cached probe outcome plus the entry it measured. The pair is what makes
- *  the cache honest: a verdict belongs to the destination it probed, not to the
- *  name it sits under — an edit to the raw `hosts` row (or a hand-edit the next
- *  refresh picks up) retires it by changing the entry. */
+/** One cached probe outcome plus the inputs it measured under. The pair is
+ *  what makes the cache honest: a verdict belongs to the destination it
+ *  probed, not to the name it sits under — an edit to the raw `hosts` row (or
+ *  a hand-edit the next refresh picks up) retires it by changing the entry —
+ *  and to the posture it ran under, so saving a new global
+ *  `ssh.host_key_verification` retires a verdict earned under the old one
+ *  (#6632). */
 export interface HostCheck {
   /** The saved entry at request time; undefined when the host left the table
    *  before the answer landed. */
   entry: HostEntry | undefined;
+  /** The effective host-key mode the probe ran under — the entry's own
+   *  `host_key_verification`, else the global `ssh.host_key_verification` it
+   *  inherited, and "" for a `use_ssh_config` host, whose probe composes no
+   *  host-key options at all. */
+  posture: string;
   result: HostCheckResult;
 }
 
@@ -195,6 +203,30 @@ export function describeHost(entry: HostEntry): string {
   if (entry.user) s = `${entry.user}@${s}`;
   if (entry.port) s = `${s}:${entry.port}`;
   return s;
+}
+
+/** The host-key mode a probe of `entry` actually runs under — hostPosture in
+ *  session/ssh_command_host.go, which the daemon's CheckHost feeds with
+ *  cfg.SSHHostKeyVerification (daemon/checkhost.go): the entry's own
+ *  `host_key_verification` override, else the global
+ *  `ssh.host_key_verification` as served, else the manifest's `strict`
+ *  default. A `use_ssh_config` host answers "" — hostCheckShell composes no
+ *  host-key options for it (session/host_probe.go), the operator's ssh_config
+ *  is the authority, so the global is not an input its verdict can stale
+ *  under. */
+export function effectiveHostKeyPosture(entry: HostEntry, entries: ConfigEntry[]): string {
+  if (entry.use_ssh_config === true) {
+    return "";
+  }
+  if (entry.host_key_verification) {
+    return entry.host_key_verification;
+  }
+  for (const e of entries) {
+    if (e.key === "ssh.host_key_verification") {
+      return e.value === "" ? "strict" : e.value;
+    }
+  }
+  return "strict";
 }
 
 /** Whether two saved entries are the same probing target, field by field. A
@@ -326,7 +358,7 @@ export function renderHostsSection(
 
   const list = h("div", { class: "af-hosts-list" });
   for (const row of rows) {
-    list.append(renderHostRow(row, state, actions, busy(row.name)));
+    list.append(renderHostRow(row, entries, state, actions, busy(row.name)));
   }
   section.append(list);
 
@@ -381,6 +413,7 @@ export function renderHostsSection(
  *  the latest probe or mutation outcome under itself. */
 function renderHostRow(
   row: HostRow,
+  entries: ConfigEntry[],
   state: HostsState,
   actions: HostActions,
   isBusy: boolean,
@@ -423,8 +456,12 @@ function renderHostRow(
   }
   el.append(buttons);
 
+  // The verdict shows only while every input it was probed under still holds:
+  // the same destination (sameHostEntry) and the same effective host-key
+  // posture — a global `ssh.host_key_verification` the row inherits retires a
+  // verdict the old posture earned (#6632).
   const check = state.checks[row.name];
-  if (check !== undefined && sameHostEntry(check.entry, row.entry)) {
+  if (check !== undefined && sameHostEntry(check.entry, row.entry) && check.posture === effectiveHostKeyPosture(row.entry, entries)) {
     el.append(h("div", { class: "af-hosts-check-lines" }, ...hostCheckLines(check.result).map((line) => h("div", {}, line))));
   }
   if (state.status !== null && state.status.name === row.name) {
