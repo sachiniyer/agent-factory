@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { gzipSync } from "node:zlib";
-export const keys = ["raw_bytes", "gzip_bytes", "lazy_raw_bytes", "lazy_gzip_bytes", "first_terminal_ms", "echo_ms", "rail_ms", "load_shift", "snapshot_shift", "frame_ms", "key_render_ms"];
+export const keys = ["raw_bytes", "gzip_bytes", "lazy_raw_bytes", "lazy_gzip_bytes", "mermaid_raw_bytes", "mermaid_gzip_bytes", "first_terminal_ms", "echo_ms", "rail_ms", "load_shift", "snapshot_shift", "frame_ms", "key_render_ms"];
 
 export function summarize(runs) {
   assert.equal(runs.length, 3, "exactly three runs required");
@@ -27,11 +27,15 @@ export function regressions(metrics, budgets) {
 }
 
 // Files under lazy/ load on demand (the Docs tab), not with the shell, so they
-// get their own budget instead of hiding inside the shell's.
+// get their own budget instead of hiding inside the shell's. lazy/mermaid.js
+// (#6642) is lazier still — it fetches only when a doc holds a ```mermaid block
+// and dwarfs the editor — so it is measured under its own pair of keys rather
+// than inside the Docs chunk's.
 export function bundleBytes(files) {
-  const sum = { raw_bytes: 0, gzip_bytes: 0, lazy_raw_bytes: 0, lazy_gzip_bytes: 0 };
+  const sum = { raw_bytes: 0, gzip_bytes: 0, lazy_raw_bytes: 0, lazy_gzip_bytes: 0, mermaid_raw_bytes: 0, mermaid_gzip_bytes: 0 };
   for (const [path, bytes] of files) {
-    const prefix = path.split(/[\\/]/)[0] === "lazy" ? "lazy_" : "";
+    const parts = path.split(/[\\/]/);
+    const prefix = parts[0] === "lazy" ? (parts[1].startsWith("mermaid") ? "mermaid_" : "lazy_") : "";
     sum[`${prefix}raw_bytes`] += bytes.length;
     sum[`${prefix}gzip_bytes`] += gzipSync(bytes, { level: 9 }).length;
   }

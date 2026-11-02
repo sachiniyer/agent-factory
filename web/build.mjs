@@ -60,6 +60,32 @@ await build({
   logLevel: "info",
 });
 
+// The Mermaid library is an even lazier chunk (#6642): the Docs bundle fetches
+// dist/lazy/mermaid.js (by URL, like docs_tab.ts fetches the Docs bundle) only
+// when a doc being previewed holds a ```mermaid fence — and mermaid's own
+// dynamic imports then pull only the diagram types that doc actually draws.
+// Splitting is ON for this build only: a single mermaid.js would be ~5MB of
+// renderer a flowchart doc does not need, while the entry plus its shared
+// chunks is about 0.7MB raw. af-web.js and docs-editor.js stay non-split so
+// nothing they share is promoted into a startup fetch. All output is named
+// mermaid* so the perf harness budgets it under its own keys and never in the
+// shell's — and it is embedded in dist, never a CDN, because af serves the web
+// offline.
+await build({
+  entryPoints: { mermaid: "src/mermaid_chunk.ts" },
+  bundle: true,
+  format: "esm",
+  platform: "browser",
+  target: "es2022",
+  outdir: "dist/lazy",
+  splitting: true,
+  chunkNames: "mermaid-[name]-[hash]",
+  sourcemap: false,
+  minify: true,
+  legalComments: "none",
+  logLevel: "info",
+});
+
 // Stamp the web client's X-AF-Client-Version value into the bundle.
 //
 // af() (src/api.ts) sends that header on every /v1/ request so the daemon decodes the

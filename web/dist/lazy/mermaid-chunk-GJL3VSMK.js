@@ -1,0 +1,1 @@
+import{h as o}from"./mermaid-chunk-47APHFXK.js";import{a as m}from"./mermaid-chunk-V2GPDJ7W.js";var g=m((t,e)=>{let n;return e==="sandbox"&&(n=o("#i"+t)),(e==="sandbox"?o(n.nodes()[0].contentDocument.body):o("body")).select(`[id="${t}"]`)},"getDiagramElement");export{g as a};

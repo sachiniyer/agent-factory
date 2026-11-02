@@ -1,23 +1,23 @@
 {
     "raw_bytes": {
-        "baseline": 1364595,
+        "baseline": 1377434,
         "samples": [
-            1364595,
-            1364595,
-            1364595
+            1377434,
+            1377434,
+            1377434
         ],
         "stddev": 0,
-        "margin": 68229.75
+        "margin": 68871.7
     },
     "gzip_bytes": {
-        "baseline": 312686,
+        "baseline": 315687,
         "samples": [
-            312686,
-            312686,
-            312686
+            315687,
+            315687,
+            315687
         ],
         "stddev": 0,
-        "margin": 15634.300000000001
+        "margin": 15784.35
     },
     "first_terminal_ms": {
         "baseline": 2870.4166666666665,
@@ -99,23 +99,43 @@
         "margin": 350.6397233333334
     },
     "lazy_raw_bytes": {
-        "baseline": 371003,
+        "baseline": 376180,
         "samples": [
-            371003,
-            371003,
-            371003
+            376180,
+            376180,
+            376180
         ],
         "stddev": 0,
-        "margin": 18550.15
+        "margin": 18809
     },
     "lazy_gzip_bytes": {
-        "baseline": 120125,
+        "baseline": 121937,
         "samples": [
-            120125,
-            120125,
-            120125
+            121937,
+            121937,
+            121937
         ],
         "stddev": 0,
-        "margin": 6006.25
+        "margin": 6096.85
+    },
+    "mermaid_raw_bytes": {
+        "baseline": 5187319,
+        "samples": [
+            5187319,
+            5187319,
+            5187319
+        ],
+        "stddev": 0,
+        "margin": 259365.95
+    },
+    "mermaid_gzip_bytes": {
+        "baseline": 1506935,
+        "samples": [
+            1506935,
+            1506935,
+            1506935
+        ],
+        "stddev": 0,
+        "margin": 75346.75
     }
 }

@@ -97,10 +97,12 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1364595.000 | 1364595.000–1364595.000 | 0.000 | 1432824.750 |
-| gzip_bytes | 312686.000 | 312686.000–312686.000 | 0.000 | 328320.300 |
-| lazy_raw_bytes | 371003.000 | 371003.000–371003.000 | 0.000 | 389553.150 |
-| lazy_gzip_bytes | 120125.000 | 120125.000–120125.000 | 0.000 | 126131.250 |
+| raw_bytes | 1377434.000 | 1377434.000–1377434.000 | 0.000 | 1446305.700 |
+| gzip_bytes | 315687.000 | 315687.000–315687.000 | 0.000 | 331471.350 |
+| lazy_raw_bytes | 376180.000 | 376180.000–376180.000 | 0.000 | 394989.000 |
+| lazy_gzip_bytes | 121937.000 | 121937.000–121937.000 | 0.000 | 128033.850 |
+| mermaid_raw_bytes | 5187319.000 | 5187319.000–5187319.000 | 0.000 | 5446684.950 |
+| mermaid_gzip_bytes | 1506935.000 | 1506935.000–1506935.000 | 0.000 | 1582281.750 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -125,6 +127,31 @@ To deliberately rebaseline, run `AF_PERF_RECORD=1 make perf-container`, inspect
 `scripts/perf/baselines.json` and update this table with `metrics.md`. Explain the
 reason in the PR. A slower result is evidence to investigate, not an automatic
 reason to move a budget.
+
+### Mermaid lazy chunk provenance (#6642)
+
+A ```mermaid fence in a proposal doc renders as a diagram in the Docs view's
+live preview. The renderer is mermaid 12.2.0, shipped as `web/dist/lazy/`
+mermaid.js plus its `mermaid-*` split chunks — entry and shared core, plus one
+lazy file per diagram type, so a doc pays for what it draws rather than for the
+whole library. The Docs bundle fetches the entry only when a doc holds a
+```mermaid block; af-web.js carries none of it.
+
+The `mermaid_*` entries measure the whole committed `lazy/mermaid*` set —
+the payload the binary embeds — over `web/dist` with `bundleBytes` from
+`scripts/perf/check.mjs`, the function `report.mjs` calls; `lazy_*` keeps
+measuring only docs-editor.js. First render of a flowchart fetches the entry
+plus core plus the flowchart and dagre chunks (~1.1MB raw of the 5.19MB set);
+the rest stays unfetched. Committed values are deterministic, three identical
+samples, margin baseline x 0.05, same as the other byte budgets. Not recorded
+with `make perf-container`; the figures are byte-exact.
+
+The same refresh moves `raw_bytes` to 1,377,434 (master's committed dist at
+`ea1b463514` was already 1,376,749 — the recorded 1,364,595 predated it — and
+the new `.cm-md-mermaid` CSS adds 685), `gzip_bytes` to 315,687 (master 315,607
++80), `lazy_raw_bytes` to 376,180 (master 371,254 +4,926 of widget, loader,
+sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to 121,937
+(120,175 +1,762). Every timing and layout-shift baseline is unchanged.
 
 ### Lazy bundle provenance (proposal Docs tab)
 
