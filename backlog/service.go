@@ -233,7 +233,7 @@ func (s *Service) Add(req AddRequest) (*AddResponse, error) {
 			}
 		}
 		if orch != nil {
-			if group, err = batchGroup(b, ids); err != nil {
+			if group, err = batchGroup(b, order); err != nil {
 				return nil, err
 			}
 			if bound, err = s.bind(b, group, *orch, req.ReplaceOrchestrator, nil); err != nil {

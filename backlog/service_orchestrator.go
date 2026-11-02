@@ -246,19 +246,17 @@ func (s *Service) SetOrchestratorHandoff(req SetOrchestratorHandoffRequest) (*Or
 	return &OrchestratorResponse{ID: id, Orchestrator: s.orchestratorView(p.id, b.Item(id).Orchestrator)}, nil
 }
 
-// batchGroup is the one top-level item the batch's items sit under.
-func batchGroup(b *Backlog, ids map[string]int) (int, error) {
+// batchGroup is the one top-level item the batch's items sit under. items is
+// every item the batch added or updated, keyed or not: a batch without a
+// proposal may leave its items unkeyed, so its key map does not name them all
+// (Codex P2 on #6559).
+func batchGroup(b *Backlog, items []int) (int, error) {
 	roots := map[int]bool{}
 	var order []int
-	for _, it := range b.Items {
-		for _, id := range ids {
-			if it.ID != id {
-				continue
-			}
-			if r := b.rootOf(id); !roots[r] {
-				roots[r] = true
-				order = append(order, r)
-			}
+	for _, id := range items {
+		if r := b.rootOf(id); !roots[r] {
+			roots[r] = true
+			order = append(order, r)
 		}
 	}
 	if len(order) != 1 {

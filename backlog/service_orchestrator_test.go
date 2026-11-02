@@ -177,6 +177,28 @@ func TestAddBatchOrchestrateNeedsOneGroup(t *testing.T) {
 	}
 }
 
+// TestAddBatchOrchestrateCountsUnkeyedItems: a batch without a proposal may
+// leave its items unkeyed, so the group is found from every item the batch
+// added or updated, not from its key map (Codex P2 on #6559).
+func TestAddBatchOrchestrateCountsUnkeyedItems(t *testing.T) {
+	s, _ := orchService(t)
+	if _, err := s.Add(AddRequest{RepoID: repoID, Items: []ItemInput{{Key: "g", Title: "G"}, {Key: "a", Title: "A", Parent: Ref{Key: "g"}}}}); err != nil {
+		t.Fatal(err)
+	}
+	// Unkeyed children under the existing group B-1: they are the batch, and B-1 is its group.
+	out, err := s.Add(AddRequest{RepoID: repoID, Orchestrator: "o1", Items: []ItemInput{
+		{Title: "C", Parent: Ref{ID: 1}}, {Title: "D", Parent: Ref{ID: 1}}}})
+	if err != nil || out.Orchestrator == nil || out.Orchestrator.ID != 1 || out.Orchestrator.Orchestrator.SessionID != "o1" {
+		t.Fatalf("%+v %v", out, err)
+	}
+	// A keyed group and an unrelated unkeyed root: two top-level items, refused.
+	_, err = s.Add(AddRequest{RepoID: repoID, Orchestrator: "o1", ReplaceOrchestrator: true, Items: []ItemInput{
+		{Key: "h", Title: "H"}, {Key: "x", Title: "X", Parent: Ref{Key: "h"}}, {Title: "loose"}}})
+	if err == nil || !strings.Contains(err.Error(), "under 2 top-level items") {
+		t.Fatalf("a batch under two top-level items must be refused: %v", err)
+	}
+}
+
 func TestSetOrchestratorHandoff(t *testing.T) {
 	s, _ := orchService(t)
 	mustAdd(t, s, ItemInput{Key: "g", Title: "G"}, ItemInput{Key: "a", Title: "A", Parent: Ref{Key: "g"}})
