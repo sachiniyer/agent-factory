@@ -342,40 +342,37 @@ func (t *TmuxSession) start(workDir string) error {
 			commandDone = nil
 			if commandErr != nil {
 				_ = ptmx.Close()
-				var launchErr error
-				if systemdScoped {
-					launchErr = fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
-				} else {
-					launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
-				}
-
-				// tmux's own resource failure mode the exit status cannot
-				// carry: the server dying on its socket/state filesystem
-				// (ENOSPC creating the socket or the tmux-<uid> dir) reports
-				// only as "can't create socket"/"no space" text in the
-				// child's output — invisible to errors.Is by design, and the
-				// lost-restore classifier never reads message text. Probe
-				// that filesystem from THIS process so a real resource verdict
-				// rides the chain instead of the launch failure charging the
-				// structural retry budget (#5295 review).
-				socketDir, statErr := tmuxSocketFilesystemDir()
-				if probeErr := socketFSProbe(socketDir); probeErr != nil {
-					launchErr = errors.Join(launchErr,
-						fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
-				}
-				if statErr != nil {
-					launchErr = errors.Join(launchErr,
-						fmt.Errorf("could not inspect tmux socket filesystem %s: %w", socketDir, statErr))
-				}
-
 				// The launch process began. Its exit status, even paired with later
 				// name absence, cannot prove a pane never ran and is not still flushing
 				// after tmux removed its session. Keep every answered post-spawn failure
 				// outside ErrSessionNotStarted so LocalBackend preserves the worktree.
-				return launchErr
+				return t.classifyLaunchError(commandErr, systemdScoped)
 			}
 		case <-timeout:
 			ptmx.Close()
+			// The deadline and the launch-exit channel can both be ready at the
+			// same select (Go chooses pseudo-randomly among ready cases), and the
+			// exit can also land after the deadline fires. A pending nonzero
+			// launch exit is the actionable cause — the same facts as the
+			// commandErr case above — so drain it non-blockingly and classify it
+			// the same way before falling back to the readiness-timeout path.
+			// Without this drain the exit is silently discarded (the deadline is
+			// already past, so no later iteration can read it), the operator is
+			// told a misleading "machine too busy / program exited instantly"
+			// readiness timeout, and LocalBackend deletes the fresh worktree on
+			// what is purely goroutine scheduling — the deletion flip the
+			// commandErr case's invariant exists to prevent. The drain also
+			// preserves the socketFSProbe errno evidence the timeout arm alone
+			// skips, so a real resource verdict still rides the chain for the
+			// lost-restore environmental classifier (#5295 review).
+			var lateCommandErr error
+			select {
+			case lateCommandErr = <-commandDone:
+			default:
+			}
+			if lateCommandErr != nil {
+				return t.classifyLaunchError(lateCommandErr, systemdScoped)
+			}
 			// Two things look identical from here: tmux never showed us the
 			// session inside the deadline (a loaded machine delays the server
 			// fork, #4606), or the pane program exited instantly (bad path,
@@ -726,6 +723,48 @@ func (t *TmuxSession) reattach(opts reattachOptions) error {
 		startedAt:  resolvedAt,
 	})
 	return nil
+}
+
+// classifyLaunchError is the single classification of an answered nonzero
+// launch exit shared by the readiness poll's commandDone and timeout arms. It
+// wraps the exit as the actionable launch cause, joins the
+// tmuxSocketFilesystemDir/socketFSProbe errno verdict so a real resource verdict
+// rides the chain for the lost-restore environmental classifier (#5295
+// review), and returns OUTSIDE ErrSessionNotStarted so LocalBackend preserves
+// the worktree — the invariant from #2207/#2211 that an answered post-spawn
+// failure, even paired with later name absence, cannot prove a pane never ran
+// and is not still flushing after tmux removed its session.
+//
+// Both select arms reach it so the strict both-ready race (the deadline and the
+// exit simultaneously ready, or the exit landing just after the deadline) is
+// resolved deterministically in favor of the actionable cause rather than
+// nondeterministically flipping between "worktree preserved" and "worktree
+// deleted" on goroutine scheduling.
+func (t *TmuxSession) classifyLaunchError(commandErr error, systemdScoped bool) error {
+	var launchErr error
+	if systemdScoped {
+		launchErr = fmt.Errorf("error starting tmux session: systemd-run --user --scope failed to create session %q: %w", t.sanitizedName, commandErr)
+	} else {
+		launchErr = fmt.Errorf("error starting tmux session: tmux new-session for %q failed: %w", t.sanitizedName, commandErr)
+	}
+	// tmux's own resource failure mode the exit status cannot carry: the
+	// server dying on its socket/state filesystem (ENOSPC creating the
+	// socket or the tmux-<uid> dir) reports only as "can't create
+	// socket"/"no space" text in the child's output — invisible to errors.Is
+	// by design, and the lost-restore classifier never reads message text.
+	// Probe that filesystem from THIS process so a real resource verdict
+	// rides the chain instead of the launch failure charging the structural
+	// retry budget (#5295 review).
+	socketDir, statErr := tmuxSocketFilesystemDir()
+	if probeErr := socketFSProbe(socketDir); probeErr != nil {
+		launchErr = errors.Join(launchErr,
+			fmt.Errorf("write probe of tmux socket filesystem %s also failed: %w", socketDir, probeErr))
+	}
+	if statErr != nil {
+		launchErr = errors.Join(launchErr,
+			fmt.Errorf("could not inspect tmux socket filesystem %s: %w", socketDir, statErr))
+	}
+	return launchErr
 }
 
 // sessionReadyDeadline bounds how long Start waits for tmux to report a freshly
