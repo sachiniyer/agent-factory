@@ -28,6 +28,17 @@ type testHost struct {
 	// onTarget runs inside AnswerTarget, between the service reading the item and
 	// its transaction.
 	onTarget func()
+	// answerRuns are the StartAnswerRun requests; answerRunErr fails them.
+	answerRuns   []AnswerRunRequest
+	answerRunErr error
+}
+
+func (h *testHost) StartAnswerRun(_ string, req AnswerRunRequest) (Message, error) {
+	h.answerRuns = append(h.answerRuns, req)
+	if h.answerRunErr != nil {
+		return Message{}, h.answerRunErr
+	}
+	return Message{Kind: KindAnswer, Author: AuthorUser, Text: req.Text, Answers: req.QuestionID, Delivery: DeliveryNewRun}, nil
 }
 
 func (h *testHost) SetAttention(_, sessionID string, questionID int, reason string) {
@@ -390,12 +401,12 @@ func TestServiceBudget(t *testing.T) {
 	reset := time.Date(2026, 10, 20, 14, 0, 0, 0, time.UTC)
 	h.usage = planusage.Usage{Account: "default", Windows: planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 30, Backlog: 12, ResetsAt: &reset}}}
 	b, err := s.GetBudget(GetBudgetRequest{})
-	want := Budget{SchemaVersion: BudgetSchemaVersion, Share: 50, StopAt: 90, MaxPerRun: 10}
+	want := Budget{SchemaVersion: BudgetSchemaVersion, Limit: 50, MaxPerRun: 10}
 	if err != nil || b.Budget != want || b.Windows.FiveHour.Backlog != 12 || b.Account != "default" {
 		t.Fatal(b, err)
 	}
-	out, err := s.SetBudget(SetBudgetRequest{Share: ptr(30.0), StopAt: ptr(100.0)})
-	want.Share, want.StopAt = 30, 100
+	out, err := s.SetBudget(SetBudgetRequest{Limit: ptr(30.0)})
+	want.Limit = 30
 	if err != nil || out.Budget != want || out.Windows.FiveHour.Plan != 30 {
 		t.Fatal(out, err)
 	}
@@ -408,14 +419,14 @@ func TestServiceBudget(t *testing.T) {
 		req  SetBudgetRequest
 		want string
 	}{
-		{SetBudgetRequest{}, "nothing to change — use --share, --stop-at, --max-per-run or --usd-limit"},
-		{SetBudgetRequest{Share: ptr(101.0)}, "--share must be between 0 and 100"},
-		{SetBudgetRequest{StopAt: ptr(-1.0)}, "--stop-at must be between 0 and 100"},
+		{SetBudgetRequest{}, "nothing to change — use --limit, --max-per-run or --usd-limit"},
+		{SetBudgetRequest{Limit: ptr(101.0)}, "--limit must be between 0 and 100"},
+		{SetBudgetRequest{Limit: ptr(-1.0)}, "--limit must be between 0 and 100"},
 		{SetBudgetRequest{MaxPerRun: ptr(math.NaN())}, "--max-per-run must be between 0 and 100"},
-		{SetBudgetRequest{Share: ptr(math.Inf(1))}, "--share must be between 0 and 100"},
+		{SetBudgetRequest{Limit: ptr(math.Inf(1))}, "--limit must be between 0 and 100"},
 		{SetBudgetRequest{USDLimit: ptr(-1.0)}, "--usd-limit must be a finite amount of US dollars, 0 or more"},
 		{SetBudgetRequest{USDLimit: ptr(math.Inf(1))}, "--usd-limit must be a finite amount of US dollars, 0 or more"},
-		{SetBudgetRequest{Share: ptr(10.0), USDLimit: ptr(math.NaN())}, "--usd-limit must be a finite amount of US dollars, 0 or more"},
+		{SetBudgetRequest{Limit: ptr(10.0), USDLimit: ptr(math.NaN())}, "--usd-limit must be a finite amount of US dollars, 0 or more"},
 	} {
 		if _, err := s.SetBudget(c.req); err == nil || err.Error() != c.want {
 			t.Errorf("%+v: %v", c.req, err)
@@ -432,7 +443,7 @@ func TestServiceRunnerView(t *testing.T) {
 		t.Fatal(err)
 	}
 	reset := time.Now().Add(2 * time.Hour)
-	reading := planusage.Usage{Windows: planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 20, Backlog: 5, ResetsAt: &reset}}}
+	reading := planusage.Usage{Windows: planusage.Windows{FiveHour: planusage.PlanWindow{Plan: 20, ResetsAt: &reset}}}
 	steps := []struct {
 		edit  func(*Budget)
 		usage planusage.Usage
@@ -441,8 +452,9 @@ func TestServiceRunnerView(t *testing.T) {
 	}{
 		{func(*Budget) {}, planusage.Usage{}, RunnerWaiting, GateNoReading},
 		{func(*Budget) {}, planusage.Usage{Metering: true}, RunnerWaiting, GateMetering},
-		{func(b *Budget) { b.Share = 0 }, reading, RunnerStopped, GateShare},
-		{func(b *Budget) { b.Share = 50 }, reading, RunnerIdle, ""},
+		{func(b *Budget) { b.Limit = 0 }, reading, RunnerStopped, GateLimit},
+		{func(b *Budget) { b.Limit = 20 }, reading, RunnerStopped, GateLimit},
+		{func(b *Budget) { b.Limit = 50 }, reading, RunnerIdle, ""},
 		{func(b *Budget) { b.USDLimit = 10 }, planusage.Usage{}, RunnerIdle, ""},
 	}
 	for i, st := range steps {

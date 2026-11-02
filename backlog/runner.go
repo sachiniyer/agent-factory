@@ -14,8 +14,7 @@ const RunnerRunning = "running"
 
 // The gates that stop the runner, as RunnerView.Gate names them.
 const (
-	GateShare       = "share"
-	GateStopAt      = "stop_at"
+	GateLimit       = "limit"
 	GateUsageLimit  = "usage_limit"
 	GateNoReading   = "no_reading"
 	GateUnmeterable = "unmeterable"
@@ -77,9 +76,10 @@ type window struct {
 	rolling string
 }
 
-// CheckGates reports the first closed gate, in the order account, share 0,
-// metering, share,
-// stop_at, usage limit, no reading, unmeterable, usd_limit.
+// CheckGates reports the first closed gate, in the order account, plan usage
+// off, meter unavailable, limit 0, metering, limit, usage limit, no reading,
+// unmeterable, usd_limit. The limit gate names the window over the limit; when
+// both are, it names the one that resets last, since that is when starts resume.
 func CheckGates(in GateInput) Gate {
 	b, u := in.Budget, in.Usage
 	if in.NoAccount != "" {
@@ -92,8 +92,8 @@ func CheckGates(in GateInput) Gate {
 	if u.Unavailable != "" {
 		return Gate{GateMeterUnavailable, "Plan metering is unavailable, so the runner waits · " + u.Unavailable}
 	}
-	if b.Share <= 0 {
-		return Gate{GateShare, "Backlog share is 0% · raise it with \"af backlog budget --share 50\""}
+	if b.Limit <= 0 {
+		return Gate{GateLimit, "Plan limit is 0% · raise it with \"af backlog budget --limit 50\""}
 	}
 	if u.Metering {
 		return Gate{GateMetering, "Reading plan usage…"}
@@ -102,17 +102,15 @@ func CheckGates(in GateInput) Gate {
 		{u.Windows.FiveHour, "the 5-hour window", "the last 5 hours"},
 		{u.Windows.SevenDay, "the week", "the last 7 days"},
 	}
-	for _, w := range windows {
-		if w.w.Valid() && w.w.Backlog >= b.Share {
-			return Gate{GateShare, fmt.Sprintf("Backlog used its %s of %s · resumes %s",
-				Percent(b.Share), w.label, ResetLabel(*w.w.ResetsAt, in.Now, in.Loc))}
+	var over *window
+	for i, w := range windows {
+		if w.w.Valid() && w.w.Plan >= b.Limit && (over == nil || w.w.ResetsAt.After(*over.w.ResetsAt)) {
+			over = &windows[i]
 		}
 	}
-	for _, w := range windows {
-		if w.w.Valid() && w.w.Plan >= b.StopAt {
-			return Gate{GateStopAt, fmt.Sprintf("Plan at %s of %s (stop at %s) · resumes %s",
-				Percent(w.w.Plan), w.label, Percent(b.StopAt), ResetLabel(*w.w.ResetsAt, in.Now, in.Loc))}
-		}
+	if over != nil {
+		return Gate{GateLimit, fmt.Sprintf("Plan at %s of %s (limit %s) · resumes %s",
+			Percent(over.w.Plan), over.label, Percent(b.Limit), ResetLabel(*over.w.ResetsAt, in.Now, in.Loc))}
 	}
 	if in.LimitUnknown != "" {
 		return Gate{GateUsageLimit, "Can't tell whether the plan is at its usage limit · " + in.LimitUnknown}

@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 
 import {
   type Backlog, type BacklogView, type Item, type ListOptions, type State,
-  applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, parseBacklogView, safeHttpUrl,
+  applyMove, canStartNow, dropMove, itemActions, keyboardMove, listRows, needsYouByRoot, needsYouCount, needsYouLabel, neededBy, openQuestion, parseBacklogView, safeHttpUrl,
   sessionItems, sessionItemsSig, sources, topQueued,
 } from "./backlog_model.js";
 import { waitsOnBlock } from "./backlog_cycle.js";
@@ -77,6 +77,20 @@ test("listRows adds the needs-you count to a parent's reason", () => {
   assert.equal(rows[2].reason, "1 needs you");
 });
 
+// Mirrors backlog.Message.closesQuestion and Item.AnswerStarting in Go: an
+// answer kept for a new run (the asking session is gone) or one a later answer
+// replaced leaves its question open, but not while the run carrying it starts.
+test("openQuestion stays open with an answer kept for a new run, but not while that run starts", () => {
+  const q = { id: 1, kind: "question", author: "agent:x", text: "q", at: "" };
+  const kept = { id: 2, kind: "answer", author: "user", text: "a", answers: 1, delivery: "new_run", at: "" };
+  const run = { session_id: "", title: "", state: "failed", prev_status: "review" as const, started_by: "user", started_at: "", answers: [2] };
+  assert.equal(openQuestion(item(1, { thread: [q, kept], runs: [run] }))?.id, 1);
+  assert.equal(openQuestion(item(1, { thread: [q, { ...kept, delivery: "superseded" }] }))?.id, 1);
+  assert.equal(openQuestion(item(1, { thread: [q, kept], runs: [{ ...run, state: "starting" }] })), undefined);
+  assert.equal(openQuestion(item(1, { thread: [q, { ...kept, delivery: "delivered" }] })), undefined);
+  assert.equal(needsYouCount([{ backlog: backlog(item(1, { thread: [q, kept], runs: [{ ...run, state: "starting" }] })), states: {} } as BacklogView]), 0);
+});
+
 test("needsYouCount counts open questions once across projects", () => {
   const a = tree();
   a.items[1].thread = [
@@ -101,7 +115,7 @@ test("sessionItems maps run session ids to items", () => {
     { session_id: "", title: "B-7 a", state: "starting", prev_status: "queued", started_by: "user", started_at: "" },
   ] }));
   const m = sessionItems(new Map([["/repo", view(b)]]));
-  assert.deepEqual([...m.entries()], [["s1", { root: "/repo", id: 7, title: "item 7" }]]);
+  assert.deepEqual([...m.entries()], [["s1", { root: "/repo", id: 7, title: "item 7", state: "draft" }]]);
 });
 
 test("keyboardMove steps among siblings and nests", () => {

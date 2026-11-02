@@ -10,6 +10,7 @@ import (
 	"strings"
 
 	"github.com/spf13/cobra"
+	"github.com/spf13/pflag"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/backlog"
@@ -306,19 +307,41 @@ var backlogAddCmd = &cobra.Command{
 		"\"title\", \"body\", \"parent\", \"waits_on\", \"program\", \"sequential\"}]}. key is " +
 		"local to the file; parent and waits_on take a key or an item id. With proposal set, an " +
 		"item with the same proposal and key as an existing one is updated, not added again. The " +
-		"batch is all or nothing and prints each key's id.",
+		"batch is all or nothing and prints each key's id. From an item session, add takes only a " +
+		"title and --parent: the agent files work it found as a draft, and af notes on the new " +
+		"item's thread which item's agent added it.",
 	Args: cobra.MaximumNArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		return runBacklog(func() (any, error) {
-			if err := refuseFromItemSession("add"); err != nil {
-				return nil, err
+			if self := inItemSession(); self != nil {
+				if err := refuseItemSessionAddFlags(cmd); err != nil {
+					return nil, err
+				}
+				return backlogAddOne(cmd, args, self.ID)
 			}
 			if backlogAddFile != "" {
 				return backlogAddBatch(cmd, args)
 			}
-			return backlogAddOne(cmd, args)
+			return backlogAddOne(cmd, args, "")
 		})
 	},
+}
+
+// itemSessionAddFlags are the flags of add an item session may pass: an agent
+// files the work it found as a draft (decision (3) on #6284), and leaves its
+// order, dependencies and program to the user.
+var itemSessionAddFlags = map[string]bool{"parent": true}
+
+// refuseItemSessionAddFlags refuses, from an item session, an add that passes
+// any other of add's own flags, --file included.
+func refuseItemSessionAddFlags(cmd *cobra.Command) error {
+	var refused error
+	cmd.LocalNonPersistentFlags().VisitAll(func(f *pflag.Flag) {
+		if refused == nil && f.Changed && !itemSessionAddFlags[f.Name] {
+			refused = refuseFromItemSession("add --" + f.Name)
+		}
+	})
+	return refused
 }
 
 func backlogAddBatch(cmd *cobra.Command, args []string) (any, error) {
@@ -367,7 +390,8 @@ func readFileOrStdin(cmd *cobra.Command, path string) (string, error) {
 	return string(b), nil
 }
 
-func backlogAddOne(cmd *cobra.Command, args []string) (any, error) {
+// backlogAddOne adds one draft. sessionID is the item session adding it, or "".
+func backlogAddOne(cmd *cobra.Command, args []string, sessionID string) (any, error) {
 	if len(args) != 1 {
 		return nil, errors.New("af backlog add needs a title, or --file <path or -> for many items")
 	}
@@ -403,6 +427,7 @@ func backlogAddOne(cmd *cobra.Command, args []string) (any, error) {
 	var resp daemon.AddBacklogItemsResponse
 	if err := callBacklogRoute("AddBacklogItems", daemon.AddBacklogItemsRequest{
 		RepoID: t.repoID, RepoPath: t.repoPath, Items: []backlog.ItemInput{in}, Before: before, After: after,
+		SessionID: sessionID,
 	}, &resp); err != nil {
 		return nil, err
 	}

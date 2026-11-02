@@ -85,7 +85,9 @@ func (s *controlServer) StartBacklogItem(req StartBacklogItemRequest, resp *Star
 
 // StartBacklogItem starts item req.ID now. An item with a live session gets
 // "continue" in that session; any other item gets a new session, created on a
-// tracked goroutine, and the returned run is still starting.
+// tracked goroutine, and the returned run is still starting. A start that
+// carries an answer kept for a new run (BeginStart) gets the StartPrompt with
+// it and af's facts about the previous run.
 func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog.RunRef, error) {
 	svc := m.backlogService()
 	ref, err := svc.Resolve(req.RepoID, req.RepoPath)
@@ -104,23 +106,13 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 	if plan.Continue != "" {
 		return m.continueBacklogItem(ref, req.ID, by, plan.Continue)
 	}
-	// The same normalization svc.Resolve applied to find the project (a leading
-	// "~" expanded against the daemon host's home): the raw value would reach the
-	// host preflight and CreateSession unexpanded, and a start of "~/project"
-	// would fail where listing and adding items with that path succeeded.
-	root := ""
-	if strings.TrimSpace(req.RepoPath) != "" {
-		if root, err = config.ResolveDaemonHostPath(req.RepoPath); err != nil {
-			return backlog.RunRef{}, err
-		}
+	root, err := backlogStartRoot(ref.ID, req.RepoPath)
+	if err != nil {
+		return backlog.RunRef{}, err
 	}
-	if root == "" {
-		if root, err = registeredProjectRootForRepoID(ref.ID); err != nil {
-			return backlog.RunRef{}, err
-		}
-		if root == "" {
-			return backlog.RunRef{}, fmt.Errorf("project %s is not registered, so its checkout is unknown — run \"af projects add <path to the repository>\" and start the item again", ref.ID)
-		}
+	var prev backlog.PrevRun
+	if len(plan.Run.Answers) > 0 {
+		prev = m.prevBacklogRun(ref.ID, root, b.Item(req.ID))
 	}
 
 	var create CreateSessionRequest
@@ -137,34 +129,69 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 			return nil, fmt.Errorf("%s changed while starting; retry", backlog.FormatID(req.ID))
 		}
 		plan = p
-		it := b.Item(req.ID)
-		if it.Program != "" {
-			if err := validateCreateProgram(it.Program); err != nil {
-				return nil, err
-			}
-		}
-		create = CreateSessionRequest{
-			TitleBase:   backlog.SessionTitleBase(it),
-			RepoPath:    root,
-			Program:     it.Program,
-			Prompt:      b.ItemPrompt(it, proposalDir(ref.ID, it)),
-			Backend:     string(session.BackendLocal),
-			BacklogItem: it.ID,
-		}
-		// The host-owned checks `af sessions create` runs (the agent is
-		// installed, tmux exists): fail the start here, with the actionable
-		// message and no run recorded, instead of a session that dies while
-		// waiting for an agent that cannot launch (found in the slice 4
-		// play-test).
-		if err := validateBacklogCreate(create); err != nil {
-			return nil, err
-		}
-		return []int{req.ID}, nil
+		create, err = backlogCreateRequest(ref.ID, b, req.ID, root, prev)
+		return []int{req.ID}, err
 	})
 	if err != nil {
 		m.backlog.release(ref.ID)
 		return backlog.RunRef{}, svc.Named(ref, err)
 	}
+	m.launchBacklogCreate(ref, req.ID, plan.Run.StartedAt, create)
+	return plan.Run, nil
+}
+
+// backlogStartRoot is the checkout an item session is created in: the request's
+// project path, normalized the way svc.Resolve normalized it to find the
+// project (a leading "~" expanded against the daemon host's home), or else the
+// registered project's root. The raw value would reach the host preflight and
+// CreateSession unexpanded, and a start of "~/project" would fail where listing
+// and adding items with that path succeeded.
+func backlogStartRoot(repoID, repoPath string) (string, error) {
+	if strings.TrimSpace(repoPath) != "" {
+		return config.ResolveDaemonHostPath(repoPath)
+	}
+	root, err := registeredProjectRootForRepoID(repoID)
+	if err != nil {
+		return "", err
+	}
+	if root == "" {
+		return "", fmt.Errorf("project %s is not registered, so its checkout is unknown — run \"af projects add <path to the repository>\" and start the item again", repoID)
+	}
+	return root, nil
+}
+
+// backlogCreateRequest is the create for the starting run of item id in b, whose
+// first prompt is the StartPrompt with prev. It runs the host-owned checks `af
+// sessions create` runs (the agent is installed, tmux exists), so a start fails
+// here, with the actionable message and no run recorded, instead of a session
+// that dies while waiting for an agent that cannot launch (found in the slice 4
+// play-test).
+func backlogCreateRequest(repoID string, b *backlog.Backlog, id int, root string, prev backlog.PrevRun) (CreateSessionRequest, error) {
+	it := b.Item(id)
+	if it.Program != "" {
+		if err := validateCreateProgram(it.Program); err != nil {
+			return CreateSessionRequest{}, err
+		}
+	}
+	prev.PR = it.PR
+	create := CreateSessionRequest{
+		TitleBase:   backlog.SessionTitleBase(it),
+		RepoPath:    root,
+		Program:     it.Program,
+		Prompt:      b.StartPrompt(it, proposalDir(repoID, it), prev),
+		Backend:     string(session.BackendLocal),
+		BacklogItem: it.ID,
+	}
+	if err := validateBacklogCreate(create); err != nil {
+		return CreateSessionRequest{}, err
+	}
+	return create, nil
+}
+
+// launchBacklogCreate creates the session of item id's run that began at
+// startedAt, on a tracked goroutine, and records the outcome on the run. The
+// caller reserved a slot; finishBacklogStart releases it.
+func (m *Manager) launchBacklogCreate(ref backlog.ProjectRef, id int, startedAt time.Time, create CreateSessionRequest) {
 	launched := m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
@@ -186,12 +213,11 @@ func (m *Manager) StartBacklogItem(req backlog.StartRequest, by string) (backlog
 			}
 			err = errBacklogPromptNotDelivered
 		}
-		m.finishBacklogStart(ref, req.ID, plan.Run.StartedAt, data, err, stop)
+		m.finishBacklogStart(ref, id, startedAt, data, err, stop)
 	})
 	if !launched {
-		m.finishBacklogStart(ref, req.ID, plan.Run.StartedAt, session.InstanceData{}, errors.New("af is shutting down"), nil)
+		m.finishBacklogStart(ref, id, startedAt, session.InstanceData{}, errors.New("af is shutting down"), nil)
 	}
-	return plan.Run, nil
 }
 
 func proposalDir(repoID string, it *backlog.Item) string {
@@ -218,7 +244,7 @@ func (m *Manager) finishBacklogStart(ref backlog.ProjectRef, id int, startedAt t
 	delay := finishStartBackoff
 	for {
 		_, err := svc.Apply(ref, func(b *backlog.Backlog) ([]int, error) {
-			return []int{id}, b.FinishStart(id, startedAt, data.ID, data.Title, createErr, svc.Now())
+			return []int{id}, b.FinishStart(id, startedAt, data.ID, data.Title, data.Branch, createErr, svc.Now())
 		})
 		if err == nil {
 			// An idle edge observed before this link was committed found no item

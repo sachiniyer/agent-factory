@@ -1,5 +1,5 @@
 // Package backlog holds the ordered tree of work items for one project and the
-// global budget, the share of the Claude plan the runner may use.
+// global budget, the Claude plan use under which the runner starts items.
 package backlog
 
 import (
@@ -60,6 +60,12 @@ const (
 	DeliveryPending   = "pending"
 	DeliveryDelivered = "delivered"
 	DeliveryFailed    = "failed"
+	// DeliveryNewRun is an answer kept for a new run of the item, because the
+	// session that asked is gone. DeliverySuperseded is a kept answer that a later
+	// answer to the same question replaced. Neither closes its question: the
+	// question closes when a run starts with the answer (see FinishStart).
+	DeliveryNewRun     = "new_run"
+	DeliverySuperseded = "superseded"
 
 	OnDoneKeep    = "keep"
 	OnDoneArchive = "archive"
@@ -111,9 +117,15 @@ type Source struct {
 }
 
 type RunRef struct {
-	SessionID  string           `json:"session_id"`
-	Title      string           `json:"title"`
-	State      string           `json:"state"`
+	SessionID string `json:"session_id"`
+	Title     string `json:"title"`
+	State     string `json:"state"`
+	// Branch is the run's session branch, recorded when the run starts so af can
+	// name it to a later run after the session is gone.
+	Branch string `json:"branch,omitempty"`
+	// Answers are the kept answers (DeliveryNewRun) this run's first prompt
+	// carries, oldest first: one per open question its gone session left.
+	Answers    []int            `json:"answers,omitempty"`
 	PrevStatus Status           `json:"prev_status"`
 	StartedBy  string           `json:"started_by"`
 	StartedAt  time.Time        `json:"started_at"`
@@ -236,7 +248,7 @@ func (b *Backlog) get(id int) (*Item, error) {
 func (it *Item) OpenQuestion() *Message {
 	answered := map[int]bool{}
 	for _, m := range it.Thread {
-		if m.Kind == KindAnswer && m.Answers != 0 {
+		if m.closesQuestion() {
 			answered[m.Answers] = true
 		}
 	}
@@ -284,6 +296,32 @@ func (it *Item) closeAFQuestions(reason string) {
 			m.Closed = reason
 		}
 	}
+}
+
+// closesQuestion is whether m is an answer that closes the question it names.
+// An answer kept for a new run, or one a later answer replaced, does not.
+func (m Message) closesQuestion() bool {
+	return m.Kind == KindAnswer && m.Answers != 0 && m.Delivery != DeliveryNewRun && m.Delivery != DeliverySuperseded
+}
+
+// KeptAnswers are the answers kept for a new run whose questions are still
+// open, oldest first: at most one per question, since a later answer to the
+// same question supersedes the kept one (BeginAnswerRun).
+func (it *Item) KeptAnswers() []*Message {
+	var out []*Message
+	for i := range it.Thread {
+		if m := &it.Thread[i]; m.Kind == KindAnswer && m.Delivery == DeliveryNewRun && it.questionOpen(m.Answers) {
+			out = append(out, m)
+		}
+	}
+	return out
+}
+
+// AnswerStarting is whether the item's latest run is starting with a kept
+// answer: the question it answers is still open, but the user has answered it.
+func (it *Item) AnswerStarting() bool {
+	r := it.lastRun()
+	return r != nil && r.State == RunStarting && len(r.Answers) > 0
 }
 
 func (it *Item) lastRun() *RunRef {

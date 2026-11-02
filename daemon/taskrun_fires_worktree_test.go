@@ -98,10 +98,11 @@ func TestTaskFireLeftover_BoundWorktreeReportedAndQuarantined(t *testing.T) {
 	}
 }
 
-// TestTaskFireLeftover_ReportedKillCommandIsShellLiteral: the removal command
-// is printed for a user to paste, so a title carrying $( ) or backticks must
-// be single-quoted shell-literal — %q's double quotes would still expand.
-func TestTaskFireLeftover_ReportedKillCommandIsShellLiteral(t *testing.T) {
+// TestTaskFireLeftover_ReportedRemoveCommandIsShellLiteral: the removal
+// command is printed for a user to paste — `af sessions archive` restorably
+// first, `af sessions kill` as the permanent option — so a title carrying
+// $( ) or backticks must be single-quoted shell-literal.
+func TestTaskFireLeftover_ReportedRemoveCommandIsShellLiteral(t *testing.T) {
 	title := "nasty-$(printf expanded)"
 	repoPath, repo, sanitized, _ := fakeReapFixture(t, title)
 	branch := worktreeBranchFor(t, title)
@@ -119,8 +120,12 @@ func TestTaskFireLeftover_ReportedKillCommandIsShellLiteral(t *testing.T) {
 		fire, repo, nil); err != nil {
 		t.Fatalf("taskFireLeftoverRecord: %v", err)
 	}
-	if !strings.Contains(warnings.String(), "af sessions kill 'nasty-$(printf expanded)'") {
-		t.Fatalf("the command must pass the title shell-literally; logged: %s", warnings.String())
+	logged := warnings.String()
+	if !strings.Contains(logged, "af sessions archive 'nasty-$(printf expanded)'") {
+		t.Fatalf("the restorable command must come first and pass the title shell-literally; logged: %s", logged)
+	}
+	if !strings.Contains(logged, "af sessions kill 'nasty-$(printf expanded)'") {
+		t.Fatalf("the permanent command must also pass the title shell-literally; logged: %s", logged)
 	}
 }
 

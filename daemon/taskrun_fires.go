@@ -521,8 +521,9 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 			attribution = fmt.Sprintf("the worktree the interrupted cron fire %q (instance %s, intended %s) bound before creation — it is this attempt's",
 				fire.Title, fire.InstanceID, fire.IntendedAt.Format(time.RFC3339))
 		}
-		log.WarningLog.Printf("task %s: interrupted fire left %s at %s; it stays quarantined, holding: %s. Look at it, then remove it with `af sessions kill %s`.",
-			t.ID, attribution, wtPath, taskFireWorktreeResidue(wtPath, identityRoot), config.ShellQuotePath(fire.Title))
+		log.WarningLog.Printf("task %s: interrupted fire left %s at %s; it stays quarantined, holding: %s. Look at it, then remove it with `af sessions archive %s` — restorable — or `af sessions kill %s` for permanent removal.",
+			t.ID, attribution, wtPath, taskFireWorktreeResidue(wtPath, identityRoot),
+			config.ShellQuotePath(fire.Title), config.ShellQuotePath(fire.Title))
 	}
 	// Anything unproven is recorded startup-state-unknown: nothing may
 	// auto-teardown under an identity af could not confirm (#2207), and the

@@ -30,7 +30,10 @@ func (backlogTestHost) AnswerTarget(_, _ string) backlog.AnswerTarget {
 	return backlog.TargetLive
 }
 func (backlogTestHost) DeliverAnswer(string, backlog.PendingAnswer) {}
-func (backlogTestHost) Gate(string) backlog.Gate                    { return backlog.Gate{} }
+func (backlogTestHost) StartAnswerRun(string, backlog.AnswerRunRequest) (backlog.Message, error) {
+	return backlog.Message{}, errors.New("the api tests start no answer runs")
+}
+func (backlogTestHost) Gate(string) backlog.Gate { return backlog.Gate{} }
 func (backlogTestHost) Usage() planusage.Usage {
 	at := backlogTestNow.Add(-90 * time.Second)
 	return planusage.Usage{Account: planusage.DefaultAccount, ReadingAt: &at,
@@ -346,7 +349,7 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 		t.Fatal(err)
 	}
 	v := decodeOut[backlogRunnerView](t, out)
-	if v.State != backlog.RunnerOff || v.Runner || v.MaxRunning != 1 || v.OnDone != backlog.OnDoneKeep || v.Budget.Share != 50 || v.Budget.MaxPerRun != 10 {
+	if v.State != backlog.RunnerOff || v.Runner || v.MaxRunning != 1 || v.OnDone != backlog.OnDoneKeep || v.Budget.Limit != 50 || v.Budget.MaxPerRun != 10 {
 		t.Fatalf("%+v", v)
 	}
 	if out, err = runBacklogCmd(t, "runner", "on", "--max-running", "2", "--on-done", "archive"); err != nil {
@@ -365,9 +368,9 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 		args []string
 		want func(backlog.Budget) bool
 	}{
-		{[]string{"budget"}, func(b backlog.Budget) bool { return b.Share == 50 && b.StopAt == 90 && b.USDLimit == 0 }},
-		{[]string{"budget", "--share", "30%", "--stop-at", "95"}, func(b backlog.Budget) bool { return b.Share == 30 && b.StopAt == 95 }},
-		{[]string{"budget", "--max-per-run", "0"}, func(b backlog.Budget) bool { return b.MaxPerRun == 0 && b.Share == 30 }},
+		{[]string{"budget"}, func(b backlog.Budget) bool { return b.Limit == 50 && b.USDLimit == 0 }},
+		{[]string{"budget", "--limit", "30%"}, func(b backlog.Budget) bool { return b.Limit == 30 }},
+		{[]string{"budget", "--max-per-run", "0"}, func(b backlog.Budget) bool { return b.MaxPerRun == 0 && b.Limit == 30 }},
 		{[]string{"budget", "--usd-limit", "$12.50"}, func(b backlog.Budget) bool { return b.USDLimit == 12.5 }},
 	} {
 		out, err := runBacklogCmd(t, step.args...)
@@ -380,10 +383,12 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 		args []string
 		want string
 	}{
-		{[]string{"budget", "--share", "101"}, "--share must be between 0 and 100"},
-		{[]string{"budget", "--stop-at=-1"}, "--stop-at must be between 0 and 100"},
+		{[]string{"budget", "--limit", "101"}, "--limit must be between 0 and 100"},
+		{[]string{"budget", "--limit=-1"}, "--limit must be between 0 and 100"},
 		{[]string{"budget", "--max-per-run", "NaN"}, "--max-per-run must be between 0 and 100"},
-		{[]string{"budget", "--share", "half"}, "--share must be between 0 and 100"},
+		{[]string{"budget", "--limit", "half"}, "--limit must be between 0 and 100"},
+		{[]string{"budget", "--share", "30"}, `--share was removed: the runner now starts items only while your total plan use, from any source, is under one limit (default 50%) · set it with "af backlog budget --limit <pct>"`},
+		{[]string{"budget", "--stop-at", "80", "--limit", "40"}, errBudgetFlagRemoved("stop-at").Error()},
 		{[]string{"budget", "--usd-limit", "inf"}, `--usd-limit must be a finite amount of US dollars, 0 or more — for example 5 or 2.50, not "inf"`},
 		{[]string{"budget", "--usd-limit", "1e400"}, `--usd-limit must be a finite amount of US dollars, 0 or more — for example 5 or 2.50, not "1e400"`},
 		{[]string{"budget", "--usd-limit=-1"}, `--usd-limit must be a finite amount of US dollars, 0 or more — for example 5 or 2.50, not "-1"`},
@@ -392,7 +397,7 @@ func TestBacklogRunnerAndBudget(t *testing.T) {
 			t.Errorf("%v: %v", c.args, err)
 		}
 	}
-	if _, err := runBacklogCmd(t, "budget", "--share", "101"); err == nil || err.Error() != "--share must be between 0 and 100" {
+	if _, err := runBacklogCmd(t, "budget", "--limit", "101"); err == nil || err.Error() != "--limit must be between 0 and 100" {
 		t.Fatal(err)
 	}
 	if out, _ := runBacklogCmd(t, "runner"); decodeOut[backlogRunnerView](t, out).State != backlog.RunnerIdle {

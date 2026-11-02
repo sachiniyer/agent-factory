@@ -15,6 +15,10 @@ export interface RunRef {
   prev_status: Status;
   started_by: string;
   started_at: string;
+  /** The run's session branch, recorded when it starts. */
+  branch?: string;
+  /** The kept answers (delivery "new_run") this run's first prompt carries. */
+  answers?: number[];
 }
 
 export interface Message {
@@ -25,6 +29,8 @@ export interface Message {
   answers?: number;
   closed?: string;
   at: string;
+  /** An answer's way to the agent; "new_run" and "superseded" do not close its question. */
+  delivery?: string;
 }
 
 export interface Item {
@@ -65,7 +71,7 @@ export interface Derived {
 export interface RunnerView {
   state: "off" | "idle" | "running" | "waiting" | "stopped" | string;
   reason?: string;
-  /** The closed gate when the runner is stopped or waiting: share, stop_at,
+  /** The closed gate when the runner is stopped or waiting: limit,
    *  usage_limit, no_reading, unmeterable, usd_limit, no_account, metering. */
   gate?: string;
   used: number;
@@ -78,11 +84,11 @@ export interface BacklogView {
   runner: RunnerView;
 }
 
-/** The global budget: percents of the Claude plan, and an optional dollar
- *  limit for accounts with no plan readings. */
+/** The global budget: the plan % under which the runner starts items, the
+ *  cap per run, and an optional dollar limit for accounts with no plan
+ *  readings. */
 export interface Budget {
-  share: number;
-  stop_at: number;
+  limit: number;
   max_per_run: number;
   usd_limit: number;
   usd_spent: number;
@@ -212,8 +218,15 @@ export function derivedOf(view: BacklogView, id: number): Derived {
 
 /** The item's oldest question that no answer names and that is not closed. */
 export function openQuestion(it: Item): Message | undefined {
+  // An answer to a gone session starts a new run that carries it: while that
+  // run starts, the item does not need the user (backlog.Item.AnswerStarting).
+  const last = it.runs?.[it.runs.length - 1];
+  if (last?.state === "starting" && last.answers?.length) return undefined;
   const thread = it.thread ?? [];
-  const answered = new Set(thread.filter((m) => m.kind === "answer" && m.answers).map((m) => m.answers));
+  // An answer kept for a new run, or one a later answer replaced, leaves its
+  // question open until a run starts with it (backlog.Message.closesQuestion).
+  const closes = (m: Message) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
+  const answered = new Set(thread.filter(closes).map((m) => m.answers));
   return thread.find((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
 }
 
@@ -239,6 +252,7 @@ export interface SessionItem {
   root: string;
   id: number;
   title: string;
+  state: State;
 }
 
 /** The proposals the backlog's items came from, in first-seen order. */
@@ -249,7 +263,7 @@ export function sources(b: Backlog): string[] {
 /** What a rail chip draws and navigates by: a change in any part redraws it. The project
  *  root is part of it, since a rebound project keeps its items' ids and titles. */
 export function sessionItemsSig(items: ReadonlyMap<string, SessionItem>): string {
-  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root]));
+  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root, it.state]));
 }
 
 /** Maps each item session id to its item, from the items' run refs. A session
@@ -259,7 +273,7 @@ export function sessionItems(views: ReadonlyMap<string, BacklogView>): Map<strin
   for (const [root, v] of views) {
     for (const it of v.backlog.items) {
       for (const run of it.runs ?? []) {
-        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title });
+        if (run.session_id) out.set(run.session_id, { root, id: it.id, title: it.title, state: derivedOf(v, it.id).state });
       }
     }
   }
@@ -452,6 +466,26 @@ export function overlayMove(fresh: Backlog, moved: Backlog, base: Backlog): Back
 /** Items that wait on id. */
 export function neededBy(b: Backlog, id: number): Item[] {
   return b.items.filter((it) => (it.waits_on ?? []).includes(id));
+}
+
+/** Open items that wait on id: the row's "blocks n". Open by derived state, the
+ *  one listRows hides closed rows by: a parent whose children all finished
+ *  derives done while its stored status can still read running. */
+export function blocking(view: BacklogView, id: number): Item[] {
+  return neededBy(view.backlog, id).filter((it) => !closedState(derivedOf(view, it.id).state));
+}
+
+/** The items id waits on and the items that wait on it. */
+export function relatedIDs(b: Backlog, id: number): Set<number> {
+  const out = new Set<number>((itemByID(b, id)?.waits_on ?? []).filter((w) => itemByID(b, w)));
+  for (const it of neededBy(b, id)) out.add(it.id);
+  out.delete(id);
+  return out;
+}
+
+/** The newest run: the one the state chip links to and the session card shows. */
+export function latestRun(it: Item): RunRef | undefined {
+  return it.runs?.at(-1);
 }
 
 export type ItemAction = "queue" | "draft" | "start" | "review" | "done" | "drop" | "reopen" | "delete";

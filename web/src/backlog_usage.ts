@@ -7,7 +7,6 @@ import type { Budget, RunnerView } from "./backlog_model.js";
 
 export interface PlanWindow {
   plan: number;
-  backlog: number;
   /** null when there is no valid reading for the window. */
   resets_at: string | null;
   /** The metered cost of every transcript in the window, in US dollars. */
@@ -61,7 +60,6 @@ function parseWindow(v: unknown): PlanWindow {
   const w = isRecord(v) ? v : {};
   return {
     plan: Number(w.plan) || 0,
-    backlog: Number(w.backlog) || 0,
     resets_at: typeof w.resets_at === "string" ? w.resets_at : null,
     all_cost: Number(w.all_cost) || 0,
   };
@@ -126,21 +124,12 @@ export function usd(v: number): string {
   return `$${v.toFixed(2)}`;
 }
 
-/** The window closest to stopping the runner: the larger of backlog / share
- *  and plan / stop at; a tie goes to the 5-hour window. null when neither
- *  window has a valid reading. */
-export function tighterWindow(u: Usage, b: Budget, now: number): WindowKey | null {
-  const ratio = (v: number, limit: number): number => (limit > 0 ? v / limit : Infinity);
+/** The window closest to the limit: the higher plan %; a tie goes to the
+ *  5-hour window. null when neither window has a valid reading. */
+export function tighterWindow(u: Usage, now: number): WindowKey | null {
   let best: WindowKey | null = null;
-  let score = -Infinity;
   for (const k of WINDOWS) {
-    const w = u[k];
-    if (!valid(w, now)) continue;
-    const s = Math.max(ratio(w.backlog, b.share), ratio(w.plan, b.stop_at));
-    if (s > score) {
-      best = k;
-      score = s;
-    }
+    if (valid(u[k], now) && (best === null || u[k].plan > u[best].plan)) best = k;
   }
   return best;
 }
@@ -162,19 +151,20 @@ export function readingAge(at: string | null, now: number): string {
   return hours < 24 ? `read ${hours} h ago` : `read ${Math.floor(hours / 24)} d ago`;
 }
 
-/** The runner bar's detail: both windows, the reading's age, and the scope. */
-export function usageLines(u: Usage, now: number): string[] {
+/** The runner bar's detail: both windows against the limit, the reading's
+ *  age, and the scope. */
+export function usageLines(u: Usage, b: Budget, now: number): string[] {
   const line = (k: WindowKey): string => {
     const w = u[k];
     const label = WINDOW_LABELS[k].hover;
     if (!valid(w, now)) return `${label} · no reading`;
-    return `${label} · plan ${pct(w.plan)} · backlog ${pct(w.backlog)} · resets ${resetLabel(w.resets_at!, now)}`;
+    return `${label} · plan ${pct(w.plan)} of ${pct(b.limit)} limit · resets ${resetLabel(w.resets_at!, now)}`;
   };
   return [line("five_hour"), line("seven_day"), `${readingAge(u.reading_at, now)} · all projects`];
 }
 
-export function usageHover(u: Usage, now: number): string {
-  return usageLines(u, now).join("\n");
+export function usageHover(u: Usage, b: Budget, now: number): string {
+  return usageLines(u, b, now).join("\n");
 }
 
 /** A run's use as a percent of its account's 5-hour window: its cost in the
@@ -191,7 +181,7 @@ export function runUse(sessionId: string, u: Usage, now: number, account = ""): 
 
 export interface Gate {
   /** The gate and the window it closed, stable while the numbers move but new for the
-   *  next window: "stop_at:five_hour:2000-01-03T14:00:00Z". */
+   *  next window: "limit:five_hour:2000-01-03T14:00:00Z". */
   key: string;
   text: string;
 }
@@ -199,22 +189,26 @@ export interface Gate {
 /** The first closed budget gate, or null when all are open. A start by hand
  *  passes the gates, so the web asks once per gate before it does. */
 export function closedGate(b: Budget | null, u: Usage | null, runner: RunnerView | null, now: number): Gate | null {
-  if (b && b.share <= 0) return { key: "share:zero", text: "The backlog share is 0%." };
+  if (b && b.limit <= 0) return { key: "limit:zero", text: "The plan limit is 0%." };
   // With the runner on, the daemon's gate is for the account this project's sessions
   // use; the top-level windows are the newest-reading account's, which may be another.
   const daemonGate = runner !== null && runner.state !== "off";
   if (b && u && !daemonGate) {
+    // The window over the limit that resets last, as the daemon's gate names it:
+    // starts resume only once both windows are under.
+    let over: WindowKey | null = null;
     for (const k of WINDOWS) {
       const w = u[k];
-      if (valid(w, now) && w.backlog >= b.share) {
-        return { key: `share:${k}:${w.resets_at}`, text: `The backlog used its ${pct(b.share)} of ${WINDOW_LABELS[k].gate}.` };
+      if (valid(w, now) && w.plan >= b.limit && (over === null || Date.parse(w.resets_at!) > Date.parse(u[over].resets_at!))) {
+        over = k;
       }
     }
-    for (const k of WINDOWS) {
-      const w = u[k];
-      if (valid(w, now) && w.plan >= b.stop_at) {
-        return { key: `stop_at:${k}:${w.resets_at}`, text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[k].gate}.` };
-      }
+    if (over !== null) {
+      const w = u[over];
+      return {
+        key: `limit:${over}:${w.resets_at}`,
+        text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[over].gate}, over the ${pct(b.limit)} limit.`,
+      };
     }
   }
   // The budget's own totals, not the runner's gate: the daemon's runner view carries
@@ -226,7 +220,7 @@ export function closedGate(b: Budget | null, u: Usage | null, runner: RunnerView
     const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
     if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
     // The reason names the window and when it resumes, so a new window asks again.
-    if (runner.gate === "share" || runner.gate === "stop_at") return { key: `${runner.gate}:${runner.reason}`, text };
+    if (runner.gate === "limit") return { key: `${runner.gate}:${runner.reason}`, text };
   }
   return null;
 }
