@@ -196,7 +196,11 @@ session can offer both; see [usage limits](usage-limits.md).
 Open a rail row’s **…** menu for **Archive** and **Delete session**. Other actionable rows
 reveal the menu on hover, or by keyboard: with navigation focused, `j`/`k`
 selects the row and Tab reaches its actions trigger, then `Enter` opens the
-menu. Archive and Delete session each open a confirmation:
+menu. A kill-only recovery row that `j`/`k` skips — such as one in
+`startup_state_unknown` or awaiting an account swap — keeps its actions
+trigger in the Tab order directly, so Tab to it and `Enter` open the menu
+without selecting the row first. Archive and Delete session each open a
+confirmation:
 
 - **Archive** tears down a local session's terminal and moves its worktree into
   the archive. Docker and remote-hook sessions push the branch to `origin` and
