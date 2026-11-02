@@ -139,7 +139,7 @@ test("#6573: a divider beside fit-hidden leaves still drags — its floor prices
   // Aim the host at ~700px: two panes fit (2*320+4), three cannot.
   const host = page.locator(".af-term-host");
   const hostW0 = (await host.boundingBox())!.width;
-  await page.setViewportSize({ width: Math.round(2220 - (hostW0 - 700)) });
+  await page.setViewportSize({ width: Math.round(2220 - (hostW0 - 700)), height: 800 });
   await expect(page.locator(".af-split-narrow")).toContainText("2 panes hidden");
   await expect(page.locator(".af-term-host .af-pane:visible")).toHaveCount(2);
 
