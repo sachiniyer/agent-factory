@@ -34,6 +34,8 @@ import {
   rowTitle,
   unreachableDetail,
   sessionWarningText,
+  SETUP_HOOK_FAILED_PREFIX,
+  setupHookFailedText,
 } from "./status.js";
 import { InFlightOp, Liveness, Status, type SessionData } from "./types.js";
 
@@ -366,6 +368,27 @@ test("the persistent banner joins every session warning kind (#6337)", () => {
   assert.equal(
     sessionWarningText(sess({ agent_config_skipped: ["claude:CLAUDE.md: missing"] })),
     "af agent config skipped: claude:CLAUDE.md: missing",
+  );
+});
+
+test("setup-hook failure renders under the shared prefix (#6667)", () => {
+  assert.equal(
+    setupHookFailedText(sess({ setup_hook_failed: "entry 1 failed: exit status 3" })),
+    `${SETUP_HOOK_FAILED_PREFIX}entry 1 failed: exit status 3`,
+  );
+  assert.equal(setupHookFailedText(sess({ setup_hook_failed: "   " })), "");
+  assert.equal(setupHookFailedText(sess({})), "");
+});
+
+test("the persistent banner includes a setup-hook failure with the other notices", () => {
+  assert.equal(
+    sessionWarningText(
+      sess({
+        callback_unavailable: "require_token is false",
+        setup_hook_failed: "entry 1 failed: exit status 3",
+      }),
+    ),
+    "af callback unavailable: require_token is false · af setup hook failed: entry 1 failed: exit status 3",
   );
 });
 
