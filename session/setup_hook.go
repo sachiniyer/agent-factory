@@ -147,12 +147,51 @@ func transferDockerSetupPayload(p *dockerProvisioner, localPayload string) strin
 	// becomes readable by anyone else. containerUser is unset exactly when the
 	// session already runs as root, where the root-owned copy is readable.
 	if p.containerUser != "" {
-		if _, err := p.execSh(30*time.Second,
-			"chown -R "+shellQuote(p.containerUser)+" "+shellQuote(containerDest)); err != nil {
-			note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
-			log.ErrorLog.Printf("setup_commands: %s", note)
+		if note := p.chownSetupPayload(containerDest); note != "" {
 			return note
 		}
+	}
+	return ""
+}
+
+// chownSetupPayload hands the staged payload to the session's containerUser.
+// The recursive chown must never cross a mount point — through a host bind at
+// or under the staging dir, a root chown re-owns the operator's host files —
+// so it keys off the container's own mount table, the same contract the
+// session-HOME chown carries (#5424). A staging dir that itself sits inside a
+// non-root mount is reported, never chowned; mounts beneath it are pruned.
+// Returns a session-visible note on any failure, "" on success.
+func (p *dockerProvisioner) chownSetupPayload(containerDest string) string {
+	realDest, mounts, err := p.readMountTableFor(containerDest)
+	if err != nil {
+		note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	points, err := parseMountPoints(mounts)
+	if err != nil {
+		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: the container mount table is unusable: %v", p.containerUser, err)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	// A staging path that resolves to the filesystem root — via a symlinked
+	// /af-setup — would make the recursive chown cover the whole container
+	// filesystem, mounts included. Refuse before any chown is built.
+	if realDest == "/" {
+		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: %s resolves to the filesystem root", p.containerUser, containerDest)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	if mp := enclosingMount(points, realDest); mp != "/" {
+		note := fmt.Sprintf("the setup staging dir %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure the mounted files are readable by that user", realDest, mp, p.containerUser)
+		log.WarningLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	if _, err := p.execSh(30*time.Second,
+		chownRecursiveScript(realDest, p.containerUser, mountPointsUnder(points, realDest))); err != nil {
+		note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
 	}
 	return ""
 }

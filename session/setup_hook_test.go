@@ -385,16 +385,30 @@ func TestSetupHookPassthroughDeniesUnapproved(t *testing.T) {
 
 // --- docker payload transfer ownership + daemon-side payload lifecycle ---
 
+// dockerSetupPayloadStub answers the payload transfer's docker calls: the
+// mount-table read gets the resolved staging dir plus a mountinfo built from
+// mountPoints, everything else succeeds silently.
+func dockerSetupPayloadStub(calls *[][]string, mountPoints ...string) func(context.Context, []string, ...string) ([]byte, error) {
+	return func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		*calls = append(*calls, append([]string(nil), args...))
+		if isMountTableExec(args) {
+			lines := []string{"/af-setup", mountinfoLine(1, "/", "overlay")}
+			for i, mp := range mountPoints {
+				lines = append(lines, mountinfoLine(10+i, mp, "ext4"))
+			}
+			return []byte(strings.Join(lines, "\n") + "\n"), nil
+		}
+		return nil, nil
+	}
+}
+
 // The docker transfer must hand the staged payload to the session's own
 // user: docker cp lands it root-owned while keeping the daemon's modes, so a
 // 0600 file stays 0600 — unreadable by the non-root user a BYO image runs
 // its agent-server as, and by the overlay copy it performs.
 func TestTransferDockerSetupPayloadChownsToSessionUser(t *testing.T) {
 	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return nil, nil
-	}))
+	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls)))
 	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
 	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
 
@@ -402,17 +416,15 @@ func TestTransferDockerSetupPayloadChownsToSessionUser(t *testing.T) {
 	require.NotNil(t, chown,
 		"the staged payload must be chowned to the session user as root; calls=%v", calls)
 	assert.Contains(t, strings.Join(chown, " "),
-		"chown -R "+shellQuote(dockerNonRootImageUser)+" "+shellQuote("/af-setup"))
+		"chown -R "+dockerNonRootImageUser+" "+shellQuote("/af-setup"))
 }
 
 // A root-default image leaves containerUser unset: the session already runs
-// as root, so the root-owned payload is readable as copied — no chown.
+// as root, so the root-owned payload is readable as copied — no chown, and
+// no mount-table read either.
 func TestTransferDockerSetupPayloadRootSessionSkipsChown(t *testing.T) {
 	var calls [][]string
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
-		calls = append(calls, append([]string(nil), args...))
-		return nil, nil
-	}))
+	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls)))
 	p := &dockerProvisioner{containerID: "cid123"}
 	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
 
@@ -420,14 +432,50 @@ func TestTransferDockerSetupPayloadRootSessionSkipsChown(t *testing.T) {
 		"a session running as root needs no ownership handoff; calls=%v", calls)
 }
 
+// A mount point beneath the staging dir is pruned from the recursive chown —
+// through a host bind there it would re-own the operator's host files, the
+// same hazard the session-HOME chown guards (#5424).
+func TestTransferDockerSetupPayloadChownPrunesNestedMounts(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls, "/af-setup/creds")))
+	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
+	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
+
+	chown := findExecCall(calls, "--user 0:0", "find", "chown")
+	require.NotNil(t, chown,
+		"a nested mount must switch the handoff to the find -prune form; calls=%v", calls)
+	joined := strings.Join(chown, " ")
+	assert.Contains(t, joined, "-path "+shellQuote("/af-setup/creds"),
+		"the mount point under the staging dir must be pruned; call=%v", chown)
+	assert.Contains(t, joined, "-prune -o -exec chown -h "+dockerNonRootImageUser,
+		"everything else under the staging dir is still chowned; call=%v", chown)
+	assert.NotContains(t, joined, "chown -R",
+		"the prune form must not also run a bare recursive chown; call=%v", chown)
+}
+
+// A staging dir that itself sits inside a mount is not af's to re-own: the
+// chown is skipped outright and the session row gets a note saying why.
+func TestTransferDockerSetupPayloadSkipsMountedStagingDir(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls, "/af-setup")))
+	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
+	note := transferDockerSetupPayload(p, t.TempDir())
+
+	require.NotEqual(t, "", note)
+	assert.Contains(t, note, "inside the mount")
+	assert.Nil(t, findExecCall(calls, "chown"),
+		"a staging dir inside a host mount must never be chowned; calls=%v", calls)
+}
+
 // A failed ownership handoff is a recorded, session-visible note like every
 // other transfer failure — never a silent unreadable payload.
 func TestTransferDockerSetupPayloadChownFailureIsRecorded(t *testing.T) {
-	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+	stub := dockerSetupPayloadStub(&[][]string{})
+	t.Cleanup(SetDockerExecForTest(func(ctx context.Context, env []string, args ...string) ([]byte, error) {
 		if strings.Contains(strings.Join(args, " "), "chown") {
 			return nil, fmt.Errorf("chown: operation not permitted")
 		}
-		return nil, nil
+		return stub(ctx, env, args...)
 	}))
 	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
 	note := transferDockerSetupPayload(p, t.TempDir())
