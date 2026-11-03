@@ -1,6 +1,8 @@
 package session
 
 import (
+	"context"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -379,4 +381,124 @@ func TestSetupHookPassthroughDeniesUnapproved(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, "missing", strings.TrimSpace(string(got)),
 		"an unapproved name must not reach the setup script")
+}
+
+// --- docker payload transfer ownership + daemon-side payload lifecycle ---
+
+// The docker transfer must hand the staged payload to the session's own
+// user: docker cp lands it root-owned while keeping the daemon's modes, so a
+// 0600 file stays 0600 — unreadable by the non-root user a BYO image runs
+// its agent-server as, and by the overlay copy it performs.
+func TestTransferDockerSetupPayloadChownsToSessionUser(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
+	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
+
+	chown := findExecCall(calls, "--user 0:0", "chown -R")
+	require.NotNil(t, chown,
+		"the staged payload must be chowned to the session user as root; calls=%v", calls)
+	assert.Contains(t, strings.Join(chown, " "),
+		"chown -R "+shellQuote(dockerNonRootImageUser)+" "+shellQuote("/af-setup"))
+}
+
+// A root-default image leaves containerUser unset: the session already runs
+// as root, so the root-owned payload is readable as copied — no chown.
+func TestTransferDockerSetupPayloadRootSessionSkipsChown(t *testing.T) {
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string(nil), args...))
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid123"}
+	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
+
+	assert.Nil(t, findExecCall(calls, "chown"),
+		"a session running as root needs no ownership handoff; calls=%v", calls)
+}
+
+// A failed ownership handoff is a recorded, session-visible note like every
+// other transfer failure — never a silent unreadable payload.
+func TestTransferDockerSetupPayloadChownFailureIsRecorded(t *testing.T) {
+	t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+		if strings.Contains(strings.Join(args, " "), "chown") {
+			return nil, fmt.Errorf("chown: operation not permitted")
+		}
+		return nil, nil
+	}))
+	p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
+	note := transferDockerSetupPayload(p, t.TempDir())
+	require.NotEqual(t, "", note)
+	assert.Contains(t, note, dockerNonRootImageUser)
+}
+
+// A settled Instance.Kill is the permanent-deletion path every backend
+// funnels through — local sessions via localAgentServer→teardownTabs,
+// off-box ones via remoteAgentServer.Kill (docker reaps through its
+// runtimeTeardown closure, never teardownTabs). Either way the daemon-side
+// payload's only handle is the record the kill deletes, so a settled kill
+// must reclaim it wherever the session ran.
+func TestKillDiscardsLocalSetupPayloadOnSettledKill(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	staging := localSetupStaging(t, "sess-kill")
+	require.NoError(t, os.MkdirAll(filepath.Join(staging, "payload"), 0755))
+
+	i := &Instance{ID: "sess-kill", Title: "sess", agentSrv: &stubAgentServer{}}
+	require.NoError(t, i.Kill())
+	_, err := os.Stat(staging)
+	assert.True(t, os.IsNotExist(err),
+		"a settled kill must remove the daemon-side setup payload")
+}
+
+// An unknown teardown outcome keeps the record as the retry's only handle —
+// and the payload with it, for the attempt that eventually settles.
+func TestKillKeepsLocalSetupPayloadOnUnknownOutcome(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	staging := localSetupStaging(t, "sess-kill-unknown")
+	require.NoError(t, os.MkdirAll(filepath.Join(staging, "payload"), 0755))
+
+	srv := &stubAgentServer{killErr: fmt.Errorf("%w: reap timed out", ErrWorkspaceStateUnknown)}
+	i := &Instance{ID: "sess-kill-unknown", Title: "sess", agentSrv: srv}
+	require.ErrorIs(t, i.Kill(), ErrWorkspaceStateUnknown)
+	_, err := os.Stat(staging)
+	assert.NoError(t, err, "an unsettled kill must keep the payload for the retry")
+}
+
+// Archive keeps the row and its payload: ArchiveSandbox drives the
+// AgentServer's Kill directly for push-then-teardown — never the
+// record-deleting Instance.Kill — so the staging dir survives for the
+// restore's rebuild.
+func TestArchiveSandboxKeepsLocalSetupPayload(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	staging := localSetupStaging(t, "sess-arch")
+	require.NoError(t, os.MkdirAll(filepath.Join(staging, "payload"), 0755))
+
+	as := &stubAgentServer{branch: "root/s"}
+	i := newStubbedSandboxInstance(as)
+	i.ID = "sess-arch"
+	_, err := i.ArchiveSandbox()
+	require.NoError(t, err)
+	assert.Equal(t, 1, as.killCalls)
+	_, statErr := os.Stat(staging)
+	assert.NoError(t, statErr, "archive must keep the payload for the restore's rebuild")
+}
+
+// A workspace-preserving stop is NOT a deletion: the record and the tree
+// stay for a reattach, so teardownTabs — reached directly rather than
+// through Instance.Kill — must leave the payload alone even though its mode
+// is teardownKill{keepWorkspace: true}.
+func TestWorkspacePreservingStopKeepsLocalSetupPayload(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	staging := localSetupStaging(t, "sess-preserve")
+	require.NoError(t, os.MkdirAll(filepath.Join(staging, "payload"), 0755))
+
+	inst := &Instance{ID: "sess-preserve", Title: "sess", backend: &LocalBackend{}}
+	srv := &localAgentServer{inst: inst}
+	require.NoError(t, srv.StopPreservingWorkspace())
+	_, err := os.Stat(staging)
+	assert.NoError(t, err,
+		"a workspace-preserving stop must keep the payload for the preserved tree")
 }

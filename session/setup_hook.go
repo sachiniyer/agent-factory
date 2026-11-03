@@ -140,6 +140,20 @@ func transferDockerSetupPayload(p *dockerProvisioner, localPayload string) strin
 		log.ErrorLog.Printf("setup_commands: %s", note)
 		return note
 	}
+	// docker cp lands files root-owned while keeping the daemon's modes, so a
+	// 0600 payload stays 0600 — but owned by root, unreadable by the user the
+	// agent-server (and the overlay copy) runs as on a non-root image. Hand
+	// the staged tree to that user: chown changes ownership only, so nothing
+	// becomes readable by anyone else. containerUser is unset exactly when the
+	// session already runs as root, where the root-owned copy is readable.
+	if p.containerUser != "" {
+		if _, err := p.execSh(30*time.Second,
+			"chown -R "+shellQuote(p.containerUser)+" "+shellQuote(containerDest)); err != nil {
+			note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
+			log.ErrorLog.Printf("setup_commands: %s", note)
+			return note
+		}
+	}
 	return ""
 }
 
@@ -156,12 +170,22 @@ func localSetupPayloadDir(sessionID string) string {
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
 // the <AF home>/af-setup/<id> tree holding payload — at permanent-deletion
-// points (#6667). It must NOT run while the row still lives: a rebuild can
-// still consume the payload, so callers gate on a settled teardown. A hosted
-// session stages beside its workspace instead and is untouched here — the
-// sandbox teardown owns that tree. Best-effort: a leftover is scratch space,
-// not a correctness hazard, so a removal failure only logs.
+// points (#6667): a settled Instance.Kill, which every backend's delete path
+// funnels through. It must NOT run while the row still lives: a rebuild can
+// still consume the payload, so callers gate on the same settled
+// classification deleteSessionRecord applies, and archive/workspace-preserving
+// stops — which keep the record — never reach it. A hosted session stages
+// beside its workspace instead and is untouched here — the sandbox teardown
+// owns that tree. Best-effort: a leftover is scratch space, not a correctness
+// hazard, so a removal failure only logs.
 func (i *Instance) discardLocalSetupPayload() {
+	if i.ID == "" {
+		// An unregistered throwaway instance (a TUI naming placeholder, a
+		// failed create before ID assignment) has no staging tree of its own
+		// — and the path it would compute is the shared af-setup ROOT, so a
+		// removal here would take every other session's payload with it.
+		return
+	}
 	dir := localSetupPayloadDir(i.ID)
 	if dir == "" {
 		return
