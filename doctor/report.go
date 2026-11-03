@@ -390,9 +390,17 @@ func unproven(findings []Finding) int {
 func collapsedProcessDetail(check string, total, unproven, fixable, fixed, failed int, fixMode bool) string {
 	switch check {
 	case "orphaned-process":
-		parts := []string{fmt.Sprintf("%s from dead sessions", plural(total, "orphaned process", "orphaned processes"))}
+		// Not every row on this key is a confirmed orphan: report-only rows
+		// mean death could not be corroborated (or a live session's pane
+		// tree could not be read). The collapsed text must not assert death
+		// for them — only the fixable share is proven dead (#6716).
+		parts := []string{fmt.Sprintf("%s from sessions absent from the live listing",
+			plural(total, "marked process", "marked processes"))}
 		if fixable > 0 {
-			parts = append(parts, fmt.Sprintf("%d safe to clean", fixable))
+			parts = append(parts, fmt.Sprintf("%d proven dead and safe to clean", fixable))
+		}
+		if unproven > 0 {
+			parts = append(parts, fmt.Sprintf("%d reported, not killed", unproven))
 		}
 		if fixMode && fixed > 0 {
 			parts = append(parts, fmt.Sprintf("%d fixed", fixed))
@@ -686,7 +694,7 @@ func findingRemediation(f Finding, fixMode bool) string {
 	case "possible-orphan":
 		return "verify ownership, then kill the process manually if stale"
 	case "orphaned-process":
-		return "run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually"
+		return "inspect the process manually — it was reported, not killed"
 	case "leaked-tmux-session":
 		return "verify ownership, then run the tmux kill command shown in the message"
 	case "foreign-daemon":

@@ -8,6 +8,19 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## `af doctor --json`: unproven and foreign marked processes moved row keys
+
+- Some `af doctor` process findings moved to more honest check names
+  (#6712). Dead-session rows for a proven-foreign home, a missing marker,
+  and every unproven-ownership shape moved off `orphaned-processes` onto
+  `foreign-home-processes` / `foreign-home-unresolved`, and live-session
+  rows for a missing marker moved off `escaped-processes` onto
+  `foreign-home-unresolved`. The documented `--json` contract is unchanged
+  — `checks[]` names, `summary`, `incomplete` and the exit status mean
+  what they meant — but a consumer grouping findings by row key will see
+  the move; group by `actionable`/`fixable` rather than by key where the
+  distinction matters.
+
 ## Breaking: the Backlog feature is removed (v1.0.343)
 
 - **Backlog is gone entirely** (#6662): the `af backlog` command tree, the

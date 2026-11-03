@@ -861,7 +861,7 @@ func TestRenderShapes(t *testing.T) {
 	out := buf.String()
 	require.Contains(t, out, "Agent Factory Doctor")
 	require.Contains(t, out, "orphaned-processes")
-	require.Contains(t, out, "1 safe to clean")
+	require.Contains(t, out, "1 proven dead and safe to clean")
 	require.Contains(t, out, "leaked-tmux-session")
 	require.Contains(t, out, "FIXED stale-temp-home")
 	require.Contains(t, out, "1 fixable with `af doctor --fix`")
@@ -1224,7 +1224,7 @@ func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
 	out := buf.String()
 
 	require.Contains(t, out, "47 issues require action")
-	require.Contains(t, out, "47 orphaned processes from dead sessions",
+	require.Contains(t, out, "47 marked processes from sessions absent from the live listing",
 		"the per-check row and the summary total must be the same arithmetic (#1979)")
 
 	idxCount := strings.Index(out, "issues require action")
