@@ -142,6 +142,12 @@ var errNoDaemon = errors.New("no daemon (test fake)")
 
 // snapshotOf builds a snapshot function restricted to the given pids (read
 // from the real /proc), so Run can never act outside the test's processes.
+// Each listed pid is reparented to init: the filtered table contains no real
+// ancestors, and a recorded parent the snapshot cannot show is exactly the
+// unverified-ancestry shape the kill arm must refuse (#6703) — so the honest
+// default fixture is a process whose parent is gone, the way a genuinely
+// reparented orphan's is. Tests that mean to stage ancestry overwrite the
+// PPID afterwards (see stageParent in orphan_ancestor_proof_test.go).
 func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, error) {
 	t.Helper()
 	return func() (map[int]proctree.Process, error) {
@@ -152,6 +158,7 @@ func snapshotOf(t *testing.T, pids ...int) func() (map[int]proctree.Process, err
 		out := map[int]proctree.Process{}
 		for _, pid := range pids {
 			if p, ok := full[pid]; ok {
+				p.PPID = 1
 				out[pid] = p
 			}
 		}

@@ -8,7 +8,6 @@ import (
 
 	"github.com/stretchr/testify/require"
 
-	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -135,15 +134,20 @@ func TestOrphanInheritedMarkerForeignAncestor_NotKilled(t *testing.T) {
 	home := testguard.SocketTempDir(t)
 	foreignHome := t.TempDir()
 
-	// Two ancestors staged into the snapshot: another install's tmux server
-	// (AGENT_FACTORY_HOME declared for the other home) and a bystander that
-	// declares nothing. The pids name no real process — the snapshot is
-	// patched below and the env reads come from the stub, so nothing real is
-	// ever inspected or signalled.
-	foreignServerPID := 1 << 30
-	bystanderPID := 1<<30 + 1
-	stubProcessEnv(t, foreignServerPID, map[string]string{"AGENT_FACTORY_HOME": foreignHome})
-	stubProcessEnv(t, bystanderPID, map[string]string{"HOME": t.TempDir()})
+	// Two real ancestors: another install's tmux server (AGENT_FACTORY_HOME
+	// declared for the other home) and a bystander that declares nothing.
+	// Since #6703 the walk revalidates each recorded ancestor's identity and
+	// reads its environ for real, so ancestors must be live processes whose
+	// environ answers — a synthetic snapshot row would read as unverifiable
+	// rather than foreign. AGENT_FACTORY_HOME="" keeps the bystander from
+	// inheriting the sandbox's ambient home declaration.
+	foreignServer := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AGENT_FACTORY_HOME": foreignHome,
+	})
+	bystander := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AGENT_FACTORY_HOME": "",
+		"HOME":               t.TempDir(),
+	})
 
 	under := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-under-foreign-server",
@@ -158,25 +162,9 @@ func TestOrphanInheritedMarkerForeignAncestor_NotKilled(t *testing.T) {
 		"TMUX":                ambientTmuxEnv(t),
 	})
 
-	opts := testOptionsWithHome(t, home, true, under.PID, free.PID) // Fix: true
-	base := opts.snapshot
-	opts.snapshot = func() (map[int]proctree.Process, error) {
-		snap, err := base()
-		if err != nil {
-			return nil, err
-		}
-		if v, ok := snap[under.PID]; ok {
-			v.PPID = foreignServerPID
-			snap[under.PID] = v
-		}
-		if v, ok := snap[free.PID]; ok {
-			v.PPID = bystanderPID
-			snap[free.PID] = v
-		}
-		snap[foreignServerPID] = proctree.Process{PID: foreignServerPID, PPID: 1, Comm: "tmux: server"}
-		snap[bystanderPID] = proctree.Process{PID: bystanderPID, PPID: 1, Comm: "sh"}
-		return snap, nil
-	}
+	opts := testOptionsWithHome(t, home, true, under.PID, free.PID, foreignServer.PID, bystander.PID) // Fix: true
+	stageParent(&opts, under.PID, foreignServer.PID, nil)
+	stageParent(&opts, free.PID, bystander.PID, nil)
 
 	report, err := Run(opts)
 	require.NoError(t, err)
