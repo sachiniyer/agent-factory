@@ -121,6 +121,10 @@ test("scrub drops attributes carrying URLs, escapes or scriptable schemes (B2)",
     ["url unicode-space padded", "fill", "url(\u00a0#x)"],
     ["image-set", "style", "background: image-set('/af-mmd-probe/x.png' 1x)"],
     ["-webkit-image-set", "style", "background: -webkit-image-set(url('/x.png') 1x)"],
+    ["image()", "style", "background: image('/af-mmd-probe/x.png')"],
+    ["element()", "style", "background: -moz-element(#other)"],
+    ["src()", "style", "background: src('/af-mmd-probe/x.png')"],
+    ["cross-fade()", "style", "background: cross-fade(url(#x), url(/af-mmd-probe/x.png), 50%)"],
     ["backslash escape", "style", "background: u\\72l('/af-mmd-probe/x.png')"],
     ["comment obfuscation", "style", "background: u/**/rl('/x.png')"],
     ["expression", "style", "width: expression(x())"],
@@ -152,6 +156,26 @@ test("scrub drops url() arguments a character-class scan would skip (B1)", () =>
     const root = scrubbed(el("svg", [], [el("style", [], [], `.a{${value}}`), el("g")]));
     assert.deepEqual(kidNames(root), ["g"], `${label} must drop the whole block`);
   }
+});
+
+test("scrub keeps <switch> with its sanitized children and drops its conditional gates", () => {
+  // Journey labels ride <switch><foreignObject/><text/></switch>: keep the
+  // switch so the SVG fallback survives, drop the foreignObject branch, and
+  // strip the conditional-processing attributes wherever they appear so no
+  // child can be gated out of rendering.
+  const root = scrubbed(el("svg", [], [
+    el("switch", [attr("requiredExtensions", "http://x.invalid/ext")], [
+      el("foreignObject", [attr("requiredFeatures", "http://www.w3.org/TR/SVG11/feature#Extensibility")], [
+        el("div", [], [], "task", "http://www.w3.org/1999/xhtml"),
+      ]),
+      el("text", [attr("systemLanguage", "en")], [], "task name"),
+    ]),
+  ]));
+  assert.deepEqual(kidNames(root), ["switch"]);
+  const sw = root.children[0];
+  assert.deepEqual(kidNames(sw), ["text"], "foreignObject goes, the SVG fallback stays");
+  assert.deepEqual(attrNames(sw), [], "requiredExtensions is stripped");
+  assert.deepEqual(attrNames(sw.children[0]), [], "systemLanguage is stripped");
 });
 
 test("scrub keeps url(#fragment) in presentation attributes", () => {

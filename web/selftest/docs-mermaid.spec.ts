@@ -213,38 +213,64 @@ flowchart LR
   F1 --> F2`;
   // A state diagram's `style` statement is raw CSS to end of line and lands
   // verbatim in the shape's style attribute — the one place a url() can hide
-  // behind characters a character-class scan skips (U+2028 below). The
-  // sanitizer must drop it so the page never gets to fetch what it names.
+  // behind characters a character-class scan skips (U+2028 below). Mermaid's
+  // own style handling keeps only the first declaration, so each statement
+  // carries exactly one: S1's is the hostile url() the sanitizer must strip,
+  // S2's benign fill is the control proving single declarations do reach
+  // the page (otherwise the probe would exercise nothing).
   const stateStyle = `stateDiagram-v2
   S1 --> S2
-  style S1 fill:#8ff;background:url(\u{2028}/af-mmd-probe/state-style.png)`;
+  style S1 background:url(\u{2028}/af-mmd-probe/state-style.png)
+  style S2 fill:#8ff`;
+  // Journey labels come out as <switch><foreignObject/><text/></switch> —
+  // the switch must survive so the SVG <text> fallback does.
+  const journey = `journey
+  title A shift
+  section Morning
+    Wake up: 5: Me
+    Coffee: 4: Me
+  section Evening
+    Sleep: 3: Me`;
   // The img-node fence goes FIRST: whatever it does — error or a hung render
   // — the plain and probe diagrams after it must still render, proving a
   // wedged queue can't take the renderer down until reload (N2).
   const pane = await openDocs(page, request, "mermaid-fetch-probe", "mermaid-fetch-plan", {
-    goals: `# Fetch probes\n\n${fence(imgNode)}\n\n${fence(DIAGRAM)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\n${fence(stateStyle)}\n\nEnd.\n`,
+    goals: `# Fetch probes\n\n${fence(imgNode)}\n\n${fence(DIAGRAM)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\n${fence(stateStyle)}\n\n${fence(journey)}\n\nEnd.\n`,
   });
   const widgets = pane.locator(".cm-md-mermaid");
   // Only the img-node widget may report an inline error (its fetch is denied
   // inside the frame); every other widget MUST render a real svg — an error
   // is not success.
   await expect(widgets.nth(0).locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 40_000 });
-  for (const i of [1, 2, 3, 4]) {
+  for (const i of [1, 2, 3, 4, 5]) {
     await expect(widgets.nth(i).locator("svg"), `widget ${i} must render`).toBeVisible({ timeout: 40_000 });
   }
   // The state diagram rendered — but its style statement's probe URL must
-  // have been scrubbed from whatever attribute or style block carried it.
-  const probeSurvivors = await widgets.nth(4).locator("svg").evaluate((root) => {
+  // have been scrubbed from whatever attribute or style block carried it,
+  // while S2's single benign declaration must have made it through (the
+  // control proving the probe exercised the sanitizer at all).
+  const stateSvg = widgets.nth(4).locator("svg");
+  const [probeSurvivors, controlHits] = await stateSvg.evaluate((root) => {
     const hits: string[] = [];
+    let control = 0;
     for (const el of [root, ...root.querySelectorAll("*")]) {
       for (const a of el.attributes) {
         if (a.value.includes("af-mmd-probe")) hits.push(`${el.tagName}@${a.name}`);
+        if (a.value.includes("#8ff")) control++;
       }
       if ((el.textContent ?? "").includes("af-mmd-probe")) hits.push(`${el.tagName}#text`);
     }
-    return hits;
+    return [hits, control] as const;
   });
   expect(probeSurvivors, "no element may carry the state style's probe URL").toEqual([]);
+  expect(controlHits, "a benign single-declaration style must reach the page").toBeGreaterThan(0);
+  // Journey: section/task names live in <switch>'s SVG <text> fallback —
+  // dropped wholesale before <switch> joined the keep list.
+  const journeySvg = widgets.nth(5).locator("svg");
+  await expect(journeySvg.locator("text").filter({ hasText: "Coffee" }).first(),
+    "journey task names must survive via the switch's text fallback").toBeVisible();
+  expect(await journeySvg.locator("foreignObject").count(),
+    "the foreignObject branch of every switch must still be dropped").toBe(0);
   // N1: the render frame's document must put the DNS-prefetch kill first —
   // anchor hosts inside label HTML are prefetched before CSP applies.
   const firstMeta = await page.evaluate(() => {

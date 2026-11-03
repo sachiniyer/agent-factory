@@ -46,7 +46,16 @@ const RENDER_FRAME_CSP =
 // chunk's serialized queue busy until reload.
 let renderFrame: HTMLIFrameElement | null = null;
 
+const OPEN_FRAME_TIMEOUT_MS = 30_000;
+// A frame that just failed to open is not retried inside this window —
+// otherwise every repaint would poll the whole open timeout again.
+const OPEN_RETRY_AFTER_MS = 30_000;
+let lastOpenFailedAt = 0;
+
 async function openRenderFrame(): Promise<MermaidChunk> {
+  if (Date.now() - lastOpenFailedAt < OPEN_RETRY_AFTER_MS) {
+    throw new Error("the mermaid render frame failed to open recently");
+  }
   const url = new URL("./mermaid.js", import.meta.url).href;
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
@@ -63,16 +72,21 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   renderFrame = frame;
   const w = frame.contentWindow;
   if (!w) {
+    lastOpenFailedAt = Date.now();
     dropRenderFrame();
     throw new Error("the mermaid render frame has no window");
   }
   // The chunk self-registers on the frame's window when its module executes;
   // a load failure only ever shows as a timeout, so a retry rebuilds it all.
-  for (let i = 0; i < 1200; i++) {
+  // The wait is a deadline, not an iteration count: timers can be throttled
+  // (background tab), and counting polls would stretch it without bound.
+  const deadline = Date.now() + OPEN_FRAME_TIMEOUT_MS;
+  while (Date.now() < deadline) {
     const api = (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk;
     if (api) return api;
     await new Promise((r) => setTimeout(r, 25));
   }
+  lastOpenFailedAt = Date.now();
   dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");
 }
@@ -201,7 +215,11 @@ const KEEP = new Set([
   "title", "desc",
   "clippath", "mask", "pattern",
   "lineargradient", "radialgradient", "stop",
-  "style", "image",
+  // <switch> keeps its children sanitized recursively: renderers (journey
+  // labels among them) pair a <foreignObject> with an SVG <text> fallback,
+  // and dropping the switch takes the fallback with it — the foreignObject
+  // branch still goes.
+  "style", "image", "switch",
 ]);
 
 const SVG_NS = "http://www.w3.org/2000/svg";
@@ -215,14 +233,16 @@ const SVG_NS = "http://www.w3.org/2000/svg";
 // diagram's own CSS never needs any of the rest, so one means the source was
 // hostile, not stylish.
 const HOSTILE_STYLE =
-  /image-set|\\|\/\*|@(?!keyframes\b)|expression|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+  /image-set|\\|\/\*|@(?!keyframes\b)|expression|javascript:|vbscript:|-moz-binding|behavior\s*:|\b(?:src|image|element|cross-fade)[ \t\n\r\f]*\(/i;
 
 // In an attribute value, image-set, backslash escapes, comment obfuscation
-// and the scriptable schemes are never legitimate. url() is checked per
-// occurrence instead — url(#...) is how markers, gradients and clips point at
-// each other inside the file, and any other argument means a fetch.
+// and the scriptable schemes are never legitimate — and neither are the
+// other CSS functions that name a load (image, element, src, cross-fade).
+// url() is checked per occurrence instead — url(#...) is how markers,
+// gradients and clips point at each other inside the file, and any other
+// argument means a fetch.
 const HOSTILE_ATTR_VALUE =
-  /image-set|\\|\/\*|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+  /image-set|\\|\/\*|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:|\b(?:src|image|element|cross-fade)[ \t\n\r\f]*\(/i;
 
 const CSS_WS = new Set([" ", "\t", "\n", "\r", "\f"]);
 
@@ -273,7 +293,13 @@ export function scrub(el: Element): void {
     // (evil:href, evil:onclick) get the same treatment as the plain names.
     const local = attr.localName.toLowerCase();
     const value = attr.value;
-    if (local.startsWith("on") || local === "srcdoc") {
+    if (local.startsWith("on") || local === "srcdoc" ||
+        // A <switch> picks its first child whose conditions pass — its
+        // conditional-processing attributes are dropped so the surviving
+        // child always renders; a diagram must not gate which of its own
+        // representations shows.
+        local === "requiredfeatures" || local === "requiredextensions" ||
+        local === "systemlanguage") {
       el.removeAttribute(attr.name);
     } else if (local === "href") {
       // Internal fragment refs (#id) stay, and <image> keeps inline raster
@@ -372,6 +398,11 @@ async function renderOne(source: string, theme: Record<string, string>): Promise
   }
 }
 
+// A source that timed out once is poison for the session: retrying a hung
+// render costs the whole timeout per repaint and holds every diagram queued
+// behind it, so the next ask fails fast instead.
+const timedOut = new Set<string>();
+
 function renderCached(source: string, mode: "light" | "dark", theme: Record<string, string>): Promise<string> {
   const key = mode + "\n" + source;
   const hit = svgCache.get(key);
@@ -380,8 +411,10 @@ function renderCached(source: string, mode: "light" | "dark", theme: Record<stri
     svgCache.set(key, hit);
     return hit;
   }
+  if (timedOut.has(key)) return Promise.reject(new RenderTimeoutError());
   const p = renderSerialized(source, theme).catch((e: unknown) => {
     svgCache.delete(key);
+    if (e instanceof RenderTimeoutError) timedOut.add(key);
     throw e;
   });
   svgCache.set(key, p);
