@@ -8,13 +8,15 @@
 // re-renders mounted diagrams on a light/dark flip.
 //
 // Proposals are partly agent-authored, so the diagram source is semi-trusted
-// and it renders inside the daemon's control origin. The chunk is initialized
-// with securityLevel 'strict' — mermaid encodes label HTML, ignores click
-// statements, and its `secure` list keeps %%{init}%% directives from undoing
-// any of that — and sanitizeSvg is the second, ours: it keeps only the SVG
-// vocabulary mermaid emits, so no <a>, <foreignObject>, <script>, event
-// attribute, external reference or SMIL animation survives a render. The
-// page's CSP (default-src 'self') is the third layer under both.
+// and it renders inside the daemon's control origin. Three layers, in render
+// order: mermaid runs inside a srcdoc iframe whose own CSP denies every load
+// the diagram names (images/fonts/connections — any origin), the chunk is
+// initialized with securityLevel 'strict' (mermaid DOMPurify-cleans label
+// HTML, ignores click statements, and `secure` keeps %%{init}%% directives
+// from undoing any of that or writing into generated CSS), and sanitizeSvg is
+// ours: it keeps only the SVG vocabulary mermaid emits, so no <a>,
+// <foreignObject>, <script>, event attribute, external reference or SMIL
+// animation survives a render. The page's CSP is the last layer under all.
 
 import type { EditorView } from "@codemirror/view";
 import { WidgetType } from "@codemirror/view";
@@ -35,9 +37,14 @@ let chunk: Promise<MermaidChunk> | null = null;
 // default-src. The only thing that leaves the frame is the svg string.
 const RENDER_FRAME_CSP =
   "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
-  "img-src 'none'; font-src 'none'; connect-src 'none'; media-src 'none'; " +
+  "img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; " +
   "object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; " +
   "manifest-src 'none'; base-uri 'none'; form-action 'none'";
+
+// The frame lives as long as the page does, unless a render out-waits us —
+// see renderWithTimeout, which tears it down so a hung render can't keep the
+// chunk's serialized queue busy until reload.
+let renderFrame: HTMLIFrameElement | null = null;
 
 async function openRenderFrame(): Promise<MermaidChunk> {
   const url = new URL("./mermaid.js", import.meta.url).href;
@@ -45,24 +52,28 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;
   frame.style.cssText = "position:fixed;left:-200vw;top:-200vh;width:1px;height:1px;border:0";
+  // The DNS-prefetch meta MUST be first: browsers prefetch anchor hosts that
+  // reach the frame inside label HTML, and CSP does not govern prefetch.
   frame.srcdoc =
-    `<!doctype html><meta charset="utf-8">` +
+    `<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">` +
+    `<meta charset="utf-8">` +
     `<meta http-equiv="Content-Security-Policy" content="${RENDER_FRAME_CSP}">` +
     `<script type="module" src="${url}"><\/script>`;
   document.body.appendChild(frame);
+  renderFrame = frame;
   const w = frame.contentWindow;
   if (!w) {
-    frame.remove();
+    dropRenderFrame();
     throw new Error("the mermaid render frame has no window");
   }
   // The chunk self-registers on the frame's window when its module executes;
   // a load failure only ever shows as a timeout, so a retry rebuilds it all.
-  for (let i = 0; i < 400; i++) {
+  for (let i = 0; i < 1200; i++) {
     const api = (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk;
     if (api) return api;
     await new Promise((r) => setTimeout(r, 25));
   }
-  frame.remove();
+  dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");
 }
 
@@ -75,6 +86,15 @@ function loadMermaidChunk(): Promise<MermaidChunk> {
     });
   }
   return chunk;
+}
+
+/** Removes the render frame and forgets the chunk, so the next render opens a
+ *  fresh frame — and a fresh mermaid, whose serialized render queue is not
+ *  stuck behind whatever hung the last one. */
+function dropRenderFrame(): void {
+  renderFrame?.remove();
+  renderFrame = null;
+  chunk = null;
 }
 
 /** The mode af paints in — the same rule theme.ts's currentMode() applies,
@@ -204,7 +224,7 @@ const HOSTILE_STYLE =
 const HOSTILE_ATTR_VALUE =
   /image-set|\\|\/\*|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
 
-const CSS_URL_ARG = /url\s*\(\s*['"]?\s*(.)/gi;
+const CSS_URL_ARG = /url[ \t\n\r\f]*\([ \t\n\r\f]*['"]?[ \t\n\r\f]*(.)/gi;
 
 /** True when a value holds a url() whose target is anything but #fragment —
  *  a fetch the diagram chose. (A regex lookahead can't express this: the
@@ -241,10 +261,14 @@ export function scrub(el: Element): void {
       el.removeAttribute(attr.name);
     } else if (local === "href") {
       // Internal fragment refs (#id) stay, and <image> keeps inline raster
-      // data — a link out of the file does not. Only <image> may carry data:;
-      // on <use> it can name a whole second document.
-      const v = value.trim().toLowerCase();
-      const ok = v.startsWith("#") || (el.localName.toLowerCase() === "image" && v.startsWith("data:image/"));
+      // data — a link out of the file does not. Only <image> may carry data:,
+      // only the raster types a renderer legitimately emits. The trim is C0
+      // control and space only — what the URL parser strips — not JS trim(),
+      // which also strips unicode spaces a URL would keep, hiding the true
+      // first character from the # check.
+      const v = value.replace(/^[\x00-\x20]+|[\x00-\x20]+$/g, "").toLowerCase();
+      const ok = v.startsWith("#") ||
+        (el.localName.toLowerCase() === "image" && /^data:image\/(png|gif|jpeg|webp);base64,/.test(v));
       if (!ok) el.removeAttribute(attr.name);
     } else if (HOSTILE_ATTR_VALUE.test(value) || hasExternalCssUrl(value)) {
       el.removeAttribute(attr.name);
@@ -286,6 +310,27 @@ const live = new Map<HTMLElement, DiagramHandle>();
 const svgCache = new Map<string, Promise<string>>();
 const SVG_CACHE_MAX = 32;
 
+class RenderTimeoutError extends Error {
+  constructor() {
+    super("render timed out");
+  }
+}
+
+const RENDER_TIMEOUT_MS = 20_000;
+
+/** Renders with a parent-side timer: mermaid serializes renders through its
+ *  own queue inside the frame, so a render that never settles — a denied load
+ *  can hang it — would keep every later diagram waiting until reload. On
+ *  timeout the whole frame is torn down (dropRenderFrame), so the next paint
+ *  opens a fresh frame with an unstuck queue. */
+function renderWithTimeout(m: MermaidChunk, source: string): Promise<string> {
+  return Promise.race([
+    m.renderMermaidDiagram(source, mermaidThemeVars()),
+    new Promise<never>((_, reject) =>
+      setTimeout(() => reject(new RenderTimeoutError()), RENDER_TIMEOUT_MS)),
+  ]);
+}
+
 function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
   const key = mode + "\n" + source;
   const hit = svgCache.get(key);
@@ -295,8 +340,9 @@ function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
     return hit;
   }
   const p = loadMermaidChunk()
-    .then((m) => m.renderMermaidDiagram(source, mermaidThemeVars()))
+    .then((m) => renderWithTimeout(m, source))
     .catch((e: unknown) => {
+      if (e instanceof RenderTimeoutError) dropRenderFrame();
       svgCache.delete(key);
       throw e;
     });

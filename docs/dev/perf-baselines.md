@@ -99,10 +99,10 @@ under the `perf-baselines` artifact.
 | --- | ---: | ---: | ---: | ---: |
 | raw_bytes | 1377536.000 | 1377536.000–1377536.000 | 0.000 | 1446412.800 |
 | gzip_bytes | 315696.000 | 315696.000–315696.000 | 0.000 | 331480.800 |
-| lazy_raw_bytes | 377447.000 | 377447.000–377447.000 | 0.000 | 396319.350 |
-| lazy_gzip_bytes | 122810.000 | 122810.000–122810.000 | 0.000 | 128950.500 |
-| mermaid_raw_bytes | 5187783.000 | 5187783.000–5187783.000 | 0.000 | 5447172.150 |
-| mermaid_gzip_bytes | 1512610.000 | 1512610.000–1512610.000 | 0.000 | 1588240.500 |
+| lazy_raw_bytes | 377824.000 | 377824.000–377824.000 | 0.000 | 396715.200 |
+| lazy_gzip_bytes | 123001.000 | 123001.000–123001.000 | 0.000 | 129151.050 |
+| mermaid_raw_bytes | 5187694.000 | 5187694.000–5187694.000 | 0.000 | 5447078.700 |
+| mermaid_gzip_bytes | 1512569.000 | 1512569.000–1512569.000 | 0.000 | 1588197.450 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -151,9 +151,9 @@ baseline x 0.05, same as the other byte budgets. Not recorded with
 The same refresh moves `raw_bytes` to 1,377,536 (master's committed dist at
 `ea1b463514` was already 1,376,749 — the recorded 1,364,595 predated it — and
 the new `.cm-md-mermaid` CSS adds 787), `gzip_bytes` to 315,696 (master 315,607
-+89), `lazy_raw_bytes` to 377,447 (master 371,254 +6,193 of widget, frame
++89), `lazy_raw_bytes` to 377,824 (master 371,254 +6,570 of widget, frame
 loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
-122,810 (120,175 +2,635). Every timing and layout-shift baseline is unchanged.
+123,001 (120,175 +2,826). Every timing and layout-shift baseline is unchanged.
 
 ### Lazy bundle provenance (proposal Docs tab)
 

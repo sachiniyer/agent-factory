@@ -93,10 +93,23 @@ test("scrub href keeps #fragments, drops everything else, by local name", () => 
   assert.deepEqual(attrNames(use), ["href"]);
 });
 
-test("scrub href keeps data:image only on <image>", () => {
+test("scrub href trims only URL whitespace, so unicode-space tricks fail (N5)", () => {
+  // A URL parser strips C0 controls and space, not unicode spaces: "%A0#x"
+  // is not a fragment ref, and "%A0javascript:" is not a scheme — but both
+  // are a fetch the diagram chose, so both go.
+  const use = scrubbed(el("use", [
+    attr("href", "\u00a0#x"),
+    attr("xlink:href", "\u00a0javascript:x()", "href"),
+  ]));
+  assert.deepEqual(attrNames(use), []);
+});
+
+test("scrub href keeps raster data:image only on <image> (N5)", () => {
   const img = scrubbed(el("image", [attr("href", "data:image/png;base64,AAAA")]));
-  const use = scrubbed(el("use", [attr("href", "data:image/svg+xml;base64,AAAA")]));
+  const svgImg = scrubbed(el("image", [attr("href", "data:image/svg+xml;base64,AAAA")]));
+  const use = scrubbed(el("use", [attr("href", "data:image/png;base64,AAAA")]));
   assert.deepEqual(attrNames(img), ["href"]);
+  assert.deepEqual(attrNames(svgImg), [], "svg payloads are not rasters");
   assert.deepEqual(attrNames(use), []);
 });
 
@@ -105,6 +118,7 @@ test("scrub drops attributes carrying URLs, escapes or scriptable schemes (B2)",
     ["url external", "fill", "url(https://mmd.invalid/x.png)"],
     ["url same-origin", "fill", "url(/af-mmd-probe/x.png)"],
     ["url relative", "fill", "url(assets/x.png)"],
+    ["url unicode-space padded", "fill", "url(\u00a0#x)"],
     ["image-set", "style", "background: image-set('/af-mmd-probe/x.png' 1x)"],
     ["-webkit-image-set", "style", "background: -webkit-image-set(url('/x.png') 1x)"],
     ["backslash escape", "style", "background: u\\72l('/af-mmd-probe/x.png')"],

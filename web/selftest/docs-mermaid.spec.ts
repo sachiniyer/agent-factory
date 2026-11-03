@@ -112,13 +112,34 @@ function diagramChosen(url: string, pageUrl: string): boolean {
 
 // Chromium fires "request" for a load the render frame's CSP then denies —
 // requestWillBeSent precedes the block — so a request event alone is not a
-// leak: only one that COMPLETES reached the wire. Track finished URLs and
-// failed URLs separately.
-function watchRequests(page: Page): { finished: Set<string>; failed: Set<string> } {
-  const finished = new Set<string>(), failed = new Set<string>();
+// leak. But neither is finished-only: a failed or aborted fetch can still
+// have reached the wire (DNS, connect). A request counts as denied only when
+// its failure errorText says blocked, or a CSP-violation console message
+// names its URL.
+function watchRequests(page: Page): { finished: Set<string>; failed: Map<string, string>; cspDenied: Set<string> } {
+  const finished = new Set<string>();
+  const failed = new Map<string, string>();
+  const cspDenied = new Set<string>();
   page.on("requestfinished", (r) => finished.add(r.url()));
-  page.on("requestfailed", (r) => failed.add(r.url()));
-  return { finished, failed };
+  page.on("requestfailed", (r) => failed.set(r.url(), r.failure()?.errorText ?? ""));
+  page.on("console", (m) => {
+    const text = m.text();
+    if (text.includes("Content Security Policy")) {
+      const url = text.match(/'(https?:[^']+)'/);
+      if (url) cspDenied.add(url[1]);
+    }
+  });
+  return { finished, failed, cspDenied };
+}
+
+/** True when a diagram-chosen request actually reached the wire — completed,
+ * or failed/aborted without evidence the frame's CSP refused it. */
+function leaked(u: string, pageUrl: string, w: ReturnType<typeof watchRequests>): boolean {
+  if (!diagramChosen(u, pageUrl)) return false;
+  if (w.finished.has(u)) return true;
+  const err = w.failed.get(u);
+  if (err === undefined) return true; // attempted, still in flight — not denied
+  return !/blocked/i.test(err) && !w.cspDenied.has(u);
 }
 
 test("docs mermaid: click callbacks, javascript: links and HTML labels render inert", async ({ page, request }) => {
@@ -161,7 +182,7 @@ flowchart LR
   }
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   expect(dialogs, "no dialog may come out of a diagram").toEqual([]);
-  const chosen = requests.filter((u) => diagramChosen(u, page.url()) && finished.has(u));
+  const chosen = requests.filter((u) => leaked(u, page.url(), { finished, failed: new Map(), cspDenied: new Set() }));
   expect(chosen, "a diagram may not make the browser fetch anything it names").toEqual([]);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
@@ -179,7 +200,7 @@ test("docs mermaid: a render cannot make the browser ask for anything the diagra
   const imgNode = `flowchart LR
   P@{ img: "/af-mmd-probe/img-node.png", label: "img", w: 40, h: 40, constraint: "off" }
   P --> Q["node"]`;
-  const directive = `%%{init: {"fontFamily": "x; background: url(/af-mmd-probe/font-directive.png);"}}}%%
+  const directive = `%%{init: {"fontFamily": "x; background: url(/af-mmd-probe/font-directive.png);"}}%%
 flowchart LR
   D1 --> D2`;
   const frontmatter = `---
@@ -188,26 +209,36 @@ config:
 ---
 flowchart LR
   F1 --> F2`;
+  // The img-node fence goes FIRST: whatever it does — error or a hung render
+  // — the plain and probe diagrams after it must still render, proving a
+  // wedged queue can't take the renderer down until reload (N2).
   const pane = await openDocs(page, request, "mermaid-fetch-probe", "mermaid-fetch-plan", {
-    goals: `# Fetch probes\n\n${fence(DIAGRAM)}\n\n${fence(imgNode)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\nEnd.\n`,
+    goals: `# Fetch probes\n\n${fence(imgNode)}\n\n${fence(DIAGRAM)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\nEnd.\n`,
   });
   const widgets = pane.locator(".cm-md-mermaid");
-  await expect(widgets.first().locator("svg")).toBeVisible({ timeout: 30_000 });
-  // Each widget either rendered an svg or reported inline — the img node
-  // errors, its fetch denied by the frame's CSP. Either way nothing may
-  // have fetched, same-origin included.
-  for (const w of await widgets.all()) {
-    await expect(w.locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 30_000 });
+  // Only the img-node widget may report an inline error (its fetch is denied
+  // inside the frame); every other widget MUST render a real svg — an error
+  // is not success.
+  await expect(widgets.nth(0).locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 40_000 });
+  for (const i of [1, 2, 3]) {
+    await expect(widgets.nth(i).locator("svg"), `widget ${i} must render`).toBeVisible({ timeout: 40_000 });
   }
-  // No diagram-chosen URL may reach the wire: requests the frame's CSP
-  // denied show up as failed attempts, never as finished ones.
-  const leaked = requests.filter((u) => diagramChosen(u, page.url()) && finished.has(u));
-  expect(leaked, "zero diagram-chosen requests reached the wire, same-origin counted").toEqual([]);
+  // N1: the render frame's document must put the DNS-prefetch kill first —
+  // anchor hosts inside label HTML are prefetched before CSP applies.
+  const firstMeta = await page.evaluate(() => {
+    const f = [...document.querySelectorAll("iframe")].find((el) => el.srcdoc.includes("x-dns-prefetch-control"));
+    return f?.contentDocument?.head?.firstElementChild?.outerHTML ?? null;
+  });
+  expect(firstMeta, "the x-dns-prefetch-control meta must be the frame's first element")
+    .toContain('http-equiv="x-dns-prefetch-control"');
+  // No diagram-chosen URL may reach the wire.
+  const leakedUrls = requests.filter((u) => leaked(u, page.url(), { finished, failed, cspDenied }));
+  expect(leakedUrls, "zero diagram-chosen requests reached the wire, same-origin counted").toEqual([]);
   // And the img-node probe must show its fetch attempted and denied — proof
   // the frame's CSP engaged, not that the code path never ran.
   const imgProbe = new URL("/af-mmd-probe/img-node.png", page.url()).href;
   expect(
-    requests.includes(imgProbe) && failed.has(imgProbe) && !finished.has(imgProbe),
+    requests.includes(imgProbe) && (failed.has(imgProbe) || cspDenied.has(imgProbe)) && !finished.has(imgProbe),
     "the img-node load must be attempted and denied by the render frame's CSP",
   ).toBe(true);
   await expect(pane.locator(".cm-content")).toContainText("End.");
