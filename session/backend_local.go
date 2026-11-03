@@ -384,6 +384,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			if cleanupErr != nil {
 				err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 			}
+			if cleanupState == git.CleanupSettled {
+				// The failed create's record is going away — its setup
+				// payload (#6667) would linger under the AF home forever.
+				i.discardLocalSetupPayload()
+			}
 			setupErr = fmt.Errorf("failed to start new session: %w", err)
 			if cleanupState != git.CleanupSettled {
 				setupErr = fmt.Errorf("%w: %w at %s", setupErr, ErrWorkspaceLeftBehind, gw.GetWorktreePath())

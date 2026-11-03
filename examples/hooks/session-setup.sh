@@ -12,7 +12,9 @@
 #       AF_SETUP_DEST        payload staging dir — files left here are copied
 #                            into the fresh worktree before hooks run. LOCAL
 #                            path for a local session; a path ON THE SESSION'S
-#                            HOST for a remote one (use the ssh route below)
+#                            HOST for a remote one with an ssh route (use the
+#                            route below); a daemon-local path af transports
+#                            itself when no AF_SSH route is exported (docker)
 #       AF_SETUP_MODE        "local" | "remote"
 #       AF_SETUP_HOST        the picked host name, when the session has one
 #       AF_SSH               ssh command WITHOUT the destination (options only)
@@ -42,20 +44,23 @@ WANTED_FILES="config/dev.local.yml"
 
 # copy_in SRC copies one source file into the payload staging dir, preserving
 # its path below the checkout root so the overlay lands it in the same place.
+# When no AF_SSH route is exported (local sessions, and off-box runtimes with
+# no ssh transport such as docker), AF_SETUP_DEST is a daemon-local path af
+# transports itself — plain file operations are the whole contract.
 copy_in() {
     rel=$1
     src=$AF_SETUP_SOURCE/$rel
     [ -f "$src" ] || return 0
-    if [ "$AF_SETUP_MODE" = "local" ]; then
-        mkdir -p "$AF_SETUP_DEST/$(dirname "$rel")"
-        cp -p "$src" "$AF_SETUP_DEST/$rel"
-    elif [ -n "${AF_SSH_DEST:-}" ]; then
+    if [ -n "${AF_SSH_DEST:-}" ] && [ -n "${AF_SSH:-}" ]; then
         af_ssh "$AF_SSH_DEST" "mkdir -p '$AF_SETUP_DEST/$(dirname "$rel")'"
         rsync -a -e "$AF_SSH" "$src" "$AF_SSH_DEST:$AF_SETUP_DEST/$rel"
-    else
+    elif [ -n "${AF_SSH_FULL:-}" ]; then
         # Free-form transport: rsync -e cannot be used, so pipe tar over
         # AF_SSH_FULL the way move_cmd documents.
         tar -C "$AF_SETUP_SOURCE" -cf - "$rel" | af_ssh_full "tar -C '$AF_SETUP_DEST' -xf -"
+    else
+        mkdir -p "$AF_SETUP_DEST/$(dirname "$rel")"
+        cp -p "$src" "$AF_SETUP_DEST/$rel"
     fi
 }
 
@@ -75,13 +80,13 @@ for rel in $WANTED_FILES; do
 done
 
 # 3. A command run on the host — the generic half of the hook. Local sessions
-# run it here; remote sessions run it through the session's own connection.
+# run it here; sessions with an ssh route run it through the session's own
+# connection. An off-box runtime with no ssh route (docker) exposes no host
+# command channel, so there is nothing to run it through.
 if [ "$AF_SETUP_MODE" = "local" ]; then
     mkdir -p "$HOME/.cache/myapp"
-else
-    if [ -n "${AF_SSH_DEST:-}" ]; then
-        af_ssh "$AF_SSH_DEST" "mkdir -p \"\$HOME/.cache/myapp\""
-    else
-        af_ssh_full "mkdir -p \"\$HOME/.cache/myapp\""
-    fi
+elif [ -n "${AF_SSH_DEST:-}" ] && [ -n "${AF_SSH:-}" ]; then
+    af_ssh "$AF_SSH_DEST" "mkdir -p \"\$HOME/.cache/myapp\""
+elif [ -n "${AF_SSH_FULL:-}" ]; then
+    af_ssh_full "mkdir -p \"\$HOME/.cache/myapp\""
 fi
