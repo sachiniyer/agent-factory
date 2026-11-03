@@ -134,6 +134,26 @@ test("scrub drops attributes carrying URLs, escapes or scriptable schemes (B2)",
   }
 });
 
+test("scrub drops url() arguments a character-class scan would skip (B1)", () => {
+  // JS `.` excludes U+2028/U+2029 but CSS treats them as ordinary URL
+  // characters — a regex scan steps over the occurrence and the value
+  // survives whole. The string-scan must find them, quoted and not.
+  const cases: [string, string][] = [
+    ["unquoted U+2028", "background:url(\u2028/af-mmd-probe/x.png)"],
+    ["unquoted U+2029", "background:url(\u2029/af-mmd-probe/x.png)"],
+    ["quoted U+2028", "background:url('\u2028/af-mmd-probe/x.png')"],
+    ["quoted U+2029", 'background:url("\u2029/af-mmd-probe/x.png")'],
+    ["padded U+2028", "background:url( \u2028/af-mmd-probe/x.png)"],
+    ["U+2028 before a fragment — still not #", "background:url(\u2028#x)"],
+  ];
+  for (const [label, value] of cases) {
+    const e = scrubbed(el("rect", [attr("style", value)]));
+    assert.deepEqual(attrNames(e), [], `${label} must be dropped`);
+    const root = scrubbed(el("svg", [], [el("style", [], [], `.a{${value}}`), el("g")]));
+    assert.deepEqual(kidNames(root), ["g"], `${label} must drop the whole block`);
+  }
+});
+
 test("scrub keeps url(#fragment) in presentation attributes", () => {
   const e = scrubbed(el("path", [
     attr("fill", "url(#grad)"),

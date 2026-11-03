@@ -139,7 +139,9 @@ function leaked(u: string, pageUrl: string, w: ReturnType<typeof watchRequests>)
   if (w.finished.has(u)) return true;
   const err = w.failed.get(u);
   if (err === undefined) return true; // attempted, still in flight — not denied
-  return !/blocked/i.test(err) && !w.cspDenied.has(u);
+  // ERR_BLOCKED_BY_CSP exactly — the looser /blocked/i would excuse
+  // ERR_BLOCKED_BY_ORB, _RESPONSE and _CLIENT, which are real network events.
+  return !/ERR_BLOCKED_BY_CSP/.test(err) && !w.cspDenied.has(u);
 }
 
 test("docs mermaid: click callbacks, javascript: links and HTML labels render inert", async ({ page, request }) => {
@@ -209,20 +211,40 @@ config:
 ---
 flowchart LR
   F1 --> F2`;
+  // A state diagram's `style` statement is raw CSS to end of line and lands
+  // verbatim in the shape's style attribute — the one place a url() can hide
+  // behind characters a character-class scan skips (U+2028 below). The
+  // sanitizer must drop it so the page never gets to fetch what it names.
+  const stateStyle = `stateDiagram-v2
+  S1 --> S2
+  style S1 fill:#8ff;background:url(\u{2028}/af-mmd-probe/state-style.png)`;
   // The img-node fence goes FIRST: whatever it does — error or a hung render
   // — the plain and probe diagrams after it must still render, proving a
   // wedged queue can't take the renderer down until reload (N2).
   const pane = await openDocs(page, request, "mermaid-fetch-probe", "mermaid-fetch-plan", {
-    goals: `# Fetch probes\n\n${fence(imgNode)}\n\n${fence(DIAGRAM)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\nEnd.\n`,
+    goals: `# Fetch probes\n\n${fence(imgNode)}\n\n${fence(DIAGRAM)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\n${fence(stateStyle)}\n\nEnd.\n`,
   });
   const widgets = pane.locator(".cm-md-mermaid");
   // Only the img-node widget may report an inline error (its fetch is denied
   // inside the frame); every other widget MUST render a real svg — an error
   // is not success.
   await expect(widgets.nth(0).locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 40_000 });
-  for (const i of [1, 2, 3]) {
+  for (const i of [1, 2, 3, 4]) {
     await expect(widgets.nth(i).locator("svg"), `widget ${i} must render`).toBeVisible({ timeout: 40_000 });
   }
+  // The state diagram rendered — but its style statement's probe URL must
+  // have been scrubbed from whatever attribute or style block carried it.
+  const probeSurvivors = await widgets.nth(4).locator("svg").evaluate((root) => {
+    const hits: string[] = [];
+    for (const el of [root, ...root.querySelectorAll("*")]) {
+      for (const a of el.attributes) {
+        if (a.value.includes("af-mmd-probe")) hits.push(`${el.tagName}@${a.name}`);
+      }
+      if ((el.textContent ?? "").includes("af-mmd-probe")) hits.push(`${el.tagName}#text`);
+    }
+    return hits;
+  });
+  expect(probeSurvivors, "no element may carry the state style's probe URL").toEqual([]);
   // N1: the render frame's document must put the DNS-prefetch kill first —
   // anchor hosts inside label HTML are prefetched before CSP applies.
   const firstMeta = await page.evaluate(() => {
@@ -241,5 +263,15 @@ flowchart LR
     requests.includes(imgProbe) && (failed.has(imgProbe) || cspDenied.has(imgProbe)) && !finished.has(imgProbe),
     "the img-node load must be attempted and denied by the render frame's CSP",
   ).toBe(true);
+  // Same for the state-style probe: the frame may attempt it while the svg
+  // sits in the frame's scratch, but it must be denied there and never
+  // complete — the page copy carries no trace of it at all (checked above).
+  const styleProbe = new URL("/af-mmd-probe/state-style.png", page.url()).href;
+  if (requests.includes(styleProbe)) {
+    expect(
+      (failed.has(styleProbe) || cspDenied.has(styleProbe)) && !finished.has(styleProbe),
+      "the state-style load, if attempted, must be denied by the render frame's CSP",
+    ).toBe(true);
+  }
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });

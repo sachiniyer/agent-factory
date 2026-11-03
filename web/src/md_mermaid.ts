@@ -42,7 +42,7 @@ const RENDER_FRAME_CSP =
   "manifest-src 'none'; base-uri 'none'; form-action 'none'";
 
 // The frame lives as long as the page does, unless a render out-waits us —
-// see renderWithTimeout, which tears it down so a hung render can't keep the
+// see renderOne, which tears it down so a hung render can't keep the
 // chunk's serialized queue busy until reload.
 let renderFrame: HTMLIFrameElement | null = null;
 
@@ -224,13 +224,29 @@ const HOSTILE_STYLE =
 const HOSTILE_ATTR_VALUE =
   /image-set|\\|\/\*|expression\s*\(|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
 
-const CSS_URL_ARG = /url[ \t\n\r\f]*\([ \t\n\r\f]*['"]?[ \t\n\r\f]*(.)/gi;
+const CSS_WS = new Set([" ", "\t", "\n", "\r", "\f"]);
 
 /** True when a value holds a url() whose target is anything but #fragment —
- *  a fetch the diagram chose. (A regex lookahead can't express this: the
- *  whitespace/quote skip would backtrack and let url( match alone.) */
+ *  a fetch the diagram chose. Plain string scan, not a regex: no occurrence
+ *  may be skipped. A `(.)` capture misses U+2028/U+2029 (`.` excludes line
+ *  separators, but CSS treats them as ordinary URL characters), which let
+ *  url(\u2028/…) slip through a character-class scan entirely. */
 function hasExternalCssUrl(value: string): boolean {
-  for (const m of value.matchAll(CSS_URL_ARG)) if (m[1] !== "#") return true;
+  const v = value.toLowerCase();
+  let i = v.indexOf("url");
+  while (i !== -1) {
+    let j = i + 3;
+    while (CSS_WS.has(v[j])) j++;
+    if (v[j] !== "(") {
+      i = v.indexOf("url", j);
+      continue;
+    }
+    j++;
+    while (CSS_WS.has(v[j])) j++;
+    if (v[j] === '"' || v[j] === "'") j++;
+    if (v[j] !== "#") return true;
+    i = v.indexOf("url", j);
+  }
   return false;
 }
 
@@ -318,17 +334,42 @@ class RenderTimeoutError extends Error {
 
 const RENDER_TIMEOUT_MS = 20_000;
 
-/** Renders with a parent-side timer: mermaid serializes renders through its
- *  own queue inside the frame, so a render that never settles — a denied load
- *  can hang it — would keep every later diagram waiting until reload. On
- *  timeout the whole frame is torn down (dropRenderFrame), so the next paint
- *  opens a fresh frame with an unstuck queue. */
-function renderWithTimeout(m: MermaidChunk, source: string): Promise<string> {
-  return Promise.race([
-    m.renderMermaidDiagram(source, mermaidThemeVars()),
-    new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new RenderTimeoutError()), RENDER_TIMEOUT_MS)),
-  ]);
+// One render in flight, serialized in the PARENT: the chunk keeps its own
+// queue too, but a per-render timeout can only be fair here — a timer that
+// started at enqueue would share a slow diagram's deadline with every
+// diagram queued behind it.
+let renderQueue: Promise<unknown> = Promise.resolve();
+
+function renderSerialized(source: string): Promise<string> {
+  const job = renderQueue.then(() => renderOne(source));
+  renderQueue = job.catch(() => {});
+  return job;
+}
+
+/** Dispatches one render on the current frame with the timeout running.
+ *  On timeout the frame is torn down — but only if it is still the frame
+ *  this render was dispatched on, so a dead frame's late timer can never
+ *  kill a healthier replacement. The timer is cleared on settle so success
+ *  carries no pending teardown. */
+async function renderOne(source: string): Promise<string> {
+  const m = await loadMermaidChunk();
+  const frame = renderFrame;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    return await Promise.race([
+      m.renderMermaidDiagram(source, mermaidThemeVars()),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new RenderTimeoutError()), RENDER_TIMEOUT_MS);
+      }),
+    ]);
+  } catch (e) {
+    if (e instanceof RenderTimeoutError && renderFrame === frame) {
+      dropRenderFrame();
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
 }
 
 function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
@@ -339,13 +380,10 @@ function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
     svgCache.set(key, hit);
     return hit;
   }
-  const p = loadMermaidChunk()
-    .then((m) => renderWithTimeout(m, source))
-    .catch((e: unknown) => {
-      if (e instanceof RenderTimeoutError) dropRenderFrame();
-      svgCache.delete(key);
-      throw e;
-    });
+  const p = renderSerialized(source).catch((e: unknown) => {
+    svgCache.delete(key);
+    throw e;
+  });
   svgCache.set(key, p);
   if (svgCache.size > SVG_CACHE_MAX) {
     svgCache.delete(svgCache.keys().next().value as string);
