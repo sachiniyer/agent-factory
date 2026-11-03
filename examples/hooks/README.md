@@ -26,7 +26,7 @@ output log, like a `post_worktree_commands` failure.
 | `AF_SETUP_SOURCE` | The session's source checkout on the daemon (also the working directory) |
 | `AF_SETUP_MODE` | `local` or `remote` |
 | `AF_SETUP_HOST` | The picked host name, when the session has one |
-| `AF_SETUP_DEST` | Payload staging dir — its contents are copied into the fresh worktree before hooks run. Local path for a local session; a path on the session's host for a remote one |
+| `AF_SETUP_DEST` | Payload staging dir — its contents are copied into the fresh worktree before hooks run. A daemon-local path when no `AF_SSH` route is exported (every local session, and off-box runtimes with no ssh transport such as `backend = "docker"`); a path on the session's host for a remote session with an ssh route |
 | `AF_SSH` | ssh command **without** the destination — the form `rsync -e` wants (remote, af-composed transports only) |
 | `AF_SSH_DEST` | The destination (`user@host` or alias) |
 | `AF_SSH_FULL` | The complete ssh command — always set when a transport exists, and the only ssh variable for a free-form `sandbox.ssh` command |
