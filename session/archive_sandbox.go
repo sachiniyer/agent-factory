@@ -516,6 +516,14 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		SessionEnvPassthrough:          i.sessionEnvPassthrough,
 		ProvisionSessionEnvPassthrough: spec.SessionEnvPassthrough,
 	}, spec.RepoRoot, kind, res.Backend, adopt != nil)
+	if adopt != nil {
+		// The adopt marker makes the hook a no-op, so res carries "" — and
+		// binding it verbatim would erase the note the ORIGINAL provision
+		// recorded. A reattach provisions nothing new, so its prior note is
+		// still the truth: pass it back in, the same carry-forward #6337
+		// gives agentConfigSkipped on the identical bind.
+		res.SetupHookFailed = i.SetupHookFailed()
+	}
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
 	if bindErr := i.bindProvisionResult(res); bindErr != nil {

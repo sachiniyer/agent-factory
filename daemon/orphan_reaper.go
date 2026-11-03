@@ -16,6 +16,15 @@ var sweepOrphanContainers = session.SweepOrphanContainers
 // generation for this home leaked (#5564). Package-level for the same reason.
 var sweepOrphanSandboxTunnels = session.SweepOrphanSandboxTunnels
 
+// sweepStaleSetupPayloads removes af-setup/<id> staging dirs whose session id
+// has no remaining handle — payloads a ghost kill, a post-hook create
+// failure, or a dead daemon generation dropped without reclaiming (#6674
+// review). It runs through the same deferred path as the container sweep:
+// the skipped-repos defer applies identically, since an incomplete session
+// view cannot distinguish a stale payload from one a live rebuild still
+// consumes. Package-level so tests can stub the filesystem work.
+var sweepStaleSetupPayloads = session.SweepStaleSetupPayloads
+
 // stopSandboxTunnels stops every live sandbox tunnel this daemon spawned.
 // Registered as a RunDaemon defer at manager construction so every exit path —
 // SIGTERM, the Shutdown RPC, an early warm-up return — runs it. A session's own
@@ -134,12 +143,17 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	manager.deferredOrphanSweepArmed = false
 	// Collect the protected slugs inline under the already-held m.mu (a factored
 	// helper would acquire m.mu itself) so the snapshot and the sweep stay in
-	// lockstep under createSweepMu.
+	// lockstep under createSweepMu. The setup-payload keep set is built in the
+	// same breath — it is complete exactly when the slug set is, and incomplete
+	// exactly when it is not.
 	titles := make([]string, 0, len(manager.instances)+len(manager.pendingCreates))
+	keepIDs := make(map[string]bool, len(manager.instances)+len(manager.pendingCreates))
 	for _, inst := range manager.instances {
 		titles = append(titles, inst.Title)
+		keepIDs[inst.ID] = true
 	}
 	for key, pending := range manager.pendingCreates {
+		keepIDs[pending.ID] = true
 		if _, settled := manager.instances[key]; settled {
 			continue
 		}
@@ -152,6 +166,7 @@ func runDeferredOrphanSweepIfReady(manager *Manager) {
 	log.InfoLog.Printf("orphan sweep: running the deferred destructive pass; every skipped repo's instances.json now parses AND its rows re-materialize, so the protected set is complete.")
 	manager.mu.Unlock()
 	sweepOrphanContainers(homeID, slugs)
+	sweepStaleSetupPayloads(keepIDs)
 }
 
 // launchDeferredOrphanSweepIfReady starts the deferred orphan sweep on a

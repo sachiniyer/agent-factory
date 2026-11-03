@@ -27,7 +27,11 @@ import (
 // written. The safety lives in the copy itself: it never overwrites, it
 // refuses to merge through a non-directory destination, and it reproduces
 // symlinks rather than following them — no read ever leaves the staging dir
-// through a link the payload planted.
+// through a link the payload planted. The check-then-read gap does not
+// reopen that: a concurrent writer could swap a link in between the lstat
+// and the open, which would still be harmless here — the copy runs under the
+// same uid as anything that can write the tree, and a same-uid writer could
+// always write the worktree files directly instead of gaming the copy.
 func (g *GitWorktree) applySetupOverlay() {
 	dir := strings.TrimSpace(g.setupOverlayDir)
 	if dir == "" {

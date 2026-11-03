@@ -421,14 +421,17 @@ func TestTransferDockerSetupPayloadChownsToSessionUser(t *testing.T) {
 }
 
 // A root-default image leaves containerUser unset: the session already runs
-// as root, so the root-owned payload is readable as copied — no chown, and
-// no mount-table read either.
+// as root, so the root-owned payload is readable as copied — no chown. The
+// staging-dir proof still runs for it: a root write is a root write, and the
+// check gates the cp, not just the chown.
 func TestTransferDockerSetupPayloadRootSessionSkipsChown(t *testing.T) {
 	var calls [][]string
 	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls)))
 	p := &dockerProvisioner{containerID: "cid123"}
 	assert.Equal(t, "", transferDockerSetupPayload(p, t.TempDir()))
 
+	assert.NotNil(t, findExecCall(calls, "/proc/self/mountinfo"),
+		"the staging-dir proof must run before the first root write, image user or not; calls=%v", calls)
 	assert.Nil(t, findExecCall(calls, "chown"),
 		"a session running as root needs no ownership handoff; calls=%v", calls)
 }
@@ -454,8 +457,10 @@ func TestTransferDockerSetupPayloadChownPrunesNestedMounts(t *testing.T) {
 		"the prune form must not also run a bare recursive chown; call=%v", chown)
 }
 
-// A staging dir that itself sits inside a mount is not af's to re-own: the
-// chown is skipped outright and the session row gets a note saying why.
+// A staging dir that itself sits inside a mount is not af's to write into:
+// a docker cp there lands root-owned files on the operator's host mount. The
+// proof refuses the whole transfer before the first write, and the session
+// row gets a note saying why.
 func TestTransferDockerSetupPayloadSkipsMountedStagingDir(t *testing.T) {
 	var calls [][]string
 	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls, "/af-setup")))
@@ -464,14 +469,28 @@ func TestTransferDockerSetupPayloadSkipsMountedStagingDir(t *testing.T) {
 
 	require.NotEqual(t, "", note)
 	assert.Contains(t, note, "inside the mount")
+	assert.False(t, dockerCopyRan(calls),
+		"a staging dir inside a host mount must never receive the payload copy; calls=%v", calls)
 	assert.Nil(t, findExecCall(calls, "chown"),
 		"a staging dir inside a host mount must never be chowned; calls=%v", calls)
 }
 
-// The root chown may act only on exactly the staging dir af created: a
+// dockerCopyRan reports whether the recorded docker calls include the
+// payload copy — the first root write into the staging dir the
+// staging-dir proof is there to gate.
+func dockerCopyRan(calls [][]string) bool {
+	for _, call := range calls {
+		if len(call) > 0 && call[0] == "cp" {
+			return true
+		}
+	}
+	return false
+}
+
+// The root writes may act only on exactly the staging dir af created: a
 // symlinked staging path resolves to wherever it points, so any resolved
-// target other than the mkdir'd path refuses the handoff outright — "/"
-// included, as the worst case, not a special case.
+// target other than the mkdir'd path refuses the whole transfer — "/"
+// included, as the worst case, not a special case — before the first write.
 func TestTransferDockerSetupPayloadRefusesResolvedMismatch(t *testing.T) {
 	for _, resolved := range []string{"/", "/elsewhere", "/af-setup/real"} {
 		var calls [][]string
@@ -484,8 +503,10 @@ func TestTransferDockerSetupPayloadRefusesResolvedMismatch(t *testing.T) {
 		}))
 		p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
 		note := transferDockerSetupPayload(p, t.TempDir())
-		require.NotEqual(t, "", note, "resolved target %q must refuse the handoff", resolved)
+		require.NotEqual(t, "", note, "resolved target %q must refuse the transfer", resolved)
 		assert.Contains(t, note, "not the staging dir")
+		assert.False(t, dockerCopyRan(calls),
+			"resolved target %q must refuse before the payload copy runs", resolved)
 		assert.Nil(t, findExecCall(calls, "chown"),
 			"a mismatched resolved target must never be chowned; calls=%v", calls)
 	}
@@ -586,7 +607,7 @@ func TestLocalSetupPayloadSessionDirGuard(t *testing.T) {
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
 
-	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", "..", "x"), "/abs/path", filepath.Join(home, "other")} {
+	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", "..", "x"), "/abs/path", filepath.Join(home, "other"), "\x00", "a\x00b"} {
 		dir, ok := localSetupPayloadSessionDir(id)
 		assert.False(t, ok, "id %q must not name a payload dir (got %q)", id, dir)
 		assert.Empty(t, dir)
@@ -612,7 +633,7 @@ func TestDiscardLocalSetupPayloadRefusesMalformedIDs(t *testing.T) {
 	require.NoError(t, os.MkdirAll(sibling, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(sibling, "keep"), []byte("x"), 0644))
 
-	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", ".."), "/abs/path"} {
+	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", ".."), "/abs/path", "\x00", "a\x00b"} {
 		i := &Instance{ID: id, Title: "sess"}
 		i.discardLocalSetupPayload()
 		_, statErr := os.Stat(filepath.Join(sibling, "keep"))
@@ -665,4 +686,81 @@ func TestSetupHookSkippedForAdoptedRuntime(t *testing.T) {
 	assert.True(t, os.IsNotExist(err), "an adopted runtime must not run setup_commands")
 	_, err = os.Stat(localSetupStaging(t, "sess-adopt"))
 	assert.True(t, os.IsNotExist(err), "an adopted runtime must not even stage a payload")
+}
+
+// The restore caller must reach the adopted skip too: reprovisionRemoteOpts
+// passes adopt != nil, and a regression there (passing false) replays the
+// hook over a workspace whose agent may already have run — and whose staged
+// tree an unprivileged principal could already have written. The prior
+// create's failure note must also survive the adopted bind: an adopt
+// provisions nothing new, so its older note is still the truth.
+func TestReprovisionAdoptSkipsSetupHookAndKeepsPriorNote(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	writeSetupCommandsConfig(t, repoRoot, `setup_commands = ["touch `+marker+`"]
+`)
+
+	var calls [][]string
+	t.Cleanup(SetDockerExecForTest(dockerSetupPayloadStub(&calls)))
+	freshBackend := &dockerBackend{provisioner: &dockerProvisioner{
+		containerID: "fresh", containerUser: dockerNonRootImageUser}}
+	rt := fakeRuntime{res: ProvisionResult{
+		Backend:  freshBackend,
+		Endpoint: &AgentServerEndpoint{URL: "http://127.0.0.1:9", Token: "tok"},
+		Teardown: func() error { return nil },
+	}}
+	restoreRuntime := SetRuntimeForTest(BackendDocker, func() Runtime { return rt })
+	defer restoreRuntime()
+
+	i := &Instance{
+		ID:              "sess-adopted",
+		Title:           "s",
+		Path:            repoRoot,
+		Branch:          "root/s",
+		backend:         newInertSandboxBackend("docker"),
+		setupHookFailed: "entry 1 failed",
+	}
+	require.NoError(t, i.reprovisionRemoteOpts(
+		&AdoptSpec{SessionDir: "/remote/af-sessions/sess-adopted", Branch: "root/s"}, false))
+
+	_, err := os.Stat(marker)
+	assert.True(t, os.IsNotExist(err),
+		"an adopted restore must not replay setup_commands")
+	_, err = os.Stat(localSetupStaging(t, "sess-adopted"))
+	assert.True(t, os.IsNotExist(err),
+		"an adopted restore must not even stage a payload")
+	assert.Empty(t, calls,
+		"an adopted restore must not run the docker payload transfer either; calls=%v", calls)
+	assert.Equal(t, "entry 1 failed", i.SetupHookFailed(),
+		"an adopted restore keeps the note the original create recorded")
+}
+
+// The hook runs inside provision and provision only — never after an agent
+// launch, where the session's own principal may already have written the
+// staged tree a root chown then runs over. The whole production call-site
+// set is pinned here: both approved sites sit inside provision paths that
+// precede every Launch their caller drives, so a new caller (a launch-time
+// convenience, a resume hook, a late adopt) fails this test until someone
+// re-justifies the ordering knowingly.
+func TestSetupHookCallSitesPinnedToProvision(t *testing.T) {
+	entries, err := os.ReadDir(".")
+	require.NoError(t, err)
+	sites := map[string]int{}
+	for _, entry := range entries {
+		name := entry.Name()
+		if entry.IsDir() || !strings.HasSuffix(name, ".go") || strings.HasSuffix(name, "_test.go") {
+			continue
+		}
+		src, err := os.ReadFile(name)
+		require.NoError(t, err)
+		for _, line := range strings.Split(string(src), "\n") {
+			if strings.Contains(line, "runSessionSetupHook(") &&
+				!strings.Contains(line, "func runSessionSetupHook(") {
+				sites[name]++
+			}
+		}
+	}
+	assert.Equal(t, map[string]int{"instance_factory.go": 1, "archive_sandbox.go": 1}, sites,
+		"runSessionSetupHook may only be invoked inside provision — both sites precede every Launch their caller drives; a post-launch caller must re-justify the ordering, not slip in")
 }

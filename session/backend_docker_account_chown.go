@@ -139,11 +139,12 @@ func enclosingMount(points []string, p string) string {
 // coreutils chown dereferences command-line symlinks by default, so a symlink
 // under /root (a non-root BYO image may ship one) would otherwise re-point
 // the chown at the link's target — which may be outside home or on another
-// host bind. In the no-prune form it is the same guard one level down: `-R`
-// descends through a symlinked DIRECTORY on busybox builds without
-// CONFIG_DESKTOP, so only `-h` keeps the handoff acting on the links
-// themselves, never a target. busybox and coreutils both implement `-h`
-// (#5424 review).
+// host bind. The no-prune form has a per-entry variant of the same hazard:
+// busybox `chown -R` built without CONFIG_DESKTOP walks the tree with lstat
+// but still calls chown(2) on each link it lists, and that chown dereferences
+// and re-owns the target one level — only `-h` makes every chown act on the
+// link itself, whichever chown the image ships. busybox and coreutils both
+// implement `-h` (#5424 review).
 func chownRecursiveScript(home, owner string, prune []string) string {
 	if len(prune) == 0 {
 		return fmt.Sprintf("chown -R -h %s %s", owner, shellQuote(home))
