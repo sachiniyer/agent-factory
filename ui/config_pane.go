@@ -562,6 +562,11 @@ func (c *ConfigPane) commitEdit() {
 	}
 
 	result, notice, err := c.save(entry.Key, value)
+	// The write produced an outcome either way, so it retires the Hosts
+	// section's status: one line reports the LATEST event, and a stale check
+	// outcome must never sit in front of the validator's refusal or the
+	// save's echo and notice (#6718 review).
+	c.clearHostStatus()
 	if err != nil {
 		// Stay in edit mode on a rejection: the bad value is still in the field
 		// for the user to correct, which is the whole point of validating before

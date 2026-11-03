@@ -608,6 +608,67 @@ func TestConfigPaneHostAddErrorStaysVisible(t *testing.T) {
 	}
 }
 
+// A stale host-check status must never hide the outcome of a newer action:
+// the next outcome — a refused edit, a save echo with its notice, an account
+// result — retires it. One line reports the LATEST event (#6718 review).
+func TestConfigPaneHostStatusRetiresForNewerOutcome(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	c.SetHostCheckResults("box1", nil, errors.New("the daemon is not running"))
+	if view := c.String(); !strings.Contains(view, "the daemon is not running") {
+		t.Fatal("a request-level check failure lands in the status line")
+	}
+
+	// A refused edit: the validator's words must show, not the check's.
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return nil, "", errors.New("default_program must be one of: claude, codex")
+	}
+	selectKey(t, c, "default_program")
+	c.beginEdit()
+	c.input.SetValue("not-an-agent")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	view := c.String()
+	if strings.Contains(view, "the daemon is not running") {
+		t.Error("a stale check error must not hide the validation failure")
+	}
+	if !strings.Contains(view, "must be one of: claude, codex") {
+		t.Error("the refused edit keeps the validator's message visible")
+	}
+	if !c.editing {
+		t.Error("the rejected value keeps the field open for correction")
+	}
+
+	// A successful save: the confirmation AND its restart notice.
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: k, Value: v}, "apply on next daemon start", nil
+	}
+	c.input.SetValue("codex")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	view = c.String()
+	if !strings.Contains(view, "set default_program = codex") {
+		t.Error("the save echoes in the writer's words")
+	}
+	if !strings.Contains(view, "apply on next daemon start") {
+		t.Error("the restart notice survives next to the echo")
+	}
+	if strings.Contains(view, "the daemon is not running") {
+		t.Error("nothing stale may outlive the save")
+	}
+
+	// An account operation's outcome retires a later check error the same way.
+	c.SetHostCheckResults("box1", nil, errors.New("check refused again"))
+	c.SetAccountStatus("registration refused by the daemon", true)
+	view = c.String()
+	if strings.Contains(view, "check refused again") {
+		t.Error("a stale check error must not hide the account outcome")
+	}
+	if !strings.Contains(view, "registration refused by the daemon") {
+		t.Error("the account outcome shows")
+	}
+}
+
 // Esc abandons the form with nothing sent.
 func TestConfigPaneHostAddEsc(t *testing.T) {
 	c := newHostTestPane(t, twoHosts(), "")
