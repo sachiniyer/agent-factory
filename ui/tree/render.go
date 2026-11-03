@@ -365,6 +365,13 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		descS = listDescStyle
 	}
 
+	// The detail block's bottom padding spaces the branch (or warning) line
+	// off the tab children below it; a collapsed row renders no children, so
+	// the pad would dangle as an orphaned blank row (#6612).
+	if !expanded {
+		descS = descS.PaddingBottom(0)
+	}
+
 	// Unexpanded, unselected sessions start with one row. The selected group
 	// retains its branch and operation details; failures remain visible below.
 	if !selected && !expanded {
