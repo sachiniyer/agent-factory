@@ -614,13 +614,17 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 	close(doneCh)
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 
-	// Determine the command outcome immediately after Wait, before the
-	// filesystem I/O of CloseAndReadTail. If that read, timestamp update, or
-	// close crosses the deadline, a later ctx.Err() check would otherwise
-	// record a timeout and retain a failure log even though Wait returned
-	// success; snapshotting here distinguishes a process the deadline killed
-	// from one that exited cleanly.
-	timedOut := ctx.Err() != nil
+	// Determine the command outcome from the process state, not the context
+	// clock. A shell that exited successfully immediately before the deadline
+	// would otherwise be reported as a timeout if the context expires during
+	// the post-Wait process-group kill or the log I/O below; Exited() is true
+	// only when the shell terminated on its own terms and false when the
+	// deadline's SIGKILL ended it — the same classification the on-archive
+	// runner applies (#3407). waitErr is checked the same way below so os/exec
+	// splicing context.DeadlineExceeded over a clean exit-0 does not surface a
+	// failure for a hook that reached its own exit, which would also retain a
+	// failure log for a command that completed normally.
+	timedOut := ctx.Err() != nil && (cmd.ProcessState == nil || !cmd.ProcessState.Exited())
 
 	// Close the launcher's descriptor and read a bounded tail. The
 	// best-effort completion-time refresh makes completion the retention
@@ -638,7 +642,7 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 		log.ErrorLog.Printf("setup_commands %q timed out after %s (full output: %s)%s", commandForLog, setupCommandTimeout, outputPath, hooklog.Excerpt(outputTail))
 		return note
 	}
-	if waitErr != nil {
+	if waitErr != nil && !(errors.Is(waitErr, context.DeadlineExceeded) && cmd.ProcessState != nil && cmd.ProcessState.Exited() && cmd.ProcessState.ExitCode() == 0) {
 		note := fmt.Sprintf("entry %d failed: %v; full output: %s", index+1, waitErr, outputPath)
 		log.ErrorLog.Printf("setup_commands %q failed (full output: %s): %v%s", commandForLog, outputPath, waitErr, hooklog.Excerpt(outputTail))
 		return note
@@ -666,7 +670,20 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 // non-blocking exclusive flock succeeds only when no such descendant keeps the
 // lock, in which case unlinking is safe; a held lock leaves the file to
 // retention rather than unlinking an inode a live writer still grows.
+//
+// This only applies to a lock-aware log — one whose filename carries the
+// hooklog versioned marker (setup-v1-*, the prefix hooklog.Open writes only
+// when it acquired flock). An unmarked fallback log, which Open returns when
+// flock is unavailable on the storage, was created WITHOUT a lock, so a
+// descendant that escaped the kill inherited no lock to re-test against; the
+// flock below would succeed even while that descendant keeps writing, and
+// unlinking would grow an inaccessible inode past retention. Fallback logs are
+// explicitly never trusted for retention by hooklog itself, so preserve them
+// here too rather than unlinking a log whose live-writer proof cannot be read.
 func setupHookLogQuiescent(path string) bool {
+	if !strings.HasPrefix(filepath.Base(path), "setup-v1-") {
+		return false
+	}
 	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
 	if err != nil {
 		if os.IsNotExist(err) {
