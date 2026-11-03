@@ -567,14 +567,20 @@ placement clears it and the row never warns about a file the live scope now
 holds. Every surface renders the joined entries under the `af agent config
 skipped:` prefix.
 
-**`setup_hook_failed`** (string, omitted when empty) — why this session's
-daemon-side `setup_commands` hook failed: the entry, its exit status or
-timeout, and the retained output log. A failing entry does not block the
-session; the note persists on the row (in the same durability class as
-`callback_unavailable`) so every surface can render `af setup hook failed: …`
-rather than leaving the operator to wonder why the workspace is missing its
-setup. See [backends.md](backends.md#session-setup-hook-setup_commands) for the
-hook contract.
+**`setup_hook_failed`** (string, omitted when empty) — an opaque note on why
+this session's daemon-side `setup_commands` hook failed. The note is produced
+at any point in the setup pipeline: when the staging root is unusable, when a
+staging directory cannot be created, when a Docker payload transfer or
+worktree-overlay step fails, or — when a command actually ran — when an entry
+fails, times out, or cannot start. Only the entry-failure form carries the
+entry index, its exit status or timeout, and the retained output log; the
+pre-entry and transfer forms carry a plain reason string with no entry, exit
+status, timeout, or output log. None of these block the session; the note
+persists on the row (in the same durability class as `callback_unavailable`)
+so every surface can render `af setup hook failed: …` rather than leaving the
+operator to wonder why the workspace is missing its setup. See
+[backends.md](backends.md#session-setup-hook-setup_commands) for the hook
+contract.
 
 ## Examples
 
