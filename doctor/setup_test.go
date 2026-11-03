@@ -10,6 +10,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -126,7 +127,13 @@ func TestDoctorAgentBinaryScanIncludesOpencode(t *testing.T) {
 
 func setupDoctorRepo(t *testing.T) string {
 	t.Helper()
-	repo := filepath.Join(t.TempDir(), "repo")
+	// CanonicalTempDir, not t.TempDir: the anchored-override tests compare the
+	// path the doctor reports for the resolved override against this spelling,
+	// and the toplevel the doctor reports follows the spelling the repo was
+	// reached through — so the fixture's repo path must already be canonical
+	// or the comparison breaks wherever the temp root sits behind a symlink
+	// (macOS's /var -> /private/var, any symlinked TMPDIR) (#6729).
+	repo := filepath.Join(testguard.CanonicalTempDir(t), "repo")
 	require.NoError(t, os.MkdirAll(repo, 0o755))
 	require.NoError(t, exec.Command("git", "init", repo).Run())
 	require.NoError(t, exec.Command("git", "-C", repo, "config", "user.email", "test@example.com").Run())

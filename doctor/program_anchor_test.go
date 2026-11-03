@@ -3,11 +3,13 @@ package doctor
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -33,11 +35,13 @@ func TestCheckAgentPrograms_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testin
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
-	// Run from a SUBDIR of the repo: the binary lives at the repo root, not
-	// under the cwd, so cwd-relativity would resolve to <subdir>/bin/claude
-	// (missing) while workspace-relativity (the fix) resolves to
-	// <repo>/bin/claude (present).
-	subdir := filepath.Join(repo, "subdir")
+	// Run from a SUBDIR of the repo, itself reached through a symlink: the
+	// binary lives at the repo root, not under the cwd, so cwd-relativity
+	// would resolve to <subdir>/bin/claude (missing) while
+	// workspace-relativity (the fix) resolves to <repo>/bin/claude
+	// (present) — and the launch must not care that the repo's path goes
+	// through a symlink (#6729).
+	subdir := filepath.Join(repoViaSymlink(t, repo), "subdir")
 	require.NoError(t, os.MkdirAll(subdir, 0o755))
 	chdir(t, subdir)
 
@@ -51,11 +55,11 @@ func TestCheckAgentPrograms_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testin
 	require.Zero(t, rep.UnresolvedCount(), "agent-program findings: %+v", rep.Findings)
 	row := findCheck(t, rep, "default_program")
 	require.Equal(t, StatusPass, row.Status, "the relative override resolves against the repo workspace")
-	require.Contains(t, row.Detail, filepath.Join(repo, "bin", "claude"),
+	require.Equal(t, filepath.Join(repo, "bin", "claude"), reportedProgramPath(t, row),
 		"the resolved path must be in the repo, not the cwd")
 	override := findCheck(t, rep, "program_overrides.claude")
 	require.Equal(t, StatusPass, override.Status)
-	require.Contains(t, override.Detail, filepath.Join(repo, "bin", "claude"))
+	require.Equal(t, filepath.Join(repo, "bin", "claude"), reportedProgramPath(t, override))
 }
 
 // TestCheckAgentPrograms_RelativeOverride_OutsideRepo_HonestMessageNotReinstall
@@ -97,7 +101,10 @@ func TestCheckAgentBinaries_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testin
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
-	subdir := filepath.Join(repo, "subdir")
+	// The repo is reached through a symlink for the same reason as the
+	// setup-path test above: the anchor must hold when the repo's own path
+	// goes through one (#6729).
+	subdir := filepath.Join(repoViaSymlink(t, repo), "subdir")
 	require.NoError(t, os.MkdirAll(subdir, 0o755))
 	chdir(t, subdir)
 
@@ -112,7 +119,7 @@ func TestCheckAgentBinaries_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testin
 	require.Equal(t, StatusPass, row.Status,
 		"the relative override resolves against the repo workspace, not the cwd")
 	require.False(t, row.Problem)
-	require.Contains(t, row.Detail, filepath.Join(repo, "bin", "claude"))
+	require.Equal(t, filepath.Join(repo, "bin", "claude"), reportedProgramPath(t, row))
 	require.Contains(t, agentsHeaderValue(rep), "claude=present")
 	require.NotContains(t, agentsHeaderValue(rep), "claude=missing")
 }
@@ -168,7 +175,14 @@ func TestCheckAgentBinaries_BareNamePresent_OutsideRepo_StillPasses(t *testing.T
 // through Run, so the workspace computation and the agent-program check are
 // observed in their real call order alongside the rest of the setup checks.
 func TestDoctorSetup_RelativeOverrideInRepo_AnchoredToRepoRootPasses(t *testing.T) {
-	home := t.TempDir()
+	// SocketTempDir, not t.TempDir: the run resolves the daemon control
+	// socket under this home, so <home>/daemon.sock must fit sun_path (103
+	// bytes on darwin). A t.TempDir() home under macOS's ~48-byte
+	// /var/folders/<hash>/T/ root, plus this test's long name, lands the
+	// socket path past it and fails the unrelated `daemon` row — the #1940
+	// guard reporting a home too deep to host a socket, which has nothing
+	// to do with the anchor this test asserts (#6729).
+	home := testguard.SocketTempDir(t)
 	binDir := t.TempDir() // for fake tmux, on PATH
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
@@ -179,7 +193,7 @@ func TestDoctorSetup_RelativeOverrideInRepo_AnchoredToRepoRootPasses(t *testing.
 	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
 		[]byte("default_program = \"claude\"\n\n[program_overrides]\nclaude = \"bin/claude\"\n"), 0o644))
-	subdir := filepath.Join(repo, "subdir")
+	subdir := filepath.Join(repoViaSymlink(t, repo), "subdir")
 	require.NoError(t, os.MkdirAll(subdir, 0o755))
 	chdir(t, subdir)
 
@@ -248,4 +262,32 @@ func TestCheckProgramCommand_OutsideRepo_CwdIndependentCommandKeepsClassifiedRem
 	// A leading-./ relative path is also cwd-dependent.
 	_, _, outsideRepo = checkProgramCommand("", config.ErrNotGitRepository, "./venv/bin/claude")
 	require.True(t, outsideRepo, "a ./-prefixed relative path is cwd-dependent; emit the honest message")
+}
+
+// repoViaSymlink returns a second path that reaches repo through a real
+// symlink, so the anchored-resolution tests exercise a symlinked repo path
+// on every platform instead of only where the temp root happens to sit
+// behind one (macOS's /var -> /private/var, a symlinked TMPDIR). Making the
+// hop explicit is what keeps a canonicalized fixture from hiding the case
+// later (#6729).
+func repoViaSymlink(t *testing.T, repo string) string {
+	t.Helper()
+	link := filepath.Join(filepath.Dir(repo), "repo-via-link")
+	require.NoError(t, os.Symlink(repo, link))
+	return link
+}
+
+// reportedProgramPath returns the executable path a passing program check
+// row's Detail ends with, canonicalized. The doctor reports the resolution
+// in whatever spelling the platform's getcwd and git produced — the
+// physical toplevel on Linux, the as-entered (possibly symlinked) spelling
+// on darwin — so a path assertion has to compare canonical paths rather
+// than the spelling the fixture used to reach the repo (#6729).
+func reportedProgramPath(t *testing.T, row CheckResult) string {
+	t.Helper()
+	i := strings.LastIndexByte(row.Detail, ' ')
+	require.GreaterOrEqual(t, i, 0, "check row %q carries no resolved path: %q", row.Name, row.Detail)
+	resolved, err := filepath.EvalSymlinks(row.Detail[i+1:])
+	require.NoError(t, err, "check row %q reports a path that does not resolve: %q", row.Name, row.Detail[i+1:])
+	return resolved
 }
