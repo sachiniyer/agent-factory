@@ -569,14 +569,17 @@ skipped:` prefix.
 
 **`setup_hook_failed`** (string, omitted when empty) — an opaque note on why
 this session's daemon-side `setup_commands` hook failed. The note is produced
-at any point in the setup pipeline: when the staging root is unusable, when a
+once the setup pipeline is running: when the staging root is unusable, when a
 staging directory cannot be created, when a Docker payload transfer or
-worktree-overlay step fails, or — when a command actually ran — when an entry
-fails, times out, or cannot start. Only the entry-failure form carries the
-entry index, its exit status or timeout, and the retained output log; the
-pre-entry and transfer forms carry a plain reason string with no entry, exit
-status, timeout, or output log. None of these block the session; the note
-persists on the row (in the same durability class as `callback_unavailable`)
+worktree-overlay step fails, or when an entry fails, times out, cannot start,
+or cannot open its output log. (An in-repo `setup_commands` document that
+cannot be loaded is logged rather than reported here — the session proceeds
+without running its setup and the field stays empty.) The pre-entry and
+transfer forms carry a plain reason string. An entry failure always carries
+the entry index; it adds the retained output log once a log could be opened,
+and the exit status or timeout once the command actually started. None of
+these block the session; the note persists on the row (in the same
+durability class as `callback_unavailable`)
 so every surface can render `af setup hook failed: …` rather than leaving the
 operator to wonder why the workspace is missing its setup. See
 [backends.md](backends.md#session-setup-hook-setup_commands) for the hook
