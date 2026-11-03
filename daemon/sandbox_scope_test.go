@@ -238,13 +238,17 @@ func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
 	// A commit landing mid-flight can never read as gone: the committed and
 	// pending checks share one acquisition of m.mu, so the caller is judged
 	// absent from BOTH sets at one instant or not at all (#6708 review). Commit
-	// the create the way the real path does — the row lands in m.instances and
-	// the pending entry drops — and the SAME credential's next snapshot answers
-	// through the committed path, never CallerGone.
-	newbie, err := session.FromInstanceData(session.InstanceData{
-		ID: pendingID, Title: "newbie", Status: session.Running, Liveness: session.LiveReady,
+	// the create the way the real path does — the completed Instance keeps the
+	// pending row's id, lands in m.instances, and the pending entry drops — and
+	// the SAME credential's next snapshot answers through the committed path,
+	// never CallerGone.
+	newbie, err := session.NewInstance(session.InstanceOptions{
+		ID: pendingID, Title: "newbie", Path: f.me.Path, Program: "claude",
 	})
 	require.NoError(t, err)
+	newbie.SetStartedForTest(true)
+	newbie.SetStatusForTest(session.Ready)
+	f.backends["newbie"] = "ssh"
 	f.mgr.mu.Lock()
 	f.mgr.instances[daemonInstanceKey(f.repoA, "newbie")] = newbie
 	delete(f.mgr.pendingCreates, daemonInstanceKey(f.repoA, "newbie"))
