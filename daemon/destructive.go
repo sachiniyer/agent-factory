@@ -54,5 +54,15 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 	if err != nil {
 		return false, err
 	}
-	return storage.DeleteInstanceByStableID(title, stableID)
+	deleted, err := storage.DeleteInstanceByStableID(title, stableID)
+	if err != nil || !deleted {
+		return deleted, err
+	}
+	// The record is gone, so its daemon-side setup-payload staging dir can no
+	// longer be consumed by a rebuild — reclaim it at the exit rather than
+	// leaving it (secrets, usually) for the next daemon-start sweep. This is
+	// the ghost path's only reach: a live kill already dropped it through
+	// Instance.Kill, so the call below is a no-op there.
+	session.DiscardLocalSetupPayload(title, stableID)
+	return true, nil
 }

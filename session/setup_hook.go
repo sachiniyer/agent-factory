@@ -58,13 +58,13 @@ const setupStagingRootName = "af-setup"
 // post_worktree_commands contract — but every failure is recorded with the
 // entry, the exit status and the retained full-output log.
 //
-// It runs ONLY against a freshly provisioned runtime that has not launched
-// its agent: the docker payload handoff ends with a root chown over the
-// staged tree, and an ownership change must never run over files an
-// unprivileged in-container principal could already have written. Adopted
-// runtimes fail that precondition — a reattached workspace kept its prior
-// state and its agent may already have run — so adopted is an explicit,
-// tested skip rather than a call-site convention (#6674 review).
+// Its callers run it against a freshly provisioned runtime before the agent
+// starts: the docker payload handoff ends with a root chown over the staged
+// tree, and an ownership change must never run over files an unprivileged
+// in-container principal could already have written. Adopted runtimes may
+// already hold such writes — a reattached workspace kept its prior state and
+// its agent may already have run — so adopted is an explicit, tested skip
+// rather than a call-site convention (#6674 review).
 func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind, b Backend, adopted bool) string {
 	// --here attaches the user's own tree: like post_worktree_commands, the
 	// setup hook provisions fresh checkouts and must not run unasked inside
@@ -137,9 +137,12 @@ func transferDockerSetupPayload(p *dockerProvisioner, localPayload string) strin
 	// string-built path collapses to the same directory either way, but the
 	// docker CLI parses a cleaner path.
 	containerDest := filepath.Clean(filepath.Dir(dockerWorkspaceDir) + "/" + setupStagingRootName)
-	if _, err := p.execSh(30*time.Second, "mkdir -p -- "+shellQuote(containerDest)); err != nil {
-		note := fmt.Sprintf("cannot create container staging dir %s: %v", containerDest, err)
-		log.ErrorLog.Printf("setup_commands: %s", note)
+	// Prove the staging dir is af's to write BEFORE the first root write into
+	// it — and for every image, not just ones needing the ownership handoff:
+	// a docker cp or a chown landing in a host bind or a symlinked-away path
+	// is wrong no matter which user the session runs as.
+	realDest, points, note := p.setupStagingMountCheck(containerDest)
+	if note != "" {
 		return note
 	}
 	// `docker cp src/. dst` copies the payload CONTENTS into the staging dir.
@@ -155,49 +158,58 @@ func transferDockerSetupPayload(p *dockerProvisioner, localPayload string) strin
 	// becomes readable by anyone else. containerUser is unset exactly when the
 	// session already runs as root, where the root-owned copy is readable.
 	if p.containerUser != "" {
-		if note := p.chownSetupPayload(containerDest); note != "" {
+		if note := p.chownSetupPayload(realDest, points); note != "" {
 			return note
 		}
 	}
 	return ""
 }
 
-// chownSetupPayload hands the staged payload to the session's containerUser.
-// The recursive chown must never cross a mount point — through a host bind at
-// or under the staging dir, a root chown re-owns the operator's host files —
-// so it keys off the container's own mount table, the same contract the
-// session-HOME chown carries (#5424). A staging dir that itself sits inside a
-// non-root mount is reported, never chowned; mounts beneath it are pruned.
-// Returns a session-visible note on any failure, "" on success.
-func (p *dockerProvisioner) chownSetupPayload(containerDest string) string {
+// setupStagingMountCheck creates the container staging dir and proves it is
+// safe for a root write: it resolves to exactly the path af asked for (a
+// symlinked staging path resolves to wherever it points — "/" being only the
+// worst case — and the resolved target read off the exec stream could itself
+// be displaced, so the check keys on an EXACT match with the path af passed
+// to mkdir, not on an enumeration of bad targets) and it sits on the
+// container's own root filesystem (through a host bind at or over it, a root
+// write or chown lands on the operator's host files — the same hazard the
+// session-HOME chown guards, #5424). Returns the resolved path and the parsed
+// mount table for the caller's chown prune set, or a session-visible note on
+// any failure.
+func (p *dockerProvisioner) setupStagingMountCheck(containerDest string) (realDest string, points []string, note string) {
 	realDest, mounts, err := p.readMountTableFor(containerDest)
 	if err != nil {
-		note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
+		note := fmt.Sprintf("cannot stage the setup payload at %s: %v", containerDest, err)
 		log.ErrorLog.Printf("setup_commands: %s", note)
-		return note
+		return "", nil, note
 	}
-	points, err := parseMountPoints(mounts)
+	points, err = parseMountPoints(mounts)
 	if err != nil {
-		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: the container mount table is unusable: %v", p.containerUser, err)
+		note := fmt.Sprintf("refusing to stage the setup payload at %s: the container mount table is unusable: %v", containerDest, err)
 		log.ErrorLog.Printf("setup_commands: %s", note)
-		return note
+		return "", nil, note
 	}
-	// The root chown may act only on exactly the staging dir af created —
-	// nothing else is af's to re-own. A symlinked staging path resolves to
-	// wherever it points ("/" being only the worst case), and the resolved
-	// target read off the exec stream could itself be displaced, so the
-	// refusal keys on an EXACT match with the path af passed to mkdir, not
-	// on an enumeration of bad targets.
 	if realDest != containerDest {
-		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: %s resolves to %s, which is not the staging dir af created", p.containerUser, containerDest, realDest)
+		note := fmt.Sprintf("refusing to stage the setup payload at %s: it resolves to %s, which is not the staging dir af created", containerDest, realDest)
 		log.ErrorLog.Printf("setup_commands: %s", note)
-		return note
+		return "", nil, note
 	}
 	if mp := enclosingMount(points, realDest); mp != "/" {
-		note := fmt.Sprintf("the setup staging dir %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure the mounted files are readable by that user", realDest, mp, p.containerUser)
+		note := fmt.Sprintf("the setup staging dir %s is inside the mount %s (not the container's root filesystem); not writing the payload there — mount the payload in another way", realDest, mp)
 		log.WarningLog.Printf("setup_commands: %s", note)
-		return note
+		return "", nil, note
 	}
+	return realDest, points, ""
+}
+
+// chownSetupPayload hands the staged payload to the session's containerUser.
+// The recursive chown must never cross a mount point — through a host bind
+// under the staging dir it re-owns the operator's host files — so mounts
+// beneath realDest (already proven to be the staging dir af created, on the
+// container's root filesystem, by setupStagingMountCheck) are pruned, the
+// same contract the session-HOME chown carries (#5424). Returns a
+// session-visible note on any failure, "" on success.
+func (p *dockerProvisioner) chownSetupPayload(realDest string, points []string) string {
 	if _, err := p.execSh(30*time.Second,
 		chownRecursiveScript(realDest, p.containerUser, mountPointsUnder(points, realDest))); err != nil {
 		note := fmt.Sprintf("cannot hand the setup payload to the session user %s: %v", p.containerUser, err)
@@ -230,7 +242,7 @@ func localSetupPayloadDir(sessionID string) string {
 // load without format validation, so a corrupted record reaches this — the
 // check must be here, not at the writers.
 func localSetupPayloadSessionDir(sessionID string) (string, bool) {
-	if sessionID == "." || sessionID == ".." || filepath.Base(sessionID) != sessionID || filepath.IsAbs(sessionID) {
+	if sessionID == "." || sessionID == ".." || filepath.Base(sessionID) != sessionID || filepath.IsAbs(sessionID) || strings.ContainsRune(sessionID, 0) {
 		return "", false
 	}
 	home, err := config.GetConfigDir()
@@ -238,6 +250,23 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 		return "", false
 	}
 	return filepath.Join(home, setupStagingRootName, sessionID), true
+}
+
+// setupStagingRootForDelete returns the af-setup root only when it exists as
+// a REAL directory. Every destructive path gates on this: ReadDir and
+// RemoveAll both follow a symlink at the root, and af never creates that
+// link — but an operator can (af-setup moved to a data disk, or shared
+// between two homes). Removing "stale" entries under a linked root empties
+// the shared TARGET, taking every other home's payload — and any unrelated
+// dir beside them — with it. A symlinked AF home path itself stays allowed;
+// only this one entry is checked.
+func setupStagingRootForDelete(home string) (string, bool) {
+	root := filepath.Join(home, setupStagingRootName)
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return root, true
 }
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
@@ -249,6 +278,15 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 // stops — which keep the record — never reach it. A hosted session stages
 // beside its workspace instead and is untouched here — the sandbox teardown
 // owns that tree.
+func (i *Instance) discardLocalSetupPayload() {
+	DiscardLocalSetupPayload(i.Title, i.ID)
+}
+
+// DiscardLocalSetupPayload removes <AF home>/af-setup/<id> for a session id
+// the caller has proven dead — the exported form for deletion paths with no
+// live Instance (a settled ghost cleanup's record delete, a failed create
+// that left no record). Idempotent: deletion paths that already dropped the
+// dir reach it as a no-op.
 //
 // The id guard is load-bearing, not paranoia: instance ids load from disk
 // unvalidated, and the naive join turns "", ".", "a/.." into the SHARED
@@ -256,14 +294,24 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 // there is unrecoverable. A refused id logs an error and deletes NOTHING.
 // Best-effort: a leftover is scratch space, not a correctness hazard, so a
 // removal failure only logs.
-func (i *Instance) discardLocalSetupPayload() {
-	dir, ok := localSetupPayloadSessionDir(i.ID)
+func DiscardLocalSetupPayload(title, sessionID string) {
+	dir, ok := localSetupPayloadSessionDir(sessionID)
 	if !ok {
-		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir: instance id %q is not a single path element", i.Title, i.ID)
+		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir: instance id %q is not a single path element", title, sessionID)
+		return
+	}
+	home := filepath.Dir(filepath.Dir(dir))
+	root, ok := setupStagingRootForDelete(home)
+	if !ok {
+		// No real af-setup root means nothing under it is af's to delete — a
+		// missing root is the common case and a linked one is the refusal.
+		if _, err := os.Lstat(root); err == nil {
+			log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s is not a real directory", title, dir, root)
+		}
 		return
 	}
 	if err := os.RemoveAll(dir); err != nil {
-		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", i.Title, dir, err)
+		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", title, dir, err)
 	}
 }
 
