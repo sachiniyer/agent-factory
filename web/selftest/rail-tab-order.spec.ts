@@ -66,7 +66,12 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   // retried rather than letting one event strand a single attempt.
   await page.keyboard.press("Control+]");
   await expect(async () => {
-    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    // Re-anchor on a view tab, not a bare blur(): Chromium keeps the
+    // sequential-navigation starting point at a blurred control, so a retry
+    // whose previous attempt ended mid-pane would resume Tabbing AFTER the
+    // pane and count zero rail stops — passing the bound below vacuously. The
+    // view tabs precede the rail in DOM order, so every attempt re-walks it.
+    await page.locator(".af-viewnav .af-viewtab").first().focus();
     const stops: string[] = [];
     let railStops = 0;
     let reachedPane = false;
