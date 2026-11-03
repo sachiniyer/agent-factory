@@ -271,7 +271,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				report.addAdvisoryFinding(nonOwningFinding(p, name, cls, false))
 				continue
 			}
-			verdict, proofSocket := ctx.sessionDeathProof(p, name)
+			verdict, proofSocket := deathProof(ctx, p, name)
 			switch verdict {
 			case deathLiveElsewhere:
 				// The session is absent from the union listing but live on
@@ -295,6 +295,8 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						Detail: fmt.Sprintf("%s marks session %s (home %s), which is live on "+
 							"tmux socket %s, but its pane tree could not be read (%v) — "+
 							"it is reported, not killed", describeProc(p), name, cls.marker, proofSocket, paneErr),
+						Remediation: "inspect the session's pane tree on the tmux socket named above — " +
+							"the process is report-only",
 					})
 					continue
 				}
@@ -333,6 +335,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						"record does not account for would look the same here; it is "+
 						"reported, not killed",
 						describeProc(p), name, cls.marker),
+					Remediation: ctx.unconfirmedDeathRemedy(p),
 				})
 				continue
 			}
@@ -424,11 +427,15 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 type ownershipVerdict int
 
 const (
+	// ownershipUnprovenUnknown is the zero value: a verdict nobody produced.
+	// It must never read as proven-ours — the kill arm's only way through is
+	// an explicitly produced ownershipThisInstall (#6716).
+	ownershipUnprovenUnknown ownershipVerdict = iota
 	// ownershipThisInstall is the only verdict that may arm a kill — and the
 	// only verdict that may attribute an escapee to this install: a matching
 	// marker AND the process's own environment resolving to this home AND no
 	// ancestor declaring a different one.
-	ownershipThisInstall ownershipVerdict = iota
+	ownershipThisInstall
 	// ownershipForeignEnv means the process's own environment resolves to a
 	// different install's home — its matching AF_HOME marker was inherited.
 	ownershipForeignEnv
@@ -447,6 +454,12 @@ const (
 	// path — relative to its launching af process's frame, which doctor
 	// cannot recover — so it names no identifiable install.
 	ownershipUnprovenRelativeMarker
+	// ownershipUnprovenRelativeOwnHome means the marker matches this
+	// install but the process's own AGENT_FACTORY_HOME is a relative path —
+	// resolved against its working directory NOW, not the frame it was set
+	// in, which cannot be recovered. af never stamps an absolute marker
+	// beside a relative own home, so refusing it costs no kill (#6716).
+	ownershipUnprovenRelativeOwnHome
 	// ownershipUnprovenOwnEnv means the marker matches this install but the
 	// process's own environment establishes no home — it answered, and
 	// nothing it says resolves to an install.
@@ -477,6 +490,7 @@ type processOwnership struct {
 	foreignHome string
 	ancestorPID int
 	derivedHome string
+	ownHome     string // the process's own home spelling a verdict cites
 	cause       ancestorUnproven
 }
 
@@ -501,6 +515,16 @@ func (ctx *scanContext) markedProcessOwnership(p proctree.Process) processOwners
 	if !sameHome(marker, ctx.opts.ConfigDir) {
 		return processOwnership{verdict: ownershipForeignMarker, marker: marker, foreignHome: marker}
 	}
+	// A process's own RELATIVE AGENT_FACTORY_HOME is resolved against its
+	// working directory — the directory it happens to be in NOW, not the
+	// frame it was set in, which cannot be recovered. af never stamps an
+	// absolute AF_HOME marker beside a relative own home, so refusing the
+	// claim costs no legitimate kill (#6716). Tilde spellings are not
+	// relative: resolveHomeIn anchors them at the process's own HOME.
+	if raw, found, err := daemonProcessEnvLookup(p.PID, "AGENT_FACTORY_HOME"); err == nil &&
+		found && raw != "" && !filepath.IsAbs(raw) && !strings.HasPrefix(raw, "~") {
+		return processOwnership{verdict: ownershipUnprovenRelativeOwnHome, marker: marker, ownHome: raw}
+	}
 	ownHome, known := daemonProcessHome(p.PID)
 	if known && !sameHome(ownHome, ctx.opts.ConfigDir) {
 		// A foreign-home claim must name a real install. An explicitly
@@ -513,11 +537,19 @@ func (ctx *scanContext) markedProcessOwnership(p proctree.Process) processOwners
 		}
 		return processOwnership{verdict: ownershipForeignEnv, marker: marker, foreignHome: ownHome}
 	}
-	switch res := ctx.ancestorHomeProof(p); res.verdict {
+	switch res := ancestorWalk(ctx, p); res.verdict {
 	case ancestryForeign:
 		return processOwnership{verdict: ownershipForeignAncestor, marker: marker,
 			foreignHome: res.home, ancestorPID: res.pid}
 	case ancestryUnproven:
+		return processOwnership{verdict: ownershipUnprovenAncestor, marker: marker,
+			ancestorPID: res.pid, cause: res.cause}
+	case ancestryClean:
+		// The only verdict that may leave ownership to the environment layers.
+	default:
+		// ancestryUnknown or a future verdict nobody handled: anything other
+		// than clean is not a fully verified chain, so the process is not
+		// proven ours (#6716).
 		return processOwnership{verdict: ownershipUnprovenAncestor, marker: marker,
 			ancestorPID: res.pid, cause: res.cause}
 	}
@@ -575,9 +607,13 @@ func nonOwningFinding(p proctree.Process, session string, cls processOwnership, 
 	const foreignRemedy = "run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually"
 	switch cls.verdict {
 	case ownershipForeignMarker:
+		foreignWhy := "its session may be live on that install's private tmux server, so it is reported, not killed"
+		if live {
+			foreignWhy = "it is not attributed to this install"
+		}
 		return Finding{Check: "foreign-home-process",
 			Detail: fmt.Sprintf("%s %s but belongs to another agent-factory home (%s) — %s",
-				d, what, cls.foreignHome, so),
+				d, what, cls.foreignHome, foreignWhy),
 			Remediation: foreignRemedy}
 	case ownershipForeignEnv:
 		return Finding{Check: "foreign-home-process",
@@ -602,6 +638,13 @@ func nonOwningFinding(p proctree.Process, session string, cls processOwnership, 
 				"cannot be resolved to a specific agent-factory home — ownership is "+
 				"unproven, so %s", d, what, cls.marker, so),
 			Remediation: "inspect the process's launching frame to identify which install its relative AF_HOME names"}
+	case ownershipUnprovenRelativeOwnHome:
+		return Finding{Check: "foreign-home-unresolved",
+			Detail: fmt.Sprintf("%s %s and its AF_HOME matches this install, but its own "+
+				"AGENT_FACTORY_HOME (%s) is a relative path — resolved against a working "+
+				"directory that may have changed since it was set, so ownership is "+
+				"unproven, so %s", d, what, cls.ownHome, so),
+			Remediation: "inspect the process's environment manually to identify its agent-factory home"}
 	case ownershipUnprovenOwnEnvUnreadable:
 		return Finding{Check: "foreign-home-unresolved",
 			Detail: fmt.Sprintf("%s %s and its AF_HOME matches this install, but its own "+
@@ -614,12 +657,28 @@ func nonOwningFinding(p proctree.Process, session string, cls processOwnership, 
 				"ownership is unproven, so %s", d, what, cls.derivedHome, so),
 			Remediation: "inspect the process manually — the home its environment would derive does not exist"}
 	case ownershipUnprovenAncestor:
+		// Transient causes (missing / recycled / unreadable) may resolve on a
+		// rerun; structural ones (a cycle, the hop bound) truncate the proof
+		// every time, so the remedy and the framing differ (#6716). The
+		// cycle's loop-back point is described as such — it can be the
+		// process's own pid, which is not "the ancestor" in any useful sense.
+		basis := fmt.Sprintf("ancestor pid %d could not be verified — %s",
+			cls.ancestorPID, cls.cause.describe())
+		remedy := "rerun `af doctor` — the process table may have raced this scan; " +
+			"inspect the process manually if it persists"
+		switch cls.cause {
+		case ancestorGapCycle:
+			basis = fmt.Sprintf("its ancestor chain loops back onto pid %d", cls.ancestorPID)
+			remedy = "inspect the process's ancestor chain manually — it could not be fully verified"
+		case ancestorGapDepth:
+			basis = fmt.Sprintf("its ancestor chain exceeds the %d-hop verification bound at pid %d",
+				ancestorHopLimit, cls.ancestorPID)
+			remedy = "inspect the process's ancestor chain manually — it could not be fully verified"
+		}
 		return Finding{Check: "foreign-home-unresolved",
-			Detail: fmt.Sprintf("%s %s and its AF_HOME matches this install, but ancestor "+
-				"pid %d could not be verified — %s — ownership is unproven, so %s",
-				d, what, cls.ancestorPID, cls.cause.describe(), so),
-			Remediation: "rerun `af doctor` — the process table may have raced this scan; " +
-				"inspect the process manually if it persists"}
+			Detail: fmt.Sprintf("%s %s and its AF_HOME matches this install, but %s — "+
+				"ownership is unproven, so %s", d, what, basis, so),
+			Remediation: remedy}
 	case ownershipUnprovenOwnEnv:
 		return Finding{Check: "foreign-home-unresolved",
 			Detail: fmt.Sprintf("%s %s and its AF_HOME matches this install, but its own "+
@@ -641,7 +700,11 @@ func nonOwningFinding(p proctree.Process, session string, cls processOwnership, 
 type ancestryVerdict int
 
 const (
-	ancestryClean ancestryVerdict = iota
+	// ancestryUnknown is the zero value: a verdict nobody produced. It must
+	// never read as clean — only an explicitly produced ancestryClean may
+	// leave ownership to the environment layers (#6716).
+	ancestryUnknown ancestryVerdict = iota
+	ancestryClean
 	ancestryForeign
 	ancestryUnproven
 )
@@ -799,6 +862,12 @@ func declaredAgentFactoryHome(pid int) (string, bool, bool) {
 // to each recorded ancestor — a var so a test can script an identity that
 // changes mid-scan rather than race a real exec (#6704).
 var ancestorIdentity = proctree.SameIdentity
+
+// ancestorWalk is the classifier's call into the ancestor proof — a var so a
+// test can hand the classifier a verdict nobody produced (#6716).
+var ancestorWalk = func(ctx *scanContext, p proctree.Process) ancestryResult {
+	return ctx.ancestorHomeProof(p)
+}
 
 // ancestorHopLimit bounds the ancestor chain — a var so a test can shrink it
 // rather than spawn a chain past the production bound (#6704).

@@ -28,20 +28,56 @@ import (
 type sessionDeathVerdict int
 
 const (
+	// deathUnproven is the zero value: a verdict nobody produced cannot
+	// corroborate the session's death — the record could not be proven
+	// current, the socket hosting it could not be listed, or no evidence
+	// names the server it lived on. The process is reported, never killed.
+	// No enum on the kill path may put its arming value at zero (#6716).
+	deathUnproven sessionDeathVerdict = iota
 	// deathProven: the session is dead on the server that hosted it AND every
 	// socket generation the daemon has used is accounted for — absence reads
 	// as death, so the kill arm may fire.
-	deathProven sessionDeathVerdict = iota
-	// deathUnproven: doctor cannot corroborate the session's death — the
-	// record could not be proven current, the socket hosting it could not be
-	// listed, or no evidence names the server it lived on. The process is
-	// reported, never killed.
-	deathUnproven
+	deathProven
 	// deathLiveElsewhere: the session is absent from the union listing but
 	// live on the socket the process's own TMUX env names — verified by
 	// listing THAT socket and finding it there. socket carries where.
 	deathLiveElsewhere
 )
+
+// deathProof is the seam tests replace to stage a session-death verdict the
+// proof's closed list cannot produce — the zero value or a future one — and
+// verify the kill arm's switch refuses it (#6716).
+var deathProof = func(ctx *scanContext, p proctree.Process, name string) (sessionDeathVerdict, string) {
+	return ctx.sessionDeathProof(p, name)
+}
+
+// unconfirmedDeathRemedy is the unconfirmed-death row's remedy. It names the
+// server that actually hosted the session when the evidence names one — the
+// socket the process's own TMUX env stamps (the env's whole point is naming
+// the server its session lived on), else the socket the daemon's record
+// pins — never "its daemon record", which may not exist or may never have
+// been consulted. When no evidence names a server it says where to look
+// rather than inventing one (#6716).
+func (c *scanContext) unconfirmedDeathRemedy(p proctree.Process) string {
+	host := ""
+	if tmuxEnv, st := proctree.LookupEnv(p.PID, "TMUX"); st == proctree.EnvFound {
+		if sock, _, _ := strings.Cut(tmuxEnv, ","); strings.TrimSpace(sock) != "" {
+			host = strings.TrimSpace(sock)
+		}
+	}
+	if host == "" {
+		if sock, kind := c.recordedSocket(); kind == recordedSocketPinned {
+			host = sock
+		}
+	}
+	if host == "" {
+		return "find the tmux server the session ran on — from the process's " +
+			"TMUX env or the daemon's server record — and verify the session " +
+			"is dead there before killing the process manually"
+	}
+	return fmt.Sprintf("verify the session is dead on tmux socket %s — "+
+		"the server that hosted it — before killing the process manually", host)
+}
 
 // recordedServerCurrent reports whether the daemon's server-state record was
 // written by the daemon generation currently serving this home — the

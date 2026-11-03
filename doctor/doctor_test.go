@@ -328,8 +328,14 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 	require.Len(t, foreignRow, 1, "a foreign-home orphan must be reported under the foreign-home key")
 	require.Contains(t, foreignRow[0].Detail, "another agent-factory home",
 		"foreign-home orphan must say whose it is: %s", foreignRow[0].Detail)
+	require.Contains(t, foreignRow[0].Detail, "private tmux server",
+		"the foreign-marker row must keep the hedge that the other install's session may be live: %s",
+		foreignRow[0].Detail)
 	require.Empty(t, foreignRow[0].FixAction,
 		"without a proven home match the finding must be report-only: %s", foreignRow[0].Detail)
+	require.Equal(t,
+		"run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually",
+		foreignRow[0].Remediation, "the foreign-home remedy must be exactly the true one (#6716)")
 	require.False(t, foreignRow[0].Fixed)
 
 	unresolved := findByCheck(report, "foreign-home-unresolved")
@@ -338,6 +344,9 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 		"unmarked orphan must say why it is not killed: %s", unresolved[0].Detail)
 	require.Empty(t, unresolved[0].FixAction,
 		"without a proven home match the finding must be report-only: %s", unresolved[0].Detail)
+	require.Equal(t,
+		"inspect the process manually — no readable AF_HOME marker names an install",
+		unresolved[0].Remediation, "the no-marker remedy must be exactly the true one (#6716)")
 	require.False(t, unresolved[0].Fixed)
 
 	payload := BuildJSONReport(report, true, true)
@@ -852,7 +861,7 @@ func TestRenderShapes(t *testing.T) {
 	out := buf.String()
 	require.Contains(t, out, "Agent Factory Doctor")
 	require.Contains(t, out, "orphaned-processes")
-	require.Contains(t, out, "1 safe to clean")
+	require.Contains(t, out, "1 proven dead and safe to clean")
 	require.Contains(t, out, "leaked-tmux-session")
 	require.Contains(t, out, "FIXED stale-temp-home")
 	require.Contains(t, out, "1 fixable with `af doctor --fix`")
@@ -1215,7 +1224,7 @@ func TestSummaryLeadsWithActionableCountMatchingUnresolved(t *testing.T) {
 	out := buf.String()
 
 	require.Contains(t, out, "47 issues require action")
-	require.Contains(t, out, "47 orphaned processes from dead sessions",
+	require.Contains(t, out, "47 marked processes from sessions absent from the live listing",
 		"the per-check row and the summary total must be the same arithmetic (#1979)")
 
 	idxCount := strings.Index(out, "issues require action")

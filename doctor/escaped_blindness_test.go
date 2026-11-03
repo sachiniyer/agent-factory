@@ -306,6 +306,9 @@ func TestEscapedProcessForeignHomeNotAttributedToThisInstall(t *testing.T) {
 	require.NotContains(t, foreign[0].Detail, "escaped the pane tree",
 		"a foreign-home process must not be reported as escaping our live session: %s", foreign[0].Detail)
 	require.Empty(t, foreign[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Equal(t,
+		"run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually",
+		foreign[0].Remediation, "the foreign-home remedy must be exactly the true one (#6716)")
 	require.Empty(t, findByCheck(report, "escaped-process"),
 		"a foreign-home process must not be reported as an escapee of our live session")
 	require.Empty(t, findByCheck(report, "orphaned-process"),
@@ -408,6 +411,9 @@ func TestEscapedProcessRelativeMarkerNotAttributedToThisInstall(t *testing.T) {
 	require.NotContains(t, foreign[0].Detail, "escaped the pane tree",
 		"a relative-marker process must not be reported as escaping our live session: %s", foreign[0].Detail)
 	require.Empty(t, foreign[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Equal(t,
+		"inspect the process's launching frame to identify which install its relative AF_HOME names",
+		foreign[0].Remediation, "the relative-marker remedy must be exactly the true one (#6716)")
 	require.Empty(t, findByCheck(report, "orphaned-process"),
 		"a live-session marker must not route through the orphaned-process arm")
 	require.Empty(t, findBlindnessRows(report, name),
@@ -764,6 +770,10 @@ func TestEscapedProcessInheritedMarkerUnprovenHome_NotEscaped(t *testing.T) {
 	require.NotContains(t, unproven[0].Detail, "escaped the pane tree",
 		"an unproven-ownership process must not be reported as escaping our live session: %s", unproven[0].Detail)
 	require.Empty(t, unproven[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Equal(t,
+		"inspect the process's environment manually to identify its agent-factory home",
+		unproven[0].Remediation,
+		"the own-env remedy must be exactly the true one (#6716)")
 	require.True(t, alive(unprovenEscapee), "the escaped arm must not kill, even under --fix")
 }
 

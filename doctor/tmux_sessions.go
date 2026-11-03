@@ -281,7 +281,7 @@ type paneCapture struct {
 // Memoized per (session, socket) for the run: every marked process on the same
 // session would otherwise re-read the whole process table and re-issue the
 // bounded pane capture — N marks costing N captures and N timeout budgets.
-func captureSessionProcessTrees(ctx *scanContext, name, socket string) ([]proctree.Process, error) {
+var captureSessionProcessTrees = func(ctx *scanContext, name, socket string) ([]proctree.Process, error) {
 	key := socket + "\x00" + name
 	if c, seen := ctx.paneCaptures[key]; seen {
 		return c.procs, c.err
