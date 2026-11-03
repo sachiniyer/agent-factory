@@ -567,8 +567,12 @@ func setupHookEnv(opts InstanceOptions, absPath, mode, dest string, route setupS
 }
 
 // runSetupCommand executes one setup_commands entry and returns its failure
-// note ("" on success). Output goes to a retained hook log named in the note;
-// the process-group teardown matches the post-worktree runner so a script's
+// note ("" on success). Output goes to a per-run hook log: a failed entry keeps
+// the file and names it in the note, while a successful one removes it after a
+// confirmed tail read — the same lifecycle the post-worktree and on-archive
+// runners carry, so retained success logs do not erode the per-kind retention
+// quota protecting failed-run evidence named in the durable note. The
+// process-group teardown matches the post-worktree runner so a script's
 // backgrounded children never outlive it.
 func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 	commandForLog := log.RedactCredentials(cmdStr)
@@ -578,7 +582,6 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 		return fmt.Sprintf("entry %d could not open its output log: %v", index+1, err)
 	}
 	outputPath := outputFile.Name()
-	defer outputFile.Close()
 
 	log.InfoLog.Printf("setup_commands entry %d for %s (full output: %s): %q", index+1, dir, outputPath, commandForLog)
 
@@ -594,7 +597,10 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 	// cannot leak (#610).
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	if err := cmd.Start(); err != nil {
-		return fmt.Sprintf("entry %d failed to start: %v; full output: %s", index+1, err, outputPath)
+		_ = outputFile.Close()
+		note := fmt.Sprintf("entry %d failed to start: %v; full output: %s", index+1, err, outputPath)
+		log.ErrorLog.Printf("setup_commands %q failed to start (full output: %s): %v", commandForLog, outputPath, err)
+		return note
 	}
 	doneCh := make(chan struct{})
 	go func(pgid int) {
@@ -608,15 +614,33 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 	close(doneCh)
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 
+	// Close the launcher's descriptor and read a bounded tail. The
+	// best-effort completion-time refresh makes completion the retention
+	// clock for kept output; the success path then removes the file, matching
+	// the post-worktree and on-archive runners so retained success logs do
+	// not erode the per-kind quota that protects failed-run evidence named in
+	// the durable note.
+	outputTail, outputReadErr := hooklog.CloseAndReadTail(outputFile)
+	if outputReadErr != nil {
+		log.WarningLog.Printf("setup_commands %q output tail could not be read from %s: %v", commandForLog, outputPath, outputReadErr)
+	}
+
 	if ctx.Err() != nil {
 		note := fmt.Sprintf("entry %d timed out after %s; full output: %s", index+1, setupCommandTimeout, outputPath)
-		log.ErrorLog.Printf("setup_commands %q timed out after %s (full output: %s)", commandForLog, setupCommandTimeout, outputPath)
+		log.ErrorLog.Printf("setup_commands %q timed out after %s (full output: %s)%s", commandForLog, setupCommandTimeout, outputPath, hooklog.Excerpt(outputTail))
 		return note
 	}
 	if waitErr != nil {
 		note := fmt.Sprintf("entry %d failed: %v; full output: %s", index+1, waitErr, outputPath)
-		log.ErrorLog.Printf("setup_commands %q failed: %v (full output: %s)", commandForLog, waitErr, outputPath)
+		log.ErrorLog.Printf("setup_commands %q failed (full output: %s): %v%s", commandForLog, outputPath, waitErr, hooklog.Excerpt(outputTail))
 		return note
+	}
+	// Success: remove the completed log so retained success output does not
+	// erode the per-kind retention quota protecting failed-run evidence.
+	if outputReadErr == nil {
+		if removeErr := hooklog.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
+			log.WarningLog.Printf("setup_commands %q completed but its output log %s could not be removed: %v", commandForLog, outputPath, removeErr)
+		}
 	}
 	return ""
 }
