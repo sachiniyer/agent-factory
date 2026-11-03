@@ -184,8 +184,8 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 		"prepareNonAccountUser must create /workspace for the clone; call=%v", chown)
 	require.Contains(t, chownJoined, shellQuote(dockerWorkspaceDir),
 		"prepareNonAccountUser must create /workspace for the clone; call=%v", chown)
-	require.Contains(t, chownJoined, "chown "+dockerNonRootImageUser,
-		"prepareNonAccountUser must chown to the probed uid:gid; call=%v", chown)
+	require.Contains(t, chownJoined, "chown -h "+dockerNonRootImageUser,
+		"prepareNonAccountUser must chown to the probed uid:gid, acting on links never their targets; call=%v", chown)
 	require.Contains(t, chownJoined, shellQuote(dockerContainerHome),
 		"prepareNonAccountUser must chown HOME (dockerContainerHome) so the non-root user can write it; call=%v", chown)
 	require.Contains(t, chownJoined, shellQuote(dockerWorkspaceDir),
@@ -194,9 +194,9 @@ func TestDockerProvision_NonAccount_NonRootImage_Provisions(t *testing.T) {
 	// descendants under /root (e.g. /root/.codex or /root/.config with mode
 	// 0700) does not leave them unreadable by the selected uid (#5424 review).
 	// /workspace is freshly created by mkdir -p, so its chown stays shallow.
-	require.Contains(t, chownJoined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+	require.Contains(t, chownJoined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
 		"prepareNonAccountUser must recursively chown HOME so root-owned descendants become accessible; call=%v", chown)
-	require.NotContains(t, chownJoined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+	require.NotContains(t, chownJoined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
 		"/workspace is freshly created by mkdir -p; its chown must stay shallow; call=%v", chown)
 
 	// git config (configureGit) runs as the probed non-root user with HOME=/root
@@ -386,9 +386,9 @@ func TestPrepareNonAccountUser_ChownsHomeRecursively(t *testing.T) {
 	chown := findExecCall(calls, "--user 0:0", "chown", dockerNonRootImageUser)
 	require.NotNil(t, chown, "prepareNonAccountUser must chown HOME and /workspace as root; calls=%v", calls)
 	joined := strings.Join(chown, " ")
-	require.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
+	require.Contains(t, joined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome),
 		"HOME must be chowned recursively so root-owned descendants become accessible; call=%v", chown)
-	require.NotContains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+	require.NotContains(t, joined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
 		"/workspace is freshly created by mkdir -p; its chown must stay shallow; call=%v", chown)
 	require.Equal(t, dockerNonRootImageUser, p.containerUser,
 		"containerUser must record the probed uid:gid so later execs run as it; calls=%v", calls)
@@ -459,7 +459,7 @@ func TestPrepareNonAccountUser_OwnerReadCarriesDaemonWriteClass(t *testing.T) {
 // ships under /root is re-owned itself, not its target outside HOME.
 func TestChownRecursiveScript(t *testing.T) {
 	// No prune targets: the plain recursive chown is simpler and stays.
-	assert.Equal(t, "chown -R 1000:1000 "+shellQuote(dockerContainerHome),
+	assert.Equal(t, "chown -R -h 1000:1000 "+shellQuote(dockerContainerHome),
 		chownRecursiveScript(dockerContainerHome, "1000:1000", nil))
 
 	// With credential targets, find prunes them and chowns everything else.
@@ -546,7 +546,7 @@ func TestPrepareNonAccountUser_PrunesEveryMountUnderHome(t *testing.T) {
 	assert.NotContains(t, joined, "/opt/elsewhere", "a mount outside HOME is irrelevant to the HOME chown")
 	assert.NotContains(t, joined, "chown -R", "a recursive chown would cross into the mounts")
 	assert.Contains(t, joined, "-exec chown -h "+dockerNonRootImageUser)
-	assert.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
+	assert.Contains(t, joined, "chown -h "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
 }
 
 func TestPrepareNonAccountUser_NoMountUnderHome_RecursesPlainly(t *testing.T) {
@@ -555,7 +555,7 @@ func TestPrepareNonAccountUser_NoMountUnderHome_RecursesPlainly(t *testing.T) {
 	p := &dockerProvisioner{containerID: "cid"}
 	require.NoError(t, p.prepareNonAccountUser())
 	joined := strings.Join(findExecCall(calls, "--user 0:0", "chown"), " ")
-	assert.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
+	assert.Contains(t, joined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
 	assert.NotContains(t, joined, "find")
 }
 
@@ -649,7 +649,7 @@ func TestPrepareNonAccountUser_HomeInsideAnEnclosingMountIsNeverChowned(t *testi
 		assert.NotContains(t, joined, "chown -R", "HOME is inside a host bind: no recursive chown")
 		assert.NotContains(t, joined, "find ", "HOME is inside a host bind: no chown of any kind")
 		assert.NotContains(t, joined, "/data/home")
-		assert.Contains(t, joined, "chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
+		assert.Contains(t, joined, "chown -h "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir),
 			"the workspace is on the container's root filesystem and is still chowned")
 	})
 	t.Run("home and workspace are themselves mounts", func(t *testing.T) {
@@ -666,8 +666,8 @@ func TestPrepareNonAccountUser_HomeInsideAnEnclosingMountIsNeverChowned(t *testi
 		p := &dockerProvisioner{containerID: "cid"}
 		require.NoError(t, p.prepareNonAccountUser())
 		joined := strings.Join(findExecCall(calls, "--user 0:0", "mkdir -p "+shellQuote(dockerContainerHome)), " ")
-		assert.Contains(t, joined, "chown -R "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
-		assert.NotContains(t, joined, " chown "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
+		assert.Contains(t, joined, "chown -R -h "+dockerNonRootImageUser+" "+shellQuote(dockerContainerHome))
+		assert.NotContains(t, joined, " chown -h "+dockerNonRootImageUser+" "+shellQuote(dockerWorkspaceDir))
 	})
 }
 

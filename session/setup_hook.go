@@ -57,11 +57,19 @@ const setupStagingRootName = "af-setup"
 // when there is nothing to run). It never blocks create on a failure — the
 // post_worktree_commands contract — but every failure is recorded with the
 // entry, the exit status and the retained full-output log.
-func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind, b Backend) string {
+//
+// It runs ONLY against a freshly provisioned runtime that has not launched
+// its agent: the docker payload handoff ends with a root chown over the
+// staged tree, and an ownership change must never run over files an
+// unprivileged in-container principal could already have written. Adopted
+// runtimes fail that precondition — a reattached workspace kept its prior
+// state and its agent may already have run — so adopted is an explicit,
+// tested skip rather than a call-site convention (#6674 review).
+func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind, b Backend, adopted bool) string {
 	// --here attaches the user's own tree: like post_worktree_commands, the
 	// setup hook provisions fresh checkouts and must not run unasked inside
 	// the user's live one.
-	if opts.InPlace {
+	if opts.InPlace || adopted {
 		return ""
 	}
 	// setup_commands is repo-only, so the in-repo document is the whole
@@ -174,11 +182,14 @@ func (p *dockerProvisioner) chownSetupPayload(containerDest string) string {
 		log.ErrorLog.Printf("setup_commands: %s", note)
 		return note
 	}
-	// A staging path that resolves to the filesystem root — via a symlinked
-	// /af-setup — would make the recursive chown cover the whole container
-	// filesystem, mounts included. Refuse before any chown is built.
-	if realDest == "/" {
-		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: %s resolves to the filesystem root", p.containerUser, containerDest)
+	// The root chown may act only on exactly the staging dir af created —
+	// nothing else is af's to re-own. A symlinked staging path resolves to
+	// wherever it points ("/" being only the worst case), and the resolved
+	// target read off the exec stream could itself be displaced, so the
+	// refusal keys on an EXACT match with the path af passed to mkdir, not
+	// on an enumeration of bad targets.
+	if realDest != containerDest {
+		note := fmt.Sprintf("refusing to chown the setup payload for the session user %s: %s resolves to %s, which is not the staging dir af created", p.containerUser, containerDest, realDest)
 		log.ErrorLog.Printf("setup_commands: %s", note)
 		return note
 	}
@@ -198,13 +209,35 @@ func (p *dockerProvisioner) chownSetupPayload(containerDest string) string {
 
 // localSetupPayloadDir is where a LOCAL session's setup payload stages. The
 // worktree's overlay dir convention reads the same path — see
-// setupOverlayDirFor.
+// setupOverlayDirFor. A session id that is not a single path element names no
+// payload dir at all ("" disables): joined naively, "..", "a/.." and friends
+// would resolve OUT of af-setup — into the AF home or above it — and the
+// deletion path must never compute such a name (#6674 review).
 func localSetupPayloadDir(sessionID string) string {
-	home, err := config.GetConfigDir()
-	if err != nil {
+	dir, ok := localSetupPayloadSessionDir(sessionID)
+	if !ok {
 		return ""
 	}
-	return filepath.Join(home, setupStagingRootName, sessionID, "payload")
+	return filepath.Join(dir, "payload")
+}
+
+// localSetupPayloadSessionDir returns the per-session staging dir —
+// <AF home>/af-setup/<id> — and whether the id may name one. The ONLY safe
+// session id is a single path element other than "." and "..": "" and "."
+// resolve to the shared af-setup root (every session's payload), ".." and
+// "a/.." escape to the AF home or above, and anything containing a separator
+// reaches outside the one directory the id is allowed to name. Persisted ids
+// load without format validation, so a corrupted record reaches this — the
+// check must be here, not at the writers.
+func localSetupPayloadSessionDir(sessionID string) (string, bool) {
+	if sessionID == "." || sessionID == ".." || filepath.Base(sessionID) != sessionID || filepath.IsAbs(sessionID) {
+		return "", false
+	}
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return "", false
+	}
+	return filepath.Join(home, setupStagingRootName, sessionID), true
 }
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
@@ -215,22 +248,22 @@ func localSetupPayloadDir(sessionID string) string {
 // classification deleteSessionRecord applies, and archive/workspace-preserving
 // stops — which keep the record — never reach it. A hosted session stages
 // beside its workspace instead and is untouched here — the sandbox teardown
-// owns that tree. Best-effort: a leftover is scratch space, not a correctness
-// hazard, so a removal failure only logs.
+// owns that tree.
+//
+// The id guard is load-bearing, not paranoia: instance ids load from disk
+// unvalidated, and the naive join turns "", ".", "a/.." into the SHARED
+// af-setup root and "..", "../.." into the AF home or its parent — a RemoveAll
+// there is unrecoverable. A refused id logs an error and deletes NOTHING.
+// Best-effort: a leftover is scratch space, not a correctness hazard, so a
+// removal failure only logs.
 func (i *Instance) discardLocalSetupPayload() {
-	if i.ID == "" {
-		// An unregistered throwaway instance (a TUI naming placeholder, a
-		// failed create before ID assignment) has no staging tree of its own
-		// — and the path it would compute is the shared af-setup ROOT, so a
-		// removal here would take every other session's payload with it.
+	dir, ok := localSetupPayloadSessionDir(i.ID)
+	if !ok {
+		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir: instance id %q is not a single path element", i.Title, i.ID)
 		return
 	}
-	dir := localSetupPayloadDir(i.ID)
-	if dir == "" {
-		return
-	}
-	if err := os.RemoveAll(filepath.Dir(dir)); err != nil {
-		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", i.Title, filepath.Dir(dir), err)
+	if err := os.RemoveAll(dir); err != nil {
+		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", i.Title, dir, err)
 	}
 }
 

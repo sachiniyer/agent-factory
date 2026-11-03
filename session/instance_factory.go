@@ -297,7 +297,7 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// business and would otherwise run a second time inside the sandbox with
 	// the wrong environment) all skip it.
 	if opts.SandboxCredentials != nil && !opts.HostedRemotely {
-		res.SetupHookFailed = runSessionSetupHook(opts, absPath, kind, res.Backend)
+		res.SetupHookFailed = runSessionSetupHook(opts, absPath, kind, res.Backend, false)
 	}
 	return res, nil
 }
