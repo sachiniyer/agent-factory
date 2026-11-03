@@ -1,6 +1,8 @@
 package config
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -78,12 +80,36 @@ func TestResolveConfigSetupCommandsAbsent(t *testing.T) {
 	assert.Empty(t, resolved.SetupCommands)
 }
 
-// setup_commands executes shell commands, so it is repo-scoped by the manifest:
-// a global config must not be allowed to set it, exactly like
-// post_worktree_commands.
-func TestSetupCommandsRejectedInGlobalConfig(t *testing.T) {
+// setup_commands executes shell commands, so the manifest scopes it to the
+// checked-in repo file exactly like post_worktree_commands: it must not appear
+// in the global view, and its only admitted source is the repo file — a global
+// config.toml carrying it is ignored (warned unknown-key), never executed.
+func TestSetupCommandsManifestIsRepoOnly(t *testing.T) {
+	var entry ManifestEntry
+	found := false
+	for _, e := range AllManifest() {
+		if e.Key == "setup_commands" {
+			entry, found = e, true
+		}
+	}
+	require.True(t, found, "setup_commands must be a manifest key")
+	assert.False(t, entry.Sources.Has(SourceGlobal))
+	assert.False(t, entry.Sources.Has(SourceProjectPersonal))
+	assert.True(t, entry.Sources.Has(SourceRepoShared))
+	assert.Equal(t, MergeListReplace, entry.Merge)
+
+	for _, e := range Manifest() {
+		assert.NotEqual(t, "setup_commands", e.Key,
+			"setup_commands must not be settable from the global config file")
+	}
+
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	_, err := parseGlobalConfigContent(`setup_commands = ["./x.sh"]`)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "setup_commands")
+	dir, err := GetConfigDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, TomlConfigFileName),
+		[]byte(`setup_commands = ["./x.sh"]`+"\n"), 0600))
+	cfg, err := LoadConfig()
+	require.NoError(t, err, "a global config carrying a repo-only key still loads — it is ignored, not fatal")
+	assert.NotNil(t, cfg)
 }

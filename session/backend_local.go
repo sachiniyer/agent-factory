@@ -97,6 +97,9 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		if err != nil {
 			return fmt.Errorf("failed to create git worktree: %w", err)
 		}
+		// Arm the setup-hook payload overlay for a FRESH create only — adoption
+		// attaches a preserved workspace and must not re-apply it (#6667).
+		gitWorktree.SetSetupOverlayDir(setupOverlayDirFor(i))
 		i.mu.Lock()
 		i.setGitWorktreeLocked(gitWorktree)
 		if i.Branch != branchName {
@@ -320,6 +323,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if err := gw.Setup(); err != nil {
 			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
 			return setupErr
+		}
+		// A staged setup payload that failed to copy in is non-blocking like
+		// the hook failure itself, but the row must say so (#6667).
+		if overlayErr := gw.SetupOverlayError(); overlayErr != "" {
+			i.noteSetupHookFailure(overlayErr)
 		}
 
 		// Inject Agent Factory instructions into the session. The daemon create

@@ -45,6 +45,11 @@ type InRepoConfig struct {
 	// value when the key is present in the file — including an explicit
 	// empty array, which disables legacy commands.
 	PostWorktreeCommands []string `json:"post_worktree_commands,omitempty" toml:"post_worktree_commands,omitempty"`
+	// SetupCommands are the daemon-side generic setup hook entries (#6667):
+	// shell commands run on the daemon's machine after a session's workspace
+	// is provisioned and before its post_worktree_commands and agent start.
+	// In-repo only — there is no legacy per-repo location for this key.
+	SetupCommands []string `json:"setup_commands,omitempty" toml:"setup_commands,omitempty"`
 	// RemoteHooks configures the remote hook backend for this repo.
 	RemoteHooks *RemoteHooks `json:"remote_hooks,omitempty" toml:"remote_hooks,omitempty"`
 
@@ -84,7 +89,7 @@ func (c *InRepoConfig) CommandBearingFields() []string {
 		return nil
 	}
 	var fields []string
-	for _, key := range []string{"post_worktree_commands", "program_overrides", "remote_hooks"} {
+	for _, key := range []string{"post_worktree_commands", "program_overrides", "remote_hooks", "setup_commands"} {
 		if c.setKeys[key] {
 			fields = append(fields, key)
 		}
@@ -659,6 +664,7 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 	shellValues := shellValueSet{}
 	shellValues.addMap("program_overrides", cfg.ProgramOverrides, nil, "")
 	shellValues.addList("post_worktree_commands", cfg.PostWorktreeCommands)
+	shellValues.addList("setup_commands", cfg.SetupCommands)
 	shellValues.warnExecSeparator(prettyPath)
 
 	return &cfg, data, nil

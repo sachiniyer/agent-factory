@@ -8,8 +8,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/sachiniyer/agent-factory/config"
 )
 
 // The setup overlay is the second half of #6667: whatever the daemon-side
@@ -25,7 +23,7 @@ func commitFile(t *testing.T, repoRoot, name, content string) {
 		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
 	)
 	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "c"}} {
-		cmd := exec.Command("git", "-C", repoRoot, args...)
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
 		cmd.Env = env
 		out, err := cmd.CombinedOutput()
 		require.NoError(t, err, string(out))
@@ -44,7 +42,7 @@ func TestSetupOverlayCopiesPayloadIntoWorktree(t *testing.T) {
 
 	gw, _, err := NewGitWorktree(repoRoot, "overlay-session", branchPrefixForTest(t))
 	require.NoError(t, err)
-	gw.SetSetupOverlayDir(payload, payload)
+	gw.SetSetupOverlayDir(payload)
 	require.NoError(t, gw.Setup())
 
 	wt := gw.GetWorktreePath()
@@ -70,14 +68,23 @@ func TestSetupOverlayRunsBeforePostWorktreeHooks(t *testing.T) {
 	require.NoError(t, os.MkdirAll(dir, 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(dir, "config.toml"),
 		[]byte(`post_worktree_commands = ["test -f .env && touch .hook-saw-env"]`+"\n"), 0644))
-	commitFile(t, repoRoot, ".agent-factory/config.toml", "")
+	env := append(os.Environ(),
+		"GIT_AUTHOR_NAME=test", "GIT_AUTHOR_EMAIL=test@test.com",
+		"GIT_COMMITTER_NAME=test", "GIT_COMMITTER_EMAIL=test@test.com",
+	)
+	for _, args := range [][]string{{"add", "-A"}, {"commit", "-m", "config"}} {
+		cmd := exec.Command("git", append([]string{"-C", repoRoot}, args...)...)
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		require.NoError(t, err, string(out))
+	}
 
 	payload := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(payload, ".env"), []byte("A=1\n"), 0644))
 
 	gw, _, err := NewGitWorktree(repoRoot, "overlay-order", branchPrefixForTest(t))
 	require.NoError(t, err)
-	gw.SetSetupOverlayDir(payload, payload)
+	gw.SetSetupOverlayDir(payload)
 	require.NoError(t, gw.Setup())
 	<-gw.HooksDone()
 
@@ -97,7 +104,7 @@ func TestSetupOverlayMissingDirIsNoOp(t *testing.T) {
 
 	gw, _, err := NewGitWorktree(repoRoot, "overlay-empty", branchPrefixForTest(t))
 	require.NoError(t, err)
-	gw.SetSetupOverlayDir(filepath.Join(t.TempDir(), "does-not-exist"), "")
+	gw.SetSetupOverlayDir(filepath.Join(t.TempDir(), "does-not-exist"))
 	require.NoError(t, gw.Setup())
 	assert.Equal(t, "", gw.SetupOverlayError())
 
@@ -114,7 +121,7 @@ func TestSetupOverlayEmptyDirIsNoOp(t *testing.T) {
 
 	gw, _, err := NewGitWorktree(repoRoot, "overlay-emptydir", branchPrefixForTest(t))
 	require.NoError(t, err)
-	gw.SetSetupOverlayDir(t.TempDir(), "")
+	gw.SetSetupOverlayDir(t.TempDir())
 	require.NoError(t, gw.Setup())
 	assert.Equal(t, "", gw.SetupOverlayError())
 
@@ -133,7 +140,7 @@ func TestSetupOverlayErrorRecordedOnFailure(t *testing.T) {
 	require.NoError(t, os.WriteFile(filepath.Join(payload, ".env"), []byte("A=1\n"), 0644))
 
 	g := &GitWorktree{worktreePath: wt}
-	g.SetSetupOverlayDir(payload, "")
+	g.SetSetupOverlayDir(payload)
 	g.applySetupOverlay()
 	assert.NotEqual(t, "", g.SetupOverlayError(), "a failed payload copy must be recorded")
 }

@@ -180,6 +180,15 @@ type GitWorktree struct {
 	// Lifecycle-owned join handle for bounded deferred journal terminalization
 	// or reclamation.
 	hooksRetirementDone <-chan struct{}
+	// setupOverlayDir is the payload directory the daemon-side setup hook
+	// staged for this worktree (#6667). applySetupOverlay copies its contents
+	// in right after the worktree is placed and before hooks run. Empty means
+	// no overlay — the common case.
+	setupOverlayDir string
+	// setupOverlayErr records a payload copy failure. It is surfaced on the
+	// session row rather than propagated: an overlay failure, like the hook
+	// failure that produced the payload, must not block the worktree create.
+	setupOverlayErr string
 }
 
 // RelocationRecovery is the durable, non-authoritative second handle retained

@@ -905,6 +905,41 @@ them. The script runs on the daemon box, never from repository config.
 
 See `examples/move-script/move.sh` for a documented example.
 
+## Session setup hook (`setup_commands`)
+
+A repo's `setup_commands` run **on the daemon's machine**, in the session's
+source checkout, after provisioning has established the session's transport —
+ssh route, agent-server, auth — and before `post_worktree_commands` and the
+agent start (#6667). Local sessions run the same script with a local
+destination and no ssh variables.
+
+- **env:** `AF_SETUP_SESSION_ID`, `AF_SETUP_SESSION`, `AF_SETUP_SOURCE` (the
+  source checkout — also the working directory), `AF_SETUP_MODE`
+  (`local`|`remote`), `AF_SETUP_HOST` (the picked host name, when set), and
+  `AF_SETUP_DEST` — a payload staging dir whose contents af copies into the
+  fresh worktree before hooks run. For a remote session it is a path ON THE
+  HOST, created through the session's own ssh connection; reach it through
+  the route below rather than assuming a filesystem you share.
+- **ssh route:** the same `AF_SSH` / `AF_SSH_DEST` / `AF_SSH_FULL` contract
+  `move_cmd` uses — the session's own connection, for host commands and
+  `rsync -e` alike. Only an af-composed transport (`backend = "ssh"`) earns
+  the `AF_SSH`/`AF_SSH_DEST` split; a free-form `sandbox.ssh` command sets
+  `AF_SSH_FULL` alone, and a session with no ssh transport (local, docker,
+  hook) sets none. See the move-script contract above for the quoting
+  idioms — the variables are shell command lines, never expand them
+  unquoted.
+- **failure:** a failing entry does not block the session. It is recorded on
+  the session row as `af setup hook failed: <entry>: <status>` — on every
+  surface like the callback notice — with the full output retained in a hook
+  log the note names.
+- **confinement:** the script is operator-controlled and is NOT confined by
+  af on the remote host — whatever the new machine needs, it can do. Keep
+  `examples/hooks/session-setup.sh`'s discipline (writes only into
+  `AF_SETUP_DEST` and `HOME`) unless you mean to change the host.
+
+See `examples/hooks/session-setup.sh` for a documented example covering
+`.env*` copies, selected uncommitted files, and a host command.
+
 ## Session-scoped account sync (listed hosts)
 
 > **Status:** `--account` and `default_accounts` are admitted on an ssh session

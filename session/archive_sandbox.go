@@ -550,6 +550,9 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	// skip the old one recorded, and a reattach that provisions nothing passes
 	// its prior list back in (#6337).
 	i.agentConfigSkipped = append([]string(nil), res.AgentConfigSkipped...)
+	// Same provision-evidence install: a fresh runtime that ran the setup hook
+	// clean clears the note an older provision recorded (#6667).
+	i.setupHookFailed = res.SetupHookFailed
 	i.touchLocked()
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false

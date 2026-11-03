@@ -3,7 +3,6 @@ package session
 import (
 	"io"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -145,7 +144,7 @@ func TestSetupHookRemoteEnvContractAndRoute(t *testing.T) {
 			return nil, nil
 		},
 	}
-	b := &sandboxBackend{provisioner: prov}
+	b := &sshBackend{provisioner: prov}
 
 	opts := InstanceOptions{ID: "sess-remote-1", Title: "sess", Path: repoRoot, Host: "gpu-box"}
 	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b)
@@ -171,10 +170,41 @@ func TestSetupHookRemoteEnvContractAndRoute(t *testing.T) {
 	assert.NotContains(t, s, "AF_SSH=ssh -F none -o 'User=dev' -p 2200 'real.example'")
 }
 
-// A free-form sandbox_ssh whose destination token cannot be isolated exports
-// only AF_SSH_FULL: the same degrade move_cmd documents, because guessing at
-// an operator's quoting is worse than naming the honest contract.
-func TestSetupHookRemoteUnsplittableTransport(t *testing.T) {
+// A free-form sandbox_ssh exports AF_SSH_FULL alone — even when its last
+// token looks like a destination. The move_cmd contract: an operator's own
+// quoting cannot be split honestly, so only the composed-for-`backend=ssh`
+// transport earns AF_SSH/AF_SSH_DEST.
+func TestSetupHookRemoteFreeFormTransport(t *testing.T) {
+	repoRoot := initTempGitRepo(t)
+	writeSetupCommandsConfig(t, repoRoot, `setup_commands = ["env | grep '^AF_' | sort > env.out"]
+`)
+
+	prov := &sandboxProvisioner{
+		// Splittable-looking, but operator-composed — af never guesses.
+		sshCmd:     `ssh -F none -o 'User=dev' -p 2200 'real.example'`,
+		sessionDir: "/remote/sess-dir",
+		runCommandFn: func(_ time.Duration, _ string, _ io.Reader, _ bool) ([]byte, error) {
+			return nil, nil
+		},
+	}
+	b := &sandboxBackend{provisioner: prov}
+
+	opts := InstanceOptions{ID: "sess-remote-2", Title: "sess", Path: repoRoot}
+	note := runSessionSetupHook(opts, repoRoot, BackendSandbox, b)
+	assert.Equal(t, "", note)
+
+	env, err := os.ReadFile(filepath.Join(repoRoot, "env.out"))
+	require.NoError(t, err)
+	s := string(env)
+	assert.Contains(t, s, "AF_SSH_FULL="+prov.sshCmd)
+	assert.NotContains(t, s, "AF_SSH_DEST=")
+	assert.NotContains(t, s, "AF_SSH=ssh -F")
+}
+
+// An af-composed ssh command whose destination token cannot be isolated also
+// degrades to AF_SSH_FULL alone — defensive, since composition always pins
+// the destination last.
+func TestSetupHookSSHBackendUnsplittableTransport(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	writeSetupCommandsConfig(t, repoRoot, `setup_commands = ["env | grep '^AF_' | sort > env.out"]
 `)
@@ -186,10 +216,10 @@ func TestSetupHookRemoteUnsplittableTransport(t *testing.T) {
 			return nil, nil
 		},
 	}
-	b := &sandboxBackend{provisioner: prov}
+	b := &sshBackend{provisioner: prov}
 
-	opts := InstanceOptions{ID: "sess-remote-2", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendSandbox, b)
+	opts := InstanceOptions{ID: "sess-remote-3", Title: "sess", Path: repoRoot}
+	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b)
 	assert.Equal(t, "", note)
 
 	env, err := os.ReadFile(filepath.Join(repoRoot, "env.out"))

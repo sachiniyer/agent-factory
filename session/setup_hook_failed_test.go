@@ -32,10 +32,13 @@ func TestSetupHookFailedNoteAndReconcile(t *testing.T) {
 // The note rides the same InstanceData projection + storage fields the other
 // session-level warnings use, and survives the restore path.
 func TestSetupHookFailedDataRoundTrip(t *testing.T) {
-	i := &Instance{Title: "sess", Path: t.TempDir()}
-	i.noteSetupHookFailure("entry 2 failed: exit status 3")
+	inst := &Instance{Title: "sess", Path: t.TempDir()}
+	require.NoError(t, inst.bindProvisionResult(ProvisionResult{
+		Backend:         newInertSandboxBackend("ssh"),
+		SetupHookFailed: "entry 2 failed: exit status 3",
+	}))
 
-	data := i.ToInstanceData()
+	data := inst.ToInstanceData().ForStorage()
 	assert.Equal(t, "entry 2 failed: exit status 3", data.SetupHookFailed)
 
 	restored, err := FromInstanceData(data)

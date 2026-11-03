@@ -148,6 +148,10 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		class: operatorConfig, keys: []string{"on_archive_command"},
 		note: "the resolved archive hook, in its own transient scope",
 	}},
+	"session/setup_hook.go:runSetupCommand": {{
+		class: operatorConfig, keys: []string{"setup_commands"},
+		note: "the repo's daemon-side setup hook entry (#6667), run as `sh -c <command>` in the source checkout",
+	}},
 	"session/backend_sandbox.go:(*sandboxProvisioner).buildRunCommand": {{
 		class: operatorConfig, keys: []string{"sandbox.ssh"},
 		note: "the operator's ssh command as a PREFIX: `sh -c '<sandbox.ssh> \"$@\"' af-sandbox <script>`",
