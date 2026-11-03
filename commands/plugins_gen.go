@@ -94,6 +94,7 @@ var pluginReleaseDigests = []string{
 	"93d42e1fcb58d3da90594df0c172da0e175a822309db0d730612ef038ec45916", // 3.29 — VS Code tabs on remote sessions open the editor on the session host (W5.4)
 	"38f6a650cdda3eea952c88c4552daa11466b963310f6970fbecdfe2766876654", // 3.30 — sessions attention --self: ask the user for attention
 	"40515e6a69fc6a11fdd64459be3050f56568e09264b89f2ef94f7c684bcc150a", // 3.31 — af backlog: list, show and add for every agent (#6284)
+	"38f6a650cdda3eea952c88c4552daa11466b963310f6970fbecdfe2766876654", // 3.32 — remove the Backlog feature's agent guidance (#6662); the seeded payload reverts byte-for-byte to the 3.30 tree, so this digest repeats 3.30 by design — a non-adjacent repeat is a revert, not a no-op bump
 }
 
 // pluginGenBanner marks a generated Markdown/shell artifact. Like genBanner it

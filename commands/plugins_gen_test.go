@@ -572,16 +572,19 @@ func TestPluginReleaseDigestLedgerIsValid(t *testing.T) {
 	if len(pluginReleaseDigests) == 0 {
 		t.Fatal("plugin release digest ledger is empty")
 	}
-	seen := make(map[string]bool, len(pluginReleaseDigests))
 	for idx, digest := range pluginReleaseDigests {
 		decoded, err := hex.DecodeString(digest)
 		if err != nil || len(decoded) != 32 {
 			t.Fatalf("plugin release %d digest %q is not SHA-256: decoded=%d err=%v", idx+1, digest, len(decoded), err)
 		}
-		if seen[digest] {
-			t.Fatalf("plugin release %d repeats an earlier content digest; do not mint a new version for unchanged bytes", idx+1)
+		// A repeat of the PREVIOUS digest means the payload did not change —
+		// a no-op version bump, which the ledger exists to refuse. A repeat of
+		// an earlier, non-adjacent digest is a revert to a historical payload
+		// (a removed feature restoring old bytes), which IS a real change and
+		// must still mint a forward version so installed plugins update.
+		if idx > 0 && digest == pluginReleaseDigests[idx-1] {
+			t.Fatalf("plugin release %d repeats the previous content digest; do not mint a new version for unchanged bytes", idx+1)
 		}
-		seen[digest] = true
 	}
 }
 

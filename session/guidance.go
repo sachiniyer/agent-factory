@@ -34,12 +34,12 @@ type guidanceCaps struct {
 	// WebHTTPSOnly: the admitted web tabs are external HTTPS targets only — a
 	// loopback target (--port) is refused, as it is on a remote workspace.
 	WebHTTPSOnly bool
-	// HostStores: the session's af calls reach the daemon host's proposal and
-	// backlog stores. A local worktree's agent calls af over the host's own
+	// HostStores: the session's af calls reach the daemon host's proposal
+	// store. A local worktree's agent calls af over the host's own
 	// socket; an agent in a remote workspace calls it with the scoped sandbox
-	// credential, and no proposal or backlog route admits that credential
+	// credential, and no proposal route admits that credential
 	// (daemon/httproutes.go: none is sandboxAllowed). False drops the proposal
-	// and backlog verbs, and the proposal skill, from the guidance.
+	// verbs, and the proposal skill, from the guidance.
 	HostStores bool
 }
 
@@ -136,7 +136,7 @@ func (g guidanceCaps) Reference() string {
 	if !g.HostStores {
 		// Each section is its own paragraph, so it goes with the blank line
 		// that separates it from the next one.
-		for _, section := range []string{afBacklogSection, afUsageProposalsInside, afUsageBacklogInside, afUsageOrchestratorInside} {
+		for _, section := range []string{afUsageProposalsInside} {
 			out = strings.Replace(out, section+"\n\n", "", 1)
 		}
 	}
