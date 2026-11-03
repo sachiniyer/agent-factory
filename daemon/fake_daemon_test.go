@@ -1,13 +1,16 @@
 package daemon
 
 import (
+	"fmt"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"syscall"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 )
@@ -49,8 +52,10 @@ func spawnFakeDaemonProc(t *testing.T, argv0, script string, extraArgs ...string
 }
 
 // spawnFakeDaemonHomeProc is spawnFakeDaemonProc for a caller that classifies the
-// fake by home: it returns only once the environ is readable too, or skips the
-// test when this host will not let the test read it. See waitForFakeDaemon.
+// fake by home: it returns only once the fake is provable by the SAME
+// home/identity predicate the code under test uses, or skips the test when
+// this host will not let the test read the environ that predicate needs. See
+// waitForFakeDaemon.
 func spawnFakeDaemonHomeProc(t *testing.T, argv0, script string, extraArgs ...string) *exec.Cmd {
 	t.Helper()
 	cmd := fakeDaemonCmd(t, argv0, script, extraArgs...)
@@ -85,12 +90,16 @@ func fakeDaemonCmd(t *testing.T, argv0, script string, extraArgs ...string) *exe
 // fakeDaemonHomeKey is the variable daemon scoping reads from a process's environ.
 const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 
-// waitForFakeDaemon blocks until cmd's fake daemon can be classified BY HOME: its
-// argv is the one it was built to expose AND its environ is readable and agrees
-// with the environment it was started with. A test that classifies or binds the
-// fake by home (classifyDaemonHome, StopDaemon's PID binding) must wait here
-// (never on argv alone). A test that reads only argv waits on
-// waitForFakeDaemonArgv and never touches the environ (#6195).
+// waitForFakeDaemon blocks until cmd's fake daemon can be classified BY HOME:
+// its argv is the one it was built to expose, its environ is readable and
+// agrees with the environment it was started with, AND the home/identity
+// predicate the code under test runs on it (classifyDaemonHome for
+// StopDaemon and the sigterm fallback, verifyScopedDaemon for the reset scan)
+// has reached a DECISIVE verdict — daemonOurs or daemonForeign — bounded by a
+// deadline that fails the test clearly if it lapses. A test that classifies
+// or binds the fake by home must wait here (never on argv alone). A test that
+// reads only argv waits on waitForFakeDaemonArgv and never touches the
+// environ (#6195).
 //
 // argv and environ are separate /proc reads with no ordering guarantee between
 // them. A fake can show its crafted argv while its environ is still empty or
@@ -105,6 +114,18 @@ const fakeDaemonHomeKey = "AGENT_FACTORY_HOME"
 // argsAreDaemonBinary sees "bash" and writes the daemon off as foreign: an
 // assertion that should fail passes, and one that should pass fails, for a reason
 // that has nothing to do with the code under test.
+//
+// The environ half has a second window neither wait above covers: for a moment
+// after exec the child is still rewriting its initial environ block in place —
+// bash's startup variable pass temporarily NULs the '=' in a "KEY=VALUE" entry,
+// so AGENT_FACTORY_HOME that already read back correctly can read ABSENT on the
+// very next read. The classifier reads that as a default-home daemon, and with
+// no $HOME to resolve the default against it is daemonUnverifiable — the
+// fail-closed verdict the code under test then gets blamed for (#6705:
+// TestSigtermFallback_AmbiguousCandidates signaling only one of two fakes,
+// TestStopDaemon_ForeignHomePIDFileNotKilled erroring "could not be bound to
+// this home"). A first good environ read does not prove the block has settled;
+// waitForFakeDaemonProvable polls the predicate itself until it decides.
 //
 // When the environ stays unreadable (EnvUnknown) the test is SKIPPED with the
 // reason, not failed: on a SIP-enabled Mac with Apple's /bin/bash, this binary can
@@ -129,12 +150,7 @@ func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 	if environ == nil {
 		environ = os.Environ()
 	}
-	want, wantSet := "", false
-	for _, kv := range environ {
-		if k, v, ok := strings.Cut(kv, "="); ok && k == fakeDaemonHomeKey {
-			want, wantSet = v, true
-		}
-	}
+	want, wantSet := fakeDaemonEnv(environ, fakeDaemonHomeKey)
 	ready := func() (string, proctree.EnvStatus, bool) {
 		got, status := proctree.LookupEnv(pid, fakeDaemonHomeKey)
 		if wantSet {
@@ -145,6 +161,7 @@ func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 	deadline := time.Now().Add(5 * time.Second)
 	for time.Now().Before(deadline) {
 		if _, _, ok := ready(); ok {
+			waitForFakeDaemonProvable(t, pid, environ)
 			return
 		}
 		time.Sleep(10 * time.Millisecond)
@@ -158,6 +175,134 @@ func waitForFakeDaemon(t *testing.T, cmd *exec.Cmd, argv0 string) {
 		t.Fatalf("fake daemon pid %d never exposed a readable environ with %s=%q set=%v (got %q, status %v)",
 			pid, fakeDaemonHomeKey, want, wantSet, got, status)
 	}
+}
+
+// fakeDaemonEnv returns the value environ binds key to — the last "key=value"
+// wins, the way exec applies duplicates — and whether the key is set at all.
+func fakeDaemonEnv(environ []string, key string) (string, bool) {
+	want, ok := "", false
+	prefix := key + "="
+	for _, kv := range environ {
+		if v, found := strings.CutPrefix(kv, prefix); found {
+			want, ok = v, true
+		}
+	}
+	return want, ok
+}
+
+// waitForFakeDaemonProvable blocks until pid is provable by the SAME predicate
+// the code under test binds it with — the uid, environ, and path/frame reads
+// classifyDaemonHome (StopDaemon, the sigterm fallback's recorded-PID handling)
+// or verifyScopedDaemon (the reset scan) performs — not merely until one
+// environ read looks right. See waitForFakeDaemon for why a single good read
+// is not proof: the child rewrites its exec-time environ in place during bash
+// startup, so the settle signal is the rewrite being done, which a child of
+// the fake in /proc/<pid>/task/<pid>/children marks (bash finishes variable
+// init before it runs the script's first command, and every fake recipe opens
+// with `sleep`). The environ check is re-verified on every poll so a settled
+// read is never mistaken for a mid-rewrite one.
+//
+// Env spellings the recorded-PID classifier can never decide — a bare env with
+// no $HOME to expand the default in, a raw "~user", or a home that is (or
+// links into) a process-relative procfs path — are daemonUnverifiable by
+// DESIGN, not by an unresolved read, so waiting on classifyDaemonHome there
+// would only burn the deadline. Those fakes' consumers (the reset-scan tests)
+// bind with verifyScopedDaemon instead, which resolves the same env against
+// the CALLER's home; for every shape config.ConfigDirFor can resolve, this
+// waits on that predicate, which exercises the same uid/environ reads. A raw
+// "~user" resolves under neither — there is nothing left to prove.
+//
+// The wait is bounded by testSpawnReadyTimeout and fails the test with the
+// last verdicts and env if it lapses — a fake the code under test cannot
+// classify is a broken fixture, not a passing one.
+func waitForFakeDaemonProvable(t *testing.T, pid int, environ []string) {
+	t.Helper()
+	env, envSet := fakeDaemonEnv(environ, fakeDaemonHomeKey)
+	envOK := func() bool {
+		got, status := proctree.LookupEnv(pid, fakeDaemonHomeKey)
+		if envSet {
+			return status == proctree.EnvFound && got == env
+		}
+		return status == proctree.EnvAbsent
+	}
+	ready := func() bool {
+		if !envOK() || !fakeDaemonPastEnvScan(pid) {
+			return false
+		}
+		if fakeDaemonHomeIndecidable(pid, env, environ) {
+			if _, err := config.ConfigDirFor(env); err != nil {
+				// The env VALUE pins daemonUnverifiable for every predicate
+				// (raw "~user"): argv+environ proof is the whole readiness.
+				return true
+			}
+			return verifyScopedDaemon(pid, os.Getuid(), "") != daemonUnverifiable
+		}
+		return classifyDaemonHome(pid) != daemonUnverifiable
+	}
+	deadline := time.Now().Add(testSpawnReadyTimeout)
+	for {
+		if ready() {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Fatalf("fake daemon pid %d (%s=%q) never became provable under the "+
+				"home/identity predicate in %s: last classifyDaemonHome=%v, "+
+				"verifyScopedDaemon=%v — the uid/environ/path reads the code "+
+				"under test performs on it never all resolved",
+				pid, fakeDaemonHomeKey, env, testSpawnReadyTimeout,
+				classifyDaemonHome(pid), verifyScopedDaemon(pid, os.Getuid(), ""))
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+}
+
+// fakeDaemonHomeIndecidable reports whether classifyDaemonHome's verdict on a
+// fake spawned with this AGENT_FACTORY_HOME is pinned to daemonUnverifiable by
+// the VALUE itself, so that waiting for a decisive verdict from it would only
+// burn the deadline: a default or tilde home the child has no $HOME to expand
+// in, a raw "~user" spelling, or a home that is (or symlinks into) a
+// process-relative procfs path. This mirrors the env-shape arms inside
+// classifyDaemonHome; the per-process reads that can still race (uid and the
+// environ itself) are proven through verifyScopedDaemon instead.
+func fakeDaemonHomeIndecidable(pid int, env string, environ []string) bool {
+	switch {
+	case env == "" || env == "~" || strings.HasPrefix(env, "~/"):
+		// The default and tilde arms resolve through the child's own $HOME.
+		home, ok := fakeDaemonEnv(environ, "HOME")
+		return !ok || home == ""
+	case strings.HasPrefix(env, "~"):
+		return true // a raw "~user" is rejected unconditionally
+	}
+	resolved := env
+	if !filepath.IsAbs(resolved) {
+		// A relative home resolves through the child's cwd, which is itself
+		// one of the reads that can still race — call it decidable and let
+		// the predicate wait cover it.
+		cwd, ok := proctree.WorkingDir(pid)
+		if !ok || cwd == "" {
+			return false
+		}
+		resolved = filepath.Join(cwd, env)
+	}
+	return isProcessRelativeProcfsHome(resolved) || homeSymlinkEntersProcessRelativeProcfs(resolved)
+}
+
+// fakeDaemonPastEnvScan reports whether the fake's bash has finished rewriting
+// its initial environ. During startup bash writes its variable table over the
+// exec-time block in place — a "KEY=VALUE" entry can transiently read back as
+// a bare "KEY" plus a bare value while it does — so one environ read that saw
+// the right value is no proof the block has settled. The rewrite happens in
+// initialize_shell_variables, before bash runs the script's first command;
+// every fake recipe's script opens with `sleep`, so a child in
+// /proc/<pid>/task/<pid>/children marks init complete. Where that file cannot
+// be read (no /proc, an older kernel) there is nothing better than the polling
+// itself, so this returns true.
+func fakeDaemonPastEnvScan(pid int) bool {
+	children, err := os.ReadFile(fmt.Sprintf("/proc/%d/task/%d/children", pid, pid))
+	if err != nil {
+		return true
+	}
+	return len(strings.Fields(string(children))) > 0
 }
 
 // waitForFakeDaemonArgv blocks until cmd's process has exec'd into the crafted
