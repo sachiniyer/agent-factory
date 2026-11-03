@@ -123,7 +123,7 @@ or `api.md`). Replies always use the file name (`api.md`).
 | `POST /v1/AddProposalDoc` | target, `slug`, `name`, `author` | `{slug, doc, path, commit}` |
 | `POST /v1/RemoveProposalDoc` | target, `slug`, `doc`, `author` | `{slug, doc, path, commit}`; the doc stays in history |
 | `POST /v1/ReadProposalDoc` | target, `slug`, `doc` | `{slug, doc, text, commit}` |
-| `POST /v1/SaveProposalDoc` | target, `slug`, `doc`, `text`, `base` | `{slug, doc, text, commit, merged}`, or 409 |
+| `POST /v1/SaveProposalDoc` | target, `slug`, `doc`, `text`, `base`, `writer`, `seq` | `{slug, doc, text, commit, merged}`, or 409 |
 | `POST /v1/WriteProposalDoc` | target, `slug`, `doc`, `text`, `author` | `{slug, doc, path, commit, author}` |
 | `POST /v1/PullProposalChanges` | `session_id` | the `changes` output above |
 | `POST /v1/CheckpointProposal` | `session_id` | `{slug, commit, cursor, unseen}` |
@@ -175,6 +175,16 @@ Shapes:
 
 `SaveProposalDoc` is the Docs tab save. It always commits as `human`.
 
+- `writer` and `seq` are optional. `writer` names one editor (a Docs tab's
+  sync) and `seq` counts its saves upward. A save whose `seq` is not above
+  the highest the daemon has saved from that `writer` for the doc is refused
+  with 409 `proposal_stale_save` and commits nothing. Fencing requires a
+  nonempty `writer` and a positive `seq`; an empty `writer`, a zero `seq`,
+  or omitting both leaves the save unfenced. The fence is process-local and
+  bounded: the high-water mark lives only in the daemon's memory, is cleared
+  on every restart, and the oldest writer/doc key is forgotten past 4,096
+  entries — after either, a save at or below the old sequence is admitted
+  again rather than refused with `proposal_stale_save`.
 - `base` is the `commit` from the last read or save of this doc. It is
   required, and it must be a lowercase hex commit id (7 to 64 characters). Any
   other value, such as a ref name, fails with `unknown base commit`.
@@ -199,8 +209,10 @@ Shapes:
 
 - `commit` in a 200 reply is the new head. When nothing changed, no commit is
   made and `commit` is the current head. Send it as the next `base`.
-- After a 409, the tab resolves the conflict and saves again with `base` set
-  to `head` from the 409 reply.
+- After a 409 `proposal_conflict`, the tab resolves the conflict and saves
+  again with `base` set to `head` from the 409 reply. A 409
+  `proposal_stale_save` carries `data: null` (no `head`) and is a terminal
+  refusal, not a merge conflict: do not retry it with `base` set to `head`.
 
 ### Event
 
