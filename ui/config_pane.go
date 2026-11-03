@@ -111,8 +111,8 @@ type ConfigPane struct {
 	quota quotaSection
 
 	// hosts is the Hosts section (#5571 W10.5): the operator's sandbox host
-	// list, derived from the `hosts`/`default_host` manifest rows below Usage
-	// and worked through the same daemon paths `af hosts` rides. Held by
+	// list, derived from the `hosts`/`default_host` manifest rows and worked
+	// through the same daemon paths `af hosts` rides. Held by
 	// config_pane_hosts.go.
 	hosts hostsSection
 
@@ -281,6 +281,10 @@ func (c *ConfigPane) TakeAssistantRequest() bool {
 // advanced toggle, and keeps the cursor on something selectable.
 func (c *ConfigPane) rebuildRows() {
 	selectedAccount := c.selectedAccount()
+	var selectedHost HostRow
+	if host := c.selectedHost(); host != nil {
+		selectedHost = *host
+	}
 	c.rows = nil
 	for _, tier := range config.ManifestTiers {
 		if tier == config.TierAdvanced && !c.showAdvanced {
@@ -302,13 +306,15 @@ func (c *ConfigPane) rebuildRows() {
 			c.rows = append(c.rows, configRow{entry: &entry})
 		}
 	}
-	// Accounts last: the config keys are what this overlay is for, and a
-	// credential section above them would push them off the first screen. Usage
-	// (#2983) sits after it — daemon-reported sections go last, newest last;
-	// Hosts (#5571 W10.5) follows.
+	// Hosts (#5571 W10.5) follows the tiers: it is config content — the
+	// section renders the same `hosts`/`default_host` keys the tiers hold,
+	// so it belongs ahead of the daemon-owned domains. Accounts and Usage
+	// keep the tail, newest last — and the account register rows stay the
+	// list's last selectable rows, the invariant the register flow's
+	// navigate-to-bottom drives rely on.
+	c.appendHostRows()
 	c.appendAccountRows()
 	c.appendQuotaRows()
-	c.appendHostRows()
 	if selectedAccount != nil {
 		found := false
 		for i, row := range c.rows {
@@ -321,6 +327,23 @@ func (c *ConfigPane) rebuildRows() {
 		}
 		if !found && c.accounts.registering {
 			c.cancelRegister() // the editor's row disappeared; never retain an invisible field
+		}
+	}
+	if selectedHost.Name != "" || selectedHost.Action != "" {
+		for i, row := range c.rows {
+			host := row.host
+			if host == nil {
+				continue
+			}
+			if host.Action != "" {
+				if selectedHost.Action == host.Action {
+					c.selectedIdx = i
+					break
+				}
+			} else if selectedHost.Action == "" && host.Name == selectedHost.Name {
+				c.selectedIdx = i
+				break
+			}
 		}
 	}
 	c.clampSelection()

@@ -513,6 +513,101 @@ func TestConfigPaneHostsFollowHandEdits(t *testing.T) {
 	}
 }
 
+// The section sits ahead of Accounts: the host list is config content — the
+// tiers' own `hosts`/`default_host` keys — and the register rows stay the
+// list's last selectable rows, the invariant the register flow's
+// navigate-to-bottom drives rely on.
+func TestConfigPaneHostsPrecedeAccounts(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.SetAccounts([]AccountRow{{Agent: "codex", Name: "existing"}},
+		[]string{"codex", "gemini"}, nil)
+
+	hostsIdx, accountsIdx := -1, -1
+	lastSelectable := -1
+	for i, row := range c.rows {
+		switch row.heading {
+		case hostsHeading:
+			hostsIdx = i
+		case accountsHeading:
+			accountsIdx = i
+		}
+		if row.isSelectable() {
+			lastSelectable = i
+		}
+	}
+	if hostsIdx < 0 || accountsIdx < 0 || hostsIdx > accountsIdx {
+		t.Fatalf("the Hosts section must sit ahead of Accounts, got hosts=%d accounts=%d", hostsIdx, accountsIdx)
+	}
+	if account := c.rows[lastSelectable].account; account == nil || !account.Register {
+		t.Fatal("the last selectable row must be a register row — the register flow navigates to the bottom")
+	}
+}
+
+// A rebuild keeps the selected host under the cursor: the section's rows are
+// re-derived on every rebuild, so selection must follow the row's identity —
+// the name, or the action — not its old index. Otherwise an 'a' fold, an
+// async SetAccounts/SetQuota landing under a remote target, or a removed
+// sibling leaves the cursor on a DIFFERENT host and 'd' removes it (#6718
+// review — the same preservation accounts get).
+func TestConfigPaneHostSelectionSurvivesRebuild(t *testing.T) {
+	hosts := twoHosts()
+	hosts["box3"] = config.HostConfig{Host: "box3.example"}
+	c := newHostTestPane(t, hosts, "")
+	selectHostRow(t, c, "box3")
+
+	// The 'a' fold removes the advanced rows ABOVE the section: box3's index
+	// moves up by the folded count while its identity stays.
+	pressKey(c, "a")
+	if host := c.selectedHost(); host == nil || host.Name != "box3" {
+		t.Fatalf("the cursor must follow the selected host across a rebuild, got %+v", host)
+	}
+	pressKey(c, "a")
+	if host := c.selectedHost(); host == nil || host.Name != "box3" {
+		t.Fatalf("…and back again, got %+v", host)
+	}
+
+	// A sibling leaving the table above the selection — a hand-edit, or a
+	// remote write landing — must not slide the cursor onto another row.
+	for i := range c.entries {
+		if c.entries[i].Key == "hosts" {
+			c.entries[i].Value = `{"box2":{"host":"box2.tail.example"},"box3":{"host":"box3.example"}}`
+		}
+	}
+	c.rebuildRows()
+	if host := c.selectedHost(); host == nil || host.Name != "box3" {
+		t.Fatalf("a removed sibling must not move the selection to another row, got %+v", host)
+	}
+
+	// The action rows keep their identity too — "+ add a host" is one row
+	// wherever the host count puts it.
+	selectHostAction(t, c, hostActionAdd)
+	pressKey(c, "a")
+	if host := c.selectedHost(); host == nil || host.Action != hostActionAdd {
+		t.Fatalf("the add row must keep the cursor across a rebuild, got %+v", host)
+	}
+}
+
+// A refused submit must be VISIBLE in the windowed render, not just in the
+// model: the form's fields outgrow a short overlay and field navigation
+// cannot pass the last field, so the error rides the footer where the window
+// cannot clip it (#6718 review).
+func TestConfigPaneHostAddErrorStaysVisible(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.SetSize(64, 12)
+	c.beginHostAdd()
+	c.hosts.form.fields[hostFieldName].input.SetValue("box3")
+	c.hosts.form.fields[hostFieldDestination].input.SetValue("box3:bad")
+	c.hosts.form.focus = hostFieldCount - 1
+	pressKey(c, "enter")
+
+	if !c.hosts.adding {
+		t.Fatal("a refused submit keeps the form open")
+	}
+	if view := c.String(); !strings.Contains(view, "must be a number") {
+		t.Fatalf("the parse refusal must render inside the short overlay, got:\n%s", view)
+	}
+}
+
 // Esc abandons the form with nothing sent.
 func TestConfigPaneHostAddEsc(t *testing.T) {
 	c := newHostTestPane(t, twoHosts(), "")

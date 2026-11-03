@@ -63,7 +63,12 @@ func TestRecoveryDriverScenes(t *testing.T) {
 					h.configPane.SetFocus(true)
 					require.NotNil(t, load)
 					_, _ = h.Update(load())
-					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
+					// The account row is no longer one Down from the config
+					// keys — the Hosts section sits between them. Land on it
+					// by its cursor mark rather than a fixed offset.
+					for i := 0; i < 30 && !strings.Contains(ansi.Strip(h.configPane.String()), "› codex · remote-work"); i++ {
+						_, _ = h.Update(tea.KeyMsg{Type: tea.KeyDown})
+					}
 					_, _ = h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 					require.True(t, h.configPane.HasFocus(), "refused login keeps Accounts visible")
 					require.Contains(t, ansi.Strip(h.configPane.String()), "http://buildbox:8443")

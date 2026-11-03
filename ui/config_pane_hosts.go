@@ -208,12 +208,14 @@ func (c *ConfigPane) hostRowsFromEntries() ([]HostRow, string) {
 	return rows, ""
 }
 
-// appendHostRows renders the section into the pane's flattened row list. It is
-// appended LAST: the section derives from the manifest entries the pane
-// already holds (its `hosts`/`default_host` rows also render in the tiers
-// above), so it needs no load and no daemon answer to exist — a pane built
-// from SetEntries alone still shows it. Daemon-reported state (the verdicts)
-// lives on the rows, not on the section's presence.
+// appendHostRows renders the section into the pane's flattened row list,
+// straight after the tiers: the section derives from the manifest entries
+// the pane already holds (its `hosts`/`default_host` rows also render in
+// the tiers above), so it needs no load and no daemon answer to exist — a
+// pane built from SetEntries alone still shows it. Daemon-reported state
+// (the verdicts) lives on the rows, not on the section's presence, and
+// sitting ahead of Accounts keeps the register rows last — the invariant
+// the register flow's navigate-to-bottom drives rely on.
 func (c *ConfigPane) appendHostRows() {
 	rows, parseError := c.hostRowsFromEntries()
 	c.hosts.parseError = parseError
@@ -519,6 +521,9 @@ func (c *ConfigPane) beginHostAdd() {
 	c.sizeHostFields()
 	c.hosts.form.fields[0].input.Focus()
 	c.clearStatus()
+	// The form renders hosts.status in its footer: open clean — a leftover
+	// check verdict would read as a form error before anything was submitted.
+	c.clearHostStatus()
 }
 
 // sizeHostFields bounds each form input to the pane — an unbounded textinput
@@ -783,16 +788,28 @@ func hostRowDetail(row HostRow) string {
 }
 
 // renderHostAddView lays out the add form through the same header/window/
-// footer assembly as the list and the explain view.
+// footer assembly as the list and the explain view. The outcome — nearly
+// always a refused write or destination — rides the FOOTER, not the field
+// list: the window follows the focused field and field navigation cannot
+// pass the last field, so an error appended after it would sit below the
+// visible slice in a short overlay with no way to scroll to it.
 func (c *ConfigPane) renderHostAddView() string {
 	header := c.fitPaneLine(configTitleStyle.Render("Add a host")) + "\n" +
 		c.wrap("saved through the daemon's own host-table edit · fields validate where the write happens", configHintStyle)
-	footer := "\n" + configHintStyle.Render(c.fitHints([]configHint{
+	var footer strings.Builder
+	if c.hosts.status != "" {
+		style := configOKStyle
+		if c.hosts.statusIsError {
+			style = configErrorStyle
+		}
+		footer.WriteString(c.wrap(c.hosts.status, style))
+	}
+	footer.WriteString("\n" + configHintStyle.Render(c.fitHints([]configHint{
 		{text: "↑/↓ field", drop: 2},
 		{text: "space toggle", drop: 3},
 		{text: "↵ next · save on last", drop: 1},
 		{text: "esc cancel"},
-	})) + "\n"
+	})) + "\n")
 
 	var lines []string
 	form := &c.hosts.form
@@ -822,13 +839,5 @@ func (c *ConfigPane) renderHostAddView() string {
 		line := cursor + labelStyle.Render(fmt.Sprintf("%-21s", field.label)) + control
 		lines = append(lines, c.fitPaneLine(line))
 	}
-	if c.hosts.status != "" {
-		style := configOKStyle
-		if c.hosts.statusIsError {
-			style = configErrorStyle
-		}
-		lines = append(lines, "")
-		lines = append(lines, strings.Split(strings.TrimSuffix(c.wrap(c.hosts.status, style), "\n"), "\n")...)
-	}
-	return c.renderWindowed(header, footer, lines, form.focus, form.focus+1)
+	return c.renderWindowed(header, footer.String(), lines, form.focus, form.focus+1)
 }

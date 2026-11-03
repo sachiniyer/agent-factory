@@ -96,6 +96,12 @@ func TestDesignDriverScenes(t *testing.T) {
 					h.state = stateConfigEditor
 					h.configPane.SetAccounts(nil, []string{"claude"}, nil)
 					h.configPane.SetFocus(true)
+					// The register row is no longer the first selectable row —
+					// the Hosts section sits ahead of Accounts. Land on it by
+					// its footer verb rather than a fixed offset.
+					for i := 0; i < 30 && !strings.Contains(h.configPane.String(), "↵ register"); i++ {
+						h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyDown})
+					}
 					h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 					h.configPane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("work")})
 				case "accounts":
