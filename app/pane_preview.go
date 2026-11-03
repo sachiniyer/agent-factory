@@ -524,7 +524,7 @@ func paneBindingLabel(binding paneBinding) string {
 		}
 	}
 	if label == "" {
-		return binding.instance.Title
+		return tree.DisplayTitle(binding.instance)
 	}
-	return fmt.Sprintf("%s · %s", binding.instance.Title, label)
+	return fmt.Sprintf("%s · %s", tree.DisplayTitle(binding.instance), label)
 }

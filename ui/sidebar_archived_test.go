@@ -144,6 +144,33 @@ func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
 		"the Archived folder is absent while the only archived-liveness row is restoring")
 }
 
+// TestSidebar_UntitledDraftNotCounted (#6711): the create flow's naming draft —
+// an untitled instance with its create op in flight — renders as the naming
+// input row but is not yet a session, so the section header must not count it.
+// Giving the draft a title (typing, or Enter adopting the suggestion) makes it
+// a session, and then it joins the count with its own row.
+func TestSidebar_UntitledDraftNotCounted(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	addTestInstance(s, archTestInstance(t, "alpha", session.Ready))
+	addTestInstance(s, archTestInstance(t, "beta", session.Ready))
+	s.SetSize(40, 40)
+
+	draft, err := session.NewInstance(session.InstanceOptions{
+		Title: "", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	draft.SetBackend(session.NewFakeBackend())
+	draft.SetInFlightOpForTest(session.OpCreating)
+	addTestInstance(s, draft)
+
+	assert.Contains(t, s.View(), "Sessions (2)",
+		"the untitled naming draft is an input row, not a session — the header counts only titled rows")
+
+	require.NoError(t, draft.SetTitle("named-now"))
+	assert.Contains(t, s.View(), "Sessions (3)",
+		"once titled the draft is a session and joins the count")
+}
+
 // TestSidebar_NoArchivedFolderWhenEmpty (#1028): with nothing archived, the
 // Archived folder header is not shown at all.
 func TestSidebar_NoArchivedFolderWhenEmpty(t *testing.T) {

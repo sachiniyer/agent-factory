@@ -114,6 +114,30 @@ func TestTabbedWindowViewIsExactlyRectSized(t *testing.T) {
 	}
 }
 
+// TestTabbedWindowHeaderUntitledDraft (#6711): while the create flow's naming
+// draft is still untitled, binding it — committed or #1321 preview — must not
+// print a bare leading separator before the tab label; a clear placeholder
+// names the session-to-be.
+func TestTabbedWindowHeaderUntitledDraft(t *testing.T) {
+	draft, err := session.NewInstance(session.InstanceOptions{
+		Title: "", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	draft.SetBackend(session.NewFakeBackend())
+	draft.SetInFlightOpForTest(session.OpCreating)
+
+	w := newTestTabbedWindow()
+	setWindowInstance(w, draft)
+	assert.Contains(t, w.renderHeader(80), "new session · Agent",
+		"an untitled draft's header shows a placeholder title, not a bare separator")
+
+	previewed := newTestTabbedWindow()
+	setWindowInstance(previewed, startedWindowInstance(t, "alpha"))
+	previewed.SetPreview(draft, 0, "alpha · Agent")
+	assert.Contains(t, previewed.renderHeader(80), "new session · Agent · preview",
+		"the preview arm shows the same placeholder instead of a blank title")
+}
+
 // TestTabbedWindowHeaderEllipsizesAtNarrowWidth pins #1098 finding 2: at a
 // 40x10 terminal the pane header used to hard-cut (`alpha · Termina`); the
 // cut must be marked with an ellipsis instead.
