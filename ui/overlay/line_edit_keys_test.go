@@ -26,6 +26,28 @@ func TestSearchOverlayCtrlUClearsQuery(t *testing.T) {
 	assert.Equal(t, "zzz", s.query)
 }
 
+// TestSearchOverlayDropsLeadingSlash is #6710's repro: '/' opens the dialog as
+// a prompt affordance and the buffer must start empty, yet the play-test still
+// captured "/ gam" — a '/' reached the field anyway (a second press, or a
+// vim-style "/pattern" paste). No session title or branch begins with '/', so
+// a leading one is never intended query text; mid-query '/' stays valid.
+func TestSearchOverlayDropsLeadingSlash(t *testing.T) {
+	s := NewSearchOverlay(nil)
+	assert.False(t, s.HandleKeyPress(keyRune('/')),
+		"a stray opener edits nothing; it does not close search")
+	typeInto(s.HandleKeyPress, "gam")
+	assert.Equal(t, "gam", s.query, "the query starts empty — no '/' may lead it")
+
+	mid := NewSearchOverlay(nil)
+	typeInto(mid.HandleKeyPress, "a/b")
+	assert.Equal(t, "a/b", mid.query, "a '/' inside the query is ordinary text")
+
+	pasted := NewSearchOverlay(nil)
+	assert.False(t, pasted.HandleKeyPress(pasteRunes("/gam")),
+		"a vim-style '/pattern' paste is the same affordance, and does not close search")
+	assert.Equal(t, "gam", pasted.query, "a pasted leading '/' is dropped the same way")
+}
+
 func TestProjectPickerPathInputsCtrlUClears(t *testing.T) {
 	p := pickerFixture()
 	for !p.addRowSelected() {

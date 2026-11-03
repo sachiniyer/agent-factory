@@ -101,9 +101,18 @@ func (s *SearchOverlay) HandleKeyPress(msg tea.KeyMsg) bool {
 			s.selectedIdx++
 		}
 	default:
-		if query, ok := ui.EditLine(s.query, msg); ok && query != s.query {
-			s.query = query
-			s.updateResults()
+		if query, ok := ui.EditLine(s.query, msg); ok {
+			// The '/' that opens the dialog is a prompt affordance, not query
+			// text: the buffer must start empty (vim/fzf convention, #6710).
+			// The open action consumes the opener at dispatch, but a stray
+			// leading '/' can still arrive here — a re-pressed opener, or a
+			// vim-style "/pattern" typed/pasted into the already-open field.
+			// No session title or branch begins with '/', so a leading one is
+			// never intended query text; a '/' inside the query stays valid.
+			if query = strings.TrimLeft(query, "/"); query != s.query {
+				s.query = query
+				s.updateResults()
+			}
 		}
 	}
 	return false
