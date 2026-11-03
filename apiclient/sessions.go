@@ -94,18 +94,35 @@ func classifyLocalSnapshotFailure(err error) error {
 	return fmt.Errorf("%w: %v", daemon.ErrDaemonNotAnswering, err)
 }
 
+// ErrCallerRowNotRegistered is returned by CallerNoSpawn when the daemon reports
+// a bound caller (resp.Caller != "") but no instance in the returned snapshot
+// matches that caller — the registration race where a just-spawned session's
+// credential is live in the sandbox before its row is visible in the daemon
+// snapshot (#6586). It is distinct from the operator-credential case (Caller
+// empty, ok=false, nil error), which has no row to wait for, so a caller can
+// retry the credential-bound lookup only while the race window is open and fall
+// through to the tmux-name path otherwise.
+var ErrCallerRowNotRegistered = errors.New("the calling session is not yet registered with the daemon")
+
 // CallerNoSpawn returns the session a sandbox credential is bound to together
 // with that session's (narrowed) row (#5571 W3.2). ok is false when the daemon
 // reports no bound caller — an operator credential, an older daemon, or no
-// daemon at all — so the caller falls back to resolving by tmux name. It never
-// starts a daemon.
-func CallerNoSpawn() (row session.InstanceData, ok bool, err error) {
+// daemon at all — so the caller falls back to resolving by tmux name. When the
+// daemon DOES report a bound caller but the row is not yet in the snapshot — the
+// registration race a just-spawned program can hit (#6586) — it returns
+// ErrCallerRowNotRegistered so the caller can retry within a bounded window
+// rather than collapsing that race into a silent "no bound caller" and falling
+// through to the tmux-name path, which the sandbox projection makes unusable
+// (it strips TmuxName from every row). It never starts a daemon. ctx bounds the
+// round-trip itself: the caller's retry loop can thus be bounded in wall time
+// even where the transport carries no deadline of its own (the local socket).
+func CallerNoSpawn(ctx context.Context) (row session.InstanceData, ok bool, err error) {
 	c, err := NewTargeted()
 	if err != nil {
 		return session.InstanceData{}, false, err
 	}
 	var resp daemon.SnapshotResponse
-	if err := c.callCtx(context.Background(), "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
+	if err := c.callCtx(ctx, "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
 		return session.InstanceData{}, false, err
 	}
 	if resp.Caller == "" {
@@ -116,5 +133,11 @@ func CallerNoSpawn() (row session.InstanceData, ok bool, err error) {
 			return d, true, nil
 		}
 	}
-	return session.InstanceData{}, false, nil
+	// The daemon reports a bound caller but the row is not yet in the
+	// snapshot — the registration race (#6586). Distinguish this from the
+	// operator-credential case (Caller empty above) so callers can retry
+	// the credential-bound lookup within a bounded window rather than
+	// falling through to the tmux-name path, which the sandbox projection
+	// makes unreachable for a sandbox credential (it strips TmuxName).
+	return session.InstanceData{}, false, ErrCallerRowNotRegistered
 }
