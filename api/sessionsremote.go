@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -163,15 +164,27 @@ func remoteSelfRefusal(flag string) error {
 // route a sandbox credential is admitted to. There is deliberately no tmux
 // fallback: a name read from this machine could match a same-named session on
 // the daemon and act on the wrong one.
+//
+// Like resolveSelfSession, the credential-bound lookup is retried through the
+// registration race (#6586): a just-spawned program can exec before its session
+// row is visible in the daemon snapshot, and the daemon reports the caller even
+// while the row is missing. ErrCallerRowNotRegistered distinguishes that race
+// from an operator credential (no bound caller), which gets the refusal — the
+// credential does not name a session at all.
 func resolveCredentialSelf() (*session.InstanceData, error) {
-	row, ok, err := callerSessionFn()
-	if err != nil {
-		return nil, err
+	for attempt := 0; ; attempt++ {
+		row, ok, err := callerSessionFn()
+		if err == nil {
+			if !ok {
+				return nil, remoteSelfRefusal("--self")
+			}
+			return &row, nil
+		}
+		if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) || attempt == selfResolveAttempts-1 {
+			return nil, err
+		}
+		selfResolveSleep(selfResolvePoll)
 	}
-	if !ok {
-		return nil, remoteSelfRefusal("--self")
-	}
-	return &row, nil
 }
 
 // remoteCreateInputs is the client-side half of a create against a REMOTE

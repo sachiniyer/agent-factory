@@ -79,12 +79,45 @@ var errSelfNotFound = errors.New("no Agent Factory session found")
 // A sandbox credential is bound to its session (#5571 W3.2), so when the daemon
 // reports a bound caller that row is the answer: the narrowed projection a
 // sandbox receives withholds TmuxName, and matching on it would never find the
-// caller. Otherwise — operator credential, older daemon — the tmux path is
-// unchanged.
+// caller. The credential-bound lookup is therefore the ONLY path that can
+// resolve a sandbox credential, and it is retried through the registration race
+// (#6586): a just-spawned program can exec as the first action of a
+// just-spawned af session before its session row is visible in the daemon
+// snapshot, and the daemon reports the caller even while the row is missing
+// (resp.Caller is set unconditionally for a sandbox credential, independent of
+// whether the row has registered). ErrCallerRowNotRegistered distinguishes that
+// race from an operator credential (Caller empty), which has no row to wait for,
+// so the credential-bound lookup polls only while the race window is open and
+// falls through to the tmux path otherwise — the tmux path is unreachable for a
+// sandbox credential (the projection strips TmuxName) but stays for operator
+// tokens and older daemons.
 func resolveSelfSession() (*session.InstanceData, error) {
 	if apiclient.HasDaemonToken() {
-		if row, ok, err := callerSessionFn(); err == nil && ok {
-			return &row, nil
+		for attempt := 0; ; attempt++ {
+			row, ok, err := callerSessionFn()
+			if err == nil {
+				if ok {
+					return &row, nil
+				}
+				// Operator credential / older daemon: the daemon reported no
+				// bound caller, so there is no row to wait for. Fall through to
+				// the tmux-name path.
+				break
+			}
+			// The daemon reported a bound caller but the row is not yet in the
+			// snapshot — the registration race (#6586). Retry within the same
+			// bounded window the tmux-name path uses, since the credential-bound
+			// lookup is the only path that can resolve a sandbox credential and
+			// the row is expected to register within this window. A non-race
+			// error (transport, auth) is not retried here — it surfaces so the
+			// caller sees the real failure rather than a misleading tmux miss.
+			if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) {
+				return nil, err
+			}
+			if attempt == selfResolveAttempts-1 {
+				return nil, err
+			}
+			selfResolveSleep(selfResolvePoll)
 		}
 	}
 	tmuxName, err := currentTmuxName()
