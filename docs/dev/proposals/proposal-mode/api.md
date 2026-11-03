@@ -180,7 +180,11 @@ Shapes:
   the highest the daemon has saved from that `writer` for the doc is refused
   with 409 `proposal_stale_save` and commits nothing. Fencing requires a
   nonempty `writer` and a positive `seq`; an empty `writer`, a zero `seq`,
-  or omitting both leaves the save unfenced.
+  or omitting both leaves the save unfenced. The fence is process-local and
+  bounded: the high-water mark lives only in the daemon's memory, is cleared
+  on every restart, and the oldest writer/doc key is forgotten past 4,096
+  entries — after either, a save at or below the old sequence is admitted
+  again rather than refused with `proposal_stale_save`.
 - `base` is the `commit` from the last read or save of this doc. It is
   required, and it must be a lowercase hex commit id (7 to 64 characters). Any
   other value, such as a ref name, fails with `unknown base commit`.
