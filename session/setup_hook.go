@@ -669,7 +669,12 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 // the process-group kill (e.g. via setsid) while inheriting stdout/stderr. A
 // non-blocking exclusive flock succeeds only when no such descendant keeps the
 // lock, in which case unlinking is safe; a held lock leaves the file to
-// retention rather than unlinking an inode a live writer still grows.
+// retention rather than unlinking an inode a live writer still grows. The
+// check retries the non-blocking flock for a brief budget before reporting
+// held, because a background child the entry started in its original process
+// group is only SIGKILL-queued and releases its inherited descriptor
+// asynchronously — an immediate single probe would retain a successful log for
+// a writer that is about to close, not one that escaped.
 //
 // This only applies to a lock-aware log — one whose filename carries the
 // hooklog versioned marker (setup-v1-*, the prefix hooklog.Open writes only
@@ -693,13 +698,34 @@ func setupHookLogQuiescent(path string) bool {
 		return false
 	}
 	defer file.Close()
-	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
-		if errors.Is(err, syscall.EWOULDBLOCK) {
-			log.WarningLog.Printf("setup_commands output log %s is still held by an escaped descendant; leaving it to retention", path)
-		} else {
+	// A background child the entry started in its original process group
+	// (e.g. `sleep 60 &`) is only SIGKILL-queued by the process-group kill
+	// above; it releases its inherited descriptor asynchronously as the
+	// kernel reaps it. A single non-blocking flock can therefore still see
+	// the lock held even though the child was not escaped and is about to
+	// close, which would permanently retain a successful log and erode the
+	// quota this removal protects. Retry the non-blocking lock for a brief
+	// budget so a killed-but-not-yet-reaped writer releases before we
+	// classify it as an escaped descendant and leave the log to retention.
+	const quiesceBudget = 500 * time.Millisecond
+	deadline := time.Now().Add(quiesceBudget)
+	sleep := 5 * time.Millisecond
+	for {
+		if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err == nil {
+			return true
+		} else if !errors.Is(err, syscall.EWOULDBLOCK) {
 			log.WarningLog.Printf("setup_commands output log %s lock check failed before removal: %v", path, err)
+			return false
 		}
-		return false
+		remaining := time.Until(deadline)
+		if remaining <= 0 {
+			log.WarningLog.Printf("setup_commands output log %s is still held after %s; leaving it to retention", path, quiesceBudget)
+			return false
+		}
+		if sleep > remaining {
+			sleep = remaining
+		}
+		time.Sleep(sleep)
+		sleep *= 2
 	}
-	return true
 }
