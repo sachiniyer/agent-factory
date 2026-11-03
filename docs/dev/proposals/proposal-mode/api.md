@@ -50,6 +50,9 @@ path filled in:
 6. Do not change a `> [!decision]` callout without asking the user.
 7. To add a doc, run `af proposal add-doc`.
 8. If you lose track of the proposal, run `af proposal attach`.
+9. A fenced code block whose info string is mermaid renders as a diagram in
+    the user's web proposal view (the terminal shows the source), so keep the
+    source valid mermaid.
 
 ### changes output
 

@@ -182,6 +182,15 @@ func TestWarnedShellValueKeys_EachOneActuallyWarns(t *testing.T) {
 			require.NoError(t, err)
 			return warnings.String()
 		},
+		"setup_commands": func(t *testing.T) string {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			repoRoot := t.TempDir()
+			writeInRepoTomlConfig(t, repoRoot, "setup_commands = [\"exec -- ./session-setup.sh\"]\n")
+			warnings := captureLog(t, &aflog.WarningLog)
+			_, _, err := LoadInRepoConfig(repoRoot)
+			require.NoError(t, err)
+			return warnings.String()
+		},
 	}
 
 	for _, key := range warnedShellValueKeys {

@@ -345,6 +345,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	archiveWarning := i.ArchiveWarning()
 	callbackWarning := i.CallbackUnavailable()
 	agentConfigSkipped := i.AgentConfigSkipped()
+	setupHookFailed := i.SetupHookFailed()
 	arrow := nonExpandableArrow
 	if Expandable(i) {
 		if expanded {
@@ -730,6 +731,11 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 		// Same cross-surface contract as the callback notice (#6337): the row
 		// names every declared config file af could not place, with the reason.
 		warningTexts = append(warningTexts, session.AgentConfigSkippedPrefix+strings.Join(agentConfigSkipped, "; "))
+	}
+	if setupHookFailed != "" {
+		// Same cross-surface contract again (#6667): the row names the failed
+		// setup_commands entry and the retained output log.
+		warningTexts = append(warningTexts, session.SetupHookFailedPrefix+setupHookFailed)
 	}
 	if len(warningTexts) == 0 {
 		if description != "" {

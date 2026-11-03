@@ -47,6 +47,7 @@ var warnedShellValueKeys = []string{
 	"root_agent.program",
 	"root_agents",
 	"sandbox.ssh",
+	"setup_commands",
 }
 
 // detectedClaudeNote is appended when a value still matches the claude command af

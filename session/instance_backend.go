@@ -61,7 +61,7 @@ func (i *Instance) Start(firstTimeSetup bool) error {
 // leaking the capture goroutine when a session is killed with a live stream open
 // (#1632). The agent-server then kills the underlying session.
 func (i *Instance) Kill() error {
-	return i.AgentServer().Kill(false)
+	return i.killAgentServer(false)
 }
 
 // CleanupFailedCreate tears down resources a failed create may have started.
@@ -99,7 +99,27 @@ func (i *Instance) CleanupFailedCreate(startErr error) error {
 // itself) because Instance has no subtypes to lose an override on — the
 // Go-embedding hazard Backend.Kill's doc explains does not apply here.
 func (i *Instance) KillTrustingOwnLifecycleLock() error {
-	return i.AgentServer().Kill(true)
+	return i.killAgentServer(true)
+}
+
+// killAgentServer runs the AgentServer kill behind Kill and
+// KillTrustingOwnLifecycleLock, then reclaims the session's daemon-side
+// setup-commands payload (#6667) once the teardown's outcome is settled —
+// the same TeardownStateUnknown classification deleteSessionRecord applies
+// before dropping the record, so the staging dir never outlives its only
+// handle. An unknown outcome keeps both: the retained record is the retry's
+// handle, and its payload stays for the attempt that eventually settles.
+//
+// Only a permanent deletion flows through here. Archive reaches
+// AgentServer.Kill (remote) or teardownArchive (local) directly, and a
+// workspace-preserving stop reaches teardownTabs — none of those drops the
+// record, so none may drop the payload a rebuild can still consume.
+func (i *Instance) killAgentServer(trustLiveGeneration bool) error {
+	err := i.AgentServer().Kill(trustLiveGeneration)
+	if !TeardownStateUnknown(err) {
+		i.discardLocalSetupPayload()
+	}
+	return err
 }
 
 // runtimeLiveBoundary lets the daemon settle predecessor-owned evidence at the

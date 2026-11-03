@@ -186,6 +186,9 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 		if s.inst != nil && resp.Conversation != nil {
 			s.inst.recordReportedConversationFrom(s.rc, *resp.Conversation)
 		}
+		if s.inst != nil && resp.SetupHookFailed != "" {
+			s.inst.noteSetupHookFailure(resp.SetupHookFailed)
+		}
 		if s.inst != nil && len(req.Tabs) > 0 {
 			s.inst.applyRestoreOutcome(req.Tabs, resp.TabsRestored, resp.TabsGone)
 		}
@@ -866,6 +869,9 @@ type agentLaunchResp struct {
 	// to a live session, and the ids whose session tmux confirmed absent.
 	TabsRestored []string `json:"tabs_restored,omitempty"`
 	TabsGone     []string `json:"tabs_gone,omitempty"`
+	// SetupHookFailed relays an in-sandbox setup-payload overlay failure the
+	// remote worktree create recorded (#6667).
+	SetupHookFailed string `json:"setup_hook_failed,omitempty"`
 }
 
 type agentSnapshotResp struct {

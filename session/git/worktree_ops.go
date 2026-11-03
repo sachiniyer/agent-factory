@@ -47,6 +47,9 @@ func (g *GitWorktree) Setup() error {
 		return setupErr
 	}
 	g.markWorktreePlaced()
+	// The setup hook's staged payload lands before post-worktree hooks so
+	// those commands see the files it prepared (#6667).
+	g.applySetupOverlay()
 	// Fire-and-forget post-worktree hooks (cancellable via hooksCtx)
 	g.hooksDone = g.runHooks()
 	return nil
@@ -85,6 +88,7 @@ func (g *GitWorktree) RebuildFromExistingBranch() error {
 	}
 	g.branchCreatedByUs = branchCreatedByUs
 	g.markWorktreePlaced()
+	g.applySetupOverlay()
 	g.startHooks()
 	return nil
 }
@@ -137,6 +141,7 @@ func (g *GitWorktree) RebuildFreshFromRecordedBase() error {
 	g.baseCommitSHA = baseCommit
 	g.branchCreatedByUs = true
 	g.markWorktreePlaced()
+	g.applySetupOverlay()
 	g.startHooks()
 	return nil
 }

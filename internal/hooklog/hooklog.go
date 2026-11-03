@@ -32,6 +32,8 @@ type Kind string
 const (
 	PostWorktree Kind = "post-worktree"
 	OnArchive    Kind = "on-archive"
+	// Setup is the daemon-side setup_commands hook (#6667).
+	Setup Kind = "setup"
 )
 
 // Open creates a private per-run log under $AF_HOME/logs/hooks. The returned
@@ -43,7 +45,7 @@ func Open(kind Kind) (*os.File, error) {
 
 func open(kind Kind, flock func(int, int) error) (*os.File, error) {
 	switch kind {
-	case PostWorktree, OnArchive:
+	case PostWorktree, OnArchive, Setup:
 	default:
 		return nil, fmt.Errorf("unknown hook log kind %q", kind)
 	}

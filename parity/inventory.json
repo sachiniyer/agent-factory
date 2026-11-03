@@ -33,7 +33,7 @@
         "pointer": "api/sessions_backends.go:19 sessionsBackendsCmd -> daemon/control_client.go:567 ListBackends"
       },
       "verdict": "parity",
-      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally — which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view — a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
+      "notes": "POST /v1/ListBackends (#1968) serves config.SupportedBackends per-repo with a tri-state answer (available / unavailable+reason / unknown+reason). CLI half CLOSED by #2584: `af sessions backends` prints that catalog verbatim, reaching the SAME controlServer.ListBackends the web's picker calls over /v1/ListBackends (daemon/httproutes.go wires the route to that method; the gob control socket exposes it), so the surfaces cannot describe a repo's backends differently and a backend added server-side reaches all of them with no client change (pinned by TestSessionsBackends_PassesThroughAnUnknownBackendName). It resolves the project through the same resolveRepo `sessions create` uses, so it describes the create it predicts, and the --backend flag help names it. TUI half CLOSED by #1933's create-form backend field, which is exactly the flip #2584's note anticipated ('this cell flips to yes with that picker, not before'): the TUI reaches the same catalog over apiclient.ListBackends and renders the daemon's labels/statuses/reasons rather than deriving availability locally \u2014 which would answer about the CLIENT's host, since apiclient.NewTargeted may point at a REMOTE daemon. Note what 'yes' means uniformly here: on both UIs this capability IS the create-time picker rendering availability, not a standalone catalog view \u2014 a catalog with no way to act on it would be a dead-end read. The CLI's standalone verb is the shape that fits a scripting surface. Three surfaces, one catalog, one implementation: parity."
     },
     {
       "id": "cli.argshape.session-title",
@@ -88,7 +88,7 @@
         "pointer": "cobra's InitDefaultCompletionCmd (af completion bash|zsh|fish|powershell)"
       },
       "verdict": "deliberate",
-      "notes": "A shell integration emitted for the user's shell rc. There is nothing to complete in a TUI or a browser, so the other surfaces have no analogue. Added by cobra lazily at Execute() time, which is why the derivation must init cobra's defaults before walking the tree — otherwise this surface exists and the inventory cannot see it."
+      "notes": "A shell integration emitted for the user's shell rc. There is nothing to complete in a TUI or a browser, so the other surfaces have no analogue. Added by cobra lazily at Execute() time, which is why the derivation must init cobra's defaults before walking the tree \u2014 otherwise this surface exists and the inventory cannot see it."
     },
     {
       "id": "config-agent",
@@ -106,7 +106,7 @@
         "pointer": ""
       },
       "verdict": "unclear",
-      "notes": "Spawns the user's default agent to help set up config. The web has had it since #2467: 'Configure with assistant' in the config view POSTs /v1/config-assistant, which builds the same SpawnConfigAgentRequest (configagent.BuildSpawnRequest, ModeChange) the TUI's C drives, and streams the daemon-owned bare tmux session into an overlay. What remains is a CLI-only owner call: whether a public verb should spawn+attach the assistant (the `af accounts login` shape) — a new verb's contract shape is a maintainer decision, not filed. Reap paths differ by surface: TUI via the internal ReapConfigAgent RPC, web via DELETE /v1/config-assistant."
+      "notes": "Spawns the user's default agent to help set up config. The web has had it since #2467: 'Configure with assistant' in the config view POSTs /v1/config-assistant, which builds the same SpawnConfigAgentRequest (configagent.BuildSpawnRequest, ModeChange) the TUI's C drives, and streams the daemon-owned bare tmux session into an overlay. What remains is a CLI-only owner call: whether a public verb should spawn+attach the assistant (the `af accounts login` shape) \u2014 a new verb's contract shape is a maintainer decision, not filed. Reap paths differ by surface: TUI via the internal ReapConfigAgent RPC, web via DELETE /v1/config-assistant."
     },
     {
       "id": "config.explain",
@@ -143,7 +143,7 @@
         "pointer": "commands/configcmd.go:280,410 config get/list"
       },
       "verdict": "parity",
-      "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces — the earlier 'is config a UI concern?' question is answered yes. #3708 routed the TUI read through the daemon's GetConfig when --daemon-url/AF_DAEMON_URL names one, so all three surfaces now answer about the SAME machine; `af config get`/`list` stay local-only by #3661's decision, which is about what those verbs claim to resolve rather than about what the daemon serves."
+      "notes": "#1960 added a config editor to the TUI (`,`, over the config manifest) and the web (GetConfig/SetConfigValue), so reading global config is now at parity across all three surfaces \u2014 the earlier 'is config a UI concern?' question is answered yes. #3708 routed the TUI read through the daemon's GetConfig when --daemon-url/AF_DAEMON_URL names one, so all three surfaces now answer about the SAME machine; `af config get`/`list` stay local-only by #3661's decision, which is about what those verbs claim to resolve rather than about what the daemon serves."
     },
     {
       "id": "config.migrate",
@@ -161,7 +161,7 @@
         "pointer": "commands/configmigratecmd.go config migrate (config.MigrateGlobalConfig)"
       },
       "verdict": "deliberate",
-      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place — their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling — so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
+      "notes": "#3624: a one-shot rewrite of the deprecated spellings the loader warns about, so the warning that fired on every config load has a command that ends it. n/a on the TUI and web because neither can produce a deprecated key in the first place \u2014 their edits go through SetGlobalConfigValue, which writes the canonical grouped spelling \u2014 so the only files needing migration are hand-edited or inherited from an older af, and both surfaces already read either spelling transparently. It is also a whole-file rewrite with a backup and a diff to read, which is a terminal affordance rather than a form one."
     },
     {
       "id": "config.read-project",
@@ -216,7 +216,7 @@
         "pointer": "commands/configcmd.go config validate (LoadConfigReadOnly)"
       },
       "verdict": "deliberate",
-      "notes": "#2453/#2454: a read-only check that config.toml loads, the companion to a hand-edit and the config assistant's validate-after step. n/a on the TUI and web because their edits go through the validated SetGlobalConfigValue/manifest path and so can never produce an unloadable file — there is nothing for a validate affordance to catch. The config assistant, which does hand-edit the structured keys, runs `af config validate` itself."
+      "notes": "#2453/#2454: a read-only check that config.toml loads, the companion to a hand-edit and the config assistant's validate-after step. n/a on the TUI and web because their edits go through the validated SetGlobalConfigValue/manifest path and so can never produce an unloadable file \u2014 there is nothing for a validate affordance to catch. The config assistant, which does hand-edit the structured keys, runs `af config validate` itself."
     },
     {
       "id": "config.write",
@@ -234,7 +234,7 @@
         "pointer": "commands/configcmd.go:506 config set"
       },
       "verdict": "parity",
-      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 — together with its read, which had to move at the same time or the editor would write values it never read."
+      "notes": "#1960: the TUI config editor (`,`) writes config.toml through the same path `af config set` uses; the web writes via SetConfigValue. Setting a config key is now at parity. Since #3231 all three go through the daemon's admission-gated SetConfigValue while a daemon runs, and since #3708 the TUI's write follows --daemon-url/AF_DAEMON_URL exactly as `af config set` has since #3679 \u2014 together with its read, which had to move at the same time or the editor would write values it never read."
     },
     {
       "id": "config.unset-global-alias",
@@ -271,7 +271,7 @@
       },
       "verdict": "unclear",
       "issue": "#5157",
-      "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project; the CLI path is deliberately local-only (commands/configremote.go refuses --project under --daemon-url) because that file lives on the daemon's host. The UI half still needs a project-scoped admission-gated write route beside GetProjectConfig (the UIs cannot write in-process — #3231 routes every UI write through the daemon) and the editor scope selector the config.read-project fix (#4634, PR #4947) adds to both surfaces — building a second selector would be the parallel-implementation failure the parity rules exist to prevent. AWAITING OWNER CALL: the tracker #5157 was closed by the maintainer on 2026-10-27 without comment, and its only path forward (#4947) sits on 'hold' for an owner decision about the new scope-picker surface it adds. Whether UI project-writes should be re-filed once that lands — or whether they should exist at all — is his call, so the row is 'unclear' rather than 'real-gap'; the gap itself (tui=no, web=no) is unchanged."
+      "notes": "Stage 5 of #2216 adds CLI per-project writes: `af config set <key> --project <id-or-path>` and `af config unset <key> --project`. The value lands in the project's machine-local ~/.agent-factory/.agent-factory-projects/<id>/config.toml, above the checked-in in-repo layer, and only for the preference keys the manifest admits per project; the CLI path is deliberately local-only (commands/configremote.go refuses --project under --daemon-url) because that file lives on the daemon's host. The UI half still needs a project-scoped admission-gated write route beside GetProjectConfig (the UIs cannot write in-process \u2014 #3231 routes every UI write through the daemon) and the editor scope selector the config.read-project fix (#4634, PR #4947) adds to both surfaces \u2014 building a second selector would be the parallel-implementation failure the parity rules exist to prevent. AWAITING OWNER CALL: the tracker #5157 was closed by the maintainer on 2026-10-27 without comment, and its only path forward (#4947) sits on 'hold' for an owner decision about the new scope-picker surface it adds. Whether UI project-writes should be re-filed once that lands \u2014 or whether they should exist at all \u2014 is his call, so the row is 'unclear' rather than 'real-gap'; the gap itself (tui=no, web=no) is unchanged."
     },
     {
       "id": "daemon.lifecycle",
@@ -307,7 +307,7 @@
         "pointer": "commands/root.go:386,393 --daemon-url/--token"
       },
       "verdict": "deliberate",
-      "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction — it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
+      "notes": "The web is SERVED BY the daemon it talks to, so it has no 'point me elsewhere' knob by construction \u2014 it is already at the only daemon it can reach. The TUI and CLI are separate processes that must be told where the daemon is, so the flags are persistent on root for both."
     },
     {
       "id": "daemon.token",
@@ -361,7 +361,7 @@
         "pointer": "commands/root.go:362 + api/api.go:651 advertise tmux.SupportedProgramsString()"
       },
       "verdict": "parity",
-      "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src — the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
+      "notes": "RESOLVED by #1970. A third drift dimension under verbs and fields: the VALUES a surface offers for a field. The TUI and CLI read tmux.SupportedPrograms (session/tmux/session.go); the web kept its own copy in two pickers, so adding an agent server-side would have left the web silently offering the old set with every field-level check green. The fix is structural rather than a re-sync: the daemon SERVES the enum (POST /v1/ListPrograms, daemon/programs.go) and the web renders the response (web/src/programs.ts), so a seventh agent reaches the web with no edit under web/src \u2014 the acceptance criterion, pinned by TestListPrograms_NewProgramReachesClientsWithNoClientChange and its web twin. TestWebProgramEnumMatchesWire (the interim 'is the copy current?' guard) is replaced by TestWebHardcodesNoAgentEnum, which asserts the stronger property that NO copy exists. The reported default comes from the same decision function the create path uses (defaultProgramFor), so the picker's 'repo default' label cannot disagree with the program a real create picks."
     },
     {
       "id": "install.bug-report",
@@ -398,7 +398,7 @@
       },
       "verdict": "real-gap",
       "issue": "#5571",
-      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first; the web half is the config view's Hosts section — the same hosts_edit write (never a second whole-table writer), the same CheckHost probe, and the same renderHostCheck verdict copy, with add/remove refused on a daemon too old to answer config_hosts_edit rather than risk an empty-`hosts` write. The remaining half is the TUI equivalent, still tracked on #5571's W10.5 plan comment; its verdict stays real-gap until then. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
+      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first; the web half is the config view's Hosts section \u2014 the same hosts_edit write (never a second whole-table writer), the same CheckHost probe, and the same renderHostCheck verdict copy, with add/remove refused on a daemon too old to answer config_hosts_edit rather than risk an empty-`hosts` write. The remaining half is the TUI equivalent, still tracked on #5571's W10.5 plan comment; its verdict stays real-gap until then. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
     },
     {
       "id": "host.check",
@@ -417,7 +417,7 @@
       },
       "verdict": "deliberate",
       "issue": "#5571",
-      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor. The web runs it as part of host management (#5571 W10.5): the config view's Hosts section probes a saved host — or every one — after add and on demand, and shows the verdict under the row. The TUI analogue stays n/a by the same reasoning as before: its host surface is the create picker, which READS the readiness its answer updates (HostOption.readiness/note on ListBackends) refreshed on the daemon's ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
+      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor. The web runs it as part of host management (#5571 W10.5): the config view's Hosts section probes a saved host \u2014 or every one \u2014 after add and on demand, and shows the verdict under the row. The TUI analogue stays n/a by the same reasoning as before: its host surface is the create picker, which READS the readiness its answer updates (HostOption.readiness/note on ListBackends) refreshed on the daemon's ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
     },
     {
       "id": "install.doctor",
@@ -435,7 +435,7 @@
         "pointer": "commands/doctorcmd.go:34"
       },
       "verdict": "deliberate",
-      "notes": "Diagnoses the host install, including the case where the daemon is down — exactly when neither UI can run."
+      "notes": "Diagnoses the host install, including the case where the daemon is down \u2014 exactly when neither UI can run."
     },
     {
       "id": "install.reset",
@@ -489,7 +489,7 @@
         "pointer": "commands/root.go:173,201,210; api/apicmd.go:26"
       },
       "verdict": "deliberate",
-      "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking — see docs/dev/surface-parity.md."
+      "notes": "af version/keys/debug/api are introspection verbs for humans and scripts at a shell, and cobra's built-in `af help` / `--help` / `--version` are the same class. The TUI's ? overlay covers the keys half for its own surface; the web has neither, since a GUI's affordances are the help. cobra adds the built-ins lazily at Execute() time, so the derivation inits them before walking \u2014 see docs/dev/surface-parity.md."
     },
     {
       "id": "meta.internal",
@@ -526,45 +526,45 @@
       },
       "verdict": "parity",
       "issue": "#5859",
-      "notes": "The daemon refuses a task whose project path is not a git repository on ITS host when the request sets validate_path (daemon/task_path_validation.go). Remote CLI and TUI clients set it through apiclient; a local TUI/CLI run the same check client-side (ui/task_pane_edit.go validateForm, which re-checks on EVERY save per #924). The web now sends validate_path:true on both AddTask and UpdateTask — the web has no filesystem to check against and its project select derives options from live state (sessions ∪ tasks ∪ registry), so a path gone stale since the read is refused at save with the daemon's actionable message instead of failing at fire. Because the edit modal's patch always carries project_path, an edit re-validates the submitted repo the same way the local TUI form does on every save; a patch without the field (the enable toggle) skips the check exactly as it does on the Go clients."
+      "notes": "The daemon refuses a task whose project path is not a git repository on ITS host when the request sets validate_path (daemon/task_path_validation.go). Remote CLI and TUI clients set it through apiclient; a local TUI/CLI run the same check client-side (ui/task_pane_edit.go validateForm, which re-checks on EVERY save per #924). The web now sends validate_path:true on both AddTask and UpdateTask \u2014 the web has no filesystem to check against and its project select derives options from live state (sessions \u222a tasks \u222a registry), so a path gone stale since the read is refused at save with the daemon's actionable message instead of failing at fire. Because the edit modal's patch always carries project_path, an edit re-validates the submitted repo the same way the local TUI form does on every save; a patch without the field (the enable toggle) skips the check exactly as it does on the Go clients."
     },
     {
       "id": "project.add",
       "title": "Register a new project",
       "tui": {
         "status": "yes",
-        "pointer": "app/switch_project.go handleAddProject → registerProjectThroughDaemon (apiclient RegisterProject RPC)"
+        "pointer": "app/switch_project.go handleAddProject \u2192 registerProjectThroughDaemon (apiclient RegisterProject RPC)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' → web/src/modals.ts addProjectModal → api.ts registerProject (RegisterProject RPC)"
+        "pointer": "web/src/ui.ts renderProjectSwitch '+ Add project' \u2192 web/src/modals.ts addProjectModal \u2192 api.ts registerProject (RegisterProject RPC)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) → daemon RegisterProject RPC"
+        "pointer": "api/projects.go newProjectsAddCmd (af projects add, register alias) \u2192 daemon RegisterProject RPC"
       },
       "verdict": "parity",
       "issue": "#2456",
-      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it — `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() — so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
+      "notes": "#2456 adds the daemon RegisterProject RPC (POST /v1/RegisterProject); all three surfaces route through it \u2014 `af projects add` (register is a deprecated alias) over the gob control socket, the TUI's picker '+ Add project' via apiclient (registerProjectThroughDaemon), and the web switcher's '+ Add project' via af() \u2014 so the checkout is resolved on the daemon's filesystem and the single writer (#960) owns the registry. The web add is the coherent zero-projects empty state (the switcher is always openable and hosts the action). Parity now that the TUI add writes the durable registry instead of the legacy in-process root_agents entry, and all three switchers union the registry into their project lists (project.list)."
     },
     {
       "id": "project.add.url",
       "title": "Register a project by git URL: the daemon clones it under projects_root",
       "tui": {
         "status": "yes",
-        "pointer": "app/switch_project.go handleAddProject (a git URL) → registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
+        "pointer": "app/switch_project.go handleAddProject (a git URL) \u2192 registerProjectURLThroughDaemon (apiclient RegisterProjectURL)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/index.ts openAddProject routes a URL-shaped value (api.ts looksLikeGitURL, mirroring projectclone.LooksLikeURL) to api.ts registerProjectURL → {url}; modal releases for the clone and a daemon refusal remounts it with the message inline (web/src/add_project_flow.test.ts)"
+        "pointer": "web/src/index.ts openAddProject routes a URL-shaped value (api.ts looksLikeGitURL, mirroring projectclone.LooksLikeURL) to api.ts registerProjectURL \u2192 {url}; modal releases for the clone and a daemon refusal remounts it with the message inline (web/src/add_project_flow.test.ts)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) → daemon.RegisterProjectRequest.URL"
+        "pointer": "api/projects.go newProjectsAddCmd (a git URL argument) \u2192 daemon.RegisterProjectRequest.URL"
       },
       "verdict": "parity",
       "issue": "#5571",
-      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). All three surfaces take one field and route on the same rule: LooksLikeURL on CLI (api/projects.go) and TUI (app/switch_project.go), its mirror looksLikeGitURL on web — routing only, Validate stays daemon-side so the surfaces cannot disagree on what counts. The web modal closes for the in-request clone (up to projectclone.Budget — minutes, like a remote create) and reports the outcome create-style: success lands via projects.changed, a definite refusal remounts the form with the daemon's message and the typed URL intact, an unknown outcome is surfaced as such. The web_rpcs field_coverage gap for RegisterProject.url is deleted with this flip — the web now sends both fields."
+      "notes": "W9.10. The daemon clones the URL on ITS host with ITS credentials under the global projects_root and registers the checkout; the URL is validated there (https/ssh/scp-like only; file://, paths, option-like values and embedded passwords refused). All three surfaces take one field and route on the same rule: LooksLikeURL on CLI (api/projects.go) and TUI (app/switch_project.go), its mirror looksLikeGitURL on web \u2014 routing only, Validate stays daemon-side so the surfaces cannot disagree on what counts. The web modal closes for the in-request clone (up to projectclone.Budget \u2014 minutes, like a remote create) and reports the outcome create-style: success lands via projects.changed, a definite refusal remounts the form with the daemon's message and the typed URL intact, an unknown outcome is surfaced as such. The web_rpcs field_coverage gap for RegisterProject.url is deleted with this flip \u2014 the web now sends both fields."
     },
     {
       "id": "project.browse",
@@ -575,7 +575,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/dirpicker.ts directoryPicker → web/src/modals.ts addProjectModal; web/src/api.ts listDirectory (ListDirectory RPC)"
+        "pointer": "web/src/dirpicker.ts directoryPicker \u2192 web/src/modals.ts addProjectModal; web/src/api.ts listDirectory (ListDirectory RPC)"
       },
       "cli": {
         "status": "n/a",
@@ -583,7 +583,7 @@
       },
       "verdict": "deliberate",
       "issue": "#2788",
-      "notes": "#2788 adds the daemon ListDirectory RPC (POST /v1/ListDirectory) and the web Add-project picker that reads it. It is deliberately web-only, and the reason is the same for both other surfaces: they already run WHERE the filesystem is, next to a shell. `af projects add` is typed at a prompt that has $PWD, tab-completion and `ls`, so a browser inside the CLI would reimplement the shell badly; the TUI's '+ Add project…' overlay sits in a terminal on that same host, one keystroke from the same shell. The web is the only surface with no such access — a phone, or any browser away from the daemon host, cannot see the paths it is being asked to type — which is why the affordance exists there and nowhere else. All three keep the free-text path as the input the submit actually reads (project.add), so nothing the picker can reach is reachable ONLY through it. Re-open this only if the TUI overlay grows the same complaint; the RPC is surface-agnostic and would serve it unchanged."
+      "notes": "#2788 adds the daemon ListDirectory RPC (POST /v1/ListDirectory) and the web Add-project picker that reads it. It is deliberately web-only, and the reason is the same for both other surfaces: they already run WHERE the filesystem is, next to a shell. `af projects add` is typed at a prompt that has $PWD, tab-completion and `ls`, so a browser inside the CLI would reimplement the shell badly; the TUI's '+ Add project\u2026' overlay sits in a terminal on that same host, one keystroke from the same shell. The web is the only surface with no such access \u2014 a phone, or any browser away from the daemon host, cannot see the paths it is being asked to type \u2014 which is why the affordance exists there and nowhere else. All three keep the free-text path as the input the submit actually reads (project.add), so nothing the picker can reach is reachable ONLY through it. Re-open this only if the TUI overlay grows the same complaint; the RPC is surface-agnostic and would serve it unchanged."
     },
     {
       "id": "project.delete",
@@ -612,7 +612,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts listProjects → project.ts projectSummaries/pickerProjects ∪ registeredProjects; web/src/ui.ts project switcher"
+        "pointer": "web/src/api.ts listProjects \u2192 project.ts projectSummaries/pickerProjects \u222a registeredProjects; web/src/ui.ts project switcher"
       },
       "cli": {
         "status": "yes",
@@ -620,45 +620,45 @@
       },
       "verdict": "parity",
       "issue": "#2478",
-      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) ∪ registry ∪ root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
+      "notes": "The CLI, TUI, and web all now surface the durable registry (#2216 identity slice, read via config.ListProjects / the daemon's ListProjects RPC). #2456 added the read half (ListProjects RPC, POST /v1/ListProjects) and unioned it into both switchers: derived (live sessions + tasks) \u222a registry \u222a root_agents, so a registered-but-sessionless project appears everywhere and is creatable-into. This closes the #2478 gap (the TUI/web switchers previously derived only from sessions + legacy root_agents). The web reads over HTTP; the two Go surfaces read config.ListProjects() in-process (a read of on-disk config the daemon writes needs no round trip)."
     },
     {
       "id": "project.rebind",
       "title": "Rebind a stable project identity to a replacement checkout",
       "tui": {
         "status": "yes",
-        "pointer": "ui/overlay/projectPickerOverlay.go rebind mode (b on a registry-backed row) → app/switch_project.go handleRebindProject → rebindProjectThroughDaemon (apiclient RebindProject)"
+        "pointer": "ui/overlay/projectPickerOverlay.go rebind mode (b on a registry-backed row) \u2192 app/switch_project.go handleRebindProject \u2192 rebindProjectThroughDaemon (apiclient RebindProject)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/ui.ts renderProjectSwitch footer 'Rebind…' + 'checkout missing' row marker → web/src/modals.ts rebindProjectModal → web/src/api.ts rebindProject (POST /v1/RebindProject)"
+        "pointer": "web/src/ui.ts renderProjectSwitch footer 'Rebind\u2026' + 'checkout missing' row marker \u2192 web/src/modals.ts rebindProjectModal \u2192 web/src/api.ts rebindProject (POST /v1/RebindProject)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects.go projectsRebindCmd (af projects rebind) → daemon RebindProject RPC"
+        "pointer": "api/projects.go projectsRebindCmd (af projects rebind) \u2192 daemon RebindProject RPC"
       },
       "verdict": "parity",
       "issue": "#2216",
-      "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending — the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind…' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject — no surface reimplements them."
+      "notes": "Rebind is now daemon-backed like register (#2456): POST /v1/RebindProject + the gob control-socket method wrap config.RebindProject (the single writer, #960) and publish projects.changed, so all three surfaces share one mutation path. The CLI resolves its path arg against the caller's cwd before sending \u2014 the same contract as `af projects add`. The TUI offers it in the project picker: registry-backed rows carry their prj_ id, a row whose path_exists is false shows a 'missing' marker, and `b` opens a path-prompt mode whose daemon rejection is corrected inline (mirroring the add flow). The web switcher keeps full registry records in state, marks a missing checkout on the row, and offers 'Rebind\u2026' in the menu footer for the selected registered project via rebindProjectModal (same host-path field + directory browser as add-project). The stable prj_ id, checkout-marker checks, and ownership refusal all live in config.RebindProject \u2014 no surface reimplements them."
     },
     {
       "id": "session.attention",
       "title": "Ask the user for attention",
       "tui": {
         "status": "yes",
-        "pointer": "ui/tree/render.go attentionIcon/showAttention/attentionText — a static ! in the theme attention role replaces the status glyph on live rows, and 'needs attention: <reason>' leads the row detail; the row reads the same Instance.Attention projection the web rail reads"
+        "pointer": "ui/tree/render.go attentionIcon/showAttention/attentionText \u2014 a static ! in the theme attention role replaces the status glyph on live rows, and 'needs attention: <reason>' leads the row detail; the row reads the same Instance.Attention projection the web rail reads"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/status.ts rowDot (attention arm) → web/src/ui.ts sessionRow (blinking yellow dot; the reason in the row title); web/src/components.ts terminalChrome (an Attention chip in the session header; its × clears it via SetAttention, keyed to the request it showed)"
+        "pointer": "web/src/status.ts rowDot (attention arm) \u2192 web/src/ui.ts sessionRow (blinking yellow dot; the reason in the row title); web/src/components.ts terminalChrome (an Attention chip in the session header; its \u00d7 clears it via SetAttention, keyed to the request it showed)"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) → daemon SetAttention RPC"
+        "pointer": "api/sessions_attention.go newSessionsAttentionCmd (af sessions attention) \u2192 daemon SetAttention RPC"
       },
       "verdict": "parity",
       "issue": "#5461",
-      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Closed by the TUI half of #5461: the rail row paints a static bang in theme.Roles().Attention (the TUI has no animation, #1766) where the web blinks its dot, guards on the same live-only predicate the web's hasAttention applies, and leads the detail with the reason — outranking the ordinary idle detail, yielding to unreachable/restore reports, collapsed to glyph-only on unselected rows like the web's tooltip model. Clear rules stay daemon-owned and surface-agnostic: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding wraps every client's PTY write path), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
+      "notes": "Agents set it with `af sessions attention --self`, as the af skill teaches. Closed by the TUI half of #5461: the rail row paints a static bang in theme.Roles().Attention (the TUI has no animation, #1766) where the web blinks its dot, guards on the same live-only predicate the web's hasAttention applies, and leads the detail with the reason \u2014 outranking the ordinary idle detail, yielding to unreachable/restore reports, collapsed to glyph-only on unselected rows like the web's tooltip model. Clear rules stay daemon-owned and surface-agnostic: a submitted line on the agent pane (daemon/attention.go attentionClearingBinding wraps every client's PTY write path), the dismiss control in the web session header (web/src/components.ts terminalChrome), or a Running edge after the agent went idle (session/attention.go noteAttentionLivenessLocked)."
     },
     {
       "id": "project.color",
@@ -669,11 +669,11 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/project_color.ts projectColorRow (project menu color row) → web/src/index.ts doSetProjectColor → web/src/api.ts setProjectColor (POST /v1/SetProjectColor); the color paints the session frame and the favicon"
+        "pointer": "web/src/project_color.ts projectColorRow (project menu color row) \u2192 web/src/index.ts doSetProjectColor \u2192 web/src/api.ts setProjectColor (POST /v1/SetProjectColor); the color paints the session frame and the favicon"
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/projects_color.go projectsColorCmd (af projects color) → daemon SetProjectColor RPC"
+        "pointer": "api/projects_color.go projectsColorCmd (af projects color) \u2192 daemon SetProjectColor RPC"
       },
       "verdict": "deliberate",
       "notes": "The color exists to find a project's browser tab or window: the web paints the session frame and the favicon with it. The TUI runs inside a terminal it does not own, so it has no favicon or window chrome to paint; the CLI can still set the color for the web. config.SetProjectColor is the single writer; it stores the color in an appearance.json sidecar beside project.json."
@@ -713,7 +713,7 @@
       },
       "verdict": "parity",
       "issue": "#2983",
-      "notes": "Closed by serving the report from the daemon (POST /v1/QuotaReport, daemon/quota_report.go): all three surfaces render the SAME records->quota.Build read — internal/quotaobs Collect is the one projection, and the rows ship pre-rendered (quota.RenderedAgent) so no client re-derives the vocabulary. The panel sits in the config view/pane next to Accounts, per #3385's precedent for daemon-reported non-config sections. The report keeps provider ENTITLEMENT (always \"not reported\" — no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall; a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. Not sandboxAllowed — it reports fleet-wide session health with no per-session owner to narrow to. Multiple accounts per agent (#2983 Part 2) is a separate capability, session.accounts."
+      "notes": "Closed by serving the report from the daemon (POST /v1/QuotaReport, daemon/quota_report.go): all three surfaces render the SAME records->quota.Build read \u2014 internal/quotaobs Collect is the one projection, and the rows ship pre-rendered (quota.RenderedAgent) so no client re-derives the vocabulary. The panel sits in the config view/pane next to Accounts, per #3385's precedent for daemon-reported non-config sections. The report keeps provider ENTITLEMENT (always \"not reported\" \u2014 no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall; a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. Not sandboxAllowed \u2014 it reports fleet-wide session health with no per-session owner to narrow to. Multiple accounts per agent (#2983 Part 2) is a separate capability, session.accounts."
     },
     {
       "id": "session.account-login",
@@ -750,7 +750,7 @@
       },
       "verdict": "parity",
       "issue": "#3844",
-      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account — the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key — a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file — which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
+      "notes": "An account is a credential DIRECTORY the agent CLI treats as its home; af never reads or stores the secret. The boundary is applied in the pane exec shim, which injects the account's config root and subtracts every other identity-bearing variable. #3385 gave the TUI config tab and the web an Accounts section that LISTS registered accounts with their logged-in state and REGISTERS new ones; #3844 closed the SELECT half on both. The TUI naming form has an account field (ctrl+o) and the web's new-session modal an Account picker, each built from the daemon's own ListAccounts registry, each narrowed to the agent that surface's program selection runs as, and each riding CreateSessionRequest.Account \u2014 the field `af sessions create --account` fills. All three surfaces also check the account that comes BACK on the created session against the one that was picked, so a daemon predating account support cannot leave a UI reporting an identity the session does not have. #3386 added the `default_accounts` config key \u2014 a per-agent map admitted globally and in the machine-local personal per-project layer, never in a checked-in repo file \u2014 which the DAEMON applies at CreateSession (daemon/accounts_default.go applyDefaultAccount, through agentaccount.Resolve), so explicit > project default > global default > ambient holds on every surface without any of them re-implementing it. A default af cannot honour refuses the create naming the key and its file rather than falling back to the ambient identity, and both pickers PRESELECT the default from ListAccountsResponse.Defaults and mark its row, so a scoped create is visible before it is made."
     },
     {
       "id": "session.archive",
@@ -768,7 +768,7 @@
         "pointer": "api/sessions_lifecycle.go:78 sessionsArchiveCmd"
       },
       "verdict": "parity",
-      "notes": "Reachable everywhere. Restorable everywhere too as of #1932 — see session.restore, which closed the web's archive-only one-way door."
+      "notes": "Reachable everywhere. Restorable everywhere too as of #1932 \u2014 see session.restore, which closed the web's archive-only one-way door."
     },
     {
       "id": "session.attach",
@@ -804,7 +804,7 @@
         "pointer": "api/sessions.go:372 sessionsCreateCmd"
       },
       "verdict": "parity",
-      "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows — no surface is a superset of another."
+      "notes": "The verb is at parity; the OPTIONS are not. See the session.create.opt.* rows \u2014 no surface is a superset of another."
     },
     {
       "id": "session.create.opt.backend",
@@ -815,7 +815,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable; the browser's exact wire path is proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend, and the modal-to-createSession seam by web/selftest/web-driver.spec.ts's create test — it submits the + New modal with hook selected against the real coder-launch.sh provisioner in scripts/container/web-selftest-entry.sh. Rendering the remote row needed session/instance_data.go ToInstanceData to keep Worktree.RepoPath for sandbox backends (the #1933 fix)"
+        "pointer": "web/src/api.ts:265 createSession sends `backend` when picked (via ListBackends), built as a body variable; the browser's exact wire path is proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend, and the modal-to-createSession seam by web/selftest/web-driver.spec.ts's create test \u2014 it submits the + New modal with hook selected against the real coder-launch.sh provisioner in scripts/container/web-selftest-entry.sh. Rendering the remote row needed session/instance_data.go ToInstanceData to keep Worktree.RepoPath for sandbox backends (the #1933 fix)"
       },
       "cli": {
         "status": "yes",
@@ -823,7 +823,7 @@
       },
       "verdict": "parity",
       "issue": "#5290",
-      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog — the same RPC the web picker reads, reached through apiclient.ListBackends — and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. The web cell was `partial` rather than `yes` for one reason: nobody had shown a WORKING remote session created over the browser's request path — #1968 watched provisioning succeed and the session then time out waiting for its program, cause unresolved. That evidence now exists and is executable: TestWebCreateSessionOnHookBackend (integration/web_remote_hook_test.go) POSTs the modal's verbatim body — title_base/repo_path/program/prompt/backend='hook' — to /v1/CreateSession against a repo carrying remote_hooks but NO backend key (so the field, not repo config, does the routing), watches launch_cmd's agent-server come up and the daemon's readiness wait complete over the remote pane, attaches /v1/sessions/{id}/stream and reads typed input echoed back, then observes KillSession -> MsgExit -> delete_cmd reaping. Green on a PR Validation probe. The browser-level run DID reproduce the class of failure #1968 saw, with two root causes found and handled: (1) a remote session whose program_overrides point at a non-agent binary can never satisfy readiness — resolvedAgentLocked has no remote tmux binding, falls back to the config name, and demands a glyph the override never prints; filed as #5108, worked around in the fixture by having the fake agent emit `❯` like every integration fixture; (2) the settled projection dropped Worktree.RepoPath for sandbox backends, so the web rail scoped the remote row out of every project and cleared its selection — invisible sessions, the actual #1933 symptom; fixed in session/instance_data.go. The web-driver selftest then covers the seams the wire-level test cannot see — the modal actually SENDING the picked backend and the row staying visible/attachable — by submitting + New with hook selected and attaching the remote session through the browser UI. See docs/dev/surface-parity.md 'reachable != user-settable'."
+      "notes": "The TUI half is CLOSED: the naming form has a backend field (ctrl+r) whose list is the daemon's ListBackends catalog \u2014 the same RPC the web picker reads, reached through apiclient.ListBackends \u2014 and the choice rides sessionStartRequest.Backend to CreateSessionRequest.Backend, the field `af sessions create --backend` fills. It is a control and not merely a reachable field: the picker offers exactly the backends the daemon named (no enum in app/), refuses an `unavailable`/`unknown` row with the daemon's own reason rather than promising it, and its 'repo default' row sends NO backend so the repo config still decides. The hint sheds below ~93 columns (ui/menu.go hintDropOrder); the help overlay names the field at every width. The web cell was `partial` rather than `yes` for one reason: nobody had shown a WORKING remote session created over the browser's request path \u2014 #1968 watched provisioning succeed and the session then time out waiting for its program, cause unresolved. That evidence now exists and is executable: TestWebCreateSessionOnHookBackend (integration/web_remote_hook_test.go) POSTs the modal's verbatim body \u2014 title_base/repo_path/program/prompt/backend='hook' \u2014 to /v1/CreateSession against a repo carrying remote_hooks but NO backend key (so the field, not repo config, does the routing), watches launch_cmd's agent-server come up and the daemon's readiness wait complete over the remote pane, attaches /v1/sessions/{id}/stream and reads typed input echoed back, then observes KillSession -> MsgExit -> delete_cmd reaping. Green on a PR Validation probe. The browser-level run DID reproduce the class of failure #1968 saw, with two root causes found and handled: (1) a remote session whose program_overrides point at a non-agent binary can never satisfy readiness \u2014 resolvedAgentLocked has no remote tmux binding, falls back to the config name, and demands a glyph the override never prints; filed as #5108, worked around in the fixture by having the fake agent emit `\u276f` like every integration fixture; (2) the settled projection dropped Worktree.RepoPath for sandbox backends, so the web rail scoped the remote row out of every project and cleared its selection \u2014 invisible sessions, the actual #1933 symptom; fixed in session/instance_data.go. The web-driver selftest then covers the seams the wire-level test cannot see \u2014 the modal actually SENDING the picked backend and the row staying visible/attachable \u2014 by submitting + New with hook selected and attaching the remote session through the browser UI. See docs/dev/surface-parity.md 'reachable != user-settable'."
     },
     {
       "id": "session.create.opt.host",
@@ -897,7 +897,7 @@
       },
       "verdict": "parity",
       "issue": "#1936",
-      "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap — the TUI was the short surface, with the field dead at its only construction site."
+      "notes": "Closed by #1936: the naming form grew an initial-prompt field on shift+tab (a textarea overlay, so multi-line prompts and pastes survive), populating the sessionStartRequest.Prompt that was already plumbed to the daemon. Was an inverted gap \u2014 the TUI was the short surface, with the field dead at its only construction site."
     },
     {
       "id": "session.create.opt.remote",
@@ -908,7 +908,7 @@
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker — the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind); proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend and by the web-driver selftest's hook-selected modal submit; session/instance_data.go ToInstanceData keeps Worktree.RepoPath on the settled projection so the remote row stays visible in the project-scoped rail"
+        "pointer": "web/src/api.ts createSession sends backend='hook' via the #1968 ListBackends picker \u2014 the SAME BackendHook force_remote selects (session/instance_factory.go resolveBackendKind); proven end-to-end by integration/web_remote_hook_test.go TestWebCreateSessionOnHookBackend and by the web-driver selftest's hook-selected modal submit; session/instance_data.go ToInstanceData keeps Worktree.RepoPath on the settled projection so the remote row stays visible in the project-scoped rail"
       },
       "cli": {
         "status": "yes",
@@ -916,7 +916,7 @@
       },
       "verdict": "parity",
       "issue": "#5291",
-      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. The web reaches hook through that same explicit field — its picker never emits force_remote, which field_coverage now declares `ok` rather than a gap, because the stronger backend spelling already covers the capability (same reason the CLI's force_remote cell is `ok`). The web cell was `partial` on the strength of #1968's unproven remote provisioning; TestWebCreateSessionOnHookBackend closes that with an end-to-end pass over the browser's exact endpoints — create, events rail, stream attach + echo, kill, delete_cmd reap — green on a PR Validation probe. The browser-level proof then surfaced and pinned the real web defect: remote sessions carried an empty Worktree.RepoPath on the settled projection, so the rail's project scope hid them and cleared selection — #1933's symptom; fixed at session/instance_data.go. A second latent bug (remote readiness falls back to the program NAME when the override resolves to a non-agent command) is filed as #5108 — it hits all three surfaces alike, so it is a product bug rather than a parity gap."
+      "notes": "The TUI uses explicit backend selection, including hook; the legacy New remote shortcut and force_remote emission are retired (#4017). Configured new_remote bindings open the creation form with its backend field focused. The wire force_remote field remains accepted for older clients; explicit backend wins over it. The web reaches hook through that same explicit field \u2014 its picker never emits force_remote, which field_coverage now declares `ok` rather than a gap, because the stronger backend spelling already covers the capability (same reason the CLI's force_remote cell is `ok`). The web cell was `partial` on the strength of #1968's unproven remote provisioning; TestWebCreateSessionOnHookBackend closes that with an end-to-end pass over the browser's exact endpoints \u2014 create, events rail, stream attach + echo, kill, delete_cmd reap \u2014 green on a PR Validation probe. The browser-level proof then surfaced and pinned the real web defect: remote sessions carried an empty Worktree.RepoPath on the settled projection, so the rail's project scope hid them and cleared selection \u2014 #1933's symptom; fixed at session/instance_data.go. A second latent bug (remote readiness falls back to the program NAME when the override resolves to a non-agent command) is filed as #5108 \u2014 it hits all three surfaces alike, so it is a product bug rather than a parity gap."
     },
     {
       "id": "session.create.opt.title",
@@ -952,7 +952,7 @@
         "pointer": "api/sessions.go:301 sessionsGetCmd"
       },
       "verdict": "deliberate",
-      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue — the row is already on screen. Its payload is the same self-describing session object `list` emits (see session.list; #3631 added status_name/liveness_name/tabs[].kind_name), and the ambiguity-widening `warnings` member of the --json form rides beside it."
+      "notes": "A scripting read-verb. The TUI and web render the whole projection continuously, so 'get one record' has no UI analogue \u2014 the row is already on screen. Its payload is the same self-describing session object `list` emits (see session.list; #3631 added status_name/liveness_name/tabs[].kind_name), and the ambiguity-widening `warnings` member of the --json form rides beside it."
     },
     {
       "id": "session.handoff",
@@ -971,7 +971,7 @@
       },
       "verdict": "parity",
       "issue": "#2013",
-      "notes": "Closed across all three surfaces. #4018 adds an operator-selected account: app/handoff_accounts.go filters the current agent's registered accounts and preselects the project default; web/src/modals.ts filters accounts for the selected agent; api/sessions_handoff.go accepts --account with optional --to. All submit HandoffSessionRequest.Account to the shared account-swap transaction. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one — #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web calls the version-bound HandoffSessionV2 transport alias so the receiving daemon proves account-aware support in the mutation request itself. The legacy POST /v1/HandoffSession public route remains served and inventoried for older clients; both names delegate to the same daemon handler, so there is no parallel recovery logic. The web renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSessionV2.brief)."
+      "notes": "Closed across all three surfaces. #4018 adds an operator-selected account: app/handoff_accounts.go filters the current agent's registered accounts and preselects the project default; web/src/modals.ts filters accounts for the selected agent; api/sessions_handoff.go accepts --account with optional --to. All submit HandoffSessionRequest.Account to the shared account-swap transaction. Shipped TUI+CLI in the #2013 prompted-handoff PR; the web action was the deferred follow-up, and #2084 is why it stayed a real gap not a deliberate one \u2014 #2084 gave the web a way OUT of a limit-blocked session (closing #1934), so the web surfaced the exact state that motivates a handoff while offering only one of the two answers to it (wait, but not switch). The web calls the version-bound HandoffSessionV2 transport alias so the receiving daemon proves account-aware support in the mutation request itself. The legacy POST /v1/HandoffSession public route remains served and inventoried for older clients; both names delegate to the same daemon handler, so there is no parallel recovery logic. The web renders the served ListPrograms enum (enum.agent-programs) in a picker, so a new agent is a handoff target with no web change. The gate is not re-derived client-side: the daemon projects InstanceData.CanHandoff from the SAME Capabilities().Handoff + ValidateRuntimeAction(RuntimeActionHandoff) predicates the TUI's handleHandoff reads, and CurrentAgent from the SAME session.CurrentAgentName the daemon's same-agent guard resolves through, so the picker's exclude-current and the button's show/hide cannot drift from the daemon. `brief` is deliberately not sent (see field_coverage HandoffSessionV2.brief)."
     },
     {
       "id": "session.kill",
@@ -1015,7 +1015,7 @@
       "title": "Retire an ambiguous pending handoff mission on the operator's attestation that it already landed, without resending",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_handoff_resolve.go — the `c` resolve picker's \"Mark delivered\" row -> app/session_control.go confirmHandoffDeliveryThroughDaemon"
+        "pointer": "app/handle_handoff_resolve.go \u2014 the `c` resolve picker's \"Mark delivered\" row -> app/session_control.go confirmHandoffDeliveryThroughDaemon"
       },
       "web": {
         "status": "yes",
@@ -1027,7 +1027,7 @@
       },
       "verdict": "parity",
       "issue": "#4429",
-      "notes": "A handoff whose mission delivery reports sent-unverified or could-not-confirm may already have landed: resending can double-deliver, doing nothing leaves a durable obligation no verb used to retire. ConfirmHandoffDelivery is the attestation half of the exit — a separate verb rather than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead of silently resending. The daemon probes that a runtime answers at the binding, then settles the leftover replacement/startup-unknown state and clears the mission in one commit. Automatic recovery still owns only positive mission-scoped non-delivery (PromptNotDelivered); ambiguous verdicts stay operator-resolved. The TUI surfaces it inside the `c` resolve picker (no new binding — the same key now chooses between resend and mark-delivered when a confirmable verdict exists); the web grows a second head action with a confirmation modal; the CLI spells it as a flag on the same recovery command."
+      "notes": "A handoff whose mission delivery reports sent-unverified or could-not-confirm may already have landed: resending can double-deliver, doing nothing leaves a durable obligation no verb used to retire. ConfirmHandoffDelivery is the attestation half of the exit \u2014 a separate verb rather than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead of silently resending. The daemon probes that a runtime answers at the binding, then settles the leftover replacement/startup-unknown state and clears the mission in one commit. Automatic recovery still owns only positive mission-scoped non-delivery (PromptNotDelivered); ambiguous verdicts stay operator-resolved. The TUI surfaces it inside the `c` resolve picker (no new binding \u2014 the same key now chooses between resend and mark-delivered when a confirmable verdict exists); the web grows a second head action with a confirmation modal; the CLI spells it as a flag on the same recovery command."
     },
     {
       "id": "session.list",
@@ -1045,7 +1045,7 @@
         "pointer": "api/sessions.go:234 sessionsListCmd"
       },
       "verdict": "parity",
-      "notes": "Every surface renders the same daemon Snapshot. The CLI half is the SCRIPTING shape of it, so #3631 made that payload self-describing: `status`, `liveness` and `tabs[].kind` keep their integer types (external scripters already decode them as numbers, and retyping a public field is not a bug fix) and each gained an always-present string twin — `status_name`, `liveness_name`, `tabs[].kind_name` — derived at encode time from the SAME vocabulary tables the `--status` filter and `tab_kinds[].kind` already used (session/state_names.go). The TUI and web are unaffected by construction: they render state as glyphs and rows from the typed struct, never from these words, so this is a wire-shape property of one shared payload rather than a capability a surface can lack."
+      "notes": "Every surface renders the same daemon Snapshot. The CLI half is the SCRIPTING shape of it, so #3631 made that payload self-describing: `status`, `liveness` and `tabs[].kind` keep their integer types (external scripters already decode them as numbers, and retyping a public field is not a bug fix) and each gained an always-present string twin \u2014 `status_name`, `liveness_name`, `tabs[].kind_name` \u2014 derived at encode time from the SAME vocabulary tables the `--status` filter and `tab_kinds[].kind` already used (session/state_names.go). The TUI and web are unaffected by construction: they render state as glyphs and rows from the typed struct, never from these words, so this is a wire-shape property of one shared payload rather than a capability a surface can lack."
     },
     {
       "id": "session.list.filters",
@@ -1136,7 +1136,7 @@
         "pointer": "api/sessions.go sessionsPreviewCmd --tab/--tab-name/--tab-id"
       },
       "verdict": "parity",
-      "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 — it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
+      "notes": "Closed by #1948. PreviewRequest always carried Tab and TabID and the CLI sent neither, so `af sessions preview` could only ever see tab 0 \u2014 it could CREATE a tab and then had no way to read it. The CLI now sends all three selectors and gained --tab-name, the handle a person actually has; the id/name/ordinal precedence is session.ResolveTabIndex, shared with every other tab verb rather than restated per surface."
     },
     {
       "id": "session.prune",
@@ -1154,7 +1154,7 @@
         "pointer": "api/sessions_prune.go sessionsPruneCmd -> daemon/control_client.go PruneSessions -> controlServer.PruneSessions (daemon/prune.go)"
       },
       "verdict": "deliberate",
-      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row — the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. The dry run is a strictly read-only listing of reclaimable archives; --apply (#5189) deletes exactly what that same verdict lists, bound to the plan the operator confirmed, keeps each branch, and leaves a pruned tombstone row that every surface lists as archived and that restore refuses by naming the branch. The apply is CLI-only for the same reason as the sweep: a destructive bulk action stays behind an explicit flag and a confirmed plan, not a button. The daemon route POST /v1/PruneSessions is public so the same RPC (apply, only) is reachable for remote daemons and external tooling."
+      "notes": "CLI-only by design (#5136): prune is a fleet SWEEP gated on an explicit --older-than duration and a repo scope, not a per-session action on the selected rail row \u2014 the shape every TUI/web session verb takes. The interactive surfaces deliberately keep per-session kill/archive/restore and leave the retention decision to an operator script; a mistaken bulk delete cannot hide behind a button. The dry run is a strictly read-only listing of reclaimable archives; --apply (#5189) deletes exactly what that same verdict lists, bound to the plan the operator confirmed, keeps each branch, and leaves a pruned tombstone row that every surface lists as archived and that restore refuses by naming the branch. The apply is CLI-only for the same reason as the sweep: a destructive bulk action stays behind an explicit flag and a confirmed plan, not a button. The daemon route POST /v1/PruneSessions is public so the same RPC (apply, only) is reachable for remote daemons and external tooling."
     },
     {
       "id": "session.restore",
@@ -1334,14 +1334,14 @@
         "pointer": "api/sessions_tabs.go:273 tab-rename (+ tabs rename)"
       },
       "verdict": "parity",
-      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). TUI half CLOSED: `R` opens a prompt seeded with the current name of the tab the user is looking at — the focused pane's effective binding, else the tree's active tab, the same target `w` closes — and submits daemon.Manager.RenameTab over the same /v1/RenameTab route the web calls. The request carries stable ids (session ID + TabID) captured at prompt-open, matching the #2358 rule every retained TUI action follows; a pre-#1738 id-less tab is protected by the captured roster generation, the same rule delete consent applies. The daemon's own guards hold on every surface: only kinds that DISPLAY their name are renameable (session.TabKindRenameable — web, process, VS Code), so the agent tab and shell tabs refuse before the prompt opens with the same reason the RPC would give. The resolved (sanitized, collision-suffixed) name is reflected on the local projection and reported in the status bar."
+      "notes": "#1904 added tab rename to the CLI (tab-rename --new-name) and web (RenameTab). TUI half CLOSED: `R` opens a prompt seeded with the current name of the tab the user is looking at \u2014 the focused pane's effective binding, else the tree's active tab, the same target `w` closes \u2014 and submits daemon.Manager.RenameTab over the same /v1/RenameTab route the web calls. The request carries stable ids (session ID + TabID) captured at prompt-open, matching the #2358 rule every retained TUI action follows; a pre-#1738 id-less tab is protected by the captured roster generation, the same rule delete consent applies. The daemon's own guards hold on every surface: only kinds that DISPLAY their name are renameable (session.TabKindRenameable \u2014 web, process, VS Code), so the agent tab and shell tabs refuse before the prompt opens with the same reason the RPC would give. The resolved (sanitized, collision-suffixed) name is reflected on the local projection and reported in the status bar."
     },
     {
       "id": "session.tab.reorder",
       "title": "Reorder a tab within a session",
       "tui": {
         "status": "yes",
-        "pointer": "app/handle_tabs.go handleMoveTab (</>; move_tab_left/move_tab_right) → app/session_control.go reorderTabThroughDaemon → apiclient.Client.ReorderTab → POST /v1/ReorderTab"
+        "pointer": "app/handle_tabs.go handleMoveTab (</>; move_tab_left/move_tab_right) \u2192 app/session_control.go reorderTabThroughDaemon \u2192 apiclient.Client.ReorderTab \u2192 POST /v1/ReorderTab"
       },
       "web": {
         "status": "yes",
@@ -1352,7 +1352,7 @@
         "pointer": "api/sessions_tabs.go:348 tab-reorder (+ tabs reorder)"
       },
       "verdict": "parity",
-      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename — resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence — the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation). Like t/w it is offered only on live locally-managed rosters: off-box backends skip ReconcileTabsFromData (app/sync.go), and the daemon freezes archived rosters for restore)."
+      "notes": "#1904 added reorder to the CLI (tab-reorder --index) and web (ReorderTab, drag in the tab bar); the TUI had no affordance and the owner call was deferred alongside session.tab.rename \u2014 resolved when #4570 grew the TUI's tab-mutation surface. The TUI now exposes it as the rebindable </> pair on the focused tab, routing through the SAME daemon ReorderTab RPC (agent tab pinned at slot 0 in both directions, identity carried by stable session id + tab id, no local persistence \u2014 the projection applies the daemon's resolved index and the shared slot resolver carries panes/selection across the permutation). Like t/w it is offered only on live locally-managed rosters: off-box backends skip ReconcileTabsFromData (app/sync.go), and the daemon freezes archived rosters for restore)."
     },
     {
       "id": "session.watch",
@@ -1370,7 +1370,7 @@
         "pointer": "api/sessions_watch.go sessionsWatchCmd; api/sessions_watch_fleet.go fleetWatcher"
       },
       "verdict": "deliberate",
-      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there — you just look. The fleet form (#3009, no title or --all) is edge-triggered and exists for an automated driver rather than a person: it returns when any session TRANSITIONS, which is not something a UI can offer by rendering state, so it stays CLI-only for the same reason."
+      "notes": "A blocking scripting primitive for automation. Both UIs show liveness continuously, so 'block until idle' is meaningless there \u2014 you just look. The fleet form (#3009, no title or --all) is edge-triggered and exists for an automated driver rather than a person: it returns when any session TRANSITIONS, which is not something a UI can offer by rendering state, so it stays CLI-only for the same reason."
     },
     {
       "id": "session.whoami",
@@ -1485,11 +1485,11 @@
       "title": "Inspect whether a task is actually firing on its schedule, and who last changed it",
       "tui": {
         "status": "yes",
-        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue · missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
+        "pointer": "ui/automations.go titleRow ([!] on an overdue, unschedulable or unarmed row, [?] on an unassessable one), attentionFragment (\"overdue \u00b7 missed N\", the unschedulable reason, or \"not armed\") and nextRunSummary (the armed entry's next fire, or a computed time marked \"(from cron)\"); the arming observation reaches the rail on the existing snapshot poll (app/sync.go -> liveTaskArmingFetcher -> task.ApplyLiveArming)"
       },
       "web": {
         "status": "yes",
-        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue · missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
+        "pointer": "web/src/tasks.ts taskHealthMark (the mark that replaces the enabled tick), taskHealthSummary (\"overdue \u00b7 missed N\", the unschedulable reason, or \"enabled but not armed\") and taskArmingSummary (the live entry's next run), rendered from the fields ListTasks already returns"
       },
       "cli": {
         "status": "yes",
@@ -1522,7 +1522,7 @@
       "title": "Cap a watch task's in-flight session count",
       "tui": {
         "status": "yes",
-        "pointer": "ui/task_pane_edit.go renderCapField — Max runs row, create and edit"
+        "pointer": "ui/task_pane_edit.go renderCapField \u2014 Max runs row, create and edit"
       },
       "web": {
         "status": "yes",
@@ -1533,7 +1533,7 @@
         "pointer": "api/api.go:862 af tasks add/update --max-concurrent-runs"
       },
       "verdict": "parity",
-      "notes": "Surfaced on both UIs in #4180, following the on_complete gated-field pattern exactly: a text input on watch/no-target shapes, the daemon's own reason in place of it otherwise. Both UIs ask ONE predicate — task.CapUnavailableReason, with the web's twin pinned by task/testdata/cap_vectors.json — and parse input by the shared task.ParseCapInput rule (empty = 0 = unlimited; negatives, non-integers, and values above the safe-integer ceiling refused identically)."
+      "notes": "Surfaced on both UIs in #4180, following the on_complete gated-field pattern exactly: a text input on watch/no-target shapes, the daemon's own reason in place of it otherwise. Both UIs ask ONE predicate \u2014 task.CapUnavailableReason, with the web's twin pinned by task/testdata/cap_vectors.json \u2014 and parse input by the shared task.ParseCapInput rule (empty = 0 = unlimited; negatives, non-integers, and values above the safe-integer ceiling refused identically)."
     },
     {
       "id": "task.on-complete",
@@ -1660,7 +1660,7 @@
         "pointer": ""
       },
       "verdict": "deliberate",
-      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity — see docs/dev/surface-parity.md."
+      "notes": "Navigation is per-surface chrome, not a product capability: each UI navigates its own layout idiomatically and a CLI has nothing to navigate. Deliberately NOT held to key-for-key parity \u2014 see docs/dev/surface-parity.md."
     },
     {
       "id": "tui.panes",
@@ -1693,17 +1693,17 @@
       },
       "cli": {
         "status": "n/a",
-        "pointer": "commands/configcmd.go config set web.terminal_font_size_{phone,desktop} writes the leaf (config.write) but the CLI has no renderer to adjust — the same shape as appearance.select."
+        "pointer": "commands/configcmd.go config set web.terminal_font_size_{phone,desktop} writes the leaf (config.write) but the CLI has no renderer to adjust \u2014 the same shape as appearance.select."
       },
       "verdict": "deliberate",
-      "notes": "#5500: web-only chrome over two manifest-admitted global config leaves (config/web.go, config/manifest.go:539). The VALUES are shared daemon-side so every browser that attaches inherits them, and the generic config write path can set them from any surface — but the capability itself (step the rendered pitch) exists only where a renderer honors it. The TUI cannot reach the host emulator's font size and the CLI has nothing to render, so both are n/a rather than gaps. Not derivable by the audit (no dedicated RPC/verb/binding), recorded here so it is never re-reported as a gap."
+      "notes": "#5500: web-only chrome over two manifest-admitted global config leaves (config/web.go, config/manifest.go:539). The VALUES are shared daemon-side so every browser that attaches inherits them, and the generic config write path can set them from any surface \u2014 but the capability itself (step the rendered pitch) exists only where a renderer honors it. The TUI cannot reach the host emulator's font size and the CLI has nothing to render, so both are n/a rather than gaps. Not derivable by the audit (no dedicated RPC/verb/binding), recorded here so it is never re-reported as a gap."
     },
     {
       "id": "wire.id-addressing",
       "title": "Address a session by its stable id rather than by title",
       "tui": {
         "status": "yes",
-        "pointer": "app/session_action_target.go — captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths — the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) — sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
+        "pointer": "app/session_action_target.go \u2014 captured sessionActionTarget builds every retained-intent session request {ID,Title,RepoID}; streamAddress (same file) id-addresses both WS stream paths \u2014 the live-pane dialer via liveBindCandidate (app/live_termpane.go) and deferred full-screen attach via attachStreamFn (app/handle_actions.go) \u2014 sending the instance's stable id with an empty repo scope so the daemon's id-first stream resolver applies"
       },
       "web": {
         "status": "yes",
@@ -1715,7 +1715,7 @@
       },
       "verdict": "deliberate",
       "issue": "#2358",
-      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget — captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope — the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace — for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest — a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped — they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect — and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
+      "notes": "#2358 closed as delivered; the action-by-action audit this row reserved is now done and the two residual holes it missed are closed. TUI: every session-targeting request flows through sessionActionTarget \u2014 captured at intent (handle_actions.go, handle_handoff.go, handle_tabs.go, restore_confirm.go, live_termpane.go) and re-resolved by that identity at completion (resolveSessionActionTarget), never by title alone. The interactive WS stream joins the same contract: streamAddress sends the instance's stable id with an EMPTY repo scope \u2014 the daemon reads an unscoped /v1/sessions/{idOrTitle}/stream segment as an id first (authoritativeStreamTarget), while a non-empty repo_id would re-select the title namespace \u2014 for both the live-pane dialer (liveBindCandidate) and the deferred full-screen attach (handle_actions.go). Enumerating every Title+RepoID wire type: all 13 mutation types carry `id`; the only session-targeting type without one is PreviewRequest \u2014 a continuous READ bound to the visible row (its tab axis already carries tab_id), and no mutation can be mistargeted through it. DeliverPromptRequest is scheduler-internal (keyed by repo_path). CLI: one-shot commands remain deliberately {title,repo_id}-scoped \u2014 they resolve the target from their own arguments inside a single dispatch, so no retained boundary exists for an id to protect \u2014 and `sessions archive --self` sends the resolved row's id because the caller's identity cannot come from the arguments. `send-prompt --all` is NOT one-shot: it materializes the target list, then dispatches, so it now carries each enumerated row's id (scopedInstance.ID) or a killed-and-recreated same-title row could inherit the prompt. The five remaining cli `id` field declarations (CreateTab/CloseTab/KillSession/RenameTab/ReorderTab) stay `ok` on the one-shot grounds already accepted on RestoreSession/ResumeFromLimit/HandoffSession; SendPromptRequest's decl was removed outright once the broadcast reached `id`. A user-facing --id selector would be a new CLI contract, not this capability."
     },
     {
       "id": "worktree.hooks.edit",
@@ -1748,7 +1748,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd → POST /v1/{Start,Attach,Detach}Proposal, PullProposalChanges, CheckpointProposal (daemon/proposals.go)"
+        "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd \u2192 POST /v1/{Start,Attach,Detach}Proposal, PullProposalChanges, CheckpointProposal (daemon/proposals.go)"
       },
       "verdict": "real-gap",
       "issue": "TBD",
@@ -1767,7 +1767,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd → POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
+        "pointer": "api/proposals.go proposalListCmd/proposalPathCmd/proposalAddDocCmd/proposalRemoveDocCmd/proposalCatCmd/proposalWriteCmd \u2192 POST /v1/{List,Get}Proposal(s), AddProposalDoc, RemoveProposalDoc, ReadProposalDoc, WriteProposalDoc (daemon/proposals.go)"
       },
       "verdict": "deliberate",
       "issue": "#5848",
@@ -1805,7 +1805,7 @@
       },
       "cli": {
         "status": "yes",
-        "pointer": "api/proposals_push.go proposalPushModeCmd/proposalSendCmd → POST /v1/SetProposalPushMode, SendProposalChanges (daemon/proposals_push.go)"
+        "pointer": "api/proposals_push.go proposalPushModeCmd/proposalSendCmd \u2192 POST /v1/SetProposalPushMode, SendProposalChanges (daemon/proposals_push.go)"
       },
       "verdict": "deliberate",
       "issue": "#5848",
@@ -1986,9 +1986,9 @@
       "error_details": "tui.navigation",
       "expand": "tui.navigation",
       "fixed:account": "session.accounts",
-      "fixed:account ✓": "session.accounts",
+      "fixed:account \u2713": "session.accounts",
       "fixed:backend": "session.create.opt.backend",
-      "fixed:backend ✓": "session.create.opt.backend",
+      "fixed:backend \u2713": "session.create.opt.backend",
       "fixed:cancel": "session.create",
       "fixed:change program": "session.create.opt.program",
       "fixed:delete project": "project.delete",
@@ -1996,7 +1996,7 @@
       "fixed:focus": "tui.navigation",
       "fixed:focus prev": "tui.navigation",
       "fixed:initial prompt": "session.create.opt.prompt",
-      "fixed:initial prompt ✓": "session.create.opt.prompt",
+      "fixed:initial prompt \u2713": "session.create.opt.prompt",
       "fixed:interact": "session.send-prompt",
       "fixed:go": "tui.panes",
       "fixed:jump to tab (number or name)": "tui.panes",
@@ -2160,7 +2160,6 @@
       "af gen-docs --plugin-root": "meta.internal",
       "af help --help": "meta.discovery",
       "af hook-guard-tmux --help": "meta.internal",
-      "af internal --help": "meta.internal",
       "af keys --help": "meta.discovery",
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",
@@ -2362,7 +2361,7 @@
   "field_coverage": {
     "_comment": [
       "The OPTION dimension: a surface can call the right verb while silently",
-      "declining half its request. That is where real gaps live — #1933 (the TUI",
+      "declining half its request. That is where real gaps live \u2014 #1933 (the TUI",
       "never sets CreateSessionRequest.Backend) and #1948 (the CLI never sets",
       "PreviewRequest.Tab/TabID/Full) are the same shape.",
       "",
@@ -2429,10 +2428,10 @@
       "RebindProjectRequest": {
         "cli": {
           "expected_root": {
-            "ok": "The compare-and-set precondition (#4822) protects a root a UI DISPLAYED from a rebind that landed after the user read it; the TUI and web send the root they showed. `af projects rebind <id> <path>` shows nothing first — reading the registry and echoing its root back in the same process would only narrow the window, not close any race the user could see — so it keeps the documented last-writer-wins behaviour, which is also the contract for any client that omits the field (docs/http-api.md)."
+            "ok": "The compare-and-set precondition (#4822) protects a root a UI DISPLAYED from a rebind that landed after the user read it; the TUI and web send the root they showed. `af projects rebind <id> <path>` shows nothing first \u2014 reading the registry and echoing its root back in the same process would only narrow the window, not close any race the user could see \u2014 so it keeps the documented last-writer-wins behaviour, which is also the contract for any client that omits the field (docs/http-api.md)."
           },
           "expected_checkout_id": {
-            "ok": "The second half of the guarded pair (#4822 spec): the checkout marker the row carried, which is what a same-path reclone changes while the root spelling stays put. The TUI and web send the pair they displayed. `af projects rebind` observes nothing — a read it makes in the same process is not the user's observation — so it sends no precondition, the documented last-writer-wins contract for any client that omits the fields (docs/http-api.md)."
+            "ok": "The second half of the guarded pair (#4822 spec): the checkout marker the row carried, which is what a same-path reclone changes while the root spelling stays put. The TUI and web send the pair they displayed. `af projects rebind` observes nothing \u2014 a read it makes in the same process is not the user's observation \u2014 so it sends no precondition, the documented last-writer-wins contract for any client that omits the fields (docs/http-api.md)."
           }
         }
       },
@@ -2540,7 +2539,7 @@
       "CreateTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           }
         },
         "tui": {
@@ -2564,7 +2563,7 @@
       "CloseTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_index": {
             "ok": "The CLI addresses the tab by --name; tab_index is the ordinal fallback the daemon only consults when TabName is empty (daemon/control_types.go:248)."
@@ -2582,7 +2581,7 @@
       "KillSessionRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call — a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
+            "ok": "The CLI resolves one session by title under --repo scoping and dispatches it in the same call \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract RestoreSession/ResumeFromLimit/HandoffSession already declare `ok`. `sessions archive --self` is the exception that does send the resolved row's id: the caller's own identity cannot come from the arguments."
           }
         }
       },
@@ -2600,7 +2599,7 @@
             "ok": "Internal correlation for the web's persistent uncertain-outcome fence, not a user option. The TUI retains no restore ticket across a lost response or reconnect and never releases a client-owned fence from a daemon boot transition, so it has no boot identity to pin; stable ID still protects the selected session."
           },
           "force_reap": {
-            "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke that a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
+            "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it \u2014 not a button or a keystroke that a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
           }
         }
       },
@@ -2621,7 +2620,7 @@
             "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
           },
           "task.ordinal": {
-            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on \u2014 the append does \u2014 so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
           },
           "task.arming": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2630,7 +2629,7 @@
             "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
           },
           "task.unschedulable": {
-            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire \u2014 it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
           },
           "task.unschedulable_reason": {
             "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
@@ -2672,7 +2671,7 @@
             "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
           },
           "task.repo_id": {
-            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
+            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input \u2014 like created_at/last_run_at."
           }
         },
         "tui": {
@@ -2680,7 +2679,7 @@
             "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
           },
           "task.ordinal": {
-            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+            "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on \u2014 the append does \u2014 so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
           },
           "task.arming": {
             "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -2689,7 +2688,7 @@
             "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
           },
           "task.unschedulable": {
-            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+            "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire \u2014 it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
           },
           "task.unschedulable_reason": {
             "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
@@ -2731,50 +2730,50 @@
             "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
           },
           "task.repo_id": {
-            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
+            "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input \u2014 like created_at/last_run_at."
           }
         }
       },
       "UpdateTaskRequest": {
         "tui": {
           "update.cron_expr": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.enabled": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.name": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.program": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.project_path": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.prompt": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.target_session": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.watch_cmd": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass."
           },
           "update.max_concurrent_runs": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Max runs row (ui/task_pane_edit.go renderCapField) writes task.Task.MaxConcurrentRuns and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Max runs row (ui/task_pane_edit.go renderCapField) writes task.Task.MaxConcurrentRuns and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "update.host": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Host row (ui/task_pane_edit.go, editHost) writes task.Task.Host and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's Host row (ui/task_pane_edit.go, editHost) writes task.Task.Host and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           },
           "update.on_complete": {
-            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's On-done row (ui/task_pane_edit.go renderOnCompleteSelector) writes task.Task.OnComplete and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
+            "ok": "Reached via task.DiffTask over the edited task.Task (ui/task_pane_state.go:91): the TUI never writes a task.TaskUpdate literal, so the AST cannot prove the field statically. Derivation reports it unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The form's On-done row (ui/task_pane_edit.go renderOnCompleteSelector) writes task.Task.OnComplete and the diff carries it; the AddTask side of the SAME field needs no declaration because app/home_tasks.go builds the task.Task literal, which the walk can read."
           }
         },
         "cli": {
@@ -2782,53 +2781,53 @@
             "ok": "Same as AddTaskRequest: validated locally on the local socket, and set by apiclient for a remote target."
           },
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
       "RemoveTaskRequest": {
         "tui": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           }
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
       "TriggerTaskRequest": {
         "tui": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
+            "ok": "Reached via task.ExpectProject over the record the pane displayed (#3230): ui/task_pane_state.go ConsumeDirty pins the loaded baseline, and app/content_persistence.go / app/home_tasks.go pin the record they act on. The constructor lives in task/, so the tui AST walk cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literals."
           }
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
       "RenameTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web addresses tabs by it so a reorder can't misroute another client's ordinal; the CLI/TUI address by --name/index and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -2846,7 +2845,7 @@
       "ReorderTabRequest": {
         "cli": {
           "id": {
-            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch — a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
+            "ok": "The CLI resolves the session by title under --repo scoping inside the same dispatch \u2014 a one-shot command has no retained intent boundary for a stable id to protect, the same contract the sibling session-level `id` declarations (RestoreSession/ResumeFromLimit/HandoffSession) record as `ok`."
           },
           "tab_id": {
             "ok": "The TAB's stable id (#1971): the web and TUI address tabs by it from their live projections so a reorder can't misroute another client's ordinal; the CLI addresses by --name and the daemon resolves (session.TabMatches also accepts the displayed label, #1984). A CLI-side tab_id would be a niche convenience, not a gap."
@@ -2857,7 +2856,7 @@
         },
         "tui": {
           "tab_index": {
-            "ok": "The TUI addresses the tab by its stable TabID captured from the live projection (tab name rides along as the legacy fallback), so the ordinal source field is never needed — tab_index exists for callers like the CLI that address by --name without a projection to read ids from."
+            "ok": "The TUI addresses the tab by its stable TabID captured from the live projection (tab name rides along as the legacy fallback), so the ordinal source field is never needed \u2014 tab_index exists for callers like the CLI that address by --name without a projection to read ids from."
           }
         }
       },
@@ -2890,18 +2889,18 @@
       "RestartTaskRequest": {
         "tui": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate \u2014 an operator workflow after editing an external script, which neither UI owns)."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate — an operator workflow after editing an external script, which neither UI owns)."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded through apiclient.RestartTask (#3730): the constructor lives outside this surface's scan, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the apiclient request literal. No TUI affordance calls it: the apiclient twin exists so `af tasks restart` can reach a REMOTE daemon over HTTP, and task.restart's tui verdict stays \"no\" (deliberate \u2014 an operator workflow after editing an external script, which neither UI owns)."
           }
         },
         "cli": {
           "expect.enforce": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           },
           "expect.project_path": {
-            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached — the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
+            "ok": "Reached via task.ExpectProject (task/task.go), returned by api/tasks_resolve.go resolveTaskArg and threaded to every mutating task RPC (#1891, #3230): the constructor lives outside the cli scan surface, so the AST cannot prove the nested fields statically. Derivation reports them unreached \u2014 the SAFE direction, since unprovable forces a declaration rather than a silent pass. The top-level expect is derived from the control_client.go request literals."
           }
         }
       },
@@ -2921,30 +2920,30 @@
       },
       "SetConfigValue": {
         "hosts_edit.host.host": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.user": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.port": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.identity_file": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.workspace_root": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.host_key_verification": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         },
         "hosts_edit.host.use_ssh_config": {
-          "ok": "The web DOES send this — inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
+          "ok": "The web DOES send this \u2014 inside the whole HostConfig object it passes under hosts_edit.host (the HostsEdit.host literal in web/src/index.ts doHostAdd, typed by web/src/types.ts HostEntry). The derivation reads one level of nesting, so the inner fields are declared rather than derived; every one the add form fills rides inside that object."
         }
       },
       "ListAccounts": {
         "agent": {
-          "ok": "The web section lists EVERY agent's accounts at once — it renders one group per agent and a register form under each — so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."
+          "ok": "The web section lists EVERY agent's accounts at once \u2014 it renders one group per agent and a register form under each \u2014 so it never narrows the read. The filter exists for `af accounts list <agent>`, where a caller asked for one agent; a UI that sent it would have to decide which agent the operator meant before showing them the list they came for."
         }
       },
       "Snapshot": {
@@ -2969,13 +2968,13 @@
       },
       "CreateSession": {
         "title": {
-          "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) — the TUI's friendly behavior. See session.create.opt.title."
+          "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) \u2014 the TUI's friendly behavior. See session.create.opt.title."
         },
         "in_place": {
           "gap": "session.create.opt.inplace"
         },
         "force_remote": {
-          "ok": "The web reaches the hook backend explicitly via backend='hook' — its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
+          "ok": "The web reaches the hook backend explicitly via backend='hook' \u2014 its picker never emits force_remote, and the explicit backend wins over the legacy selector (session/instance_factory.go). Same reason the CLI's force_remote cell is `ok`."
         },
         "validate_first": {
           "ok": "Opt-in used by the remote CLI, which cannot run the host-owned account and preflight checks itself; the web's pickers offer only accounts and backends the daemon already reported, so it does not need the daemon to repeat them (#5744)."
@@ -3020,7 +3019,7 @@
           "ok": "Derived at READ time and never a client input (#3684): it is a digest of the tasks.json bytes the load decoded, stamped beside the ordinal by the same helper and stripped by saveTasks with it. It says WHICH VERSION of the store a row number refers to, so two reads can tell whether they saw the same file; a surface that sent one would be naming a generation it did not read, and the next load would overwrite it."
         },
         "task.ordinal": {
-          "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on — the append does — so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
+          "ok": "Derived at READ time and never a client input (#3680): it is the record's row number in tasks.json, computed by the load that produced it (task.stampOrdinals) and stripped by saveTasks alongside the health fields. A create does not choose which row it lands on \u2014 the append does \u2014 so a surface that sent one would be asserting an identity only the store assigns, and the very next read would overwrite it."
         },
         "task.arming": {
           "ok": "Derived at READ time and never a client input (#3623): the daemon populates overdue/missed_occurrences from the record and its own clock, and next_run_at/arming from the live scheduler entry. saveTasks strips all four on the way to disk, so a surface that sent one would be asserting a health verdict rather than requesting a task."
@@ -3029,7 +3028,7 @@
           "ok": "Derived alongside missed_occurrences and stripped with it (#3623): it says that count hit the derivation's cap and is a floor rather than an exact number. A client cannot know that about a walk it did not perform."
         },
         "task.unschedulable": {
-          "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire — it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
+          "ok": "Derived at READ time and stripped on write (#3623): it says the task's cron expression can never produce a fire \u2014 it does not parse, or it matches no date. That is a verdict about the expression, reached by the store, not something a surface submits."
         },
         "task.unschedulable_reason": {
           "ok": "Derived at READ time and stripped on write (#3626): it names WHICH shape of unschedulable the store's own classifier reached (task.UnschedulableReason), so a surface that cannot call it renders that answer instead of re-deriving one from cron_expr. It is the wording of a verdict the store reached, not an input to it."
@@ -3071,7 +3070,7 @@
           "ok": "Daemon-owned provenance (#5571 W3.5): the daemon stamps the sandbox session that created a task, and task.AddTaskChecked clears any client-supplied value. No client surface sets it; a client that could would forge which credential a task's deliveries are held to."
         },
         "task.repo_id": {
-          "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input — like created_at/last_run_at."
+          "ok": "Daemon-resolved at bind time (#1893): task.RepoID is sha256 of the main repo root, computed by the daemon when the task binds to a project, never a client input \u2014 like created_at/last_run_at."
         }
       },
       "RenameTab": {
@@ -3086,7 +3085,7 @@
       },
       "RestoreSession": {
         "force_reap": {
-          "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it — not a button or a keystroke a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
+          "ok": "The force-reap override is deliberately CLI-only. It discards a reachable sandbox's unpushed work (#2923), so it must be a typed, per-invocation act with the consequence written next to it \u2014 not a button or a keystroke a mis-click can reach. The refusal it releases names the exact command, so the TUI and web point at the CLI rather than reproducing the hazard."
         }
       },
       "AddProposalDoc": {
@@ -3127,8 +3126,8 @@
     "_comment": [
       "The CLI-vs-CLI axis: within a noun group, does the same concept take the same",
       "shape across sibling verbs? A user who learned `af sessions create --prompt X`",
-      "could not predict `af sessions send-prompt <title> <prompt>` — same concept, two",
-      "shapes, two siblings — and got 'unknown flag: --prompt', which names the flag as",
+      "could not predict `af sessions send-prompt <title> <prompt>` \u2014 same concept, two",
+      "shapes, two siblings \u2014 and got 'unknown flag: --prompt', which names the flag as",
       "wrong without saying the positional is what it wants.",
       "",
       "Flags come from the cobra tree, positionals from each command's Use line. The",
@@ -3137,7 +3136,7 @@
       "",
       "A verb accepting BOTH forms is compatible with either neighbour, so the fix is",
       "A verb accepting BOTH forms is compatible with either neighbour, so the fix is",
-      "always additive — teach one verb the other's form, never migrate.",
+      "always additive \u2014 teach one verb the other's form, never migrate.",
       "",
       "synonyms are keyed per VERB, not globally: `tab-create <title> --name <tabname>`",
       "uses --name for the TAB, so a global name->title rule would invent a divergence."

@@ -535,6 +535,12 @@ type InstanceData struct {
 	// row must keep saying so until positive evidence (a placement that copies
 	// everything) clears it. Additive + omitempty for the same reason.
 	AgentConfigSkipped []string `json:"agent_config_skipped,omitempty"`
+	// SetupHookFailed records why this session's daemon-side setup_commands
+	// hook failed (#6667): entry, exit status or timeout, retained output log.
+	// Persisted in the same durability class as CallbackUnavailable — the
+	// failure is still true after a restart, so the row keeps saying so until
+	// a later provision replaces the note. Additive + omitempty.
+	SetupHookFailed string `json:"setup_hook_failed,omitempty"`
 	// ArchiveReport makes a deliberately incomplete archive discoverable across
 	// daemon restarts and at restore time. It lives beside the session record,
 	// never inside the copied tree where a user path could collide with it. Live

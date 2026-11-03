@@ -134,17 +134,19 @@ func enclosingMount(points []string, p string) string {
 // readable and writable by the selected uid. The mounted file's own
 // ownership is already correct on the host, so skipping it loses nothing.
 //
-// The `chown` in the prune form runs with `-h` (a.k.a. --no-dereference): find
-// passes each path as a command-line argument, and GNU coreutils chown
-// dereferences command-line symlinks by default, so a symlink under /root (a
-// non-root BYO image may ship one) would otherwise re-point the chown at the
-// link's target — which may be outside home or on another host bind. `-h` makes
-// chown act on the symlink itself, matching what a plain `chown -R` does for
-// the entries it descends to. busybox and coreutils both implement `-h`
+// Both chown forms run with `-h` (a.k.a. --no-dereference). In the prune form
+// it is required: find passes each path as a command-line argument, and GNU
+// coreutils chown dereferences command-line symlinks by default, so a symlink
+// under /root (a non-root BYO image may ship one) would otherwise re-point
+// the chown at the link's target — which may be outside home or on another
+// host bind. In the no-prune form it is the same guard one level down: `-R`
+// descends through a symlinked DIRECTORY on busybox builds without
+// CONFIG_DESKTOP, so only `-h` keeps the handoff acting on the links
+// themselves, never a target. busybox and coreutils both implement `-h`
 // (#5424 review).
 func chownRecursiveScript(home, owner string, prune []string) string {
 	if len(prune) == 0 {
-		return fmt.Sprintf("chown -R %s %s", owner, shellQuote(home))
+		return fmt.Sprintf("chown -R -h %s %s", owner, shellQuote(home))
 	}
 	var b strings.Builder
 	b.WriteString("find ")
@@ -277,7 +279,7 @@ func (p *dockerProvisioner) prepareNonAccountUser() error {
 	if mp := enclosingMount(points, realWorkspace); mp != "/" {
 		log.WarningLog.Printf("docker session workspace %s is inside the mount %s (not the container's root filesystem); not chowning it to %s — make sure it is writable by that user", realWorkspace, mp, owner)
 	} else {
-		steps = append(steps, fmt.Sprintf("chown %s %s", owner, shellQuote(realWorkspace)))
+		steps = append(steps, fmt.Sprintf("chown -h %s %s", owner, shellQuote(realWorkspace)))
 	}
 	out, err = p.docker(dockerShortStepTimeout,
 		"exec", "--user", "0:0", p.containerID, "sh", "-c", strings.Join(steps, " && "))
@@ -330,4 +332,23 @@ func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, re
 		return "", "", "", dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so the session HOME is not chowned: %q", strings.TrimSpace(string(out))), dockerOpLocal)
 	}
 	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), lines[2], nil
+}
+
+// readMountTableFor is readMountTable for a single directory — the setup
+// hook's payload staging dir. Same contract: mkdir, resolve symlinks, and
+// return the container's own mountinfo in one exec; an unreadable or
+// unparseable answer is an error the caller must refuse to chown over.
+func (p *dockerProvisioner) readMountTableFor(dir string) (realDir, mountinfo string, err error) {
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", "--user", "0:0", p.containerID, "sh", "-c",
+		`mkdir -p -- "$1" && cd -- "$1" && pwd -P && cat /proc/self/mountinfo`,
+		"sh", dir)
+	if err != nil {
+		return "", "", dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so %s is not chowned (a chown cannot be proven to stay off host mounts): %s: %w", dir, strings.TrimSpace(string(out)), err), dockerOpRootExec)
+	}
+	lines := strings.SplitN(string(out), "\n", 2)
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "/") || strings.TrimSpace(lines[1]) == "" {
+		return "", "", dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so %s is not chowned: %q", dir, strings.TrimSpace(string(out))), dockerOpLocal)
+	}
+	return strings.TrimSpace(lines[0]), lines[1], nil
 }

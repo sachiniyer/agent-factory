@@ -502,6 +502,20 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		}
 		res.CallbackUnavailable = rerr.Error()
 	}
+	// A fresh replacement is a fresh machine — it needs the same operator
+	// setup the create path ran, so the hook fires against it here (#6667).
+	// An ADOPTED workspace kept its prior state and its agent may already
+	// have run inside it; replaying a setup would double-apply, and the
+	// ownership handoff must never run over a tree an unprivileged principal
+	// could have written — the adopt marker is the hook's own skip, not a
+	// call-site convention (#6674 review).
+	res.SetupHookFailed = runSessionSetupHook(InstanceOptions{
+		ID:                             i.ID,
+		Title:                          i.Title,
+		Host:                           i.Host,
+		SessionEnvPassthrough:          i.sessionEnvPassthrough,
+		ProvisionSessionEnvPassthrough: spec.SessionEnvPassthrough,
+	}, spec.RepoRoot, kind, res.Backend, adopt != nil)
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
 	if bindErr := i.bindProvisionResult(res); bindErr != nil {
@@ -550,6 +564,9 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	// skip the old one recorded, and a reattach that provisions nothing passes
 	// its prior list back in (#6337).
 	i.agentConfigSkipped = append([]string(nil), res.AgentConfigSkipped...)
+	// Same provision-evidence install: a fresh runtime that ran the setup hook
+	// clean clears the note an older provision recorded (#6667).
+	i.setupHookFailed = res.SetupHookFailed
 	i.touchLocked()
 	if i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = false

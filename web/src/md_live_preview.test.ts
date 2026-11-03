@@ -122,6 +122,46 @@ test("fenced code is left as source", () => {
   assert.deepEqual(lineClasses(s, specs).get(2), ["cm-md-codeblock"]);
 });
 
+test("a mermaid fence away from the cursor becomes one mermaid spec with its source", () => {
+  const doc = "```mermaid\nflowchart LR\n  A-->B\n```" + tail;
+  const { specs, s } = specsFor(doc);
+  const mermaids = specs.filter((x) => x.type === "mermaid");
+  assert.equal(mermaids.length, 1);
+  const m = mermaids[0]!;
+  assert.ok(m.type === "mermaid");
+  assert.equal(m.source, "flowchart LR\n  A-->B");
+  assert.equal(s.doc.lineAt(m.from).number, 1);
+  assert.equal(s.doc.lineAt(m.to).number, 4);
+  assert.equal(lineClasses(s, specs).size, 0, "the fence's lines are not styled as a code block");
+});
+
+test("a mermaid fence that holds the cursor shows its source", () => {
+  const doc = "```mermaid\nflowchart LR\n  A-->B\n```" + tail;
+  const { specs, s } = specsFor(doc, doc.indexOf("-->"));
+  assert.equal(specs.filter((x) => x.type === "mermaid").length, 0);
+  assert.deepEqual(lineClasses(s, specs).get(2), ["cm-md-codeblock"]);
+});
+
+test("the mermaid info string tolerates case, spacing and the tilde fence", () => {
+  for (const open of ["```Mermaid", "``` mermaid", "~~~mermaid"]) {
+    const { specs } = specsFor(`${open}\ngraph TD\n  A-->B\n${open[0]}${open[0]}${open[0]}${tail}`);
+    assert.equal(specs.filter((x) => x.type === "mermaid").length, 1, open);
+  }
+});
+
+test("other languages still render as code blocks", () => {
+  const doc = "```go\nfunc main() {}\n```" + tail;
+  const { specs, s } = specsFor(doc);
+  assert.equal(specs.filter((x) => x.type === "mermaid").length, 0);
+  assert.deepEqual(lineClasses(s, specs).get(2), ["cm-md-codeblock"]);
+});
+
+test("an empty mermaid fence still becomes a mermaid spec", () => {
+  const { specs } = specsFor("```mermaid\n```" + tail);
+  const m = specs.filter((x) => x.type === "mermaid")[0];
+  assert.ok(m && m.type === "mermaid" && m.source === "");
+});
+
 test("parseTable keeps escaped pipes inside a cell", () => {
   assert.deepEqual(parseTable(["a | b", "--|--", "x \\| y | z"]).rows, [["a", "b"], ["x | y", "z"]]);
 });

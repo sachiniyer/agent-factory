@@ -703,6 +703,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "setup_commands",
+		Type:       "list",
+		Default:    "none",
+		Purpose:    "Commands run on the daemon's machine after a session's workspace is provisioned and before its agent starts.",
+		Tier:       TierAdvanced,
+		Settable:   false,
+		Sources:    sourceRepoOnly,
+		Precedence: precedenceRepo,
+		Merge:      MergeListReplace,
+		Formats:    formatTOMLJSON,
+	},
+	{
 		Key:        "remote_hooks",
 		Type:       "table",
 		Default:    "none",

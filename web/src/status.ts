@@ -625,12 +625,30 @@ export function agentConfigSkippedText(s: SessionData): string {
   return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
 }
 
+/** The cross-surface phrase every surface renders before a session's
+ *  setup-hook failure note (#6667) — kept as one exported constant so the rail
+ *  banner and the row tooltip can never spell it two ways. Mirrors
+ *  session.SetupHookFailedPrefix. */
+export const SETUP_HOOK_FAILED_PREFIX = "af setup hook failed: ";
+
+/** The daemon-projected setup-hook failure note, rendered under the shared
+ *  prefix. "" means the hook ran clean (or the session has none). */
+export function setupHookFailedText(s: SessionData): string {
+  const note = s.setup_hook_failed?.trim() ?? "";
+  return note === "" ? "" : SETUP_HOOK_FAILED_PREFIX + note;
+}
+
 /** Every session-level notice the persistent pane banner carries — the
- *  incomplete-archive warning, the callback-absence advisory, and the skipped
- *  agent-config list — joined so a row carrying several cannot drop one. ""
- *  means there is nothing to show. */
+ *  incomplete-archive warning, the callback-absence advisory, the skipped
+ *  agent-config list, and the setup-hook failure note — joined so a row
+ *  carrying several cannot drop one. "" means there is nothing to show. */
 export function sessionWarningText(s: SessionData): string {
-  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)]
+  return [
+    archiveWarningText(s),
+    callbackUnavailableText(s),
+    agentConfigSkippedText(s),
+    setupHookFailedText(s),
+  ]
     .filter((t) => t !== "")
     .join(" · ");
 }
