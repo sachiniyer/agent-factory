@@ -26,7 +26,7 @@ import (
 // local payload sits where anything with the operator's uid could have
 // written. The safety lives in the copy itself: it never overwrites, it
 // refuses to merge through a non-directory destination, and it reproduces
-// symlinks rather than following them — no read ever leaves the staging dir
+// symlinks rather than following them — no read leaves the staging dir
 // through a link the payload planted. A concurrent writer CAN still send one
 // outside it — swap a link in between the lstat and the open and the open
 // follows — and that is harmless here only because the copy runs under the
