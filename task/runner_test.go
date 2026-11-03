@@ -884,19 +884,19 @@ func TestSubmittedTurnContent(t *testing.T) {
 		{
 			name:    "claude timed status row",
 			agent:   "claude",
-			content: "transcript\n✻ Whirring… (12s · esc to interrupt)\n╭──╮\n│ ❯ │\n╰──╯",
+			content: claudeWorkingPane("12s"),
 			want:    true,
 		},
 		{
 			name:    "claude hint without the running timer is prose",
 			agent:   "claude",
-			content: "the agent printed press esc to interrupt in prose\n❯ ",
+			content: claudeFrame("the agent printed press esc to interrupt in prose\n", "❯ \n", ""),
 			want:    false,
 		},
 		{
 			name:    "claude idle composer is not working",
 			agent:   "claude",
-			content: "transcript\n❯ ",
+			content: claudeIdlePane(),
 			want:    false,
 		},
 		{
@@ -969,9 +969,9 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		var calls atomic.Int32
 		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
 			if n := calls.Add(1); n >= 3 {
-				return fmt.Sprintf("✻ Whirring… (%ds · esc to interrupt)\n❯ ", n), nil
+				return claudeWorkingPane(fmt.Sprintf("%ds", n)), nil
 			}
-			return "❯ ", nil
+			return claudeIdlePane(), nil
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("in-turn chrome inside the budget must upgrade the verdict")
@@ -980,16 +980,17 @@ func TestSubmittedTurnVisible(t *testing.T) {
 
 	t.Run("idle pane keeps the ambiguous verdict", func(t *testing.T) {
 		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
-			return "❯ ", nil
+			return claudeIdlePane(), nil
 		})
 		if submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("a merely readable pane must never upgrade sent-unverified")
 		}
 	})
 
-	// #4528 (Codex): a timed row that never changes is text, not chrome. The
-	// claude/devin arm cannot scope its match to a live region — the row sits
-	// above the composer with the transcript above it — so prose holding both
+	// #4528 (Codex): a timed row that never changes is text, not chrome. Claude
+	// scopes its timed row to the live-composer status slot — a quote sitting
+	// in the transcript above it never even becomes a row — while devin's arm
+	// still cannot scope its match to a live region, so prose holding both
 	// fragments matches, and this repository's own source quotes the chrome
 	// verbatim. Upgrading on it would retire a mission that never landed.
 	t.Run("static timed row in the transcript never upgrades", func(t *testing.T) {
@@ -999,19 +1000,22 @@ func TestSubmittedTurnVisible(t *testing.T) {
 			content string
 		}{
 			{
-				name:    "prose quoting the chrome with a duration",
-				agent:   "claude",
-				content: "after 12s press esc to interrupt\n❯ ",
+				name:  "prose quoting the chrome with a duration",
+				agent: "claude",
+				content: claudeFrame("after 12s press esc to interrupt\n",
+					"❯ \n", ""),
 			},
 			{
-				name:    "a verbatim quote of the status row",
-				agent:   "claude",
-				content: "src: \"✻ Whirring… (12s · esc to interrupt)\"\n╭──╮\n│ ❯ │\n╰──╯",
+				name:  "a verbatim quote of the status row",
+				agent: "claude",
+				content: claudeFrame("src: \"* Bloviating… (12s · ↓ 108 tokens)\"\n✻ Cogitated for 26s · done 11:09 PM\n",
+					"❯ \n", ""),
 			},
 			{
-				name:    "two quoted rows in the opening capture",
-				agent:   "claude",
-				content: "✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (30s · esc to interrupt)\n❯ ",
+				name:  "two quoted rows in the opening capture",
+				agent: "claude",
+				content: claudeFrame("* Bloviating… (12s · ↓ 108 tokens)\n* Bloviating… (30s · ↓ 108 tokens)\n✻ Cogitated for 26s · done 11:09 PM\n",
+					"❯ \n", ""),
 			},
 			{
 				name:    "devin prose with a duration",
@@ -1034,7 +1038,7 @@ func TestSubmittedTurnVisible(t *testing.T) {
 	t.Run("a ticking timer upgrades", func(t *testing.T) {
 		var calls atomic.Int32
 		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
-			return fmt.Sprintf("transcript\n✻ Whirring… (%ds · esc to interrupt)\n❯ ", calls.Add(1)), nil
+			return claudeWorkingPane(fmt.Sprintf("%ds", calls.Add(1))), nil
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("an advancing timer is the agent's own proof that a turn is running")
@@ -1044,7 +1048,9 @@ func TestSubmittedTurnVisible(t *testing.T) {
 	// #4528 (Codex, second round): a row that is merely NEW is not a tick. A paste
 	// that fails to submit pushes the view up and can scroll an old status line
 	// into frame; it then stands still, and it has no earlier self in the window
-	// to have ticked from. Neither shape may retire a mission that never landed.
+	// to have ticked from. For claude the transcript is not even the slot its
+	// timed row lives in, so a quote there can never become a row. Neither shape
+	// may retire a mission that never landed.
 	t.Run("a static row scrolled into view never upgrades", func(t *testing.T) {
 		for _, tc := range []struct {
 			name   string
@@ -1055,24 +1061,29 @@ func TestSubmittedTurnVisible(t *testing.T) {
 				name:  "an old status line enters after the opening capture",
 				agent: "claude",
 				frames: []string{
-					"line a\nline b\n❯ ",
-					"✻ Whirring… (12s · esc to interrupt)\nline a\nline b\n❯ [Pasted text]",
+					claudeIdlePane(),
+					claudeFrame("* Bloviating… (12s · ↓ 108 tokens)\n✻ Cogitated for 26s · done 11:09 PM\n",
+						"❯ [Pasted text]\n", ""),
 				},
 			},
 			{
 				name:  "one quoted row scrolls out as a later one scrolls in",
 				agent: "claude",
 				frames: []string{
-					"✻ Whirring… (12s · esc to interrupt)\nline a\n❯ ",
-					"line a\n✻ Whirring… (30s · esc to interrupt)\n❯ [Pasted text]",
+					claudeFrame("* Bloviating… (12s · ↓ 108 tokens)\nline a\n✻ Cogitated for 26s · done 11:09 PM\n",
+						"❯ \n", ""),
+					claudeFrame("line a\n* Bloviating… (30s · ↓ 108 tokens)\n✻ Cogitated for 26s · done 11:09 PM\n",
+						"❯ [Pasted text]\n", ""),
 				},
 			},
 			{
 				name:  "two matching rows, one of them larger later",
 				agent: "claude",
 				frames: []string{
-					"✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (12s · esc to interrupt)\n❯ ",
-					"✻ Whirring… (12s · esc to interrupt)\n✻ Whirring… (13s · esc to interrupt)\n❯ ",
+					claudeFrame("* Bloviating… (12s · ↓ 108 tokens)\n* Bloviating… (12s · ↓ 108 tokens)\n✻ Cogitated for 26s · done 11:09 PM\n",
+						"❯ \n", ""),
+					claudeFrame("* Bloviating… (12s · ↓ 108 tokens)\n* Bloviating… (13s · ↓ 108 tokens)\n✻ Cogitated for 26s · done 11:09 PM\n",
+						"❯ \n", ""),
 				},
 			},
 			{
@@ -1107,8 +1118,10 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		spinner := []string{"✻", "✶", "✳", "✢"}
 		inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
 			n := int(calls.Add(1))
-			return fmt.Sprintf("transcript\n%s Whirring… (1m %ds · ↑ %d.%dk tokens · esc to interrupt)\n❯ ",
-				spinner[n%len(spinner)], 5+n, 1+n, n%10), nil
+			return claudeFrame(
+				fmt.Sprintf("%s Whirring… (1m %ds · ↑ %d.%dk tokens)\n",
+					spinner[n%len(spinner)], 5+n, 1+n, n%10),
+				"❯ \n", "  ⏸ manual mode on · esc to interrupt · ← 2 agents\n"), nil
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("a row whose timer advances is the same row, whatever else repaints on it")

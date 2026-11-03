@@ -601,14 +601,14 @@ type Manager struct {
 	// once the run ends or the row is gone. Guarded by pausedMu.
 	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
 
-	// unverifiedSendWatches holds the re-verification watchers armed by task
-	// sends that landed sent-unverified (#6590): the poll's pane captures keep
-	// feeding the send's bound chrome watcher past the bounded Confirm window,
-	// and a turn the agent demonstrably began after that send promotes the
-	// task's recorded verdict to sent. Keyed by stableSessionKey then task ID;
-	// a task's watch re-bounds to its newest unverified send. Guarded by
-	// pausedMu.
+	// unverifiedSendWatches holds the poll-fed chrome watchers re-verifying
+	// task sends recorded sent-unverified (#6590): a turn the agent began
+	// after the send promotes the recorded verdict to sent. Keyed by
+	// stableSessionKey then task ID. Guarded by pausedMu.
 	unverifiedSendWatches map[string]map[string]*unverifiedSendWatch
+	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
+	// watches are memory-only while their verdict rows are durable (#6590).
+	sendReverifyRearmOnce sync.Once
 
 	// events is the WS events-plane fan-out (#1592 Phase 2 PR5): every session/
 	// task mutation the daemon owns publishes here, and GET /v1/events streams it

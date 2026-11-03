@@ -55,7 +55,7 @@ func claudeComposer(lines []string) (top, bottom int, ok bool) {
 // finished session from reading as busy forever.
 func isClaudeWorkingContent(content string) bool {
 	lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
-	top, bottom, ok := claudeComposer(lines)
+	_, bottom, ok := claudeComposer(lines)
 	if !ok {
 		return false
 	}
@@ -63,6 +63,20 @@ func isClaudeWorkingContent(content string) bool {
 		if escToInterruptHint.MatchString(line) {
 			return true
 		}
+	}
+	row, _, ok := claudeStatusRow(lines)
+	return ok && claudeSpinnerLine.MatchString(row)
+}
+
+// claudeStatusRow returns the line a running Claude Code turn draws its status
+// row into — the first unindented non-blank line above the live composer — and
+// its index in lines. Indented lines are skipped because Claude Code indents
+// its transcript ("⎿" continuations, tips) and the hints it interleaves under
+// the status row, so nothing but the status slot itself can answer here.
+func claudeStatusRow(lines []string) (row string, idx int, ok bool) {
+	top, _, found := claudeComposer(lines)
+	if !found {
+		return "", 0, false
 	}
 	for i := top - 1; i >= 0; i-- {
 		line := strings.TrimRight(lines[i], " ")
@@ -72,7 +86,7 @@ func isClaudeWorkingContent(content string) bool {
 		if r, _ := utf8.DecodeRuneInString(line); r == ' ' || r == '\t' {
 			continue
 		}
-		return claudeSpinnerLine.MatchString(line)
+		return line, i, true
 	}
-	return false
+	return "", 0, false
 }

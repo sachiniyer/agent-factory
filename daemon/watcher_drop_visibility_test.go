@@ -342,9 +342,9 @@ func TestRecordedParkedHeadResumeRetiresTerminalOverlay(t *testing.T) {
 
 	statusWrites := 0
 	originalUpdate := updateWatchTaskStatus
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status, target string) (task.Task, error) {
 		statusWrites++
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, at, status, target)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 
@@ -431,11 +431,11 @@ func TestRecordedParkedHeadResumeKeepsDeliveredSentRow(t *testing.T) {
 
 	statusWrites := 0
 	originalUpdate := updateWatchTaskStatus
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status, target string) (task.Task, error) {
 		statusWrites++
 		require.NotEqual(t, TaskStatusLimitParked, status,
 			"a delivered head must never be republished as parked")
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, at, status, target)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 

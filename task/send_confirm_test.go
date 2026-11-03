@@ -41,13 +41,14 @@ func confirms(t *testing.T, pane *scriptedPane, age time.Duration) bool {
 	return c.Confirm(ctx)
 }
 
-const (
-	idleComposer = "❯ \n"
-	stagedChip   = "❯ [Pasted text #1 +40 lines]\n"
+var (
+	idleComposer = claudeIdlePane()
+	stagedChip   = claudeFrame("✻ Cogitated for 26s · done 11:09 PM\n",
+		"❯ [Pasted text #1 +40 lines]\n", "")
 )
 
 func turnRow(sec string) string {
-	return "✻ Working… (" + sec + " · esc to interrupt)\n❯ \n"
+	return claudeWorkingPane(sec)
 }
 
 // #6474 case 1: a landed prompt is promoted — the agent's turn began after our

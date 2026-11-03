@@ -2658,6 +2658,9 @@
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
           },
+          "task.last_run_target": {
+            "ok": "Delivery-owned, never a client input: the daemon stamps the session title a delivery targeted with the verdict (task.UpdateTaskStatusForTarget) so a restarted daemon re-arms re-verification on the send's real session, not the task's possibly-retargeted config (#6590). A surface setting it would be lying about history."
+          },
           "task.last_run_id": {
             "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
           },
@@ -2716,6 +2719,9 @@
           },
           "task.last_run_status": {
             "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run (task.Task last_run_at/last_run_status). A surface setting it would be lying about history."
+          },
+          "task.last_run_target": {
+            "ok": "Delivery-owned, never a client input: the daemon stamps the session title a delivery targeted with the verdict (task.UpdateTaskStatusForTarget) so a restarted daemon re-arms re-verification on the send's real session, not the task's possibly-retargeted config (#6590). A surface setting it would be lying about history."
           },
           "task.last_run_id": {
             "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."
@@ -3056,6 +3062,9 @@
         },
         "task.last_run_status": {
           "ok": "Scheduler-owned, never a client input: the daemon stamps it after a run. A surface setting it would be lying about history."
+        },
+        "task.last_run_target": {
+          "ok": "Delivery-owned, never a client input: the daemon stamps the session title a delivery targeted with the verdict so a restarted daemon re-arms re-verification on the send's real session, not the task's possibly-retargeted config (#6590). A surface setting it would be lying about history."
         },
         "task.last_run_id": {
           "ok": "Scheduler-owned run identity, never a client input: the daemon records which run last_run_status describes (task.RecordRunStatus) so a stale writer cannot overwrite a newer run. A surface setting it would be lying about history."

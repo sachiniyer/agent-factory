@@ -9,9 +9,10 @@ import (
 )
 
 // updateWatchTaskStatus is the one task-store write seam used by watch event
-// outcomes and watcher lifecycle status. Tests count calls here to prove a held
-// queue head causes no full-store rewrite on retry.
-var updateWatchTaskStatus = task.UpdateTaskStatus
+// outcomes and watcher lifecycle status. It stamps the delivery's session
+// title as the verdict's LastRunTarget (#6590). Tests count calls here to
+// prove a held queue head causes no full-store rewrite on retry.
+var updateWatchTaskStatus = task.UpdateTaskStatusForTarget
 
 // watchDeliveryOptions carries queue-owned occurrence state into the delivery
 // hook. Only replay has a cursor to identify; live delivery passes the zero
@@ -83,8 +84,9 @@ func (w *taskWatcher) reconcileRecordedParkedHead(cursor eventQueueCursor) {
 	}
 	if _, err := w.commitParkedStatus(cursor, func() error {
 		// nil preserves the occurrence's original LastRunAt — this is a
-		// republish of the parked outcome, not a new run.
-		_, err := updateWatchTaskStatus(w.taskID, nil, TaskStatusLimitParked)
+		// republish of the parked outcome, not a new run, so the recorded
+		// LastRunTarget is preserved with it.
+		_, err := updateWatchTaskStatus(w.taskID, nil, TaskStatusLimitParked, w.targetSession)
 		return err
 	}); err != nil {
 		log.WarningLog.Printf("watch task %s: could not republish the recorded park over a stale terminal status: %v", w.taskID, err)

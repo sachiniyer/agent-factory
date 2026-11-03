@@ -230,7 +230,10 @@ func deliverWatchEventWithOptions(taskID, line string, options watchDeliveryOpti
 	if !deferParkedStatus && (status != TaskStatusLimitParked || !statusRecorded) {
 		now := time.Now()
 		writeStatus := func() error {
-			_, err := updateWatchTaskStatus(taskID, &now, status)
+			// The verdict records the session the delivery went to — the
+			// task's config may be retargeted later, and a restarted daemon
+			// re-arms the send's re-verification on THIS identity (#6590).
+			_, err := updateWatchTaskStatus(taskID, &now, status, task.CanonicalTargetSession(t.TargetSession))
 			return err
 		}
 		var err error

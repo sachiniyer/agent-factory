@@ -57,17 +57,19 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 		return false
 	}
 	// Claude and devin print an elapsed timer on their in-turn row, and that is
-	// the only part of this pane a running turn is guaranteed to rewrite. Their
-	// row is unscopeable — it sits above the composer with the transcript above
-	// it — so presence alone would accept prose that merely holds the same two
+	// the only part of this pane a running turn is guaranteed to rewrite.
+	// Claude's row is scoped to the status slot above the live composer but
+	// shares no row with its interrupt hint (that moved to the footer, #6590);
+	// devin's still carries both fragments on one unscopeable line. For devin,
+	// presence alone would accept prose that merely holds the same two
 	// fragments, including a verbatim quote of the chrome or a stale line a
-	// failed paste scrolled into view. So the proof is the timer ADVANCING on
-	// one row: the same status row, found once in each of two consecutive
-	// captures, with a larger elapsed time in the later one. Chrome ticks; text
-	// stands still, and a row that merely scrolls into view has no earlier self
-	// to have ticked from (timedRowTicked). The other agents' indicators are
-	// already scoped to their live frame, so for them the row's presence there
-	// is the proof.
+	// failed paste scrolled into view. So the proof for both is the timer
+	// ADVANCING on one row: the same status row, found once in each of two
+	// consecutive captures, with a larger elapsed time in the later one. Chrome
+	// ticks; text stands still, and a row that merely scrolls into view has no
+	// earlier self to have ticked from (timedRowTicked). The other agents'
+	// indicators are already scoped to their live frame, so for them the row's
+	// presence there is the proof.
 	timed := agent == tmux.ProgramClaude || agent == tmux.ProgramDevin
 	var prev map[string]timedRow
 	deadline := time.Now().Add(postSubmitDeliveredBudget)
@@ -83,7 +85,7 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 				return true
 			}
 		default:
-			cur := timedTurnRowsByIdentity(content)
+			cur := timedRowsFor(content, agent)
 			if timedRowTicked(prev, cur) {
 				return true
 			}
@@ -132,11 +134,18 @@ func submittedTurnContent(content, agent string) bool {
 			}
 		}
 		return false
-	case tmux.ProgramClaude, tmux.ProgramDevin:
-		// Claude and devin embed the hint in a timed status row —
-		// "✻ … (12s · esc to interrupt)", "Thinking · 3s (esc to interrupt)".
-		// The shape alone is not proof that a turn is running; submittedTurnVisible
-		// is what requires the row to tick.
+	case tmux.ProgramClaude:
+		// Claude draws its timed status row in the slot above the live
+		// composer and its interrupt hint on a separate footer below it —
+		// no row carries both fragments any more (#6590). The scoped
+		// spinner row, or a footer hint on its own, is the busy signal;
+		// submittedTurnVisible is what requires the row to tick.
+		return isClaudeWorkingContent(content)
+	case tmux.ProgramDevin:
+		// Devin still embeds the hint in a timed status row —
+		// "Thinking · 3s (esc to interrupt)". The shape alone is not proof
+		// that a turn is running; submittedTurnVisible is what requires the
+		// row to tick.
 		return len(timedTurnRows(content)) > 0
 	}
 	return false
@@ -174,6 +183,41 @@ type timedRow struct {
 	// live row is anchored above the composer; transcript text scrolls.
 	fromBottom int
 	elapsed    time.Duration
+}
+
+// timedRowsFor returns a capture's timed status rows under the resolved
+// agent's own pane contract. Claude moved its interrupt hint off the status
+// row and onto a footer below the composer (#6590), so its timed row is the
+// spinner row in the slot the composer scopes; devin's row still carries hint
+// and timer on one line.
+func timedRowsFor(content, agent string) map[string]timedRow {
+	if agent == tmux.ProgramClaude {
+		return claudeTimedRows(content)
+	}
+	return timedTurnRowsByIdentity(content)
+}
+
+// claudeTimedRows reads the row in claude's live-composer status slot. When it
+// holds a spinner row with an elapsed timer, that row is the turn's timed
+// status row — produced as the singleton timedRowTicked can watch advance.
+// Anything else in the slot (a done summary, transcript text, a pane with no
+// composer) yields no row: those never tick.
+func claudeTimedRows(content string) map[string]timedRow {
+	lines := strings.Split(strings.TrimRight(paneAnsiEscape.ReplaceAllString(content, ""), " \t\r\n"), "\n")
+	row, idx, ok := claudeStatusRow(lines)
+	if !ok || !claudeSpinnerLine.MatchString(row) {
+		return nil
+	}
+	elapsed, ok := rowElapsed(row)
+	if !ok {
+		return nil
+	}
+	trimmed := strings.TrimSpace(row)
+	id := strings.TrimLeftFunc(trimmed, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
+	id = statusRowNumber.ReplaceAllString(id, "#")
+	return map[string]timedRow{
+		id: {count: 1, fromBottom: len(lines) - 1 - idx, elapsed: elapsed},
+	}
 }
 
 // timedTurnRowsByIdentity groups a capture's timed status rows by identity —
@@ -299,7 +343,7 @@ func NewTurnWatch(agent string, boundary time.Time) *TurnWatch {
 func (w *TurnWatch) Observe(content string, at time.Time) bool {
 	switch w.agent {
 	case tmux.ProgramClaude, tmux.ProgramDevin:
-		cur := timedTurnRowsByIdentity(content)
+		cur := timedRowsFor(content, w.agent)
 		row, ticked := tickingTimedRow(w.prev, cur)
 		w.prev = cur
 		// rowElapsed reads a whole-second display, so its truncation leaves a
