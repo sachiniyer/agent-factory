@@ -385,8 +385,8 @@
       "id": "host.manage",
       "title": "Add, list, check and remove sandbox hosts in one command",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane_hosts.go (the `,` config overlay's Hosts section: add form, per-row enter/d/D verbs for check/remove/default) -> ui/config_target.go applyingHostsEdit + CheckHostForEditor (daemon.EditGlobalHosts / daemon.CheckHost locally, health-gated SetConfigValue hosts_edit / apiclient.CheckHost remote) -> app/host_check.go hostCheckCmd for the async probe; verdicts render daemon.HostCheckLines, the same arms `af hosts check` prints and the web mirrors"
       },
       "web": {
         "status": "yes",
@@ -396,16 +396,16 @@
         "status": "yes",
         "pointer": "commands/hostscmd.go af hosts add|list|check|remove: add writes the W6.1 entry through the admission-gated `config set hosts` path, then runs daemon.CheckHost and prints each missing tool with its fix"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W10.5 of the sandbox-parity epic. The CLI half landed first; the web half is the config view's Hosts section \u2014 the same hosts_edit write (never a second whole-table writer), the same CheckHost probe, and the same renderHostCheck verdict copy, with add/remove refused on a daemon too old to answer config_hosts_edit rather than risk an empty-`hosts` write. The remaining half is the TUI equivalent, still tracked on #5571's W10.5 plan comment; its verdict stays real-gap until then. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
+      "notes": "W10.5 of the sandbox-parity epic, now landed on all three surfaces. Every surface manages the operator's host list through the same paths: add/remove ride the atomic per-entry hosts_edit write (config.EditGlobalHosts \u2014 never a second whole-table writer), with the daemon's ConfigHostsEdit bit re-read at send time so a daemon too old to apply hosts_edit atomically is refused rather than risk an empty-`hosts` write; check rides the daemon's CheckHost probe and renders the shared HostCheckLines arms. The TUI's section sits in the `,` config overlay, the same place the web's does; a remote --daemon-url target never falls back to the local machine for a write or a probe. Connectivity stays the operator's: af opens no tunnel and edits no ssh config."
     },
     {
       "id": "host.check",
       "title": "Probe a listed host for the tools a sandbox session needs and record its readiness",
       "tui": {
-        "status": "n/a",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "ui/config_pane_hosts.go (enter on a host row, or the check-all row, records a probe) -> app/host_check.go hostCheckCmd -> ui/config_target.go CheckHostForEditor: daemon.CheckHost on the local control socket, apiclient.Client.CheckHost (POST /v1/CheckHost) under a remote target \u2014 never the local daemon for a remote target; verdicts render daemon.HostCheckLines under the row"
       },
       "web": {
         "status": "yes",
@@ -415,9 +415,9 @@
         "status": "yes",
         "pointer": "doctor/hosts.go checkListedHosts -> daemon/control_client.go CheckHost (POST /v1/CheckHost); the daemon's supervisor also refreshes every listed host on a timer (daemon/checkhost.go)"
       },
-      "verdict": "deliberate",
+      "verdict": "parity",
       "issue": "#5571",
-      "notes": "W2.3 of the sandbox-parity epic. A diagnostic, like install.doctor. The web runs it as part of host management (#5571 W10.5): the config view's Hosts section probes a saved host \u2014 or every one \u2014 after add and on demand, and shows the verdict under the row. The TUI analogue stays n/a by the same reasoning as before: its host surface is the create picker, which READS the readiness its answer updates (HostOption.readiness/note on ListBackends) refreshed on the daemon's ~10 minute jittered timer and on `af doctor`. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false): a probe dials the operator's hosts."
+      "notes": "W2.3 of the sandbox-parity epic. All three surfaces run the daemon's CheckHost probe: the CLI via `af hosts check`/`af doctor`, the web and the TUI inside their Hosts sections on demand and after add, each showing the verdict under its row. The create pickers also READ the cached readiness (HostOption.readiness) the daemon's ~10 minute jittered refresh keeps current. The TUI probe runs async (app/host_check.go) because an ssh probe is a dial, not a bounded socket call. The RPC refuses a name outside the global host list before anything is dialed, and stays out of the sandbox credential scope (sandboxAllowed is false)."
     },
     {
       "id": "install.doctor",
@@ -2385,46 +2385,7 @@
           }
         }
       },
-      "SetConfigValueRequest": {
-        "tui": {
-          "hosts_edit": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.clear_default": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.name": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.op": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.host": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.user": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.port": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.identity_file": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.workspace_root": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.host_key_verification": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          },
-          "hosts_edit.host.use_ssh_config": {
-            "ok": "A per-entry edit of the host table (add or remove one entry), applied by the writer as one read-modify-write under the config file lock (#5855). Only `af hosts add/remove` edit a single entry of the table; the TUI and web write single scalar keys, or replace a whole value the user just edited, and a client that omits the field gets exactly that."
-          }
-        }
-      },
+      "SetConfigValueRequest": {},
       "RebindProjectRequest": {
         "cli": {
           "expected_root": {

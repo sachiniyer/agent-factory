@@ -357,8 +357,11 @@ type home struct {
 	// Identifies the current opening and its latest remote accounts operation.
 	// quotaGeneration does the same for the Usage read (#2983), so a report
 	// fetched for an earlier opening cannot land on the pane after a reopen.
-	accountGeneration uint64
-	quotaGeneration   uint64
+	// hostCheckGeneration does the same for the Hosts section's probes (#5571
+	// W10.5): an ssh answer from a closed opening is discarded, not applied.
+	accountGeneration   uint64
+	quotaGeneration     uint64
+	hostCheckGeneration uint64
 	// A remote mutation outlives the overlay and is released only on completion.
 	accountRegisterInFlight *daemon.RegisterAccountRequest
 	// menu displays the key hints inside the status bar (shared handle for

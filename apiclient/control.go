@@ -400,6 +400,19 @@ func (c *Client) ListBackends(req daemon.ListBackendsRequest) (daemon.ListBacken
 	return resp, nil
 }
 
+// CheckHost asks the daemon to probe a listed host (empty: every listed host)
+// and record its readiness — POST /v1/CheckHost, the same route the web's
+// Hosts section calls. It dials the host, so unlike ListBackends it is not
+// free; the daemon refuses a name outside its own global host list before
+// anything is dialed.
+func (c *Client) CheckHost(req daemon.CheckHostRequest) (daemon.CheckHostResponse, error) {
+	var resp daemon.CheckHostResponse
+	if err := c.call("CheckHost", req, &resp); err != nil {
+		return daemon.CheckHostResponse{}, err
+	}
+	return resp, nil
+}
+
 // ListPrograms reports the daemon host's program catalog and the default a
 // program-less create resolves to for repoPath (#4889). For a remote target
 // this is the only honest answer — the remote daemon's default_program is

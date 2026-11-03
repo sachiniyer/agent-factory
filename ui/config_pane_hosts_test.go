@@ -1,0 +1,487 @@
+package ui
+
+import (
+	"errors"
+	"strings"
+	"testing"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
+)
+
+// The Hosts section (#5571 W10.5) is the TUI's `af hosts add|list|check|remove`.
+// These tests drive the pane's own seams — editHosts for the table writes,
+// save for the default pick — the same way the config-row tests drive save:
+// the real writers live in config_target.go and are exercised by the app, but
+// what this file proves is that the SECTION asks for the right write, shows
+// the writer's outcome, and records exactly one probe per keypress.
+
+func newHostTestPane(t *testing.T, hosts map[string]config.HostConfig, def string) *ConfigPane {
+	t.Helper()
+	cfg := config.DefaultConfig()
+	cfg.Hosts = hosts
+	cfg.DefaultHost = def
+	c := NewConfigPane()
+	c.SetSize(100, 200)
+	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml")
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	return c
+}
+
+func selectHostRow(t *testing.T, c *ConfigPane, name string) {
+	t.Helper()
+	for i, row := range c.rows {
+		if row.host != nil && row.host.Name == name {
+			c.selectedIdx = i
+			return
+		}
+	}
+	t.Fatalf("host %q is not a row in the config editor", name)
+}
+
+func selectHostAction(t *testing.T, c *ConfigPane, action string) {
+	t.Helper()
+	for i, row := range c.rows {
+		if row.host != nil && row.host.Action == action {
+			c.selectedIdx = i
+			return
+		}
+	}
+	t.Fatalf("the %q action is not a row in the config editor", action)
+}
+
+func twoHosts() map[string]config.HostConfig {
+	return map[string]config.HostConfig{
+		"box1": {Host: "box1.tail.example", User: "dev", Port: 2222},
+		"box2": {Host: "box2.tail.example"},
+	}
+}
+
+// The section lists what the manifest carries: one row per saved host in name
+// order, the default named on its row, and the two action rows below — the
+// same list `af hosts list` prints and the web section renders.
+func TestConfigPaneHostsRows(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	view := c.String()
+
+	for _, want := range []string{
+		hostsHeading,
+		"box1", "box2",
+		"dev@box1.tail.example:2222", // config.DescribeHost — the shared summary
+		"default",
+		"+ add a host",
+		"↻ check all hosts",
+	} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the Hosts section does not render %q\n%s", want, view)
+		}
+	}
+	// Sorted: box1 before box2, as the CLI and web order them.
+	if strings.Index(view, "box1") > strings.Index(view, "box2") {
+		t.Error("hosts must render in name order")
+	}
+}
+
+// An empty table still shows the section — the add verb is how the first host
+// gets in — but offers no check-all.
+func TestConfigPaneHostsEmpty(t *testing.T) {
+	c := newHostTestPane(t, nil, "")
+	view := c.String()
+	if !strings.Contains(view, "No hosts saved") {
+		t.Error("an empty host table should say so rather than render nothing")
+	}
+	if !strings.Contains(view, "+ add a host") {
+		t.Error("the add verb must exist on the empty table — it is how the first host gets in")
+	}
+	if strings.Contains(view, "↻ check all hosts") {
+		t.Error("check-all on an empty table would probe nothing; it must not render")
+	}
+}
+
+// A host table that will not decode — a hand-edit can leave one — is named as
+// unparseable rather than hidden behind "No hosts saved", which would lie
+// about the file's contents.
+func TestConfigPaneHostsUnparseable(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	for i := range c.entries {
+		if c.entries[i].Key == "hosts" {
+			c.entries[i].Value = "not json"
+		}
+	}
+	c.rebuildRows()
+	view := c.String()
+	if !strings.Contains(view, "could not be read") {
+		t.Error("a hosts value that does not decode must say so, not render as empty")
+	}
+	if strings.Contains(view, "+ add a host") {
+		t.Error("mutating verbs on an unreadable table would write over a file we could not parse")
+	}
+}
+
+// enter on a host row records exactly one probe request, marks the row busy,
+// and the landed verdict renders under it. The app performs the recorded
+// request; the pane only stores it.
+func TestConfigPaneHostCheckRequest(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+
+	name, asked := c.TakeHostCheckRequest()
+	if !asked || name != "box1" {
+		t.Fatalf("enter on a host row must record a probe for that host, got (%q, %v)", name, asked)
+	}
+	if _, askedAgain := c.TakeHostCheckRequest(); askedAgain {
+		t.Error("one keypress is one probe — the request must not replay")
+	}
+	if !c.hostBusy("box1") {
+		t.Error("the row must show the probe in flight")
+	}
+	if !strings.Contains(c.String(), "probing…") {
+		t.Error("a probing row should show it, the way the web dims its check button")
+	}
+	// A second enter while probing rests rather than stacking behind the ssh.
+	pressKey(c, "enter")
+	if _, askedAgain := c.TakeHostCheckRequest(); askedAgain {
+		t.Error("enter on an already-probing host must not stack a second request")
+	}
+
+	c.SetHostCheckResults("box1", []daemon.HostCheckResult{{
+		Name: "box1", Probed: true, Reachable: true, Complete: true, Readiness: "ready",
+	}}, nil)
+	if c.hostBusy("box1") {
+		t.Error("the landed answer must rest the busy mark")
+	}
+	if !strings.Contains(c.String(), "ready (git, tmux and gh answered)") {
+		t.Error("the verdict must render under the row — the same arms `af hosts check` prints")
+	}
+}
+
+// check-all records the empty-name request and rests every row's verbs for its
+// span — a per-host answer landing first would be overwritten by the slower
+// aggregate anyway.
+func TestConfigPaneHostCheckAll(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostAction(t, c, hostActionCheckAll)
+	pressKey(c, "enter")
+
+	name, asked := c.TakeHostCheckRequest()
+	if !asked || name != "" {
+		t.Fatalf("check-all must record the empty-name probe, got (%q, %v)", name, asked)
+	}
+	if !c.hostBusy("box1") || !c.hostBusy("box2") {
+		t.Error("check-all probes every row, so every row's verbs rest")
+	}
+	// Verbs rest during the aggregate probe.
+	selectHostRow(t, c, "box1")
+	pressKey(c, "d")
+	if c.hostBusy("") {
+		// still busy; nothing should have happened
+	}
+
+	c.SetHostCheckResults("", []daemon.HostCheckResult{
+		{Name: "box1", Probed: true, Reachable: true, Complete: true, Readiness: "ready"},
+		{Name: "box2", Probed: true, Reachable: false, Error: "connection refused"},
+	}, nil)
+	if c.hostBusy("") {
+		t.Error("the landed aggregate must rest the busy mark")
+	}
+	selectHostRow(t, c, "box2")
+	if !strings.Contains(c.String(), "could not be probed") {
+		t.Error("each host's own verdict lands on its own row")
+	}
+}
+
+// A request-level failure — a refused name, a dead daemon — becomes the
+// section's status in the writer's words, and the busy mark rests.
+func TestConfigPaneHostCheckError(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+
+	c.SetHostCheckResults("box1", nil, errors.New("the daemon is not running"))
+	if c.hostBusy("box1") {
+		t.Error("a failed request must still rest the busy mark")
+	}
+	status, isErr := c.HostStatusLine()
+	if !isErr || !strings.Contains(status, "the daemon is not running") {
+		t.Errorf("the refusal must surface verbatim, got %q", status)
+	}
+	if !strings.Contains(c.String(), "the daemon is not running") {
+		t.Error("the section's status wins the pane's status line while set")
+	}
+}
+
+// 'd' removes through the editHosts seam — one hosts_edit remove — and the
+// saved row leaves the list. Removing the default names it up front
+// (clear_default, the same decision the web's button and the CLI's flag are).
+func TestConfigPaneHostRemove(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	var got config.HostsEdit
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		got = edit
+		return &config.SetResult{Key: "hosts", Value: `{"box2":{"host":"box2.tail.example"}}`}, "live now", nil
+	}
+
+	selectHostRow(t, c, "box1")
+	pressKey(c, "d")
+	if got.Op != config.HostsEditRemove || got.Name != "box1" || !got.ClearDefault {
+		t.Fatalf("removing the default must send a remove with clear_default, got %+v", got)
+	}
+	view := c.String()
+	if strings.Contains(view, "dev@box1.tail.example:2222") {
+		t.Error("the removed host must leave the list")
+	}
+	if !strings.Contains(view, "removed host box1") {
+		t.Error("the removal echoes in the pane's words")
+	}
+}
+
+func TestConfigPaneHostRemoveKeepsDefaultQuiet(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	var got config.HostsEdit
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		got = edit
+		return &config.SetResult{Key: "hosts", Value: `{"box1":{"host":"box1.tail.example","user":"dev","port":2222}}`}, "", nil
+	}
+	selectHostRow(t, c, "box2")
+	pressKey(c, "d")
+	if got.ClearDefault {
+		t.Error("removing a non-default host must not claim it clears the default")
+	}
+}
+
+// A refused remove shows the writer's error and changes nothing.
+func TestConfigPaneHostRemoveRefused(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		return nil, "", errors.New("the daemon is not running")
+	}
+	selectHostRow(t, c, "box1")
+	pressKey(c, "d")
+	if !strings.Contains(c.String(), "the daemon is not running") {
+		t.Error("a refused write shows the writer's words")
+	}
+	if !strings.Contains(c.String(), "dev@box1.tail.example:2222") {
+		t.Error("a refused write changes nothing")
+	}
+}
+
+// 'D' writes default_host through the pane's ordinary save seam — the same
+// scalar write `af config set default_host` performs.
+func TestConfigPaneHostMakeDefault(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	var gotKey, gotValue string
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		gotKey, gotValue = k, v
+		return &config.SetResult{Key: k, Value: v}, "live now", nil
+	}
+	selectHostRow(t, c, "box2")
+	pressKey(c, "D")
+	if gotKey != "default_host" || gotValue != "box2" {
+		t.Fatalf("D must save default_host=<name>, got %s=%s", gotKey, gotValue)
+	}
+	selectHostRow(t, c, "box2")
+	if !c.rows[c.selectedIdx].host.IsDefault {
+		t.Error("the default mark must move to the saved row")
+	}
+}
+
+// The add form sends ONE hosts_edit add through the seam — the destination
+// field through the CLI's own grammar — then records the tail probe `af hosts
+// add` runs, so the new row starts with a verdict in flight.
+func TestConfigPaneHostAdd(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	var got config.HostsEdit
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		got = edit
+		return &config.SetResult{Key: "hosts", Value: `{"box1":{"host":"box1.tail.example"},"box2":{"host":"box2.tail.example"},"box3":{"host":"box3.example","user":"me","port":2222}}`}, "live now", nil
+	}
+
+	selectHostAction(t, c, hostActionAdd)
+	pressKey(c, "enter")
+	if !c.IsEditing() {
+		t.Fatal("the add form takes runes — q in a name must be a character, not an exit")
+	}
+	// Type the name, advance, type the destination.
+	typeInto(c, "box3")
+	pressKey(c, "enter")
+	typeInto(c, "me@box3.example:2222")
+	// Focus the last field and commit.
+	for c.hosts.form.focus < hostFieldCount-1 {
+		pressKey(c, "enter")
+	}
+	pressKey(c, "enter")
+
+	if c.hosts.adding {
+		t.Fatal("a committed form leaves the add view")
+	}
+	if got.Op != config.HostsEditAdd || got.Name != "box3" {
+		t.Fatalf("the form must send an add for the typed name, got %+v", got)
+	}
+	if got.Host == nil || got.Host.Host != "box3.example" || got.Host.User != "me" || got.Host.Port != 2222 {
+		t.Fatalf("the destination must parse through the CLI's grammar, got %+v", got.Host)
+	}
+	if !strings.Contains(c.String(), "saved host box3") {
+		t.Error("the save echoes in the writer's words")
+	}
+	name, asked := c.TakeHostCheckRequest()
+	if !asked || name != "box3" {
+		t.Fatalf("af hosts add probes after the save — the pane must too, got (%q, %v)", name, asked)
+	}
+}
+
+// --default: the second write is the default_host scalar, reported against the
+// save rather than as a lost write when it is refused.
+func TestConfigPaneHostAddDefault(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: "hosts", Value: "{}"}, "", nil
+	}
+	var savedKey, savedValue string
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		savedKey, savedValue = k, v
+		return &config.SetResult{Key: k, Value: v}, "", nil
+	}
+
+	c.beginHostAdd()
+	c.hosts.form.fields[hostFieldName].input.SetValue("box3")
+	c.hosts.form.fields[hostFieldDestination].input.SetValue("box3.example")
+	c.hosts.form.fields[hostFieldMakeDefault].on = true
+	c.hosts.form.focus = hostFieldCount - 1
+	pressKey(c, "enter")
+
+	if savedKey != "default_host" || savedValue != "box3" {
+		t.Fatalf("make-default must save default_host=<name>, got %s=%s", savedKey, savedValue)
+	}
+	if !strings.Contains(c.String(), "as the default") {
+		t.Error("the echo names the default pick, as `af hosts add --default` reports it")
+	}
+}
+
+func TestConfigPaneHostAddDefaultRefused(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: "hosts", Value: "{}"}, "", nil
+	}
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return nil, "", errors.New("refused")
+	}
+	c.beginHostAdd()
+	c.hosts.form.fields[hostFieldName].input.SetValue("box3")
+	c.hosts.form.fields[hostFieldDestination].input.SetValue("box3.example")
+	c.hosts.form.fields[hostFieldMakeDefault].on = true
+	c.hosts.form.focus = hostFieldCount - 1
+	pressKey(c, "enter")
+
+	if !strings.Contains(c.String(), "could not make it the default") {
+		t.Error("a refused default is reported against the save, never as a lost host")
+	}
+}
+
+// A destination the CLI's grammar rejects never reaches the writer — the form
+// stays open with the parse refusal, exactly as `af hosts add` would print it.
+func TestConfigPaneHostAddBadDestination(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	called := false
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		called = true
+		return nil, "", nil
+	}
+	c.beginHostAdd()
+	c.hosts.form.fields[hostFieldName].input.SetValue("box3")
+	c.hosts.form.fields[hostFieldDestination].input.SetValue("box3.example:notaport")
+	c.hosts.form.focus = hostFieldCount - 1
+	pressKey(c, "enter")
+
+	if called {
+		t.Error("a destination the grammar rejects must never reach the writer")
+	}
+	if !c.hosts.adding {
+		t.Error("the form stays open for the correction")
+	}
+	status, isErr := c.HostStatusLine()
+	if !isErr || status == "" {
+		t.Error("the parse refusal shows in the form's own words")
+	}
+}
+
+// A verdict belongs to the entry it probed: change the saved destination and
+// the stale answer stops rendering — the web's own cache rule (#6632).
+func TestConfigPaneHostVerdictStalesWithEntry(t *testing.T) {
+	hosts := twoHosts()
+	c := newHostTestPane(t, hosts, "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	c.SetHostCheckResults("box1", []daemon.HostCheckResult{{
+		Name: "box1", Probed: true, Reachable: true, Complete: true, Readiness: "ready",
+	}}, nil)
+	if !strings.Contains(c.String(), "ready (git, tmux and gh answered)") {
+		t.Fatal("the fresh verdict renders")
+	}
+	// The saved entry moves underneath the verdict — a hand-edit, or a remove
+	// and re-add under the same name.
+	changed := twoHosts()
+	e := changed["box1"]
+	e.Port = 2200
+	changed["box1"] = e
+	cfg := config.DefaultConfig()
+	cfg.Hosts = changed
+	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml")
+	selectHostRow(t, c, "box1")
+	if strings.Contains(c.String(), "ready (git, tmux and gh answered)") {
+		t.Error("a verdict measured on another destination must stop rendering")
+	}
+}
+
+// Busy rests the row's verbs — the web disables its buttons during a probe; a
+// remove mid-flight would leave a verdict for a row that vanished.
+func TestConfigPaneHostBusyRestsVerbs(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	editCalled := false
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		editCalled = true
+		return nil, "", nil
+	}
+	saveCalled := false
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		saveCalled = true
+		return nil, "", nil
+	}
+
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	// Busy now: d, D and enter are all no-ops.
+	pressKey(c, "d")
+	pressKey(c, "D")
+	pressKey(c, "enter")
+	if editCalled || saveCalled {
+		t.Error("a probing row's verbs rest — no remove or default write mid-flight")
+	}
+	if _, asked := c.TakeHostCheckRequest(); asked {
+		t.Error("no second probe stacks behind the first")
+	}
+}
+
+// Esc abandons the form with nothing sent.
+func TestConfigPaneHostAddEsc(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	called := false
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		called = true
+		return nil, "", nil
+	}
+	c.beginHostAdd()
+	typeInto(c, "box3")
+	pressKey(c, "esc")
+	if c.hosts.adding {
+		t.Error("esc leaves the add view")
+	}
+	if called {
+		t.Error("esc must not send the half-typed form")
+	}
+}

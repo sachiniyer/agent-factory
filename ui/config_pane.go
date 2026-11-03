@@ -83,6 +83,12 @@ type ConfigPane struct {
 	// target. The rows say WHAT a value is; this answers WHERE it came from.
 	explain func(key string) (*config.ResolvedValue, error)
 
+	// editHosts is the hosts_edit write path (#5571 W10.5), injected on the
+	// same terms as save: NewConfigPane wires applyingHostsEdit, which routes
+	// the local daemon.EditGlobalHosts or the remote health-gated
+	// SetConfigValue — the target decision lives in config_target.go.
+	editHosts func(edit config.HostsEdit) (result *config.SetResult, notice string, err error)
+
 	// The explain sub-view (config_pane_explain.go): 'e' on a key row swaps the
 	// list for the key's full candidate trace — which layer won, which were
 	// shadowed, absent, or disallowed. savedScrollTop holds the list's scroll
@@ -104,6 +110,12 @@ type ConfigPane struct {
 	// never touches the write path, held by config_pane_quota.go.
 	quota quotaSection
 
+	// hosts is the Hosts section (#5571 W10.5): the operator's sandbox host
+	// list, derived from the `hosts`/`default_host` manifest rows below Usage
+	// and worked through the same daemon paths `af hosts` rides. Held by
+	// config_pane_hosts.go.
+	hosts hostsSection
+
 	// assistantRequested is set when the user presses the assistant key in normal
 	// mode. The pane cannot spawn the config agent itself — that is a daemon round
 	// trip owned by the app package — so it records the intent and the app reads it
@@ -120,13 +132,17 @@ type configRow struct {
 	heading string
 	entry   *config.ConfigEntry
 	// account is set for a row of the Accounts section (#3385) — an agent
-	// identity, not a config key. Exactly one of heading, entry, account and
-	// quota is meaningful on any row.
+	// identity, not a config key. Exactly one of heading, entry, account,
+	// quota and host is meaningful on any row.
 	account *AccountRow
 	// quota is set for a row of the Usage section (#2983) — a daemon-rendered
 	// report line. It takes the cursor so the scroll window can reach it, but
 	// nothing on it opens for editing.
 	quota *QuotaRow
+	// host is set for a row of the Hosts section (#5571 W10.5) — a saved host
+	// or one of the section's action rows (add, check-all), derived from the
+	// `hosts`/`default_host` manifest entries themselves.
+	host *HostRow
 }
 
 // isSelectable reports whether the cursor may land on this row. Every manifest
@@ -142,7 +158,7 @@ type configRow struct {
 // below the last editable row would render but never scroll into view. Enter
 // on one is a no-op because selectedEntry returns nil for it.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil || r.quota != nil
+	return r.entry != nil || r.account != nil || r.quota != nil || r.host != nil
 }
 
 var (
@@ -175,9 +191,10 @@ func NewConfigPane() *ConfigPane {
 	// with displayValue, which never feeds the writer.
 	in.Blur()
 	return &ConfigPane{
-		input:   in,
-		save:    applyingConfigSet,
-		explain: ExplainConfigForEditor,
+		input:     in,
+		save:      applyingConfigSet,
+		explain:   ExplainConfigForEditor,
+		editHosts: applyingHostsEdit,
 	}
 }
 
@@ -217,7 +234,7 @@ func (c *ConfigPane) HasFocus() bool { return c.hasFocus }
 // It reports the ACCOUNT name field too (#3385): that field takes arbitrary
 // runes, and "q" in an account name must be a character rather than an exit for
 // exactly the same reason it is in a config value.
-func (c *ConfigPane) IsEditing() bool { return c.editing || c.accounts.registering }
+func (c *ConfigPane) IsEditing() bool { return c.editing || c.accounts.registering || c.hosts.adding }
 
 // SetFocus focuses the pane. Dropping focus is how the overlay closes (the app
 // notices and returns to stateDefault), so it also abandons any in-progress
@@ -229,6 +246,13 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		c.accounts.busy = false
 		c.cancelEdit()
 		c.cancelRegister()
+		c.cancelHostAdd()
+		c.hosts.busy = nil
+		c.hosts.pending = nil
+		c.hosts.checkAsked = false
+		c.hosts.status = ""
+		c.hosts.statusIsError = false
+		c.hosts.statusFromCheck = false
 		c.accounts.status = ""
 		c.accounts.statusIsError = false
 		c.explaining = false
@@ -279,9 +303,11 @@ func (c *ConfigPane) rebuildRows() {
 	}
 	// Accounts last: the config keys are what this overlay is for, and a
 	// credential section above them would push them off the first screen. Usage
-	// (#2983) sits after it — daemon-reported sections go last, newest last.
+	// (#2983) sits after it — daemon-reported sections go last, newest last;
+	// Hosts (#5571 W10.5) follows.
 	c.appendAccountRows()
 	c.appendQuotaRows()
+	c.appendHostRows()
 	if selectedAccount != nil {
 		found := false
 		for i, row := range c.rows {
@@ -361,6 +387,11 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	if c.accounts.registering {
 		return c.handleRegisterKey(msg)
 	}
+	// The host add form takes runes next, on the same terms — its fields type
+	// the same letters the list reads as verbs.
+	if c.hosts.adding {
+		return c.handleHostAddKey(msg)
+	}
 	// The explain view is a reader, not a form: scroll and leave. It sits above
 	// the account-row routing because 'e' is its own way out, not an account verb.
 	if c.explaining {
@@ -370,6 +401,11 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 	// rather than falling through to beginEdit, which would open a config value
 	// editor over a row that has no config key.
 	if c.handleAccountKey(msg) {
+		return true
+	}
+	// A Hosts row answers enter, d and D itself — a probe, a remove or a
+	// default pick, never a config value editor.
+	if c.handleHostKey(msg) {
 		return true
 	}
 	switch msg.String() {
@@ -539,6 +575,9 @@ func (c *ConfigPane) commitEdit() {
 // bottom and the user is editing a row they cannot see — and a selection you
 // cannot see is one you will change by accident.
 func (c *ConfigPane) String() string {
+	if c.hosts.adding {
+		return c.renderHostAddView()
+	}
 	if c.explaining {
 		return c.renderExplainView()
 	}
@@ -606,6 +645,9 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.quota != nil:
 			rendered := c.renderQuotaRow(i, *row.quota)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.host != nil:
+			rendered := c.renderHostRow(i, *row.host)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.entry != nil:
 			rendered := c.renderEntryRow(i, row, *row.entry)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
@@ -640,6 +682,17 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 				// sees it rather than into a log.
 				for _, warning := range c.quota.warnings {
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("warning: "+warning, configErrorStyle), "\n"), "\n")...)
+				}
+			}
+			if row.heading == hostsHeading {
+				switch {
+				case c.hosts.parseError != "":
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("The host table could not be read: "+c.hosts.parseError, configErrorStyle), "\n"), "\n")...)
+				default:
+					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(hostsHeadingNote, configHintStyle), "\n"), "\n")...)
+					if len(c.rows) == i+1 || c.rows[i+1].host == nil || c.rows[i+1].host.Action != "" {
+						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(hostsEmptyNote, configHintStyle), "\n"), "\n")...)
+					}
 				}
 			}
 		}
@@ -781,6 +834,15 @@ func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
 // banner: a user who sets a value and looks away has been told exactly when they
 // were in a position to act on it.
 func (c *ConfigPane) renderStatus() string {
+	// The host check outcome wins the line while it is set: it is the newest
+	// event, and the one the user is waiting on — a probe request the daemon
+	// refused, or the empty-list answer.
+	if c.hosts.status != "" {
+		if c.hosts.statusIsError {
+			return c.wrap(c.hosts.status, configErrorStyle)
+		}
+		return c.wrap(c.hosts.status, configOKStyle)
+	}
 	// The account outcome wins the line while it is set: it is the newer event,
 	// and it is the one the user is waiting on — a register that was refused, or
 	// the report from a login that just handed the terminal back.
@@ -843,6 +905,25 @@ func (c *ConfigPane) renderHints() string {
 			}
 		} else if c.accounts.loginRefusal != "" {
 			verb = "login unavailable"
+		}
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↑/↓ move", drop: 2},
+			{text: verb, drop: 3},
+			{text: "C assistant", drop: 4},
+			{text: "esc close"},
+		})) + "\n"
+	}
+	if host := c.selectedHost(); host != nil {
+		verb := "↵ check"
+		if host.Action == hostActionAdd {
+			verb = "↵ add a host"
+		} else if host.Action == hostActionCheckAll {
+			verb = "↵ check all"
+			if c.hostBusy("") {
+				verb = "probing…"
+			}
+		} else if c.hostBusy(host.Name) {
+			verb = "probing…"
 		}
 		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
 			{text: "↑/↓ move", drop: 2},
