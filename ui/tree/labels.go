@@ -49,6 +49,18 @@ func TabGlyph(kind session.TabKind) string {
 // target in every consumer of TabLabels.
 var placeholderTabLabels = []string{"Agent"}
 
+// DisplayTitle is the instance's session title, or "new session" for the
+// create flow's still-unnamed naming draft (#6711) — the one instance whose
+// Title is legitimately empty. Every surface that names an instance identity
+// to the user (the pane header, the — cursor: hint) shares this fallback so an
+// untitled draft can never print as a bare leading separator.
+func DisplayTitle(inst *session.Instance) string {
+	if inst == nil || inst.Title == "" {
+		return "new session"
+	}
+	return inst.Title
+}
+
 // TabLabels returns the display labels for an instance's tab slots — the
 // single source of truth shared by the TabbedWindow's header, the sidebar
 // tree (#1024 PR 3), and the 1-9 jump keys, so slot numbering can never

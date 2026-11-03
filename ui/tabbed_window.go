@@ -604,10 +604,10 @@ func (w *TabbedWindow) renderHeader(width int) string {
 	if w.preview != nil && w.preview.instance != nil {
 		inst := w.preview.instance
 		label := tabLabelFor(inst, w.preview.tab)
-		text = fmt.Sprintf(" %s · %s%s · preview ", inst.Title, label, placementClause(inst))
+		text = fmt.Sprintf(" %s · %s%s · preview ", tree.DisplayTitle(inst), label, placementClause(inst))
 	} else if inst := w.boundInstance(); inst != nil {
 		label := tabLabelFor(inst, w.activeTab())
-		text = fmt.Sprintf(" %s · %s%s ", inst.Title, label, placementClause(inst))
+		text = fmt.Sprintf(" %s · %s%s ", tree.DisplayTitle(inst), label, placementClause(inst))
 		bound = true
 	} else {
 		text = " Select a session "

@@ -340,13 +340,22 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	}
 
 	var label string
-	live, archived := partitionByArchived(s.proj.GetInstances())
+	instances := s.proj.GetInstances()
+	live, archived := partitionByArchived(instances)
 	switch kind {
 	case SectionInstances:
 		// "Sessions" is the one user-facing noun (#1993) — the empty state, help,
 		// search, and actions all say session. Count live ones only; archived
-		// sessions live under their own folder.
-		label = fmt.Sprintf("Sessions (%d)", len(live))
+		// sessions live under their own folder. An empty title marks the create
+		// flow's still-unnamed naming draft (#6711): its row is the input it
+		// renders, not yet a session, so it stays out of the count until titled.
+		named := 0
+		for _, idx := range live {
+			if instances[idx].Title != "" {
+				named++
+			}
+		}
+		label = fmt.Sprintf("Sessions (%d)", named)
 	case SectionArchived:
 		label = archivedHeaderLabel(s.proj.GetInstances(), archived, s.contentWidth()-runewidth.StringWidth(arrow))
 	}
