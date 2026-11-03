@@ -54,7 +54,17 @@ func copyOverlayEntry(srcDir, destDir string, entry fs.DirEntry) error {
 	}
 	switch {
 	case info.IsDir():
-		if err := os.Mkdir(dest, info.Mode().Perm()); err != nil && !errors.Is(err, fs.ErrExist) {
+		// A merge destination that already exists must be a REAL directory:
+		// a symlink there (checked into the branch, pointing anywhere on the
+		// host) resolves outside the worktree, and Mkdir's ErrExist would let
+		// the copy descend through it and write outside the session checkout.
+		if st, err := os.Lstat(dest); err == nil {
+			if !st.IsDir() {
+				return fmt.Errorf("%s already exists in the worktree and is not a directory; a setup payload directory must not replace checked-in content", dest)
+			}
+		} else if !errors.Is(err, fs.ErrNotExist) {
+			return fmt.Errorf("stat %s: %w", dest, err)
+		} else if err := os.Mkdir(dest, info.Mode().Perm()); err != nil {
 			return fmt.Errorf("create directory %s: %w", dest, err)
 		}
 		sub, err := os.ReadDir(src)

@@ -289,7 +289,16 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// the agent and before the worktree's post_worktree_commands (#6667). Its
 	// failure is non-blocking by design; the note rides the result onto the
 	// session row the same way CallbackUnavailable does.
-	res.SetupHookFailed = runSessionSetupHook(opts, absPath, kind, res.Backend)
+	//
+	// It runs ONLY for the daemon's real create. SandboxCredentials is the
+	// existing discriminator — "nil ⇒ every non-daemon caller" — so the TUI's
+	// throwaway naming placeholder, direct NewInstance callers in tests, and
+	// the in-sandbox agent-server (HostedRemotely, whose hook is the daemon's
+	// business and would otherwise run a second time inside the sandbox with
+	// the wrong environment) all skip it.
+	if opts.SandboxCredentials != nil && !opts.HostedRemotely {
+		res.SetupHookFailed = runSessionSetupHook(opts, absPath, kind, res.Backend)
+	}
 	return res, nil
 }
 

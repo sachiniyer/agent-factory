@@ -502,6 +502,20 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 		}
 		res.CallbackUnavailable = rerr.Error()
 	}
+	// A fresh replacement is a fresh machine — it needs the same operator
+	// setup the create path ran, so the hook fires against it here (#6667).
+	// An ADOPTED workspace kept its prior state; replaying a setup into it
+	// would double-apply, so adoption skips this and the note it recorded
+	// under the original provision stays the truth.
+	if adopt == nil {
+		res.SetupHookFailed = runSessionSetupHook(InstanceOptions{
+			ID:                             i.ID,
+			Title:                          i.Title,
+			Host:                           i.Host,
+			SessionEnvPassthrough:          i.sessionEnvPassthrough,
+			ProvisionSessionEnvPassthrough: spec.SessionEnvPassthrough,
+		}, spec.RepoRoot, kind, res.Backend)
+	}
 	// The sandbox is up but its endpoint could not be wired — reap it so a bad
 	// restore never leaks a container/remote.
 	if bindErr := i.bindProvisionResult(res); bindErr != nil {

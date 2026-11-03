@@ -784,6 +784,16 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 			// its journal. A later recovery pass may establish the owning path.
 			gw.SetHookResumeDisabled(data.UserKilled || liveness == LiveArchived)
 			gw.SetHookScopeUnitPrefix(data.Worktree.HookScopeUnitPrefix)
+			// Re-arm the setup payload dir the create path armed: a rebuild
+			// after a daemon restart must still overlay what setup_commands
+			// staged (#6667). External (in-place) trees never had a payload;
+			// the local convention is a no-op when nothing was staged. A
+			// hosted instance restored inside its sandbox takes this same
+			// path — its staging lives beside its workspace instead, so the
+			// AF-home dir simply does not exist there.
+			if !data.Worktree.ExternalWorktree {
+				gw.SetSetupOverlayDir(localSetupPayloadDir(id))
+			}
 			instance.gitWorktree = gw
 			instance.worktreeMissing = data.Worktree.Missing
 			instance.worktreeMissingReason = data.Worktree.MissingReason

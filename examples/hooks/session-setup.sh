@@ -35,9 +35,10 @@ set -eu
 af_ssh()      { sh -c "$AF_SSH \"\$@\"" af-ssh "$@"; }
 af_ssh_full() { sh -c "$AF_SSH_FULL \"\$@\"" af-ssh-full "$@"; }
 
-# What this session needs beyond the clone: .env* files, plus the selected
-# uncommitted files listed below. Edit the list for your repo.
-WANTED_FILES=".env.local config/dev.local.yml"
+# What this session needs beyond the clone: .env* files (loop 1), plus the
+# selected uncommitted files listed below (loop 2). Edit the list for your
+# repo — .env.local already rides the .env* glob, so it is not repeated here.
+WANTED_FILES="config/dev.local.yml"
 
 # copy_in SRC copies one source file into the payload staging dir, preserving
 # its path below the checkout root so the overlay lands it in the same place.
@@ -58,9 +59,13 @@ copy_in() {
     fi
 }
 
-# 1. .env* files from the checkout root.
+# 1. .env* files from the checkout root — but only UNTRACKED ones. A
+# checked-in .env.example is already in the worktree; staging it again makes
+# the overlay hit its checked-in-path collision guard and skip the real
+# payload behind it. git ls-files --error-unmatch names tracked files.
 for f in "$AF_SETUP_SOURCE"/.env*; do
     [ -f "$f" ] || continue
+    git -C "$AF_SETUP_SOURCE" ls-files --error-unmatch -- "$(basename "$f")" >/dev/null 2>&1 && continue
     copy_in "$(basename "$f")"
 done
 

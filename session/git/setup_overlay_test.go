@@ -131,10 +131,11 @@ func TestSetupOverlayEmptyDirIsNoOp(t *testing.T) {
 
 // A copy failure is recorded on the worktree (the instance reads it after
 // Setup) rather than propagated — same non-blocking rule as the hook itself.
+// The fixture is a checked-in path colliding with the payload: deterministic
+// under root, where a chmod fixture would not block the copy.
 func TestSetupOverlayErrorRecordedOnFailure(t *testing.T) {
 	wt := t.TempDir()
-	require.NoError(t, os.Chmod(wt, 0555))
-	t.Cleanup(func() { _ = os.Chmod(wt, 0755) })
+	require.NoError(t, os.WriteFile(filepath.Join(wt, ".env"), []byte("checked-in\n"), 0644))
 
 	payload := t.TempDir()
 	require.NoError(t, os.WriteFile(filepath.Join(payload, ".env"), []byte("A=1\n"), 0644))
@@ -143,4 +144,9 @@ func TestSetupOverlayErrorRecordedOnFailure(t *testing.T) {
 	g.SetSetupOverlayDir(payload)
 	g.applySetupOverlay()
 	assert.NotEqual(t, "", g.SetupOverlayError(), "a failed payload copy must be recorded")
+
+	// The collision must leave the checked-in content untouched.
+	data, err := os.ReadFile(filepath.Join(wt, ".env"))
+	require.NoError(t, err)
+	assert.Equal(t, "checked-in\n", string(data))
 }
