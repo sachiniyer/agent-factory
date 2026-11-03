@@ -153,6 +153,8 @@ var auditedMkdir = map[string]struct {
 		"Creates one metadata directory after validateDirectoryNoSymlink checks its immediate parent; ENOENT if gone."},
 	"internal/upgradetxn/storage.go:createDurableDirectory": {1,
 		"Requires filepath.Dir(path) == parent and validates that parent before creating its immediate child; ENOENT if gone."},
+	"session/git/setup_overlay.go:copyOverlayEntry": {1,
+		"Creates one overlay directory level under the worktree root or under a directory the same walk just created; the parent always exists by then, so ENOENT propagates rather than resurrecting anything."},
 }
 
 func TestAuditedMkdirSites(t *testing.T) {

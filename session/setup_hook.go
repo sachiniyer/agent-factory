@@ -64,19 +64,16 @@ func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind,
 	if opts.InPlace {
 		return ""
 	}
-	repo, repoErr := config.RepoFromPath(absPath)
-	var repoCfg *config.ResolvedConfig
-	var err error
-	if repoErr == nil {
-		repoCfg, err = config.ResolveConfigForRepo(repo)
-	} else {
-		repoCfg, err = config.ResolveConfig(absPath)
-	}
+	// setup_commands is repo-only, so the in-repo document is the whole
+	// resolution — reading it directly keeps the provision path from loading
+	// the global config (which materializes a first-run config.toml in a
+	// home that has none, the #837 tripwire).
+	inRepo, _, err := config.LoadInRepoConfig(absPath)
 	if err != nil {
-		log.WarningLog.Printf("failed to resolve repo config for setup_commands: %v", err)
+		log.WarningLog.Printf("failed to load in-repo config for setup_commands: %v", err)
 		return ""
 	}
-	if len(repoCfg.SetupCommands) == 0 {
+	if inRepo == nil || len(inRepo.SetupCommands) == 0 {
 		return ""
 	}
 
@@ -106,7 +103,7 @@ func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind,
 
 	env := setupHookEnv(opts, absPath, mode, dest, route)
 	var failures []string
-	for index, cmdStr := range repoCfg.SetupCommands {
+	for index, cmdStr := range inRepo.SetupCommands {
 		if note := runSetupCommand(index, cmdStr, absPath, env); note != "" {
 			failures = append(failures, note)
 		}
