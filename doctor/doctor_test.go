@@ -320,29 +320,31 @@ func TestOrphanWithoutProvenHomeSurvivesFix(t *testing.T) {
 
 	report, err := Run(testOptions(t, true, foreign.PID, unmarked.PID))
 	require.NoError(t, err)
-	findings := findByCheck(report, "orphaned-process")
-	require.Len(t, findings, 2)
-	for _, f := range findings {
-		require.Empty(t, f.FixAction, "without a proven home match the finding must be report-only: %s", f.Detail)
-		require.False(t, f.Fixed)
-	}
-	var foreignDetail, unmarkedDetail bool
-	for _, f := range findings {
-		if strings.Contains(f.Detail, "another agent-factory home") {
-			foreignDetail = true
-		}
-		if strings.Contains(f.Detail, "no readable home marker") {
-			unmarkedDetail = true
-		}
-	}
-	require.True(t, foreignDetail, "foreign-home orphan must say whose it is")
-	require.True(t, unmarkedDetail, "unmarked orphan must say why it is not killed")
+
+	require.Empty(t, findByCheck(report, "orphaned-process"),
+		"processes whose owning install cannot be established must not be counted among this home's orphans (#6704)")
+
+	foreignRow := findByCheck(report, "foreign-home-process")
+	require.Len(t, foreignRow, 1, "a foreign-home orphan must be reported under the foreign-home key")
+	require.Contains(t, foreignRow[0].Detail, "another agent-factory home",
+		"foreign-home orphan must say whose it is: %s", foreignRow[0].Detail)
+	require.Empty(t, foreignRow[0].FixAction,
+		"without a proven home match the finding must be report-only: %s", foreignRow[0].Detail)
+	require.False(t, foreignRow[0].Fixed)
+
+	unresolved := findByCheck(report, "foreign-home-unresolved")
+	require.Len(t, unresolved, 1, "a no-marker orphan must be reported as unproven, not counted as ours")
+	require.Contains(t, unresolved[0].Detail, "no readable AF_HOME marker",
+		"unmarked orphan must say why it is not killed: %s", unresolved[0].Detail)
+	require.Empty(t, unresolved[0].FixAction,
+		"without a proven home match the finding must be report-only: %s", unresolved[0].Detail)
+	require.False(t, unresolved[0].Fixed)
 
 	payload := BuildJSONReport(report, true, true)
 	require.Zero(t, payload.Summary.Unresolved,
 		"processes whose owning install cannot be established must stay visible without failing a health probe")
 	for _, row := range payload.Checks {
-		if row.Name == "orphaned-process" {
+		if row.Name == "foreign-home-processes" || row.Name == "foreign-home-unresolved" {
 			require.False(t, row.Actionable,
 				"an UNKNOWN ownership row cannot claim the run is unhealthy until the user changes something")
 		}
@@ -368,16 +370,21 @@ func TestMarkedProcessOfLiveSessionIsNeverKilled(t *testing.T) {
 	report, err := Run(testOptions(t, true, escapee.PID))
 	require.NoError(t, err)
 	require.Empty(t, findByCheck(report, "orphaned-process"))
-	escaped := findByCheck(report, "escaped-process")
-	require.Len(t, escaped, 1)
-	require.Empty(t, escaped[0].FixAction, "escaped processes of live sessions are report-only")
+	require.Empty(t, findByCheck(report, "escaped-process"),
+		"a process with no readable AF_HOME must not be attributed as an escapee of this install (#6704)")
+	unresolved := findByCheck(report, "foreign-home-unresolved")
+	require.Len(t, unresolved, 1,
+		"a marked process with no readable AF_HOME must land on the non-attributing row")
+	require.Contains(t, unresolved[0].Detail, "no readable AF_HOME marker",
+		"the finding must say what could not be read: %s", unresolved[0].Detail)
+	require.Empty(t, unresolved[0].FixAction, "escaped processes of live sessions are report-only")
 	require.True(t, alive(escapee), "process of a live session must never be killed")
 
 	payload := BuildJSONReport(report, true, false)
 	require.Zero(t, payload.Summary.Unresolved,
 		"a process merely observed outside a live pane tree is not an established health failure")
 	for _, row := range payload.Checks {
-		if row.Name == "escaped-processes" {
+		if row.Name == "foreign-home-unresolved" {
 			require.False(t, row.Actionable,
 				"inspection advice must remain visible without making the run fail")
 		}
@@ -487,6 +494,8 @@ func TestYoungProcessesExcludedFromEveryLeakPopulation(t *testing.T) {
 
 	escaped := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 	orphaned := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-young-dead",

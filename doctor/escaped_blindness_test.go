@@ -236,11 +236,18 @@ func TestReadablePaneTreeStillReportsGenuineEscape(t *testing.T) {
 	require.NoError(t, err, "tmux new-session: %s", out)
 	t.Cleanup(func() { _ = exec.Command("tmux", "kill-session", "-t", "="+name+":").Run() })
 
-	// A separately spawned process that carries the session's marker but is NOT
-	// in its pane tree — a genuine escapee on a readable pane tree.
-	escapee := spawnWithEnv(t, "sh", nil, map[string]string{tmux.EnvMarkerSession: name})
+	// A separately spawned process that carries the session's marker and a
+	// provably-matching home but is NOT in its pane tree — a genuine escapee
+	// on a readable pane tree. (Without a matching AF_HOME it is unproven,
+	// not an escapee of ours — that shape is covered by the #6704 tests.)
+	home := testguard.SocketTempDir(t)
+	escapee := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: name,
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+	})
 
-	report, err := Run(testOptions(t, false, escapee.PID))
+	report, err := Run(testOptionsWithHome(t, home, false, escapee.PID))
 	require.NoError(t, err)
 	escapes := findByCheck(report, "escaped-process")
 	require.Len(t, escapes, 1,
@@ -425,8 +432,10 @@ func TestEscapedProcessRelativeMarkerNotAttributedToThisInstall(t *testing.T) {
 		}
 	}
 	require.NotNil(t, unresolvedRow, "the default JSON output must keep the unproven-ownership row distinct")
-	require.Contains(t, unresolvedRow.Detail, "could not be resolved to a specific install",
+	require.Contains(t, unresolvedRow.Detail, "could not be proven",
 		"the default JSON row must state ownership is unproven, not assert another home: %s", unresolvedRow.Detail)
+	require.Contains(t, unresolvedRow.Detail, "not attributed to this install",
+		"the default JSON row must not attribute unproven processes: %s", unresolvedRow.Detail)
 	require.NotContains(t, unresolvedRow.Detail, "another agent-factory home",
 		"the default JSON row must not claim a confirmed foreign home for an unproven marker: %s", unresolvedRow.Detail)
 	var foreignRow *JSONCheck
@@ -442,9 +451,9 @@ func TestEscapedProcessRelativeMarkerNotAttributedToThisInstall(t *testing.T) {
 // TestEscapedProcessOwnHomeStillReportedAsEscape is the companion regression: the
 // foreign-home guard must NOT suppress genuine escapes. A marked process outside
 // a readable live pane tree whose AF_HOME matches our install is still an escapee
-// of our session, as is a marked process carrying no AF_HOME at all (the original
-// TestReadablePaneTreeStillReportsGenuineEscape shape — the guard only reroutes a
-// process when AF_HOME is readable AND foreign).
+// of our session. A marked process carrying no AF_HOME at all is different:
+// nothing names an install, so it lands on the non-attributing unresolved row
+// (#6704) rather than being attributed as this install's escapee.
 func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
 	testguard.IsolateTmux(t)
 
@@ -461,9 +470,9 @@ func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
 		tmux.EnvMarkerHome:    home,
 		"AGENT_FACTORY_HOME":  home,
 	})
-	// An escapee carrying the marker but no AF_HOME at all: unreadable home is
-	// not foreign home, so it stays on the genuine-escape path (the orphaned arm
-	// treats unreachable AF_HOME as report-only, never as foreign).
+	// An escapee carrying the marker but no AF_HOME at all: no marker names an
+	// install, so it lands on the non-attributing unresolved row — never an
+	// escapee of ours, never a confirmed foreign install (#6704).
 	unmarkedEscapee := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: name,
 	})
@@ -472,14 +481,19 @@ func TestEscapedProcessOwnHomeStillReportedAsEscape(t *testing.T) {
 	require.NoError(t, err)
 
 	escapes := findByCheck(report, "escaped-process")
-	require.Len(t, escapes, 2, "own-home and unmarked escapees of a readable pane tree must both be reported")
-	for _, f := range escapes {
-		require.Contains(t, f.Detail, "escaped the pane tree",
-			"an own-home/unmarked escapee is still a genuine escape: %s", f.Detail)
-		require.NotContains(t, f.Detail, "another agent-factory home",
-			"only a proven FOREIGN home is rerouted: %s", f.Detail)
-		require.Empty(t, f.FixAction, "the escaped arm is report-only even for genuine escapes")
-	}
+	require.Len(t, escapes, 1, "only the own-home escapee is a genuine escape")
+	require.Contains(t, escapes[0].Detail, "escaped the pane tree",
+		"an own-home escapee is still a genuine escape: %s", escapes[0].Detail)
+	require.NotContains(t, escapes[0].Detail, "another agent-factory home",
+		"only a proven FOREIGN home is rerouted: %s", escapes[0].Detail)
+	require.Empty(t, escapes[0].FixAction, "the escaped arm is report-only even for genuine escapes")
+
+	unresolved := findByCheck(report, "foreign-home-unresolved")
+	require.Len(t, unresolved, 1, "an unmarked escapee must land on the non-attributing row")
+	require.Contains(t, unresolved[0].Detail, "no readable AF_HOME marker",
+		"the finding must say what could not be read: %s", unresolved[0].Detail)
+	require.Empty(t, unresolved[0].FixAction, "the escaped arm is report-only")
+
 	require.True(t, alive(ownEscapee), "genuine escapee must survive --fix (report-only)")
 	require.True(t, alive(unmarkedEscapee), "unmarked escapee must survive --fix (report-only)")
 }

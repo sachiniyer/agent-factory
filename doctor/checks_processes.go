@@ -713,7 +713,7 @@ const (
 func (ctx *scanContext) ancestorHomeProof(p proctree.Process) (ancestryVerdict, string, int) {
 	seen := map[int]bool{p.PID: true}
 	pid := p.PPID
-	for hops := 0; pid > 1 && hops < 128; hops++ {
+	for hops := 0; pid > 1 && hops < ancestorHopLimit; hops++ {
 		if seen[pid] {
 			// A cycle back onto an already-verified ancestor — nothing
 			// new remains to check.
@@ -727,7 +727,7 @@ func (ctx *scanContext) ancestorHomeProof(p proctree.Process) (ancestryVerdict, 
 			// it. Either way it cannot be interrogated.
 			return ancestryUnproven, "", pid
 		}
-		if same, err := proctree.SameIdentity(a); err != nil || !same {
+		if same, err := ancestorIdentity(a); err != nil || !same {
 			// The pid was recycled since the snapshot — or cannot be
 			// revalidated — so the record describes a different process
 			// than the one running now.
@@ -776,6 +776,15 @@ func declaredAgentFactoryHome(pid int) (string, bool, bool) {
 	}
 	return home, true, true
 }
+
+// ancestorIdentity is the live-process revalidation the ancestor walk applies
+// to each recorded ancestor — a var so a test can script an identity that
+// changes mid-scan rather than race a real exec (#6704).
+var ancestorIdentity = proctree.SameIdentity
+
+// ancestorHopLimit bounds the ancestor chain — a var so a test can shrink it
+// rather than spawn a chain past the production bound (#6704).
+var ancestorHopLimit = 128
 
 // processLeakObservations keeps every unprovable state visible without mixing
 // it into the leak counts. A vanished process is normal churn and needs no row;
