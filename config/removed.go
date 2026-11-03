@@ -2,6 +2,7 @@ package config
 
 import (
 	"errors"
+	"strings"
 	"sync"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -116,4 +117,104 @@ func removedAutoYesKeyPath(key []string) bool {
 		return key[0] == "auto_yes"
 	}
 	return len(key) >= 3 && key[0] == "root_agents" && key[len(key)-1] == "auto_yes"
+}
+
+// RemovedBacklogMessage is shared by the compatibility warning and new-input
+// rejection for the removed Backlog feature's [backlog] table (#6662). One
+// message keeps config, CLI, and HTTP callers on the same migration advice.
+const RemovedBacklogMessage = "the Backlog feature was removed (#6662); the [backlog] table is ignored — existing backlog.json, budget.json and plan/ files are left in place, and session records written by item sessions still load"
+
+// RemovedBacklogError returns the actionable removal error for a new write of
+// a backlog.* key. Existing config files are a compatibility input: loaders
+// ignore their stale table with at most a one-time warning so an upgrade
+// cannot prevent af or its daemon from starting.
+func RemovedBacklogError() error {
+	return errors.New(RemovedBacklogMessage)
+}
+
+// removedBacklogKey reports whether key (a canonical config path like
+// "backlog", "backlog.plan_usage" or "backlog.prices.claude-x.input") belongs
+// to the removed [backlog] table.
+func removedBacklogKey(key string) bool {
+	return key == "backlog" || strings.HasPrefix(key, "backlog.")
+}
+
+// removedBacklogTableWarrantsNotice reports whether a decoded [backlog] table
+// held settings that changed behavior — plan_usage on, or a prices override.
+// A table holding only plan_usage=false asked for nothing: the post-removal
+// default is the same nothing, so it earns no notice (the #2574 rule).
+func removedBacklogTableWarrantsNotice(table map[string]any) bool {
+	if enabled, isBool := table["plan_usage"].(bool); isBool && enabled {
+		return true
+	}
+	for key := range table {
+		if key != "plan_usage" {
+			return true
+		}
+	}
+	return false
+}
+
+// removedBacklogInShape reports whether a decoded config carries a [backlog]
+// table worth the notice.
+func removedBacklogInShape(shape map[string]any) bool {
+	table, ok := shape["backlog"].(map[string]any)
+	return ok && removedBacklogTableWarrantsNotice(table)
+}
+
+// removedBacklogWarned memoizes the once-per-source notice, mirroring
+// removedAutoYesWarned: the daemon loads config ~10x per session-create, and a
+// removed key deserves one migration notice per daemon lifetime, not one per
+// load (#2496).
+var removedBacklogWarned sync.Map
+
+// warnRemovedBacklog emits the one-time notice when a global config source's
+// shape carries a [backlog] table that did something.
+func warnRemovedBacklog(shape map[string]any, source string) {
+	if removedBacklogInShape(shape) {
+		warnRemovedBacklogAt(source)
+	}
+}
+
+// warnRemovedBacklogValue is warnRemovedBacklog for the loaders that strip the
+// table from their presence shape themselves (in-repo, personal project).
+func warnRemovedBacklogValue(value any, source string) {
+	if table, ok := value.(map[string]any); ok && removedBacklogTableWarrantsNotice(table) {
+		warnRemovedBacklogAt(source)
+	}
+}
+
+func warnRemovedBacklogAt(source string) {
+	if _, seen := removedBacklogWarned.LoadOrStore(source, struct{}{}); seen {
+		return
+	}
+	log.WarningLog.Printf("%s: %s; the stale setting is ignored during upgrade", source, RemovedBacklogMessage)
+}
+
+// resetRemovedBacklogWarnings clears the once-per-source memo for tests, the
+// same role resetRemovedAutoYesWarnings plays for auto_yes.
+func resetRemovedBacklogWarnings() {
+	removedBacklogWarned.Clear()
+}
+
+// removedKeyError returns the migration error for a canonical config key a
+// removed feature owned — auto_yes, or anything under [backlog] — or nil when
+// the key is live. The set/unset paths call it once instead of enumerating
+// tombstones.
+func removedKeyError(key string) error {
+	if key == "auto_yes" {
+		return RemovedAutoYesError()
+	}
+	if removedBacklogKey(key) {
+		return RemovedBacklogError()
+	}
+	return nil
+}
+
+// removedBacklogKeyPath reports whether a TOML strict-decode key path (e.g.
+// ["backlog"], ["backlog" "plan_usage"], ["backlog" "prices" "m" "input"])
+// is inside the removed table, so the generic unknown-key warning skips it —
+// the specific notice above already named it.
+func removedBacklogKeyPath(key []string) bool {
+	return len(key) > 0 && key[0] == "backlog"
 }

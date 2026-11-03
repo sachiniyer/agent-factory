@@ -240,9 +240,6 @@ var settableKeySpecs = map[string]settableKeySpec{
 		"terminal_font_size_desktop": {kind: cfgFloat, validate: validateWebTerminalFontSize},
 	}},
 	"keys": {structured: true},
-	"backlog": {structured: true, subkeys: map[string]settableLeafSpec{
-		"plan_usage": {kind: cfgBool},
-	}},
 }
 
 func requirePositiveInt(name, v string) error {
@@ -528,8 +525,8 @@ func SetGlobalConfigValueWithDigest(key, rawValue string) (*SetResult, ConfigDig
 	if err := RetiredThemeKeyError(key); err != nil {
 		return nil, ConfigDigest{}, err
 	}
-	if key == "auto_yes" {
-		return nil, ConfigDigest{}, RemovedAutoYesError()
+	if err := removedKeyError(key); err != nil {
+		return nil, ConfigDigest{}, err
 	}
 	section, leaf, spec, ok := resolveSettable(key)
 	if !ok {
@@ -593,8 +590,8 @@ func SetProjectConfigValue(selector, key, rawValue string) (*SetResult, error) {
 	if err := RetiredThemeKeyError(key); err != nil {
 		return nil, err
 	}
-	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+	if err := removedKeyError(key); err != nil {
+		return nil, err
 	}
 	project, err := ResolveProjectSelector(selector)
 	if err != nil {

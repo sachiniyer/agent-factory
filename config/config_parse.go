@@ -53,6 +53,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnS
 	if metadata, err := metadataForSource(data, prettyConfigPath, FormatJSON); err == nil {
 		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		warnRemovedBacklog(metadata.shape, "config file "+prettyConfigPath)
 		if warnRootAgents {
 			warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 		}
@@ -67,7 +68,7 @@ func parseConfigJSON(data []byte, prettyConfigPath string, warnRootAgents, warnS
 		known := knownJSONConfigKeys()
 		for key := range topLevel {
 			switch {
-			case key == "auto_yes" || key == "theme" || key == "appearance":
+			case key == "auto_yes" || key == "theme" || key == "appearance" || key == "backlog":
 				// Compatibility warning emitted above. Do not follow it with the
 				// generic unknown-key warning for the same removed setting.
 			case key == "keys":
@@ -123,6 +124,7 @@ func parseConfigTOML(data []byte, prettyConfigPath string) (*Config, error) {
 		applyGroupedConfigAliases(config, tables, metadata.shape)
 		config.Appearance = migratedAppearance(metadata.shape)
 		warnRemovedAutoYes(metadata.shape, "config file "+prettyConfigPath)
+		warnRemovedBacklog(metadata.shape, "config file "+prettyConfigPath)
 		warnLegacyRootAgents(metadata.shape, prettyConfigPath)
 		warnLegacyConfigAliases(metadata.shape, prettyConfigPath, FormatTOML)
 	}
@@ -186,7 +188,7 @@ func warnUnknownTomlKeys(data []byte, prettyConfigPath string) {
 	}
 	for _, keyErr := range strictErr.Errors {
 		key := keyErr.Key()
-		if removedAutoYesKeyPath(key) || (len(key) > 0 && key[0] == "theme") {
+		if removedAutoYesKeyPath(key) || removedBacklogKeyPath(key) || (len(key) > 0 && key[0] == "theme") {
 			// Compatibility warning emitted by parseConfigTOML. Avoid a second,
 			// generic warning that loses the migration recipe.
 			continue

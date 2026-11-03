@@ -507,7 +507,7 @@
         "pointer": "commands/docs_gen.go:29 (hidden); commands/docs_gen.go:61 (--plugin-root); commands/agentservercmd.go:34; commands/legacy_tmuxguardcmd.go"
       },
       "verdict": "deliberate",
-      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio↔TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes — running it by hand does nothing useful. af internal plan-tap is hidden too: it is the Claude Code status line command af injects into the Claude sessions it launches, so Claude Code runs it, not a person; it records plan usage and runs the user's own status line. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
+      "notes": "af gen-docs is Hidden:true (CI docs generation). af agent-server is daemon-consumed plumbing — its own Long says it 'exists to be consumed by a daemon rather than opened by a person' — and af --daemon is a hidden flag. af hook-guard-tmux is also hidden: #2608 retains the removed command name only as an exit-0 compatibility tombstone for already-running pre-#2563 Codex hooks; it performs no guard or user operation. af ssh-relay is hidden for the same class of reason (#3086): it is the stdio↔TCP relay af composes into its OWN ssh invocations as a ProxyCommand, so every step of a remote session dials the one address the session was pinned to. Its stdout IS the ssh transport stream while it runs, so it is af talking to af and not something a person invokes — running it by hand does nothing useful. None are user capabilities. af gen-docs --plugin-root (#2172) regenerates the committed per-agent plugin artifacts from the canonical af usage text; like the rest of gen-docs it is build tooling, run by scripts/gen-docs.sh and the CI drift gate. The TUI and web will deliberately never expose these internals — regenerating a repo's committed build artifacts and legacy hook compatibility are not things either surface should offer — so this is a recorded decision, not a parity gap to re-report."
     },
     {
       "id": "task.path-validate",
@@ -1810,150 +1810,6 @@
       "verdict": "deliberate",
       "issue": "#5848",
       "notes": "The web push chip (step 3b) now sets the mode, holds the countdown and sends now over the daemon routes the CLI uses (HoldProposalPush has no CLI verb: a hold only means something to the Docs tab whose save started the countdown). the TUI's proposal editor is a recorded non-goal (#5848; goals.md: 'The TUI does not get an editor. The Docs tab is web only.'), so with no TUI proposal edits there is nothing for a TUI push affordance to send."
-    },
-    {
-      "id": "backlog.items",
-      "title": "Keep an ordered backlog of work items per project",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Backlog PR 2 adds the daemon routes and the CLI; PR 3 adds the web Backlog view (list, reorder, item panel, waits-on picker, notes). The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.status",
-      "title": "Queue, review, finish, drop and reopen backlog items",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "The web item panel offers Queue, Back to draft, Mark done, Drop, Reopen and Delete; Send to review arrives in backlog PR 8. The agent's done --self (session_id, pr) is CLI-only by design: it runs inside an item session. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.groups",
-      "title": "Pause, unpause, archive and unarchive backlog groups",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Backlog v2 PR 2 adds the CLI and the UpdateBacklogItem fields; backlog v2 PR 7 adds Pause and Unpause to the web item panel of a parent, Archive, Unarchive, Dependencies and History to a group, and a Show archived filter. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.sessions",
-      "title": "Start backlog items as sessions",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Backlog PR 4 starts items as sessions from the CLI; PR 8 adds Start now to the web item panel, which shows Starting until the session exists. Item sessions are ordinary sessions, so open, archive and restore use the session routes. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.questions",
-      "title": "Ask and answer questions on backlog items",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Backlog PR 5 adds questions from item sessions and answers from the CLI; PR 8 adds the web answer box at the top of the item panel. Asking is agent-only (ask --self), so the web only answers. A question also sets the session's attention, which every surface already shows. Backlog v2 adds ask --then and --handoff-file (agent-only), af backlog inbox, and the web Inbox filter, built from /v1/GetBacklog: each open question as a card with its handoff and what an answer does. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.runner",
-      "title": "Show and change a project's backlog runner and the global budget",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Backlog PR 2 stores the runner switch, slots, on-done choice and the budget settings (the plan limit, cap per run, dollar limit; the limit replaced a share of the plan and a stop-at, whose hidden CLI flags are kept only to refuse with a pointer to --limit); plan readings arrive in PR 6 and the runner loop, af backlog run and the backlog.runner event in PR 7. PR 3 shows a read-only runner bar on the web and PR 8 makes it editable: the switch, max running, plan use, and the ⋯ budget settings. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.orchestrator",
-      "title": "Bind a session as a backlog group's orchestrator",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Effort orchestrator PR 2 adds binding only: the routes, the CLI and the orchestrator block on GetBacklog. PR 6 adds --stay (SetBacklogOrchestratorHandoff stay), which keeps the orchestrator live after its turn instead of archiving it. A binding is made by the agent of the session that orchestrates (whoami), so it starts on the CLI. Effort orchestrator PR 8 adds the web Effort session button, which opens the group's session (restoring or replacing it) or starts and binds a new one through OpenBacklogOrchestrator, and the group panel's Orchestrator row with Unbind. The web has no session of its own to bind, hand off from or keep live, so --self, --replace, --handoff-file and --stay stay on the CLI; OpenBacklogOrchestrator is the web's way to get a session, and on the CLI af sessions restore and af backlog orchestrate cover it. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
-    },
-    {
-      "id": "backlog.escalate",
-      "title": "Escalate a question from a group's orchestrator to the user",
-      "tui": {
-        "status": "no",
-        "pointer": ""
-      },
-      "web": {
-        "status": "no",
-        "pointer": ""
-      },
-      "cli": {
-        "status": "no",
-        "pointer": ""
-      },
-      "verdict": "deliberate",
-      "notes": "Effort orchestrator PR 5. The orchestrator escalates; it is an agent in a session, so the verb is on the CLI. The user answers an escalated question in the Inbox like any other. The TUI deliberately has no backlog board: the backlog proposal's goals.md lists a TUI board as a non-goal, and the CLI covers every action. CLI verbs and their HTTP routes were removed in #6662."
     }
   ],
   "ledger": {
@@ -1991,7 +1847,6 @@
       "af gen-docs": "meta.internal",
       "af help": "meta.discovery",
       "af hook-guard-tmux": "meta.internal",
-      "af internal plan-tap": "meta.internal",
       "af keys": "meta.discovery",
       "af projects add": "project.add",
       "af projects delete": "project.delete",
@@ -2305,8 +2160,6 @@
       "af gen-docs --plugin-root": "meta.internal",
       "af help --help": "meta.discovery",
       "af hook-guard-tmux --help": "meta.internal",
-      "af internal --help": "meta.internal",
-      "af internal plan-tap --help": "meta.internal",
       "af keys --help": "meta.discovery",
       "af keys --json": "cli.json-envelope",
       "af projects --help": "meta.discovery",

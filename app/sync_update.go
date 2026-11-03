@@ -52,10 +52,6 @@ func (m *home) updateInstanceFromSnapshot(inst *session.Instance, d session.Inst
 	if inst.ReconcileTaskRunState(d.TaskRunActive, d.TaskRunIdleEdgeHeld, d.TaskRunTurnGateHeld) {
 		changed = true
 	}
-	if inst.ReconcileBacklogRunState(d.BacklogRunActive) {
-		changed = true
-	}
-	changed = inst.ReconcileBacklogArchiveSnapshot(d.BacklogArchive) || changed
 	// The outage flag is daemon truth on every snapshot: this is the reconcile
 	// path for rows the snapshot updates IN PLACE, where FromInstanceData never
 	// runs (#5571 W1.3).

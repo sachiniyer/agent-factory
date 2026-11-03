@@ -69,13 +69,8 @@ const limitIcon = "◆ "
 //   - AttentionIcon: the session's agent asked for the user (#5461), the web's
 //     bell and Attention chip. A bang, distinct in shape from every
 //     dot/diamond/box glyph, echoing the automations rail's "[!]" marker.
-//   - AwaitingAnswerIcon: an item session af archived after its agent asked a
-//     question, waiting on the user's answer, which restores it: the web
-//     Backlog's "?" Needs you (#6475). It takes the place of ▧ on the archived
-//     row, and the Archived header's short count reuses its glyph.
 const (
-	AttentionIcon      = "! "
-	AwaitingAnswerIcon = "? "
+	AttentionIcon = "! "
 )
 
 // needsYouMark draws a needs-you icon in the generated attention role the web's
@@ -434,9 +429,6 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 			join = lostStyle.Render(lostIcon)
 		case session.LiveArchived:
 			join = archivedStyle.Render(archivedIcon)
-			if i.AwaitsAnswer() {
-				join = needsYouMark(AwaitingAnswerIcon)
-			}
 		case session.LiveLimitReached:
 			join = limitStyle.Render(limitIcon)
 		case session.LivenessUnset:
@@ -494,7 +486,7 @@ func (r *InstanceRenderer) Render(i *session.Instance, _ int, selected bool, has
 	// section header — so the name stays full-width like a live row's.
 	// A row waiting on your answer keeps full contrast: it is put away, but it
 	// is yours to act on.
-	if liveness == session.LiveArchived && !selected && !i.AwaitsAnswer() {
+	if liveness == session.LiveArchived && !selected {
 		titleS = titleS.Foreground(InstanceTitleColor)
 		descS = descS.Foreground(deletingTitleColor)
 	}

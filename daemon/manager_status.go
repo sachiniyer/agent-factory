@@ -327,7 +327,6 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	before := instance.GetLiveness()
 	beforeReset, _ := instance.LimitResetAt()
 	taskRunWasActive := instance.TaskRunActive()
-	backlogRunWasActive := instance.BacklogRunActive()
 	// Paired with the op axis, and skipped on, for the same reason as the plain poll
 	// (#2997). This is a SECOND path out of refreshInstanceStatus and it returns
 	// before that one's paired check, so it needs its own: the op skip up there ran
@@ -411,7 +410,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Ready→Ready observation moves no liveness, and nothing else on this
 	// path writes — a restart would resurrect the finished run into its held
 	// concurrency slot until the fallback matured again (#5221 review).
-	if (taskRunWasActive && !instance.TaskRunActive()) || (backlogRunWasActive && !instance.BacklogRunActive()) {
+	if taskRunWasActive && !instance.TaskRunActive() {
 		churnCheckpoint = true
 	}
 	// A run that ended failed — its initial delivery proven undelivered (#5278)
@@ -670,7 +669,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// the completion edge observable: taskRunActive flips true→false exactly once,
 	// inside a Transition below, and nothing else in the tick reports it (#2595).
 	taskRunWasActive := instance.TaskRunActive()
-	backlogRunWasActive := instance.BacklogRunActive()
 	// Snapshot dismisses a pending trust prompt then reads the pane in one probe
 	// (the exact order the poll used to run CheckAndHandleTrustPrompt then
 	// HasUpdated). Content is the capture handed back so the idle branch runs the
@@ -873,7 +871,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// nothing below writes either — a restart would resurrect the finished
 	// run into its held concurrency slot until the fallback matured again
 	// (#5221 review).
-	if (taskRunWasActive && !instance.TaskRunActive()) || (backlogRunWasActive && !instance.BacklogRunActive()) {
+	if taskRunWasActive && !instance.TaskRunActive() {
 		settlementCheckpoint = true
 	}
 	// A run that ended failed — its initial delivery proven undelivered (#5278)

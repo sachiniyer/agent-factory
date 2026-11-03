@@ -10,7 +10,6 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/sachiniyer/agent-factory/backlog"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -147,7 +146,7 @@ func seedAFState(t *testing.T, home, repo, liveWT, reusedWT string) []byte {
 	// State files and daemon-runtime dirs that must be wiped.
 	writeFile(t, filepath.Join(home, config.StateFileName), `{"schema_version":1,"help_screens_seen":7}`)
 	writeFile(t, filepath.Join(home, config.TUIStateFileName), `{}`)
-	writeFile(t, filepath.Join(home, backlog.BudgetFileName), `{"schema_version":1,"limit":5}`)
+	writeFile(t, filepath.Join(home, "budget.json"), `{"schema_version":1,"limit":5}`)
 	mkdir(t, filepath.Join(home, "events"))
 	mkdir(t, filepath.Join(home, "logs"))
 	mkdir(t, filepath.Join(home, "locks"))
@@ -262,7 +261,11 @@ func TestFactoryReset_WipesEverythingKeepsRepoAndConfig(t *testing.T) {
 	assertGone(t, filepath.Join(home, "locks"))
 	assertGone(t, filepath.Join(home, config.StateFileName))
 	assertGone(t, filepath.Join(home, config.TUIStateFileName))
-	assertGone(t, filepath.Join(home, backlog.BudgetFileName))
+	// budget.json is a leftover of the removed Backlog feature (#6662): the
+	// reset does not act on it — it is user data, preserved like repos/.
+	if _, err := os.Stat(filepath.Join(home, "budget.json")); err != nil {
+		t.Errorf("budget.json must be preserved: %v", err)
+	}
 	assertGone(t, filepath.Join(home, "tasks.json"))
 	assertGone(t, filepath.Join(home, config.ProjectRegistryDirName))
 	assertGone(t, checkoutMarker)

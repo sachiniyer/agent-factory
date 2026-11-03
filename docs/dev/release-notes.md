@@ -8,6 +8,32 @@ Read [Release process](release-process.md) first for channels and versioning.
 Use the [release testing plan](release-testing-plan.md) for validation, then
 consult the relevant notes below when preparing the announcement.
 
+## Breaking: the Backlog feature is removed (v1.0.343)
+
+- **Backlog is gone entirely** (#6662): the `af backlog` command tree, the
+  web Backlog view and its app-bar tab, the daemon's `/v1/*Backlog*` HTTP
+  routes, the item orchestrator and runner, the per-item question/answer
+  flow, and the proposal rules that steered agents at it. Sessions that were
+  started from a backlog item keep working — they are ordinary sessions.
+- **Nothing on disk is deleted.** `backlog.json`, `budget.json`,
+  `meter.json`, and the `plan/` meter and readings files stay in place;
+  `af reset` does not touch them. Session records written by older versions
+  still load: `backlog_item` is kept, and the retired `backlog_run_active`,
+  `backlog_run_ended_at` and `backlog_archive` fields are ignored on read
+  and dropped on the next write.
+- **A `[backlog]` table in config is ignored, not an error.** If it carried
+  a setting that used to do something (anything besides `plan_usage =
+  false`), af warns once per config source and moves on. `af config set` and
+  `af config unset` refuse new `backlog.*` writes with an error that says
+  the feature was removed.
+- **The Claude Code status-line tap is removed with it.** `af internal
+  plan-tap` was the `[backlog] plan_usage` feature's only consumer, so new
+  Claude sessions no longer get af's status-line wrapper injected; a Claude
+  Code session configured earlier simply keeps whatever status line it had.
+- **Upgrade note:** an older daemon keeps its backlog routes until it is
+  restarted, so run `af daemon restart` after upgrading if a stale client
+  (an old `af` binary or a cached web app) still offers Backlog actions.
+
 ## Breaking: unknown `[docker]`/`[ssh]` keys in in-repo config fail the load (v1.0.331)
 
 - **A config that printed the unknown-key warning since v1.0.297 now stops

@@ -159,7 +159,6 @@ var globalConfigReadOrder = []string{
 	"default_host",
 	"limit_retry_interval",
 	"limit_patterns",
-	"backlog",
 	"keys",
 	"web",
 }

@@ -215,7 +215,7 @@ func carriesAccountDoc(t *testing.T) string {
 
 // THE REFUSAL MUST READ AS PERMANENT, not as "not supported yet".
 //
-// This is the difference between a decision and a backlog item, and getting it
+// This is the difference between a decision and a maybe-later, and getting it
 // wrong has a specific cost: a message that implies unimplemented invites the
 // next person to implement precisely what the #3103 analysis ruled out — a copy,
 // which cannot return the agent's refreshed token and can therefore invalidate
@@ -242,7 +242,7 @@ func TestOffBoxAccountRefusalReadsAsPermanentNotUnimplemented(t *testing.T) {
 				"the refusal must name itself a decision, or the next reader treats it as unfinished work")
 			for _, hedge := range hedges {
 				assert.NotContains(t, lower, hedge,
-					"%q makes a permanent safety decision read as a backlog item", hedge)
+					"%q makes a permanent safety decision read as a maybe-later", hedge)
 			}
 
 			// It must also still say WHY it is permanent and WHAT to do instead —
