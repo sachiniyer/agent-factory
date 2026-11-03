@@ -86,10 +86,10 @@ func TestHasDaemonTokenPrefersFlag(t *testing.T) {
 	require.True(t, apiclient.HasDaemonToken())
 }
 
-// A program in a just-spawned af session can run `af backlog ask --self`
-// (or done --self, or trip the item-session guardrails) before its session row
-// is scannable (#6586): the pane execs the program while registration is still
-// landing. Inside an af_-named tmux session a not-found whoami is that race,
+// A program in a just-spawned af session can run `af sessions attention --self`
+// before its session row is scannable (#6586): the pane execs the program while
+// registration is still landing. Inside an af_-named tmux session a not-found
+// whoami is that race,
 // so the lookup polls for a bounded window rather than reporting the absence
 // at once.
 func TestResolveSelfSessionRetriesWhileTheRowRegisters(t *testing.T) {
