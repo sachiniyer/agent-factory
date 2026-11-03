@@ -119,6 +119,15 @@ type SnapshotResponse struct {
 	// projection withholds. Empty for an operator credential, so every existing
 	// client and the local path are unchanged.
 	Caller string `json:"caller,omitempty"`
+	// CallerGone reports that the session Caller names is not tracked by this
+	// daemon — neither a materialized row nor a still-registering pending
+	// create — so its row will never appear in a later snapshot: it was killed
+	// or removed, or the create that minted the credential never committed.
+	// It lets an in-sandbox --self fail fast with the accurate answer instead
+	// of polling out a registration-race window that cannot close (#6690).
+	// Sent only alongside Caller for a sandbox credential; omitted for older
+	// peers, which keep the ambiguous wait-and-see.
+	CallerGone bool `json:"caller_gone,omitempty"`
 	// BootID is the same per-process daemon identity reported by Ping. A changed
 	// value proves requests admitted by the previous process can no longer run.
 	BootID string `json:"boot_id,omitempty"`
@@ -523,11 +532,17 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// An owner that is no longer tracked reads nothing rather than everything.
 	sandboxOwnerID, isSandbox := sandboxOwner(ctx)
 	sandboxProjectID, sandboxProjectErr := "", error(nil)
+	var pendingCallerRow session.InstanceData
 	if isSandbox {
+		// Committed and pending ownership are judged under ONE lock, so a
+		// commit landing between them can never read as gone (#6708 review).
 		var proj sandboxProject
-		if proj, sandboxProjectErr = s.manager.sandboxProjectOf(sandboxOwnerID); sandboxProjectErr == nil {
+		proj, pendingCallerRow = s.manager.sandboxCallerView(sandboxOwnerID)
+		if proj.repoID != "" {
 			sandboxProjectID = proj.repoID
 			req.RepoID = proj.repoID
+		} else {
+			sandboxProjectErr = sandboxRefusal("the credential's session is no longer tracked")
 		}
 	}
 	// Sample before the rows so reconciliation delay is measured against the
@@ -539,11 +554,37 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// the old, incomplete instance list with the new, cleared skip set — a
 	// 'sessions list' would then report the repaired repo as silently empty
 	// instead of refusing the not-yet-complete snapshot (#603 over the wire).
-	instances, skipped := s.manager.SnapshotWithSkipped(req.RepoID)
+	var instances []session.InstanceData
+	var skipped []SkippedRepo
+	if isSandbox && sandboxProjectErr != nil {
+		// The owner is not a committed session: its identity answers from
+		// the pending row already captured under the lock above, and the
+		// all-repos snapshot an unscoped request would build here is
+		// discarded by the projection anyway — skip it (#6708 review).
+	} else {
+		instances, skipped = s.manager.SnapshotWithSkipped(req.RepoID)
+	}
 	alarms := s.deliveryAlarms(req.RepoID)
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
 		resp.Caller = sandboxOwnerID
+		if sandboxProjectErr != nil {
+			// The owner is not a committed session. If a still-provisioning
+			// create carries its id the credential is mid-registration:
+			// answer IDENTITY only — the caller's own provisional row, never
+			// the project, because the create may never commit and authority
+			// must not start before it does (#6708 review). Otherwise the
+			// caller is gone — killed, removed, or lost with a create that
+			// never committed — and the wire says so instead of leaving the
+			// caller to poll out a window that cannot close (#6690). The
+			// pending row was captured under the same lock that judged the
+			// committed set, so gone is decided from one consistent view.
+			if pendingCallerRow.ID != "" {
+				instances = []session.InstanceData{sandboxSafeInstanceData(pendingCallerRow)}
+			} else {
+				resp.CallerGone = true
+			}
+		}
 		// Project only what the sandbox scope HONORS, not the operator's full
 		// triple: every bit here is a promise that the daemon honors that wire
 		// field for this credential, and the client's preflight refuses a pick

@@ -153,6 +153,113 @@ func titlesOf(insts []session.InstanceData) []string {
 	return out
 }
 
+// The credential-bound caller's IDENTITY answers through the whole registration
+// window (#6690): a still-provisioning create is not in m.instances yet, but
+// its provisional row is in pendingCreates carrying the final stable id the
+// credential was minted for, so the snapshot answers --self with that one row —
+// never the project, and never authority: every acting route keeps requiring
+// the committed row until the create commits (#6708 review). And a credential
+// whose owner is in NEITHER map is gone, not still registering — the wire says
+// so (CallerGone) so the client fails fast instead of polling a window that
+// cannot close.
+func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
+	f := newScopeFixture(t)
+	snap := func(token string) SnapshotResponse {
+		code, out := f.call(t, token, "/v1/Snapshot", `{}`)
+		require.Equal(t, http.StatusOK, code, out)
+		var env struct {
+			Data SnapshotResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &env))
+		return env.Data
+	}
+	idsOf := func(insts []session.InstanceData) []string {
+		var out []string
+		for _, d := range insts {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+
+	// A pending create: not in m.instances, already carrying the final id.
+	const pendingID = "pending-caller-id"
+	f.mgr.mu.Lock()
+	f.mgr.pendingCreates[daemonInstanceKey(f.repoA, "newbie")] = session.InstanceData{
+		ID: pendingID, Title: "newbie", Status: session.Loading, InFlightOp: session.OpCreating,
+	}
+	f.mgr.mu.Unlock()
+	pendingSecret, err := f.mgr.sandboxTokens.mint(pendingID)
+	require.NoError(t, err)
+
+	// Its snapshot answers IDENTITY only: the caller's own provisional row,
+	// never the project — the create may never commit.
+	got := snap(pendingSecret)
+	assert.Equal(t, pendingID, got.Caller)
+	assert.False(t, got.CallerGone, "a pending owner is still registering, not gone")
+	assert.Equal(t, []string{pendingID}, idsOf(got.Instances),
+		"a still-registering caller sees its own row only, never the project")
+
+	// And its authority has not started: every route that lets the credential
+	// ACT keeps requiring a committed session (#6708 review) — the same
+	// refusal it got before the pending row was answerable at all.
+	for name, tc := range map[string][2]string{
+		"prompt a sibling":  {"/v1/SendPrompt", `{"prompt":"hi","title":"peer"}`},
+		"archive a sibling": {"/v1/ArchiveSession", `{"title":"peer"}`},
+		"act on itself":     {"/v1/SendPrompt", `{"prompt":"hi","id":"` + pendingID + `"}`},
+		"create":            {"/v1/CreateSession", `{"title":"x","host":"h1"}`},
+		"add a task":        {"/v1/AddTask", `{"task":{"prompt":"p","cron_expr":"* * * * *","target_session":"peer"}}`},
+		"list tasks":        {"/v1/ListTasks", `{}`},
+		"remove a task":     {"/v1/RemoveTask", `{"id":"t-x"}`},
+	} {
+		code, out := f.call(t, pendingSecret, tc[0], tc[1])
+		assert.Containsf(t, out, scopeRefusal,
+			"%s (%s %s) must be refused until the owner's session commits (status %d)", name, tc[0], tc[1], code)
+	}
+
+	// A committed credential cannot act on ANOTHER session's still-pending
+	// row either — naming the pending title resolves nothing for acting.
+	f.assertRefused(t, "/v1/SendPrompt", `{"prompt":"hi","title":"newbie"}`, "a sibling's pending create")
+	f.assertRefused(t, "/v1/ArchiveSession", `{"title":"newbie"}`, "a sibling's pending create")
+
+	// A credential whose owner is in neither map: killed, removed, or lost
+	// with a create that never committed.
+	goneSecret, err := f.mgr.sandboxTokens.mint("ghost-caller-id")
+	require.NoError(t, err)
+	gone := snap(goneSecret)
+	assert.Equal(t, "ghost-caller-id", gone.Caller)
+	assert.True(t, gone.CallerGone, "an untracked owner must be flagged gone, not left ambiguous")
+	assert.Empty(t, gone.Instances)
+
+	// The ordinary case is unchanged: a tracked owner still answers with no flag.
+	live := snap(f.secret)
+	assert.Equal(t, f.me.ID, live.Caller)
+	assert.False(t, live.CallerGone)
+
+	// A commit landing mid-flight can never read as gone: the committed and
+	// pending checks share one acquisition of m.mu, so the caller is judged
+	// absent from BOTH sets at one instant or not at all (#6708 review). Commit
+	// the create the way the real path does — the completed Instance keeps the
+	// pending row's id, lands in m.instances, and the pending entry drops — and
+	// the SAME credential's next snapshot answers through the committed path,
+	// never CallerGone.
+	newbie, err := session.NewInstance(session.InstanceOptions{
+		ID: pendingID, Title: "newbie", Path: f.me.Path, Program: "claude",
+	})
+	require.NoError(t, err)
+	newbie.SetStartedForTest(true)
+	newbie.SetStatusForTest(session.Ready)
+	f.backends["newbie"] = "ssh"
+	f.mgr.mu.Lock()
+	f.mgr.instances[daemonInstanceKey(f.repoA, "newbie")] = newbie
+	delete(f.mgr.pendingCreates, daemonInstanceKey(f.repoA, "newbie"))
+	f.mgr.mu.Unlock()
+	committed := snap(pendingSecret)
+	assert.Equal(t, pendingID, committed.Caller)
+	assert.False(t, committed.CallerGone, "a just-committed session is never reported gone")
+	assert.Contains(t, idsOf(committed.Instances), pendingID,
+		"the committed row projects through the normal project path")
+}
+
 func TestSandboxScope_SnapshotIsTheOwnersProjectOnly(t *testing.T) {
 	f := newScopeFixture(t)
 	snap := func(token string) SnapshotResponse {

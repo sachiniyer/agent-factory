@@ -174,11 +174,17 @@ var errBoundCaller = errors.New("the daemon reported the credential bound to a s
 //   - (zero, false, nil): the daemon reports no bound caller — an operator
 //     credential or an older daemon, with no row to wait for.
 //   - (zero, false, err): ErrCallerRowNotRegistered once the bounded window
-//     closes with the row still absent; any other failure verbatim when no
-//     bound caller was ever seen; and — once a bound caller HAS been seen —
-//     every failure wrapped in errBoundCaller so a bound answer can never be
-//     silently un-resolved (bound, then "no caller", or bound then a dead
-//     daemon, is an inconsistent answer to fail closed on, not a tmux cue).
+//     closes with the row still absent; a "still being created" failure once
+//     the window closes with the row still carrying OpCreating — a
+//     still-creating row is never handed to acting verbs as if it were
+//     committed (#6690); ErrCallerSessionGone once the daemon asserts the
+//     bound session is no longer tracked (a row that will never land,
+//     wrapped in errBoundCaller so it fails closed); any other failure
+//     verbatim when no bound caller was ever seen; and — once a bound caller
+//     HAS been seen — every failure wrapped in errBoundCaller so a bound
+//     answer can never be silently un-resolved (bound, then "no caller", or
+//     bound then a dead daemon, is an inconsistent answer to fail closed on,
+//     not a tmux cue).
 //
 // The poll is bounded twice: selfResolveAttempts×selfResolvePoll caps the sleep
 // budget, and selfResolveDeadline caps wall time including an in-flight call.
@@ -189,28 +195,51 @@ func pollCredentialBoundCaller() (session.InstanceData, bool, error) {
 	for attempt := 0; ; attempt++ {
 		row, ok, err := callerSessionFn(ctx)
 		if err == nil {
-			if !ok && sawBound {
-				// The credential did not change between polls, so the
-				// daemon's answer did — an inconsistency that fails closed
-				// rather than dropping to a lookup that can only resolve a
-				// different session.
-				return session.InstanceData{}, false, fmt.Errorf("%w, then reported none", errBoundCaller)
+			if ok {
+				if row.InFlightOp != session.OpCreating {
+					return row, true, nil
+				}
+				// The row is visible but the create has not committed — a
+				// still-creating row is never handed to acting verbs as if
+				// it were committed, so it gets the same bounded wait the
+				// registration race gets (#6690).
+				sawBound = true
+			} else {
+				if sawBound {
+					// The credential did not change between polls, so the
+					// daemon's answer did — an inconsistency that fails closed
+					// rather than dropping to a lookup that can only resolve a
+					// different session.
+					return session.InstanceData{}, false, fmt.Errorf("%w, then reported none", errBoundCaller)
+				}
+				return row, ok, nil
 			}
-			return row, ok, nil
-		}
-		if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) {
+		} else if errors.Is(err, apiclient.ErrCallerSessionGone) {
+			// CallerGone rides a bound answer: the credential IS bound (the
+			// daemon set Caller), but its session is no longer tracked, so
+			// the row will never land. Fail closed with the accurate answer —
+			// never an ambiguous race, never a tmux cue (#6690).
+			return session.InstanceData{}, false, fmt.Errorf("%w: %w", errBoundCaller, err)
+		} else if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) {
 			if sawBound {
-				return session.InstanceData{}, false, fmt.Errorf("%w, then the lookup failed: %v", errBoundCaller, err)
+				return session.InstanceData{}, false, fmt.Errorf("%w, then the lookup failed: %w", errBoundCaller, err)
 			}
 			return session.InstanceData{}, false, err
+		} else {
+			sawBound = true
 		}
-		sawBound = true
 		if attempt == selfResolveAttempts-1 || ctx.Err() != nil {
-			// A row that never registered is gone or never coming — the
-			// wire cannot tell a still-registering row from an archived or
-			// stopped session (the daemon reports the bound caller and an
-			// empty projection either way), so say both.
-			return session.InstanceData{}, false, fmt.Errorf("%w: %w — it may have been archived or stopped before it registered", errBoundCaller, err)
+			if err == nil {
+				// The last answer was a still-creating row: the session is
+				// on its way but not committed, so say exactly that.
+				return session.InstanceData{}, false, fmt.Errorf("%w: the calling session is still being created", errBoundCaller)
+			}
+			// A row that never registered is gone or never coming — on a
+			// daemon that does not flag CallerGone the wire cannot tell a
+			// still-registering row from a gone one (it reports the bound
+			// caller and an empty projection either way), so say all of
+			// them.
+			return session.InstanceData{}, false, fmt.Errorf("%w: %w — it may still be registering, or it may have been archived, stopped, or removed", errBoundCaller, err)
 		}
 		selfResolveSleep(selfResolvePoll)
 	}

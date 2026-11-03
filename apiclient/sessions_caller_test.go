@@ -93,6 +93,31 @@ func TestCallerNoSpawnOperatorCredential(t *testing.T) {
 	require.False(t, ok, "no bound caller: the caller falls back to the tmux-name path")
 }
 
+// A bound caller whose session the daemon reports as gone (CallerGone — the
+// session is in neither the materialized rows nor the pending creates, so its
+// row will never land) is not the registration race: ErrCallerSessionGone
+// instead of the retriable sentinel, so the caller fails fast on the first
+// answer (#6690).
+func TestCallerNoSpawnCallerGoneFailsFast(t *testing.T) {
+	clearTargetEnv(t)
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/Snapshot", func(w http.ResponseWriter, _ *http.Request) {
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.SnapshotResponse{
+			Caller:     "ghost-id",
+			CallerGone: true,
+			Instances:  []session.InstanceData{{ID: "sibling-id", Title: "sib"}},
+		}))
+	})
+	srv := httptest.NewServer(mux)
+	t.Cleanup(srv.Close)
+	t.Setenv(envDaemonURL, srv.URL)
+	t.Setenv(envDaemonToken, "tok-abc")
+
+	_, ok, err := CallerNoSpawn(context.Background())
+	require.ErrorIs(t, err, ErrCallerSessionGone)
+	require.False(t, ok)
+}
+
 // A refused credential surfaces the daemon's own answer rather than collapsing
 // into ok=false — a caller that fell back to the tmux path on a 401 would
 // report a misleading "no session" instead of the auth failure.

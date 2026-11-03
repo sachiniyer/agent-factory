@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"net/http"
 	"net/http/httptest"
@@ -14,7 +15,9 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -297,22 +300,24 @@ func TestResolveSelfSessionOperatorCredentialFallsThroughToTmux(t *testing.T) {
 // fallback exists for. Hard-failing here would regress whoami,
 // attention --self, archive --self and the proposal self-fallback to a raw dial
 // error whenever the token is exported (the pre-#6586 behavior is restored).
+//
+// Driven through the REAL client and a REAL disk fixture rather than stubs:
+// a temp home has no daemon socket, so the caller lookup fails with the real
+// local dial error, and the resolution must come back off instances.json.
 func TestResolveSelfSessionLocalCallerFailureKeepsTmuxDiskResolution(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
-	calls := 0
-	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
-		calls++
-		return session.InstanceData{}, false, errors.New("dial unix /run/af/daemon-http.sock: connect: no such file or directory")
-	})
-	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
-		return []session.InstanceData{{ID: "s1", Title: "mine", TmuxName: "af_op"}}, nil
-	})
+	t.Setenv("AF_DAEMON_URL", "")
+	remoteFlags(t, "", "")
+	raw, err := json.Marshal([]session.InstanceData{{ID: "s1", Title: "mine", TmuxName: "af_op"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("repo-x", raw))
 	stubCurrentTmuxName(t, func() (string, error) { return "af_op", nil })
 
 	got, err := resolveSelfSession()
 	require.NoError(t, err, "a failed local caller lookup must not cost the tmux/disk resolution")
 	require.Equal(t, "s1", got.ID)
-	require.Equal(t, 1, calls, "a failed local caller lookup is single-shot, then the tmux/disk resolution runs unchanged")
 }
 
 // A non-race error from the credential-bound lookup against a REMOTE daemon
@@ -475,6 +480,106 @@ func TestPollCredentialBoundCallerDeadlineCancelsAHangingCall(t *testing.T) {
 	require.Less(t, time.Since(started), 10*time.Second)
 }
 
+// --- A still-creating row keeps the bounded wait (#6690 review) --------------
+//
+// The daemon answers the caller's identity from the pending create before the
+// session commits, so the row can arrive carrying InFlightOp OpCreating. That
+// row is never handed to acting verbs as if it were committed: the poll keeps
+// the same bounded wait, resolves once the create commits, and reports "still
+// being created" — not the ambiguous gone phrasing — if the window closes
+// first.
+func TestResolveSelfSessionWaitsForAStillCreatingRowToCommit(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		if calls == 1 {
+			return session.InstanceData{ID: "sess-1", Title: "mine", InFlightOp: session.OpCreating}, true, nil
+		}
+		return session.InstanceData{ID: "sess-1", Title: "mine"}, true, nil
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a bound caller must not consult tmux while its create commits")
+		return "", nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	got, err := resolveSelfSession()
+	require.NoError(t, err)
+	require.Equal(t, "sess-1", got.ID)
+	require.Empty(t, got.InFlightOp, "the committed row is what acting verbs get")
+	require.Equal(t, 2, calls)
+}
+
+// A row still creating when the window closes reports exactly that — the
+// session is on its way, not gone — and never a tmux fallthrough.
+func TestResolveSelfSessionStillCreatingAtWindowCloseFailsClearly(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		return session.InstanceData{ID: "sess-1", Title: "mine", InFlightOp: session.OpCreating}, true, nil
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a still-creating bound caller must fail closed, not consult tmux")
+		return "", nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	_, err := resolveSelfSession()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.ErrorContains(t, err, "still being created")
+}
+
+// --- CallerGone: the daemon's gone answer fails fast (#6690) -----------------
+//
+// A bound caller whose session the daemon reports as gone (SnapshotResponse
+// .CallerGone — killed, removed, or lost with a create that never committed)
+// is not the registration race: the row will never land. The poll fails closed
+// on the FIRST answer with the accurate reason — on both targets — instead of
+// polling out the window or reaching for a tmux cue. Pinned on the LOCAL path
+// deliberately: even the path that normally falls through must not fall
+// through a bound answer.
+func TestResolveSelfSessionCallerGoneFailsClosed(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		return session.InstanceData{}, false, apiclient.ErrCallerSessionGone
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a gone bound caller must fail closed, not consult tmux")
+		return "", nil
+	})
+
+	_, err := resolveSelfSession()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.ErrorIs(t, err, apiclient.ErrCallerSessionGone)
+	require.Equal(t, 1, calls, "gone is not retried — the row will never land")
+}
+
+// resolveCredentialSelf treats the same gone answer as a failure, not as the
+// operator-credential refusal — the credential DID name a session; the daemon
+// says that session is gone.
+func TestResolveCredentialSelfCallerGoneFailsClosed(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		return session.InstanceData{}, false, apiclient.ErrCallerSessionGone
+	})
+
+	_, err := resolveCredentialSelf()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.ErrorIs(t, err, apiclient.ErrCallerSessionGone)
+	require.NotContains(t, err.Error(), "needs a sandbox credential",
+		"a gone bound caller is not the operator-credential refusal")
+	require.Equal(t, 1, calls)
+}
+
 // --- credentialBoundCaller (remote create's --repo gate) ---------------------
 
 // The --repo gate rides the same retry: a bound caller mid-registration still
@@ -499,20 +604,41 @@ func TestCredentialBoundCallerRetriesTheRace(t *testing.T) {
 	require.Equal(t, 2, calls, "the gate retried through the registration race")
 }
 
-// A bound caller whose row never lands is still a bound credential: the
-// downstream verb is refused by the daemon with the accurate reason, while a
-// false here would demand --repo from a credential that cannot name paths.
-func TestCredentialBoundCallerBoundButNeverRegisteredStaysTrue(t *testing.T) {
+// The --repo gate fails closed exactly as resolveSelfSession does: a poll that
+// does not end in a clean bound answer leaves the binding UNPROVEN, so the
+// caller keeps its "name the project explicitly" rule rather than act on an
+// inconsistent answer — bound-then-none, a window exhausted mid-registration,
+// and a session the daemon reports gone all answer false.
+func TestCredentialBoundCallerInconsistentAnswersFailClosed(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	remoteTarget(t)
-	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
-		return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
-	})
 	prev := selfResolveSleep
 	selfResolveSleep = func(time.Duration) {}
 	t.Cleanup(func() { selfResolveSleep = prev })
 
-	require.True(t, credentialBoundCaller())
+	for name, fn := range map[string]func(context.Context) (session.InstanceData, bool, error){
+		"window exhausted mid-registration": func(context.Context) (session.InstanceData, bool, error) {
+			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+		},
+		"bound, then none": func() func(context.Context) (session.InstanceData, bool, error) {
+			calls := 0
+			return func(context.Context) (session.InstanceData, bool, error) {
+				calls++
+				if calls == 1 {
+					return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+				}
+				return session.InstanceData{}, false, nil
+			}
+		}(),
+		"bound caller gone": func(context.Context) (session.InstanceData, bool, error) {
+			return session.InstanceData{}, false, apiclient.ErrCallerSessionGone
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			stubCallerSession(t, fn)
+			require.False(t, credentialBoundCaller())
+		})
+	}
 }
 
 // An operator credential (no bound caller) and a lookup that never got a bound

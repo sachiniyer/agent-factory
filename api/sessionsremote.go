@@ -2,7 +2,6 @@ package api
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -238,17 +237,17 @@ func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 // its "name the project explicitly" rule unless the daemon itself vouches for the
 // binding. It rides the same registration-race retry as --self: a bound caller
 // the daemon reports while the row is still landing must not collapse into the
-// "--repo is required" refusal a sandbox credential cannot answer — and once a
-// bound caller has been seen, the binding is proven however the poll ends.
+// "--repo is required" refusal a sandbox credential cannot answer. It fails
+// closed exactly as resolveSelfSession does: any poll that does not end in a
+// clean bound answer — bound, then none; bound, then a failure; the window
+// exhausted — is UNPROVEN, so the caller keeps its explicit-name rule rather
+// than acting on an inconsistent one.
 func credentialBoundCaller() bool {
 	if !apiclient.IsRemoteTarget() || !apiclient.HasDaemonToken() {
 		return false
 	}
 	_, ok, err := pollCredentialBoundCaller()
-	if err != nil {
-		return errors.Is(err, errBoundCaller)
-	}
-	return ok
+	return err == nil && ok
 }
 
 func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {
