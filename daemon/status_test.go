@@ -220,6 +220,115 @@ func TestRefreshStatuses_ConfirmedAliveClearsTerminalRestoreFailure(t *testing.T
 	}
 }
 
+// TestObserveTaskRunWhilePausedClearsLostRestoreFailureOnHeal is the paused-path
+// counterpart of TestRefreshStatuses_ConfirmedAliveClearsTerminalRestoreFailure.
+// The paused backstop (observeTaskRunWhilePaused) settles a LiveLost row back to
+// LiveReady on a confirmed idle capture via resolveIdleLiveness — the same
+// out-of-Lost crossing the unpaused poll performs. It must retire the durable
+// LostRestoreFailure give-up verdict on that same crossing, so a later genuine
+// loss of the same runtime is not refused automatic recovery by a stale verdict.
+func TestObserveTaskRunWhilePausedClearsLostRestoreFailureOnHeal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-heal", session.NewFakeBackend(), true, session.Lost)
+	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("preserve push failed"))
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist terminal restore failure: %v", err)
+	}
+	if !inst.LifecycleView().LostRestoreGaveUp {
+		t.Fatal("precondition: LostRestoreGaveUp must be true before the backstop")
+	}
+
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	if got := inst.GetLiveness(); got != session.LiveReady {
+		t.Fatalf("in-memory liveness = %v, want LiveReady after the backstop settled the idle capture", got)
+	}
+	if failure := inst.LostRestoreFailureSnapshot(); failure != nil {
+		t.Fatalf("paused backstop retained stale restore failure: %#v", failure)
+	}
+	if failure := persistedInstanceByTitle(t, repoID, inst.Title).LostRestoreFailure; failure != nil {
+		t.Fatalf("persisted row retained stale restore failure: %#v", failure)
+	}
+	// A later genuine loss of the same runtime must be auto-restore-eligible now
+	// that the stale give-up verdict is retired.
+	inst.SetStatusForTest(session.Lost)
+	if !lostSessionWantsRestore(inst.LifecycleView()) {
+		t.Fatal("lostSessionWantsRestore = false after the backstop healed the row: a stale give-up verdict is still blocking automatic recovery")
+	}
+}
+
+// TestObserveTaskRunWhilePausedClearsLostRestoreWaitOnHeal is the wait-verdict
+// counterpart: the same out-of-Lost settlement must also retire LostRestoreWait.
+func TestObserveTaskRunWhilePausedClearsLostRestoreWaitOnHeal(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-wait", session.NewFakeBackend(), true, session.Lost)
+	inst.SetLostRestoreWait(2, errors.New("disk full"))
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist restore wait: %v", err)
+	}
+
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	if got := inst.GetLiveness(); got != session.LiveReady {
+		t.Fatalf("in-memory liveness = %v, want LiveReady after the backstop settled the idle capture", got)
+	}
+	if wait := inst.LostRestoreWaitSnapshot(); wait != nil {
+		t.Fatalf("paused backstop retained stale restore wait: %#v", wait)
+	}
+	if wait := persistedInstanceByTitle(t, repoID, inst.Title).LostRestoreWait; wait != nil {
+		t.Fatalf("persisted row retained stale restore wait: %#v", wait)
+	}
+}
+
+// TestObserveTaskRunWhilePausedPreservesGiveUpWhenStillLost verifies the fix
+// does NOT clear the verdict when the session stays LiveLost. The churning arm
+// (obs.Updated) returns before resolveIdleLiveness, so no out-of-Lost crossing
+// occurs and the verdict must survive — parity with the unpaused path, which
+// only clears on GetLiveness() != LiveLost.
+func TestObserveTaskRunWhilePausedPreservesGiveUpWhenStillLost(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-churn", &updatedOnlyBackend{
+		FakeBackend: session.NewFakeBackend(),
+	}, true, session.Lost)
+	inst.SetLostRestoreFailure(lostRestoreMaxAttempts, errors.New("preserve push failed"))
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("persist terminal restore failure: %v", err)
+	}
+
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	if got := inst.GetLiveness(); got != session.LiveLost {
+		t.Fatalf("in-memory liveness = %v, want LiveLost: the churning arm must not settle liveness", got)
+	}
+	if failure := inst.LostRestoreFailureSnapshot(); failure == nil {
+		t.Fatal("paused backstop cleared restore failure on a still-Lost row: the verdict must survive when no out-of-Lost crossing occurred")
+	}
+}
+
+// TestObserveTaskRunWhilePausedNoGiveUpSettlesNormally verifies a session
+// without any give-up verdict settles cleanly through the paused backstop with
+// no spurious checkpoint or error — the fix adds no overhead on the happy path.
+func TestObserveTaskRunWhilePausedNoGiveUpSettlesNormally(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, manager, repoID, repoPath, "paused-clean", session.NewFakeBackend(), true, session.Lost)
+
+	key := daemonInstanceKey(repoID, inst.Title)
+	manager.observeTaskRunWhilePaused(repoID, key, inst)
+
+	if got := inst.GetLiveness(); got != session.LiveReady {
+		t.Fatalf("in-memory liveness = %v, want LiveReady after the backstop settled the idle capture", got)
+	}
+	if failure := inst.LostRestoreFailureSnapshot(); failure != nil {
+		t.Fatalf("paused backstop manufactured a restore failure: %#v", failure)
+	}
+	if wait := inst.LostRestoreWaitSnapshot(); wait != nil {
+		t.Fatalf("paused backstop manufactured a restore wait: %#v", wait)
+	}
+}
+
 func TestRefreshStatuses_ReattachBaselineDoesNotSettleActiveTaskRun(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst, err := session.NewInstance(session.InstanceOptions{
