@@ -135,10 +135,19 @@ test("scrub keeps a benign <style> block and Mermaid's own @keyframes", () => {
   assert.deepEqual(kidNames(root), ["style", "g"]);
 });
 
+test("scrub keeps a <style> block whose url()s are all #fragment refs", () => {
+  // Mermaid's generated CSS points at its own gradients and markers this way.
+  const style = el("style", [], [],
+    "#x .node{fill:url(#x-gradient)}.edge{marker-end:url('#x-arrow')}@keyframes dash{to{stroke-dashoffset:0}}");
+  const root = scrubbed(el("svg", [], [style, el("g")]));
+  assert.deepEqual(kidNames(root), ["style", "g"]);
+});
+
 test("scrub drops a <style> block containing anything Mermaid could not write (B2)", () => {
   const cases: [string, string][] = [
-    ["url", ".a{background:url('https://mmd.invalid/x.png')}"],
-    ["url fragment (lives in attrs, never style text)", ".a{fill:url(#g)}"],
+    ["url external", ".a{background:url('https://mmd.invalid/x.png')}"],
+    ["url same-origin", ".a{background:url(/af-mmd-probe/x.png)}"],
+    ["url bare identifier (resolves relative → a fetch)", ".a{fill:url(some-gradient)}"],
     ["image-set", ".a{background:image-set('/x.png' 1x)}"],
     ["backslash", ".a{background:u\\72l('/x.png')}"],
     ["comment", ".a{background:u/**/rl('/x.png')}"],

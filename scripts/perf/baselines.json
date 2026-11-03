@@ -99,43 +99,43 @@
         "margin": 350.6397233333334
     },
     "lazy_raw_bytes": {
-        "baseline": 377432,
+        "baseline": 377447,
         "samples": [
-            377432,
-            377432,
-            377432
+            377447,
+            377447,
+            377447
         ],
         "stddev": 0,
-        "margin": 18871.6
+        "margin": 18872.35
     },
     "lazy_gzip_bytes": {
-        "baseline": 122809,
+        "baseline": 122810,
         "samples": [
-            122809,
-            122809,
-            122809
+            122810,
+            122810,
+            122810
         ],
         "stddev": 0,
-        "margin": 6140.45
+        "margin": 6140.5
     },
     "mermaid_raw_bytes": {
-        "baseline": 5187694,
+        "baseline": 5187783,
         "samples": [
-            5187694,
-            5187694,
-            5187694
+            5187783,
+            5187783,
+            5187783
         ],
         "stddev": 0,
-        "margin": 259384.7
+        "margin": 259389.15
     },
     "mermaid_gzip_bytes": {
-        "baseline": 1512569,
+        "baseline": 1512610,
         "samples": [
-            1512569,
-            1512569,
-            1512569
+            1512610,
+            1512610,
+            1512610
         ],
         "stddev": 0,
-        "margin": 75628.45
+        "margin": 75630.5
     }
 }

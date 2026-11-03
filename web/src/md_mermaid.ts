@@ -187,14 +187,15 @@ const KEEP = new Set([
 const SVG_NS = "http://www.w3.org/2000/svg";
 
 // A <style> block survives only when it holds nothing mermaid could not have
-// written itself: no url/image-set reference of any kind (#fragment refs live
-// in attributes, never in the style text), no backslash (u\72l escapes), no
-// comment opener (u/**/rl) — and no at-rule but the @keyframes mermaid ships
-// in every diagram, which the page styles pin to animation:none anyway. One
-// hit drops the whole block — a diagram's own CSS never needs any of them, so
-// one means the source was hostile, not stylish.
+// written itself: no image-set, no backslash (u\72l escapes), no comment
+// opener (u/**/rl), no at-rule but the @keyframes mermaid ships in every
+// diagram (the page styles pin animation:none over them anyway) — and every
+// url() must be a #fragment ref, which is how mermaid's generated CSS points
+// at its own gradients and markers. One hit drops the whole block: a
+// diagram's own CSS never needs any of the rest, so one means the source was
+// hostile, not stylish.
 const HOSTILE_STYLE =
-  /url|image-set|\\|\/\*|@(?!keyframes\b)|expression|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
+  /image-set|\\|\/\*|@(?!keyframes\b)|expression|javascript:|vbscript:|-moz-binding|behavior\s*:/i;
 
 // In an attribute value, image-set, backslash escapes, comment obfuscation
 // and the scriptable schemes are never legitimate. url() is checked per
@@ -222,9 +223,12 @@ export function scrub(el: Element): void {
       child.remove();
       continue;
     }
-    if (name === "style" && HOSTILE_STYLE.test(child.textContent ?? "")) {
-      child.remove();
-      continue;
+    if (name === "style") {
+      const css = child.textContent ?? "";
+      if (HOSTILE_STYLE.test(css) || hasExternalCssUrl(css)) {
+        child.remove();
+        continue;
+      }
     }
     scrub(child);
   }

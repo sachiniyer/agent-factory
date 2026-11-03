@@ -75,7 +75,15 @@ async function renderNow(source: string, theme: Record<string, string>): Promise
   scratch.style.cssText = "position:fixed;left:-200vw;top:-200vh";
   document.body.appendChild(scratch);
   try {
-    const { svg } = await mermaid.render(id, source, scratch);
+    // A render can out-wait us — a fetch the frame's CSP denies (an img node)
+    // may never settle. Race it so one bad diagram can't jam the serialized
+    // queue for every other widget; a late finisher writes only to the
+    // already-emptied scratch under a unique id.
+    const { svg } = await Promise.race([
+      mermaid.render(id, source, scratch),
+      new Promise<never>((_, reject) =>
+        setTimeout(() => reject(new Error("render timed out")), 20_000)),
+    ]);
     return svg;
   } finally {
     scratch.remove();

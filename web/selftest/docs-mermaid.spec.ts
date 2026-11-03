@@ -125,7 +125,6 @@ test("docs mermaid: click callbacks, javascript: links and HTML labels render in
   const hostile = `%%{init: {"themeVariables": {"fontFamily": "x; background: url(https://mmd.invalid/pixel.png);"}}}%%
 flowchart LR
   A["<img src=x onerror=globalThis.__pwned=1>"] --> B["<b>normal</b>"]
-  C@{ img: "/af-mmd-probe/node.png", label: "img", w: 40, h: 40, constraint: "off" }
   click A call alert(1)
   click B href "javascript:globalThis.__pwned=2"`;
   const pane = await openDocs(page, request, "mermaid-hostile-probe", "mermaid-hostile-plan", {
@@ -161,14 +160,17 @@ test("docs mermaid: a render cannot make the browser ask for anything the diagra
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
   // Every fetch vector a diagram can name, each pointed at a marker path that
-  // exists nowhere: flowchart img node metadata, a top-level fontFamily via
-  // an init directive (lands in the host div's style attribute and the
-  // generated <style>), the same via yaml frontmatter, and an image-set()
-  // value with a bare-string URL — plus an external URL for good measure.
-  const probes = `%%{init: {"fontFamily": "x; background: url(/af-mmd-probe/font-directive.png);"}}}%%
-flowchart LR
+  // exists nowhere: a plain diagram first (must render), then flowchart img
+  // node metadata, a top-level fontFamily via an init directive (lands in
+  // the host div's style attribute and the generated <style>), the same via
+  // yaml frontmatter, and an image-set() value with a bare-string URL — plus
+  // an external URL for good measure.
+  const imgNode = `flowchart LR
   P@{ img: "/af-mmd-probe/img-node.png", label: "img", w: 40, h: 40, constraint: "off" }
   P --> Q["node"]`;
+  const directive = `%%{init: {"fontFamily": "x; background: url(/af-mmd-probe/font-directive.png);"}}}%%
+flowchart LR
+  D1 --> D2`;
   const frontmatter = `---
 config:
   fontFamily: "x; background: image-set('/af-mmd-probe/imgset.png' 1x), url(https://mmd.invalid/f.png)"
@@ -176,15 +178,15 @@ config:
 flowchart LR
   F1 --> F2`;
   const pane = await openDocs(page, request, "mermaid-fetch-probe", "mermaid-fetch-plan", {
-    goals: `# Fetch probes\n\n${fence(probes)}\n\nMiddle.\n\n${fence(frontmatter)}\n\nEnd.\n`,
+    goals: `# Fetch probes\n\n${fence(DIAGRAM)}\n\n${fence(imgNode)}\n\n${fence(directive)}\n\n${fence(frontmatter)}\n\nEnd.\n`,
   });
   const widgets = pane.locator(".cm-md-mermaid");
   await expect(widgets.first().locator("svg")).toBeVisible({ timeout: 30_000 });
-  // Each widget either rendered an svg or reported inline; either way nothing
-  // may have fetched — the render frame's CSP denies every load the diagram
-  // names, same-origin included.
+  // Each widget either rendered an svg or reported inline — the img node
+  // errors, its fetch denied by the frame's CSP. Either way nothing may
+  // have fetched, same-origin included.
   for (const w of await widgets.all()) {
-    await expect(w.locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible();
+    await expect(w.locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 30_000 });
   }
   const chosen = diagramChosenRequests(requests, page.url());
   expect(chosen, "zero diagram-chosen requests, same-origin counted").toEqual([]);
