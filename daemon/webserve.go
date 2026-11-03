@@ -139,6 +139,9 @@ func serveSPA(assets fs.FS, gz *web.GzipCache, w http.ResponseWriter, r *http.Re
 	// Content-Type (set by serveAsset from the extension) and never sniff a
 	// JS/HTML bundle into a different type.
 	w.Header().Set("X-Content-Type-Options", "nosniff")
+	// DNS prefetch is not governed by CSP: an anchor inside rendered
+	// semi-trusted content would otherwise have its host prefetched.
+	w.Header().Set("X-DNS-Prefetch-Control", "off")
 
 	name := path.Clean(strings.TrimPrefix(r.URL.Path, "/"))
 	if name == "" || name == "." {
