@@ -20,9 +20,14 @@ import (
 // Payload entries merge into existing worktree directories but never overwrite
 // an existing file: a staged file that collides with a checked-in path is a
 // recorded failure, not a silent clobber of repository content. The copy is
-// deliberately simple — the staging dir is operator-owned scratch space, not
-// an adversarial tree the worktree-copy anchors in worktree_copy_tree.go exist
-// to defend against.
+// deliberately simple, but the premise is NOT "the staging dir is trusted
+// scratch space": for docker sessions the handoff leaves the payload owned by
+// the session's container user — writable by any code that user runs — and a
+// local payload sits where anything with the operator's uid could have
+// written. The safety lives in the copy itself: it never overwrites, it
+// refuses to merge through a non-directory destination, and it reproduces
+// symlinks rather than following them — no read ever leaves the staging dir
+// through a link the payload planted.
 func (g *GitWorktree) applySetupOverlay() {
 	dir := strings.TrimSpace(g.setupOverlayDir)
 	if dir == "" {

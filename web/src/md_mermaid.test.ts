@@ -1,9 +1,11 @@
 // Unit tests for the SVG sanitizer in md_mermaid.ts (#6642) — the policy
 // itself, element by element and attribute by attribute, exercised on a fake
-// DOM so the hostile cases run where there is no browser.
+// DOM so the hostile cases run where there is no browser — plus the two
+// render-path helpers that are pure enough to drive directly: the chunk
+// poll and the timed-out ledger.
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { scrub } from "./md_mermaid.js";
+import { pollUntil, scrub, TimeoutLedger } from "./md_mermaid.js";
 
 const SVG_NS = "http://www.w3.org/2000/svg";
 
@@ -221,4 +223,50 @@ test("scrub drops a <style> block containing anything Mermaid could not write (B
     const root = scrubbed(el("svg", [], [el("style", [], [], css), el("g")]));
     assert.deepEqual(kidNames(root), ["g"], `${label} must drop the whole block`);
   }
+});
+
+test("pollUntil returns the first value the probe yields", async () => {
+  let calls = 0;
+  const got = await pollUntil(() => (++calls === 3 ? "ready" : undefined), 5_000);
+  assert.equal(got, "ready");
+  assert.equal(calls, 3);
+});
+
+test("pollUntil probes once more after the final sleep", async () => {
+  // The probe turns ready the moment the deadline passes — a wait that
+  // re-checked the deadline before probing after its last sleep would never
+  // see the registration and would score a good load a failure.
+  const timeoutMs = 30;
+  const start = Date.now();
+  const got = await pollUntil(
+    () => (Date.now() - start >= timeoutMs ? "ready" : undefined),
+    timeoutMs,
+  );
+  assert.equal(got, "ready");
+});
+
+test("pollUntil gives up past the deadline when nothing registers", async () => {
+  const got = await pollUntil(() => undefined, 40);
+  assert.equal(got, undefined);
+});
+
+test("TimeoutLedger fails fast inside the cooldown, then lets the source retry", () => {
+  const ledger = new TimeoutLedger(60_000, 4);
+  ledger.note("k", 1_000);
+  assert.equal(ledger.cooling("k", 1_000), true);
+  assert.equal(ledger.cooling("k", 1_000 + 59_999), true, "still inside the window");
+  assert.equal(ledger.cooling("k", 1_000 + 60_000), false, "window elapsed — retry allowed");
+  assert.equal(ledger.cooling("k", 1_000 + 60_001), false, "the elapsed entry is gone for good");
+  assert.equal(ledger.cooling("other", 1_000), false, "an unnoted key never cools");
+});
+
+test("TimeoutLedger notes a repeat timeout afresh and caps its size", () => {
+  const ledger = new TimeoutLedger(60_000, 3);
+  ledger.note("a", 0);
+  ledger.note("b", 1);
+  ledger.note("c", 2);
+  ledger.note("a", 10); // a re-note moves `a` behind `c`
+  ledger.note("d", 20); // over the cap — the oldest entry (`b`) is evicted
+  assert.equal(ledger.cooling("b", 30), false, "oldest entry was evicted");
+  for (const k of ["a", "c", "d"]) assert.equal(ledger.cooling(k, 30), true, `${k} still cools`);
 });

@@ -107,7 +107,7 @@ func TestSetupHookLocalEnvContract(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-local-1", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 
 	staging := filepath.Join(localSetupStaging(t, "sess-local-1"), "payload")
@@ -149,7 +149,7 @@ func TestSetupHookRemoteEnvContractAndRoute(t *testing.T) {
 	b := &sshBackend{provisioner: prov}
 
 	opts := InstanceOptions{ID: "sess-remote-1", Title: "sess", Path: repoRoot, Host: "gpu-box"}
-	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b)
+	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b, false)
 	assert.Equal(t, "", note)
 
 	// The staging dir is created on the host before the script runs, through
@@ -192,7 +192,7 @@ func TestSetupHookRemoteFreeFormTransport(t *testing.T) {
 	b := &sandboxBackend{provisioner: prov}
 
 	opts := InstanceOptions{ID: "sess-remote-2", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendSandbox, b)
+	note := runSessionSetupHook(opts, repoRoot, BackendSandbox, b, false)
 	assert.Equal(t, "", note)
 
 	env, err := os.ReadFile(filepath.Join(repoRoot, "env.out"))
@@ -221,7 +221,7 @@ func TestSetupHookSSHBackendUnsplittableTransport(t *testing.T) {
 	b := &sshBackend{provisioner: prov}
 
 	opts := InstanceOptions{ID: "sess-remote-3", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b)
+	note := runSessionSetupHook(opts, repoRoot, BackendSSH, b, false)
 	assert.Equal(t, "", note)
 
 	env, err := os.ReadFile(filepath.Join(repoRoot, "env.out"))
@@ -243,7 +243,7 @@ func TestSetupHookSequentialOrder(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-order", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 
 	order, err := os.ReadFile(filepath.Join(localSetupStaging(t, "sess-order"), "payload", "order"))
@@ -264,7 +264,7 @@ func TestSetupHookFailureIsRecordedNotFatal(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-fail", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	require.NotEqual(t, "", note, "a failing entry must produce a session-visible note")
 	assert.Contains(t, note, "exit status 3")
 	assert.Contains(t, note, "full output:")
@@ -296,7 +296,7 @@ func TestSetupHookCommandTimeout(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-timeout", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	require.NotEqual(t, "", note)
 	assert.Contains(t, note, "timed out")
 }
@@ -310,7 +310,7 @@ func TestSetupHookSkippedForInPlace(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-inplace", Title: "sess", Path: repoRoot, InPlace: true}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 	_, err := os.Stat(marker)
 	assert.True(t, os.IsNotExist(err), "in-place sessions must not run setup_commands")
@@ -320,7 +320,7 @@ func TestSetupHookSkippedForInPlace(t *testing.T) {
 func TestSetupHookNoCommands(t *testing.T) {
 	repoRoot := initTempGitRepo(t)
 	opts := InstanceOptions{ID: "sess-none", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 	_, err := os.Stat(localSetupStaging(t, "sess-none"))
 	assert.True(t, os.IsNotExist(err))
@@ -334,7 +334,7 @@ func TestSetupHookRemoteWithoutSSHRoute(t *testing.T) {
 `)
 
 	opts := InstanceOptions{ID: "sess-docker", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendDocker, &dockerBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendDocker, &dockerBackend{}, false)
 	assert.Equal(t, "", note)
 
 	env, err := os.ReadFile(filepath.Join(repoRoot, "env.out"))
@@ -357,7 +357,7 @@ func TestSetupHookPassthroughEnvironment(t *testing.T) {
 		ID: "sess-pass", Title: "sess", Path: repoRoot,
 		SessionEnvPassthrough: []string{"AF_SETUP_TEST_TOKEN"},
 	}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 
 	got, err := os.ReadFile(filepath.Join(localSetupStaging(t, "sess-pass"), "payload", "token"))
@@ -374,7 +374,7 @@ func TestSetupHookPassthroughDeniesUnapproved(t *testing.T) {
 
 	t.Setenv("AF_SETUP_UNAPPROVED_TOKEN", "sekrit")
 	opts := InstanceOptions{ID: "sess-deny", Title: "sess", Path: repoRoot}
-	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{})
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
 	assert.Equal(t, "", note)
 
 	got, err := os.ReadFile(filepath.Join(localSetupStaging(t, "sess-deny"), "payload", "token"))
@@ -416,7 +416,8 @@ func TestTransferDockerSetupPayloadChownsToSessionUser(t *testing.T) {
 	require.NotNil(t, chown,
 		"the staged payload must be chowned to the session user as root; calls=%v", calls)
 	assert.Contains(t, strings.Join(chown, " "),
-		"chown -R "+dockerNonRootImageUser+" "+shellQuote("/af-setup"))
+		"chown -R -h "+dockerNonRootImageUser+" "+shellQuote("/af-setup"),
+		"the handoff must act on payload symlinks themselves, never a link's target; call=%v", chown)
 }
 
 // A root-default image leaves containerUser unset: the session already runs
@@ -465,6 +466,29 @@ func TestTransferDockerSetupPayloadSkipsMountedStagingDir(t *testing.T) {
 	assert.Contains(t, note, "inside the mount")
 	assert.Nil(t, findExecCall(calls, "chown"),
 		"a staging dir inside a host mount must never be chowned; calls=%v", calls)
+}
+
+// The root chown may act only on exactly the staging dir af created: a
+// symlinked staging path resolves to wherever it points, so any resolved
+// target other than the mkdir'd path refuses the handoff outright — "/"
+// included, as the worst case, not a special case.
+func TestTransferDockerSetupPayloadRefusesResolvedMismatch(t *testing.T) {
+	for _, resolved := range []string{"/", "/elsewhere", "/af-setup/real"} {
+		var calls [][]string
+		t.Cleanup(SetDockerExecForTest(func(_ context.Context, _ []string, args ...string) ([]byte, error) {
+			calls = append(calls, append([]string(nil), args...))
+			if isMountTableExec(args) {
+				return []byte(resolved + "\n" + mountinfoLine(1, "/", "overlay") + "\n"), nil
+			}
+			return nil, nil
+		}))
+		p := &dockerProvisioner{containerID: "cid123", containerUser: dockerNonRootImageUser}
+		note := transferDockerSetupPayload(p, t.TempDir())
+		require.NotEqual(t, "", note, "resolved target %q must refuse the handoff", resolved)
+		assert.Contains(t, note, "not the staging dir")
+		assert.Nil(t, findExecCall(calls, "chown"),
+			"a mismatched resolved target must never be chowned; calls=%v", calls)
+	}
 }
 
 // A failed ownership handoff is a recorded, session-visible note like every
@@ -549,4 +573,96 @@ func TestWorkspacePreservingStopKeepsLocalSetupPayload(t *testing.T) {
 	_, err := os.Stat(staging)
 	assert.NoError(t, err,
 		"a workspace-preserving stop must keep the payload for the preserved tree")
+}
+
+// --- payload-dir id guard (#6674 review) ---
+
+// The only safe session id for payload arithmetic is a single path element
+// other than "." and "..": every other spelling resolves out of af-setup —
+// "" and "." onto the shared root itself, ".." and "a/.." into the AF home
+// or above it — and the deletion path must never compute such a name.
+func TestLocalSetupPayloadSessionDirGuard(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", "..", "x"), "/abs/path", filepath.Join(home, "other")} {
+		dir, ok := localSetupPayloadSessionDir(id)
+		assert.False(t, ok, "id %q must not name a payload dir (got %q)", id, dir)
+		assert.Empty(t, dir)
+	}
+	// A normal minted id is a direct child and nothing else.
+	id := "9d9d9d9d-1111-4222-8333-444455556666"
+	dir, ok := localSetupPayloadSessionDir(id)
+	require.True(t, ok)
+	assert.Equal(t, filepath.Join(home, "af-setup", id), dir)
+	assert.Equal(t, "af-setup", filepath.Base(filepath.Dir(dir)))
+}
+
+// A refused id deletes NOTHING — the shared af-setup root, the AF home and
+// their other sessions' payloads all survive. This is the corrupted-record
+// path: persisted ids load unvalidated, so the guard lives at the removal.
+func TestDiscardLocalSetupPayloadRefusesMalformedIDs(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	// A sibling session's payload under the shared root — the casualty a
+	// naive join would take with it.
+	sibling := filepath.Join(home, "af-setup", "sess-innocent", "payload")
+	require.NoError(t, os.MkdirAll(sibling, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(sibling, "keep"), []byte("x"), 0644))
+
+	for _, id := range []string{"", ".", "..", "/", "a/..", "a/b", filepath.Join("a", "..", ".."), "/abs/path"} {
+		i := &Instance{ID: id, Title: "sess"}
+		i.discardLocalSetupPayload()
+		_, statErr := os.Stat(filepath.Join(sibling, "keep"))
+		assert.NoError(t, statErr, "id %q must not remove the shared af-setup root", id)
+		_, statErr = os.Stat(home)
+		assert.NoError(t, statErr, "id %q must not remove the AF home", id)
+	}
+	// The shared root itself still stands.
+	_, statErr := os.Stat(filepath.Join(home, "af-setup"))
+	assert.NoError(t, statErr)
+}
+
+// A valid id removes only its own directory — the sibling payload under the
+// same root is untouched.
+func TestDiscardLocalSetupPayloadRemovesOnlyItsOwn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	mine := filepath.Join(home, "af-setup", "sess-mine", "payload")
+	sibling := filepath.Join(home, "af-setup", "sess-innocent", "payload")
+	require.NoError(t, os.MkdirAll(mine, 0755))
+	require.NoError(t, os.MkdirAll(sibling, 0755))
+
+	i := &Instance{ID: "sess-mine", Title: "sess"}
+	i.discardLocalSetupPayload()
+	_, statErr := os.Stat(filepath.Join(home, "af-setup", "sess-mine"))
+	assert.True(t, os.IsNotExist(statErr), "the session's own staging dir must be removed")
+	_, statErr = os.Stat(sibling)
+	assert.NoError(t, statErr, "a sibling session's payload must survive")
+}
+
+// --- hook ordering (#6674 review) ---
+
+// The adopt gate is the hook's own skip, not a call-site convention: an
+// adopted runtime kept its prior state and may already have launched its
+// agent, and a root ownership handoff must never run over a tree an
+// unprivileged principal could have written. adopted=true runs nothing —
+// no commands, no staging dir — even with setup_commands configured.
+func TestSetupHookSkippedForAdoptedRuntime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	marker := filepath.Join(t.TempDir(), "ran")
+	writeSetupCommandsConfig(t, repoRoot, `setup_commands = ["touch `+marker+`"]
+`)
+
+	opts := InstanceOptions{ID: "sess-adopt", Title: "sess", Path: repoRoot}
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, true)
+	assert.Equal(t, "", note)
+	_, err := os.Stat(marker)
+	assert.True(t, os.IsNotExist(err), "an adopted runtime must not run setup_commands")
+	_, err = os.Stat(localSetupStaging(t, "sess-adopt"))
+	assert.True(t, os.IsNotExist(err), "an adopted runtime must not even stage a payload")
 }
