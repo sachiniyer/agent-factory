@@ -770,6 +770,10 @@ func TestEscapedProcessInheritedMarkerUnprovenHome_NotEscaped(t *testing.T) {
 	require.NotContains(t, unproven[0].Detail, "escaped the pane tree",
 		"an unproven-ownership process must not be reported as escaping our live session: %s", unproven[0].Detail)
 	require.Empty(t, unproven[0].FixAction, "the escaped arm is report-only — no kill even under --fix")
+	require.Equal(t,
+		"inspect the process's environment manually to identify its agent-factory home",
+		unproven[0].Remediation,
+		"the own-env remedy must be exactly the true one (#6716)")
 	require.True(t, alive(unprovenEscapee), "the escaped arm must not kill, even under --fix")
 }
 

@@ -56,6 +56,10 @@ func TestOrphanInheritedMarkerForeignOwnHome_NotKilled(t *testing.T) {
 		"another install's process must not drive the exit code")
 	require.Contains(t, foreign[0].Detail, foreignHome,
 		"the finding must name the home the process actually belongs to: %s", foreign[0].Detail)
+	require.Equal(t,
+		"run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually",
+		foreign[0].Remediation,
+		"a confirmed foreign home is the one verdict where that remedy is true (#6716)")
 	require.True(t, alive(victim),
 		"`af doctor --fix` killed another install's process on an inherited marker (#6578)")
 }
@@ -178,6 +182,10 @@ func TestOrphanInheritedMarkerForeignAncestor_NotKilled(t *testing.T) {
 		"a process under another install's tree must never be armed: %s", foreign[0].Detail)
 	require.Contains(t, foreign[0].Detail, foreignHome,
 		"the finding must name the home the ancestor declares: %s", foreign[0].Detail)
+	require.Equal(t,
+		"run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually",
+		foreign[0].Remediation,
+		"a confirmed foreign ancestor names a real owning install (#6716)")
 
 	// The bystander ancestor declares no agent-factory home, so the orphan
 	// beneath it is still proven by its own environment: armed and fixed.

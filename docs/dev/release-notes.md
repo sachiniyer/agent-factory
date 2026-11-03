@@ -18,8 +18,11 @@ consult the relevant notes below when preparing the announcement.
   `foreign-home-unresolved`. The documented `--json` contract is unchanged
   — `checks[]` names, `summary`, `incomplete` and the exit status mean
   what they meant — but a consumer grouping findings by row key will see
-  the move; group by `actionable`/`fixable` rather than by key where the
-  distinction matters.
+  the move; the per-check `actionable` flag is the stable signal to group
+  on (the JSON carries no `fixable` field). Consumers matching the
+  collapsed `orphaned-processes` detail will also see its text change:
+  the fixable share now reads "N proven dead and safe to clean" and
+  report-only rows add "N reported, not killed".
 
 ## Breaking: the Backlog feature is removed (v1.0.343)
 

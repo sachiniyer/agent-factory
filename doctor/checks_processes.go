@@ -271,7 +271,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				report.addAdvisoryFinding(nonOwningFinding(p, name, cls, false))
 				continue
 			}
-			verdict, proofSocket := ctx.sessionDeathProof(p, name)
+			verdict, proofSocket := deathProof(ctx, p, name)
 			switch verdict {
 			case deathLiveElsewhere:
 				// The session is absent from the union listing but live on
@@ -335,8 +335,7 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 						"record does not account for would look the same here; it is "+
 						"reported, not killed",
 						describeProc(p), name, cls.marker),
-					Remediation: "verify the session is dead on the tmux server its daemon record " +
-						"names before killing the process manually",
+					Remediation: ctx.unconfirmedDeathRemedy(p),
 				})
 				continue
 			}

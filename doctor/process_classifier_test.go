@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"testing"
@@ -208,6 +209,66 @@ func TestZeroValueVerdictsAreNeverProven(t *testing.T) {
 	var res ancestryResult
 	require.NotEqual(t, ancestryClean, res.verdict,
 		"the zero ancestry verdict must never read as clean (#6716)")
+
+	var dv sessionDeathVerdict
+	require.Equal(t, deathUnproven, dv,
+		"the zero session-death verdict must be unproven — never the arming value (#6716)")
+	require.NotEqual(t, deathProven, dv,
+		"the zero session-death verdict must never read as proven (#6716)")
+}
+
+// TestZeroValueDeathVerdict_NeverArmed drives a session-death verdict nobody
+// produced (the zero value) through the kill arm's switch via the deathProof
+// seam: the arm must treat it like every other non-deathProven verdict —
+// report-only, never a kill.
+func TestZeroValueDeathVerdict_NeverArmed(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-zero-death",
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+		"TMUX":                ambientTmuxEnv(t),
+	})
+	control := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-zero-death",
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+		"TMUX":                ambientTmuxEnv(t),
+	})
+
+	prev := deathProof
+	deathProof = func(ctx *scanContext, p proctree.Process, name string) (sessionDeathVerdict, string) {
+		if p.PID == victim.PID {
+			return sessionDeathVerdict(0), "" // a verdict nobody produced
+		}
+		return prev(ctx, p, name)
+	}
+	t.Cleanup(func() { deathProof = prev })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, control.PID) // Fix: true
+	stageParent(&opts, victim.PID, 1, nil)
+	stageParent(&opts, control.PID, 1, nil)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	vf := findingForPID(findByCheck(report, "orphaned-process"), victim.PID)
+	require.NotNil(t, vf,
+		"a death verdict nobody produced must land on the report-only row, not arm the kill")
+	require.Contains(t, vf.Detail, "cannot corroborate",
+		"the finding must say death could not be corroborated: %s", vf.Detail)
+	require.Empty(t, vf.FixAction,
+		"a zero-valued death verdict must never arm a kill (#6716)")
+	require.True(t, alive(victim), "a zero-valued death verdict armed a kill (#6716)")
+
+	cf := findingForPID(findByCheck(report, "orphaned-process"), control.PID)
+	require.NotNil(t, cf, "the verified control must still be reported")
+	require.NotEmpty(t, cf.FixAction)
+	require.True(t, cf.Fixed, "fix outcome: %v", cf.FixErr)
+	require.Eventually(t, func() bool { return !alive(control) }, 5*time.Second, 25*time.Millisecond,
+		"a genuinely-ours orphan must still be killed by --fix")
 }
 
 // TestClassifierRefusesUnknownAncestryVerdict hands the classifier an
@@ -362,30 +423,55 @@ func TestOrphanOwnEnvUnreadable_Unproven(t *testing.T) {
 // TestOrphanedProcessUnconfirmedDeath_HonestText pins #6716 item 3: the
 // orphaned-process row whose death could NOT be corroborated must not carry
 // the foreign-home remedy ("run af doctor with the owning AGENT_FACTORY_HOME
-// active" — the owning home IS this one) and the collapsed row must not call
-// it an orphan "from dead sessions" when death was never confirmed.
+// active" — the owning home IS this one), must name the server that actually
+// hosted the session when the evidence names one, and the collapsed row must
+// not call it an orphan "from dead sessions" when death was never confirmed.
 func TestOrphanedProcessUnconfirmedDeath_HonestText(t *testing.T) {
 	testguard.IsolateTmux(t)
 	home := testguard.SocketTempDir(t)
 
 	// Matching markers but no TMUX env and no server record: the death proof
-	// cannot corroborate, so the row is report-only — death unconfirmed.
+	// cannot corroborate and no evidence names a server, so the remedy must
+	// say where to look rather than invent one.
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: "af_doctor-unconfirmed-death",
 		tmux.EnvMarkerHome:    home,
 		"AGENT_FACTORY_HOME":  home,
 	})
+	// Matching markers with a TMUX env naming a socket that cannot be listed:
+	// the env's socket is the server the session ran on, so the remedy must
+	// name THAT socket — not a daemon record that does not exist here.
+	fakeSock := testguard.SocketPath(t, "never-created")
+	socked := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: "af_doctor-unconfirmed-death-sock",
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+		"TMUX":                fmt.Sprintf("%s,0,0", fakeSock),
+	})
 
-	report, err := Run(testOptionsWithHome(t, home, true, victim.PID))
+	report, err := Run(testOptionsWithHome(t, home, true, victim.PID, socked.PID))
 	require.NoError(t, err)
 
 	orphans := findByCheck(report, "orphaned-process")
-	require.Len(t, orphans, 1)
-	require.Empty(t, orphans[0].FixAction, "unconfirmed death is report-only")
+	require.Len(t, orphans, 2)
+	vf := findingForPID(orphans, victim.PID)
+	require.NotNil(t, vf)
+	require.Empty(t, vf.FixAction, "unconfirmed death is report-only")
 	require.Equal(t,
-		"verify the session is dead on the tmux server its daemon record names before killing the process manually",
-		orphans[0].Remediation,
-		"the unconfirmed-death remedy must say what to verify — the owning home IS this one")
+		"find the tmux server the session ran on — from the process's TMUX env or "+
+			"the daemon's server record — and verify the session is dead there "+
+			"before killing the process manually",
+		vf.Remediation,
+		"with no TMUX env and no record the remedy must not invent a server (#6716)")
+
+	sf := findingForPID(orphans, socked.PID)
+	require.NotNil(t, sf)
+	require.Empty(t, sf.FixAction, "unconfirmed death is report-only")
+	require.Equal(t,
+		fmt.Sprintf("verify the session is dead on tmux socket %s — "+
+			"the server that hosted it — before killing the process manually", fakeSock),
+		sf.Remediation,
+		"when the process's own TMUX env names the hosting server the remedy must name it (#6716)")
 
 	payload := BuildJSONReport(report, true, false)
 	var orphanRow *JSONCheck
@@ -401,4 +487,63 @@ func TestOrphanedProcessUnconfirmedDeath_HonestText(t *testing.T) {
 		orphanRow.Detail)
 	require.Contains(t, orphanRow.Detail, "reported, not killed",
 		"the collapsed row must say what was actually done: %s", orphanRow.Detail)
+}
+
+// TestOrphanPaneTreeUnreadable_ReportOnly covers the last report-only row on
+// the kill arm: the session is proven live on the socket the process's own
+// TMUX env names, but its pane tree could not be read — so membership is
+// undecidable and the process is reported, never killed. Its remedy must be
+// exactly the one true for an unreadable pane tree (#6716).
+func TestOrphanPaneTreeUnreadable_ReportOnly(t *testing.T) {
+	testguard.IsolateTmux(t) // doctor's ambient server; the session lives elsewhere
+	home := testguard.SocketTempDir(t)
+
+	// A live af session on a private socket (server A) the ambient listing
+	// cannot reach — the deathLiveElsewhere shape.
+	sockA := testguard.SocketPath(t, "a")
+	const liveName = "af_doctor-live-pane-unreadable"
+	out, err := exec.Command("tmux", "-S", sockA, "new-session", "-d", "-s", liveName,
+		"sleep", "300").CombinedOutput()
+	require.NoError(t, err, "tmux new-session on server A: %s", out)
+	t.Cleanup(func() { _ = exec.Command("tmux", "-S", sockA, "kill-server").Run() })
+
+	serverAPID := tmuxServerPID(t, sockA)
+	victim := spawnWithEnv(t, "sh", nil, map[string]string{
+		tmux.EnvMarkerSession: liveName,
+		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
+		"TMUX":                fmt.Sprintf("%s,%d,0", sockA, serverAPID),
+	})
+
+	prev := captureSessionProcessTrees
+	captureSessionProcessTrees = func(ctx *scanContext, name, socket string) ([]proctree.Process, error) {
+		if name == liveName {
+			return nil, errors.New("pane tree read staged to fail")
+		}
+		return prev(ctx, name, socket)
+	}
+	t.Cleanup(func() { captureSessionProcessTrees = prev })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, serverAPID)
+	stageParent(&opts, victim.PID, 1, nil)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+
+	vf := findingForPID(findByCheck(report, "orphaned-process"), victim.PID)
+	require.NotNil(t, vf,
+		"an unreadable pane tree must land on the report-only row, not on escaped-process")
+	require.Contains(t, vf.Detail, "pane tree could not be read",
+		"the finding must name the true cause: %s", vf.Detail)
+	require.Empty(t, vf.FixAction,
+		"an unreadable pane tree must never arm a kill: %s", vf.Detail)
+	require.Equal(t,
+		"inspect the session's pane tree on the tmux socket named above — "+
+			"the process is report-only",
+		vf.Remediation,
+		"the pane-unreadable remedy must be exactly the true one (#6716)")
+	require.Nil(t, findingForPID(findByCheck(report, "escaped-process"), victim.PID),
+		"a process whose membership could not be read must not be classified escaped")
+	require.True(t, alive(victim),
+		"`af doctor --fix` killed a process whose pane tree could not be read (#6716)")
 }
