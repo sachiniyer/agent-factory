@@ -553,11 +553,21 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
 		resp.Caller = sandboxOwnerID
-		// An owner in neither the materialized rows nor the pending-create
-		// projections is gone, not still registering — say so on the wire so
-		// the caller's --self can fail fast with the accurate answer instead
-		// of polling out a window that cannot close (#6690).
-		resp.CallerGone = sandboxProjectErr != nil
+		if sandboxProjectErr != nil {
+			// The owner is not a committed session. If a still-provisioning
+			// create carries its id the credential is mid-registration:
+			// answer IDENTITY only — the caller's own provisional row, never
+			// the project, because the create may never commit and authority
+			// must not start before it does (#6708 review). Otherwise the
+			// caller is gone — killed, removed, or lost with a create that
+			// never committed — and the wire says so instead of leaving the
+			// caller to poll out a window that cannot close (#6690).
+			if pending, ok := s.manager.pendingCreateForCaller(sandboxOwnerID); ok {
+				instances = []session.InstanceData{sandboxSafeInstanceData(pending)}
+			} else {
+				resp.CallerGone = true
+			}
+		}
 		// Project only what the sandbox scope HONORS, not the operator's full
 		// triple: every bit here is a promise that the daemon honors that wire
 		// field for this credential, and the client's preflight refuses a pick

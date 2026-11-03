@@ -115,7 +115,10 @@ var ErrCallerRowNotRegistered = errors.New("the calling session is not yet regis
 var ErrCallerSessionGone = errors.New("the calling session is no longer tracked by the daemon")
 
 // CallerNoSpawn returns the session a sandbox credential is bound to together
-// with that session's (narrowed) row (#5571 W3.2). ok is false when the daemon
+// with that session's (narrowed) row (#5571 W3.2). The returned row may report
+// InFlightOp OpCreating — the daemon answers identity from the pending create
+// before the session commits, so a caller about to ACT on the row must wait
+// for the commit (the api poll does; #6690). ok is false when the daemon
 // reports no bound caller — an operator credential, an older daemon, or no
 // daemon at all — so the caller falls back to resolving by tmux name. When the
 // daemon DOES report a bound caller but the row is not yet in the snapshot — the

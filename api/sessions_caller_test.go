@@ -480,6 +480,59 @@ func TestPollCredentialBoundCallerDeadlineCancelsAHangingCall(t *testing.T) {
 	require.Less(t, time.Since(started), 10*time.Second)
 }
 
+// --- A still-creating row keeps the bounded wait (#6690 review) --------------
+//
+// The daemon answers the caller's identity from the pending create before the
+// session commits, so the row can arrive carrying InFlightOp OpCreating. That
+// row is never handed to acting verbs as if it were committed: the poll keeps
+// the same bounded wait, resolves once the create commits, and reports "still
+// being created" — not the ambiguous gone phrasing — if the window closes
+// first.
+func TestResolveSelfSessionWaitsForAStillCreatingRowToCommit(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		if calls == 1 {
+			return session.InstanceData{ID: "sess-1", Title: "mine", InFlightOp: session.OpCreating}, true, nil
+		}
+		return session.InstanceData{ID: "sess-1", Title: "mine"}, true, nil
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a bound caller must not consult tmux while its create commits")
+		return "", nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	got, err := resolveSelfSession()
+	require.NoError(t, err)
+	require.Equal(t, "sess-1", got.ID)
+	require.Empty(t, got.InFlightOp, "the committed row is what acting verbs get")
+	require.Equal(t, 2, calls)
+}
+
+// A row still creating when the window closes reports exactly that — the
+// session is on its way, not gone — and never a tmux fallthrough.
+func TestResolveSelfSessionStillCreatingAtWindowCloseFailsClearly(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		return session.InstanceData{ID: "sess-1", Title: "mine", InFlightOp: session.OpCreating}, true, nil
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a still-creating bound caller must fail closed, not consult tmux")
+		return "", nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	_, err := resolveSelfSession()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.ErrorContains(t, err, "still being created")
+}
+
 // --- CallerGone: the daemon's gone answer fails fast (#6690) -----------------
 //
 // A bound caller whose session the daemon reports as gone (SnapshotResponse

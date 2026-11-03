@@ -88,26 +88,38 @@ type sandboxProject struct {
 }
 
 // sandboxProjectOf finds the owner's own tracked row and returns its project.
-// A still-provisioning create counts too: its provisional row lives in
-// m.pendingCreates and already carries the final stable id the credential was
-// minted for (the pending row publishes before the credential reaches the
-// sandbox), so the owner's project is answerable through the whole
-// registration window — the window the row's late landing in m.instances left
-// open for in-sandbox --self calls (#6690).
+// A still-provisioning create does NOT count: this lookup feeds every route
+// that lets the credential ACT — sibling verbs, create, task add/remove, the
+// per-fire re-check — and authority must not start before the session commits
+// (#6708 review). Only the Snapshot that answers the caller's identity may
+// recognize a pending create, and it does so through pendingCreateForCaller.
 func (m *Manager) sandboxProjectOf(owner string) (sandboxProject, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst, rid := m.trackedSessionByIDLocked(owner)
-	if inst != nil {
-		return sandboxProject{repoID: rid, path: inst.Path}, nil
+	if inst == nil {
+		return sandboxProject{}, sandboxRefusal("the credential's session is no longer tracked")
 	}
-	for key, pending := range m.pendingCreates {
+	return sandboxProject{repoID: rid, path: inst.Path}, nil
+}
+
+// pendingCreateForCaller returns the provisional row of a still-provisioning
+// create whose final stable id is owner — the id its credential was minted for
+// (the pending row publishes before the credential reaches the sandbox, which
+// is what makes the registration window answerable at all, #6690). It is the
+// ONLY lookup that may stand in for a committed session row before commit:
+// the Snapshot that answers the caller's identity reads it so an in-sandbox
+// --self resolves through the window, and it is read NOWHERE ELSE — a pending
+// create is no authority for acting.
+func (m *Manager) pendingCreateForCaller(owner string) (session.InstanceData, bool) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, pending := range m.pendingCreates {
 		if pending.ID == owner {
-			rid, _ = splitDaemonInstanceKey(key)
-			return sandboxProject{repoID: rid, path: pending.Path}, nil
+			return pending, true
 		}
 	}
-	return sandboxProject{}, sandboxRefusal("the credential's session is no longer tracked")
+	return session.InstanceData{}, false
 }
 
 // authorizeSandboxSession resolves the session a sandbox request names and

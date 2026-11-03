@@ -153,14 +153,15 @@ func titlesOf(insts []session.InstanceData) []string {
 	return out
 }
 
-// The credential-bound caller answers through the whole registration window,
-// not only after the row commits (#6690): a still-provisioning create is not
-// in m.instances yet, but its provisional row is in pendingCreates carrying the
-// final stable id the credential was minted for, so the snapshot projects it
-// and an in-sandbox --self resolves instead of waiting the window out. And a
-// credential whose owner is in NEITHER map is gone, not still registering —
-// the wire says so (CallerGone) so the client fails fast instead of polling a
-// window that cannot close.
+// The credential-bound caller's IDENTITY answers through the whole registration
+// window (#6690): a still-provisioning create is not in m.instances yet, but
+// its provisional row is in pendingCreates carrying the final stable id the
+// credential was minted for, so the snapshot answers --self with that one row —
+// never the project, and never authority: every acting route keeps requiring
+// the committed row until the create commits (#6708 review). And a credential
+// whose owner is in NEITHER map is gone, not still registering — the wire says
+// so (CallerGone) so the client fails fast instead of polling a window that
+// cannot close.
 func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
 	f := newScopeFixture(t)
 	snap := func(token string) SnapshotResponse {
@@ -189,11 +190,36 @@ func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
 	f.mgr.mu.Unlock()
 	pendingSecret, err := f.mgr.sandboxTokens.mint(pendingID)
 	require.NoError(t, err)
+
+	// Its snapshot answers IDENTITY only: the caller's own provisional row,
+	// never the project — the create may never commit.
 	got := snap(pendingSecret)
 	assert.Equal(t, pendingID, got.Caller)
 	assert.False(t, got.CallerGone, "a pending owner is still registering, not gone")
-	assert.Contains(t, idsOf(got.Instances), pendingID,
-		"the pending row must project so the caller's --self resolves mid-window")
+	assert.Equal(t, []string{pendingID}, idsOf(got.Instances),
+		"a still-registering caller sees its own row only, never the project")
+
+	// And its authority has not started: every route that lets the credential
+	// ACT keeps requiring a committed session (#6708 review) — the same
+	// refusal it got before the pending row was answerable at all.
+	for name, tc := range map[string][2]string{
+		"prompt a sibling":  {"/v1/SendPrompt", `{"prompt":"hi","title":"peer"}`},
+		"archive a sibling": {"/v1/ArchiveSession", `{"title":"peer"}`},
+		"act on itself":     {"/v1/SendPrompt", `{"prompt":"hi","id":"` + pendingID + `"}`},
+		"create":            {"/v1/CreateSession", `{"title":"x","host":"h1"}`},
+		"add a task":        {"/v1/AddTask", `{"task":{"prompt":"p","cron_expr":"* * * * *","target_session":"peer"}}`},
+		"list tasks":        {"/v1/ListTasks", `{}`},
+		"remove a task":     {"/v1/RemoveTask", `{"id":"t-x"}`},
+	} {
+		code, out := f.call(t, pendingSecret, tc[0], tc[1])
+		assert.Containsf(t, out, scopeRefusal,
+			"%s (%s %s) must be refused until the owner's session commits (status %d)", name, tc[0], tc[1], code)
+	}
+
+	// A committed credential cannot act on ANOTHER session's still-pending
+	// row either — naming the pending title resolves nothing for acting.
+	f.assertRefused(t, "/v1/SendPrompt", `{"prompt":"hi","title":"newbie"}`, "a sibling's pending create")
+	f.assertRefused(t, "/v1/ArchiveSession", `{"title":"newbie"}`, "a sibling's pending create")
 
 	// A credential whose owner is in neither map: killed, removed, or lost
 	// with a create that never committed.
