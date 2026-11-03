@@ -712,8 +712,9 @@ func TestInstanceRendererDeletingRetainsSelectionRoles(t *testing.T) {
 	renderLines := func() []string {
 		out := r.Render(inst, 1, true, false, false)
 		lines := strings.Split(out, "\n")
-		// [0] title top padding, [1] title, [2] branch line, [3] branch
-		// bottom padding.
+		// [0] title top padding, [1] title, [2] branch line. A collapsed row
+		// renders no bottom padding — it exists to separate the branch from
+		// tab children, and there are none (#6612).
 		require.GreaterOrEqual(t, len(lines), 3, "expected title and branch rows")
 		return lines
 	}
@@ -727,6 +728,60 @@ func TestInstanceRendererDeletingRetainsSelectionRoles(t *testing.T) {
 	after := renderLines()
 	assert.NotContains(t, after[1], dimFG, "selected deleting title keeps ink")
 	assert.NotContains(t, after[2], dimFG, "selected deleting branch keeps ink")
+}
+
+// TestInstanceRendererCollapsedRowDropsChildSeparator is the #6612 regression:
+// the detail block's bottom padding exists to space the branch (or warning)
+// line off the tab children below it — a collapsed row renders no children, so
+// the pad dangled as an orphaned blank row. Collapsed blocks must end on their
+// last content line, while expanded blocks keep the separator.
+func TestInstanceRendererCollapsedRowDropsChildSeparator(t *testing.T) {
+	inst, err := session.NewInstance(session.InstanceOptions{
+		Title:   "folded",
+		Path:    t.TempDir(),
+		Program: "test",
+	})
+	require.NoError(t, err)
+	inst.Branch = "folded-branch"
+
+	r := NewInstanceRenderer()
+	r.SetWidth(60)
+
+	cleanLines := func(out string) []string {
+		var lines []string
+		for _, line := range strings.Split(out, "\n") {
+			lines = append(lines, ansiEscape.ReplaceAllString(line, ""))
+		}
+		return lines
+	}
+
+	// Selected + collapsed: pad, title, branch — and nothing else.
+	collapsed := cleanLines(r.Render(inst, 1, true, false, false))
+	require.Len(t, collapsed, 3,
+		"a collapsed row must not trail a child separator: %q", collapsed)
+	assert.Contains(t, collapsed[2], branchIcon,
+		"the collapsed block still ends on its branch line")
+	assert.NotEqual(t, "", strings.TrimSpace(collapsed[2]))
+
+	// Selected + expanded: the separator stays — it spaces the branch off the
+	// tab children rendered below by RenderTab.
+	expanded := cleanLines(r.Render(inst, 1, true, false, true))
+	require.Len(t, expanded, 4,
+		"an expanded row keeps its child separator: %q", expanded)
+	assert.Equal(t, "", strings.TrimSpace(expanded[3]))
+
+	// Unselected + collapsed + warning: the warning row is the last line, not
+	// another blank — the same orphan, on the warning path.
+	warned, err := session.FromInstanceData(session.InstanceData{
+		ID: "warned", Title: "warned", Branch: "warned-branch",
+		Status: session.Archived, Liveness: session.LiveArchived,
+		Program: "test", BackendType: "sandbox",
+		ArchiveWarning: "restore completed with an incomplete archive",
+	})
+	require.NoError(t, err)
+	warnedLines := cleanLines(r.Render(warned, 1, false, false, false))
+	assert.NotEqual(t, "", strings.TrimSpace(warnedLines[len(warnedLines)-1]),
+		"a collapsed warning row must not trail a blank separator either")
 }
 
 // TestInstanceRendererTreeArrow pins the tree affordance on instance rows
