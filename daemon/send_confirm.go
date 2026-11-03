@@ -311,9 +311,11 @@ func (m *Manager) sweepUnverifiedSendWatches() {
 //     inside the send's true window, so no evidence the original watch could
 //     not have used is ever fed.
 //
-// A row whose target no longer exists, whose verdict moved on, or whose window
-// already closed stays frozen — a turn that far out was never attributable to
-// the send.
+// A row whose recorded target no longer exists, whose verdict moved on, or
+// whose window already closed stays frozen — and a row that cannot name its
+// delivery's session at all stays frozen too, because arming the task's
+// current (possibly retargeted) config could attribute another session's
+// turn to this send (#6590 review).
 func (m *Manager) rearmUnverifiedSendWatches() {
 	tasks, err := task.LoadTasks()
 	if err != nil {
@@ -331,7 +333,7 @@ func (m *Manager) rearmUnverifiedSendWatches() {
 	var rearms []pendingRearm
 	m.mu.Lock()
 	for _, t := range tasks {
-		if t.LastRunStatus != TaskStatusSentUnverified || t.LastRunAt == nil || t.TargetSession == "" {
+		if t.LastRunStatus != TaskStatusSentUnverified || t.LastRunAt == nil {
 			continue
 		}
 		boundary := *t.LastRunAt
@@ -339,7 +341,22 @@ func (m *Manager) rearmUnverifiedSendWatches() {
 		if !now.Before(expires) {
 			continue
 		}
-		inst := m.instances[daemonInstanceKey(t.RepoID, t.TargetSession)]
+		// The verdict's own identity, not the task's current config: a targeted
+		// send records LastRunTarget, a created run's key IS the session's
+		// instance ID. A row that records neither cannot prove which session
+		// its send went to and stays unverified (#6590 review).
+		var inst *session.Instance
+		switch {
+		case t.LastRunTarget != "":
+			inst = m.instances[daemonInstanceKey(t.RepoID, t.LastRunTarget)]
+		case t.LastRunID != "":
+			for _, candidate := range m.instances {
+				if candidate.ID == t.LastRunID {
+					inst = candidate
+					break
+				}
+			}
+		}
 		if inst == nil {
 			continue
 		}

@@ -117,9 +117,22 @@ func runStatusTransition(cur Task, k RunKey, status string, at *time.Time) bool 
 // row and whether the write was applied (false = a no-op by the machine above).
 // lastRunAt nil leaves LastRunAt untouched, as UpdateTaskStatus does.
 func RecordRunStatus(taskID string, k RunKey, lastRunAt *time.Time, status string) (Task, bool, error) {
+	return recordRunStatusForTarget(taskID, k, lastRunAt, status, "", false)
+}
+
+// RecordRunStatusForTarget is RecordRunStatus that also stamps the delivery's
+// session title as LastRunTarget — see UpdateTaskStatusForTarget (#6590).
+func RecordRunStatusForTarget(taskID string, k RunKey, lastRunAt *time.Time, status, target string) (Task, bool, error) {
+	return recordRunStatusForTarget(taskID, k, lastRunAt, status, target, true)
+}
+
+func recordRunStatusForTarget(taskID string, k RunKey, lastRunAt *time.Time, status, target string, stampTarget bool) (Task, bool, error) {
 	return updateTaskStatusLocked(taskID, lastRunAt, status, func(cur Task) bool {
 		return runStatusTransition(cur, k, status, lastRunAt)
 	}, func(t *Task) {
+		if stampTarget && lastRunAt != nil {
+			t.LastRunTarget = target
+		}
 		switch {
 		case k.IsZero():
 			if lastRunAt != nil {

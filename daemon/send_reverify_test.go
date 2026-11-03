@@ -411,7 +411,7 @@ func TestUnverifiedSendReArmsFromVerdictRowOnBoot(t *testing.T) {
 		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
 	}))
 	lastRun := time.Now().Add(-time.Minute)
-	_, err := task.UpdateTaskStatus("feed6599", &lastRun, TaskStatusSentUnverified)
+	_, err := task.UpdateTaskStatusForTarget("feed6599", &lastRun, TaskStatusSentUnverified, "root")
 	require.NoError(t, err)
 
 	m.sweepUnverifiedSendWatches() // the boot sweep re-arms in-window rows
@@ -449,7 +449,7 @@ func TestUnverifiedSendReArmSkipsExpiredRow(t *testing.T) {
 		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
 	}))
 	lastRun := time.Now().Add(-2 * sendReverifyWindow)
-	_, err := task.UpdateTaskStatus("feed6600", &lastRun, TaskStatusSentUnverified)
+	_, err := task.UpdateTaskStatusForTarget("feed6600", &lastRun, TaskStatusSentUnverified, "root")
 	require.NoError(t, err)
 
 	m.sweepUnverifiedSendWatches()
@@ -479,4 +479,51 @@ func TestUnverifiedSendReArmSkipsSettledRows(t *testing.T) {
 	m.pausedMu.Lock()
 	defer m.pausedMu.Unlock()
 	require.Empty(t, m.unverifiedSendWatches, "a settled verdict must not arm a re-verification watch")
+}
+
+// A task retargeted after the send keeps its verdict bound to the session the
+// delivery actually went to: the re-arm reads the recorded LastRunTarget, not
+// the task's current config, so an unrelated turn on the NEW target can never
+// promote the old send (#6590 review).
+func TestUnverifiedSendReArmBindsRecordedTarget(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	instA := registerStarted(t, m, repoID, repoPath, "a", session.NewFakeBackend(), true, session.Running)
+	instB := registerStarted(t, m, repoID, repoPath, "b", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6602", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "b", ProjectPath: repoPath, Enabled: true, // retargeted after the send
+	}))
+	lastRun := time.Now().Add(-time.Minute)
+	_, err := task.UpdateTaskStatusForTarget("feed6602", &lastRun, TaskStatusSentUnverified, "a")
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches()
+
+	m.pausedMu.Lock()
+	onA := m.unverifiedSendWatches[stableSessionKey(repoID, instA)]["feed6602"]
+	onB := m.unverifiedSendWatches[stableSessionKey(repoID, instB)]["feed6602"]
+	m.pausedMu.Unlock()
+	require.NotNil(t, onA, "the send went to a: its watch re-arms on a")
+	require.Nil(t, onB, "the retargeted config must not arm the new target")
+}
+
+// A row recorded before the delivery target existed carries no identity to
+// bind: a verdict that cannot name its session stays frozen rather than arm
+// the task's current — possibly retargeted — config (#6590 review).
+func TestUnverifiedSendReArmSkipsUntargetedRow(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6603", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
+	}))
+	lastRun := time.Now().Add(-time.Minute)
+	_, err := task.UpdateTaskStatus("feed6603", &lastRun, TaskStatusSentUnverified)
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches()
+
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	require.Empty(t, m.unverifiedSendWatches, "a row with no recorded delivery target must not re-arm")
 }

@@ -812,9 +812,9 @@ func TestParkedQueueHeadDoesNotRewriteTaskStoreAfterWatcherStops(t *testing.T) {
 	t.Cleanup(func() { deliverPromptForTask = original })
 	originalUpdate := updateWatchTaskStatus
 	statusWrites := 0
-	updateWatchTaskStatus = func(taskID string, at *time.Time, status string) (task.Task, error) {
+	updateWatchTaskStatus = func(taskID string, at *time.Time, status, target string) (task.Task, error) {
 		statusWrites++
-		return originalUpdate(taskID, at, status)
+		return originalUpdate(taskID, at, status, target)
 	}
 	t.Cleanup(func() { updateWatchTaskStatus = originalUpdate })
 

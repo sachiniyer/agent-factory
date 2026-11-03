@@ -104,8 +104,8 @@ func TestParkedStatusPublicationExcludesSupervisorStatus(t *testing.T) {
 	parkCommitted := make(chan struct{})
 	releasePark := make(chan struct{})
 	var parkOnce sync.Once
-	updateWatchTaskStatus = func(id string, at *time.Time, status string) (task.Task, error) {
-		stored, err := originalUpdate(id, at, status)
+	updateWatchTaskStatus = func(id string, at *time.Time, status, target string) (task.Task, error) {
+		stored, err := originalUpdate(id, at, status, target)
 		if status == TaskStatusLimitParked {
 			parkOnce.Do(func() { close(parkCommitted) })
 			<-releasePark

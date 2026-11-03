@@ -128,6 +128,13 @@ type Task struct {
 	CreatedAt     time.Time  `json:"created_at"`
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
+	// LastRunTarget is the session title the last-run delivery targeted (#6590):
+	// the identity a restarted daemon re-arms a sent-unverified send's
+	// re-verification against. The task's own TargetSession is config and may
+	// have been retargeted since the verdict was stamped — only the delivery's
+	// recorded target can name the session the send actually went to.
+	// Daemon-owned, never patchable, stamped with a verdict timestamp.
+	LastRunTarget string `json:"last_run_target,omitempty"`
 	// LastRunID / LastRunStartedAt identify the run LastRunStatus describes
 	// (see RunKey, RecordRunStatus): daemon-owned, never patchable, and absent on
 	// rows written before they existed — a row without a key accepts any writer.
@@ -645,6 +652,23 @@ func loadTasksForScope(scope *repoScope) ([]Task, error) {
 // the error discard it.
 func UpdateTaskStatus(taskID string, lastRunAt *time.Time, lastRunStatus string) (Task, error) {
 	updated, _, err := UpdateTaskStatusIf(taskID, lastRunAt, lastRunStatus, nil)
+	return updated, err
+}
+
+// UpdateTaskStatusForTarget is UpdateTaskStatus that also stamps the session
+// title the delivery targeted as LastRunTarget (#6590). The verdict's
+// re-verification must be re-armed against the session the send actually went
+// to, and the task's own TargetSession is config that a retarget may have moved
+// since — so the delivery records its target with the verdict. The stamp
+// applies only with a verdict timestamp: a nil lastRunAt status-only write
+// preserves whatever target the verdict write recorded, matching the
+// LastRunAt preservation rule.
+func UpdateTaskStatusForTarget(taskID string, lastRunAt *time.Time, lastRunStatus, target string) (Task, error) {
+	updated, _, err := updateTaskStatusLocked(taskID, lastRunAt, lastRunStatus, nil, func(t *Task) {
+		if lastRunAt != nil {
+			t.LastRunTarget = target
+		}
+	})
 	return updated, err
 }
 

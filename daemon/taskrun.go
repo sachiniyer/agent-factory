@@ -549,7 +549,10 @@ func runTaskDelivery(taskID string, expect task.ProjectExpectation, replay *task
 	// machine, so a failure stamped for this run during its delivery is not
 	// overwritten by "started", and a stale writer cannot claim a newer run.
 	now := time.Now()
-	if _, _, err := task.RecordRunStatus(taskID, run, &now, status); err != nil {
+	// The verdict stamps the delivery's target too: a restarted daemon re-arms
+	// a sent-unverified send's re-verification on the session the send went to,
+	// and the task's config may have been retargeted since (#6590).
+	if _, _, err := task.RecordRunStatusForTarget(taskID, run, &now, status, task.CanonicalTargetSession(t.TargetSession)); err != nil {
 		log.ErrorLog.Printf("failed to update task status: %v", err)
 	}
 	// The delivery completed — the occurrence is consumed whether or not the
