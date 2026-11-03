@@ -57,7 +57,7 @@ func prune(dir, opened string, now time.Time) (int, error) {
 	}
 	var pruneErr error
 	pruned := 0
-	for _, kind := range []Kind{PostWorktree, OnArchive} {
+	for _, kind := range []Kind{PostWorktree, OnArchive, Setup} {
 		logs := byKind[kind]
 		sort.Slice(logs, func(i, j int) bool {
 			if logs[i].completed.Equal(logs[j].completed) {
@@ -82,7 +82,7 @@ func prune(dir, opened string, now time.Time) (int, error) {
 }
 
 func logKind(name string) Kind {
-	for _, kind := range []Kind{PostWorktree, OnArchive} {
+	for _, kind := range []Kind{PostWorktree, OnArchive, Setup} {
 		prefix := string(kind) + lockedLogMarker
 		if strings.HasPrefix(name, prefix) && strings.HasSuffix(name, ".log") && len(name) > len(prefix)+len(".log") {
 			return kind

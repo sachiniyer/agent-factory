@@ -6827,8 +6827,18 @@ function agentConfigSkippedText(s) {
   const entries = (s.agent_config_skipped ?? []).map((entry) => entry.trim()).filter((entry) => entry !== "");
   return entries.length === 0 ? "" : AGENT_CONFIG_SKIPPED_PREFIX + entries.join("; ");
 }
+var SETUP_HOOK_FAILED_PREFIX = "af setup hook failed: ";
+function setupHookFailedText(s) {
+  const note = s.setup_hook_failed?.trim() ?? "";
+  return note === "" ? "" : SETUP_HOOK_FAILED_PREFIX + note;
+}
 function sessionWarningText(s) {
-  return [archiveWarningText(s), callbackUnavailableText(s), agentConfigSkippedText(s)].filter((t) => t !== "").join(" \xB7 ");
+  return [
+    archiveWarningText(s),
+    callbackUnavailableText(s),
+    agentConfigSkippedText(s),
+    setupHookFailedText(s)
+  ].filter((t) => t !== "").join(" \xB7 ");
 }
 function rootRecreateNote(s) {
   switch (s.root_recreate_context) {
@@ -7042,7 +7052,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a1a40e80309a";
+var CLIENT_VERSION = "58a3ecce2d13";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",

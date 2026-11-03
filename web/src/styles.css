@@ -5468,6 +5468,47 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
   font-weight: 600;
 }
 
+/* A ```mermaid fence off the cursor (#6642): the rendered diagram, and under it
+   the same source shown while the library loads or when a render fails. */
+.af-docs-editor .cm-md-mermaid {
+  padding: var(--af-space-1) 0;
+  cursor: text;
+}
+
+.af-docs-editor .cm-md-mermaid svg {
+  display: block;
+  max-width: 100%;
+  height: auto;
+  margin: 0 auto;
+}
+
+/* Mermaid ships edge-animation keyframes in every diagram's <style>; the spec
+   is no animation, so whatever survives the sanitizer still cannot move. */
+.af-docs-editor .cm-md-mermaid svg * {
+  animation: none !important;
+  transition: none !important;
+}
+
+.af-docs-editor .cm-md-mermaid-src {
+  margin: 0;
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  white-space: pre-wrap;
+}
+
+.af-docs-editor .cm-md-mermaid-bad .cm-md-mermaid-src {
+  border-top: calc(var(--af-space-1) / 2) solid var(--af-dead);
+}
+
+.af-docs-editor .cm-md-mermaid-errtext {
+  margin: 0;
+  padding: var(--af-space-1) 0;
+  color: var(--af-dead);
+  font-size: var(--af-type-caption);
+}
+
 @media (max-width: 768px) {
   .af-docs-head {
     flex-wrap: wrap;

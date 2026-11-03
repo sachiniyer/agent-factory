@@ -11,6 +11,7 @@ import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemir
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import { CALLOUT_LABELS, type CalloutKind, calloutKindOfLine } from "./callouts.js";
+import { MermaidWidget } from "./md_mermaid.js";
 
 export type Align = "" | "left" | "center" | "right";
 
@@ -20,7 +21,8 @@ export type PreviewSpec =
   | { type: "hide"; from: number; to: number }
   | { type: "bullet"; from: number; to: number }
   | { type: "callout-label"; from: number; to: number; kind: CalloutKind }
-  | { type: "table"; from: number; to: number; rows: string[][]; align: Align[] };
+  | { type: "table"; from: number; to: number; rows: string[][]; align: Align[] }
+  | { type: "mermaid"; from: number; to: number; source: string };
 
 const PARSE_BUDGET_MS = 50;
 
@@ -192,7 +194,20 @@ export function previewSpecs(state: EditorState, active: ReadonlySet<number>): P
         case "QuoteMark":
           if (!lineActive(node.from)) hide(node.from, withSpace(node.to));
           return;
-        case "FencedCode":
+        case "FencedCode": {
+          // A ```mermaid fence off the cursor renders as its diagram (the
+          // widget lives in md_mermaid.ts); on the cursor's lines it is an
+          // ordinary code block so its source can be edited.
+          const info = childrenNamed(node, "CodeInfo")[0];
+          const lang = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
+          if (lang === "mermaid" && !rangeActive(node.from, node.to)) {
+            const source = childrenNamed(node, "CodeText").map((c) => doc.sliceString(c.from, c.to)).join("");
+            specs.push({ type: "mermaid", from: node.from, to: node.to, source });
+          } else {
+            lineClasses(node.from, node.to, () => "cm-md-codeblock");
+          }
+          return false;
+        }
         case "CodeBlock":
           lineClasses(node.from, node.to, () => "cm-md-codeblock");
           return false;
@@ -317,6 +332,9 @@ export function specsToDecorations(specs: readonly PreviewSpec[]): DecorationSet
         break;
       case "table":
         ranges.push(Decoration.replace({ widget: new TableWidget(s.rows, s.align), block: true }).range(s.from, s.to));
+        break;
+      case "mermaid":
+        ranges.push(Decoration.replace({ widget: new MermaidWidget(s.source), block: true }).range(s.from, s.to));
         break;
     }
   }

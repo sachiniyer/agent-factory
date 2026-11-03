@@ -23,7 +23,7 @@ func TestOpenPrunesKeptLogs(t *testing.T) {
 	dir := filepath.Dir(inFlight.Name())
 	now := time.Now()
 	want := map[string]bool{filepath.Base(inFlight.Name()): true}
-	for _, kind := range []Kind{PostWorktree, OnArchive} {
+	for _, kind := range []Kind{PostWorktree, OnArchive, Setup} {
 		for i := 0; i < 25; i++ {
 			name := fmt.Sprintf("%s-v1-kept-%02d.log", kind, i)
 			seedLog(t, dir, name, now.Add(-time.Duration(i+1)*time.Hour))
@@ -65,8 +65,8 @@ func TestOpenPrunesKeptLogs(t *testing.T) {
 	t.Cleanup(func() { _ = opened.Close() })
 	want[filepath.Base(opened.Name())] = true
 	assertLogNames(t, dir, want)
-	if got := output.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "pruned 14") {
-		t.Errorf("prune INFO = %q, want one line naming pruned 14", got)
+	if got := output.String(); strings.Count(got, "\n") != 1 || !strings.Contains(got, "pruned 21") {
+		t.Errorf("prune INFO = %q, want one line naming pruned 21", got)
 	}
 	if _, err := inFlight.WriteString("still running\n"); err != nil {
 		t.Fatal(err)
@@ -82,7 +82,7 @@ func TestOpenBelowRetentionLimitUntouched(t *testing.T) {
 	t.Cleanup(func() { _ = first.Close() })
 	dir := filepath.Dir(first.Name())
 	want := map[string]bool{filepath.Base(first.Name()): true}
-	for _, kind := range []Kind{PostWorktree, OnArchive} {
+	for _, kind := range []Kind{PostWorktree, OnArchive, Setup} {
 		for i := 0; i < 19; i++ {
 			name := fmt.Sprintf("%s-v1-%d.log", kind, i)
 			seedLog(t, dir, name, time.Now().Add(-24*time.Hour))

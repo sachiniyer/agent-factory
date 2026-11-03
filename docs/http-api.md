@@ -278,8 +278,10 @@ not list. They fall into three groups:
 - **Internal JSON-envelope RPCs**, same shape as the cataloged ones but deliberately
   unadvertised as public API: `POST /v1/Preview` (the TUI's render path),
   `POST /v1/PauseStatusPoll` and `POST /v1/ResumeStatusPoll` (attach coordination),
-  and `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff
-  transport).
+  `POST /v1/HandoffSessionV2` (the version-bound account-aware handoff transport),
+  and `POST /v1/WorkspaceFacts` (reads a session's workspace for kill
+  confirmations: the off-box TUI's remote measurement of what a kill destroys,
+  and the web client's local kept-branch lookup).
 - **Non-RPC surfaces**, which speak something other than the envelope: the WebSocket
   planes `GET /v1/sessions/{id}/stream`, `GET /v1/sessions/{id}/stream-info` and
   `GET /v1/events`; the config-assistant trio on `/v1/config-assistant` and the

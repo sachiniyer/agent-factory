@@ -54,6 +54,10 @@ type ResolvedConfig struct {
 	// in-repo value when its key is present (even empty), otherwise the
 	// legacy ~/.agent-factory/repos/<id>/config.json value.
 	PostWorktreeCommands []string `config:"post_worktree_commands"`
+	// SetupCommands are the effective daemon-side setup hook entries (#6667).
+	// In-repo only: a checked-in command never runs from the legacy per-repo
+	// config or the global file.
+	SetupCommands []string `config:"setup_commands"`
 	// RemoteHooks is the effective remote hook backend config, with the
 	// same in-repo-then-legacy resolution as PostWorktreeCommands. Command
 	// values that were relative filesystem paths have been rewritten to

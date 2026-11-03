@@ -418,7 +418,6 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 		errs = append(errs, worktreeRetentionError(err, title))
 		return errors.Join(errs...)
 	}
-
 	i.mu.Lock()
 	mode.finalize(i, closed, gw)
 	// Every pane above — live tabs and pending handles alike — is CONFIRMED dead by

@@ -283,6 +283,22 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 		}
 		res.CallbackUnavailable = rerr.Error()
 	}
+
+	// The setup hook runs here — after provisioning has established the
+	// session's ssh route, agent-server and auth, before the caller launches
+	// the agent and before the worktree's post_worktree_commands (#6667). Its
+	// failure is non-blocking by design; the note rides the result onto the
+	// session row the same way CallbackUnavailable does.
+	//
+	// It runs ONLY for the daemon's real create. SandboxCredentials is the
+	// existing discriminator — "nil ⇒ every non-daemon caller" — so the TUI's
+	// throwaway naming placeholder, direct NewInstance callers in tests, and
+	// the in-sandbox agent-server (HostedRemotely, whose hook is the daemon's
+	// business and would otherwise run a second time inside the sandbox with
+	// the wrong environment) all skip it.
+	if opts.SandboxCredentials != nil && !opts.HostedRemotely {
+		res.SetupHookFailed = runSessionSetupHook(opts, absPath, kind, res.Backend)
+	}
 	return res, nil
 }
 
@@ -617,6 +633,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		return nil, resolveBackendErr
 	}
 
+	// Give the factory the id the instance will carry so anything it derives
+	// per-session during provisioning — the setup hook's staging dir names
+	// itself after it (#6667) — is the same identity the row records. opts is
+	// a copy; this backfill reaches only the factory call below.
+	opts.ID = id
 	res, err := backendFactory(opts, absPath, kind)
 	if err != nil {
 		return nil, err
@@ -722,6 +743,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		runtimeTeardown:       res.Teardown,
 		callbackUnavailable:   callbackUnavailableReasonFor(opts, res),
 		agentConfigSkipped:    append([]string(nil), res.AgentConfigSkipped...),
+		setupHookFailed:       res.SetupHookFailed,
 		hostedRemotely:        opts.HostedRemotely,
 		advertisedFeatures:    opts.AdvertisedFeatures,
 		beforeWorktreeCreate:  opts.BeforeWorktreeCreate,
