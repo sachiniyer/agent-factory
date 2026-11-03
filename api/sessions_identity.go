@@ -216,15 +216,6 @@ func pollCredentialBoundCaller() (session.InstanceData, bool, error) {
 	}
 }
 
-// insideAfTmuxSession reports whether this command runs in a tmux session af
-// spawned — the af_ prefix is af's own marker, so it names only sessions af
-// made. The guards that key on it re-read the name rather than trusting a
-// caller, so a missed lookup answers false.
-func insideAfTmuxSession() bool {
-	name, err := currentTmuxName()
-	return err == nil && strings.HasPrefix(name, tmux.TmuxPrefix)
-}
-
 // callerSessionFn resolves the credential-bound session; a var so tests can
 // substitute the daemon. The context bounds the round-trip, so the retry loop
 // above is bounded in wall time and not only in sleeps.
