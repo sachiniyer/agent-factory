@@ -406,6 +406,18 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// session from a vanished one; this path deliberately does not, because it must
 	// never conclude death. The attach already answers that question.
 	m.resolveIdleLiveness(instance, obs.Content, epoch)
+	// The same runtime just answered and crossed out of Lost; its restore
+	// give-up/wait verdict is stale, the same rule as the unpaused poll's
+	// observedAlive block. Make the retirement durable so a restart cannot
+	// reload the old outage and suppress a later genuine loss's recovery.
+	if instance.GetLiveness() != session.LiveLost {
+		if instance.ClearLostRestoreFailureAtObservation(backstopGeneration) {
+			churnCheckpoint = true
+		}
+		if instance.ClearLostRestoreWaitAtObservation(backstopGeneration) {
+			churnCheckpoint = true
+		}
+	}
 	// The run-marker flip is durable on its own: a held gate releasing on a
 	// Ready→Ready observation moves no liveness, and nothing else on this
 	// path writes — a restart would resurrect the finished run into its held
