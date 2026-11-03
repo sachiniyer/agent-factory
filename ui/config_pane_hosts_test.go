@@ -5,6 +5,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 )
@@ -464,6 +466,50 @@ func TestConfigPaneHostBusyRestsVerbs(t *testing.T) {
 	}
 	if _, asked := c.TakeHostCheckRequest(); asked {
 		t.Error("no second probe stacks behind the first")
+	}
+}
+
+// Busy rests the row's verbs, not the pane: navigation, esc and the rest still
+// work while a probe runs — a slow ssh must never lock the overlay (#6718
+// review).
+func TestConfigPaneHostBusyStillNavigates(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+
+	pressKey(c, "down")
+	if row := c.rows[c.selectedIdx].host; row == nil || row.Name != "box2" {
+		t.Error("a busy row must not swallow navigation — the overlay is not locked by a probe")
+	}
+	selectHostRow(t, c, "box1")
+	pressKey(c, "esc")
+	if c.HasFocus() {
+		t.Error("esc must still close the overlay while a probe runs")
+	}
+}
+
+// The `hosts` and `default_host` manifest rows stay editable keys, and the
+// section derives FROM them: hand-editing one must re-derive the section's
+// rows rather than leaving the old destinations and marks on screen.
+func TestConfigPaneHostsFollowHandEdits(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "box1")
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: k, Value: v}, "", nil
+	}
+	selectKey(t, c, "default_host")
+	c.beginEdit()
+	c.input.SetValue("box2")
+	// The value editor switches on msg.Type, not String: a real KeyEnter.
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	selectHostRow(t, c, "box2")
+	if !c.rows[c.selectedIdx].host.IsDefault {
+		t.Error("editing default_host must move the section's default mark")
+	}
+	selectHostRow(t, c, "box1")
+	if c.rows[c.selectedIdx].host.IsDefault {
+		t.Error("the old default must lose its mark on the same edit")
 	}
 }
 

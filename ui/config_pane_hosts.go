@@ -265,7 +265,14 @@ func (c *ConfigPane) handleHostKey(msg tea.KeyMsg) bool {
 		return true
 	}
 	if c.hostBusy(row.Name) {
-		return true
+		// A probing row rests its VERBS, not the pane: navigation, esc and the
+		// rest still fall through to the ordinary switch so a slow ssh never
+		// locks the overlay.
+		switch msg.String() {
+		case "enter", "d", "D":
+			return true
+		}
+		return false
 	}
 	switch msg.String() {
 	case "enter":
@@ -509,8 +516,28 @@ func (c *ConfigPane) hostVerdictLines(row HostRow) []string {
 func (c *ConfigPane) beginHostAdd() {
 	c.hosts.adding = true
 	c.hosts.form = newHostAddForm()
+	c.sizeHostFields()
 	c.hosts.form.fields[0].input.Focus()
 	c.clearStatus()
+}
+
+// sizeHostFields bounds each form input to the pane — an unbounded textinput
+// renders its whole value, so a long path would scroll the cursor off the
+// clipped row. Same job sizeEditField does for the value editor.
+func (c *ConfigPane) sizeHostFields() {
+	if c.width <= 0 {
+		return
+	}
+	// cursor(2) + label column(21) + a little room for the toggle box's note.
+	width := c.width - 26
+	if width < 16 {
+		width = 16
+	}
+	for i := range c.hosts.form.fields {
+		if !c.hosts.form.fields[i].toggle {
+			c.hosts.form.fields[i].input.Width = width
+		}
+	}
 }
 
 func (c *ConfigPane) cancelHostAdd() {

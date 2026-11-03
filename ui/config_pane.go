@@ -214,6 +214,7 @@ func (c *ConfigPane) SetSize(width, height int) {
 	c.width = width
 	c.height = height
 	c.sizeEditField()
+	c.sizeHostFields()
 	// An open trace was wrapped for the old width: lines emitted wider than
 	// the pane wrap or clamp in the dialog while the scroll window still
 	// budgets against the old count, leaving parts of it unreachable. Keep
@@ -566,6 +567,10 @@ func (c *ConfigPane) commitEdit() {
 			c.entries[i].Value = result.Value
 		}
 	}
+	// The `hosts`/`default_host` rows remain editable keys AND feed the Hosts
+	// section (#5571 W10.5): rebuild so a hand-edited table row re-derives the
+	// section's rows instead of leaving last save's destinations on screen.
+	c.rebuildRows()
 }
 
 // String renders the pane, windowed so the selected row is always visible.
