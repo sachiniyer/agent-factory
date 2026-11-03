@@ -144,10 +144,9 @@ func TestInstanceRendererAttentionTrailsOutageDetail(t *testing.T) {
 	assert.Contains(t, out, "unreachable <1m ago · ssh: connection reset · needs attention: which file? · af-feature")
 }
 
-// TestNeedsYouMarksShareOneRendering pins one visual language for the rail's two
-// needs-you marks (#6510, #6475): a live attention request draws "!", and an
-// archived item session waiting on an answer draws "?" in place of ▧. Both go
-// through needsYouMark, so both carry the attention role's foreground escape.
+// TestNeedsYouMarksShareOneRendering pins the attention mark's rendering
+// (#6510): a live attention request draws "!" through needsYouMark, carrying
+// the attention role's foreground escape.
 func TestNeedsYouMarksShareOneRendering(t *testing.T) {
 	prevProfile := lipgloss.ColorProfile()
 	prevDark := lipgloss.HasDarkBackground()
@@ -158,22 +157,13 @@ func TestNeedsYouMarksShareOneRendering(t *testing.T) {
 		lipgloss.SetHasDarkBackground(prevDark)
 	})
 
-	waiting, err := session.NewInstance(session.InstanceOptions{Title: "B-7 pick a db", Path: t.TempDir(), Program: "test", BacklogItem: 7})
-	require.NoError(t, err)
-	waiting.SetStatusForTest(session.Archived)
-	waiting.MarkArchivedForAnswer("ask", time.Now())
 	live := attentionInstance(t, session.Ready, "which file?")
 
 	r := NewInstanceRenderer()
 	r.SetWidth(120)
-	waitingRow := r.Render(waiting, 1, false, false, false)
 	liveRow := r.Render(live, 2, false, false, false)
-	assert.Contains(t, waitingRow, needsYouMark(AwaitingAnswerIcon), "the waiting row draws ? through needsYouMark")
 	assert.Contains(t, liveRow, needsYouMark(AttentionIcon), "the attention row draws ! through needsYouMark")
 
 	fg := termenv.RGBColor(theme.Colors()["attention"].Dark).Sequence(false)
-	require.Contains(t, needsYouMark(AwaitingAnswerIcon), fg, "the mark carries the attention role's foreground")
-	plain := ansiEscape.ReplaceAllString(waitingRow, "")
-	assert.NotContains(t, plain, strings.TrimSpace(archivedIcon), "? takes ▧'s place")
-	assert.NotContains(t, plain, strings.TrimSpace(AttentionIcon), "an awaiting-answer row is not an attention request")
+	require.Contains(t, needsYouMark(AttentionIcon), fg, "the mark carries the attention role's foreground")
 }

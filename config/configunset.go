@@ -25,8 +25,8 @@ func UnsetProjectConfigValue(selector, key string) (*UnsetResult, error) {
 	if err := RetiredThemeKeyError(key); err != nil {
 		return nil, err
 	}
-	if key == "auto_yes" {
-		return nil, RemovedAutoYesError()
+	if err := removedKeyError(key); err != nil {
+		return nil, err
 	}
 	project, err := ResolveProjectSelector(selector)
 	if err != nil {
@@ -141,8 +141,8 @@ func UnsetGlobalConfigValueWithDigest(key string) (*UnsetResult, ConfigDigest, e
 	if err := RetiredThemeKeyError(key); err != nil {
 		return nil, ConfigDigest{}, err
 	}
-	if key == "auto_yes" {
-		return nil, ConfigDigest{}, RemovedAutoYesError()
+	if err := removedKeyError(key); err != nil {
+		return nil, ConfigDigest{}, err
 	}
 	canonicalKey := canonicalConfigKey(key)
 	alias, ok := configAliasForCanonical(canonicalKey)

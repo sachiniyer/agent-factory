@@ -487,6 +487,13 @@ func LoadInRepoConfig(repoRoot string) (*InRepoConfig, []byte, error) {
 		warnRemovedAutoYesValue(value, "in-repo config "+prettyPath)
 		delete(metadata.shape, "auto_yes")
 	}
+	if value, present := metadata.shape["backlog"]; present {
+		// The removed Backlog table (#6662): same treatment as auto_yes — warn
+		// when it did something, strip it either way so the allowlist below
+		// does not reject a file af itself wrote.
+		warnRemovedBacklogValue(value, "in-repo config "+prettyPath)
+		delete(metadata.shape, "backlog")
+	}
 	presentKeys := make(map[string]bool, len(metadata.shape))
 	for key := range metadata.shape {
 		presentKeys[key] = true

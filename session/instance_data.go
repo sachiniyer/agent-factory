@@ -176,12 +176,6 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	data.TaskRunInterruptedAt = i.taskRunInterruptedAt
 	data.TaskRunFailurePending = i.taskRunFailurePending
 	data.BacklogItem = i.BacklogItem
-	data.BacklogRunActive = i.backlogRunActive
-	data.BacklogRunEndedAt = i.backlogRunEndedAt
-	if i.backlogArchive != nil {
-		rec := *i.backlogArchive
-		data.BacklogArchive = &rec
-	}
 	gate := i.runGateActiveLocked()
 	data.TaskRunIdleEdgeHeld = gate && i.taskRunIdleEdgeHeld
 	data.TaskRunTurnGateHeld = gate && i.taskRunTurnGateHeld
@@ -505,9 +499,6 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		// finished run from an interrupted one.
 		taskRunActive:        data.TaskRunActive,
 		BacklogItem:          data.BacklogItem,
-		backlogRunActive:     data.BacklogRunActive && data.BacklogItem != 0,
-		backlogRunEndedAt:    data.BacklogRunEndedAt,
-		backlogArchive:       backlogArchiveFromData(data),
 		taskRunInterrupted:   data.TaskRunInterrupted && !data.TaskRunActive,
 		taskRunInterruptedAt: data.TaskRunInterruptedAt,
 		taskRunIdleEdgeHeld:  runGateActiveInData(data) && data.TaskRunIdleEdgeHeld,

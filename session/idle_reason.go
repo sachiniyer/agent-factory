@@ -527,8 +527,8 @@ func (i *Instance) TaskRunInterrupted() bool {
 const taskRunResumeWindow = 15 * time.Minute
 
 // TaskRunObservable reports whether the daemon must observe this session's
-// run: a task run or a backlog run in flight (both use the task run's completion
-// gate), or a task run interrupted and still resumable (#6230). Every gate that
+// run: a task run in flight (the run gate), or a task run interrupted and
+// still resumable (#6230). Every gate that
 // decides whether to watch a run asks this, never TaskRunActive alone.
 func (i *Instance) TaskRunObservable(now time.Time) bool {
 	if i.RunGateActive() {

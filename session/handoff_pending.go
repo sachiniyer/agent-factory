@@ -329,10 +329,6 @@ func (i *Instance) MarkStartupStateUnknown() {
 		i.taskRunActive = false
 		i.touchLocked()
 	}
-	if i.backlogRunActive {
-		i.backlogRunActive = false
-		i.touchLocked()
-	}
 	// The create attempt has settled into an explicit blocked outcome. Leaving
 	// OpCreating set makes projections report an operation that no goroutine owns
 	// and can keep old clients polling forever.

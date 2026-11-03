@@ -226,10 +226,9 @@ type LifecycleView struct {
 	// TaskRunActive is whether this session's task run is still in flight — the one
 	// fact the concurrency cap counts. See Instance.taskRunActive.
 	TaskRunActive bool
-	// BacklogItem and BacklogRunActive describe an item session; see
-	// Instance.backlogRunActive.
-	BacklogItem      int
-	BacklogRunActive bool
+	// BacklogItem is the removed Backlog feature's item id on a session record
+	// (#6662); kept so old records still project. Nothing reads it.
+	BacklogItem int
 	// Recoverable is the backend's Recover capability: whether a lost session can
 	// be revived in place at all.
 	Recoverable bool
@@ -283,7 +282,6 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		RestoreWaitingOnEnvironment: i.lostRestoreWait.valid(),
 		TaskRunActive:               i.taskRunActive,
 		BacklogItem:                 i.BacklogItem,
-		BacklogRunActive:            i.backlogRunActive,
 	}
 }
 

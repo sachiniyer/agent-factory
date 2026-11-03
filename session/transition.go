@@ -656,10 +656,8 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	// session has exactly one run, and anything that happens to it afterwards
 	// (a user prompting it, an un-archive) is not the task's.
 	//
-	// The backlog run marker shares this gate but is re-armed per delivery
-	// (ArmBacklogRun); endRunsLocked clears both markers. The replaced-runtime
-	// interruption below is the TASK run's contract (#4222): a backlog run that
-	// meets a replaced runtime takes the ordinary edges.
+	// endRunsLocked clears the marker and the held edges. The replaced-runtime
+	// interruption below is the TASK run's contract (#4222).
 	if i.runGateActiveLocked() {
 		if i.taskRunActive && ev.kind == tkConfirmLive && from.op == OpRestoring && i.agentRuntimeReplaced {
 			// A restore landing on a REPLACED runtime ends a still-in-flight
@@ -838,10 +836,6 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	if from.liveness == LiveArchived && to.liveness != LiveArchived {
 		i.archivedAt = time.Time{}
 		i.prune.nonce = ""
-		// A session that left the archive no longer waits there for an answer.
-		if i.backlogArchive != nil && !i.backlogArchive.ArchivedAt.IsZero() {
-			i.backlogArchive = nil
-		}
 	}
 	if from.op == OpArchiving && to.op != OpArchiving && i.archiveSettled != nil {
 		close(i.archiveSettled)

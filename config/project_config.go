@@ -222,6 +222,12 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		warnRemovedAutoYesValue(value, "personal project config "+prettyPath)
 		delete(metadata.shape, "auto_yes")
 	}
+	if value, present := metadata.shape["backlog"]; present {
+		// The removed Backlog table (#6662): warn when it did something, strip it
+		// either way.
+		warnRemovedBacklogValue(value, "personal project config "+prettyPath)
+		delete(metadata.shape, "backlog")
+	}
 	for key := range metadata.shape {
 		if !isProjectPersonalKey(key) {
 			return nil, fmt.Errorf("personal project config %s: %q cannot be set per project (allowed keys: %s)",
