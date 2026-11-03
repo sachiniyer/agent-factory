@@ -6250,26 +6250,26 @@ function currentXtermTheme() {
 
 // src/recovery.ts
 function recoveryScreen(state) {
-  const action2 = h("button", { type: "button", class: "af-recovery-action" }, state.action);
-  action2.addEventListener("click", state.run);
+  const action = h("button", { type: "button", class: "af-recovery-action" }, state.action);
+  action.addEventListener("click", state.run);
   const screen = h(
     "section",
     { class: "af-recovery" },
     h("h1", { class: state.failed ? "af-recovery-title af-recovery-failed" : "af-recovery-title" }, state.condition),
     ...state.detail ? [h("p", { class: "af-recovery-detail" }, state.detail)] : [],
-    action2
+    action
   );
   scopeRecovery(screen);
   if (state.failed) screen.setAttribute("role", "alert");
   return screen;
 }
-function mutationNotice(condition, detail, action2, failed = true) {
+function mutationNotice(condition, detail, action, failed = true) {
   return scopeRecovery(h(
     "div",
     { class: "af-recovery af-recovery-notice", role: "alert" },
     h("strong", { class: failed ? "af-recovery-failed" : "" }, condition),
     h("p", { class: "af-recovery-detail" }, detail),
-    h("p", { class: "af-recovery-next" }, action2)
+    h("p", { class: "af-recovery-next" }, action)
   ));
 }
 function scopeRecovery(element) {
@@ -6651,9 +6651,9 @@ function hasAttention(s) {
 function otherAttentionCount(sessions, selectedId) {
   return sessions.filter((s) => s.id !== selectedId && hasAttention(s)).length;
 }
-function attentionWords(count2) {
-  if (count2 <= 0) return "";
-  return count2 === 1 ? "1 session needs attention" : `${count2} sessions need attention`;
+function attentionWords(count) {
+  if (count <= 0) return "";
+  return count === 1 ? "1 session needs attention" : `${count} sessions need attention`;
 }
 function attentionReason(s) {
   return hasAttention(s) ? (s.attention?.reason ?? "").trim() : "";
@@ -7052,7 +7052,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "58a3ecce2d13";
+var CLIENT_VERSION = "8a02ca5279c8";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7312,9 +7312,9 @@ async function listDirectory(path, token2) {
   const resp = await af("ListDirectory", { path }, token2);
   return { ...resp, entries: resp.entries ?? [] };
 }
-function requireSessionID(id, action2) {
+function requireSessionID(id, action) {
   if (id === "") {
-    throw new ApiError(0, `cannot ${action2}: this session has no stable id to target safely`);
+    throw new ApiError(0, `cannot ${action}: this session has no stable id to target safely`);
   }
 }
 async function createTab(id, title, token2) {
@@ -7435,9 +7435,9 @@ async function listTasks(token2) {
   const resp = await af("ListTasks", {}, token2);
   return resp.tasks ?? [];
 }
-function requireTaskID(id, action2) {
+function requireTaskID(id, action) {
   if (id === "") {
-    throw new ApiError(0, `cannot ${action2}: this task has no stable id to target safely`);
+    throw new ApiError(0, `cannot ${action}: this task has no stable id to target safely`);
   }
 }
 async function addTask(task, token2) {
@@ -7541,7 +7541,7 @@ async function startAccountLogin(agent, name, token2) {
 }
 
 // src/nav.ts
-var VIEWS = ["sessions", "backlog", "tasks", "config"];
+var VIEWS = ["sessions", "tasks", "config"];
 function cycleView(current, delta) {
   const i = VIEWS.indexOf(current);
   const n = VIEWS.length;
@@ -8080,33 +8080,33 @@ function terminalChrome(opts) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
-  const action2 = (label, className, run) => {
-    const button2 = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
-    button2.addEventListener("click", () => {
+  const action = (label, className, run) => {
+    const button = h("button", { type: "button", class: `af-ghost af-term-action ${className}` }, label);
+    button.addEventListener("click", () => {
       menu.close();
       run();
     });
-    return button2;
+    return button;
   };
   const newTabButton = (kind, label, glyph, name) => {
-    const button2 = h(
+    const button = h(
       "button",
       { type: "button", class: `af-ghost af-term-action af-term-new af-term-new-${kind}`, title: name },
       icon(glyph),
       h("span", { class: "af-term-new-label" }, label)
     );
-    button2.setAttribute("aria-label", name);
-    button2.hidden = true;
-    button2.addEventListener("mousedown", (event) => {
+    button.setAttribute("aria-label", name);
+    button.hidden = true;
+    button.addEventListener("mousedown", (event) => {
       if (event.detail > 1) event.preventDefault();
     });
-    button2.addEventListener("click", (event) => {
+    button.addEventListener("click", (event) => {
       if (event.detail > 1) return;
       menu.close();
-      button2.blur();
+      button.blur();
       opts.newTab(kind);
     });
-    return button2;
+    return button;
   };
   const newTerminal = newTabButton("shell", "Terminal", "terminal", "New terminal tab");
   const newVSCode = newTabButton("vscode", "VS Code", "panels", "New VS Code tab");
@@ -8121,24 +8121,24 @@ function terminalChrome(opts) {
   tabs.setAttribute("aria-label", "Session tabs");
   const actions2 = h("div", { class: "af-term-actions" });
   actions2.hidden = true;
-  const retry = action2("Retry limit", "", opts.retry);
+  const retry = action("Retry limit", "", opts.retry);
   retry.title = "Retry after the usage limit";
-  const deliver = action2("Mark delivered", "", opts.markDelivered);
+  const deliver = action("Mark delivered", "", opts.markDelivered);
   deliver.title = "Retire the pending handoff mission without resending \u2014 the pane already shows it landed";
   deliver.hidden = true;
-  const handoff = action2("Handoff", "", opts.handoff);
+  const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
-  const copy = action2("Copy link", "af-copy-link", opts.copyLink);
+  const copy = action("Copy link", "af-copy-link", opts.copyLink);
   copy.title = "Copy link to this session";
-  const fontDecrease = action2("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
+  const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
   fontDecrease.title = "Decrease terminal text size";
   fontDecrease.setAttribute("aria-label", "Decrease terminal text size");
-  const fontIncrease = action2("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
+  const fontIncrease = action("A+", "af-term-zoom", () => opts.fontSizeStep?.(1));
   fontIncrease.title = "Increase terminal text size";
   fontIncrease.setAttribute("aria-label", "Increase terminal text size");
   const tabUnavailable = h("span", { class: "af-tab-new-unavailable" });
   tabUnavailable.hidden = true;
-  const closePane = action2("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
+  const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
   menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
@@ -8194,7 +8194,7 @@ function viewNavigation(onSelect) {
   const el2 = h("div", { class: "af-viewnav", role: "tablist" });
   el2.setAttribute("aria-label", "Views");
   const tabs = /* @__PURE__ */ new Map();
-  const labels = { sessions: "Sessions", backlog: "Backlog", tasks: "Tasks", config: "Config" };
+  const labels = { sessions: "Sessions", tasks: "Tasks", config: "Config" };
   for (const view of VIEWS) {
     const tab = h("button", { type: "button", class: "af-viewtab", role: "tab" }, labels[view]);
     tab.dataset.view = view;
@@ -8300,11 +8300,11 @@ function emptyAccountsState() {
 var ACCOUNT_INPUT_ATTR = "data-account-input";
 var ACCOUNTS_NOTE = "Sign in with the agent\u2019s login flow. Follow the URL in the pane.";
 function renderAccountsSection(state, actions2, registration = { open: false, agent: "" }) {
-  const section3 = h("section", { class: "af-accounts" });
-  section3.setAttribute("aria-label", "Accounts");
+  const section = h("section", { class: "af-accounts" });
+  section.setAttribute("aria-label", "Accounts");
   if (state.loaded === false && !state.error) {
-    section3.append(h("p", {}, "Connecting\u2026"));
-    return section3;
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
   }
   const head = h(
     "div",
@@ -8312,22 +8312,22 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
     h("span", { class: "af-accounts-title" }, "Accounts"),
     h("span", { class: "af-view-count" }, String(state.entries.length))
   );
-  section3.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
+  section.append(head, h("p", { class: "af-accounts-note" }, ACCOUNTS_NOTE));
   if (state.error !== "") {
-    section3.append(
+    section.append(
       h("p", { class: "af-accounts-error", role: "alert" }, `Accounts could not be read: ${state.error}`)
     );
-    return section3;
+    return section;
   }
   if (state.agents.length === 0) {
-    section3.append(
+    section.append(
       h(
         "p",
         { class: "af-accounts-empty" },
         "No agents support accounts."
       )
     );
-    return section3;
+    return section;
   }
   const list = h("div", { class: "af-accounts-list" });
   for (const agent of state.agents) {
@@ -8357,7 +8357,7 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
   agentSelect.addEventListener("change", sync);
   sync();
   add.append(h("summary", {}, "Add account"), h("label", { class: "af-modal-field" }, "Agent", agentSelect), ...forms);
-  section3.append(list, add);
+  section.append(list, add);
   if (state.entries.length === 0 && !registration.open) {
     add.hidden = true;
     const empty = recoveryScreen({ condition: "No accounts", action: "Add account", run: () => {
@@ -8367,9 +8367,9 @@ function renderAccountsSection(state, actions2, registration = { open: false, ag
       registration.open = true;
       add.querySelector(".af-accounts-register:not([hidden]) input")?.focus();
     } });
-    section3.prepend(empty);
+    section.prepend(empty);
   }
-  return section3;
+  return section;
 }
 function renderAccountRow(entry, status, actions2) {
   const row = h("div", { class: "af-accounts-row" });
@@ -8387,13 +8387,13 @@ function renderAccountRow(entry, status, actions2) {
       h("span", { class: "af-accounts-dir" }, entry.dir)
     )
   );
-  const button2 = h(
+  const button = h(
     "button",
     { type: "button", class: "af-ghost af-accounts-login" },
     entry.logged_in ? "Log in again" : "Log in"
   );
-  button2.addEventListener("click", () => actions2.login(entry.agent, entry.name));
-  row.append(button2);
+  button.addEventListener("click", () => actions2.login(entry.agent, entry.name));
+  row.append(button);
   if (entry.registration_only) {
     row.append(
       h(
@@ -8428,9 +8428,9 @@ function renderRegisterRow(agent, status, actions2) {
       submit();
     }
   });
-  const button2 = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
-  button2.addEventListener("click", submit);
-  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button2);
+  const button = h("button", { type: "button", class: "af-ghost af-accounts-add" }, "Register");
+  button.addEventListener("click", submit);
+  row.append(h("div", { class: "af-accounts-label" }, field("Name", input)), button);
   appendStatus(row, status, agent, "");
   return row;
 }
@@ -8451,11 +8451,11 @@ function emptyQuotaState() {
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
 function renderQuotaSection(state) {
-  const section3 = h("section", { class: "af-quota" });
-  section3.setAttribute("aria-label", "Usage");
+  const section = h("section", { class: "af-quota" });
+  section.setAttribute("aria-label", "Usage");
   if (state.loaded === false && !state.error) {
-    section3.append(h("p", {}, "Connecting\u2026"));
-    return section3;
+    section.append(h("p", {}, "Connecting\u2026"));
+    return section;
   }
   const head = h(
     "div",
@@ -8463,21 +8463,21 @@ function renderQuotaSection(state) {
     h("span", { class: "af-quota-title" }, "Usage"),
     h("span", { class: "af-view-count" }, String(state.agents.length))
   );
-  section3.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
+  section.append(head, h("p", { class: "af-quota-note" }, QUOTA_NOTE));
   if (state.error !== "") {
-    section3.append(
+    section.append(
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
     );
-    return section3;
+    return section;
   }
   for (const warning of state.warnings) {
-    section3.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
+    section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
   }
   if (state.agents.length === 0) {
-    section3.append(
+    section.append(
       h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
     );
-    return section3;
+    return section;
   }
   const list = h("div", { class: "af-quota-list" });
   for (const agent of state.agents) {
@@ -8494,8 +8494,8 @@ function renderQuotaSection(state) {
     );
     list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
   }
-  section3.append(list);
-  return section3;
+  section.append(list);
+  return section;
 }
 
 // src/hosts.ts
@@ -8582,8 +8582,8 @@ function hostsEditRefusal(version) {
   return `the running daemon${v} cannot apply a host-list edit atomically; run \`af daemon restart\` to upgrade it, then retry (nothing was written)`;
 }
 function renderHostsSection(entries, state, actions2, disclosure = { open: false }) {
-  const section3 = h("section", { class: "af-hosts" });
-  section3.setAttribute("aria-label", "Hosts");
+  const section = h("section", { class: "af-hosts" });
+  section.setAttribute("aria-label", "Hosts");
   const { rows, parseError } = hostRows(entries);
   const busy = (name) => state.busy.includes(name) || state.busy.includes("");
   const checkAllBtn = h(
@@ -8600,7 +8600,7 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
     h("span", { class: "af-view-count" }, String(rows.length)),
     checkAllBtn
   );
-  section3.append(
+  section.append(
     head,
     h(
       "p",
@@ -8609,20 +8609,20 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
     )
   );
   if (parseError !== "") {
-    section3.append(
+    section.append(
       h("p", { class: "af-hosts-error", role: "alert" }, `The host table could not be read: ${parseError}`)
     );
-    return section3;
+    return section;
   }
   if (state.editable !== true) {
     const reason = state.editable === false ? "This daemon is older than atomic host-list edits; adding or removing a host here is refused rather than risk writing an empty host table. `af hosts` on the host itself works, or upgrade the daemon." : "The daemon's capabilities could not be read; adding or removing a host here is refused until they can. Check the connection and reopen this view.";
-    section3.append(h("p", { class: "af-hosts-notice" }, reason));
+    section.append(h("p", { class: "af-hosts-notice" }, reason));
   }
   const list = h("div", { class: "af-hosts-list" });
   for (const row of rows) {
     list.append(renderHostRow(row, entries, state, actions2, busy(row.name)));
   }
-  section3.append(list);
+  section.append(list);
   if (state.editable === true) {
     const add = h("details", { class: "af-host-disclosure" });
     add.open = disclosure.open;
@@ -8633,7 +8633,7 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
       h("summary", {}, "Add host"),
       renderAddForm(entries, state.status, actions2)
     );
-    section3.append(add);
+    section.append(add);
     if (rows.length === 0 && !disclosure.open) {
       add.hidden = true;
       const empty = recoveryScreen({
@@ -8647,19 +8647,19 @@ function renderHostsSection(entries, state, actions2, disclosure = { open: false
           add.querySelector(`input[${HOST_INPUT_ATTR}="name"]`)?.focus();
         }
       });
-      section3.prepend(empty);
+      section.prepend(empty);
     }
   } else if (rows.length === 0) {
-    section3.append(h("p", { class: "af-hosts-empty" }, "No hosts saved."));
+    section.append(h("p", { class: "af-hosts-empty" }, "No hosts saved."));
   }
   if (state.status !== null) {
     const formShowsIt = state.status.name === "" && state.editable === true && disclosure.open;
     const orphaned = state.status.name !== "" && !rows.some((r) => r.name === state.status.name);
     if (orphaned || state.status.name === "" && !formShowsIt) {
-      section3.append(statusBlock(state.status));
+      section.append(statusBlock(state.status));
     }
   }
-  return section3;
+  return section;
 }
 function renderHostRow(row, entries, state, actions2, isBusy) {
   const el2 = h("div", { class: "af-hosts-row" });
@@ -8763,8 +8763,8 @@ function renderAddForm(entries, status, actions2) {
     }
     actions2.add(draft);
   };
-  const button2 = h("button", { type: "button", class: "af-ghost af-hosts-add" }, "Add host");
-  button2.addEventListener("click", submit);
+  const button = h("button", { type: "button", class: "af-ghost af-hosts-add" }, "Add host");
+  button.addEventListener("click", submit);
   name.input.addEventListener("keydown", (e) => {
     if (e.key === "Enter") {
       e.preventDefault();
@@ -8787,7 +8787,7 @@ function renderAddForm(entries, status, actions2) {
     hkvControl,
     sshConfigField,
     makeDefaultField,
-    h("div", { class: "af-hosts-addrow" }, button2)
+    h("div", { class: "af-hosts-addrow" }, button)
   );
   if (status !== null && status.name === "") {
     form.append(statusBlock(status));
@@ -9089,20 +9089,20 @@ var ConfigPane = class {
   }
   /** Every register field's current text, keyed by agent. */
   readAccountDrafts() {
-    const drafts2 = /* @__PURE__ */ new Map();
+    const drafts = /* @__PURE__ */ new Map();
     for (const field2 of this.el.querySelectorAll(`input[${ACCOUNT_INPUT_ATTR}]`)) {
       const agent = field2.getAttribute(ACCOUNT_INPUT_ATTR);
       if (agent !== null && field2.value !== "") {
-        drafts2.set(agent, field2.value);
+        drafts.set(agent, field2.value);
       }
     }
-    return drafts2;
+    return drafts;
   }
   /** Puts them back on the freshly rendered fields. An agent whose row is gone —
    *  a roster that shrank between renders — simply drops its draft; there is no
    *  field left to hold it. */
-  restoreAccountDrafts(drafts2) {
-    for (const [agent, value] of drafts2) {
+  restoreAccountDrafts(drafts) {
+    for (const [agent, value] of drafts) {
       const field2 = this.accountInput(agent);
       if (field2) {
         field2.value = value;
@@ -9119,19 +9119,19 @@ var ConfigPane = class {
    *  option. Skipping EMPTY text fields would lose a deliberate blank, so they
    *  are recorded unconditionally — the restore re-applies "" harmlessly. */
   readHostDrafts() {
-    const drafts2 = /* @__PURE__ */ new Map();
+    const drafts = /* @__PURE__ */ new Map();
     for (const field2 of this.el.querySelectorAll(`[${HOST_INPUT_ATTR}]`)) {
       const key = field2.getAttribute(HOST_INPUT_ATTR);
       if (key === null) continue;
       const checked = field2 instanceof HTMLInputElement && field2.type === "checkbox" ? field2.checked : false;
-      drafts2.set(key, { value: field2.value, checked });
+      drafts.set(key, { value: field2.value, checked });
     }
-    return drafts2;
+    return drafts;
   }
   /** Puts them back on the freshly rendered fields. A field that is gone — the
    *  capability gate closed the form mid-draft — simply drops its draft. */
-  restoreHostDrafts(drafts2) {
-    for (const [key, draft] of drafts2) {
+  restoreHostDrafts(drafts) {
+    for (const [key, draft] of drafts) {
       const field2 = this.hostInput(key);
       if (field2 === null) continue;
       if (field2 instanceof HTMLInputElement && field2.type === "checkbox") {
@@ -9300,9 +9300,9 @@ var ConfigPane = class {
    *  a layer did. Rendered only while the row's key trigger is open, so a closed
    *  row carries no trace chrome. */
   renderExplainSection(e) {
-    const section3 = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
-    section3.append(this.renderExplainBody());
-    return section3;
+    const section = h("div", { class: "af-config-explain", id: `af-config-explain-${e.key}` });
+    section.append(this.renderExplainBody());
+    return section;
   }
   toggleExplain(key) {
     if (this.explainKey === key) {
@@ -9951,11 +9951,11 @@ var TerminalSoftInput = class {
     this.send(input.data);
   };
   /** Queue custom input after xterm's already-scheduled composition finalizer. */
-  deferAfterPendingComposition(action2) {
+  deferAfterPendingComposition(action) {
     if (!this.pending.length && !this.postCompositionTimers.size) return false;
     const release = setTimeout(() => {
       this.postCompositionTimers.delete(release);
-      action2();
+      action();
     }, 0);
     this.postCompositionTimers.add(release);
     return true;
@@ -10333,11 +10333,11 @@ var TerminalKeybar = class {
       row.className = "af-keybar-row";
       this.rows.push(row);
       for (const key of keys) {
-        const button2 = document.createElement("button");
-        button2.type = "button";
-        button2.textContent = key;
+        const button = document.createElement("button");
+        button.type = "button";
+        button.textContent = key;
         const zoom = FONT_ZOOM_LABELS[key];
-        button2.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
+        button.setAttribute("aria-label", key === "^C" ? "Interrupt (^C)" : zoom?.name ?? key);
         const act = (event) => {
           if (!this.focused || !this.phone.matches) return;
           if (key === "Arrows" || key === "More keys") this.arrows = key === "Arrows";
@@ -10351,29 +10351,29 @@ var TerminalKeybar = class {
         };
         const onRelease = key === "Paste";
         let pressedId;
-        button2.addEventListener("pointerdown", (event) => {
+        button.addEventListener("pointerdown", (event) => {
           if (onRelease) pressedId = event.pointerId;
           keybarPointerDown(event, onRelease ? void 0 : act);
         });
         if (onRelease) {
-          button2.addEventListener("pointerup", (event) => {
+          button.addEventListener("pointerup", (event) => {
             if (event.pointerId !== pressedId) return;
             pressedId = void 0;
-            const rect = button2.getBoundingClientRect();
+            const rect = button.getBoundingClientRect();
             if (event.clientX >= rect.left && event.clientX < rect.right && event.clientY >= rect.top && event.clientY < rect.bottom) act(event);
           });
-          button2.addEventListener("pointercancel", (event) => {
+          button.addEventListener("pointercancel", (event) => {
             if (event.pointerId === pressedId) pressedId = void 0;
           });
-          button2.addEventListener("pointerleave", () => {
+          button.addEventListener("pointerleave", () => {
             pressedId = void 0;
           });
         }
-        button2.addEventListener("click", (event) => {
+        button.addEventListener("click", (event) => {
           if (keybarClickIsPointerless(event)) act();
         });
-        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button2);
-        row.append(button2);
+        if (key === "Ctrl" || key === "Alt") this.buttons.set(key, button);
+        row.append(button);
       }
       this.bar.append(row);
     }
@@ -10663,13 +10663,13 @@ var TerminalKeybar = class {
     this.rows.forEach((row, index) => {
       row.hidden = index !== (this.arrows ? 1 : 0);
     });
-    for (const [key, button2] of this.buttons) {
+    for (const [key, button] of this.buttons) {
       const state = this.modifiers.state(key);
-      button2.dataset.state = state;
-      button2.setAttribute("aria-pressed", String(state !== "off"));
-      button2.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
-      button2.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
-      button2.textContent = state === "locked" ? `\u25B8 ${key}` : key;
+      button.dataset.state = state;
+      button.setAttribute("aria-pressed", String(state !== "off"));
+      button.setAttribute("aria-description", state === "locked" ? "Locked; tap to release" : state === "once" ? "Next key" : "Double tap to lock");
+      button.title = state === "locked" ? `${key} locked \xB7 Tap to release` : `${key} \xB7 Double tap to lock`;
+      button.textContent = state === "locked" ? `\u25B8 ${key}` : key;
     }
   }
   layout = () => {
@@ -10688,9 +10688,9 @@ var TerminalKeybar = class {
       this.bar.style.width = `${width}px`;
       const narrow = width < 348;
       this.bar.classList.toggle("af-keybar-narrow", narrow);
-      for (const button2 of this.bar.querySelectorAll("button[aria-label='More keys']")) {
+      for (const button of this.bar.querySelectorAll("button[aria-label='More keys']")) {
         const text = narrow ? "More" : "More keys";
-        if (button2.textContent !== text) button2.textContent = text;
+        if (button.textContent !== text) button.textContent = text;
       }
       this.bar.style.top = `${bottom - this.bar.getBoundingClientRect().height}px`;
       const height = Math.max(0, bottom - this.bar.getBoundingClientRect().height - this.host.getBoundingClientRect().top);
@@ -10905,8 +10905,8 @@ var MidLineHold = class {
     const lastCommit = Math.max(data.lastIndexOf(COMMIT), data.lastIndexOf(ABANDON));
     if (lastCommit >= 0) {
       this.releasedByIdleBound = false;
-      const tail2 = data.slice(lastCommit + 1);
-      if (!startsADraft(tail2)) {
+      const tail = data.slice(lastCommit + 1);
+      if (!startsADraft(tail)) {
         this.uncommitted = false;
         return "none";
       }
@@ -11146,15 +11146,15 @@ function wordRangeAtColumn(cells, col) {
   if (!partOfWord(col)) {
     return null;
   }
-  let start2 = col;
-  while (start2 > 0 && partOfWord(start2 - 1)) {
-    start2 -= 1;
+  let start = col;
+  while (start > 0 && partOfWord(start - 1)) {
+    start -= 1;
   }
   let end = col;
   while (end + 1 < cells.length && partOfWord(end + 1)) {
     end += 1;
   }
-  return { start: start2, length: end - start2 + 1 };
+  return { start, length: end - start + 1 };
 }
 function lineContentColumns(cells) {
   let last = -1;
@@ -12724,7 +12724,7 @@ var AttachTerminal = class {
    *  attached TUI's claim, or another window's, and re-open the window #1638
    *  closed. Ceasing to renew costs at most one lease of extra hold and cannot
    *  revoke anyone else's protection — see delivery_hold.ts. */
-  dispatchHold(action2) {
+  dispatchHold(action) {
     if (!this.midLine.holding) {
       this.stopMidLineTimer();
     } else if (this.midLineTimer === null) {
@@ -12732,8 +12732,8 @@ var AttachTerminal = class {
         this.dispatchHold(this.midLine.tick(holdClockMs()));
       }, 500);
     }
-    if (action2 === "pause") {
-      this.cb.onDeliveryHold?.(action2);
+    if (action === "pause") {
+      this.cb.onDeliveryHold?.(action);
     }
   }
   stopMidLineTimer() {
@@ -12801,7 +12801,7 @@ function loginWithoutPaneCopy(login) {
 }
 function openAccountLogin(opts) {
   const { token: token2, mountHost, login, onClosed } = opts;
-  let closed2 = false;
+  let closed = false;
   let term = null;
   const status = h("span", { class: "af-assistant-status" }, "Connecting\u2026");
   status.setAttribute("role", "status");
@@ -12828,10 +12828,10 @@ function openAccountLogin(opts) {
   panel.setAttribute("aria-label", `Log in to ${title}`);
   const overlay = h("div", { class: "af-assistant-overlay" }, panel);
   function close() {
-    if (closed2) {
+    if (closed) {
       return;
     }
-    closed2 = true;
+    closed = true;
     term?.dispose();
     term = null;
     overlay.remove();
@@ -12854,7 +12854,7 @@ function openAccountLogin(opts) {
   mountHost.append(overlay);
   term = new AttachTerminal(termHost2, token2, accountLoginStreamEndpoint(login.agent, login.name), {
     onStatus: (s) => {
-      if (!closed2) {
+      if (!closed) {
         status.textContent = loginTerminalStatusCopy(s, login);
       }
     },
@@ -12904,7 +12904,7 @@ function spawnFailureCopy(e) {
 }
 function openConfigAssistant(opts) {
   const { token: token2, mountHost, onClosed } = opts;
-  let closed2 = false;
+  let closed = false;
   let term = null;
   const status = h("span", { class: "af-assistant-status" }, "Starting\u2026");
   status.setAttribute("role", "status");
@@ -12960,10 +12960,10 @@ function openConfigAssistant(opts) {
     }
   }
   function close() {
-    if (closed2) {
+    if (closed) {
       return;
     }
-    closed2 = true;
+    closed = true;
     document.removeEventListener("keydown", onKeydown2);
     if (term) {
       term.dispose();
@@ -12980,13 +12980,13 @@ function openConfigAssistant(opts) {
         await spawnConfigAssistant(token2);
         return;
       } catch (e) {
-        if (closed2) {
+        if (closed) {
           throw CLOSED;
         }
         const httpStatus = e instanceof ApiError ? e.status : -1;
         if (httpStatus === 409 && attempt < SPAWN_RETRY_LIMIT) {
           await delay(SPAWN_RETRY_DELAY_MS);
-          if (closed2) {
+          if (closed) {
             throw CLOSED;
           }
           continue;
@@ -12996,12 +12996,12 @@ function openConfigAssistant(opts) {
     }
   }
   function attach() {
-    if (closed2) {
+    if (closed) {
       return;
     }
     term = new AttachTerminal(termHost2, token2, configAssistantStreamEndpoint(), {
       onStatus: (s) => {
-        if (!closed2) {
+        if (!closed) {
           setStatus(terminalStatusText(s));
         }
       },
@@ -13013,7 +13013,7 @@ function openConfigAssistant(opts) {
     term.focus();
   }
   void spawn().then(() => attach()).catch((e) => {
-    if (e === CLOSED || closed2) {
+    if (e === CLOSED || closed) {
       return;
     }
     const copy = spawnFailureCopy(e);
@@ -13817,10 +13817,10 @@ function confirmModal(opts) {
   body.append(h("p", { class: opts.action === "kill" ? "af-modal-text af-modal-danger" : "af-modal-text" }, copy.body));
   const card = handle.el.firstElementChild;
   if (opts.immediateRestore) {
-    const progress2 = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
-    body.append(progress2);
+    const progress = h("p", { class: "af-modal-text", role: "status", id: "af-restore-progress" }, "Restoring session\u2026");
+    body.append(progress);
     card.tabIndex = -1;
-    card.setAttribute("aria-describedby", progress2.id);
+    card.setAttribute("aria-describedby", progress.id);
     let isBusy = false;
     card.addEventListener("keydown", (event) => {
       if (isBusy && event.key === "Tab") {
@@ -13835,7 +13835,7 @@ function confirmModal(opts) {
       if (busy && card.isConnected) card.focus();
       setBusy(busy);
       card.setAttribute("aria-busy", String(busy));
-      progress2.textContent = busy ? "Restoring session\u2026" : "";
+      progress.textContent = busy ? "Restoring session\u2026" : "";
       confirmBtn.textContent = busy ? "Restoring\u2026" : "Retry restore";
     };
     const setError = handle.setError;
@@ -13994,39 +13994,6 @@ function removeTaskModal(name, onConfirm, onCancel) {
   const { handle, body } = modalChrome({ title: `Remove ${name}?`, confirmLabel: "Remove", confirmClass: "af-primary", onCancel });
   body.append(h("p", { class: "af-modal-text af-modal-danger" }, "Delete the task and stop future runs. Keep existing sessions."));
   asForm(handle.el.firstElementChild, onConfirm);
-  return handle;
-}
-function askConfirm(opts, mount2, dismiss) {
-  return new Promise((resolve) => {
-    let settled = false;
-    const settle = (ok) => {
-      if (settled) return;
-      settled = true;
-      resolve(ok);
-    };
-    const m = textConfirmModal({
-      ...opts,
-      onConfirm: () => {
-        settle(true);
-        dismiss(m);
-      },
-      onCancel: () => {
-        settle(false);
-        dismiss(m);
-      }
-    });
-    const close = m.close.bind(m);
-    m.close = () => {
-      settle(false);
-      close();
-    };
-    mount2(m);
-  });
-}
-function textConfirmModal(opts) {
-  const { handle, body } = modalChrome({ title: opts.title, confirmLabel: opts.confirmLabel, confirmClass: "af-primary", onCancel: opts.onCancel });
-  body.append(h("p", { class: "af-modal-text" }, opts.body));
-  asForm(handle.el.firstElementChild, opts.onConfirm);
   return handle;
 }
 function markDeliveredModal(sessionTitle, onConfirm, onCancel) {
@@ -14264,9 +14231,9 @@ function projectSummaries(sessions, tasks, registeredRoots = []) {
     if (!root2) {
       continue;
     }
-    const arr2 = byRoot.get(root2) ?? [];
-    arr2.push(s);
-    byRoot.set(root2, arr2);
+    const arr = byRoot.get(root2) ?? [];
+    arr.push(s);
+    byRoot.set(root2, arr);
   }
   const taskCounts = /* @__PURE__ */ new Map();
   for (const t of tasks) {
@@ -14293,13 +14260,13 @@ function projectSummaries(sessions, tasks, registeredRoots = []) {
   return [...roots].sort().map((root2) => {
     const rows = byRoot.get(root2) ?? [];
     const live = rows.filter((s) => !isArchived(s));
-    const working2 = live.filter((s) => isWorking(s)).length;
+    const working = live.filter((s) => isWorking(s)).length;
     return {
       root: root2,
       name: projectName(root2),
       path: root2,
       liveCount: live.length,
-      workingCount: working2,
+      workingCount: working,
       totalCount: rows.length,
       taskCount: taskCounts.get(root2) ?? 0
     };
@@ -14346,11 +14313,11 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   if (summaries.length === 0) {
     return null;
   }
-  const valid2 = new Set(summaries.map((p) => p.root));
+  const valid = new Set(summaries.map((p) => p.root));
   let best = null;
   for (const s of sessions) {
     const root2 = s.worktree?.repo_path;
-    if (!root2 || isArchived(s) || !valid2.has(root2)) {
+    if (!root2 || isArchived(s) || !valid.has(root2)) {
       continue;
     }
     if (!best || (s.created_at ?? "") > (best.created_at ?? "")) {
@@ -14362,7 +14329,7 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   }
   let bestTask = null;
   for (const t of tasks) {
-    if (!t.project_path || !valid2.has(t.project_path)) {
+    if (!t.project_path || !valid.has(t.project_path)) {
       continue;
     }
     if (!bestTask || (t.created_at ?? "") > (bestTask.created_at ?? "")) {
@@ -14372,11 +14339,11 @@ function defaultProject(sessions, tasks, registeredRoots = []) {
   return bestTask?.project_path ?? summaries[0]?.root ?? null;
 }
 function reconcileProject(sessions, tasks, persisted, current, registeredRoots = []) {
-  const valid2 = validRoots(sessions, tasks, registeredRoots);
-  if (current && valid2.has(current)) {
+  const valid = validRoots(sessions, tasks, registeredRoots);
+  if (current && valid.has(current)) {
     return current;
   }
-  if (persisted && valid2.has(persisted)) {
+  if (persisted && valid.has(persisted)) {
     return persisted;
   }
   return defaultProject(sessions, tasks, registeredRoots);
@@ -14481,16 +14448,16 @@ function rebindTargetAfterAwait(inputs) {
   return { kind: "rebind", idx: inputs.targetIdx };
 }
 function tabRebindRefusalNotice(reason, verb) {
-  const done2 = verb === "create" ? "Tab created" : "Tab closed";
+  const done = verb === "create" ? "Tab created" : "Tab closed";
   switch (reason) {
     case "session-gone":
-      return `${done2} \xB7 its session is gone now`;
+      return `${done} \xB7 its session is gone now`;
     case "selection-moved":
-      return `${done2} on the session you left \xB7 this pane kept its tab`;
+      return `${done} on the session you left \xB7 this pane kept its tab`;
     case "layout-moved":
-      return `${done2} \xB7 the layout changed meanwhile, so the pane kept its tab`;
+      return `${done} \xB7 the layout changed meanwhile, so the pane kept its tab`;
     case "tab-gone":
-      return verb === "create" ? `${done2}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done2} \xB7 the tab the pane would have moved to is gone too`;
+      return verb === "create" ? `${done}, but it is no longer in the tab list \xB7 the pane kept its tab` : `${done} \xB7 the tab the pane would have moved to is gone too`;
   }
 }
 
@@ -14593,17 +14560,17 @@ function siblingSubtreeOf(root2, leafId) {
   return siblingSubtreeOf(root2.b, leafId);
 }
 function focusSuccessorAfterDrop(prev, droppedId, survivors) {
-  const siblings2 = [];
+  const siblings = [];
   let node = prev;
   while (node && node.kind === "split") {
     const inA = findLeaf(node.a, droppedId);
     if (!inA && !findLeaf(node.b, droppedId)) {
       return null;
     }
-    siblings2.unshift(inA ? node.b : node.a);
+    siblings.unshift(inA ? node.b : node.a);
     node = inA ? node.a : node.b;
   }
-  for (const sib of siblings2) {
+  for (const sib of siblings) {
     const hit = leaves(sib).find((l) => survivors.has(l.id));
     if (hit) {
       return hit.id;
@@ -15231,12 +15198,12 @@ function framedReachable(port, probeSrc, probeMessage, fresh) {
     frame.setAttribute("referrerpolicy", "no-referrer");
     frame.setAttribute("aria-hidden", "true");
     frame.style.display = "none";
-    let done2 = false;
+    let done = false;
     const finish = (ok) => {
-      if (done2) {
+      if (done) {
         return;
       }
-      done2 = true;
+      done = true;
       window.clearTimeout(timer);
       window.removeEventListener("message", onMessage);
       frame.remove();
@@ -15944,7 +15911,7 @@ var SplitView = class {
             // auxiliary shell has nothing to collide with — and pausing the
             // session-wide lease for it would defer a delivery aimed at a different
             // PTY, postponing a cron run to its next tick for no reason.
-            ...leaf.tab === 0 ? { onDeliveryHold: (action2) => this.holdDeliveries(action2) } : {}
+            ...leaf.tab === 0 ? { onDeliveryHold: (action) => this.holdDeliveries(action) } : {}
           }
         );
       } else if (moved) {
@@ -16569,8 +16536,8 @@ var SplitView = class {
    *  Best-effort by the same contract the TUI's heartbeat states: a failed RPC is
    *  swallowed, and the worst case is that a delivery lands mid-line as it does
    *  today. Reporting it would be noise about a degraded nicety, mid-keystroke. */
-  holdDeliveries(action2) {
-    if (action2 !== "pause") {
+  holdDeliveries(action) {
+    if (action !== "pause") {
       return;
     }
     const sessionID = this.sessionId;
@@ -17763,7 +17730,7 @@ var TasksPane = class {
     }
     if (focusedId && focused?.name) {
       const row = this.el.querySelector(`[data-task-id="${CSS.escape(focusedId)}"]`);
-      const control = [...row?.querySelectorAll("button") ?? []].find((button2) => sameControlKey(controlKey(button2), focused));
+      const control = [...row?.querySelectorAll("button") ?? []].find((button) => sameControlKey(controlKey(button), focused));
       control?.focus({ preventScroll: true });
     }
   }
@@ -18681,16 +18648,16 @@ function prefersReducedMotion() {
 }
 function paintFavicon() {
   const tile = appliedColor ?? DEFAULT_FAVICON_COLOR;
-  for (const link2 of document.querySelectorAll('link[rel="icon"]')) {
-    if (link2.dataset.afDefaultHref === void 0) link2.dataset.afDefaultHref = link2.getAttribute("href") ?? "";
-    const size = Number.parseInt(link2.sizes.value, 10) || 32;
-    const key = `${link2.type}|${size}|${blinkInverted}`;
+  for (const link of document.querySelectorAll('link[rel="icon"]')) {
+    if (link.dataset.afDefaultHref === void 0) link.dataset.afDefaultHref = link.getAttribute("href") ?? "";
+    const size = Number.parseInt(link.sizes.value, 10) || 32;
+    const key = `${link.type}|${size}|${blinkInverted}`;
     let href = faviconHrefs.get(key);
     if (href === void 0) {
-      href = link2.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
+      href = link.type === "image/svg+xml" ? projectFaviconDataUrl(tile, blinkInverted) : projectFaviconPng(tile, blinkInverted, size);
       faviconHrefs.set(key, href);
     }
-    link2.setAttribute("href", href ?? link2.dataset.afDefaultHref);
+    link.setAttribute("href", href ?? link.dataset.afDefaultHref);
   }
 }
 function applyProjectColor(root2, color, surfaces) {
@@ -18781,18 +18748,18 @@ function docsShortcuts(tabs, open) {
   return docsTabIndexes(tabs).map((index) => {
     const tab = tabs[index];
     const name = `Open ${tabDisplayLabel(tab)}`;
-    const button2 = h(
+    const button = h(
       "button",
       { type: "button", class: "af-ghost af-term-action af-term-docs", title: name },
       icon(tabIcon(tab.kind))
     );
-    button2.setAttribute("aria-label", name);
-    button2.dataset.tabIndex = String(index);
-    button2.addEventListener("click", () => {
-      button2.blur();
+    button.setAttribute("aria-label", name);
+    button.dataset.tabIndex = String(index);
+    button.addEventListener("click", () => {
+      button.blur();
       open(index);
     });
-    return button2;
+    return button;
   });
 }
 
@@ -18903,3316 +18870,6 @@ function orderChildren(parent, children) {
   }
 }
 
-// src/backlog_model.ts
-var STATE_LABELS = {
-  done: "Done",
-  dropped: "Dropped",
-  needs_you: "Needs you",
-  in_review: "In review",
-  working: "Working",
-  starting: "Starting",
-  stopped: "Stopped",
-  waiting: "Waiting",
-  queued: "Queued",
-  draft: "Draft"
-};
-var STATE_GLYPHS = {
-  done: "\u2713",
-  dropped: "\xD7",
-  needs_you: "?",
-  in_review: "\u270E",
-  working: "\u25CF",
-  starting: "\u25CC",
-  stopped: "\u25A0",
-  waiting: "\u23F8",
-  queued: "\u25B8",
-  draft: "\u25CB"
-};
-var FILTERS = [
-  { filter: "all", label: "All" },
-  { filter: "needs_you", label: "Needs you" },
-  { filter: "in_review", label: "In review" },
-  { filter: "working", label: "Working" },
-  { filter: "queued", label: "Queued" },
-  { filter: "waiting", label: "Waiting" },
-  { filter: "draft", label: "Draft" }
-];
-var FILTER_STATES = {
-  needs_you: ["needs_you"],
-  in_review: ["in_review"],
-  working: ["working", "starting"],
-  queued: ["queued"],
-  waiting: ["waiting"],
-  draft: ["draft"]
-};
-function formatID(id) {
-  return `B-${id}`;
-}
-function isRecord(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function arr(v) {
-  return Array.isArray(v) ? v : [];
-}
-function parseItem(v) {
-  const it = isRecord(v) ? v : {};
-  return { ...it, waits_on: arr(it.waits_on), runs: arr(it.runs), thread: arr(it.thread) };
-}
-function parseBacklogView(d) {
-  const v = isRecord(d) ? d : {};
-  const b = isRecord(v.backlog) ? v.backlog : {};
-  const settings = isRecord(b.settings) ? b.settings : { runner: false, max_running: 1, on_done: "keep" };
-  const runner = isRecord(v.runner) ? v.runner : { state: "off", used: 0, max: 1 };
-  return {
-    backlog: {
-      schema_version: Number(b.schema_version) || 0,
-      next_id: Number(b.next_id) || 1,
-      settings,
-      items: arr(b.items).map(parseItem)
-    },
-    states: isRecord(v.states) ? v.states : {},
-    runner,
-    orchestrators: isRecord(v.orchestrators) ? v.orchestrators : {}
-  };
-}
-function itemByID(b, id) {
-  return b.items.find((it) => it.id === id);
-}
-function childrenOf(b, id) {
-  return b.items.filter((it) => (it.parent ?? 0) === id);
-}
-function isParent(b, id) {
-  return b.items.some((it) => it.parent === id);
-}
-function isAncestor(b, anc, id) {
-  const seen = /* @__PURE__ */ new Set();
-  for (let it = itemByID(b, id); it && it.parent && !seen.has(it.id); it = itemByID(b, it.parent)) {
-    seen.add(it.id);
-    if (it.parent === anc) return true;
-  }
-  return false;
-}
-function derivedOf(view, id) {
-  return view.states[String(id)] ?? { state: "draft" };
-}
-function openQuestions(it) {
-  const last = it.runs?.[it.runs.length - 1];
-  if (last?.state === "starting" && last.answers?.length) return [];
-  const thread = it.thread ?? [];
-  const closes = (m) => m.kind === "answer" && !!m.answers && m.delivery !== "new_run" && m.delivery !== "superseded";
-  const answered = new Set(thread.filter(closes).map((m) => m.answers));
-  return thread.filter((m) => m.kind === "question" && !m.closed && !answered.has(m.id));
-}
-function openQuestion(it) {
-  return openQuestions(it)[0];
-}
-function rootOf(b, id) {
-  const seen = /* @__PURE__ */ new Set();
-  let it = itemByID(b, id);
-  while (it?.parent && !seen.has(it.id)) {
-    seen.add(it.id);
-    const up = itemByID(b, it.parent);
-    if (!up) break;
-    it = up;
-  }
-  return it?.id ?? id;
-}
-function withOrchestrator(b, id, q) {
-  return q.route === "orchestrator" && !!itemByID(b, rootOf(b, id))?.orchestrator;
-}
-function userQuestions(b, it) {
-  return openQuestions(it).filter((q) => !withOrchestrator(b, it.id, q));
-}
-function orchestratorQuestion(b, it) {
-  return openQuestions(it).find((q) => withOrchestrator(b, it.id, q));
-}
-function archivedBy(b, id) {
-  const seen = /* @__PURE__ */ new Set();
-  for (let it = itemByID(b, id); it && !seen.has(it.id); it = it.parent ? itemByID(b, it.parent) : void 0) {
-    if (it.archived) return it.id;
-    seen.add(it.id);
-  }
-  return 0;
-}
-function needsYouCount(views) {
-  let n = 0;
-  for (const v of views) {
-    for (const it of v.backlog.items) if (!archivedBy(v.backlog, it.id)) n += userQuestions(v.backlog, it).length;
-  }
-  return n;
-}
-function needsYouByRoot(views) {
-  const out = /* @__PURE__ */ new Map();
-  for (const [root2, v] of views) {
-    const n = needsYouCount([v]);
-    if (n > 0) out.set(root2, n);
-  }
-  return out;
-}
-function sources(b) {
-  return [...new Set(b.items.map((it) => it.source?.proposal ?? "").filter(Boolean))];
-}
-function sessionItemsSig(items) {
-  return JSON.stringify([...items].map(([sid, it]) => [sid, it.id, it.title, it.root, it.state]));
-}
-function sessionItems(views) {
-  const out = /* @__PURE__ */ new Map();
-  for (const [root2, v] of views) {
-    for (const it of v.backlog.items) {
-      for (const run of it.runs ?? []) {
-        if (run.session_id) out.set(run.session_id, { root: root2, id: it.id, title: it.title, state: derivedOf(v, it.id).state });
-      }
-    }
-  }
-  return out;
-}
-function closedState(s) {
-  return s === "done" || s === "dropped";
-}
-function listRows(view, opts) {
-  const b = view.backlog;
-  const kids = /* @__PURE__ */ new Map();
-  for (const it of b.items) {
-    const p = it.parent ?? 0;
-    kids.set(p, [...kids.get(p) ?? [], it.id]);
-  }
-  const wanted = opts.filter === "all" ? null : FILTER_STATES[opts.filter];
-  const matchMemo = /* @__PURE__ */ new Map();
-  const matches = (id) => {
-    const memo = matchMemo.get(id);
-    if (memo !== void 0) return memo;
-    matchMemo.set(id, false);
-    const it = itemByID(b, id);
-    const own = (wanted === null || wanted.includes(derivedOf(view, id).state)) && (!opts.source || it?.source?.proposal === opts.source);
-    const r = own || (kids.get(id) ?? []).some(matches);
-    matchMemo.set(id, r);
-    return r;
-  };
-  const needsBelow = (id) => (kids.get(id) ?? []).reduce((n, c) => {
-    const it = itemByID(b, c);
-    return n + (it && userQuestions(b, it).length > 0 ? 1 : 0) + needsBelow(c);
-  }, 0);
-  const rows = [];
-  const walk = (parent, depth) => {
-    for (const id of kids.get(parent) ?? []) {
-      const item = itemByID(b, id);
-      if (!item) continue;
-      const derived = derivedOf(view, id);
-      if (!opts.showDone && closedState(derived.state)) continue;
-      if (!opts.showArchived && item.archived) continue;
-      if (!matches(id)) continue;
-      const hasKids = (kids.get(id) ?? []).length > 0;
-      const folded = hasKids && opts.folded.has(id);
-      let reason = derived.reason ?? "";
-      if (hasKids) {
-        const n = needsBelow(id);
-        if (n > 0) reason = reason ? `${reason} \xB7 ${n} needs you` : `${n} needs you`;
-      }
-      rows.push({ item, depth, derived, parent: hasKids, folded, reason });
-      if (hasKids && !folded) walk(id, depth + 1);
-    }
-  };
-  walk(0, 0);
-  return rows;
-}
-function siblings(b, id) {
-  const it = itemByID(b, id);
-  return it ? childrenOf(b, it.parent ?? 0) : [];
-}
-function canBeParent(it) {
-  return it.status !== "running" && (it.runs ?? []).length === 0;
-}
-function keyboardMove(b, id, dir) {
-  const it = itemByID(b, id);
-  if (!it) return null;
-  const sibs = siblings(b, id);
-  const i = sibs.findIndex((s) => s.id === id);
-  switch (dir) {
-    case "up":
-      return i > 0 ? { before: sibs[i - 1].id } : null;
-    case "down":
-      return i >= 0 && i < sibs.length - 1 ? { after: sibs[i + 1].id } : null;
-    case "in": {
-      const prev = i > 0 ? sibs[i - 1] : void 0;
-      return prev && canBeParent(prev) ? { into: prev.id } : null;
-    }
-    case "out":
-      return it.parent ? { after: it.parent } : null;
-  }
-}
-function dropMove(b, dragId, targetId, zone) {
-  const target = itemByID(b, targetId);
-  if (!target || !itemByID(b, dragId) || dragId === targetId || isAncestor(b, dragId, targetId)) return null;
-  if (zone === "into") return canBeParent(target) ? { into: targetId } : null;
-  return zone === "before" ? { before: targetId } : { after: targetId };
-}
-function subtreeEnd(items, i, b) {
-  const root2 = items[i].id;
-  let j = i + 1;
-  while (j < items.length && isAncestor(b, root2, items[j].id)) j++;
-  return j;
-}
-function applyMove(b, id, to) {
-  const it = itemByID(b, id);
-  if (!it) return null;
-  let parent = it.parent ?? 0;
-  let anchor = 0;
-  if ("before" in to || "after" in to) {
-    anchor = "before" in to ? to.before : to.after;
-    const a = itemByID(b, anchor);
-    if (!a) return null;
-    parent = a.parent ?? 0;
-  } else if ("into" in to) {
-    anchor = to.into;
-    parent = to.into;
-  }
-  if (anchor === id || anchor !== 0 && isAncestor(b, id, anchor)) return null;
-  if (parent !== 0) {
-    const p = itemByID(b, parent);
-    if (!p || !canBeParent(p)) return null;
-  }
-  const items = b.items.map((x) => ({ ...x }));
-  const start2 = items.findIndex((x) => x.id === id);
-  const end = subtreeEnd(items, start2, b);
-  const block = items.splice(start2, end - start2);
-  block[0].parent = parent || void 0;
-  const moved = { ...b, items };
-  const indexOf = (x) => items.findIndex((y) => y.id === x);
-  const bottomOf = (p) => p === 0 ? items.length : subtreeEnd(items, indexOf(p), moved);
-  let at;
-  if ("before" in to) at = indexOf(to.before);
-  else if ("after" in to) at = subtreeEnd(items, indexOf(to.after), moved);
-  else if ("top" in to) at = parent === 0 ? 0 : indexOf(parent) + 1;
-  else at = bottomOf(parent);
-  items.splice(at, 0, ...block);
-  if (parent !== 0) {
-    const p = items.find((x) => x.id === parent);
-    if (p) p.status = "draft";
-  }
-  return moved;
-}
-function overlayMove(fresh, moved, base) {
-  const now = new Map(fresh.items.map((x) => [x.id, x]));
-  const was = new Map(base.items.map((x) => [x.id, x]));
-  const seen = /* @__PURE__ */ new Set();
-  const items = [];
-  for (const m of moved.items) {
-    const f = now.get(m.id);
-    if (!f) continue;
-    seen.add(m.id);
-    const b = was.get(m.id);
-    items.push({ ...f, parent: m.parent, ...b && b.status !== m.status ? { status: m.status } : {} });
-  }
-  for (const f of fresh.items) if (!seen.has(f.id)) items.push(f);
-  return { ...fresh, items };
-}
-function neededBy(b, id) {
-  return b.items.filter((it) => (it.waits_on ?? []).includes(id));
-}
-function blocking(view, id) {
-  return neededBy(view.backlog, id).filter((it) => !closedState(derivedOf(view, it.id).state));
-}
-function relatedIDs(b, id) {
-  const out = new Set((itemByID(b, id)?.waits_on ?? []).filter((w) => itemByID(b, w)));
-  for (const it of neededBy(b, id)) out.add(it.id);
-  out.delete(id);
-  return out;
-}
-function latestRun(it) {
-  return it.runs?.at(-1);
-}
-var ACTION_LABELS = {
-  queue: "Queue",
-  draft: "Back to draft",
-  start: "Start now",
-  review: "Send to review",
-  done: "Mark done",
-  drop: "Drop",
-  reopen: "Reopen",
-  delete: "Delete"
-};
-function canStartNow(b, it, derived) {
-  if (isParent(b, it.id)) return false;
-  if (it.status === "done" || it.status === "dropped") return false;
-  return derived.state !== "working" && derived.state !== "starting" && derived.state !== "needs_you";
-}
-function itemActions(b, it, derived) {
-  if (isParent(b, it.id)) {
-    const out2 = [];
-    if (b.items.some((c) => isAncestor(b, it.id, c.id) && c.status === "draft" && !isParent(b, c.id))) out2.push("queue");
-    if (!closedState(derived.state)) out2.push("drop");
-    return out2;
-  }
-  const out = [];
-  const s = it.status;
-  if (s === "draft" || s === "review") out.push("queue");
-  if (s === "queued" || s === "review") out.push("draft");
-  if (canStartNow(b, it, derived)) out.push("start");
-  if (s === "running" && openQuestion(it)?.author === "af") out.push("review");
-  if (s !== "done" && s !== "dropped") out.push("done", "drop");
-  else out.push("reopen");
-  if (s === "draft" && (it.runs ?? []).length === 0 && (it.thread ?? []).length === 0) out.push("delete");
-  return out;
-}
-function safeHttpUrl2(raw) {
-  if (!raw) return null;
-  try {
-    const u = new URL(raw);
-    return (u.protocol === "http:" || u.protocol === "https:") && u.host ? u.href : null;
-  } catch {
-    return null;
-  }
-}
-function topQueued(view) {
-  return view.backlog.items.find((it) => derivedOf(view, it.id).state === "queued" && !isParent(view.backlog, it.id));
-}
-function needsYouLabel(n) {
-  return n === 1 ? "1 needs you" : `${n} need you`;
-}
-
-// src/backlog_usage.ts
-var WINDOW_LABELS = {
-  five_hour: { bar: "5-hour window", gate: "the 5-hour window", hover: "5-hour" },
-  seven_day: { bar: "week", gate: "the week", hover: "Weekly" }
-};
-var WINDOWS = ["five_hour", "seven_day"];
-function isRecord2(v) {
-  return typeof v === "object" && v !== null && !Array.isArray(v);
-}
-function numbers(v) {
-  const out = {};
-  if (isRecord2(v)) {
-    for (const [k, x] of Object.entries(v)) if (typeof x === "number") out[k] = x;
-  }
-  return out;
-}
-function strings(v) {
-  const out = {};
-  if (isRecord2(v)) {
-    for (const [k, x] of Object.entries(v)) if (typeof x === "string") out[k] = x;
-  }
-  return out;
-}
-function parseWindow(v) {
-  const w = isRecord2(v) ? v : {};
-  return {
-    plan: Number(w.plan) || 0,
-    resets_at: typeof w.resets_at === "string" ? w.resets_at : null,
-    all_cost: Number(w.all_cost) || 0
-  };
-}
-function parseUsage(d) {
-  const v = isRecord2(d) ? d : {};
-  const w = isRecord2(v.windows) ? v.windows : {};
-  const accounts = {};
-  if (isRecord2(v.accounts)) {
-    for (const [name, a] of Object.entries(v.accounts)) {
-      if (isRecord2(a) && isRecord2(a.windows)) accounts[name] = parseWindow(a.windows.five_hour);
-    }
-  }
-  return {
-    metering: v.metering === true,
-    account: typeof v.account === "string" ? v.account : "",
-    accounts,
-    five_hour: parseWindow(w.five_hour),
-    seven_day: parseWindow(w.seven_day),
-    reading_at: typeof v.reading_at === "string" ? v.reading_at : null,
-    runs: numbers(v.runs),
-    run_window: numbers(v.run_window),
-    unmeterable: strings(v.unmeterable)
-  };
-}
-function spendHasUnmeterable(ev) {
-  return isRecord2(ev) && "unmeterable" in ev;
-}
-function applySpend(prev, ev) {
-  if (!isRecord2(ev)) return prev;
-  return {
-    metering: false,
-    account: prev?.account ?? "",
-    accounts: prev?.accounts ?? {},
-    five_hour: parseWindow(ev.five_hour),
-    seven_day: parseWindow(ev.seven_day),
-    reading_at: typeof ev.reading_at === "string" ? ev.reading_at : null,
-    runs: numbers(ev.runs),
-    run_window: "run_window" in ev ? numbers(ev.run_window) : prev?.run_window ?? {},
-    unmeterable: spendHasUnmeterable(ev) ? strings(ev.unmeterable) : prev?.unmeterable ?? {}
-  };
-}
-function valid(w, now) {
-  return w.resets_at !== null && Date.parse(w.resets_at) > now;
-}
-function pct(v) {
-  return `${Number(v.toFixed(1))}%`;
-}
-function usd(v) {
-  return `$${v.toFixed(2)}`;
-}
-function tighterWindow(u, now) {
-  let best = null;
-  for (const k of WINDOWS) {
-    if (valid(u[k], now) && (best === null || u[k].plan > u[best].plan)) best = k;
-  }
-  return best;
-}
-function resetLabel(at, now) {
-  const d = new Date(at);
-  const hm = `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  if (d.getTime() - now < 24 * 36e5) return hm;
-  return `${d.toLocaleDateString("en-US", { weekday: "short" })} ${hm}`;
-}
-function readingAge(at, now) {
-  if (!at) return "no reading yet";
-  const min = Math.floor(Math.max(0, now - Date.parse(at)) / 6e4);
-  if (min < 1) return "read just now";
-  if (min < 60) return `read ${min} min ago`;
-  const hours = Math.floor(min / 60);
-  return hours < 24 ? `read ${hours} h ago` : `read ${Math.floor(hours / 24)} d ago`;
-}
-function usageLines(u, b, now) {
-  const line = (k) => {
-    const w = u[k];
-    const label = WINDOW_LABELS[k].hover;
-    if (!valid(w, now)) return `${label} \xB7 no reading`;
-    return `${label} \xB7 plan ${pct(w.plan)} of ${pct(b.limit)} limit \xB7 resets ${resetLabel(w.resets_at, now)}`;
-  };
-  return [line("five_hour"), line("seven_day"), `${readingAge(u.reading_at, now)} \xB7 all projects`];
-}
-function usageHover(u, b, now) {
-  return usageLines(u, b, now).join("\n");
-}
-function runUse(sessionId, u, now, account = "") {
-  const name = account || "default";
-  const w = name !== u.account && u.accounts[name] ? u.accounts[name] : u.five_hour;
-  const cost = u.run_window[sessionId];
-  if (cost === void 0 || !valid(w, now) || !w.all_cost || w.all_cost <= 0) return null;
-  return Math.min(100, w.plan * cost / w.all_cost);
-}
-function closedGate(b, u, runner, now) {
-  if (b && b.limit <= 0) return { key: "limit:zero", text: "The plan limit is 0%." };
-  const daemonGate = runner !== null && runner.state !== "off";
-  if (b && u && !daemonGate) {
-    let over = null;
-    for (const k of WINDOWS) {
-      const w = u[k];
-      if (valid(w, now) && w.plan >= b.limit && (over === null || Date.parse(w.resets_at) > Date.parse(u[over].resets_at))) {
-        over = k;
-      }
-    }
-    if (over !== null) {
-      const w = u[over];
-      return {
-        key: `limit:${over}:${w.resets_at}`,
-        text: `The plan is at ${pct(w.plan)} of ${WINDOW_LABELS[over].gate}, over the ${pct(b.limit)} limit.`
-      };
-    }
-  }
-  if (b && b.usd_limit > 0 && b.usd_spent >= b.usd_limit) {
-    return { key: "usd_limit", text: `The backlog spent its ${usd(b.usd_limit)} dollar limit.` };
-  }
-  if (runner?.state === "stopped" && runner.reason) {
-    const text = `${webReason(runner.reason).replace(/\.$/, "")}.`;
-    if (runner.gate === "usage_limit" || runner.gate === "usd_limit") return { key: runner.gate, text };
-    if (runner.gate === "limit") return { key: `${runner.gate}:${runner.reason}`, text };
-  }
-  return null;
-}
-function webReason(reason) {
-  const out = reason.replace(/,?\s+or\s+[^;,·]*"af [^"]*"[^;,·]*/g, "").replace(/(?:[;,]\s*|\s·\s)?[^;,·]*"af [^"]*"[^;,·]*/g, "").trim();
-  return out || reason;
-}
-
-// src/backlog_api.ts
-async function getBacklog(root2, token2) {
-  return parseBacklogView(await af("GetBacklog", { repo_path: root2 }, token2));
-}
-function parseBudgetReply(resp) {
-  const b = resp?.budget;
-  return {
-    budget: {
-      limit: Number(b?.limit) || 0,
-      max_per_run: Number(b?.max_per_run) || 0,
-      usd_limit: Number(b?.usd_limit) || 0,
-      usd_spent: Number(b?.usd_spent) || 0
-    },
-    usage: parseUsage(resp)
-  };
-}
-async function getBudget(token2) {
-  return parseBudgetReply(await af("GetBudget", {}, token2));
-}
-async function setBudget(update, token2) {
-  return parseBudgetReply(await af("SetBudget", {
-    limit: update.limit,
-    max_per_run: update.max_per_run,
-    usd_limit: update.usd_limit
-  }, token2));
-}
-async function setSettings(root2, update, token2) {
-  const resp = await af("SetBacklogSettings", {
-    repo_path: root2,
-    runner: update.runner,
-    max_running: update.max_running,
-    on_done: update.on_done
-  }, token2);
-  return resp.settings;
-}
-async function startItem(root2, id, token2) {
-  const resp = await af("StartBacklogItem", { repo_path: root2, id }, token2);
-  return resp.run;
-}
-var backlogRoutes = { runBacklog: true };
-async function runNext(root2, token2) {
-  const resp = await af("RunBacklog", { repo_path: root2, count: 1 }, token2);
-  return { started: Array.isArray(resp?.started) ? resp.started : [], reason: resp?.reason ?? "" };
-}
-async function answerQuestion(root2, id, questionId, text, token2) {
-  const resp = await af("PostBacklogMessage", {
-    repo_path: root2,
-    id,
-    kind: "answer",
-    text,
-    question_id: questionId
-  }, token2);
-  return resp.message;
-}
-async function addItem(root2, input, token2) {
-  const resp = await af("AddBacklogItems", {
-    repo_path: root2,
-    items: [{ key: "new", title: input.title, parent: input.parent || void 0 }]
-  }, token2);
-  return resp?.ids?.new ?? 0;
-}
-async function updateItem(root2, id, update, token2) {
-  const resp = await af("UpdateBacklogItem", {
-    repo_path: root2,
-    id,
-    title: update.title,
-    body: update.body,
-    waits_on: update.waits_on,
-    sequential: update.sequential,
-    paused: update.paused,
-    archived: update.archived
-  }, token2);
-  return resp.item;
-}
-async function moveItem(root2, id, to, token2) {
-  await af("MoveBacklogItem", {
-    repo_path: root2,
-    id,
-    before: "before" in to ? to.before : void 0,
-    after: "after" in to ? to.after : void 0,
-    into: "into" in to ? to.into : void 0,
-    top: "top" in to ? true : void 0,
-    bottom: "bottom" in to ? true : void 0
-  }, token2);
-}
-async function setItemStatus(root2, id, status, token2) {
-  await af("SetBacklogItemStatus", { repo_path: root2, id, status }, token2);
-}
-async function deleteItem(root2, id, token2) {
-  await af("DeleteBacklogItem", { repo_path: root2, id }, token2);
-}
-async function addNote(root2, id, text, token2) {
-  const resp = await af("PostBacklogMessage", { repo_path: root2, id, kind: "note", text }, token2);
-  return resp.message;
-}
-async function openOrchestrator(root2, id, token2) {
-  const resp = await af("OpenBacklogOrchestrator", { repo_path: root2, id }, token2);
-  return { session_id: resp?.session_id ?? "", title: resp?.title ?? "", change: resp?.change ?? "" };
-}
-async function unbindOrchestrator(root2, id, token2) {
-  await af("SetBacklogOrchestrator", { repo_path: root2, id, clear: true }, token2);
-}
-
-// src/backlog_groups.ts
-function isGroup(b, it) {
-  return !it.parent && isParent(b, it.id);
-}
-function inbox(view) {
-  const out = [];
-  for (const item of view.backlog.items) {
-    if (archivedBy(view.backlog, item.id)) continue;
-    for (const question of userQuestions(view.backlog, item)) out.push({ item, question });
-  }
-  const at = (e) => Date.parse(e.question.at) || 0;
-  return out.sort((a, b) => at(a) - at(b));
-}
-function inboxNotes(view) {
-  const out = [];
-  for (const item of view.backlog.items) {
-    if (archivedBy(view.backlog, item.id)) continue;
-    for (const note of item.thread ?? []) if (note.kind === "note" && note.inbox) out.push({ item, note });
-  }
-  const at = (e) => Date.parse(e.note.at) || 0;
-  return out.sort((a, b) => at(a) - at(b));
-}
-function answerEffect(it, sessions, lookup) {
-  const run = latestRun(it);
-  if (run?.state !== "started" || !run.session_id) return "new_run";
-  const s = sessions.find((x) => x.id === run.session_id);
-  if (!s && lookup) {
-    const l = lookup(run.session_id);
-    if (l === "failed") return "unknown";
-    if (l !== "done") return "checking";
-  }
-  if (!s || s.user_killed === true || (s.in_flight_op ?? InFlightOp.None) === InFlightOp.Killing) return "new_run";
-  if (isArchived(s)) return "restore";
-  const kind = rowKind(s);
-  return kind === "lost" || kind === "dead" ? "restore" : "live";
-}
-function answerEffectText(effect) {
-  switch (effect) {
-    case "restore":
-      return "Restores the session";
-    case "new_run":
-      return "Starts a new run with the previous agent's notes";
-    case "checking":
-      return "Checking the session\u2026";
-    case "unknown":
-      return "Can't tell yet whether the session is there";
-    default:
-      return "Goes to the session";
-  }
-}
-function inGroup(b, group, id) {
-  return id === group || isAncestor(b, group, id);
-}
-function groupDependencies(b, group) {
-  const out = [];
-  for (const from of b.items) {
-    if (!inGroup(b, group, from.id)) continue;
-    for (const toID of from.waits_on ?? []) {
-      out.push({ from, to: itemByID(b, toID), toID, inside: inGroup(b, group, toID) });
-    }
-  }
-  return out;
-}
-var closed = (s) => s === "done" || s === "dropped";
-function groupHistory(view, group) {
-  const b = view.backlog;
-  const at = (it) => Date.parse(it.updated_at) || 0;
-  return b.items.filter((it) => isAncestor(b, group, it.id) && closed(derivedOf(view, it.id).state)).sort((x, y) => at(y) - at(x));
-}
-
-// src/backlog_effort.ts
-var WITH_EFFORT_SESSION = "With effort session";
-function orchestratorOf(view, group) {
-  const o = itemByID(view.backlog, group)?.orchestrator;
-  if (!o) return void 0;
-  return view.orchestrators?.[String(group)] ?? { ...o, state: "gone", pending: 0 };
-}
-function effortLabel(view, group) {
-  return orchestratorOf(view, group) ? "Effort session" : "Start effort session";
-}
-function effortProgress(view, group) {
-  const o = orchestratorOf(view, group);
-  if (!o) return "Starting effort session\u2026";
-  if (o.state === "gone") return "Replacing effort session\u2026";
-  if (o.state === "archived" || o.state === "lost" || o.state === "dead") return "Restoring effort session\u2026";
-  return "Opening effort session\u2026";
-}
-var STATE_TEXT = {
-  live: "Live",
-  archived: "Archived",
-  lost: "Lost",
-  dead: "Dead",
-  limited: "Usage limit",
-  gone: "Gone"
-};
-function orchestratorStateText(state) {
-  return STATE_TEXT[state] ?? state;
-}
-function routedTag(view, it) {
-  if (!orchestratorQuestion(view.backlog, it)) return [];
-  if (view.states[String(it.id)]?.reason === WITH_EFFORT_SESSION) return [];
-  return [h("span", { class: "af-backlog-tag af-backlog-effort-tag" }, WITH_EFFORT_SESSION)];
-}
-var WAIT_LISTED_MS = 3e4;
-var EffortSessions = class {
-  constructor(host, rerender2) {
-    this.host = host;
-    this.rerender = rerender2;
-  }
-  busy = /* @__PURE__ */ new Map();
-  waiting = null;
-  waitTimer = null;
-  sessions = [];
-  project = null;
-  /** The selection generation: each open and each move to another project
-   *  starts a new one, and only the current one may open a session. */
-  selection = 0;
-  /** The project the pane shows. Moving to another supersedes every open in
-   *  flight and stops waiting. */
-  showProject(root2) {
-    if (root2 === this.project) return;
-    this.project = root2;
-    this.selection++;
-    this.stopWaiting();
-  }
-  sessionsChanged(sessions) {
-    this.sessions = sessions;
-    const w = this.waiting;
-    if (w && w.selection === this.selection && sessions.some((s) => s.id === w.id)) {
-      this.stopWaiting();
-      this.host.openSession(w.id);
-    }
-  }
-  stopWaiting() {
-    this.waiting = null;
-    if (this.waitTimer !== null) clearTimeout(this.waitTimer);
-    this.waitTimer = null;
-  }
-  waitFor(id, selection) {
-    this.stopWaiting();
-    this.waiting = { id, selection };
-    this.waitTimer = setTimeout(() => this.stopWaiting(), WAIT_LISTED_MS);
-  }
-  button(root2, view, group) {
-    const progress2 = this.busy.get(`${root2}
-${group.id}`);
-    const bound = !!group.orchestrator;
-    const label = progress2 ?? effortLabel(view, group.id);
-    const b = h(
-      "button",
-      { type: "button", class: "af-ghost af-backlog-effort" },
-      label,
-      ...progress2 || !bound ? [] : [icon("external-link")]
-    );
-    b.dataset.action = "effort";
-    b.disabled = progress2 !== void 0;
-    b.setAttribute("aria-label", `${label.replace(/…$/, "")} for ${formatID(group.id)}`);
-    if (progress2) b.setAttribute("aria-busy", "true");
-    b.addEventListener("click", () => void this.open(root2, view, group.id));
-    return b;
-  }
-  async open(root2, view, group) {
-    const key = `${root2}
-${group}`;
-    const token2 = this.host.token();
-    if (token2 === null || this.busy.has(key)) return;
-    const selection = ++this.selection;
-    this.stopWaiting();
-    this.busy.set(key, effortProgress(view, group));
-    this.rerender();
-    try {
-      const r = await openOrchestrator(root2, group, token2);
-      if (selection !== this.selection || this.project !== root2) return;
-      if (this.sessions.some((s) => s.id === r.session_id)) this.host.openSession(r.session_id);
-      else this.waitFor(r.session_id, selection);
-    } catch (e) {
-      this.host.notify(errorText(e));
-    } finally {
-      this.busy.delete(key);
-      this.rerender();
-      await this.host.refresh(root2);
-    }
-  }
-  async unbind(root2, group) {
-    const ok = await this.host.confirm(
-      "Unbind effort session",
-      `The session keeps running, but af stops sending it the events of ${formatID(group)}. Questions that wait for it go to the Inbox.`,
-      "Unbind"
-    );
-    const token2 = this.host.token();
-    if (!ok || token2 === null) return;
-    try {
-      await unbindOrchestrator(root2, group, token2);
-    } catch (e) {
-      this.host.notify(errorText(e));
-    }
-    await this.host.refresh(root2);
-  }
-};
-
-// src/backlog_group_panel.ts
-var PAUSED_GLYPH = "\u2016";
-function action(label, key, run) {
-  const b = h("button", { type: "button", class: "af-ghost" }, label);
-  b.dataset.action = key;
-  b.addEventListener("click", run);
-  return b;
-}
-function groupButtons(it, group, change) {
-  if (it.archived) return [action("Unarchive", "unarchive", () => change(it.id, { archived: false }))];
-  const out = [it.paused ? action("Unpause", "unpause", () => change(it.id, { paused: false })) : action("Pause", "pause", () => change(it.id, { paused: true }))];
-  if (group) out.push(action("Archive", "archive", () => change(it.id, { archived: true })));
-  return out;
-}
-function link(view, id, it, select) {
-  if (!it) return h("span", { class: "af-backlog-reason" }, `${formatID(id)} (missing)`);
-  const d = derivedOf(view, id);
-  const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(id)} ${it.title}`);
-  b.addEventListener("click", () => select(id));
-  return h(
-    "span",
-    { class: "af-backlog-dep-end" },
-    b,
-    h("span", { class: `af-backlog-reason af-backlog-state-${d.state}` }, `(${STATE_LABELS[d.state]})`)
-  );
-}
-function section(title, ...children) {
-  return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
-}
-function orchestratorSection(view, group, actions2) {
-  const o = orchestratorOf(view, group.id);
-  if (!o) {
-    if (group.archived) return null;
-    return section("Orchestrator", h(
-      "div",
-      { class: "af-backlog-dep af-backlog-orchestrator" },
-      h("span", { class: "af-backlog-reason" }, "No effort session"),
-      actions2.start(view, group)
-    ));
-  }
-  const open = h("button", { type: "button", class: "af-backlog-item-link" }, o.title || o.session_id);
-  open.setAttribute("aria-label", `Open effort session ${o.title || o.session_id}`);
-  open.addEventListener("click", () => actions2.open(group.id));
-  const facts = [orchestratorStateText(o.state)];
-  if (o.pending > 0) facts.push(`${o.pending} pending event${o.pending === 1 ? "" : "s"}`);
-  const unbind = action("Unbind", "unbind-orchestrator", () => actions2.unbind(group.id));
-  unbind.setAttribute("aria-label", "Unbind effort session");
-  return section("Orchestrator", h(
-    "div",
-    { class: "af-backlog-dep af-backlog-orchestrator" },
-    open,
-    h("span", { class: "af-backlog-reason" }, facts.join(" \xB7 ")),
-    unbind
-  ));
-}
-function groupSections(view, group, select) {
-  const deps = groupDependencies(view.backlog, group.id);
-  const depList = deps.length === 0 ? h("p", { class: "af-backlog-reason" }, "No dependencies") : h("ul", { class: "af-backlog-deps" }, ...deps.map((d) => h(
-    "li",
-    { class: "af-backlog-dep" },
-    link(view, d.from.id, d.from, select),
-    h("span", { class: "af-backlog-reason" }, "waits on"),
-    link(view, d.toID, d.to, select),
-    ...d.inside ? [] : [h("span", { class: "af-backlog-reason" }, "\xB7 outside the group")]
-  )));
-  const done2 = groupHistory(view, group.id);
-  const history2 = done2.length === 0 ? h("p", { class: "af-backlog-reason" }, "Nothing done or dropped yet") : h("ul", { class: "af-backlog-history" }, ...done2.map((it) => {
-    const d = derivedOf(view, it.id);
-    const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(it.id)} ${it.title}`);
-    b.addEventListener("click", () => select(it.id));
-    return h(
-      "li",
-      { class: "af-backlog-dep" },
-      b,
-      h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` }, h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]), STATE_LABELS[d.state]),
-      h("span", { class: "af-backlog-reason" }, formatTime(it.updated_at))
-    );
-  }));
-  return [section("Dependencies", depList), section("History", history2)];
-}
-
-// src/backlog_cards.ts
-function segments(rows) {
-  const out = [];
-  for (const row of rows) {
-    const last = out.at(-1);
-    if (row.depth === 0 && row.parent) out.push({ kind: "group", head: row, rows: [] });
-    else if (row.depth > 0 && last?.kind === "group") last.rows.push(row);
-    else if (last?.kind === "loose") last.rows.push(row);
-    else out.push({ kind: "loose", rows: [row] });
-  }
-  return out;
-}
-function positions(rows) {
-  return new Map(rows.map((r, i) => [r.item.id, i + 1]));
-}
-var working = (s) => s === "working" || s === "starting";
-function count(view, items) {
-  const c = { done: 0, total: 0, working: 0, needsYou: 0 };
-  for (const it of items) {
-    const s = derivedOf(view, it.id).state;
-    if (s === "dropped") continue;
-    c.total++;
-    if (s === "done") c.done++;
-    if (working(s)) c.working++;
-    if (s === "needs_you") c.needsYou++;
-  }
-  return c;
-}
-function tops(b) {
-  const byID = new Map(b.items.map((it) => [it.id, it]));
-  const out = /* @__PURE__ */ new Map();
-  for (const start2 of b.items) {
-    const path = [];
-    const seen = /* @__PURE__ */ new Set();
-    let above;
-    for (let it = start2; it && !seen.has(it.id); it = it.parent ? byID.get(it.parent) : void 0) {
-      if (above = out.get(it.id)) break;
-      seen.add(it.id);
-      path.push(it);
-    }
-    let acc = above ?? { root: path[path.length - 1].id, archived: false };
-    for (let i = path.length - 1; i >= 0; i--) {
-      acc = { root: acc.root, archived: acc.archived || path[i].archived === true };
-      out.set(path[i].id, acc);
-    }
-  }
-  return out;
-}
-function cardCounts(view) {
-  const b = view.backlog;
-  const parents = /* @__PURE__ */ new Set();
-  for (const it of b.items) if (it.parent) parents.add(it.parent);
-  const top = tops(b);
-  const leaves2 = /* @__PURE__ */ new Map();
-  const live = [];
-  let groups = 0;
-  for (const it of b.items) {
-    const t = top.get(it.id);
-    if (!t) continue;
-    const parent = parents.has(it.id);
-    if (!t.archived && !it.parent && parent) groups++;
-    if (parent) continue;
-    if (!t.archived) live.push(it);
-    if (t.root === it.id) continue;
-    const list = leaves2.get(t.root);
-    if (list) list.push(it);
-    else leaves2.set(t.root, [it]);
-  }
-  const c = count(view, live);
-  return {
-    groups: new Map([...leaves2].map(([g, items]) => [g, count(view, items)])),
-    overview: [plural(groups, "group"), plural(c.total, "item"), ...tail(c)].join(" \xB7 ")
-  };
-}
-var NO_COUNTS = { done: 0, total: 0, working: 0, needsYou: 0 };
-var plural = (n, one) => `${n} ${one}${n === 1 ? "" : "s"}`;
-function tail(c) {
-  return [...c.working > 0 ? [`${c.working} working`] : [], ...c.needsYou > 0 ? [needsYouLabel(c.needsYou)] : []];
-}
-function progressText(c) {
-  return [`${c.done} of ${c.total} done`, ...tail(c)].join(" \xB7 ");
-}
-function waitsInGroup(view, it, pos) {
-  const out = { open: 0, dropped: 0, after: [] };
-  for (const w of it.waits_on ?? []) {
-    if (!itemByID(view.backlog, w)) continue;
-    const s = derivedOf(view, w).state;
-    if (s !== "done") out.open++;
-    if (s === "dropped") out.dropped++;
-    const p = pos.get(w);
-    if (p !== void 0) out.after.push({ pos: p, dropped: s === "dropped" });
-  }
-  out.after.sort((x, y) => x.pos - y.pos);
-  return out;
-}
-function metaLine(view, it, pos) {
-  const { open, dropped, after } = waitsInGroup(view, it, pos);
-  const parts = [h("span", { class: "af-backlog-id" }, formatID(it.id))];
-  if (after.length > 0) {
-    parts.push(h("span", { ariaHidden: "true" }, "\xB7"), h("span", {}, "after"), ...after.map((a) => a.dropped ? h("span", { class: "af-backlog-pos-chip af-backlog-pos-dropped" }, `#${a.pos} dropped`) : h("span", { class: "af-backlog-pos-chip" }, `#${a.pos}`)));
-  }
-  if (open > 0) {
-    const text = `waiting on ${plural(open, "item")}${dropped > 0 ? ` (${dropped} dropped)` : ""}`;
-    parts.push(h("span", { ariaHidden: "true" }, "\xB7"), h("span", { class: dropped > 0 ? "af-backlog-warn" : "" }, text));
-  }
-  return h("span", { class: "af-backlog-meta" }, ...parts);
-}
-function presentational(el2) {
-  el2.setAttribute("role", "none");
-  return el2;
-}
-function progress(c, id) {
-  const pct2 = c.total === 0 ? 0 : Math.round(c.done / c.total * 100);
-  const fill = h("span", { class: "af-backlog-progress-fill" });
-  fill.style.width = `${pct2}%`;
-  return hiddenLine(h(
-    "li",
-    { class: "af-backlog-progress", id },
-    h("span", { class: "af-backlog-progress-bar" }, fill),
-    h("span", { class: "af-backlog-reason" }, progressText(c))
-  ));
-}
-function hiddenLine(el2) {
-  el2.setAttribute("aria-hidden", "true");
-  return presentational(el2);
-}
-function pausedNotice(id) {
-  return hiddenLine(h(
-    "li",
-    { class: "af-backlog-notice", id },
-    h("span", { ariaHidden: "true" }, PAUSED_GLYPH),
-    " Paused \u2014 the runner starts nothing in this group until you unpause it."
-  ));
-}
-
-// src/backlog_inbox.ts
-var EMPTY_INBOX = "No questions";
-var QuestionBox = class {
-  constructor(id, submit) {
-    this.submit = submit;
-    this.answer = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: `Answer ${formatID(id)}\u2026` });
-    this.answer.setAttribute("aria-label", "Answer");
-    this.send = h("button", { type: "button", class: "af-primary" }, "Send answer");
-    this.send.addEventListener("click", () => this.sendAnswer());
-    this.answer.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && (e.metaKey || e.ctrlKey) && !e.isComposing) {
-        e.preventDefault();
-        this.sendAnswer();
-      }
-    });
-    this.handoffWrap = h(
-      "div",
-      { class: "af-backlog-handoff-wrap", hidden: true },
-      h("div", { class: "af-backlog-label" }, "Notes from the agent"),
-      this.handoff
-    );
-    this.el = h(
-      "div",
-      { class: "af-backlog-question", role: "group", hidden: true },
-      h("div", { class: "af-backlog-question-text" }, icon("circle-question"), this.text),
-      this.handoffWrap,
-      this.effect,
-      h("div", { class: "af-backlog-note-row" }, this.answer, this.send)
-    );
-    this.el.setAttribute("aria-label", "Open question");
-  }
-  el;
-  text = h("span", {});
-  handoff = h("pre", { class: "af-backlog-handoff" });
-  handoffWrap;
-  effect = h("p", { class: "af-backlog-reason af-backlog-effect" });
-  answer;
-  send;
-  qid = 0;
-  get questionId() {
-    return this.qid;
-  }
-  set(q, effect = "") {
-    this.el.hidden = !q;
-    if ((q?.id ?? 0) !== this.qid) this.answer.value = "";
-    this.qid = q?.id ?? 0;
-    this.text.textContent = q ? q.author === "af" ? `af asks: ${q.text}` : q.text : "";
-    const notes = q?.handoff?.trim() ?? "";
-    this.handoffWrap.hidden = notes === "";
-    this.handoff.textContent = notes;
-    this.effect.hidden = effect === "";
-    this.effect.textContent = effect;
-  }
-  sendAnswer() {
-    const text = this.answer.value.trim();
-    const qid = this.qid;
-    if (!text || !qid || this.send.disabled) return;
-    this.send.disabled = true;
-    void this.submit(qid, text).then((ok) => {
-      this.send.disabled = false;
-      if (ok && this.qid === qid && this.answer.value.trim() === text) this.answer.value = "";
-    });
-  }
-};
-var InboxList = class {
-  constructor(actions2) {
-    this.actions = actions2;
-    this.list.setAttribute("aria-label", "Inbox");
-    this.el.append(this.list, this.empty);
-  }
-  el = h("div", { class: "af-backlog-inbox" });
-  list = h("ul", { class: "af-backlog-inbox-list" });
-  empty = h("p", { class: "af-backlog-empty" }, EMPTY_INBOX);
-  cards = /* @__PURE__ */ new Map();
-  // Run sessions the page did not hold, by id: asked for, answered, or unanswerable.
-  lookups = /* @__PURE__ */ new Map();
-  last = null;
-  render(root2, view, sessions) {
-    this.last = [root2, view, sessions];
-    const entries = inbox(view);
-    this.lookUpMissing(entries.map((e) => e.item), sessions);
-    const next = /* @__PURE__ */ new Map();
-    for (const { item, question } of entries) {
-      const key = `${root2}\0${item.id}:${question.id}`;
-      const card = this.cards.get(key) ?? this.card(root2, item.id);
-      const label = `${formatID(item.id)} ${item.title}`;
-      const age = `Asked ${formatTime(question.at)}`;
-      if (card.head.dataset.sig !== `${label}
-${age}`) {
-        card.head.dataset.sig = `${label}
-${age}`;
-        const open = h("button", { type: "button", class: "af-backlog-item-link" }, label);
-        open.addEventListener("click", () => this.actions.select(item.id));
-        card.head.replaceChildren(open, h("span", { class: "af-backlog-reason" }, age));
-      }
-      card.box.set(question, answerEffectText(answerEffect(item, sessions, (id) => this.lookups.get(id))));
-      next.set(key, card);
-    }
-    this.cards = next;
-    const notes = inboxNotes(view).map(({ item, note }) => this.note(root2, item, note));
-    const want = [...[...next.values()].map((c) => c.li), ...notes];
-    const have = [...this.list.children];
-    if (want.length !== have.length || want.some((li, i) => li !== have[i])) this.reorder(want);
-    this.empty.hidden = want.length > 0;
-  }
-  /** An absent run session is not proof it is gone: a page holds only live sessions
-   *  until it asks. Ask the daemon for each once, then draw again (Codex P2 on #6548). */
-  lookUpMissing(items, sessions) {
-    const missing = [...new Set(items.map((it) => it.runs?.at(-1)).filter((r) => r?.state === "started" && !!r.session_id).map((r) => r.session_id))].filter((id) => !this.lookups.has(id) && !sessions.some((s) => s.id === id));
-    if (missing.length === 0) return;
-    for (const id of missing) this.lookups.set(id, "pending");
-    const settle = (state) => {
-      for (const id of missing) this.lookups.set(id, state);
-      if (this.last) this.render(...this.last);
-    };
-    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
-  }
-  /** Puts the cards in order. replaceChildren detaches every card, and a detached
-   *  answer box loses focus and its selection: a card that survives gets both back,
-   *  so a question arriving or leaving never takes the typing away (Codex P2 on #6548). */
-  reorder(want) {
-    const active = document.activeElement;
-    const keep = active && this.list.contains(active) && want.some((li) => li.contains(active)) ? active : null;
-    const sel = keep && typeof keep.selectionStart === "number" ? { start: keep.selectionStart, end: keep.selectionEnd ?? keep.selectionStart, dir: keep.selectionDirection ?? "none" } : null;
-    this.list.replaceChildren(...want);
-    if (!keep || document.activeElement === keep) return;
-    keep.focus({ preventScroll: true });
-    if (sel && typeof keep.setSelectionRange === "function") keep.setSelectionRange(sel.start, sel.end, sel.dir);
-  }
-  /** A read-only note card. Its signature names the project, as a question
-   *  card's key does, and lets an unchanged note keep its node. */
-  note(root2, item, note) {
-    const label = `${formatID(item.id)} ${item.title}`;
-    const sig = `note\0${root2}\0${item.id}:${note.id}
-${label}
-${note.text}
-${note.at}
-${item.pr ?? ""}`;
-    const kept = [...this.list.children].find((li2) => li2.dataset.sig === sig);
-    if (kept) return kept;
-    const open = h("button", { type: "button", class: "af-backlog-item-link" }, label);
-    open.addEventListener("click", () => this.actions.select(item.id));
-    const pr = safeHttpUrl2(item.pr);
-    const text = h("p", { class: "af-backlog-inbox-note-text" }, note.text);
-    const li = h(
-      "li",
-      { class: "af-backlog-inbox-card af-backlog-inbox-note" },
-      h("div", { class: "af-backlog-inbox-head" }, open, h("span", { class: "af-backlog-reason" }, `Noted ${formatTime(note.at)}`)),
-      text,
-      ...pr ? [h("a", { class: "af-backlog-row-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, "Pull request", icon("external-link"))] : []
-    );
-    li.dataset.sig = sig;
-    return li;
-  }
-  card(root2, id) {
-    const head = h("div", { class: "af-backlog-inbox-head" });
-    const box = new QuestionBox(id, (qid, text) => this.actions.answer(root2, id, qid, text));
-    const li = h("li", { class: "af-backlog-inbox-card" }, head, box.el);
-    return { li, head, box };
-  }
-};
-
-// src/backlog_serial.ts
-var SerialQueue = class {
-  saving = false;
-  queued = null;
-  /** True while a request is in flight or waiting: an older write could still land. */
-  busy() {
-    return this.saving || this.queued !== null;
-  }
-  /** `run` may return a promise that settles true once the write AND the refresh after
-   *  it have landed; a plain void return counts as settled at once. `done` hears that
-   *  request's own outcome. */
-  submit(run, done2) {
-    if (this.saving) {
-      this.queued = { run, done: done2 };
-      return;
-    }
-    const result = run();
-    if (!result) {
-      done2(true);
-      return;
-    }
-    this.saving = true;
-    const finish = (ok) => {
-      this.saving = false;
-      done2(ok);
-      const next = this.queued;
-      this.queued = null;
-      if (next) this.submit(next.run, next.done);
-    };
-    result.then(finish, () => finish(false));
-  }
-};
-var queues = /* @__PURE__ */ new Map();
-function queueFor(key) {
-  let q = queues.get(key);
-  if (!q) {
-    q = new SerialQueue();
-    queues.set(key, q);
-  }
-  return q;
-}
-var SerialSaver = class {
-  constructor(save, settled, queue = new SerialQueue()) {
-    this.save = save;
-    this.settled = settled;
-    this.queue = queue;
-  }
-  submit(value) {
-    this.queue.submit(() => this.save(value), (ok) => this.settled(value, ok));
-  }
-};
-var drafts = /* @__PURE__ */ new Map();
-function getDraft(key) {
-  return drafts.has(key) ? drafts.get(key) : null;
-}
-function setDraft(key, value) {
-  if (value === null) drafts.delete(key);
-  else drafts.set(key, value);
-}
-
-// src/backlog_body.ts
-var SAVE_DELAY_MS = 800;
-function createTextareaEditor(parent, opts) {
-  const area = document.createElement("textarea");
-  area.className = "af-backlog-body-input";
-  area.value = opts.text;
-  area.rows = 6;
-  area.setAttribute("aria-label", opts.label);
-  area.addEventListener("input", () => opts.onChange(area.value));
-  parent.append(area);
-  return {
-    getText: () => area.value,
-    setText: (t) => {
-      area.value = t;
-    },
-    destroy: () => area.remove()
-  };
-}
-var bodyEditorLoader = {
-  load: async () => ({ createDocsEditor: createTextareaEditor })
-};
-var BodyEditor = class {
-  /** `queueKey` names the item's body: editors for the same body share one save
-   *  queue, so a save held by a closed panel cannot land after a reopened one's. */
-  constructor(save, label, queueKey) {
-    this.save = save;
-    this.queue = queueKey === void 0 ? new SerialQueue() : queueFor(queueKey);
-    this.draftKey = queueKey;
-    if (this.draft !== null) this.text = this.draft;
-    this.el = document.createElement("div");
-    this.el.className = "af-backlog-body";
-    const fallback = document.createElement("pre");
-    fallback.className = "af-backlog-body-text";
-    this.el.append(fallback);
-    bodyEditorLoader.load().then((mod) => {
-      if (this.disposed) return;
-      this.el.replaceChildren();
-      this.editor = mod.createDocsEditor(this.el, { text: this.text, label, onChange: (t) => this.changed(t) });
-    }, () => {
-      fallback.textContent = this.text;
-    });
-  }
-  el;
-  editor = null;
-  text = "";
-  timer = null;
-  // The edit the user made that no confirming response has covered yet: typed (the
-  // debounce is running) or saved and still in flight. Stored text arriving while it
-  // is set is older than the edit and must not replace it. It survives a failed save,
-  // so the edit is kept (and the next change saves it again).
-  localDraft = null;
-  draftKey;
-  get draft() {
-    return this.draftKey === void 0 ? this.localDraft : getDraft(this.draftKey);
-  }
-  set draft(v) {
-    if (this.draftKey === void 0) this.localDraft = v;
-    else setDraft(this.draftKey, v);
-  }
-  disposed = false;
-  // Counts the item's edits, shared with every editor of it like the draft: a save's
-  // acknowledgement covers the edit it carried only if no edit has been made since,
-  // whatever text that edit left (typing A, B, A again is three edits, not none).
-  get rev() {
-    return this.draftKey === void 0 ? this.localRev : getDraft(`${this.draftKey}\0rev`) ?? 0;
-  }
-  set rev(v) {
-    if (this.draftKey === void 0) this.localRev = v;
-    else setDraft(`${this.draftKey}\0rev`, v);
-  }
-  localRev = 0;
-  /** `save` may return a promise that settles true once the write AND the refresh
-   *  after it have landed; a plain void return acknowledges at once. */
-  queue;
-  /** Shows the stored body. An edit that is typed or not yet acknowledged is kept. Once
-   *  every write has settled and nothing is waiting to be saved, a stored body that is
-   *  exactly the draft releases it (a save whose confirming read failed is acknowledged
-   *  by a later one); while a write is in flight or the debounce is running, a matching
-   *  snapshot may be stale and proves nothing. */
-  setText(text) {
-    if (this.draft !== null && this.draft === text && this.timer === null && !this.queue.busy()) this.draft = null;
-    if (this.draft !== null || text === this.text) return;
-    this.text = text;
-    if (this.editor) {
-      if (this.editor.getText() !== text) this.editor.setText(text);
-    } else {
-      const pre = this.el.querySelector("pre");
-      if (pre) pre.textContent = text;
-    }
-  }
-  changed(text) {
-    this.text = text;
-    this.draft = text;
-    this.rev++;
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = setTimeout(() => this.flush(), SAVE_DELAY_MS);
-  }
-  flush() {
-    if (this.timer === null) return;
-    clearTimeout(this.timer);
-    this.timer = null;
-    const text = this.text;
-    const rev = this.rev;
-    this.queue.submit(() => this.save(text), (ok) => {
-      if (ok && this.rev === rev && this.draft === text) this.draft = null;
-    });
-  }
-  dispose() {
-    this.flush();
-    this.disposed = true;
-    this.editor?.destroy();
-  }
-};
-
-// src/backlog_cycle.ts
-var start = (id) => `${id}s`;
-var done = (id) => `${id}d`;
-var nodeID = (n) => Number(n.slice(0, -1));
-var isDone = (n) => n.endsWith("d");
-function edges(b) {
-  const g = /* @__PURE__ */ new Map();
-  const add = (from, to) => {
-    g.set(from, [...g.get(from) ?? [], to]);
-  };
-  const exists = new Set(b.items.map((it) => it.id));
-  const prevChild = /* @__PURE__ */ new Map();
-  for (const it of b.items) {
-    for (const w of it.waits_on ?? []) {
-      if (exists.has(w)) add(start(it.id), done(w));
-    }
-    const p = it.parent ?? 0;
-    if (p !== 0 && exists.has(p)) {
-      add(start(it.id), start(p));
-      const prev = prevChild.get(p);
-      if (prev !== void 0 && itemByID(b, p)?.sequential) add(start(it.id), done(prev));
-      prevChild.set(p, it.id);
-      add(done(p), done(it.id));
-    }
-  }
-  for (const it of b.items) {
-    if (!isParent(b, it.id)) add(done(it.id), start(it.id));
-  }
-  return g;
-}
-function findPath(g, from, to) {
-  const prev = /* @__PURE__ */ new Map([[from, from]]);
-  const queue = [from];
-  while (queue.length > 0) {
-    let n = queue.shift();
-    if (n === to) {
-      const path = [];
-      for (; n !== from; n = prev.get(n)) path.push(n);
-      path.push(from);
-      return path.reverse();
-    }
-    for (const m of g.get(n) ?? []) {
-      if (!prev.has(m)) {
-        prev.set(m, n);
-        queue.push(m);
-      }
-    }
-  }
-  return null;
-}
-function collapse(path) {
-  const ids = [];
-  for (const n of path) {
-    const id = nodeID(n);
-    if (ids.length === 0 || ids[ids.length - 1] !== id) ids.push(id);
-  }
-  return ids;
-}
-function isWaitEdge(b, from, to) {
-  if (isDone(from) || !isDone(to) || nodeID(from) === nodeID(to)) return false;
-  return (itemByID(b, nodeID(from))?.waits_on ?? []).includes(nodeID(to));
-}
-function allWaitEdges(b, path) {
-  for (let k = 0; k + 1 < path.length; k++) {
-    const from = path[k];
-    const to = path[k + 1];
-    if (nodeID(from) === nodeID(to) && isDone(from) && !isDone(to)) continue;
-    if (!isWaitEdge(b, from, to)) return false;
-  }
-  return true;
-}
-var formatPath = (ids) => ids.map(formatID).join(" \u2192 ");
-function waitsOnBlock(b, id, target) {
-  if (!itemByID(b, id) || !itemByID(b, target)) return `${formatID(target)} not found`;
-  const a = formatID(id);
-  const t = formatID(target);
-  if (id === target) return `${a} cannot wait on itself`;
-  if (isAncestor(b, target, id)) return `${a} cannot wait on ${t}: ${t} contains it`;
-  if (isAncestor(b, id, target)) return `${a} cannot wait on ${t}: ${t} is inside it`;
-  const g = edges(b);
-  const from = done(target);
-  const to = start(id);
-  g.set(to, [...g.get(to) ?? [], from]);
-  const path = findPath(g, from, to);
-  if (path === null) return null;
-  const ids = [id, ...collapse(path)];
-  if (!allWaitEdges(b, path)) return `${a} cannot wait on ${t}: that would make a wait cycle (${formatPath(ids)})`;
-  return `${a} cannot wait on ${t}: ${t} already waits on ${a} (${formatPath(ids)})`;
-}
-
-// src/backlog_panel.ts
-function sameList(a, b) {
-  return a.length === b.length && a.every((v, i) => v === b[i]);
-}
-function outcomeSaver(done2, note) {
-  if (!done2) return;
-  return done2.then((o) => {
-    note(o);
-    return o === "confirmed";
-  });
-}
-var ACTION_STATUS = {
-  queue: "queued",
-  draft: "draft",
-  review: "review",
-  done: "done",
-  drop: "dropped",
-  reopen: "draft"
-};
-function stateChip(view, id, reason = derivedOf(view, id).reason ?? "", link2) {
-  const d = derivedOf(view, id);
-  if (reason.startsWith(`${STATE_LABELS[d.state]} \xB7 `)) reason = reason.slice(STATE_LABELS[d.state].length + 1);
-  const glyph = h("span", { class: "af-backlog-glyph", ariaHidden: "true" }, STATE_GLYPHS[d.state]);
-  let chip;
-  if (link2) {
-    const label = `${STATE_LABELS[d.state]}${link2.extra}`;
-    chip = h(
-      "button",
-      { type: "button", class: `af-backlog-chip af-backlog-chip-link af-backlog-state-${d.state}`, tabIndex: -1 },
-      glyph,
-      label,
-      h("span", { class: "af-backlog-chip-arrow", ariaHidden: "true" }, "\u2197")
-    );
-    chip.setAttribute("aria-label", `${label} \xB7 Open session`);
-    chip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      link2.open();
-    });
-    link2.decorate?.(chip);
-  } else {
-    chip = h("span", { class: `af-backlog-chip af-backlog-state-${d.state}` }, glyph, STATE_LABELS[d.state]);
-  }
-  return reason ? h("span", { class: "af-backlog-state" }, chip, h("span", { class: "af-backlog-reason" }, reason)) : chip;
-}
-function section2(title, ...children) {
-  return h("section", { class: "af-backlog-section" }, h("h3", { class: "af-backlog-section-title" }, title), ...children);
-}
-function button(label, run, cls = "af-ghost") {
-  const b = h("button", { type: "button", class: cls }, label);
-  b.addEventListener("click", run);
-  return b;
-}
-function entryField(placeholder, label, submit) {
-  const input = h("input", { type: "text", class: "af-backlog-entry", placeholder });
-  input.setAttribute("aria-label", label);
-  input.addEventListener("keydown", (e) => {
-    if (e.key !== "Enter" || e.isComposing) return;
-    const text = input.value.trim();
-    if (!text) return;
-    e.preventDefault();
-    input.value = "";
-    submit(text);
-  });
-  return input;
-}
-var ItemPanel = class {
-  constructor(root2, id, actions2, previews = null) {
-    this.root = root2;
-    this.id = id;
-    this.actions = actions2;
-    this.previews = previews;
-    this.titleKey = `${root2}\0${id}\0title`;
-    this.waitsKey = `${root2}\0${id}\0waits`;
-    let titleOutcome = "confirmed";
-    let waitsOutcome = "confirmed";
-    this.titles = new SerialSaver((title) => outcomeSaver(actions2.update(id, { title }), (o) => {
-      titleOutcome = o;
-    }), (title) => {
-      if (this.titleDraft !== title) return;
-      if (titleOutcome !== "unconfirmed") this.titleDraft = null;
-      this.repaint();
-    }, queueFor(`${root2}\0${id}\0title`));
-    this.waits = new SerialSaver((waits_on) => outcomeSaver(actions2.update(id, { waits_on }), (o) => {
-      waitsOutcome = o;
-    }), (list) => {
-      if (this.waitsDraft !== null && sameList(this.waitsDraft, list) && waitsOutcome !== "unconfirmed") this.waitsDraft = null;
-      this.repaint();
-    }, queueFor(`${root2}\0${id}\0waits`));
-    this.title = h("input", { type: "text", class: "af-backlog-title-input" });
-    this.title.setAttribute("aria-label", "Backlog item title");
-    const commitTitle = () => {
-      const it = this.item();
-      const t = this.title.value.trim();
-      if (!it) return;
-      if (t && t !== (this.titleDraft ?? it.title)) {
-        this.titleDraft = t;
-        this.titles.submit(t);
-      } else this.title.value = this.titleDraft ?? it.title;
-    };
-    this.title.addEventListener("change", commitTitle);
-    this.title.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.isComposing) this.title.blur();
-    });
-    this.body = new BodyEditor((text) => outcomeSaver(actions2.update(id, { body: text }), () => {
-    }), "Body", `${root2}\0${id}\0body`);
-    this.note = h("textarea", { class: "af-backlog-note", rows: 2, placeholder: "Add a note\u2026" });
-    this.note.setAttribute("aria-label", "Note");
-    const addNote2 = button("Add note", () => {
-      const text = this.note.value.trim();
-      if (!text) return;
-      this.note.value = "";
-      const done2 = actions2.note(id, text);
-      if (done2) done2.then((ok) => {
-        if (!ok) this.note.value = this.note.value ? `${text}
-${this.note.value}` : text;
-      }, () => {
-      });
-    });
-    this.head = h("div", { class: "af-backlog-panel-state", tabIndex: -1 });
-    this.question = new QuestionBox(id, (qid, text) => actions2.answer(id, qid, text));
-    this.above = h("div", { class: "af-backlog-panel-rest" });
-    this.below = h("div", { class: "af-backlog-panel-rest" });
-    this.threadList = h("ol", { class: "af-backlog-thread" });
-    const close = h("button", { type: "button", class: "af-ghost af-backlog-close", title: "Close" }, icon("x"));
-    close.setAttribute("aria-label", "Close item");
-    close.addEventListener("click", () => actions2.close());
-    this.closeButton = close;
-    const top = h(
-      "div",
-      { class: "af-backlog-panel-top" },
-      h("span", { class: "af-backlog-id" }, formatID(id)),
-      this.title,
-      close
-    );
-    this.card.setAttribute("aria-label", "Session");
-    this.el = h(
-      "aside",
-      { class: "af-backlog-panel" },
-      top,
-      this.head,
-      this.card,
-      this.question.el,
-      this.above,
-      section2("Body", this.body.el),
-      this.below,
-      section2("Thread", this.threadList, h("div", { class: "af-backlog-note-row" }, this.note, addNote2))
-    );
-    this.el.setAttribute("aria-label", `Item ${formatID(id)}`);
-    this.el.addEventListener("keydown", (e) => {
-      if (e.key !== "Escape" || e.defaultPrevented || e.isComposing) return;
-      e.preventDefault();
-      actions2.close();
-    });
-  }
-  el;
-  title;
-  body;
-  note;
-  head;
-  card = h("section", { class: "af-backlog-card", hidden: true });
-  earlierOpen = false;
-  question;
-  above;
-  below;
-  threadList;
-  closeButton;
-  pickerQuery = "";
-  pickerOpen = false;
-  moveOpen = false;
-  view = null;
-  sessions = [];
-  usage = null;
-  // Run sessions the rail did not hold, by id: asked for, answered, or unanswerable.
-  lookups = /* @__PURE__ */ new Map();
-  // The title the user submitted that no confirming response has covered yet: a
-  // refresh that read the old item must not put the old title back over it.
-  get titleDraft() {
-    return getDraft(this.titleKey);
-  }
-  set titleDraft(v) {
-    setDraft(this.titleKey, v);
-  }
-  // The waits-on list the user last submitted, likewise held until acknowledged, so
-  // a second change builds on it instead of on the stored list.
-  get waitsDraft() {
-    return getDraft(this.waitsKey);
-  }
-  set waitsDraft(v) {
-    setDraft(this.waitsKey, v);
-  }
-  titleKey;
-  waitsKey;
-  titles;
-  waits;
-  focus() {
-    this.closeButton.focus({ preventScroll: true });
-  }
-  /** An absent run session is not proof it is gone: the rail pages archived rows in
-   *  only when the archive filter is on. Ask the daemon for them by id once. */
-  lookUpMissing(it) {
-    const missing = (it.runs ?? []).map((r) => r.session_id).filter((id) => !!id && !this.lookups.has(id) && !this.sessions.some((s) => s.id === id));
-    if (missing.length === 0) return;
-    for (const id of missing) this.lookups.set(id, "pending");
-    const settle = (state) => {
-      for (const id of missing) this.lookups.set(id, state);
-      this.repaint();
-    };
-    this.actions.loadSessions(missing).then(() => settle("done"), () => settle("failed"));
-  }
-  /** The waits-on list as the user sees it: their last submission until it is acknowledged. */
-  waitsOf(it) {
-    return this.waitsDraft ?? it.waits_on ?? [];
-  }
-  setWaits(it, list) {
-    this.waitsDraft = list;
-    this.waits.submit(list);
-    this.repaint();
-  }
-  /** Draws again from what the panel last rendered, for a change that arrives on its own (a lookup, a write's outcome). */
-  repaint() {
-    if (this.view) this.render(this.view, this.sessions, this.usage);
-  }
-  item() {
-    return this.view ? itemByID(this.view.backlog, this.id) : void 0;
-  }
-  render(view, sessions, usage = null) {
-    this.view = view;
-    this.sessions = sessions;
-    this.usage = usage;
-    const it = this.item();
-    if (!it) return;
-    this.lookUpMissing(it);
-    if (this.titleDraft !== null && this.titleDraft === it.title && !queueFor(this.titleKey).busy()) this.titleDraft = null;
-    if (this.waitsDraft !== null && sameList(this.waitsDraft, it.waits_on ?? []) && !queueFor(this.waitsKey).busy()) this.waitsDraft = null;
-    if (document.activeElement !== this.title) this.title.value = this.titleDraft ?? it.title;
-    this.body.setText(it.body ?? "");
-    const restore = this.keepField();
-    this.head.replaceChildren(stateChip(view, it.id));
-    const q = userQuestions(view.backlog, it)[0] ?? orchestratorQuestion(view.backlog, it);
-    const effect = q ? answerEffectText(answerEffect(it, sessions, (id) => this.lookups.get(id))) : "";
-    this.question.set(q, q && withOrchestrator(view.backlog, it.id, q) ? `${WITH_EFFORT_SESSION} \xB7 ${effect}` : effect);
-    const card = this.sessionCard(view, it);
-    this.card.hidden = card.length === 0;
-    this.card.replaceChildren(...card);
-    this.above.replaceChildren(this.actionsRow(view, it));
-    const below = [this.waitsSection(view, it)];
-    const children = this.childrenSection(view, it);
-    if (children) below.push(children);
-    if (isGroup(view.backlog, it)) {
-      const orch = orchestratorSection(view, it, this.actions.orchestrator);
-      if (orch) below.push(orch);
-      below.push(...groupSections(view, it, this.actions.select));
-    }
-    if (it.source?.proposal) below.push(h("p", { class: "af-backlog-source" }, icon("file-text"), `From proposal ${it.source.proposal}`));
-    this.below.replaceChildren(...below);
-    this.threadList.replaceChildren(...(it.thread ?? []).map((m) => h(
-      "li",
-      { class: `af-backlog-msg af-backlog-msg-${m.kind}` },
-      h("div", { class: "af-backlog-msg-meta" }, [
-        m.kind === "note" ? "Note" : m.kind === "question" ? "Question" : "Answer",
-        m.author === "user" ? "you" : m.author.startsWith("agent:") ? "agent" : m.author,
-        formatTime(m.at),
-        ...m.closed ? [m.closed === "answered in session" ? "Answered in session" : `Closed \xB7 ${m.closed}`] : []
-      ].join(" \xB7 ")),
-      h("div", { class: "af-backlog-msg-text" }, m.text)
-    )));
-    restore();
-  }
-  /** Keeps the focus, and a field's value, across a rebuild: the same control
-   *  is found again by its tag, label and text. An item action that went away,
-   *  such as Start now once the item starts, hands focus to the first action
-   *  left, else to the state chip. */
-  keepField() {
-    const active = document.activeElement;
-    const box = [this.card, this.above, this.below].find((b) => active && b.contains(active));
-    if (!box || !active) return () => {
-    };
-    const tag = active.tagName;
-    const label = active.getAttribute("aria-label");
-    const text = active.textContent;
-    const field2 = tag === "INPUT" || tag === "SELECT";
-    const value = field2 ? active.value : "";
-    const action2 = active.dataset.action;
-    return () => {
-      const next = action2 ? this.above.querySelector(`[data-action="${action2}"]`) : [...box.querySelectorAll(tag.toLowerCase())].find((el2) => el2.getAttribute("aria-label") === label && (field2 || el2.textContent === text));
-      if (!next) {
-        if (action2) (this.above.querySelector("[data-action]") ?? this.head).focus({ preventScroll: true });
-        return;
-      }
-      if (field2) next.value = value;
-      next.focus({ preventScroll: true });
-    };
-  }
-  actionsRow(view, it) {
-    const row = h("div", { class: "af-backlog-actions" });
-    const hasRuns = (it.runs ?? []).length > 0;
-    for (const a of itemActions(view.backlog, it, derivedOf(view, it.id))) {
-      if (a === "start" && hasRuns) continue;
-      const b = button(ACTION_LABELS[a], () => {
-        if (a === "delete") this.actions.remove(it.id);
-        else if (a === "start") this.actions.start(it.id);
-        else this.actions.status(it.id, ACTION_STATUS[a]);
-      }, a === "queue" || a === "start" ? "af-primary" : "af-ghost");
-      b.dataset.action = a;
-      row.append(b);
-    }
-    if (isParent(view.backlog, it.id) || it.archived) row.append(...groupButtons(it, isGroup(view.backlog, it), this.actions.group));
-    row.append(this.moveMenu(view, it));
-    return row;
-  }
-  moveMenu(view, it) {
-    const b = view.backlog;
-    const others = b.items.filter((o) => o.id !== it.id && !isAncestor(b, it.id, o.id));
-    const pick = (label, opts, to) => {
-      const sel = h(
-        "select",
-        { class: "af-backlog-move-select" },
-        h("option", { value: "" }, label),
-        ...opts.map((o) => h("option", { value: String(o.id) }, `${formatID(o.id)} ${o.title}`))
-      );
-      sel.setAttribute("aria-label", label);
-      sel.addEventListener("change", () => {
-        if (sel.value) this.actions.move(it.id, to(Number(sel.value)));
-      });
-      return sel;
-    };
-    const panel = h(
-      "div",
-      { class: "af-backlog-move-panel" },
-      button("Top", () => this.actions.move(it.id, { top: true })),
-      button("Bottom", () => this.actions.move(it.id, { bottom: true })),
-      pick("Above\u2026", others, (id) => ({ before: id })),
-      pick(
-        "Into\u2026",
-        others.filter((o) => o.id !== it.parent && o.status !== "running" && (o.runs ?? []).length === 0),
-        (id) => ({ into: id })
-      )
-    );
-    const details = h("details", { class: "af-backlog-move", open: this.moveOpen }, h("summary", { class: "af-ghost" }, "Move\u2026"), panel);
-    details.addEventListener("toggle", () => {
-      this.moveOpen = details.open;
-    });
-    return details;
-  }
-  waitsSection(view, it) {
-    const b = view.backlog;
-    const chips = h("div", { class: "af-backlog-chips" });
-    for (const w of this.waitsOf(it)) {
-      const target = itemByID(b, w);
-      const remove = h("button", { type: "button", class: "af-backlog-chip-x", title: `Remove ${formatID(w)}` }, icon("x"));
-      remove.setAttribute("aria-label", `Remove ${formatID(w)}`);
-      remove.addEventListener("click", () => this.setWaits(it, this.waitsOf(it).filter((x) => x !== w)));
-      const state = target ? STATE_LABELS[derivedOf(view, w).state] : "missing";
-      chips.append(h(
-        "span",
-        { class: "af-backlog-link" },
-        h("span", {}, `${formatID(w)} ${target?.title ?? ""}`),
-        h("span", { class: "af-backlog-reason" }, state),
-        remove
-      ));
-    }
-    const add = button("Add", () => {
-      this.pickerOpen = !this.pickerOpen;
-      this.render(view, this.sessions, this.usage);
-      this.el.querySelector(".af-backlog-picker input")?.focus();
-    });
-    add.classList.add("af-backlog-wait-add");
-    add.setAttribute("aria-expanded", String(this.pickerOpen));
-    chips.append(add);
-    const parts = [chips];
-    if (this.pickerOpen) parts.push(this.picker(view, it));
-    const needed = neededBy(b, it.id);
-    if (needed.length > 0) {
-      parts.push(h(
-        "div",
-        { class: "af-backlog-needed" },
-        h("span", { class: "af-backlog-label" }, "Needed by"),
-        ...needed.map((n) => this.itemLink(n))
-      ));
-    }
-    return section2("Waits on", ...parts);
-  }
-  picker(view, it) {
-    const b = view.backlog;
-    const input = h("input", { type: "search", class: "af-backlog-entry", placeholder: "Search by id or title\u2026", value: this.pickerQuery });
-    input.setAttribute("aria-label", "Search items to wait on");
-    const list = h("ul", { class: "af-backlog-picker-list" });
-    const fill = () => {
-      const q = this.pickerQuery.trim().toLowerCase().replace(/^b-/, "");
-      const options = b.items.filter((o) => o.id !== it.id && !this.waitsOf(it).includes(o.id) && (q === "" || String(o.id).startsWith(q) || o.title.toLowerCase().includes(q)));
-      list.replaceChildren(...options.map((o) => {
-        const block = waitsOnBlock(b, it.id, o.id);
-        const opt = h(
-          "button",
-          { type: "button", class: "af-backlog-option", disabled: block !== null },
-          h("span", {}, `${formatID(o.id)} ${o.title}`),
-          ...block ? [h("span", { class: "af-backlog-reason" }, block)] : []
-        );
-        opt.addEventListener("click", () => {
-          this.pickerOpen = false;
-          this.pickerQuery = "";
-          this.setWaits(it, [...this.waitsOf(it), o.id]);
-        });
-        return h("li", {}, opt);
-      }));
-      if (options.length === 0) list.append(h("li", { class: "af-backlog-reason" }, "No matching items"));
-    };
-    input.addEventListener("input", () => {
-      this.pickerQuery = input.value;
-      fill();
-    });
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Escape") {
-        e.preventDefault();
-        this.pickerOpen = false;
-        this.render(view, this.sessions, this.usage);
-        this.below.querySelector(".af-backlog-wait-add")?.focus();
-      }
-    });
-    fill();
-    return h("div", { class: "af-backlog-picker" }, input, list);
-  }
-  itemLink(o) {
-    const b = h("button", { type: "button", class: "af-backlog-item-link" }, `${formatID(o.id)} ${o.title}`);
-    b.addEventListener("click", () => this.actions.select(o.id));
-    return b;
-  }
-  childrenSection(view, it) {
-    const b = view.backlog;
-    const parent = isParent(b, it.id);
-    if (!parent && (it.status === "running" || (it.runs ?? []).length > 0)) return null;
-    const parts = [];
-    if (parent) {
-      parts.push(h(
-        "ul",
-        { class: "af-backlog-children" },
-        ...childrenOf(b, it.id).map((c) => h("li", {}, this.itemLink(c), stateChip(view, c.id, "")))
-      ));
-      const sw = h("input", { type: "checkbox", checked: it.sequential === true });
-      sw.setAttribute("role", "switch");
-      sw.addEventListener("change", () => this.actions.update(it.id, { sequential: sw.checked }));
-      parts.push(h("label", { class: "af-backlog-switch" }, sw, "Run children in order"));
-    }
-    parts.push(entryField("Add child\u2026", `Add a child to ${formatID(it.id)}`, (title) => this.actions.addChild(it.id, title)));
-    return section2("Children", ...parts);
-  }
-  /** The latest run: its preview, branch and PR, its session actions, Start
-   *  again, and the earlier runs folded. Empty when the item has no run or PR. */
-  sessionCard(view, it) {
-    const runs = it.runs ?? [];
-    const pr = safeHttpUrl2(it.pr);
-    const latest = latestRun(it);
-    if (!latest && !pr) return [];
-    const out = [];
-    const s = latest?.session_id ? this.sessions.find((x) => x.id === latest.session_id) : void 0;
-    if (latest) {
-      const main = this.runMain(latest, s);
-      main.classList.add("af-backlog-card-head");
-      out.push(main, this.cardPreview(latest, s));
-    }
-    const facts = h("div", { class: "af-backlog-card-facts" });
-    if (s?.branch) facts.append(h("span", { class: "af-backlog-card-branch", title: "Branch" }, icon("git-branch"), s.branch));
-    if (pr) facts.append(h("a", { class: "af-backlog-pr", href: pr, target: "_blank", rel: "noopener noreferrer" }, icon("external-link"), "Pull request"));
-    if (facts.firstChild) out.push(facts);
-    const btns = s ? this.sessionButtons(s) : h("div", { class: "af-backlog-run-actions" });
-    if (latest && itemActions(view.backlog, it, derivedOf(view, it.id)).includes("start")) {
-      btns.append(button("Start again", () => this.actions.start(it.id)));
-    }
-    if (btns.firstChild) out.push(btns);
-    const earlier = runs.slice(0, -1).reverse();
-    if (earlier.length > 0) {
-      const list = h("ul", { class: "af-backlog-runs" }, ...earlier.map((run) => {
-        const rs = run.session_id ? this.sessions.find((x) => x.id === run.session_id) : void 0;
-        return h("li", { class: "af-backlog-run" }, this.runMain(run, rs), rs ? this.sessionButtons(rs) : h("span", {}));
-      }));
-      const details = h(
-        "details",
-        { class: "af-backlog-earlier", open: this.earlierOpen },
-        h("summary", {}, `Earlier runs (${earlier.length})`),
-        list
-      );
-      details.addEventListener("toggle", () => {
-        this.earlierOpen = details.open;
-      });
-      out.push(details);
-    }
-    return out;
-  }
-  runMain(run, s) {
-    const live = s ? ROW_KIND_LABELS[rowKind(s)] : run.state === "starting" ? "Starting" : run.state === "failed" ? "Failed" : this.absent(run);
-    const by = run.started_by === "runner" ? "runner" : "you";
-    const meta = h("div", { class: "af-backlog-reason" }, [live, `Started by ${by}`, formatTime(run.started_at)].join(" \xB7 "));
-    const cost = run.session_id ? this.usage?.runs[run.session_id] : void 0;
-    if (cost !== void 0 && this.usage) {
-      const use = runUse(run.session_id, this.usage, Date.now(), s?.account);
-      const words = use === null ? [`${usd(cost)} at API prices`] : [`${pct(use)} of the 5-hour window`, `${usd(cost)} at API prices`];
-      const span = h("span", { class: "af-backlog-run-use" }, words.join(" \xB7 "));
-      span.title = use === null ? "No reading for the 5-hour window" : `${usd(this.usage.run_window[run.session_id] ?? 0)} in this 5-hour window`;
-      meta.append(" \xB7 ", span);
-    }
-    return h("div", { class: "af-backlog-run-main" }, h("div", { class: "af-backlog-run-title" }, run.title || run.session_id), meta);
-  }
-  /** A run session the rail does not hold: Checking… while lookUpMissing asks the
-   *  daemon for it, Unavailable when that failed, else Gone. */
-  absent(run) {
-    const asked = run.session_id ? this.lookups.get(run.session_id) : void 0;
-    return asked === "pending" ? "Checking\u2026" : asked === "failed" ? "Unavailable" : "Gone";
-  }
-  sessionButtons(s) {
-    const btns = h("div", { class: "af-backlog-run-actions" });
-    const sid = s.id ?? "";
-    if (!sid) return btns;
-    btns.append(button("Open", () => this.actions.openSession(sid)));
-    const kind = rowKind(s);
-    if (kind === "archived" || kind === "lost" || kind === "dead") btns.append(button("Restore", () => this.actions.restoreSession(sid)));
-    if (!isArchived(s)) btns.append(button("Archive", () => this.actions.archiveSession(sid)));
-    return btns;
-  }
-  /** The read-only preview of the latest run's session. Its request is kept,
-   *  so a hover never supersedes it. The answer re-renders the panel; the cache
-   *  keeps that from asking again for 5 s. */
-  cardPreview(run, s) {
-    const note = (text) => h("p", { class: "af-backlog-reason af-backlog-card-note" }, text);
-    if (!s?.id) {
-      const absent = this.absent(run);
-      return note(run.state === "starting" ? "Starting\u2026" : run.state === "failed" ? "Run failed to start" : absent === "Checking\u2026" ? absent : `Session ${absent.toLowerCase()}`);
-    }
-    if (isArchived(s)) return note("Archived \xB7 Restore to see the session");
-    if (!this.previews) return note("No preview");
-    const sid = s.id;
-    const hit = this.previews.cached(sid);
-    if (!hit) {
-      void this.previews.get(sid, true).then((p) => {
-        if (this.view && this.el.isConnected) this.render(this.view, this.sessions, this.usage);
-      });
-      return note("Loading preview\u2026");
-    }
-    if (hit.error) return note(`Preview unavailable \xB7 ${hit.error}`);
-    const pre = h("pre", { class: "af-backlog-card-preview", tabIndex: 0 }, hit.text || "No output yet");
-    pre.setAttribute("aria-label", "Session preview");
-    return pre;
-  }
-  dispose() {
-    this.body.dispose();
-  }
-};
-
-// src/backlog_preview.ts
-var PREVIEW_DELAY_MS = 300;
-var PREVIEW_TTL_MS = 5e3;
-var PREVIEW_LINES = 12;
-async function previewSession(id, lines, token2) {
-  const resp = await af("PreviewSession", { id, lines }, token2);
-  return resp?.text ?? "";
-}
-var PreviewCache = class {
-  constructor(load, now = Date.now) {
-    this.load = load;
-    this.now = now;
-  }
-  entries = /* @__PURE__ */ new Map();
-  busy = false;
-  waiting = [];
-  cached(id) {
-    const e = this.entries.get(id);
-    return e && this.now() - e.at < PREVIEW_TTL_MS ? e.preview : void 0;
-  }
-  get(id, keep = false) {
-    const hit = this.cached(id);
-    if (hit) return Promise.resolve(hit);
-    if (!this.busy) return this.run(id);
-    return new Promise((resolve) => {
-      const same = this.waiting.find((w) => w.id === id);
-      if (same) {
-        const prev = same.resolve;
-        same.resolve = (p) => {
-          prev(p);
-          resolve(p);
-        };
-        same.keep ||= keep;
-        return;
-      }
-      if (!keep) {
-        for (const w of this.waiting.filter((x) => !x.keep)) w.resolve(null);
-        this.waiting = this.waiting.filter((x) => x.keep);
-      }
-      this.waiting.push({ id, keep, resolve });
-    });
-  }
-  async run(id) {
-    this.busy = true;
-    let preview;
-    try {
-      preview = { text: await this.load(id) };
-    } catch (e) {
-      preview = { text: "", error: errorText(e) };
-    }
-    this.entries.set(id, { preview, at: this.now() });
-    this.busy = false;
-    this.drain();
-    return preview;
-  }
-  drain() {
-    while (!this.busy && this.waiting.length > 0) {
-      const w = this.waiting.shift();
-      const hit = this.cached(w.id);
-      if (hit) w.resolve(hit);
-      else void this.run(w.id).then(w.resolve);
-    }
-  }
-};
-var PreviewPopover = class {
-  constructor(cache) {
-    this.cache = cache;
-    this.el = h("div", { class: "af-backlog-preview", role: "tooltip", hidden: true }, this.heading, this.body);
-    this.el.id = "af-backlog-preview";
-  }
-  el;
-  heading = h("div", { class: "af-backlog-preview-head" });
-  body = h("pre", { class: "af-backlog-preview-text" });
-  timer = null;
-  anchor = null;
-  sessionId = "";
-  // What opened the preview: the pointer on its chip, or keyboard focus on the chip's row.
-  via = "hover";
-  // Each chip's focus owner (its row), so a rebuilt chip's row can be asked.
-  owners = /* @__PURE__ */ new WeakMap();
-  /** Wires an anchor to show the session's preview on hover, and on focus of
-   *  focusEl (its row, for keyboard users). */
-  attach(anchor, sessionId, heading, focusEl = anchor) {
-    anchor.dataset.previewSession = sessionId;
-    this.owners.set(anchor, focusEl);
-    const show = (via) => this.schedule(anchor, sessionId, heading, via);
-    const hide = () => {
-      if (this.anchor === anchor) this.hide();
-    };
-    anchor.addEventListener("mouseenter", () => show("hover"));
-    focusEl.addEventListener("focus", () => show("focus"));
-    anchor.addEventListener("mouseleave", hide);
-    focusEl.addEventListener("blur", () => {
-      if (anchor.isConnected) hide();
-    });
-  }
-  /** After a list rebuild: follows the open preview to its new chip, or hides it. */
-  rebind(root2) {
-    if (!this.anchor) return;
-    const next = [...root2.querySelectorAll("[data-preview-session]")].find((el2) => el2.dataset.previewSession === this.sessionId);
-    if (!next) {
-      this.hide();
-      return;
-    }
-    this.anchor = next;
-    if (!this.el.hidden) next.setAttribute("aria-describedby", this.el.id);
-  }
-  /** After the list has settled its focus: a preview a row's focus opened stays
-   *  only while that row (rebuilt or not) still has focus, so it never floats over
-   *  the panel Enter moved focus into. A hover preview is the pointer's to end. */
-  settle() {
-    if (!this.anchor || this.via !== "focus") return;
-    const owner = this.owners.get(this.anchor) ?? this.anchor;
-    if (!owner.contains(document.activeElement)) this.hide();
-  }
-  hide() {
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
-    this.anchor?.removeAttribute("aria-describedby");
-    this.anchor = null;
-    this.sessionId = "";
-    this.el.hidden = true;
-  }
-  schedule(anchor, sessionId, heading, via) {
-    if (this.anchor === anchor) return;
-    this.hide();
-    this.anchor = anchor;
-    this.sessionId = sessionId;
-    this.via = via;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.cache.get(sessionId).then((p) => {
-        if (!p || this.sessionId !== sessionId || !this.anchor?.isConnected) return;
-        this.show(this.anchor, heading, p);
-      });
-    }, PREVIEW_DELAY_MS);
-  }
-  show(anchor, heading, p) {
-    this.heading.textContent = heading;
-    this.body.textContent = p.error ? `Preview unavailable \xB7 ${p.error}` : p.text || "No output yet";
-    this.body.classList.toggle("af-backlog-preview-error", Boolean(p.error));
-    const vw = typeof window === "undefined" ? 0 : window.innerWidth;
-    const vh = typeof window === "undefined" ? 0 : window.innerHeight;
-    Object.assign(this.el.style, previewPlacement(anchor.getBoundingClientRect(), vw, vh));
-    this.el.hidden = false;
-    this.body.scrollTop = this.body.scrollHeight;
-    anchor.setAttribute("aria-describedby", this.el.id);
-  }
-};
-function previewPlacement(r, vw, vh) {
-  const below = vh === 0 || r.top + r.height < vh * 0.6;
-  const tall = vh > 0 ? Math.max(0, below ? vh - (r.top + r.height) : r.top) : 0;
-  const left = Math.max(0, r.left);
-  const end = Math.min(vw || Infinity, r.left + r.width);
-  const fromRight = vw > 0 && end > vw / 2;
-  const wide = fromRight ? Math.max(0, end) : vw > 0 ? vw - left : 0;
-  return {
-    top: below ? `${r.top + r.height}px` : "auto",
-    bottom: below ? "auto" : `${vh - r.top}px`,
-    left: fromRight ? "auto" : `${left}px`,
-    right: fromRight ? `${Math.max(0, vw - end)}px` : "auto",
-    maxWidth: wide > 0 ? `min(calc(var(--af-space-4) * 36), ${wide}px)` : "",
-    maxHeight: tall > 0 ? `${tall}px` : ""
-  };
-}
-
-// src/backlog_runner.ts
-var MAX_RUNNING = 8;
-var RUNNER_STATES = {
-  off: "Runner off",
-  idle: "Runner on",
-  running: "Runner on",
-  waiting: "Runner waiting",
-  stopped: "Runner paused"
-};
-function runnerWords(view) {
-  const r = view.runner;
-  return {
-    state: RUNNER_STATES[r.state] ?? "Runner on",
-    reason: webReason(r.reason ?? "").replace(/\.$/, ""),
-    warn: r.state === "stopped" || r.state === "waiting"
-  };
-}
-function unmeterableItem(view, usage) {
-  const sessions = Object.keys(usage?.unmeterable ?? {});
-  for (const it of view.backlog.items) {
-    if ((it.runs ?? []).some((r) => sessions.includes(r.session_id))) return it.id;
-  }
-  const m = /\bB-(\d+)\b/.exec(view.runner.reason ?? "");
-  return m ? Number(m[1]) : null;
-}
-function mainAction(view, usage) {
-  if (view.runner.state !== "stopped" && view.runner.state !== "waiting") return null;
-  switch (view.runner.gate) {
-    case "limit":
-      return { kind: "limit" };
-    case "no_reading":
-      return { kind: "run" };
-    case "unmeterable": {
-      const id = unmeterableItem(view, usage);
-      return id === null ? null : { kind: "open", id };
-    }
-  }
-  return null;
-}
-var BUDGET_FIELDS = [
-  { key: "limit", label: "Plan limit", unit: "% of either window, any use \xB7 new runs start only below it", max: 100, step: 1 },
-  { key: "max_per_run", label: "Cap per run", unit: "% of the 5-hour window", max: 100, step: 1 },
-  { key: "usd_limit", label: "Dollar limit", unit: "$ per window at API prices \xB7 0 is off", max: 1e6, step: 0.01 }
-];
-var RunnerBar = class {
-  constructor(actions2, now = Date.now) {
-    this.actions = actions2;
-    this.now = now;
-    this.toggle = h(
-      "button",
-      { type: "button", class: "af-backlog-toggle" },
-      h("span", { class: "af-backlog-toggle-knob", ariaHidden: "true" }),
-      this.toggleLabel
-    );
-    this.toggle.setAttribute("role", "switch");
-    this.toggle.setAttribute("aria-label", "Runner");
-    this.toggle.addEventListener("click", () => {
-      if (this.view) actions2.setRunner(!this.view.backlog.settings.runner);
-    });
-    this.slots = h("select", { class: "af-backlog-slots" });
-    this.slots.setAttribute("aria-label", "Max running");
-    this.slots.addEventListener("change", () => actions2.setMaxRunning(Number(this.slots.value)));
-    const hover = () => {
-      if (this.usage && this.budget) this.plan.title = usageHover(this.usage, this.budget, this.now());
-    };
-    this.plan.addEventListener("pointerenter", hover);
-    this.plan.setAttribute("aria-expanded", "false");
-    this.plan.addEventListener("click", () => {
-      this.planDetail.hidden = !this.planDetail.hidden;
-      this.plan.setAttribute("aria-expanded", String(!this.planDetail.hidden));
-      this.fillDetail();
-    });
-    this.main = h("button", { type: "button", class: "af-primary", hidden: true });
-    this.main.addEventListener("click", () => this.runMain());
-    this.run = h("button", { type: "button", class: "af-ghost" }, "Run next");
-    this.run.hidden = actions2.runNext === void 0;
-    this.run.addEventListener("click", () => actions2.runNext?.());
-    this.onDone = h(
-      "select",
-      { class: "af-backlog-move-select" },
-      h("option", { value: "keep" }, "Keep session"),
-      h("option", { value: "archive" }, "Archive session")
-    );
-    this.onDone.setAttribute("aria-label", "When an item is done");
-    this.onDone.addEventListener("change", () => actions2.setOnDone(this.onDone.value));
-    this.menu = h("details", { class: "af-backlog-settings" }, this.menuSummary(), this.menuPanel());
-    this.el = h(
-      "div",
-      { class: "af-backlog-head" },
-      h("div", { class: "af-backlog-runner" }, this.toggle, this.reason, this.slots, this.plan),
-      h("div", { class: "af-backlog-runner-actions" }, this.main, this.run, this.menu),
-      this.planDetail
-    );
-  }
-  el;
-  toggle;
-  toggleLabel = h("span", { class: "af-backlog-runner-state" });
-  reason = h("span", { class: "af-backlog-reason" });
-  slots;
-  plan = h("button", { type: "button", class: "af-backlog-plan" });
-  planDetail = h("div", { class: "af-backlog-plan-detail", hidden: true });
-  slotsKey = "";
-  main;
-  run;
-  menu;
-  inputs = /* @__PURE__ */ new Map();
-  onDone;
-  view = null;
-  budget = null;
-  // Budget values asked for and not yet acknowledged, by field, and the chain that sends them.
-  pendingBudget = /* @__PURE__ */ new Map();
-  budgetRev = 0;
-  budgetQueue = Promise.resolve();
-  usage = null;
-  action = null;
-  menuSummary() {
-    const s = h("summary", { class: "af-ghost af-backlog-more" }, "\u22EF");
-    s.setAttribute("aria-label", "Runner and budget settings");
-    return s;
-  }
-  menuPanel() {
-    const fields2 = BUDGET_FIELDS.map((f) => {
-      const input = h("input", { type: "number", class: "af-backlog-number", min: "0", max: String(f.max), step: String(f.step) });
-      input.setAttribute("aria-label", f.label);
-      input.addEventListener("change", () => {
-        const v = Number(input.value);
-        if (input.value.trim() === "" || !Number.isFinite(v) || v < 0 || v > f.max) {
-          this.fill();
-          return;
-        }
-        const current = this.pendingBudget.get(f.key)?.v ?? this.budget?.[f.key];
-        if (current === v) return;
-        const rev = ++this.budgetRev;
-        this.pendingBudget.set(f.key, { v, rev });
-        this.writeBudget(f.key, v, rev);
-      });
-      this.inputs.set(f.key, input);
-      return h(
-        "label",
-        { class: "af-backlog-setting" },
-        h("span", { class: "af-backlog-label" }, f.label),
-        input,
-        h("span", { class: "af-backlog-reason" }, f.unit)
-      );
-    });
-    return h(
-      "div",
-      { class: "af-backlog-settings-panel" },
-      h("p", { class: "af-backlog-reason" }, "Budget \xB7 all projects"),
-      ...fields2,
-      h("p", { class: "af-backlog-reason" }, "Runner \xB7 this project"),
-      h("label", { class: "af-backlog-setting" }, h("span", { class: "af-backlog-label" }, "When an item is done"), this.onDone)
-    );
-  }
-  /** Writes go out one at a time, in the order they were made, so the last edit of a field is the
-   *  one the daemon ends up with. */
-  writeBudget(key, v, rev) {
-    const done2 = () => {
-      if (this.pendingBudget.get(key)?.rev === rev) this.pendingBudget.delete(key);
-      this.fill();
-    };
-    this.budgetQueue = this.budgetQueue.then(() => this.actions.setBudget({ [key]: v })).then(done2, done2);
-  }
-  runMain() {
-    const a = this.action;
-    if (!a) return;
-    if (a.kind === "run") this.actions.runNext?.();
-    else if (a.kind === "open") this.actions.openItem(a.id);
-    else {
-      this.menu.open = true;
-      this.inputs.get("limit")?.focus();
-    }
-  }
-  update(view, budget, usage, busy) {
-    this.view = view;
-    this.budget = budget;
-    this.usage = usage;
-    const words = runnerWords(view);
-    const on = view.backlog.settings.runner;
-    this.toggle.setAttribute("aria-checked", String(on));
-    this.toggle.classList.toggle("af-backlog-toggle-on", on);
-    this.toggleLabel.textContent = words.state;
-    this.toggleLabel.classList.toggle("af-backlog-warn", words.warn);
-    this.reason.textContent = words.reason ? `\xB7 ${words.reason}` : "";
-    this.fillSlots(view);
-    this.fillPlan();
-    this.action = mainAction(view, usage);
-    const a = this.action;
-    this.main.hidden = a === null || a.kind === "run";
-    this.main.textContent = a?.kind === "open" ? `Open ${formatID(a.id)}` : "Change limit";
-    this.run.className = a?.kind === "run" ? "af-primary" : "af-ghost";
-    this.run.disabled = busy;
-    this.fill();
-  }
-  /** Rebuilds the options only when their words change: replacing them
-   *  closes a native select the user has open. */
-  fillSlots(view) {
-    const used = view.runner.used;
-    const max = Math.max(1, view.backlog.settings.max_running);
-    const key = `${used}/${max}`;
-    if (key === this.slotsKey) return;
-    this.slotsKey = key;
-    const top = Math.max(MAX_RUNNING, max);
-    const opts = [];
-    for (let n = 1; n <= top; n++) opts.push(h("option", { value: String(n) }, `${used} of ${n} working`));
-    this.slots.replaceChildren(...opts);
-    this.slots.value = String(max);
-  }
-  fillDetail() {
-    if (this.planDetail.hidden || !this.usage) return;
-    if (!this.budget) return;
-    this.planDetail.replaceChildren(...usageLines(this.usage, this.budget, this.now()).map((l) => h("div", {}, l)));
-  }
-  fillPlan() {
-    const u = this.usage;
-    const b = this.budget;
-    this.plan.hidden = !u || !b;
-    if (!u || !b) {
-      this.planDetail.hidden = true;
-      return;
-    }
-    this.plan.title = usageHover(u, b, this.now());
-    this.fillDetail();
-    if (u.metering) {
-      this.plan.replaceChildren("Reading plan usage\u2026");
-      return;
-    }
-    const k = tighterWindow(u, this.now());
-    if (k === null) {
-      this.plan.replaceChildren(b.usd_limit > 0 ? `Backlog limit ${usd(b.usd_limit)} per window` : `Plan limit ${pct(b.limit)}`);
-      return;
-    }
-    const w = u[k];
-    const fill = h("span", { class: "af-backlog-meter-fill" });
-    fill.style.width = `${b.limit > 0 ? Math.min(100, w.plan / b.limit * 100) : 100}%`;
-    const meter = h("span", { class: "af-backlog-meter", role: "img" }, fill);
-    meter.setAttribute("aria-label", `${pct(w.plan)} of a ${pct(b.limit)} limit`);
-    this.plan.replaceChildren(`Plan ${pct(w.plan)} of ${WINDOW_LABELS[k].bar} `, meter, ` limit ${pct(b.limit)}`);
-  }
-  fill() {
-    for (const [key, input] of this.inputs) {
-      const shown = this.pendingBudget.get(key)?.v ?? this.budget?.[key];
-      if (document.activeElement !== input && shown !== void 0) input.value = String(shown);
-    }
-    if (this.view && document.activeElement !== this.onDone) this.onDone.value = this.view.backlog.settings.on_done || "keep";
-  }
-};
-
-// src/backlog_pane.ts
-var DRAG_TYPE = "application/x-af-backlog-item";
-var EMPTY_COPY = "No items yet \xB7 Name a group above, or ask an agent to make items from a proposal.";
-function placeChildren(parent, want) {
-  const keep = new Set(want);
-  for (let c = parent.firstChild; c; ) {
-    const next = c.nextSibling;
-    if (!keep.has(c)) c.remove();
-    c = next;
-  }
-  let cur = parent.firstChild;
-  for (const el2 of want) {
-    if (cur === el2) cur = cur.nextSibling;
-    else parent.insertBefore(el2, cur);
-  }
-}
-function revealPanel(el2) {
-  const view = globalThis.innerHeight;
-  if (typeof view !== "number") return;
-  const r = el2.getBoundingClientRect();
-  if (r.top >= view || r.top + r.height <= 0) el2.scrollIntoView({ block: "start" });
-}
-function stillStarting(it, derived, inFlight, sessions) {
-  if (inFlight) return true;
-  if (derived !== void 0 && derived !== "starting" && derived !== "working") return false;
-  const run = it?.runs?.at(-1);
-  if (!run || run.state === "failed") return false;
-  if (run.state === "starting") return true;
-  return run.session_id !== "" && !sessions.some((s) => s.id === run.session_id);
-}
-var BacklogPane = class {
-  constructor(host) {
-    this.host = host;
-    this.el = h("section", { class: "af-backlog" });
-    this.el.setAttribute("aria-label", "Backlog");
-    this.runner = new RunnerBar(this.runnerActions());
-    this.previews = new PreviewCache((id) => {
-      const token2 = this.host.token();
-      return token2 === null ? Promise.reject(new Error("not signed in")) : previewSession(id, PREVIEW_LINES, token2);
-    });
-    this.popover = new PreviewPopover(this.previews);
-    this.effort = new EffortSessions(host, () => this.render());
-    this.inboxList = new InboxList({
-      answer: (root2, id, qid, text) => this.answer(root2, id, qid, text),
-      select: (id) => this.select(id),
-      loadSessions: (ids) => this.host.loadSessions(ids)
-    });
-    this.newGroup = entryField("New group\u2026", "New group title", (title) => this.mutate((t) => addItem(this.root ?? "", { title }, t)));
-    this.headSlot.append(h(
-      "div",
-      { class: "af-backlog-top" },
-      h("div", { class: "af-backlog-titles" }, h("h2", { class: "af-backlog-heading" }, "Backlog"), this.overviewEl),
-      h("div", { class: "af-backlog-new af-backlog-new-group" }, icon("plus"), this.newGroup)
-    ), this.runner.el);
-    const listWrap = h("div", { class: "af-backlog-listwrap" }, this.filterSlot, this.listSlot, this.emptySlot);
-    this.main = h("div", { class: "af-backlog-main" }, listWrap);
-    const endDrag = () => {
-      this.dragId = null;
-    };
-    this.listSlot.addEventListener("dragend", endDrag);
-    this.listSlot.addEventListener("drop", endDrag);
-    this.listSlot.addEventListener("mouseleave", () => {
-      this.hoverId = null;
-      this.applyHighlight();
-    });
-  }
-  el;
-  data = null;
-  root = null;
-  sessions = [];
-  selected = null;
-  filter = "all";
-  source = null;
-  showDone = false;
-  showArchived = false;
-  inboxOn = false;
-  inboxList;
-  effort;
-  folded = /* @__PURE__ */ new Set();
-  // A reorder shown before the daemon has it. It stays until data from a refresh
-  // started after the move committed arrives; gen is Infinity until then.
-  pending = null;
-  // Reorder writes go out one at a time: each target is computed from the previous
-  // optimistic order, so they must commit in the order they were made.
-  moves = Promise.resolve();
-  // A refusal breaks the optimistic chain — but only within the project it
-  // happened in. Each move captures its project's gen at queue time and skips
-  // itself when a refusal has bumped that project's gen by the time its segment
-  // runs, so a queued move whose target was computed against a refused order is
-  // dropped instead of being sent against the daemon's real order. A refusal in
-  // one project does not discard a reorder queued in another after switching.
-  movesGen = /* @__PURE__ */ new Map();
-  panel = null;
-  dragId = null;
-  focusId = null;
-  cursor = null;
-  focusPanel = false;
-  want = null;
-  requested = /* @__PURE__ */ new Set();
-  rowEls = /* @__PURE__ */ new Map();
-  newGroup;
-  overviewEl = h("p", { class: "af-backlog-overview" });
-  cards = /* @__PURE__ */ new Map();
-  listEl = h("div", { class: "af-backlog-list" });
-  // Items started from this tab, by project and id: gen is the refresh that
-  // follows the start's reply, Infinity until it comes.
-  starts = /* @__PURE__ */ new Map();
-  running = false;
-  // Starts asked for and not yet answered by the daemon, so a second click
-  // while the confirm or the request is out does nothing.
-  asking = /* @__PURE__ */ new Set();
-  confirmed = /* @__PURE__ */ new Set();
-  runner;
-  headSlot = h("div", {});
-  filterSlot = h("div", {});
-  listSlot = h("div", {});
-  emptySlot = h("div", {});
-  main;
-  previews;
-  popover;
-  hoverId = null;
-  // The item whose "Blocks n" was clicked: the rows it blocks stay picked.
-  pinned = null;
-  update(data, root2, sessions) {
-    this.effort.showProject(root2);
-    this.effort.sessionsChanged(sessions);
-    if (data === this.data && root2 === this.root) {
-      if (sessions === this.sessions) return;
-      const before = this.runSig(this.sessions);
-      this.sessions = sessions;
-      if (this.runSig(sessions) === before && this.starts.size === 0) return;
-      this.render();
-      return;
-    }
-    if (root2 !== this.root) {
-      this.closePanel();
-      this.selected = this.want?.root === root2 ? this.want.id : null;
-      this.focusPanel = this.selected !== null;
-      this.want = null;
-      this.pinned = null;
-      this.hoverId = null;
-      this.source = null;
-      this.inboxOn = false;
-      this.cursor = null;
-      this.folded.clear();
-      this.cards.clear();
-    }
-    if (this.pending && data.generation > this.pending.gen && !data.errors.has(this.pending.root)) this.pending = null;
-    this.data = data;
-    this.root = root2;
-    this.sessions = sessions;
-    this.render();
-  }
-  /** The sessions as the rows' chips and the panel show them, to skip unrelated session events. */
-  runSig(sessions) {
-    const items = this.view()?.backlog.items ?? [];
-    const it = this.selected !== null ? items.find((x) => x.id === this.selected) : void 0;
-    const chips = items.map((x) => {
-      const sid = latestRun(x)?.session_id;
-      const s = sid ? sessions.find((y) => y.id === sid) : void 0;
-      const kind = s ? rowKind(s) : "";
-      return s ? [s.id, isArchived(s), kind === "lost" || kind === "dead"] : null;
-    });
-    return JSON.stringify([chips, (it?.runs ?? []).map((r) => {
-      const s = sessions.find((x) => x.id === r.session_id);
-      return s ? [s.id, rowKind(s), s.branch] : null;
-    })]);
-  }
-  /** Opens an item's panel. The Sessions view's item chip names the project it
-   *  is switching to, which may not have reached update() yet. */
-  select(id, root2 = this.root) {
-    if (root2 !== this.root) {
-      this.want = root2 ? { root: root2, id } : null;
-      return;
-    }
-    this.selected = id;
-    this.cursor = id;
-    this.focusPanel = true;
-    this.render();
-  }
-  /** Shows the Inbox filter: the nav badge links here. */
-  showInbox() {
-    this.inboxOn = true;
-    this.render();
-  }
-  view() {
-    const v = this.root ? this.data?.views.get(this.root) : void 0;
-    if (!v) return v;
-    let out = v;
-    if (this.pending && this.pending.root === this.root) out = { ...out, backlog: overlayMove(out.backlog, this.pending.backlog, this.pending.base) };
-    const starting = [...this.starts.values()].filter((s) => s.root === this.root);
-    if (starting.length > 0) {
-      const states = { ...out.states };
-      for (const s of starting) states[String(s.id)] = { state: "starting" };
-      out = { ...out, states };
-    }
-    return out;
-  }
-  /** Drops the starts that the daemon's data and the session list now show. */
-  pruneStarts() {
-    const gen = this.data?.generation ?? 0;
-    for (const [k, s] of this.starts) {
-      const it = this.data?.views.get(s.root)?.backlog.items.find((x) => x.id === s.id);
-      const derived = this.data?.views.get(s.root)?.states[String(s.id)]?.state;
-      if (!stillStarting(it, derived, gen <= s.gen, this.sessions)) this.starts.delete(k);
-    }
-  }
-  /** Asks once per closed budget gate, by gate and window, before a start
-   *  by hand. */
-  async gateOK(v, verb, id) {
-    const gate = closedGate(this.data?.budget ?? null, this.data?.usage ?? null, v.runner, Date.now());
-    if (gate === null || this.confirmed.has(gate.key)) return true;
-    const ok = await this.host.confirm(
-      "Budget gate closed",
-      `${gate.text} ${verb} ${formatID(id)} anyway? This run will use more.`,
-      `${verb} anyway`
-    );
-    if (ok) this.confirmed.add(gate.key);
-    return ok;
-  }
-  markStarting(root2, id) {
-    const entry = { root: root2, id, gen: Infinity };
-    this.starts.set(`${root2}
-${id}`, entry);
-    return entry;
-  }
-  settle(root2, entries) {
-    for (const e of entries) e.gen = this.host.started();
-    return this.host.refresh();
-  }
-  start(root2, id) {
-    const v = this.root === root2 ? this.view() : void 0;
-    const key = `${root2}
-${id}`;
-    if (!v || this.asking.has(key)) return;
-    this.asking.add(key);
-    void this.gateOK(v, "Start", id).then((ok) => {
-      const token2 = this.host.token();
-      if (!ok || token2 === null) {
-        this.asking.delete(key);
-        return;
-      }
-      const entry = this.markStarting(root2, id);
-      this.render();
-      startItem(root2, id, token2).then(() => {
-        this.asking.delete(key);
-        return this.settle(root2, [entry]);
-      }, (e) => {
-        this.asking.delete(key);
-        this.starts.delete(key);
-        this.host.notify(errorText(e));
-        this.render();
-        void this.host.refresh();
-      });
-    });
-  }
-  runNext() {
-    const v = this.view();
-    const root2 = this.root;
-    if (!v || !root2 || this.running) return;
-    this.running = true;
-    this.render();
-    const top = topQueued(v);
-    void (top ? this.gateOK(v, "Start", top.id) : Promise.resolve(true)).then((ok) => {
-      const token2 = this.host.token();
-      if (!ok || token2 === null) {
-        this.running = false;
-        this.render();
-        return;
-      }
-      runNext(root2, token2).then((r) => {
-        this.running = false;
-        if (r.started.length === 0 && r.reason) {
-          const why = webReason(r.reason);
-          this.host.notify(why.charAt(0).toUpperCase() + why.slice(1));
-        }
-        return this.settle(root2, r.started.map((id) => this.markStarting(root2, id)));
-      }, (e) => {
-        this.running = false;
-        this.host.notify(errorText(e));
-        void this.host.refresh();
-      }).finally(() => this.render());
-    });
-  }
-  async answer(root2, id, questionId, text) {
-    const v = this.root === root2 ? this.view() : this.data?.views.get(root2);
-    if (v && !await this.gateOK(v, "Answer", id)) return false;
-    const token2 = this.host.token();
-    if (token2 === null) return false;
-    try {
-      await answerQuestion(root2, id, questionId, text, token2);
-      void this.host.refresh();
-      return true;
-    } catch (e) {
-      this.host.notify(errorText(e));
-      void this.host.refresh();
-      return false;
-    }
-  }
-  runnerActions() {
-    return {
-      setRunner: (on) => this.mutate((t) => setSettings(this.root ?? "", { runner: on }, t)),
-      setMaxRunning: (n) => this.mutate((t) => setSettings(this.root ?? "", { max_running: n }, t)),
-      setOnDone: (onDone) => this.mutate((t) => setSettings(this.root ?? "", { on_done: onDone }, t)),
-      setBudget: (u) => this.write(this.root ?? "", (t) => setBudget(u, t).then((r) => this.host.applyBudget?.(r))),
-      runNext: backlogRoutes.runBacklog ? () => this.runNext() : void 0,
-      openItem: (id) => this.select(id)
-    };
-  }
-  mutate(run) {
-    if (this.root) this.write(this.root, run);
-  }
-  /** `root` is the project the write modifies, bound by the caller: a save the serial queue starts
-   *  later must be acknowledged by a read of that project, not of whichever one is selected by then.
-   *  Settles "confirmed" once the write and a refresh that read the project have landed, "refused" when
-   *  the write failed, and "unconfirmed" when the daemon took it but the read after it failed (the
-   *  edit may be saved; the caller keeps what it shows until a snapshot says so). */
-  write(root2, run) {
-    const token2 = this.host.token();
-    if (token2 === null) return Promise.resolve("refused");
-    return run(token2).then(() => this.host.refresh(root2).then((read) => read ? "confirmed" : "unconfirmed"), (e) => {
-      this.host.notify(errorText(e));
-      return this.host.refresh(root2).then(() => "refused");
-    });
-  }
-  move(id, to) {
-    const v = this.view();
-    const root2 = this.root;
-    if (!v || !root2) return;
-    const next = applyMove(v.backlog, id, to);
-    const pending = next ? { root: root2, backlog: next, base: v.backlog, gen: Infinity } : null;
-    if (pending) {
-      this.pending = pending;
-      this.focusId = id;
-      this.render();
-    }
-    const token2 = this.host.token();
-    if (token2 === null) return;
-    const gen = this.movesGen.get(root2) ?? 0;
-    this.moves = this.moves.then(() => {
-      if ((this.movesGen.get(root2) ?? 0) !== gen) return;
-      return moveItem(root2, id, to, token2).then(() => {
-        if (pending) pending.gen = this.host.started();
-        return this.host.refresh();
-      }, (e) => {
-        if (pending) {
-          if (!isMutationOutcomeUncertain(e)) this.movesGen.set(root2, (this.movesGen.get(root2) ?? 0) + 1);
-          if (this.pending?.root === root2) this.pending = null;
-          if (this.root === root2) {
-            this.focusId = id;
-            this.render();
-          }
-        }
-        this.host.notify(errorText(e));
-        return this.host.refresh();
-      });
-    }).catch(() => {
-    });
-  }
-  render() {
-    this.pruneStarts();
-    const v = this.view();
-    const error = this.root ? this.data?.errors.get(this.root) : void 0;
-    if (this.root === null || !v) {
-      this.closePanel();
-      this.popover.hide();
-      this.el.classList.remove("af-backlog-has-panel");
-      if (this.root === null) {
-        this.el.replaceChildren(recoveryScreen({ condition: "No project registered", action: "Add project", run: () => this.host.addProject?.() }));
-      } else if (error) {
-        this.el.replaceChildren(recoveryScreen({
-          condition: "Backlog unavailable",
-          detail: error,
-          failed: true,
-          action: "Retry",
-          run: () => void this.host.refresh()
-        }));
-      } else {
-        this.el.replaceChildren(h("p", { class: "af-backlog-empty" }, "Loading backlog\u2026"));
-        if (!this.requested.has(this.root)) {
-          this.requested.add(this.root);
-          void this.host.refresh();
-        }
-      }
-      return;
-    }
-    this.requested.delete(this.root);
-    if (this.el.firstChild !== this.headSlot) this.el.replaceChildren(this.headSlot, this.main, this.popover.el);
-    if (this.selected !== null && !itemByID(v.backlog, this.selected)) this.selected = null;
-    if (this.pinned !== null && !itemByID(v.backlog, this.pinned)) this.pinned = null;
-    const focusedRow = document.activeElement?.closest(".af-backlog-row");
-    if (focusedRow && this.focusId === null && this.listSlot.contains(focusedRow)) this.focusId = Number(focusedRow.dataset.itemId);
-    const rows = this.inboxOn ? [] : listRows(v, this.listOptions());
-    const shown = (id) => id !== null && rows.some((r) => r.item.id === id);
-    this.cursor = [this.focusId, this.cursor, this.selected].find(shown) ?? rows[0]?.item.id ?? null;
-    const active = document.activeElement;
-    const typing = active?.tagName === "INPUT" && this.listEl.contains(active) ? active : null;
-    this.rowEls = /* @__PURE__ */ new Map();
-    for (const id of this.cards.keys()) if (!rows.some((r) => r.item.id === id && r.depth === 0)) this.cards.delete(id);
-    const counts = cardCounts(v);
-    placeChildren(this.listEl, segments(rows).map((seg) => seg.kind === "group" ? this.card(v, seg.head, seg.rows, counts.groups.get(seg.head.item.id) ?? NO_COUNTS) : this.loose(v, seg.rows)));
-    this.overviewEl.textContent = counts.overview;
-    this.runner.update(v, this.data?.budget ?? null, this.data?.usage ?? null, this.running);
-    this.filterSlot.replaceChildren(this.filters(v));
-    this.emptySlot.replaceChildren();
-    if (this.inboxOn) {
-      this.popover.hide();
-      this.inboxList.render(this.root ?? "", v, this.sessions);
-      if (this.listSlot.firstChild !== this.inboxList.el) this.listSlot.replaceChildren(this.inboxList.el);
-    } else {
-      if (this.listSlot.firstChild !== this.listEl) this.listSlot.replaceChildren(this.listEl);
-      this.popover.rebind(this.listEl);
-    }
-    if (!this.inboxOn && v.backlog.items.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, EMPTY_COPY));
-    else if (!this.inboxOn && rows.length === 0) this.emptySlot.append(h("p", { class: "af-backlog-empty" }, "No items match this filter"));
-    if (this.selected !== null) {
-      if (this.panel?.id !== this.selected) {
-        this.closePanel();
-        this.panel = new ItemPanel(this.root, this.selected, this.panelActions(this.root), this.previews);
-        this.main.append(this.panel.el);
-      }
-      this.panel.render(v, this.sessions, this.data?.usage ?? null);
-    } else {
-      this.closePanel();
-    }
-    this.el.classList.toggle("af-backlog-has-panel", this.selected !== null);
-    if (this.focusPanel && this.panel) {
-      this.panel.focus();
-      revealPanel(this.panel.el);
-    } else if (typing && this.focusId === null) {
-      if (typing.isConnected && document.activeElement !== typing) typing.focus();
-    } else if (this.focusId !== null) {
-      (this.rowEls.get(this.focusId) ?? (this.cursor !== null ? this.rowEls.get(this.cursor) : void 0))?.focus({ preventScroll: true });
-    }
-    this.focusPanel = false;
-    this.focusId = null;
-    this.popover.settle();
-    this.applyHighlight();
-  }
-  /** Lights up the items the hovered, focused or selected row waits on and
-   *  those that wait on it, and the rows a pinned "Blocks n" picked. The rest
-   *  dim, except for a selection alone. */
-  applyHighlight() {
-    const v = this.view();
-    if (!v) return;
-    const active = document.activeElement?.closest?.(".af-backlog-row");
-    const focused = active && this.listSlot.contains(active) ? Number(active.dataset.itemId) : null;
-    const pointed = this.hoverId ?? focused;
-    const hot = pointed ?? this.selected;
-    const related = hot !== null ? relatedIDs(v.backlog, hot) : /* @__PURE__ */ new Set();
-    const picked = new Set(this.pinned !== null ? blocking(v, this.pinned).map((it) => it.id) : []);
-    for (const [id, el2] of this.rowEls) {
-      el2.classList.toggle("af-backlog-row-hot", related.size > 0 && id === hot);
-      el2.classList.toggle("af-backlog-row-related", related.has(id));
-      el2.classList.toggle("af-backlog-row-picked", picked.has(id) || picked.size > 0 && id === this.pinned);
-    }
-    this.listSlot.classList.toggle("af-backlog-dim", pointed !== null && related.size > 0 || picked.size > 0);
-  }
-  closePanel() {
-    this.panel?.dispose();
-    this.panel?.el.remove();
-    this.panel = null;
-  }
-  filters(v) {
-    const row = h("div", { class: "af-backlog-filters", role: "group" });
-    row.setAttribute("aria-label", "Filter items");
-    const chip = (label, on, click) => {
-      const b = h("button", { type: "button", class: `af-backlog-filter${on ? " af-backlog-filter-on" : ""}` }, label);
-      b.setAttribute("aria-pressed", String(on));
-      b.addEventListener("click", () => {
-        click();
-        this.render();
-      });
-      return b;
-    };
-    row.append(chip(`Inbox (${inbox(v).length})`, this.inboxOn, () => {
-      this.inboxOn = !this.inboxOn;
-    }));
-    const list = (click) => () => {
-      this.inboxOn = false;
-      click();
-    };
-    for (const f of FILTERS) row.append(chip(f.label, !this.inboxOn && this.filter === f.filter, list(() => {
-      this.filter = f.filter;
-    })));
-    for (const s of sources(v.backlog)) {
-      row.append(chip(`From ${s}`, !this.inboxOn && this.source === s, list(() => {
-        this.source = this.source === s ? null : s;
-      })));
-    }
-    row.append(chip("Show done", this.showDone, list(() => {
-      this.showDone = !this.showDone;
-    })));
-    if (this.showArchived || v.backlog.items.some((it) => it.archived)) {
-      row.append(chip("Show archived", this.showArchived, list(() => {
-        this.showArchived = !this.showArchived;
-      })));
-    }
-    return row;
-  }
-  /** A run of top-level items with no children: a tree of plain rows. */
-  loose(v, rows) {
-    const ul = h("ul", { class: "af-backlog-tree" }, ...rows.map((r) => this.row(v, r)));
-    ul.setAttribute("role", "tree");
-    ul.setAttribute("aria-label", "Items");
-    return ul;
-  }
-  /** A group as a card: a tree of its header row, progress, a paused notice
-   *  and its rows, then an "Add item…" row outside the tree while it is open. */
-  card(v, head, rows, counts) {
-    const g = head.item;
-    let c = this.cards.get(g.id);
-    if (!c) {
-      const root2 = this.root ?? "";
-      const input = entryField(
-        "Add item\u2026",
-        `Add item to ${formatID(g.id)}`,
-        (title) => this.write(root2, (t) => addItem(root2, { title, parent: g.id }, t))
-      );
-      const tree = h("ul", { class: "af-backlog-group-list" });
-      tree.setAttribute("role", "tree");
-      const add = h("div", { class: "af-backlog-new af-backlog-group-add" }, icon("plus"), input);
-      c = { el: h("div", { class: "af-backlog-group" }, tree, add), tree, add };
-      this.cards.set(g.id, c);
-    }
-    c.el.classList.toggle("af-backlog-group-paused", g.paused === true);
-    c.tree.setAttribute("aria-label", g.title);
-    const pos = positions(rows);
-    const lines = [progress(counts, `af-backlog-progress-${g.id}`)];
-    if (g.paused && !g.archived) lines.push(pausedNotice(`af-backlog-paused-${g.id}`));
-    const headEl = this.row(v, head, { pos, head: counts });
-    headEl.setAttribute("aria-describedby", lines.map((l) => l.id).join(" "));
-    c.tree.replaceChildren(headEl, ...lines, ...rows.map((r) => this.row(v, r, { pos })));
-    c.add.hidden = head.folded || g.archived === true;
-    return c.el;
-  }
-  row(v, row, spot) {
-    const it = row.item;
-    const li = h("li", {
-      class: `af-backlog-row${it.id === this.selected ? " af-backlog-row-selected" : ""}`,
-      tabIndex: it.id === this.cursor ? 0 : -1,
-      draggable: true
-    });
-    this.rowEls.set(it.id, li);
-    li.dataset.itemId = String(it.id);
-    li.style.paddingLeft = `calc(var(--af-space-2) + var(--af-space-4) * ${spot && !spot.head ? row.depth - 1 : row.depth})`;
-    li.setAttribute("role", "treeitem");
-    li.setAttribute("aria-level", String(row.depth + 1));
-    li.setAttribute("aria-selected", String(it.id === this.selected));
-    if (row.parent) li.setAttribute("aria-expanded", String(!row.folded));
-    const handle = h("span", { class: "af-backlog-handle", ariaHidden: "true", title: "Drag to reorder" }, "\u283F");
-    const fold = h("button", { type: "button", class: "af-backlog-fold", hidden: !row.parent, tabIndex: -1 }, row.folded ? "\u25B8" : "\u25BE");
-    fold.setAttribute("aria-label", row.folded ? `Expand ${formatID(it.id)}` : `Collapse ${formatID(it.id)}`);
-    fold.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.toggleFold(it.id, !this.folded.has(it.id));
-    });
-    li.append(handle, fold, ...this.rowBody(v, row, li, spot));
-    const keys = [[".af-backlog-chip-link", "o"], [".af-backlog-blocks", "b"], [".af-backlog-row-pr", "p"]].filter(([sel]) => li.querySelector(sel)).map(([, k]) => k);
-    if (keys.length > 0) li.setAttribute("aria-keyshortcuts", keys.join(" "));
-    li.addEventListener("click", () => this.select(it.id));
-    li.addEventListener("focus", () => {
-      this.setCursor(it.id);
-      this.applyHighlight();
-    });
-    li.addEventListener("blur", () => this.applyHighlight());
-    li.addEventListener("mouseenter", () => {
-      this.hoverId = it.id;
-      this.applyHighlight();
-    });
-    li.addEventListener("mouseleave", () => {
-      if (this.hoverId !== it.id) return;
-      this.hoverId = null;
-      this.applyHighlight();
-    });
-    li.addEventListener("keydown", (e) => this.rowKey(e, v, row, li));
-    this.wireDrag(li, v.backlog, it.id);
-    return li;
-  }
-  rowBody(v, row, li, spot) {
-    const it = row.item;
-    const title = h("span", { class: "af-backlog-row-title" }, it.title);
-    if (spot?.head) {
-      li.classList.add("af-backlog-group-head");
-      const n = spot.head.needsYou;
-      const tags = n > 0 ? [h("span", { class: "af-backlog-tag af-backlog-state-needs_you" }, needsYouLabel(n))] : [];
-      return [
-        title,
-        h("span", { class: "af-backlog-id" }, formatID(it.id)),
-        h(
-          "span",
-          { class: "af-backlog-group-end" },
-          this.rowChip(v, it, derivedOf(v, it.id).reason ?? "", li),
-          ...tags,
-          ...this.groupTags(it),
-          ...this.rowTail(v, it),
-          ...this.headActions(v, it)
-        )
-      ];
-    }
-    const tail2 = [this.rowChip(v, it, row.reason, li), ...routedTag(v, it), ...this.groupTags(it), ...this.rowTail(v, it)];
-    if (!spot) return [h("span", { class: "af-backlog-id" }, formatID(it.id)), title, ...tail2];
-    li.classList.add("af-backlog-group-row");
-    return [
-      h("span", { class: "af-backlog-pos" }, `#${spot.pos.get(it.id) ?? ""}`),
-      h("span", { class: "af-backlog-row-main" }, title, metaLine(v, it, spot.pos)),
-      h("span", { class: "af-backlog-group-end" }, ...tail2)
-    ];
-  }
-  /** The effort session button, Pause or Unpause, or Unarchive, and the group
-   *  panel. Archive stays in the panel. An archived group with no effort
-   *  session offers none. */
-  headActions(v, it) {
-    const root2 = this.root ?? "";
-    const out = it.archived && !it.orchestrator ? [] : [this.effort.button(root2, v, it)];
-    out.push(...groupButtons(it, false, (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t))));
-    const open = h("button", { type: "button", class: "af-ghost" }, "Details");
-    open.setAttribute("aria-label", `Open ${formatID(it.id)}`);
-    open.addEventListener("click", () => this.select(it.id));
-    out.push(open);
-    for (const b of out) {
-      b.tabIndex = -1;
-      b.addEventListener("click", (e) => e.stopPropagation());
-    }
-    return out;
-  }
-  /** The state chip, as a link to the latest run's session when that session
-   *  is in the session list. Hovering it, or focusing its row, previews it. */
-  rowChip(v, it, reason, li) {
-    const run = latestRun(it);
-    const sid = run?.session_id ?? "";
-    const s = sid ? this.sessions.find((x) => x.id === sid) : void 0;
-    if (!run || !s) return stateChip(v, it.id, reason);
-    const archived = isArchived(s);
-    const started = Date.parse(run.started_at);
-    let extra = "";
-    if (archived) extra = " \xB7 archived";
-    else if (derivedOf(v, it.id).state === "working" && !Number.isNaN(started)) extra = ` \xB7 ${formatDuration(Date.now() - started)}`;
-    const heading = [run.title || sid, formatTime(run.started_at)].join(" \xB7 ");
-    return stateChip(v, it.id, reason, {
-      extra,
-      open: () => this.host.openSession(sid),
-      decorate: (el2) => {
-        if (archived) el2.title = `${heading} \xB7 Archived`;
-        else this.popover.attach(el2, sid, heading, li);
-      }
-    });
-  }
-  groupTags(it) {
-    const out = [];
-    if (it.paused) {
-      out.push(h("span", { class: "af-backlog-tag af-backlog-paused" }, h("span", { ariaHidden: "true" }, PAUSED_GLYPH), " Paused"));
-    }
-    if (it.archived) out.push(h("span", { class: "af-backlog-tag" }, "Archived"));
-    return out;
-  }
-  /** "Blocks n" and the PR link at the row's end. */
-  rowTail(v, it) {
-    const out = [];
-    const blocked = blocking(v, it.id);
-    if (blocked.length > 0) {
-      const on = this.pinned === it.id;
-      const b = h("button", {
-        type: "button",
-        class: `af-backlog-blocks${on ? " af-backlog-blocks-on" : ""}`,
-        tabIndex: -1,
-        title: blocked.map((x) => `${formatID(x.id)} ${x.title}`).join("\n")
-      }, `Blocks ${blocked.length}`);
-      b.setAttribute("aria-pressed", String(on));
-      b.setAttribute("aria-label", `${formatID(it.id)} blocks ${blocked.map((x) => formatID(x.id)).join(", ")}`);
-      b.addEventListener("click", (e) => {
-        e.stopPropagation();
-        this.pick(v, it.id);
-      });
-      out.push(b);
-    }
-    const pr = safeHttpUrl2(it.pr);
-    if (pr) {
-      const a = h("a", {
-        class: "af-backlog-row-pr",
-        href: pr,
-        target: "_blank",
-        rel: "noopener noreferrer",
-        tabIndex: -1,
-        title: "Pull request"
-      }, icon("external-link"));
-      a.setAttribute("aria-label", `Pull request for ${formatID(it.id)}`);
-      a.addEventListener("click", (e) => e.stopPropagation());
-      out.push(a);
-    }
-    return out;
-  }
-  /** Pins or unpins the rows an item blocks. Pinning unfolds their parents,
-   *  and drops the filters when a filter still hides one, so focus can land. */
-  pick(v, id) {
-    if (this.pinned === id) {
-      this.pinned = null;
-      this.focusId = id;
-      this.render();
-      return;
-    }
-    const blocked = blocking(v, id);
-    if (blocked.length === 0) return;
-    for (const x of blocked) {
-      const seen = /* @__PURE__ */ new Set();
-      for (let p = x.parent; p && !seen.has(p); p = itemByID(v.backlog, p)?.parent) {
-        seen.add(p);
-        this.folded.delete(p);
-      }
-    }
-    const shown = new Set(listRows(v, this.listOptions()).map((r) => r.item.id));
-    if (blocked.some((x) => !shown.has(x.id))) {
-      this.filter = "all";
-      this.source = null;
-    }
-    this.pinned = id;
-    this.focusId = blocked[0].id;
-    this.render();
-  }
-  listOptions() {
-    return { filter: this.filter, showDone: this.showDone, folded: this.folded, source: this.source, showArchived: this.showArchived };
-  }
-  setCursor(id) {
-    this.cursor = id;
-    for (const [rid, el2] of this.rowEls) el2.tabIndex = rid === id ? 0 : -1;
-  }
-  toggleFold(id, fold) {
-    if (fold) this.folded.add(id);
-    else this.folded.delete(id);
-    this.focusId = id;
-    this.render();
-  }
-  rowKey(e, v, row, li) {
-    if (e.target !== li) return;
-    const id = row.item.id;
-    const dirs = { ArrowUp: "up", ArrowDown: "down", ArrowRight: "in", ArrowLeft: "out" };
-    if (e.altKey && dirs[e.key]) {
-      e.preventDefault();
-      const to = keyboardMove(v.backlog, id, dirs[e.key]);
-      if (to) this.move(id, to);
-      return;
-    }
-    if (e.altKey || e.ctrlKey || e.metaKey) return;
-    const els = [...this.rowEls.values()];
-    const at = els.indexOf(li);
-    let next;
-    switch (e.key) {
-      case "Enter":
-      case " ":
-        e.preventDefault();
-        this.select(id);
-        return;
-      case "ArrowDown":
-        next = els[at + 1];
-        break;
-      case "ArrowUp":
-        next = els[at - 1];
-        break;
-      case "Home":
-        next = els[0];
-        break;
-      case "End":
-        next = els[els.length - 1];
-        break;
-      case "o":
-      case "b":
-      case "p": {
-        const sel = { o: ".af-backlog-chip-link", b: ".af-backlog-blocks", p: ".af-backlog-row-pr" }[e.key];
-        const target = li.querySelector(sel);
-        if (!target) return;
-        e.preventDefault();
-        target.click();
-        return;
-      }
-      case "Escape":
-        if (this.pinned === null) return;
-        e.preventDefault();
-        this.pinned = null;
-        this.focusId = id;
-        this.render();
-        return;
-      case "ArrowRight":
-        if (row.parent && row.folded) {
-          e.preventDefault();
-          this.toggleFold(id, false);
-          return;
-        }
-        if (row.parent && els[at + 1] && Number(els[at + 1].getAttribute("aria-level")) > row.depth + 1) next = els[at + 1];
-        break;
-      case "ArrowLeft":
-        if (row.parent && !row.folded) {
-          e.preventDefault();
-          this.toggleFold(id, true);
-          return;
-        }
-        next = row.item.parent ? this.rowEls.get(row.item.parent) : void 0;
-        break;
-      default:
-        return;
-    }
-    e.preventDefault();
-    next?.focus();
-  }
-  wireDrag(li, b, id) {
-    const zoneAt = (e) => {
-      const r = li.getBoundingClientRect();
-      const y = (e.clientY - r.top) / Math.max(1, r.height);
-      const target = itemByID(b, id);
-      const nestable = target && target.status !== "running" && (target.runs ?? []).length === 0;
-      if (nestable && y > 0.3 && y < 0.7) return "into";
-      return y < 0.5 ? "before" : "after";
-    };
-    const clear = () => li.classList.remove("af-backlog-drop-before", "af-backlog-drop-after", "af-backlog-drop-into");
-    const ours = (e) => this.dragId !== null && (e.dataTransfer?.types ?? []).includes(DRAG_TYPE);
-    li.addEventListener("dragstart", (e) => {
-      this.dragId = id;
-      e.dataTransfer?.setData(DRAG_TYPE, String(id));
-      e.dataTransfer?.setData("text/plain", formatID(id));
-      if (e.dataTransfer) e.dataTransfer.effectAllowed = "move";
-    });
-    li.addEventListener("dragend", () => {
-      this.dragId = null;
-    });
-    li.addEventListener("dragover", (e) => {
-      if (!ours(e) || dropMove(b, this.dragId ?? 0, id, zoneAt(e)) === null) return;
-      e.preventDefault();
-      clear();
-      li.classList.add(`af-backlog-drop-${zoneAt(e)}`);
-    });
-    li.addEventListener("dragleave", (e) => {
-      if (!li.contains(e.relatedTarget)) clear();
-    });
-    li.addEventListener("drop", (e) => {
-      clear();
-      const drag = ours(e) ? this.dragId : null;
-      this.dragId = null;
-      if (drag === null) return;
-      e.preventDefault();
-      const to = dropMove(b, drag, id, zoneAt(e));
-      if (to) this.move(drag, to);
-    });
-  }
-  /** Actions bound to one project, so a panel never writes to another. */
-  panelActions(root2) {
-    const here = () => this.root === root2;
-    return {
-      update: (id, u) => this.write(root2, (t) => updateItem(root2, id, u, t)),
-      status: (id, s) => this.write(root2, (t) => setItemStatus(root2, id, s, t)),
-      remove: (id) => {
-        if (here()) this.selected = null;
-        this.write(root2, (t) => deleteItem(root2, id, t));
-      },
-      move: (id, to) => {
-        if (here()) this.move(id, to);
-      },
-      // A note is appended once the daemon accepts it, whether or not the read after it landed.
-      note: (id, text) => this.write(root2, (t) => addNote(root2, id, text, t)).then((o) => o !== "refused"),
-      start: (id) => this.start(root2, id),
-      answer: (id, questionId, text) => this.answer(root2, id, questionId, text),
-      addChild: (parent, title) => this.write(root2, (t) => addItem(root2, { title, parent }, t)),
-      select: (id) => this.select(id, root2),
-      close: () => {
-        if (!here()) return;
-        const id = this.selected;
-        this.selected = null;
-        this.focusId = id;
-        this.render();
-      },
-      openSession: (id) => this.host.openSession(id),
-      archiveSession: (id) => this.host.archiveSession(id),
-      restoreSession: (id) => this.host.restoreSession(id),
-      loadSessions: (ids) => this.host.loadSessions(ids),
-      group: (id, c) => this.write(root2, (t) => updateItem(root2, id, c, t)),
-      orchestrator: {
-        open: (id) => {
-          const v = this.view();
-          if (v && here()) void this.effort.open(root2, v, id);
-        },
-        unbind: (id) => void this.effort.unbind(root2, id),
-        start: (v, g) => this.effort.button(root2, v, g)
-      }
-    };
-  }
-};
-
 // src/ui.ts
 var SKIPPED_REPO_REASON = {
   corrupted: "corrupted-instances-json",
@@ -22266,11 +18923,11 @@ function retryActionForSession(s) {
   }
   return null;
 }
-function patchRetryButton(button2, action2) {
-  button2.hidden = action2 === null;
-  if (action2) {
-    button2.textContent = action2.label;
-    button2.title = action2.title;
+function patchRetryButton(button, action) {
+  button.hidden = action === null;
+  if (action) {
+    button.textContent = action.label;
+    button.title = action.title;
   }
 }
 function markDeliveredActionForSession(s) {
@@ -22418,7 +19075,7 @@ function loginView(state, actions2) {
     disabled: state.connecting
   });
   input.setAttribute("aria-label", "Daemon bearer token");
-  const button2 = h(
+  const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
@@ -22428,7 +19085,7 @@ function loginView(state, actions2) {
     { class: "af-login-form" },
     h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
     input,
-    button2
+    button
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -22468,12 +19125,12 @@ function noAuthLoginView(state, actions2) {
   if (state.loginCondition === "expired") {
     return expiredTokenlessView(state, actions2);
   }
-  const button2 = h(
+  const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
   );
-  const form = h("form", { class: "af-login-form" }, button2);
+  const form = h("form", { class: "af-login-form" }, button);
   form.addEventListener("submit", (e) => {
     e.preventDefault();
     actions2.connect("");
@@ -22501,7 +19158,7 @@ function expiredTokenlessView(state, actions2) {
     disabled: state.connecting
   });
   input.setAttribute("aria-label", "Daemon bearer token");
-  const button2 = h(
+  const button = h(
     "button",
     { type: "submit", class: "af-primary", disabled: state.connecting },
     state.connecting ? "Connecting\u2026" : "Connect"
@@ -22511,7 +19168,7 @@ function expiredTokenlessView(state, actions2) {
     { class: "af-login-form" },
     h("label", { class: "af-field-label", htmlFor: "af-token" }, "Daemon token"),
     input,
-    button2
+    button
   );
   form.addEventListener("submit", (e) => {
     e.preventDefault();
@@ -22545,10 +19202,6 @@ var AppShell = class {
     const { el: viewNav, tabs } = viewNavigation((view) => this.switchView(view));
     this.viewTabs = tabs;
     this.viewNav = viewNav;
-    tabs.get("backlog")?.append(this.backlogBadge);
-    tabs.get("backlog")?.addEventListener("click", () => {
-      if (!this.backlogBadge.hidden) this.backlogPane.showInbox();
-    });
     this.projectSwitchName = h("span", { class: "af-project-switch-name" }, "\u2014");
     const switchGlyph = icon("folder-git", "af-project-glyph");
     const switchCaret = icon("chevron-down", "af-project-caret");
@@ -22692,23 +19345,6 @@ var AppShell = class {
       trigger: (task) => this.actions.triggerTask(task),
       remove: (task) => this.actions.removeTask(task)
     });
-    this.backlogPane = new BacklogPane(this.actions.backlog ?? {
-      token: () => null,
-      refresh: async () => true,
-      started: () => 0,
-      notify: () => {
-      },
-      confirm: async () => false,
-      openSession: () => {
-      },
-      archiveSession: () => {
-      },
-      restoreSession: () => {
-      },
-      loadSessions: async () => {
-      }
-    });
-    this.backlogPane.el.hidden = true;
     this.configPane = new ConfigPane({
       save: (key, value) => this.actions.setConfigValue(key, value),
       openAssistant: () => this.actions.openConfigAssistant(),
@@ -22725,7 +19361,7 @@ var AppShell = class {
       setTheme: (choice) => this.actions.setTheme(choice),
       disconnect: () => this.actions.disconnect()
     });
-    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.backlogPane.el, this.tasksPane.el, this.configPane.el);
+    const viewport = h("div", { class: "af-viewport" }, this.sessionsBody, this.tasksPane.el, this.configPane.el);
     this.toast = h("div", { class: "af-toast" });
     this.toast.setAttribute("role", "alert");
     this.el = h("main", { class: "af-app" }, header, viewport, this.toast, this.modalHost);
@@ -22783,17 +19419,6 @@ var AppShell = class {
   appControls;
   sessionsBody;
   tasksPane;
-  backlogPane;
-  backlogBadge = h("span", { class: "af-viewtab-badge", hidden: true });
-  sessionItemMap = /* @__PURE__ */ new Map();
-  sessionItemSig = "[]";
-  chipsChanged = false;
-  lastBacklog;
-  /** Needs-you counts by project root. The Backlog tab badge shows the selected
-   *  project's; the project switcher shows each other project's. */
-  needsYou = /* @__PURE__ */ new Map();
-  needsYouSig = "";
-  needsYouChanged = false;
   configPane;
   lastView = null;
   lastTasks = null;
@@ -22975,9 +19600,9 @@ var AppShell = class {
    *  whether it bubbled: Create and lifecycle controls stop at different DOM nodes,
    *  while both must expose the modal they open. Filter actions bypass this helper
    *  because their result remains inside the rail. */
-  runRailExit(action2) {
+  runRailExit(action) {
     this.setNav(false);
-    action2();
+    action();
   }
   toggleNav() {
     this.setNav(!this.navOpen);
@@ -23035,7 +19660,6 @@ var AppShell = class {
       this.lastView = state.view;
       this.sessionsBody.hidden = state.view !== "sessions";
       this.tasksPane.el.hidden = state.view !== "tasks";
-      this.backlogPane.el.hidden = state.view !== "backlog";
       this.configPane.el.hidden = state.view !== "config";
       for (const [v, tab] of this.viewTabs) {
         tab.classList.toggle("af-viewtab-active", v === state.view);
@@ -23050,28 +19674,6 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    if (state.backlog && state.backlog !== this.lastBacklog) {
-      this.lastBacklog = state.backlog;
-      const items = sessionItems(state.backlog.views);
-      const sig = sessionItemsSig(items);
-      if (sig !== this.sessionItemSig) {
-        this.sessionItemSig = sig;
-        this.sessionItemMap = items;
-        this.chipsChanged = true;
-      }
-      const needs = needsYouByRoot(state.backlog.views);
-      const needsSig = JSON.stringify([...needs]);
-      if (needsSig !== this.needsYouSig) {
-        this.needsYouSig = needsSig;
-        this.needsYou = needs;
-        this.needsYouChanged = true;
-      }
-    }
-    const questions = state.selectedProject ? this.needsYou.get(state.selectedProject) ?? 0 : 0;
-    setNeedsYouBadge(this.backlogBadge, questions);
-    const backlogTab = this.viewTabs.get("backlog");
-    if (backlogTab) backlogTab.title = questions > 0 ? `Backlog \xB7 ${questions === 1 ? "1 question" : `${questions} questions`} \xB7 Opens the inbox` : "";
-    if (state.backlog) this.backlogPane.update(state.backlog, state.selectedProject, state.sessions);
     this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
@@ -23080,8 +19682,7 @@ var AppShell = class {
     if (selectionChanged && state.selectedId) {
       this.setNav(false);
     }
-    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || this.needsYouChanged || projectChanged) {
-      this.needsYouChanged = false;
+    if (this.lastProjectSessions !== state.sessions || this.lastProjectTasks !== state.tasks || this.lastRegisteredProjects !== state.registeredProjects || projectChanged) {
       this.lastProjectSessions = state.sessions;
       this.lastProjectTasks = state.tasks;
       this.lastRegisteredProjects = state.registeredProjects;
@@ -23092,9 +19693,7 @@ var AppShell = class {
     this.lastSelectedId = state.selectedId;
     const filterChanged = this.lastStatusFilter !== state.statusFilter;
     this.lastStatusFilter = state.statusFilter;
-    const chipsChanged = this.chipsChanged;
-    this.chipsChanged = false;
-    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged || chipsChanged) {
+    if (sessionsChanged || selectionChanged || projectChanged || filterChanged || restoresChanged || registryChanged || archiveChanged) {
       if (!this.railPainted && prioritizeTerminal) {
         this.pendingInitialRail = state;
         if (this.initialRailFrame === null) {
@@ -23181,8 +19780,8 @@ var AppShell = class {
   renderRail(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
     const visible = visibleRailSessions(state);
-    const count2 = String(visible.length);
-    if (this.railCount.textContent !== count2) this.railCount.textContent = count2;
+    const count = String(visible.length);
+    if (this.railCount.textContent !== count) this.railCount.textContent = count;
     const filterSignature = JSON.stringify([railKindCounts(state.archive, state.selectedProject, scoped), state.statusFilter]);
     if (filterSignature !== this.lastFilterSignature) {
       this.lastFilterSignature = filterSignature;
@@ -23195,15 +19794,7 @@ var AppShell = class {
     const rows = this.railRows.reconcile(
       state.selectedProject ? visible : [],
       sessionKey,
-      (s) => JSON.stringify([
-        s,
-        s.id === state.selectedId,
-        this.pendingRestores?.has(s.id ?? "") === true,
-        this.sessionItemMap.get(s.id ?? "")?.id ?? 0,
-        this.sessionItemMap.get(s.id ?? "")?.title ?? "",
-        this.sessionItemMap.get(s.id ?? "")?.root ?? "",
-        this.sessionItemMap.get(s.id ?? "")?.state ?? ""
-      ]),
+      (s) => JSON.stringify([s, s.id === state.selectedId, this.pendingRestores?.has(s.id ?? "") === true]),
       (s, previous) => {
         const key = sessionKey(s);
         const oldMenu = this.railMenus.get(key);
@@ -23217,8 +19808,7 @@ var AppShell = class {
           s.id === state.selectedId,
           (id) => this.runRailExit(() => this.actions.open(id)),
           (target) => this.rowActions(target, s.id === state.selectedId),
-          previous,
-          this.itemChip(s.id ?? "")
+          previous
         );
         const menu = wasOpen ? this.railMenus.get(key) : void 0;
         if (menu) {
@@ -23282,7 +19872,7 @@ var AppShell = class {
       }
       hasStop ||= isSelected;
       const reachable = isSelected || railRow.getAttribute("aria-disabled") === "true";
-      for (const ctrl of railRow.querySelectorAll(".af-row-actions .af-term-more, .af-backlog-session-chip")) {
+      for (const ctrl of railRow.querySelectorAll(".af-row-actions .af-term-more")) {
         const wanted = reachable ? 0 : -1;
         if (ctrl.tabIndex !== wanted) ctrl.tabIndex = wanted;
       }
@@ -23391,10 +19981,10 @@ var AppShell = class {
   }
   /** Applies the daemon-projected verb, icon, and target-qualified accessible name
    *  in one place so render and same-selection live patching cannot drift. */
-  patchLifecycleButton(btn, action2, sessionTitle, surface2 = "rail") {
-    const verb = action2 === "restore" ? "Restore session" : "Archive session";
+  patchLifecycleButton(btn, action, sessionTitle, surface2 = "rail") {
+    const verb = action === "restore" ? "Restore session" : "Archive session";
     const label = `${verb} \u201C${sessionTitle}\u201D`;
-    btn.dataset.action = action2;
+    btn.dataset.action = action;
     if (surface2 === "rail") {
       btn.textContent = verb.replace(" session", "");
     } else {
@@ -23549,7 +20139,7 @@ var AppShell = class {
   /** One state's checkbox in the filter menu: a check when shown, the state's label
    *  (the row's own words — status.ts OPERATOR_KIND_LABELS), and how many sessions in this
    *  project are in it. Clicking toggles just that state and leaves the menu open. */
-  filterItem(kind, on, count2) {
+  filterItem(kind, on, count) {
     const check = h("span", { class: "af-filter-check" }, ...on ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
     const item = h(
@@ -23557,7 +20147,7 @@ var AppShell = class {
       { type: "button", class: `af-filter-item${on ? " af-filter-item-on" : ""}` },
       check,
       h("span", { class: "af-filter-item-label" }, filterLabel(kind)),
-      h("span", { class: "af-filter-item-count" }, String(count2))
+      h("span", { class: "af-filter-item-count" }, String(count))
     );
     item.dataset.kind = kind;
     item.setAttribute("role", "checkbox");
@@ -23583,7 +20173,7 @@ var AppShell = class {
     }
     for (const p of summaries) {
       const record = state.registeredProjects.find((r) => r.root === p.root);
-      children.push(this.projectItem(p, p.root === current, record, p.root === current ? 0 : this.needsYou.get(p.root) ?? 0));
+      children.push(this.projectItem(p, p.root === current, record));
     }
     const footChildren = [];
     const add = h("button", { type: "button", class: "af-ghost af-project-add" }, "+ Add project");
@@ -23654,7 +20244,7 @@ var AppShell = class {
    *  registration behind the row, when there is one — a registration whose
    *  recorded root is gone (path_exists=false) is marked missing, the state the
    *  footer Rebind action repairs. */
-  projectItem(p, current, record, needsYou) {
+  projectItem(p, current, record) {
     const cls = `af-project-item${current ? " af-project-item-current" : ""}`;
     const check = h("span", { class: "af-project-check" }, ...current ? [icon("check")] : []);
     check.setAttribute("aria-hidden", "true");
@@ -23666,16 +20256,10 @@ var AppShell = class {
       dot.setAttribute("aria-hidden", "true");
       name.prepend(dot, " ");
     }
-    let title = name;
-    if (needsYou > 0) {
-      const badge = h("span", { class: "af-viewtab-badge af-project-item-badge" });
-      setNeedsYouBadge(badge, needsYou);
-      title = h("span", { class: "af-project-item-title" }, name, badge);
-    }
     const label = h(
       "span",
       { class: "af-project-item-label" },
-      title,
+      name,
       h("span", { class: "af-project-item-path" }, p.path)
     );
     const meta = h(
@@ -23731,24 +20315,6 @@ var AppShell = class {
   dismissCarriedActions() {
     if (this.el.classList.contains("af-session-first")) this.appControls.dismiss();
     else this.terminalChrome?.menu.dismiss();
-  }
-  /** The "B-12 · Working" chip of an item session; a click opens the item in the Backlog view. */
-  itemChip(sessionId) {
-    const item = this.sessionItemMap.get(sessionId);
-    if (!item) return void 0;
-    const chip = h(
-      "button",
-      { type: "button", class: "af-backlog-session-chip", title: `Open ${formatID(item.id)} ${item.title}` },
-      `${formatID(item.id)} \xB7 ${STATE_LABELS[item.state]}`
-    );
-    chip.setAttribute("aria-label", `Open item ${formatID(item.id)} \xB7 ${STATE_LABELS[item.state]}`);
-    chip.addEventListener("click", (e) => {
-      e.stopPropagation();
-      this.actions.switchProject(item.root);
-      this.backlogPane.select(item.id, item.root);
-      this.switchView("backlog");
-    });
-    return chip;
   }
   /** One user-owned view transition for both appbar tabs and document shortcuts. */
   switchView(view) {
@@ -24236,8 +20802,8 @@ var AppShell = class {
       "click",
       (e) => {
         const target = e.target instanceof Element ? e.target.closest(".af-tab") : null;
-        const button2 = target && bar.contains(target) ? target : null;
-        const targetIntent = button2 ? tabRenameIntents.get(button2) : void 0;
+        const button = target && bar.contains(target) ? target : null;
+        const targetIntent = button ? tabRenameIntents.get(button) : void 0;
         if (e.detail === 1) {
           firstIdentity = targetIntent?.identity() ?? null;
           return;
@@ -24395,13 +20961,13 @@ var AppShell = class {
    *  drawer (#6405). Words, not hover: a touch screen has no hover. */
   patchNavAttention(state) {
     const scoped = scopeToProject(state.sessions, state.selectedProject);
-    const count2 = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
-    const words = attentionWords(count2);
-    this.navBadge.hidden = count2 === 0;
-    if (this.navBadge.textContent !== String(count2)) this.navBadge.textContent = count2 ? String(count2) : "";
+    const count = otherAttentionCount(scoped, selectedSession(state)?.id ?? null);
+    const words = attentionWords(count);
+    this.navBadge.hidden = count === 0;
+    if (this.navBadge.textContent !== String(count)) this.navBadge.textContent = count ? String(count) : "";
     this.navToggle.setAttribute("aria-label", words ? `Toggle sessions, ${words}` : "Toggle sessions");
-    this.navToggle.toggleAttribute("data-attention", count2 > 0);
-    this.railAttention.hidden = count2 === 0;
+    this.navToggle.toggleAttribute("data-attention", count > 0);
+    this.railAttention.hidden = count === 0;
     if (this.railAttention.textContent !== words) this.railAttention.textContent = words;
   }
   patchMainHead(state) {
@@ -24567,12 +21133,12 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
 function beginTabRename(btn, tab, actions2, editedId, editedSessionId) {
   const input = h("input", { type: "text", class: "af-tab-edit", value: tab.name });
   input.setAttribute("aria-label", `Rename tab ${tabLabel(tab)}`);
-  let done2 = false;
+  let done = false;
   const finish = (commit) => {
-    if (done2) {
+    if (done) {
       return;
     }
-    done2 = true;
+    done = true;
     const next = input.value.trim();
     input.replaceWith(btn);
     if (commit && next !== "" && next !== tab.name) {
@@ -24611,14 +21177,14 @@ function archiveFooterSignature(state) {
   const a = state.archive;
   return JSON.stringify([a.lazy, a.loading, a.error ?? "", archiveHasMore(a, state.selectedProject), state.statusFilter.archived]);
 }
-function sessionRow(s, selected, openSession, buildActions, previous, itemChip) {
+function sessionRow(s, selected, openSession, buildActions, previous) {
   const status = rowStatus(s);
   const operator = operatorKind(s);
   const creating = isCreating(s);
   const actionable = isOpenableSession(s);
   const killable = isKillableSession(s);
   const managed = isActionableSession(s) || killable;
-  const title = h("div", { class: "af-row-title" }, ...itemChip ? [itemChip] : [], rowTitle(s));
+  const title = h("div", { class: "af-row-title" }, rowTitle(s));
   const outageDetail = unreachableDetail(s);
   const idleDetail = outageDetail === "" ? idleReasonDetail(s) : outageDetail;
   const branchParts = [];
@@ -24740,12 +21306,6 @@ function refreshIdleReasonAges(root2, now = /* @__PURE__ */ new Date()) {
     }
   }
 }
-function setNeedsYouBadge(el2, n) {
-  el2.hidden = n === 0;
-  if (el2.textContent === String(n)) return;
-  el2.textContent = String(n);
-  el2.setAttribute("aria-label", needsYouLabel(n));
-}
 
 // src/project_color_writes.ts
 function createLatestWriter(write, onError) {
@@ -24786,7 +21346,7 @@ function captureTabDeleteTarget(target) {
 }
 
 // src/proposal_api.ts
-function isRecord3(v) {
+function isRecord(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
 function str(v) {
@@ -24794,7 +21354,7 @@ function str(v) {
 }
 var PUSH_STATES = ["idle", "countdown", "waiting_agent", "held", "sent"];
 function parsePushStatus(d) {
-  if (!isRecord3(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
+  if (!isRecord(d) || typeof d.state !== "string" || !PUSH_STATES.includes(d.state)) {
     return null;
   }
   const due = typeof d.due_in_ms === "number" && Number.isFinite(d.due_in_ms) ? Math.max(0, d.due_in_ms) : null;
@@ -24808,14 +21368,14 @@ function parsePushStatus(d) {
   };
 }
 function parseProposalPush(ev) {
-  if (!isRecord3(ev) || ev.type !== "proposal.push") {
+  if (!isRecord(ev) || ev.type !== "proposal.push") {
     return null;
   }
   const status = parsePushStatus(ev.data);
   return status && status.sessionId !== "" && status.slug !== "" ? status : null;
 }
 function parseProposalChange(ev) {
-  if (!isRecord3(ev) || ev.type !== "proposal.changed" || !isRecord3(ev.data)) {
+  if (!isRecord(ev) || ev.type !== "proposal.changed" || !isRecord(ev.data)) {
     return null;
   }
   const d = ev.data;
@@ -24825,159 +21385,6 @@ function parseProposalChange(ev) {
   }
   return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
 }
-
-// src/backlog_data.ts
-var EMPTY_BACKLOG_DATA = { views: /* @__PURE__ */ new Map(), errors: /* @__PURE__ */ new Map(), budget: null, usage: null, generation: 0 };
-var DEBOUNCE_MS = 150;
-function backlogSessionIds(data) {
-  const ids = /* @__PURE__ */ new Set();
-  for (const view of data.views.values()) {
-    for (const it of view.backlog.items) {
-      for (const run of it.runs ?? []) if (run.session_id) ids.add(run.session_id);
-      if (it.orchestrator?.session_id) ids.add(it.orchestrator.session_id);
-    }
-  }
-  return ids;
-}
-var SESSION_EVENTS = /* @__PURE__ */ new Set(["session.updated", "session.killed", "session.archived", "session.restored"]);
-function backlogEventAction(type, sessionId, backlogSessions) {
-  if (type === "backlog.changed" || type === "backlog.runner") return "refresh";
-  if (type === "backlog.spend") return "spend";
-  if (SESSION_EVENTS.has(type) && sessionId && backlogSessions?.has(sessionId)) return "refresh";
-  return null;
-}
-var BacklogLoader = class {
-  constructor(opts) {
-    this.opts = opts;
-  }
-  generation = 0;
-  timer = null;
-  budgetGeneration = 0;
-  spendGeneration = 0;
-  accountsTimer = null;
-  // Whether a backlog.spend since the last GetBudget reply named the
-  // unmeterable runs; an older daemon's payload does not.
-  spendUnmeterable = false;
-  /** The newest refresh started so far. */
-  started() {
-    return this.generation;
-  }
-  /** Refetches every project. A later call wins over one still in flight. Settles true
-   *  when a snapshot that read `root` (every project, when none is named) was committed
-   *  after this call: a read that failed leaves the old snapshot in place, and a write
-   *  that was only followed by such a read has not been confirmed. A refresh that a newer
-   *  one superseded settles with the newer one's outcome, since its own result was
-   *  discarded. */
-  refresh(root2) {
-    const run = this.run();
-    this.tail = run;
-    return run.then((ok) => ok.size === 0 ? false : root2 === void 0 || !ok.has(root2) ? [...ok.values()].every(Boolean) : ok.get(root2) === true);
-  }
-  /** The newest refresh started so far, settled with whether each project's read landed in a committed snapshot. */
-  tail = Promise.resolve(/* @__PURE__ */ new Map());
-  /** How many refreshes have started reading: a refresh a reset made stale, with none
-   *  started after it, is the tail itself and has nothing newer to wait for. */
-  refreshesStarted = 0;
-  async run() {
-    const token2 = this.opts.token();
-    if (token2 === null) return /* @__PURE__ */ new Map();
-    const mine = ++this.refreshesStarted;
-    const gen = ++this.generation;
-    const budgetGen = ++this.budgetGeneration;
-    const spendGen = this.spendGeneration;
-    const roots = [...new Set(this.opts.roots().filter(Boolean))];
-    const [results, budget] = await Promise.all([
-      Promise.all(roots.map((root2) => getBacklog(root2, token2).then((view) => ({ root: root2, view, error: "" })).catch((e) => ({ root: root2, view: null, error: errorText(e) })))),
-      getBudget(token2).catch(() => null)
-    ]);
-    if (this.opts.token() !== token2) return /* @__PURE__ */ new Map();
-    if (gen !== this.generation) return this.refreshesStarted === mine ? /* @__PURE__ */ new Map() : this.tail;
-    const ok = new Map(results.map((r) => [r.root, r.view !== null]));
-    const cur = this.opts.current();
-    const prev = cur.views;
-    const views = /* @__PURE__ */ new Map();
-    const errors = /* @__PURE__ */ new Map();
-    for (const r of results) {
-      if (r.view) views.set(r.root, r.view);
-      else {
-        errors.set(r.root, r.error);
-        const old = prev.get(r.root);
-        if (old) views.set(r.root, old);
-      }
-    }
-    const fresh = budgetGen === this.budgetGeneration ? budget : null;
-    let usage = cur.usage;
-    if (fresh && spendGen === this.spendGeneration) {
-      usage = fresh.usage;
-      this.spendUnmeterable = false;
-    } else if (fresh && cur.usage && !this.spendUnmeterable) {
-      usage = { ...cur.usage, unmeterable: fresh.usage.unmeterable };
-    }
-    this.opts.commit({ views, errors, budget: fresh?.budget ?? cur.budget, usage, generation: gen });
-    return ok;
-  }
-  /** Takes the budget and plan use a SetBudget reply carries. A GetBudget still in flight was read
-   *  before the save, so its reply is dropped. */
-  applyBudget(reply) {
-    this.budgetGeneration++;
-    this.opts.commit({ ...this.opts.current(), budget: reply.budget, usage: reply.usage });
-  }
-  /** Applies a backlog.spend payload. A GetBudget still in flight was read
-   *  before it, so that reply's plan use is dropped. */
-  applySpend(ev) {
-    const cur = this.opts.current();
-    const usage = applySpend(cur.usage, ev);
-    if (usage === cur.usage) return;
-    this.spendGeneration++;
-    if (spendHasUnmeterable(ev)) this.spendUnmeterable = true;
-    this.opts.commit({ ...cur, usage });
-    this.requestAccounts();
-  }
-  /** A spend event carries the top-level windows but not which account they are for, nor the
-   *  other accounts' windows, and the account the daemon meters can change between events. So
-   *  each burst of events is followed by one budget-only read, whose account identity and
-   *  per-account windows replace the ones kept. */
-  requestAccounts() {
-    if (this.accountsTimer !== null) return;
-    this.accountsTimer = setTimeout(() => {
-      this.accountsTimer = null;
-      void this.refreshAccounts();
-    }, DEBOUNCE_MS);
-  }
-  async refreshAccounts() {
-    const token2 = this.opts.token();
-    if (token2 === null) return;
-    const budgetGen = this.budgetGeneration;
-    const spendGen = this.spendGeneration;
-    const fresh = await getBudget(token2).catch(() => null);
-    if (!fresh || this.opts.token() !== token2 || budgetGen !== this.budgetGeneration) return;
-    const cur = this.opts.current();
-    let usage = fresh.usage;
-    if (spendGen !== this.spendGeneration && cur.usage) {
-      usage = { ...cur.usage, account: fresh.usage.account, accounts: fresh.usage.accounts };
-    } else {
-      this.spendUnmeterable = false;
-    }
-    this.opts.commit({ ...cur, budget: fresh.budget, usage });
-  }
-  /** Coalesces a burst of events into one refetch. */
-  request() {
-    if (this.timer !== null) return;
-    this.timer = setTimeout(() => {
-      this.timer = null;
-      void this.refresh();
-    }, DEBOUNCE_MS);
-  }
-  reset() {
-    this.generation++;
-    this.budgetGeneration++;
-    this.spendGeneration++;
-    if (this.timer !== null) clearTimeout(this.timer);
-    this.timer = null;
-    if (this.accountsTimer !== null) clearTimeout(this.accountsTimer);
-    this.accountsTimer = null;
-  }
-};
 
 // src/viewport-insets.ts
 function viewportInsets(innerHeight, vv) {
@@ -25042,7 +21449,6 @@ var store = new Store({
   tabError: null,
   tasks: [],
   registeredProjects: [],
-  backlog: EMPTY_BACKLOG_DATA,
   themeChoice: initialThemeChoice,
   // Resume the persisted filter (feat: hide archived by default) before first paint,
   // for the same reason the theme is boot-stamped: rendering the default set first
@@ -25052,27 +21458,6 @@ var store = new Store({
 });
 var durableFilter = loadFilter();
 var token = null;
-var backlogLoader = new BacklogLoader({
-  token: () => token,
-  roots: () => {
-    const state = store.get();
-    const roots = projectSummaries(state.sessions, state.tasks, projectRoots(state.registeredProjects)).map((p) => p.root);
-    return state.selectedProject ? [state.selectedProject, ...roots] : roots;
-  },
-  current: () => store.get().backlog ?? EMPTY_BACKLOG_DATA,
-  commit: (backlog) => store.set({ backlog })
-});
-var backlogPhase = store.get().phase;
-store.subscribe((state) => {
-  if (state.phase === backlogPhase) return;
-  backlogPhase = state.phase;
-  if (state.phase === "app") {
-    void backlogLoader.refresh();
-  } else {
-    backlogLoader.reset();
-    if (state.backlog !== EMPTY_BACKLOG_DATA) store.set({ backlog: EMPTY_BACKLOG_DATA });
-  }
-});
 var connectionGeneration = 0;
 var pendingRestoreResync = false;
 var stream = null;
@@ -25411,28 +21796,6 @@ async function resolveArchivedRoute(id, ticket) {
     missing
   });
 }
-async function adoptSessionsById(ids) {
-  const tok = token;
-  if (tok === null) return;
-  const known = new Set(store.get().sessions.map((s) => s.id));
-  const want = ids.filter((id) => !known.has(id));
-  if (want.length === 0) return;
-  const generation = connectionGeneration;
-  const fence = optimisticSessions.snapshotFence();
-  const rows = await fetchSessionsById(tok, want);
-  if (token !== tok || connectionGeneration !== generation) return;
-  if (optimisticSessions.adopt(rows, fence).length > 0) applySessions(optimisticSessions.project());
-}
-function openBacklogSession(id) {
-  const session = store.get().sessions.find((s) => s.id === id);
-  if (!session?.id) {
-    showTransientNotice("That session is gone");
-    return;
-  }
-  if (session.worktree?.repo_path) switchProject(session.worktree.repo_path);
-  setStatusFilter(operatorKind(session), true);
-  openFromRail(session.id);
-}
 function moveSelection(id) {
   createSelectionIntent.navigate();
   clearTabError();
@@ -25479,9 +21842,6 @@ function switchView(view) {
   store.set({ view, focus: "rail" });
   if (view === "tasks") {
     refreshTasks();
-  }
-  if (view === "backlog") {
-    void backlogLoader.refresh();
   }
   if (view === "config") {
     refreshConfig();
@@ -25583,8 +21943,8 @@ function openModal(m, focusCard = false, explicitInvoker) {
           return;
         }
         if (!row && header?.isConnected) {
-          const action3 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-          const target2 = canFocus(action3) ? action3 : header.querySelector(".af-term-more");
+          const action2 = actionLabel ? header.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+          const target2 = canFocus(action2) ? action2 : header.querySelector(".af-term-more");
           if (canFocus(target2)) {
             target2.focus({ preventScroll: true });
             return;
@@ -25598,8 +21958,8 @@ function openModal(m, focusCard = false, explicitInvoker) {
         }
         focusRail();
         const menu = sessionId ? root?.querySelector(`[data-session-id="${CSS.escape(sessionId)}"]`) : null;
-        const action2 = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
-        const target = canFocus(action2) ? action2 : menu?.querySelector("button");
+        const action = actionLabel ? menu?.querySelector(`button[aria-label="${CSS.escape(actionLabel)}"]`) : null;
+        const target = canFocus(action) ? action : menu?.querySelector("button");
         if (canFocus(target)) target.focus({ preventScroll: true });
         else {
           const rail = root?.querySelector(".af-rail");
@@ -25696,14 +22056,14 @@ function newSession() {
     })
   );
 }
-function openConfirm(action2, session, invoker = captureModalInvoker()) {
-  if (action2 === "restore" && pendingRestores.has(session.id)) return;
+function openConfirm(action, session, invoker = captureModalInvoker()) {
+  if (action === "restore" && pendingRestores.has(session.id)) return;
   const target = { id: session.id, title: session.title };
   const dialogGeneration = ++modalGeneration;
-  const immediateRestore = action2 === "restore" && !restoreRequiresConfirmation(session);
-  const hasRootAcknowledgment = action2 === "kill" && session.is_root === true;
+  const immediateRestore = action === "restore" && !restoreRequiresConfirmation(session);
+  const hasRootAcknowledgment = action === "kill" && session.is_root === true;
   const refreshRootConsent = (latest) => {
-    if (action2 === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
+    if (action === "kill" && latest?.is_root === true && !hasRootAcknowledgment) {
       openConfirm("kill", { ...session, title: latest.title, is_root: true }, invoker);
       return true;
     }
@@ -25723,23 +22083,23 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
       return;
     }
     const latest = store.get().sessions.find((s) => s.id === target.id);
-    if (action2 === "kill" && !latest) {
+    if (action === "kill" && !latest) {
       modal.setError("This session is no longer available to delete.");
       return;
     }
     if (refreshRootConsent(latest)) return;
-    if (action2 === "restore" && pendingRestores.has(target.id)) return;
+    if (action === "restore" && pendingRestores.has(target.id)) return;
     const m = modal;
-    const requestGeneration = action2 === "restore" ? connectionGeneration : 0;
-    const mutation = action2 === "restore" ? null : optimisticSessions.begin(action2, latest ?? session);
-    const captureArchiveSuccess = action2 === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
-    if (action2 !== "restore" && !mutation) return;
+    const requestGeneration = action === "restore" ? connectionGeneration : 0;
+    const mutation = action === "restore" ? null : optimisticSessions.begin(action, latest ?? session);
+    const captureArchiveSuccess = action === "archive" ? pendingRestores.captureArchiveSuccess(target.id) : null;
+    if (action !== "restore" && !mutation) return;
     m.setBusy(true);
     if (mutation) {
       closeModal();
       applySessions(optimisticSessions.project());
     }
-    const run = action2 === "kill" ? killSession(target.id, target.title, tok) : action2 === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
+    const run = action === "kill" ? killSession(target.id, target.title, tok) : action === "archive" ? archiveSession(target.id, target.title, tok) : pendingRestores.run(
       target.id,
       (daemonBootId) => restoreSession(
         target.id,
@@ -25751,7 +22111,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
     );
     if (!run) return;
     void run.then(() => {
-      if (action2 === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
         return;
       }
       if (mutation) {
@@ -25763,7 +22123,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
         if (modal === m) closeModal();
       }
     }).catch((e) => {
-      if (action2 === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
+      if (action === "restore" && (requestGeneration !== connectionGeneration || token !== tok)) {
         if (token !== null && store.get().phase === "app") requestResync();
         else pendingRestoreResync = true;
         return;
@@ -25776,7 +22136,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
         applySessions(optimisticSessions.project());
         requestResync();
         if (outcome !== "reverted") {
-          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action2 === "kill" ? "Delete session" : action2} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
+          surfaceMutationError(outcome === "uncertain" ? new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`) : e, outcome);
           return;
         }
         m.setBusy(false);
@@ -25794,7 +22154,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
       if (isMutationOutcomeUncertain(e)) {
         if (modal === m) closeModal();
         requestResync();
-        surfaceMutationError(new Error(`The ${action2 === "kill" ? "Delete session" : action2} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
+        surfaceMutationError(new Error(`The ${action === "kill" ? "Delete session" : action} outcome could not be confirmed. ${errorText(e)}`), "uncertain");
         return;
       }
       const showRefusal = () => {
@@ -25802,7 +22162,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
         m.setError(errorText(e));
         if (immediateRestore && modal !== m) surfaceMutationError(e);
       };
-      if (action2 === "restore") {
+      if (action === "restore") {
         void pendingRestores.waitForRefusalResync(target.id).then(() => {
           if (requestGeneration !== connectionGeneration || token !== tok) return;
           showRefusal();
@@ -25814,7 +22174,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
     mountConfirmation(
       confirmModal({
         keptBranch,
-        action: action2,
+        action,
         sessionTitle: target.title,
         immediateRestore,
         isRoot: hasRootAcknowledgment,
@@ -25828,7 +22188,7 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
     );
     if (immediateRestore) onConfirm();
   };
-  if (action2 === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
+  if (action === "kill" && !isOffBoxWorkspace(session) && session.worktree?.external_worktree !== true) {
     const ticket = createSelectionIntent.snapshot();
     const generation = connectionGeneration;
     void fetchKeptBranch(target.id, target.title, token ?? "").then((kept) => {
@@ -25838,12 +22198,6 @@ function openConfirm(action2, session, invoker = captureModalInvoker()) {
   } else {
     mountWith();
   }
-}
-function confirmBacklog(title, body, confirmLabel) {
-  return askConfirm({ title, body, confirmLabel }, (m) => openModal(m, true), (m) => {
-    if (modal === m) closeModal();
-    else m.close();
-  });
 }
 function openDeleteProject(root2, label) {
   openModal(
@@ -27128,25 +23482,6 @@ var actions = {
     void bootstrap();
   },
   retryTasks: refreshTasks,
-  backlog: {
-    token: () => token,
-    refresh: (root2) => backlogLoader.refresh(root2),
-    started: () => backlogLoader.started(),
-    applyBudget: (reply) => backlogLoader.applyBudget(reply),
-    notify: (message) => showTransientNotice(message),
-    openSession: openBacklogSession,
-    archiveSession: (id) => {
-      const s = store.get().sessions.find((x) => x.id === id);
-      if (s && isActionableSession(s)) openConfirm("archive", s);
-    },
-    restoreSession: (id) => {
-      const s = store.get().sessions.find((x) => x.id === id);
-      if (s && isActionableSession(s)) openConfirm("restore", s);
-    },
-    loadSessions: adoptSessionsById,
-    addProject: () => openAddProject(),
-    confirm: confirmBacklog
-  },
   notice: surfaceNotice,
   paneDropHintAt: (x, y) => splitView.showTabDropHintAt(x, y),
   clearPaneDropHint: () => splitView.clearTabDropHint(),
@@ -27213,7 +23548,6 @@ function startStream(tok) {
     onResync: () => {
       markArchiveDirty();
       requestResync();
-      backlogLoader.request();
       publishProposalResync();
     },
     onStatus: (s, retryAt) => {
@@ -27270,15 +23604,6 @@ function onEvent(ev) {
     const status = parseProposalPush(ev);
     if (status) publishProposalPush(status);
     return;
-  }
-  const backlogAction = backlogEventAction(ev.type, ev.data?.id, backlogSessionIds(store.get().backlog ?? EMPTY_BACKLOG_DATA));
-  if (backlogAction === "spend") {
-    backlogLoader.applySpend(ev.data);
-    return;
-  }
-  if (backlogAction === "refresh") {
-    backlogLoader.request();
-    if (ev.type.startsWith("backlog.")) return;
   }
   if (ev.type === "task.created" || ev.type === "task.updated" || ev.type === "task.removed") {
     requestTaskResync();
@@ -27360,11 +23685,11 @@ async function loadArchivedPage() {
   if (tok === null) return;
   const project = store.get().selectedProject;
   const key = archiveKey(project);
-  const start2 = store.get().archive;
-  if (!start2.lazy || start2.loading || start2.cursors[key] === null) return;
+  const start = store.get().archive;
+  if (!start.lazy || start.loading || start.cursors[key] === null) return;
   const generation = connectionGeneration;
-  const before = start2.cursors[key] ?? null;
-  store.set({ archive: { ...start2, loading: true, error: void 0 } });
+  const before = start.cursors[key] ?? null;
+  store.set({ archive: { ...start, loading: true, error: void 0 } });
   try {
     const fence = optimisticSessions.snapshotFence();
     const page = await fetchArchivedPage(tok, { project, before });
@@ -27521,7 +23846,7 @@ function onKeydown(e) {
   const selected = selectedSessionData();
   const actionableSelected = selected && isOpenableSession(selected) ? selected : null;
   const focus = state.selectedId && actionableSelected && state.view === "sessions" ? state.focus : "rail";
-  const action2 = decideKey(
+  const action = decideKey(
     e.key,
     {
       focus,
@@ -27548,17 +23873,17 @@ function onKeydown(e) {
     },
     { alt: e.altKey, ctrl: e.ctrlKey, altGraph: e.getModifierState("AltGraph"), shift: e.shiftKey, meta: e.metaKey }
   );
-  if (action2.kind === "none") {
+  if (action.kind === "none") {
     return;
   }
   e.preventDefault();
   e.stopPropagation();
-  switch (action2.kind) {
+  switch (action.kind) {
     case "closeModal":
       closeModal();
       break;
     case "select":
-      moveSelection(action2.id);
+      moveSelection(action.id);
       break;
     case "attach":
       focusTerminal();
@@ -27567,13 +23892,13 @@ function onKeydown(e) {
       focusRail();
       break;
     case "switchTab":
-      if (shell) shell.switchTab(action2.index);
-      else switchTab(action2.index);
+      if (shell) shell.switchTab(action.index);
+      else switchTab(action.index);
       break;
     case "newTab":
       if (!e.repeat) {
         tabShortcutRepeat.arm(e.code);
-        createSessionTab(action2.tabKind);
+        createSessionTab(action.tabKind);
       }
       break;
     case "closeTab":
@@ -27581,11 +23906,11 @@ function onKeydown(e) {
       else closeSessionTab(store.get().activeTab);
       break;
     case "switchView":
-      if (shell) shell.switchView(action2.view);
-      else switchView(action2.view);
+      if (shell) shell.switchView(action.view);
+      else switchView(action.view);
       break;
     case "cyclePane":
-      splitView.cyclePane(action2.delta);
+      splitView.cyclePane(action.delta);
       break;
     case "closePane":
       splitView.closeFocusedPane();

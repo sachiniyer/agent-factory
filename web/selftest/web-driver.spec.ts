@@ -4032,7 +4032,7 @@ test("#3626: the tasks list marks a task that has stopped firing, and says how f
   await page.locator('.af-viewtab[data-view="sessions"]').click();
 });
 
-test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → backlog → tasks → config)", REAL_FIXTURE, async () => {
+test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → tasks → config)", REAL_FIXTURE, async () => {
   // Establish rail mode on the sessions view rather than inheriting it from the
   // previous flow (#2816) — same reasoning as the j/k test above: an inherited
   // precondition turns a predecessor's failure into this test's failure.
@@ -4046,9 +4046,7 @@ test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → bac
   const active = (view: string) =>
     expect(page.locator(`.af-viewtab[data-view="${view}"]`)).toHaveClass(/af-viewtab-active/);
   await active("sessions");
-  // ] advances sessions -> backlog -> tasks -> config, then wraps config -> sessions.
-  await page.keyboard.press("]");
-  await active("backlog");
+  // ] advances sessions -> tasks -> config, then wraps config -> sessions.
   await page.keyboard.press("]");
   await active("tasks");
   await page.keyboard.press("]");
@@ -4061,8 +4059,6 @@ test("the #1694 keyboard model: [ / ] cycle the top-level view (sessions → bac
   await active("config");
   await page.keyboard.press("[");
   await active("tasks");
-  await page.keyboard.press("[");
-  await active("backlog");
   await page.keyboard.press("[");
   await active("sessions");
   await expect(page.locator(".af-rail-list")).toBeVisible();
@@ -8495,7 +8491,7 @@ test("empty state (#1592 PR9, #2456): an empty Snapshot + registry renders the z
   // With no project registered the recovery pane offers registration.
   await expect(page.locator(".af-main-empty")).toContainText("No project registered");
 
-  // #2456: the zero-projects switcher is still OPENABLE (the dead end lane-detail-backlog
+  // #2456: the zero-projects switcher is still OPENABLE (the dead end it replaced
   // removed its dead-end "+ New" for), and its ONE coherent action is the "+ Add project"
   // footer — the empty state points the user straight at it. With no project selected
   // there is no Delete-project action alongside it.
@@ -13421,7 +13417,7 @@ test("#2227 mobile appbar: project context wins scarce width at 320px and 375px"
         // tabindex or CSS-only reordering would still leave assistive technology
         // jumping between rows, so walk the native DOM sequence end to end.
         await toggle.focus();
-        for (let i = 0; i < 4; i++) {
+        for (let i = 0; i < (await viewTabs.count()); i++) {
           await p.keyboard.press("Tab");
           await expect(viewTabs.nth(i), `view tab ${i + 1} follows the drawer toggle`).toBeFocused();
         }
