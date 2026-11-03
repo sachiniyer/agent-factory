@@ -406,15 +406,17 @@ func collapsedProcessDetail(check string, total, unproven, fixable, fixed, faile
 	case "foreign-home-process":
 		return fmt.Sprintf("%s from another agent-factory home — not attributed to this install", plural(total, "process", "processes"))
 	case "foreign-home-unresolved":
-		// Ownership here is UNPROVEN, not confirmed foreign: a relative
-		// AF_HOME marker is relative to its launching frame, which the
-		// doctor cannot recover, so the detector refused to identify a
-		// specific install. The collapsed row must not assert the definite
-		// "from another agent-factory home" claim the foreign-home-process
-		// row makes — that would state, in the default view, exactly the
-		// conclusion the detector withheld (the same harm the
-		// stale-temp-home hedge exists for).
-		return fmt.Sprintf("%s carry an agent-factory home marker that could not be resolved to a specific install — not attributed to this install", plural(total, "process", "processes"))
+		// Ownership here is UNPROVEN, not confirmed foreign: a missing or
+		// relative marker, an unreadable or home-less environment, a
+		// derived home that does not exist, or an ancestor chain that
+		// could not be verified — every reason routed here means the
+		// detector refused to identify a specific install. The collapsed
+		// row must say only that: asserting the definite "from another
+		// agent-factory home" claim the foreign-home-process row makes —
+		// or narrowing the cause to one of the reasons — would state, in
+		// the default view, exactly the conclusion the detector withheld
+		// (the same harm the stale-temp-home hedge exists for, #6704).
+		return fmt.Sprintf("%s whose agent-factory home could not be proven — not attributed to this install", plural(total, "process", "processes"))
 	case "possible-orphan":
 		return fmt.Sprintf("%s belong to dead tmux servers without agent-factory markers", plural(total, "process", "processes"))
 	case "runaway-cpu":
@@ -524,7 +526,7 @@ func collapsedProcessRemediation(check string, fixable int, fixMode bool) string
 	case "foreign-home-process":
 		return "rerun with `--verbose` for per-process details; run `af doctor` with the other AGENT_FACTORY_HOME active to manage them"
 	case "foreign-home-unresolved":
-		return "rerun with `--verbose` for per-process details; the marker is relative, so its home cannot be identified from here"
+		return "rerun with `--verbose` for per-process details; inspect unproven processes manually — none are attributed to this install"
 	case "possible-orphan":
 		return "rerun with `--verbose` for details; verify ownership before killing anything manually"
 	case "runaway-cpu":
@@ -680,7 +682,7 @@ func findingRemediation(f Finding, fixMode bool) string {
 	case "foreign-home-process":
 		return "run `af doctor` with the owning AGENT_FACTORY_HOME active, or inspect manually"
 	case "foreign-home-unresolved":
-		return "the AF_HOME marker is relative; inspect the process's launching frame to identify its agent-factory home"
+		return "inspect the process manually to identify its owning install"
 	case "possible-orphan":
 		return "verify ownership, then kill the process manually if stale"
 	case "orphaned-process":

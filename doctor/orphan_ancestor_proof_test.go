@@ -96,21 +96,28 @@ func findingForPID(fs []Finding, pid int) *Finding {
 }
 
 // assertAncestorRefusal asserts the fail-closed outcome: the victim is
-// reported under orphaned-process as UNPROVEN — naming the ancestor that could
-// not be verified — with no fix armed, and stays alive; the control, same dead
-// session with verified ancestry, is armed and killed.
-func assertAncestorRefusal(t *testing.T, report *Report, victim, control proctree.Process, ancestorPID int) {
+// reported on the non-attributing foreign-home-unresolved row as UNPROVEN —
+// naming the ancestor that could not be verified and the true reason — with
+// no fix armed, and stays alive; the control, same dead session with verified
+// ancestry, is armed and killed.
+func assertAncestorRefusal(t *testing.T, report *Report, victim, control proctree.Process, ancestorPID int, reason string) {
 	t.Helper()
 	orphans := findByCheck(report, "orphaned-process")
 
-	vf := findingForPID(orphans, victim.PID)
+	vf := findingForPID(findByCheck(report, "foreign-home-unresolved"), victim.PID)
 	require.NotNil(t, vf, "the unverifiable-ancestor victim must still be reported")
 	require.Contains(t, vf.Detail, "unproven",
 		"the finding must state ownership is unproven: %s", vf.Detail)
 	require.Contains(t, vf.Detail, fmt.Sprintf("%d", ancestorPID),
 		"the finding must name the ancestor that could not be verified: %s", vf.Detail)
+	require.Contains(t, vf.Detail, reason,
+		"the finding must say WHY the ancestor could not be verified: %s", vf.Detail)
 	require.Empty(t, vf.FixAction,
 		"an unverifiable ancestor must never arm a kill: %s", vf.Detail)
+	require.NotEmpty(t, vf.Remediation,
+		"an unproven row must carry a remedy true for its reason: %s", vf.Detail)
+	require.Nil(t, findingForPID(orphans, victim.PID),
+		"an unproven process must not be counted among this install's orphans: %s", vf.Detail)
 	require.True(t, alive(victim),
 		"`af doctor --fix` killed a process whose ancestor it could not verify (#6703)")
 
@@ -149,7 +156,7 @@ func TestOrphanKillArmAncestorEnvUnreadable_NotArmed(t *testing.T) {
 
 	report, err := Run(opts)
 	require.NoError(t, err)
-	assertAncestorRefusal(t, report, victim, control, ancestor.PID)
+	assertAncestorRefusal(t, report, victim, control, ancestor.PID, "environment could not be read")
 }
 
 // TestOrphanKillArmAncestorIdentityChanged_NotArmed stages the mid-scan race:
@@ -177,7 +184,7 @@ func TestOrphanKillArmAncestorIdentityChanged_NotArmed(t *testing.T) {
 
 	report, err := Run(opts)
 	require.NoError(t, err)
-	assertAncestorRefusal(t, report, victim, control, ancestor.PID)
+	assertAncestorRefusal(t, report, victim, control, ancestor.PID, "no longer names the process")
 }
 
 // TestOrphanKillArmAncestorMissingFromSnapshot_NotArmed stages the other half
@@ -202,5 +209,96 @@ func TestOrphanKillArmAncestorMissingFromSnapshot_NotArmed(t *testing.T) {
 
 	report, err := Run(opts)
 	require.NoError(t, err)
-	assertAncestorRefusal(t, report, victim, control, ancestor.PID)
+	assertAncestorRefusal(t, report, victim, control, ancestor.PID, "missing from the process snapshot")
+}
+
+// TestOrphanKillArmAncestorCycle_Unproven stages a parent chain that loops: the
+// victim's recorded parent records the VICTIM as its parent. A cycle means the
+// chain never reaches init — before #6704 the seen-set ended the walk as
+// "clean", but a chain that cannot reach init is unverified, not clean.
+func TestOrphanKillArmAncestorCycle_Unproven(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	victim, control := orphanAncestorFixture(t, home, "af_doctor-cyclic-ancestor")
+
+	ancestor := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AGENT_FACTORY_HOME": "",
+		"HOME":               t.TempDir(),
+	})
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, control.PID, ancestor.PID) // Fix: true
+	stageParent(&opts, victim.PID, ancestor.PID, nil)
+	stageParent(&opts, ancestor.PID, victim.PID, nil) // the loop
+	stageParent(&opts, control.PID, 1, nil)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	assertAncestorRefusal(t, report, victim, control, victim.PID, "loops back")
+}
+
+// TestOrphanKillArmAncestorDepthBound_Unproven stages a chain longer than the
+// verification bound. The bound exists so a corrupted table cannot spin the
+// walk forever — but a chain truncated by it leaves ancestors unexamined, and
+// unexamined is unproven, not clean.
+func TestOrphanKillArmAncestorDepthBound_Unproven(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	victim, control := orphanAncestorFixture(t, home, "af_doctor-deep-ancestor")
+
+	a1 := spawnWithEnv(t, "sh", nil, map[string]string{"AGENT_FACTORY_HOME": "", "HOME": t.TempDir()})
+	a2 := spawnWithEnv(t, "sh", nil, map[string]string{"AGENT_FACTORY_HOME": "", "HOME": t.TempDir()})
+
+	prev := ancestorHopLimit
+	ancestorHopLimit = 1
+	t.Cleanup(func() { ancestorHopLimit = prev })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, control.PID, a1.PID, a2.PID) // Fix: true
+	stageParent(&opts, victim.PID, a1.PID, nil)
+	stageParent(&opts, a1.PID, a2.PID, nil)
+	stageParent(&opts, a2.PID, 1, nil)
+	stageParent(&opts, control.PID, 1, nil)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	assertAncestorRefusal(t, report, victim, control, a2.PID, "verification bound")
+}
+
+// TestOrphanKillArmAncestorIdentityMidRead_Unproven stages the narrower
+// mid-scan race: the ancestor is still the recorded process when the walk
+// first revalidates it, but is gone or recycled by the time its environment
+// read returns. Believing the read anyway is trusting whatever the pid names
+// NOW — identity must be re-proven after the env read, not only before it.
+func TestOrphanKillArmAncestorIdentityMidRead_Unproven(t *testing.T) {
+	testguard.IsolateTmux(t)
+	home := testguard.SocketTempDir(t)
+	victim, control := orphanAncestorFixture(t, home, "af_doctor-midread-ancestor")
+
+	ancestor := spawnWithEnv(t, "sh", nil, map[string]string{
+		"AGENT_FACTORY_HOME": "",
+		"HOME":               t.TempDir(),
+	})
+
+	// The first identity revalidation passes; the one guarding the env-read
+	// result fails — the shape the ancestor exiting mid-read takes.
+	var identityCalls int
+	prev := ancestorIdentity
+	ancestorIdentity = func(a proctree.Process) (bool, error) {
+		if a.PID == ancestor.PID {
+			identityCalls++
+			if identityCalls > 1 {
+				return false, nil
+			}
+		}
+		return prev(a)
+	}
+	t.Cleanup(func() { ancestorIdentity = prev })
+
+	opts := testOptionsWithHome(t, home, true, victim.PID, control.PID, ancestor.PID) // Fix: true
+	stageParent(&opts, victim.PID, ancestor.PID, nil)
+	stageParent(&opts, control.PID, 1, nil)
+	stageParent(&opts, ancestor.PID, 1, nil)
+
+	report, err := Run(opts)
+	require.NoError(t, err)
+	assertAncestorRefusal(t, report, victim, control, ancestor.PID, "no longer names the process")
 }
