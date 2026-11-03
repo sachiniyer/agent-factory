@@ -60,31 +60,36 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   expect(tabbable.triggers, "one selected-row trigger plus each never-selectable row's").toBe(1 + inertTriggers);
 
   // The issue's repro: detach to navigation, then walk Tab from the top of the
-  // page and count how many presses land inside the rail list.
+  // page and count how many presses land inside the rail list. A repaint during
+  // the walk re-parks focus on the rail stop mid-sequence (#6684): the row is
+  // then counted twice though it still costs one stop, so the whole walk is
+  // retried rather than letting one event strand a single attempt.
   await page.keyboard.press("Control+]");
-  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
-  const stops: string[] = [];
-  let railStops = 0;
-  let reachedPane = false;
-  for (let i = 0; i < 40 && !reachedPane; i++) {
-    await page.keyboard.press("Tab");
-    const stop = await page.evaluate(() => {
-      const el = document.activeElement as HTMLElement | null;
-      return {
-        rail: !!el?.closest(".af-rail-list"),
-        pane: !!el?.closest(".af-tabbar, .af-term-head, .af-main-term, .af-pane"),
-        desc: el
-          ? `${el.tagName.toLowerCase()} ${el.className} ${el.getAttribute("aria-label") ?? ""}`
-          : "none",
-      };
-    });
-    stops.push(stop.desc);
-    if (stop.rail) railStops += 1;
-    reachedPane = stop.pane;
-  }
-  expect(reachedPane, `Tab order never reached the pane chrome: ${stops.join(" | ")}`).toBe(true);
-  expect(railStops, `${rowCount} rows must not each cost a Tab stop: ${stops.join(" | ")}`)
-    .toBeLessThanOrEqual(2 + inertTriggers);
+  await expect(async () => {
+    await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+    const stops: string[] = [];
+    let railStops = 0;
+    let reachedPane = false;
+    for (let i = 0; i < 40 && !reachedPane; i++) {
+      await page.keyboard.press("Tab");
+      const stop = await page.evaluate(() => {
+        const el = document.activeElement as HTMLElement | null;
+        return {
+          rail: !!el?.closest(".af-rail-list"),
+          pane: !!el?.closest(".af-tabbar, .af-term-head, .af-main-term, .af-pane"),
+          desc: el
+            ? `${el.tagName.toLowerCase()} ${el.className} ${el.getAttribute("aria-label") ?? ""}`
+            : "none",
+        };
+      });
+      stops.push(stop.desc);
+      if (stop.rail) railStops += 1;
+      reachedPane = stop.pane;
+    }
+    expect(reachedPane, `Tab order never reached the pane chrome: ${stops.join(" | ")}`).toBe(true);
+    expect(railStops, `${rowCount} rows must not each cost a Tab stop: ${stops.join(" | ")}`)
+      .toBeLessThanOrEqual(2 + inertTriggers);
+  }).toPass();
 
   // Focus follows the j/k selection, so Tab then Enter reaches the actions of
   // whatever row is selected — not just the first.
@@ -95,12 +100,19 @@ test("#6409: the rail is a bounded number of Tab stops and every row menu stays 
   const next = page.locator(".af-rail-list .af-row.af-row-selected");
   await expect(next.locator(".af-row-title"), "j moves the rail selection").not.toHaveText(before ?? "", { timeout: 5_000 });
   await expect(next, "DOM focus follows the selection").toBeFocused();
-  // In-row controls follow the row in DOM order.
+  // In-row controls follow the row in DOM order. The rail reparks focus when a
+  // repaint drops the focused control, but a repaint landing BETWEEN a press
+  // and the check still costs that attempt a press (#6684): re-park on the
+  // selected row and count the stops again instead of polling a focus that
+  // moved past the rail for the full expect timeout.
   const trigger = next.getByRole("button", { name: /^Actions for / });
-  for (let i = 0; i < 3 && !(await trigger.evaluate((el) => el === document.activeElement)); i++) {
-    await page.keyboard.press("Tab");
-  }
-  await expect(trigger, "the selected row's actions button is reachable by Tab").toBeFocused();
+  await expect(async () => {
+    await next.focus();
+    for (let i = 0; i < 3 && !(await trigger.evaluate((el) => el === document.activeElement)); i++) {
+      await page.keyboard.press("Tab");
+    }
+    await expect(trigger, "the selected row's actions button is reachable by Tab").toBeFocused({ timeout: 1_000 });
+  }).toPass();
   await page.keyboard.press("Enter");
   const menu = next.locator(".af-term-menu");
   await expect(menu).toBeVisible();

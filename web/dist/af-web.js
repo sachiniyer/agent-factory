@@ -7052,7 +7052,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "8a02ca5279c8";
+var CLIENT_VERSION = "9a9c06576af5";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -19883,12 +19883,12 @@ var AppShell = class {
         fallback.setAttribute("tabindex", "0");
       }
     }
-    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+    if (activeRowBefore) {
       const after = document.activeElement;
       const afterRow = after && this.railList.contains(after) ? after.closest(".af-row") : null;
       const deadSpot = !afterRow || after === afterRow && !afterRow.classList.contains("af-row-selected");
       if (deadSpot) {
-        this.railList.querySelector(".af-row-selected")?.focus();
+        (this.railList.querySelector(".af-row-selected") ?? this.railList.querySelector('.af-row[tabindex="0"]'))?.focus();
       }
     }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : void 0;
