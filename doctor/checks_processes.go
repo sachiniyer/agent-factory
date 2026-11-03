@@ -301,6 +301,17 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 									"attributed to this install", describeProc(p), name),
 							})
 							continue
+						case ownershipUnprovenAncestor:
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-unresolved",
+								Detail: fmt.Sprintf("%s carries live session %s's name and its AF_HOME "+
+									"matches this install, but ancestor pid %d could not be verified "+
+									"— it is missing from the process snapshot, changed identity "+
+									"since the snapshot was taken, or its environment could not be "+
+									"read — ownership is unproven, so it is not attributed to this "+
+									"install", describeProc(p), name, foreignPID),
+							})
+							continue
 						}
 					}
 					report.addAdvisoryFinding(Finding{
@@ -377,9 +388,14 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 				// real same-home pane process (which declares no
 				// AGENT_FACTORY_HOME of its own) still resolves to this
 				// install — and, where its environment cannot answer, the
-				// home its ancestors declare. Only a positively different
-				// answer disqualifies; what the process's frame cannot
-				// resolve is reported, not killed.
+				// home its ancestors declare. The chain is verified end to
+				// end: an ancestor that is missing from the snapshot, no
+				// longer the process it recorded, or whose environment
+				// cannot be read leaves ownership unproven rather than
+				// clean (#6703). Only a positively different answer
+				// disqualifies — and so does a chain that could not be
+				// fully verified; what the process's frame cannot resolve
+				// is reported, not killed.
 				ownership, foreignHome, foreignPID := ctx.markedProcessOwnership(p)
 				switch ownership {
 				case ownershipForeignEnv:
@@ -408,6 +424,17 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 							"environment establishes no agent-factory home — ownership is "+
 							"unproven, so it is reported, not killed",
 							describeProc(p), name, home),
+					})
+					continue
+				case ownershipUnprovenAncestor:
+					report.addAdvisoryFinding(Finding{
+						Check: "orphaned-process",
+						Detail: fmt.Sprintf("%s marks dead session %s (home %s) but ancestor "+
+							"pid %d could not be verified — it is missing from the process "+
+							"snapshot, changed identity since the snapshot was taken, or its "+
+							"environment could not be read — ownership is unproven, so it is "+
+							"reported, not killed",
+							describeProc(p), name, home, foreignPID),
 					})
 					continue
 				}
@@ -611,6 +638,11 @@ const (
 	// home at all: nothing names another install, but the marker alone is
 	// not proof of this one either.
 	ownershipUnproven
+	// ownershipUnprovenAncestor means the ancestor chain could not be fully
+	// verified — an ancestor was missing from the snapshot, no longer names
+	// the process it recorded, or its environment could not be read. An
+	// ancestor whose home cannot be ruled out is not proven non-foreign.
+	ownershipUnprovenAncestor
 )
 
 // markedProcessOwnership resolves which install a marked process belongs to,
@@ -619,16 +651,22 @@ const (
 // leaked-daemon checks act on, computed in the process's own frame — then its
 // ancestor chain is consulted for the shapes its environment cannot answer (a
 // tmux server's descendants share its inherited markers even when their own
-// AGENT_FACTORY_HOME was never set or was scrubbed). Returns the verdict, the
-// foreign home where one was proven, and the pid that declared it (0 when the
-// process's own environment did).
+// AGENT_FACTORY_HOME was never set or was scrubbed). The chain must verify
+// end to end: an ancestor the snapshot cannot show, cannot revalidate, or
+// cannot read leaves the verdict unproven rather than clean (#6703). Returns
+// the verdict, the home an ancestor declared where one was proven foreign,
+// and the ancestor pid the verdict names (0 when the process's own
+// environment did).
 func (ctx *scanContext) markedProcessOwnership(p proctree.Process) (ownershipVerdict, string, int) {
 	ownHome, known := daemonProcessHome(p.PID)
 	if known && !sameHome(ownHome, ctx.opts.ConfigDir) {
 		return ownershipForeignEnv, ownHome, p.PID
 	}
-	if home, pid, foreign := ctx.foreignDeclaredAncestor(p); foreign {
+	switch verdict, home, pid := ctx.ancestorHomeProof(p); verdict {
+	case ancestryForeign:
 		return ownershipForeignAncestor, home, pid
+	case ancestryUnproven:
+		return ownershipUnprovenAncestor, "", pid
 	}
 	if !known {
 		return ownershipUnproven, "", 0
@@ -636,11 +674,33 @@ func (ctx *scanContext) markedProcessOwnership(p proctree.Process) (ownershipVer
 	return ownershipThisInstall, "", 0
 }
 
-// foreignDeclaredAncestor walks p's ancestor chain in the run's snapshot and
-// returns the first home an ancestor DECLARES through its own
-// AGENT_FACTORY_HOME that is not this install's — proof the process runs
-// under another install's tmux server, daemon or helper, even when its own
-// environment resolves to this home or cannot be attributed at all.
+// ancestryVerdict is the outcome of walking a marked process's ancestor
+// chain: clean (every ancestor up to init was verified and none declares
+// another install's home), foreign (a verified ancestor declares another
+// install's home), or unproven (the chain could not be fully verified).
+type ancestryVerdict int
+
+const (
+	ancestryClean ancestryVerdict = iota
+	ancestryForeign
+	ancestryUnproven
+)
+
+// ancestorHomeProof walks p's ancestor chain in the run's snapshot and proves
+// what it can about the tree the process lives in: ancestryForeign plus the
+// first home an ancestor DECLARES through its own AGENT_FACTORY_HOME that is
+// not this install's — proof the process runs under another install's tmux
+// server, daemon or helper, even when its own environment resolves to this
+// home or cannot be attributed at all.
+//
+// The walk fails CLOSED (#6703): ancestryUnproven when a recorded ancestor is
+// absent from the snapshot (it exited mid-scan, or under a restricted process
+// table was never listed), when the pid no longer names the process the
+// snapshot recorded (reaped and recycled — SameIdentity, the same check the
+// death proof applies to stamped server pids), or when the ancestor's
+// environment cannot be read — a denied or withheld environ is not "declares
+// nothing". On a path that may arm a kill, an ancestor that cannot be
+// interrogated is an ancestor whose home cannot be ruled out.
 //
 // Only an explicit declaration counts; the HOME-derived default that
 // daemonProcessHome applies to the candidate is deliberately not applied to
@@ -648,40 +708,73 @@ func (ctx *scanContext) markedProcessOwnership(p proctree.Process) (ownershipVer
 // process: applying the default up the tree would let a HOME=/root login
 // shell — or pid 1 in a container — read as "another install" and disarm the
 // arm for every descendant, the mirror image of the kill this walk exists to
-// prevent. An ancestor whose declared home cannot be resolved in its own
-// frame is likewise skipped: ancestry under-disqualifies what it cannot
-// prove, leaving the process's own environment as the gate.
-func (ctx *scanContext) foreignDeclaredAncestor(p proctree.Process) (string, int, bool) {
+// prevent. An ancestor that is READ and declares no home is clean, not
+// unproven — only gaps count as gaps.
+func (ctx *scanContext) ancestorHomeProof(p proctree.Process) (ancestryVerdict, string, int) {
 	seen := map[int]bool{p.PID: true}
-	for pid, hops := p.PPID, 0; pid > 1 && hops < 128; hops++ {
+	pid := p.PPID
+	for hops := 0; pid > 1 && hops < 128; hops++ {
 		if seen[pid] {
-			break
+			// A cycle back onto an already-verified ancestor — nothing
+			// new remains to check.
+			return ancestryClean, "", 0
 		}
 		seen[pid] = true
 		a, ok := ctx.snap[pid]
 		if !ok {
-			break
+			// The recorded parent is absent from the snapshot: it exited
+			// between the stat pass and now, or the table never showed
+			// it. Either way it cannot be interrogated.
+			return ancestryUnproven, "", pid
 		}
-		if home, declared := declaredAgentFactoryHome(pid); declared && !sameHome(home, ctx.opts.ConfigDir) {
-			return home, pid, true
+		if same, err := proctree.SameIdentity(a); err != nil || !same {
+			// The pid was recycled since the snapshot — or cannot be
+			// revalidated — so the record describes a different process
+			// than the one running now.
+			return ancestryUnproven, "", pid
+		}
+		home, declared, readable := declaredAgentFactoryHome(pid)
+		if !readable {
+			return ancestryUnproven, "", pid
+		}
+		if declared && !sameHome(home, ctx.opts.ConfigDir) {
+			return ancestryForeign, home, pid
 		}
 		pid = a.PPID
 	}
-	return "", 0, false
+	if pid > 1 {
+		// The hop bound ran out mid-chain — the unexamined tail is
+		// unverified.
+		return ancestryUnproven, "", pid
+	}
+	return ancestryClean, "", 0
 }
 
 // declaredAgentFactoryHome resolves the home a process DECLARES through its
 // own AGENT_FACTORY_HOME, in its own frame — the explicit half of
 // daemonProcessHome's rule, without the HOME-derived default (see
-// foreignDeclaredAncestor for why ancestors get no default).
-func declaredAgentFactoryHome(pid int) (string, bool) {
+// ancestorHomeProof for why ancestors get no default). The third return is
+// false when the environment could not be read or a declared home could not
+// be resolved in the ancestor's frame — "no answer" is never "no home"
+// (#6703).
+func declaredAgentFactoryHome(pid int) (string, bool, bool) {
 	raw, found, err := daemonProcessEnvLookup(pid, "AGENT_FACTORY_HOME")
-	if err != nil || !found || raw == "" {
-		return "", false
+	if err != nil {
+		return "", false, false
 	}
-	homeDir, _, _ := daemonProcessEnvLookup(pid, "HOME")
+	if !found || raw == "" {
+		return "", false, true
+	}
+	homeDir, _, err := daemonProcessEnvLookup(pid, "HOME")
+	if err != nil {
+		return "", false, false
+	}
 	cwd, _ := daemonProcessCwd(pid)
-	return resolveHomeIn(raw, homeDir, cwd)
+	home, resolved := resolveHomeIn(raw, homeDir, cwd)
+	if !resolved {
+		return "", false, false
+	}
+	return home, true, true
 }
 
 // processLeakObservations keeps every unprovable state visible without mixing
