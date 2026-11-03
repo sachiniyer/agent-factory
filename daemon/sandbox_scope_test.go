@@ -234,6 +234,26 @@ func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
 	live := snap(f.secret)
 	assert.Equal(t, f.me.ID, live.Caller)
 	assert.False(t, live.CallerGone)
+
+	// A commit landing mid-flight can never read as gone: the committed and
+	// pending checks share one acquisition of m.mu, so the caller is judged
+	// absent from BOTH sets at one instant or not at all (#6708 review). Commit
+	// the create the way the real path does — the row lands in m.instances and
+	// the pending entry drops — and the SAME credential's next snapshot answers
+	// through the committed path, never CallerGone.
+	newbie, err := session.FromInstanceData(session.InstanceData{
+		ID: pendingID, Title: "newbie", Status: session.Running, Liveness: session.LiveReady,
+	})
+	require.NoError(t, err)
+	f.mgr.mu.Lock()
+	f.mgr.instances[daemonInstanceKey(f.repoA, "newbie")] = newbie
+	delete(f.mgr.pendingCreates, daemonInstanceKey(f.repoA, "newbie"))
+	f.mgr.mu.Unlock()
+	committed := snap(pendingSecret)
+	assert.Equal(t, pendingID, committed.Caller)
+	assert.False(t, committed.CallerGone, "a just-committed session is never reported gone")
+	assert.Contains(t, idsOf(committed.Instances), pendingID,
+		"the committed row projects through the normal project path")
 }
 
 func TestSandboxScope_SnapshotIsTheOwnersProjectOnly(t *testing.T) {

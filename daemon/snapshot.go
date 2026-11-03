@@ -532,11 +532,17 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// An owner that is no longer tracked reads nothing rather than everything.
 	sandboxOwnerID, isSandbox := sandboxOwner(ctx)
 	sandboxProjectID, sandboxProjectErr := "", error(nil)
+	var pendingCallerRow session.InstanceData
 	if isSandbox {
+		// Committed and pending ownership are judged under ONE lock, so a
+		// commit landing between them can never read as gone (#6708 review).
 		var proj sandboxProject
-		if proj, sandboxProjectErr = s.manager.sandboxProjectOf(sandboxOwnerID); sandboxProjectErr == nil {
+		proj, pendingCallerRow = s.manager.sandboxCallerView(sandboxOwnerID)
+		if proj.repoID != "" {
 			sandboxProjectID = proj.repoID
 			req.RepoID = proj.repoID
+		} else {
+			sandboxProjectErr = sandboxRefusal("the credential's session is no longer tracked")
 		}
 	}
 	// Sample before the rows so reconciliation delay is measured against the
@@ -548,7 +554,16 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	// the old, incomplete instance list with the new, cleared skip set — a
 	// 'sessions list' would then report the repaired repo as silently empty
 	// instead of refusing the not-yet-complete snapshot (#603 over the wire).
-	instances, skipped := s.manager.SnapshotWithSkipped(req.RepoID)
+	var instances []session.InstanceData
+	var skipped []SkippedRepo
+	if isSandbox && sandboxProjectErr != nil {
+		// The owner is not a committed session: its identity answers from
+		// the pending row already captured under the lock above, and the
+		// all-repos snapshot an unscoped request would build here is
+		// discarded by the projection anyway — skip it (#6708 review).
+	} else {
+		instances, skipped = s.manager.SnapshotWithSkipped(req.RepoID)
+	}
 	alarms := s.deliveryAlarms(req.RepoID)
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
@@ -561,9 +576,11 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 			// must not start before it does (#6708 review). Otherwise the
 			// caller is gone — killed, removed, or lost with a create that
 			// never committed — and the wire says so instead of leaving the
-			// caller to poll out a window that cannot close (#6690).
-			if pending, ok := s.manager.pendingCreateForCaller(sandboxOwnerID); ok {
-				instances = []session.InstanceData{sandboxSafeInstanceData(pending)}
+			// caller to poll out a window that cannot close (#6690). The
+			// pending row was captured under the same lock that judged the
+			// committed set, so gone is decided from one consistent view.
+			if pendingCallerRow.ID != "" {
+				instances = []session.InstanceData{sandboxSafeInstanceData(pendingCallerRow)}
 			} else {
 				resp.CallerGone = true
 			}
