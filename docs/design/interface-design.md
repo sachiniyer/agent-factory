@@ -153,7 +153,7 @@ glyphs a space-1 gap. Selection uses surface-raised, a leading accent marker and
 a bold name; retain the same liveness glyph/colour inside that row. TUI selection
 uses a cursor and raised row with no extra frame. Do not colour a whole session
 name by state. Keep one state label, and disclose mechanical churn detail when
-selected. The state glyph never animates or changes the name's starting column.
+selected. The state glyph never animates as decoration or changes the name's starting column.
 
 ### Header and view navigation
 
