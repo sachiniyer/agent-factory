@@ -189,10 +189,12 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 					// not encode AF_HOME, so a surviving process from another
 					// install can carry a name that now matches one of OUR live
 					// sessions (temporal reuse once that install's session died).
-					// Its AF_HOME proves it is not ours, so report it as such
-					// rather than attributing the escape to this install. The
-					// escaped arm remains report-only either way — no kill path
-					// is added here.
+					// A non-matching AF_HOME proves it is not ours; a matching
+					// one proves only that the SESSION was this home's — never
+					// that the process carrying it is — so a matching marker is
+					// resolved to the process's own home the way the dead arm
+					// does (#6579), below. The escaped arm remains report-only
+					// either way — no kill path is added here.
 					home, homeStatus := proctree.LookupEnv(p.PID, tmux.EnvMarkerHome)
 					if homeStatus == proctree.EnvFound {
 						// A relative AGENT_FACTORY_HOME is stamped unchanged by
@@ -250,6 +252,53 @@ func checkOrphanedProcesses(ctx *scanContext, report *Report) {
 								Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
 									"agent-factory home (%s) — not attributed to this install",
 									describeProc(p), name, home),
+							})
+							continue
+						}
+						// A matching AF_HOME proves the SESSION was this home's —
+						// never that the process carrying it is. A second install
+						// launched inside one of this home's sessions inherits
+						// AF_SESSION/AF_HOME beside its own AGENT_FACTORY_HOME (and
+						// TMUX_TMPDIR), so its daemon, its tmux server and everything
+						// they spawn carry a matching marker while belonging to the
+						// other install — and the union listing cannot see that
+						// install's live sessions, so they read as escaped here.
+						// Ownership is established the way the dead-session arm below
+						// establishes it: from the process's OWN environment, resolved
+						// in its own frame through daemonProcessHome — the HOME-derived
+						// default included, so a real same-home pane process (which
+						// declares no AGENT_FACTORY_HOME of its own) still resolves to
+						// this install — and, where its environment cannot answer, the
+						// home its ancestors declare. Only a process proven to be this
+						// install's is attributed as an escapee; a foreign or unproven
+						// one is reported without attributing the escape to this install.
+						ownership, foreignHome, foreignPID := ctx.markedProcessOwnership(p)
+						switch ownership {
+						case ownershipForeignEnv:
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but belongs to another "+
+									"agent-factory home (%s) — the matching AF_HOME marker was inherited "+
+									"from a session of this install, so it is not attributed to this install",
+									describeProc(p), name, foreignHome),
+							})
+							continue
+						case ownershipForeignAncestor:
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-process",
+								Detail: fmt.Sprintf("%s carries live session %s's name but runs under "+
+									"pid %d, which declares another agent-factory home (%s) — the "+
+									"matching marker was inherited, so it is not attributed to this install",
+									describeProc(p), name, foreignPID, foreignHome),
+							})
+							continue
+						case ownershipUnproven:
+							report.addAdvisoryFinding(Finding{
+								Check: "foreign-home-unresolved",
+								Detail: fmt.Sprintf("%s carries live session %s's name and its AF_HOME "+
+									"matches this install, but its own environment establishes no "+
+									"agent-factory home — ownership is unproven, so it is not "+
+									"attributed to this install", describeProc(p), name),
 							})
 							continue
 						}
