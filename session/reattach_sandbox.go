@@ -200,6 +200,11 @@ func (i *Instance) ReattachSandbox() error {
 	}
 	if len(i.Tabs) == 0 {
 		i.Tabs = []*Tab{newRemoteAgentTab()}
+		// Carry the reload's recorded resume handle onto the seeded tab, as
+		// materializeRestorableTabs and remoteAgentBackend.Launch do (#5826).
+		if i.reportedConversation.HasID() && i.setAgentConversationLocked(i.reportedConversation) {
+			i.conversationUnpersisted = true
+		}
 	}
 	i.appendPendingMetadataTabsLocked()
 	// The loader rewrote a live row to Lost because nothing was bound. The
