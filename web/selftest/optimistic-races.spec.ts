@@ -46,6 +46,32 @@ async function submitCreate(page: Page, title: string) {
   await page.locator(".af-modal-card button[type=submit]").click();
 }
 
+test("#6684: a repaint that drops the focused row's actions host cannot strand rail focus", async ({ page, request }) => {
+  const f = await fixture(page, request);
+  const row = f.row(f.a.title);
+  await expect(row).toHaveClass(/af-row-selected/);
+  const trigger = row.getByRole("button", { name: /^Actions for / });
+  await trigger.focus();
+  // An in-flight op clears the verbs that keep the actions host mounted. The
+  // rebuild removes the focused control, and the aria-label restore has no
+  // matching element to re-park on: without a fallback the rail's focus
+  // strands on document.body even though the row stays selected.
+  const inFlight = {
+    ...f.a, can_kill: false, lifecycle_action: undefined, in_flight_op: InFlightOp.Restoring,
+  };
+  f.state.rows = [inFlight, f.b];
+  f.event("session.updated", inFlight);
+  await expect(row.locator(".af-row-actions"), "the in-flight op dropped the actions host").toHaveCount(0);
+  await expect(row, "the rail re-parks on the selected row when the focused control is gone").toBeFocused();
+  // The host's return must not yank focus back or leave it behind.
+  const settled = { ...f.a, in_flight_op: InFlightOp.None };
+  f.state.rows = [settled, f.b];
+  f.event("session.updated", settled);
+  await expect(row.locator(".af-row-actions .af-term-more")).toHaveCount(1);
+  await page.keyboard.press("Tab");
+  await expect(trigger, "Tab reaches the restored trigger from the re-parked row").toBeFocused();
+});
+
 test("completed create event plus lost HTTP reply does not offer a duplicate create", async ({ page, request }) => {
   const f = await fixture(page, request);
   const pending = latch();

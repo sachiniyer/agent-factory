@@ -1917,13 +1917,21 @@ export class AppShell {
     // row that lost the selection while Enter attaches the new one. Dead spots
     // only, though — a restore above may have placed focus on a control inside
     // a row (an open menu must keep its place across snapshots), so the ring
-    // moves only when it landed on body or on the deselected li itself.
-    if (activeRowBefore && !activeRowBefore.classList.contains("af-row-selected")) {
+    // moves only when it landed on body or on the deselected li itself. The
+    // gate cannot key on the row losing its selection: a row that KEEPS it can
+    // still strand the ring when the focused control's replacement is absent —
+    // an in-flight op drops the whole actions host, leaving the aria-label
+    // restore nothing to land on — and then focus sits on document.body until
+    // some unrelated render rescues it (#6684).
+    if (activeRowBefore) {
       const after = document.activeElement as HTMLElement | null;
       const afterRow = after && this.railList.contains(after) ? after.closest<HTMLElement>(".af-row") : null;
       const deadSpot = !afterRow || (after === afterRow && !afterRow.classList.contains("af-row-selected"));
       if (deadSpot) {
-        this.railList.querySelector<HTMLElement>(".af-row-selected")?.focus();
+        // The selected row first, then the row holding the roving stop when
+        // nothing is selected: either is the rail's own keyboard entry point.
+        (this.railList.querySelector<HTMLElement>(".af-row-selected")
+          ?? this.railList.querySelector<HTMLElement>('.af-row[tabindex="0"]'))?.focus();
       }
     }
     const selectedMenu = state.selectedId ? this.railMenus.get(`id ${state.selectedId}`) : undefined;
