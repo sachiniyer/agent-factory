@@ -1154,10 +1154,12 @@ What the sandbox host needs, and what af does to it:
     not a guard.
   - **A live client sees the agent die** (no restart involved, or the row was
     reattached first). If the agent-server answers that the agent is gone, the
-    sandbox is still there, so recovery (and a manual restore) pushes its work
-    to `origin` before replacing it (`probeAnsweredDead`), and refuses to
-    replace anything if that push does not land. If it does not answer at all,
-    the probe is unknown and replacement is refused: unreachable is not dead.
+    sandbox is still there. When it advertises `relaunch` recovery relaunches
+    the agent in place (see above); otherwise recovery (and a manual restore)
+    pushes its work to `origin` before replacing it (`probeAnsweredDead`), and
+    refuses to replace anything if that push does not land. If it does not
+    answer at all, the probe is unknown and replacement is refused:
+    unreachable is not dead.
   - **`--force-reap`** replaces a sandbox that answered dead, or one that could
     not be probed, without pushing it; it still requires the session's branch
     to be known so the replacement never lands on the default branch.
