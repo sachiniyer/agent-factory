@@ -99,17 +99,26 @@ test("docs mermaid: an invalid diagram reports inline and keeps the document", a
   await expect(pane.locator(".cm-content"), "the document after the fence still renders").toContainText("Afterwards.");
 });
 
-// A request a diagram could have chosen: anything carrying a probe marker
-// (the fixtures name /af-mmd-probe/* paths that exist nowhere), anything on
-// the web-tab proxy path (which forwards to a session's dev server), or
-// anything off this origin at all. Same-origin counts — that is the point.
-function diagramChosenRequests(requests: string[], pageUrl: string): string[] {
+// A URL a diagram could have chosen: a probe marker (the fixtures name
+// /af-mmd-probe/* paths that exist nowhere), the web-tab proxy path (which
+// forwards to a session's dev server), or anything off this origin at all.
+// Same-origin counts — that is the point.
+function diagramChosen(url: string, pageUrl: string): boolean {
   const pageOrigin = new URL(pageUrl).origin;
-  return requests.filter((u) => {
-    const url = new URL(u);
-    return url.pathname.includes("/af-mmd-probe/") || url.pathname.startsWith("/v1/webtab/") ||
-      ((url.protocol === "http:" || url.protocol === "https:") && url.origin !== pageOrigin);
-  });
+  const u = new URL(url);
+  return u.pathname.includes("/af-mmd-probe/") || u.pathname.startsWith("/v1/webtab/") ||
+    ((u.protocol === "http:" || u.protocol === "https:") && u.origin !== pageOrigin);
+}
+
+// Chromium fires "request" for a load the render frame's CSP then denies —
+// requestWillBeSent precedes the block — so a request event alone is not a
+// leak: only one that COMPLETES reached the wire. Track finished URLs and
+// failed URLs separately.
+function watchRequests(page: Page): { finished: Set<string>; failed: Set<string> } {
+  const finished = new Set<string>(), failed = new Set<string>();
+  page.on("requestfinished", (r) => finished.add(r.url()));
+  page.on("requestfailed", (r) => failed.add(r.url()));
+  return { finished, failed };
 }
 
 test("docs mermaid: click callbacks, javascript: links and HTML labels render inert", async ({ page, request }) => {
@@ -122,6 +131,7 @@ test("docs mermaid: click callbacks, javascript: links and HTML labels render in
   // still about:blank, so the page origin is only known at assertion time.
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
+  const { finished } = watchRequests(page);
   const hostile = `%%{init: {"themeVariables": {"fontFamily": "x; background: url(https://mmd.invalid/pixel.png);"}}}%%
 flowchart LR
   A["<img src=x onerror=globalThis.__pwned=1>"] --> B["<b>normal</b>"]
@@ -151,14 +161,15 @@ flowchart LR
   }
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   expect(dialogs, "no dialog may come out of a diagram").toEqual([]);
-  const chosen = diagramChosenRequests(requests, page.url());
-  expect(chosen, "a diagram may not make the browser ask for anything it names").toEqual([]);
+  const chosen = requests.filter((u) => diagramChosen(u, page.url()) && finished.has(u));
+  expect(chosen, "a diagram may not make the browser fetch anything it names").toEqual([]);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
 
 test("docs mermaid: a render cannot make the browser ask for anything the diagram names", async ({ page, request }) => {
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
+  const { finished, failed } = watchRequests(page);
   // Every fetch vector a diagram can name, each pointed at a marker path that
   // exists nowhere: a plain diagram first (must render), then flowchart img
   // node metadata, a top-level fontFamily via an init directive (lands in
@@ -188,7 +199,16 @@ flowchart LR
   for (const w of await widgets.all()) {
     await expect(w.locator("svg, .cm-md-mermaid-errtext").first()).toBeVisible({ timeout: 30_000 });
   }
-  const chosen = diagramChosenRequests(requests, page.url());
-  expect(chosen, "zero diagram-chosen requests, same-origin counted").toEqual([]);
+  // No diagram-chosen URL may reach the wire: requests the frame's CSP
+  // denied show up as failed attempts, never as finished ones.
+  const leaked = requests.filter((u) => diagramChosen(u, page.url()) && finished.has(u));
+  expect(leaked, "zero diagram-chosen requests reached the wire, same-origin counted").toEqual([]);
+  // And the img-node probe must show its fetch attempted and denied — proof
+  // the frame's CSP engaged, not that the code path never ran.
+  const imgProbe = new URL("/af-mmd-probe/img-node.png", page.url()).href;
+  expect(
+    requests.includes(imgProbe) && failed.has(imgProbe) && !finished.has(imgProbe),
+    "the img-node load must be attempted and denied by the render frame's CSP",
+  ).toBe(true);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
