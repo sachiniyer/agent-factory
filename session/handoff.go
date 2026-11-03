@@ -457,6 +457,12 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 	i.Tabs[0].Handoffs = append(i.Tabs[0].Handoffs, entry)
 	i.touchLocked()
 	i.Tabs[0].Conversation = AgentConversationData{}
+	// The reported handle belongs to the outgoing agent's runtime; retiring it
+	// with the live slot keeps a post-swap checkpoint (handoffStorageCheckpoint)
+	// from serializing the outgoing id into AgentConversation, where it would
+	// outlive a daemon restart and let a reattach hand the incoming agent the
+	// wrong conversation (the toInstanceDataLocked reattach fallback).
+	i.reportedConversation = AgentConversationData{}
 	// Same-agent (account-only) handoffs retain the exact configured command for
 	// subsequent restarts — its override still produces the running command, and
 	// the detected agent enum is only the ledger's identity. A cross-agent swap
