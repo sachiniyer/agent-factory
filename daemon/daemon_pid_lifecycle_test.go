@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"fmt"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -194,9 +193,10 @@ func TestHealth_PIDVerifiedRequiresOwnHome(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	})
 	pid := cmd.Process.Pid
-	waitForReady(t, fmt.Sprintf("fake daemon pid=%d cmdline exposes --daemon", pid), func() bool {
-		return isAgentFactoryDaemon(pid)
-	})
+	// waitForFakeDaemon, not an argv-only wait: Health's PIDUnverifiable /
+	// PIDVerified verdicts go through classifyDaemonHome, which needs the
+	// child's settled environ — not just a visible --daemon argv (#6705).
+	waitForFakeDaemon(t, cmd, "af")
 
 	pidPath := filepath.Join(home, "daemon.pid")
 	require.NoError(t, os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0600))
@@ -238,9 +238,10 @@ func TestHealth_PIDUnverifiableIsNotAbsent(t *testing.T) {
 		_, _ = cmd.Process.Wait()
 	})
 	pid := cmd.Process.Pid
-	waitForReady(t, fmt.Sprintf("fake daemon pid=%d cmdline exposes --daemon", pid), func() bool {
-		return isAgentFactoryDaemon(pid)
-	})
+	// waitForFakeDaemon, not an argv-only wait: Health's PIDUnverifiable
+	// verdict goes through classifyDaemonHome, which needs the child's
+	// settled environ — not just a visible --daemon argv (#6705).
+	waitForFakeDaemon(t, cmd, "af")
 
 	pidPath := filepath.Join(home, "daemon.pid")
 	require.NoError(t, os.WriteFile(pidPath, []byte(strconv.Itoa(pid)), 0600))
