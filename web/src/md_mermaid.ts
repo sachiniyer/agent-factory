@@ -52,6 +52,22 @@ const OPEN_FRAME_TIMEOUT_MS = 30_000;
 const OPEN_RETRY_AFTER_MS = 30_000;
 let lastOpenFailedAt = 0;
 
+/** Polls `probe` until it yields a value or `timeoutMs` runs out, on a wall
+ *  deadline rather than an iteration count: throttled timers (a background
+ *  tab) stretch sleeps, and counting polls would stretch the wait without
+ *  bound. The probe runs once more after the final sleep — a registration
+ *  landing inside it still counts, so a good load is never scored a failure
+ *  and barred by the retry cooldown. */
+export async function pollUntil<T>(probe: () => T | undefined, timeoutMs: number): Promise<T | undefined> {
+  const deadline = Date.now() + timeoutMs;
+  let got = probe();
+  while (got === undefined && Date.now() < deadline) {
+    await new Promise((r) => setTimeout(r, 25));
+    got = probe();
+  }
+  return got;
+}
+
 async function openRenderFrame(): Promise<MermaidChunk> {
   if (Date.now() - lastOpenFailedAt < OPEN_RETRY_AFTER_MS) {
     throw new Error("the mermaid render frame failed to open recently");
@@ -78,14 +94,11 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   }
   // The chunk self-registers on the frame's window when its module executes;
   // a load failure only ever shows as a timeout, so a retry rebuilds it all.
-  // The wait is a deadline, not an iteration count: timers can be throttled
-  // (background tab), and counting polls would stretch it without bound.
-  const deadline = Date.now() + OPEN_FRAME_TIMEOUT_MS;
-  while (Date.now() < deadline) {
-    const api = (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk;
-    if (api) return api;
-    await new Promise((r) => setTimeout(r, 25));
-  }
+  const api = await pollUntil(
+    () => (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk,
+    OPEN_FRAME_TIMEOUT_MS,
+  );
+  if (api) return api;
   lastOpenFailedAt = Date.now();
   dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");
@@ -398,10 +411,46 @@ async function renderOne(source: string, theme: Record<string, string>): Promise
   }
 }
 
-// A source that timed out once is poison for the session: retrying a hung
-// render costs the whole timeout per repaint and holds every diagram queued
-// behind it, so the next ask fails fast instead.
-const timedOut = new Set<string>();
+// A source that timed out is likely to hang again, but "likely" is not
+// "certain" — a render can lose its race to a busy main thread rather than
+// to a poisoned diagram. So a timeout fails fast only inside a cooldown and
+// then earns a real retry, and the ledger is capped so a flood of distinct
+// hanging sources cannot grow it without bound.
+const TIMED_OUT_RETRY_MS = 60_000;
+const TIMED_OUT_MAX = 32;
+
+/** Per-key timeout memory for renderCached: when a key last timed out,
+ *  bounded so the ledger stays small. */
+export class TimeoutLedger {
+  private at = new Map<string, number>();
+
+  constructor(
+    private readonly cooldownMs: number,
+    private readonly max: number,
+  ) {}
+
+  /** True while `key` sits inside its cooldown. Once the cooldown has
+   *  elapsed the entry is dropped, so the next render tries for real. */
+  cooling(key: string, now: number): boolean {
+    const t = this.at.get(key);
+    if (t === undefined) return false;
+    if (now - t < this.cooldownMs) return true;
+    this.at.delete(key);
+    return false;
+  }
+
+  /** Records a fresh timeout for `key`, evicting the oldest entry if the
+   *  ledger has reached its cap. */
+  note(key: string, now: number): void {
+    this.at.delete(key);
+    this.at.set(key, now);
+    if (this.at.size > this.max) {
+      this.at.delete(this.at.keys().next().value as string);
+    }
+  }
+}
+
+const timedOut = new TimeoutLedger(TIMED_OUT_RETRY_MS, TIMED_OUT_MAX);
 
 function renderCached(source: string, mode: "light" | "dark", theme: Record<string, string>): Promise<string> {
   const key = mode + "\n" + source;
@@ -411,10 +460,10 @@ function renderCached(source: string, mode: "light" | "dark", theme: Record<stri
     svgCache.set(key, hit);
     return hit;
   }
-  if (timedOut.has(key)) return Promise.reject(new RenderTimeoutError());
+  if (timedOut.cooling(key, Date.now())) return Promise.reject(new RenderTimeoutError());
   const p = renderSerialized(source, theme).catch((e: unknown) => {
     svgCache.delete(key);
-    if (e instanceof RenderTimeoutError) timedOut.add(key);
+    if (e instanceof RenderTimeoutError) timedOut.note(key, Date.now());
     throw e;
   });
   svgCache.set(key, p);
