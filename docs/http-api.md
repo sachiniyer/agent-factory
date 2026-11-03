@@ -552,9 +552,10 @@ never mislabels a newer daemon's observation.
 ### Session warnings
 
 Session objects also carry daemon-projected warnings as additive,
-omitted-when-empty fields. Two are single strings — `archive_warning` (an
-incomplete archive's bounded notice) and `callback_unavailable` (why the session
-has no af callback) — and one is a list:
+omitted-when-empty fields. Three are single strings — `archive_warning` (an
+incomplete archive's bounded notice), `callback_unavailable` (why the session
+has no af callback), and `setup_hook_failed` (why a daemon-side
+`setup_commands` hook failed) — and one is a list:
 
 **`agent_config_skipped`** (array of strings, omitted when empty) — one
 `agent:file: <reason>` entry per declared [`sandbox_agent_config`](backends.md#ssh-backend)
@@ -565,6 +566,24 @@ refreshed by every reprovision and account swap that stages a scope, so a clean
 placement clears it and the row never warns about a file the live scope now
 holds. Every surface renders the joined entries under the `af agent config
 skipped:` prefix.
+
+**`setup_hook_failed`** (string, omitted when empty) — an opaque note on why
+this session's daemon-side `setup_commands` hook failed. The note is produced
+once the setup pipeline is running: when the staging root is unusable, when a
+staging directory cannot be created, when a Docker payload transfer or
+worktree-overlay step fails, or when an entry fails, times out, cannot start,
+or cannot open its output log. (An in-repo `setup_commands` document that
+cannot be loaded is logged rather than reported here — the session proceeds
+without running its setup and the field stays empty.) The pre-entry and
+transfer forms carry a plain reason string. An entry failure always carries
+the entry index; it adds the retained output log once a log could be opened,
+and the exit status or timeout once the command actually started. None of
+these block the session; the note persists on the row (in the same
+durability class as `callback_unavailable`)
+so every surface can render `af setup hook failed: …` rather than leaving the
+operator to wonder why the workspace is missing its setup. See
+[backends.md](backends.md#session-setup-hook-setup_commands) for the hook
+contract.
 
 ## Examples
 
