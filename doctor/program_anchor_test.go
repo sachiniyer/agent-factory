@@ -285,9 +285,18 @@ func repoViaSymlink(t *testing.T, repo string) string {
 // than the spelling the fixture used to reach the repo (#6729).
 func reportedProgramPath(t *testing.T, row CheckResult) string {
 	t.Helper()
-	i := strings.LastIndexByte(row.Detail, ' ')
+	// The path is the last %s of the detail's "%q uses %s" /
+	// "%q resolves to %s" format, so it is split out on the known delimiter —
+	// never on whitespace, which a TMPDIR containing a space would cut inside
+	// the path itself. The delimiter includes the %q command's closing quote
+	// so a delimiter-looking substring inside the path cannot false-match.
+	i, sep := strings.LastIndex(row.Detail, `" resolves to `), len(`" resolves to `)
+	if j := strings.LastIndex(row.Detail, `" uses `); j > i {
+		i, sep = j, len(`" uses `)
+	}
 	require.GreaterOrEqual(t, i, 0, "check row %q carries no resolved path: %q", row.Name, row.Detail)
-	resolved, err := filepath.EvalSymlinks(row.Detail[i+1:])
-	require.NoError(t, err, "check row %q reports a path that does not resolve: %q", row.Name, row.Detail[i+1:])
+	path := row.Detail[i+sep:]
+	resolved, err := filepath.EvalSymlinks(path)
+	require.NoError(t, err, "check row %q reports a path that does not resolve: %q", row.Name, path)
 	return resolved
 }
