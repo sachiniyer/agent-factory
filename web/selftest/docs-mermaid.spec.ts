@@ -152,7 +152,7 @@ test("docs mermaid: click callbacks, javascript: links and HTML labels render in
   // still about:blank, so the page origin is only known at assertion time.
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
-  const { finished } = watchRequests(page);
+  const watcher = watchRequests(page);
   const hostile = `%%{init: {"themeVariables": {"fontFamily": "x; background: url(https://mmd.invalid/pixel.png);"}}}%%
 flowchart LR
   A["<img src=x onerror=globalThis.__pwned=1>"] --> B["<b>normal</b>"]
@@ -182,7 +182,7 @@ flowchart LR
   }
   expect(await page.evaluate(() => (window as unknown as { __pwned?: number }).__pwned)).toBeUndefined();
   expect(dialogs, "no dialog may come out of a diagram").toEqual([]);
-  const chosen = requests.filter((u) => leaked(u, page.url(), { finished, failed: new Map(), cspDenied: new Set() }));
+  const chosen = requests.filter((u) => leaked(u, page.url(), watcher));
   expect(chosen, "a diagram may not make the browser fetch anything it names").toEqual([]);
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
@@ -190,7 +190,7 @@ flowchart LR
 test("docs mermaid: a render cannot make the browser ask for anything the diagram names", async ({ page, request }) => {
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
-  const { finished, failed } = watchRequests(page);
+  const { finished, failed, cspDenied } = watchRequests(page);
   // Every fetch vector a diagram can name, each pointed at a marker path that
   // exists nowhere: a plain diagram first (must render), then flowchart img
   // node metadata, a top-level fontFamily via an init directive (lands in
