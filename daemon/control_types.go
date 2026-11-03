@@ -65,13 +65,6 @@ type CreateSessionRequest struct {
 	// not-attempted outcome across admission and net/rpc.
 	TaskOrigin        bool `json:"-"`
 	MaxConcurrentRuns int  `json:"-"`
-	// BacklogItem is the backlog item this create starts, set only by the
-	// daemon's own item start. `json:"-"` for the same reason as TaskID: an HTTP
-	// client must not tag a session as an item session.
-	BacklogItem int `json:"-"`
-	// OrchestratorTurn opens the first turn of a session af starts to
-	// orchestrate a group, so the turn's end can archive it.
-	OrchestratorTurn bool `json:"-"`
 	// InPlace attaches the session to the repo's existing working tree at its
 	// current branch (`af sessions create --here`) instead of creating a new
 	// git worktree+branch; kill/cleanup leaves the user's tree and branch
@@ -300,12 +293,6 @@ type SendPromptRequest struct {
 	// it rides the gob loopback only — excluded from HTTP/JSON so a client
 	// cannot claim a task's verdict.
 	TaskID string `json:"-"`
-	// BacklogOrigin is daemon-internal provenance: the backlog sends an answer or
-	// a "continue" itself and manages the session's attention itself (it mirrors
-	// the item's open question), so this send must not be taken as the user
-	// answering whatever attention request happens to be set (it may be the NEXT
-	// question's).
-	BacklogOrigin bool `json:"-"`
 }
 
 type SendPromptResponse struct {
