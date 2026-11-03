@@ -70,6 +70,18 @@ path filled in:
    `waits_on` only for a dependency the order does not give. Then tell the
    user the item ids it printed, and name any existing item of this proposal
    that no longer matches a row.
+10. When the user asks you to manage, run, own or drive this proposal's
+    items, bind its parent item (key `proposal`) as its effort orchestrator:
+    in a new batch, add `--orchestrate` to `af backlog add --file -`; for
+    items that exist, run `af backlog orchestrate <parent id> --self`. Add
+    `--replace` to either command when another session holds the group. Then
+    tell the user you are now the orchestrator. An orchestrator answers the
+    questions of item sessions, reviews and merges their PRs, and marks items
+    done; the user queues items, and af's runner starts them. Bind only on
+    that ask.
+11. A fenced code block whose info string is mermaid renders as a diagram in
+    the user's web proposal view (the terminal shows the source), so keep the
+    source valid mermaid.
 
 ### changes output
 

@@ -156,6 +156,7 @@ func TestTCPListener_ServesWebShellUnauthed(t *testing.T) {
 	require.Equal(t, http.StatusOK, resp.StatusCode, "the shell must load without a token")
 	require.Contains(t, string(body), `id="app"`)
 	require.Equal(t, "default-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-src 'self' https: http:", resp.Header.Get("Content-Security-Policy"))
+	require.Equal(t, "off", resp.Header.Get("X-DNS-Prefetch-Control"), "anchor DNS prefetch is not governed by CSP and must be off")
 
 	// The JS bundle is likewise reachable unauthenticated.
 	resp, err = client.Get(baseURL + "/af-web.js")

@@ -331,3 +331,22 @@ func (p *dockerProvisioner) readMountTable(home, workspace string) (realHome, re
 	}
 	return strings.TrimSpace(lines[0]), strings.TrimSpace(lines[1]), lines[2], nil
 }
+
+// readMountTableFor is readMountTable for a single directory — the setup
+// hook's payload staging dir. Same contract: mkdir, resolve symlinks, and
+// return the container's own mountinfo in one exec; an unreadable or
+// unparseable answer is an error the caller must refuse to chown over.
+func (p *dockerProvisioner) readMountTableFor(dir string) (realDir, mountinfo string, err error) {
+	out, err := p.docker(dockerShortStepTimeout,
+		"exec", "--user", "0:0", p.containerID, "sh", "-c",
+		`mkdir -p -- "$1" && cd -- "$1" && pwd -P && cat /proc/self/mountinfo`,
+		"sh", dir)
+	if err != nil {
+		return "", "", dockerStepErr(fmt.Errorf("backend=docker: cannot read the container mount table, so %s is not chowned (a chown cannot be proven to stay off host mounts): %s: %w", dir, strings.TrimSpace(string(out)), err), dockerOpRootExec)
+	}
+	lines := strings.SplitN(string(out), "\n", 2)
+	if len(lines) < 2 || !strings.HasPrefix(lines[0], "/") || strings.TrimSpace(lines[1]) == "" {
+		return "", "", dockerStepErr(fmt.Errorf("backend=docker: the container mount table answer was not understood, so %s is not chowned: %q", dir, strings.TrimSpace(string(out))), dockerOpLocal)
+	}
+	return strings.TrimSpace(lines[0]), lines[1], nil
+}

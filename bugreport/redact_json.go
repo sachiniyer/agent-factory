@@ -182,7 +182,10 @@ var sensitiveJSONKeys = map[string]bool{
 	//   - agent_config_skipped entries quote the declared file's path under the
 	//     operator's agent home in their reasons (#6337); the typed path marks
 	//     each entry, so the list drops wholesale here.
-	"alternate_path": true, "archive_warning": true, "agent_config_skipped": true,
+	//   - setup_hook_failed quotes the retained hook log's path under the
+	//     operator's AF home and can carry an output tail (#6667); the typed
+	//     path marks it, so the field drops wholesale here.
+	"alternate_path": true, "archive_warning": true, "agent_config_skipped": true, "setup_hook_failed": true,
 	"name": true, "account": true, "account_scope": true, "program": true, "runtime_program": true, "error": true,
 	// The usage-limit swap's account labels (#3127), mirrored here for the reason
 	// every entry above is: a record the typed decode REJECTS must never be less

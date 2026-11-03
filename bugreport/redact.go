@@ -501,6 +501,12 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.CallbackUnavailable != "" {
 		d.CallbackUnavailable = redactedMarker
 	}
+	// SetupHookFailed is the same class: the note names the retained hook log
+	// path under the operator's AF home and can quote a tail of the failed
+	// command's output — user-chosen text, not a minted enum.
+	if d.SetupHookFailed != "" {
+		d.SetupHookFailed = redactedMarker
+	}
 	// AgentConfigSkipped entries each name an operator-declared agent:file and
 	// the reason af could not place it (#6337): the reason quotes the file's
 	// path under the operator's agent home, which is the same class of
