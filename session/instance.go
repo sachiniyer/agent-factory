@@ -329,6 +329,12 @@ type Instance struct {
 	// entries under AgentConfigSkippedPrefix. Mutex-protected; see
 	// agent_config_skipped.go.
 	agentConfigSkipped []string
+	// setupHookFailed retains why this session's daemon-side setup_commands
+	// hook failed (#6667): the entry, its exit status or timeout, and the
+	// retained full-output log. Persisted like callbackUnavailable and mirrored
+	// onto client projections by ReconcileSetupHookFailed; surfaces render it
+	// under SetupHookFailedPrefix. Mutex-protected; see setup_hook_failed.go.
+	setupHookFailed string
 	// hostedRemotely marks an instance running INSIDE a sandbox, where the daemon
 	// holds the session as a remote workspace (guidance.go, #5571 W3.3).
 	hostedRemotely       bool

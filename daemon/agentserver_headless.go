@@ -20,7 +20,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -633,75 +632,6 @@ type agentLifecycleRequest struct {
 	// Conversation is the daemon's recorded conversation for this launch to
 	// resume (#5571 W7.2); honored only where this host's provider store holds it.
 	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
-}
-
-// agentOKResponse is the acknowledgement for the no-return interface methods.
-type agentOKResponse struct {
-	OK bool `json:"ok"`
-	// Conversation is the conversation a launch came up on (#5571 W7.2); the
-	// daemon records it as it does for a local session.
-	Conversation *session.AgentConversationData `json:"conversation,omitempty"`
-	// TabsRestored / TabsGone answer a restart adoption's Tabs.
-	TabsRestored []string `json:"tabs_restored,omitempty"`
-	TabsGone     []string `json:"tabs_gone,omitempty"`
-}
-
-func (hs *headlessServer) Provision(req agentLifecycleRequest, resp *agentOKResponse) error {
-	if hs.inst != nil && req.SiblingTabs > 0 {
-		hs.inst.SetPersistedSiblingTabs(req.SiblingTabs)
-	}
-	if err := hs.as.Provision(req.FirstTimeSetup); err != nil {
-		return err
-	}
-	resp.OK = true
-	return nil
-}
-
-func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agentOKResponse) error {
-	// A restore-launch that carries the recorded conversation must not respawn a
-	// vanished agent onto a guessed one (#4797): see RefuseGuessedRespawn.
-	if req.RestartAdoption && !req.FirstTimeSetup && req.Conversation != nil && hs.inst != nil {
-		if err := hs.inst.RefuseGuessedRespawn(*req.Conversation); err != nil {
-			return err
-		}
-	}
-	if hs.adopted && !req.FirstTimeSetup && hs.inst != nil {
-		return hs.launchAdopted(req, resp)
-	}
-	var codexSnap session.ConversationCaptureSnapshot
-	codex := tmux.DetectAgentFromCommand(hs.program) == tmux.ProgramCodex
-	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
-		// A resume flag for a transcript this host does not hold makes the agent
-		// exit on launch, so a fresh workspace starts a new conversation instead.
-		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
-			hs.inst.SetResumeConversation(*req.Conversation)
-		} else {
-			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
-				req.Conversation.ID, req.Conversation.Agent)
-		}
-	}
-	if codex && hs.inst != nil {
-		// Before the spawn, so the capture can tell the new rollout from old ones.
-		// Correlated against the directory the launch command actually runs the
-		// agent in (an `env -C DIR codex` moves it off the worktree), not the
-		// worktree; unscoped when that is not provable (#5861).
-		codexSnap = session.BeginConversationCaptureAtCodexHomeAndWorkingDir(
-			codexHomeFor(hs.program, hs.inst.GetWorktreePath()),
-			session.LaunchCaptureWorkingDir(hs.program, hs.inst.GetWorktreePath()))
-	}
-	if err := hs.as.Launch(req.FirstTimeSetup); err != nil {
-		return err
-	}
-	resp.OK = true
-	if hs.inst == nil {
-		return nil
-	}
-	if conv := hs.inst.AgentConversation(); conv.HasID() {
-		resp.Conversation = &conv
-	} else if codex {
-		hs.captureCodexConversation(codexSnap)
-	}
-	return nil
 }
 
 // agentExposeResponse is StreamEndpoint over the wire — where this session's data

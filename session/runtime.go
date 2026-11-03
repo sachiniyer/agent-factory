@@ -225,6 +225,14 @@ type ProvisionResult struct {
 	// surface rather than only in a daemon log the user never reads. Empty when
 	// every declared file landed (or none applied).
 	AgentConfigSkipped []string
+	// SetupHookFailed records why a session's daemon-side setup_commands hook
+	// failed (#6667): which entry, the exit status or timeout, and the retained
+	// full-output log. Like CallbackUnavailable the provisioning deliberately
+	// still succeeded — a session whose setup script failed may be partially
+	// prepared but is still usable, and the row must say so on every surface.
+	// The in-sandbox overlay half reports its own failures through the launch
+	// response and joins this note on the instance.
+	SetupHookFailed string
 }
 
 // Runtime is the provision-and-expose seam (#1592 Phase 4 PR3): given a session
