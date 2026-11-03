@@ -678,6 +678,52 @@ func TestDiscardLocalSetupPayloadRefusesSymlinkedRoot(t *testing.T) {
 		"the refusal names the real root path")
 }
 
+// The flip side of the same refusal: with a linked root and NOTHING staged
+// under the link, the refusal stays silent — staging refuses to write
+// through the link, so a settled kill would otherwise log an error twice
+// (kill path and record delete) for a hazard that does not exist.
+func TestDiscardLocalSetupPayloadLinkedRootSilentWhenNothingStaged(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	var errs bytes.Buffer
+	prev := log.ErrorLog.Writer()
+	log.ErrorLog.SetOutput(&errs)
+	t.Cleanup(func() { log.ErrorLog.SetOutput(prev) })
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	target := t.TempDir()
+	require.NoError(t, os.Symlink(target, filepath.Join(home, "af-setup")))
+
+	i := &Instance{ID: "sess-none", Title: "sess"}
+	i.discardLocalSetupPayload()
+	assert.Empty(t, errs.String(),
+		"nothing was ever staged through the link — the refusal must not log a phantom hazard")
+}
+
+// The confinement property the per-entry os.Root buys: a payload that links
+// into a SIBLING's payload is removed without the delete following the link
+// — the sibling's tree survives, and only the link itself is taken.
+func TestDiscardLocalSetupPayloadKeepsSiblingLinkedInto(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	live := filepath.Join(home, "af-setup", "live", "payload")
+	require.NoError(t, os.MkdirAll(live, 0755))
+	require.NoError(t, os.WriteFile(filepath.Join(live, "secret"), []byte("x"), 0600))
+	stale := filepath.Join(home, "af-setup", "stale", "payload")
+	require.NoError(t, os.MkdirAll(stale, 0755))
+	require.NoError(t, os.Symlink("../../live/payload", filepath.Join(stale, "escape")))
+
+	i := &Instance{ID: "stale", Title: "sess"}
+	i.discardLocalSetupPayload()
+
+	data, readErr := os.ReadFile(filepath.Join(live, "secret"))
+	require.NoError(t, readErr, "a link inside a removed payload must not carry the delete into a sibling's tree")
+	assert.Equal(t, "x", string(data))
+	_, statErr := os.Stat(filepath.Join(home, "af-setup", "stale"))
+	assert.True(t, os.IsNotExist(statErr), "the stale session dir itself is still removed")
+}
+
 // Staging and reclaim agree on a linked af-setup root: reclaim refuses to
 // delete through the link, so staging must refuse to WRITE through it —
 // otherwise the payload lands in the link's target and stays there forever.
