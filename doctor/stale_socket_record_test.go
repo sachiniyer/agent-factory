@@ -470,10 +470,14 @@ func TestPriorSocketLiveSession_RecordOnlyProof_RefusesKill(t *testing.T) {
 
 	// A victim carrying the LIVE session's markers and this home, but NO
 	// TMUX env — the record-only proof shape. The record arm is the one
-	// the absent-file fall-through used to arm a kill on.
+	// the absent-file fall-through used to arm a kill on. AGENT_FACTORY_HOME
+	// is set to this home so the live-arm ownership guard (#6579) resolves
+	// the victim as this install's genuine escapee, not a foreign install's
+	// inherited-marker process.
 	victim := spawnWithEnv(t, "sh", nil, map[string]string{
 		tmux.EnvMarkerSession: liveName,
 		tmux.EnvMarkerHome:    home,
+		"AGENT_FACTORY_HOME":  home,
 	})
 
 	opts := testOptionsWithHome(t, home, true, daemonProc.PID, victim.PID) // Fix: true
