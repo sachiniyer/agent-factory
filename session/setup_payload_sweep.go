@@ -34,7 +34,18 @@ func SweepStaleSetupPayloads(keep map[string]bool) {
 		log.WarningLog.Printf("setup payload sweep: cannot resolve the AF home; skipping: %v", err)
 		return
 	}
-	root := filepath.Join(home, setupStagingRootName)
+	// The root itself must be a REAL directory before any removal under it:
+	// ReadDir and RemoveAll both follow a symlink at af-setup, and an operator
+	// can legitimately link it (moved to a data disk, or shared between two
+	// homes) — deleting "stale" entries under the link would empty the shared
+	// TARGET, taking other homes' payloads with it.
+	root, ok := setupStagingRootForDelete(home)
+	if !ok {
+		if _, lerr := os.Lstat(filepath.Join(home, setupStagingRootName)); lerr == nil {
+			log.WarningLog.Printf("setup payload sweep: refusing to run: %s is not a real directory", filepath.Join(home, setupStagingRootName))
+		}
+		return
+	}
 	entries, err := os.ReadDir(root)
 	if err != nil {
 		if !errors.Is(err, fs.ErrNotExist) {

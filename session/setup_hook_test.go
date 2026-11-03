@@ -646,6 +646,72 @@ func TestDiscardLocalSetupPayloadRefusesMalformedIDs(t *testing.T) {
 	assert.NoError(t, statErr)
 }
 
+// A symlinked af-setup ROOT is refused the same way the sweep refuses it:
+// the per-session discard must not delete through the link either, or it
+// would empty the shared target one entry at a time.
+func TestDiscardLocalSetupPayloadRefusesSymlinkedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	target := t.TempDir()
+	victim := filepath.Join(target, "sess-mine", "payload")
+	require.NoError(t, os.MkdirAll(victim, 0755))
+	require.NoError(t, os.Symlink(target, filepath.Join(home, "af-setup")))
+
+	i := &Instance{ID: "sess-mine", Title: "sess"}
+	i.discardLocalSetupPayload()
+	_, statErr := os.Stat(victim)
+	assert.NoError(t, statErr, "a linked af-setup root must be refused — the linked target's tree is not af's to delete")
+}
+
+// A failed create that leaves no record reclaims its payload at the exit:
+// the hook ran inside the factory, so every error return below it strands
+// the staged tree with no owner. The Instance return disarms the discard.
+func TestNewInstanceFailedCreateReclaimsSetupPayload(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	var staged string
+	restore := SetProvisionResultFactoryForTest(func(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
+		dir, ok := localSetupPayloadSessionDir(opts.ID)
+		require.True(t, ok)
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "payload"), 0755))
+		staged = dir
+		return ProvisionResult{
+			Backend:  &dockerBackend{},
+			Endpoint: &AgentServerEndpoint{URL: "://invalid", Token: "tok"},
+		}, nil
+	})
+	defer restore()
+
+	_, err := NewInstance(InstanceOptions{Title: "s", Path: repoRoot, Program: "claude"})
+	require.Error(t, err)
+	require.NotEmpty(t, staged)
+	_, statErr := os.Stat(staged)
+	assert.True(t, os.IsNotExist(statErr),
+		"a create that fails after the hook ran must reclaim the staged payload it can no longer own")
+}
+
+// A successful create keeps its payload — the Instance return disarms the
+// failed-create discard.
+func TestNewInstanceKeepsSetupPayloadOnSuccess(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	var staged string
+	restore := SetProvisionResultFactoryForTest(func(opts InstanceOptions, absPath string, kind BackendKind) (ProvisionResult, error) {
+		dir, ok := localSetupPayloadSessionDir(opts.ID)
+		require.True(t, ok)
+		require.NoError(t, os.MkdirAll(filepath.Join(dir, "payload"), 0755))
+		staged = dir
+		return ProvisionResult{Backend: &LocalBackend{}}, nil
+	})
+	defer restore()
+
+	_, err := NewInstance(InstanceOptions{Title: "s", Path: repoRoot, Program: "claude"})
+	require.NoError(t, err)
+	_, statErr := os.Stat(staged)
+	assert.NoError(t, statErr, "a live session keeps its staged payload for rebuilds")
+}
+
 // A valid id removes only its own directory — the sibling payload under the
 // same root is untouched.
 func TestDiscardLocalSetupPayloadRemovesOnlyItsOwn(t *testing.T) {

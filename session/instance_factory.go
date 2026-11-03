@@ -642,6 +642,17 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The setup hook ran inside backendFactory. Every exit below that fails to
+	// return an Instance strands the staged payload with no record and no
+	// owner — reclaim it at the exit rather than leaving it (secrets,
+	// usually) for the next daemon-start sweep. Disarmed only on the return
+	// that hands out the Instance.
+	payloadOrphaned := true
+	defer func() {
+		if payloadOrphaned {
+			DiscardLocalSetupPayload(opts.Title, id)
+		}
+	}()
 	backend := res.Backend
 
 	// A sandboxed runtime (docker) provisions its workspace during backendFactory
@@ -703,6 +714,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		accountAgent = sessionenv.AgentForCommand(opts.Program)
 	}
 
+	payloadOrphaned = false
 	return &Instance{
 		ID:           id,
 		sandboxCreds: opts.SandboxCredentials,

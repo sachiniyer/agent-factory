@@ -49,6 +49,31 @@ func TestSweepStaleSetupPayloads(t *testing.T) {
 	assert.NoError(t, err, "a non-directory entry under af-setup is not a staging dir — leave it")
 }
 
+// A symlinked af-setup ROOT is not af's to delete through: ReadDir and
+// RemoveAll both follow the link, so an operator who moved af-setup to a
+// data disk or shared it between two homes would lose every entry in the
+// TARGET that the keep set does not name. The sweep refuses the whole pass —
+// even with an empty keep set — and nothing under the target is touched.
+func TestSweepStaleSetupPayloadsRefusesSymlinkedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	target := t.TempDir()
+	otherHomePayload := filepath.Join(target, "other-home-session")
+	unrelated := filepath.Join(target, "unrelated-dir")
+	for _, d := range []string{otherHomePayload, unrelated} {
+		require.NoError(t, os.MkdirAll(d, 0755))
+	}
+	require.NoError(t, os.Symlink(target, filepath.Join(home, "af-setup")))
+
+	SweepStaleSetupPayloads(map[string]bool{})
+
+	for _, d := range []string{otherHomePayload, unrelated} {
+		_, err := os.Stat(d)
+		assert.NoError(t, err, "a linked af-setup root must be refused, never emptied through the link")
+	}
+}
+
 // No af-setup root at all — the common case on a home that never ran a
 // setup hook — is a silent no-op, not a warning.
 func TestSweepStaleSetupPayloadsNoRoot(t *testing.T) {

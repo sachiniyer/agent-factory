@@ -252,6 +252,23 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 	return filepath.Join(home, setupStagingRootName, sessionID), true
 }
 
+// setupStagingRootForDelete returns the af-setup root only when it exists as
+// a REAL directory. Every destructive path gates on this: ReadDir and
+// RemoveAll both follow a symlink at the root, and af never creates that
+// link — but an operator can (af-setup moved to a data disk, or shared
+// between two homes). Removing "stale" entries under a linked root empties
+// the shared TARGET, taking every other home's payload — and any unrelated
+// dir beside them — with it. A symlinked AF home path itself stays allowed;
+// only this one entry is checked.
+func setupStagingRootForDelete(home string) (string, bool) {
+	root := filepath.Join(home, setupStagingRootName)
+	info, err := os.Lstat(root)
+	if err != nil || !info.IsDir() {
+		return "", false
+	}
+	return root, true
+}
+
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
 // the <AF home>/af-setup/<id> tree holding payload — at permanent-deletion
 // points (#6667): a settled Instance.Kill, which every backend's delete path
@@ -261,6 +278,15 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 // stops — which keep the record — never reach it. A hosted session stages
 // beside its workspace instead and is untouched here — the sandbox teardown
 // owns that tree.
+func (i *Instance) discardLocalSetupPayload() {
+	DiscardLocalSetupPayload(i.Title, i.ID)
+}
+
+// DiscardLocalSetupPayload removes <AF home>/af-setup/<id> for a session id
+// the caller has proven dead — the exported form for deletion paths with no
+// live Instance (a settled ghost cleanup's record delete, a failed create
+// that left no record). Idempotent: deletion paths that already dropped the
+// dir reach it as a no-op.
 //
 // The id guard is load-bearing, not paranoia: instance ids load from disk
 // unvalidated, and the naive join turns "", ".", "a/.." into the SHARED
@@ -268,14 +294,24 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 // there is unrecoverable. A refused id logs an error and deletes NOTHING.
 // Best-effort: a leftover is scratch space, not a correctness hazard, so a
 // removal failure only logs.
-func (i *Instance) discardLocalSetupPayload() {
-	dir, ok := localSetupPayloadSessionDir(i.ID)
+func DiscardLocalSetupPayload(title, sessionID string) {
+	dir, ok := localSetupPayloadSessionDir(sessionID)
 	if !ok {
-		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir: instance id %q is not a single path element", i.Title, i.ID)
+		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir: instance id %q is not a single path element", title, sessionID)
+		return
+	}
+	home := filepath.Dir(filepath.Dir(dir))
+	root, ok := setupStagingRootForDelete(home)
+	if !ok {
+		// No real af-setup root means nothing under it is af's to delete — a
+		// missing root is the common case and a linked one is the refusal.
+		if _, err := os.Lstat(root); err == nil {
+			log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s is not a real directory", title, dir, root)
+		}
 		return
 	}
 	if err := os.RemoveAll(dir); err != nil {
-		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", i.Title, dir, err)
+		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", title, dir, err)
 	}
 }
 
