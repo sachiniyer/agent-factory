@@ -80,7 +80,7 @@ func TestDaemonSpawnedPostWorktreeHookLeavesTheDaemonCgroup(t *testing.T) {
 	repoPath := freshRepoConfig(t, []string{fmt.Sprintf("cat /proc/self/cgroup > %q", cgroupFile)})
 	spawner := selfCgroup(t)
 
-	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+	done := runPostWorktreeHooks(context.Background(), hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 	select {
 	case <-done:
 	case <-time.After(30 * time.Second):
@@ -135,7 +135,7 @@ func TestDaemonSpawnedPostWorktreeHookSurvivesTheDaemonUnitStopping(t *testing.T
 	})
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
-	done := RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
+	done := runPostWorktreeHooks(ctx, hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	pid := waitForPidFile(t, pidFile, 30*time.Second)
 	// The surviving hook is the entire point of this test, so it is still

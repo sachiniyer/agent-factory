@@ -111,7 +111,7 @@ func runPostWorktreeRestartHelper(t *testing.T) {
 	writeLegacyRepoConfig(t, config.RepoIDFromRoot(repo), &config.RepoConfig{
 		PostWorktreeCommands: []string{command},
 	})
-	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repo, worktree, nil)
+	<-runPostWorktreeHooks(context.Background(), hookRun{repoPath: repo, worktreePath: worktree, passthrough: nil})
 }
 
 func restartProbeCommand(pidFile, releaseFile, statusFile, writer string) string {
