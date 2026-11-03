@@ -241,6 +241,11 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "af's mkdir/pwd/mountinfo const script; the HOME and workspace paths arrive as $1/$2 " +
 			"positional parameters, never spliced into the script text",
 	}},
+	"session/backend_docker_account_chown.go:(*dockerProvisioner).readMountTableFor": {{
+		class: afAuthored,
+		note: "the same const script for a single directory (the setup-hook staging dir); the path " +
+			"arrives as the $1 positional parameter, never spliced into the script text",
+	}},
 
 	"session/host_program.go:(hostProgramProber).probePath": {{
 		class: afAuthored,
