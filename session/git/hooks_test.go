@@ -33,7 +33,7 @@ func TestPostWorktreeHookEnvironmentRequiresExplicitCredentialNames(t *testing.T
 	repoPath := freshRepoConfig(t, []string{
 		fmt.Sprintf(`env | sed 's/=.*//' | sort > %q`, namesPath),
 	})
-	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), []string{customName})
+	done := runPostWorktreeHooks(context.Background(), hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: []string{customName}})
 	select {
 	case <-done:
 	case <-time.After(3 * time.Second):
@@ -86,7 +86,7 @@ func TestPostWorktreeHookFailureLogsOneEntryWithBoundedPrefixedTail(t *testing.T
 	previous := aflog.ErrorLog.Writer()
 	aflog.ErrorLog.SetOutput(&errors)
 	t.Cleanup(func() { aflog.ErrorLog.SetOutput(previous) })
-	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+	<-runPostWorktreeHooks(context.Background(), hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
 	if err != nil {
@@ -152,7 +152,7 @@ func TestPostWorktreeHookSuccessRemovesOutputLog(t *testing.T) {
 		PostWorktreeCommands: []string{"printf success"},
 	})
 
-	<-RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repoPath, t.TempDir(), nil)
+	<-runPostWorktreeHooks(context.Background(), hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	logs, err := filepath.Glob(filepath.Join(home, "logs", "hooks", "post-worktree-*.log"))
 	if err != nil {
@@ -178,7 +178,7 @@ func TestHookCancellation_ChildProcessOrphaned(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
+	runPostWorktreeHooks(ctx, hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -211,7 +211,7 @@ func TestHookCancellation_BackgroundedGrandchildKilledByGroupSignal(t *testing.T
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
+	runPostWorktreeHooks(ctx, hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	pids := make([]int, len(pidFiles))
 	for i, f := range pidFiles {
@@ -250,7 +250,7 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
-	RunPostWorktreeHooksAsyncWithEnvironment(ctx, repoPath, t.TempDir(), nil)
+	runPostWorktreeHooks(ctx, hookRun{repoPath: repoPath, worktreePath: t.TempDir(), passthrough: nil})
 
 	pid := waitForPidFile(t, pidFile, 5*time.Second)
 	t.Cleanup(func() { _ = syscall.Kill(pid, syscall.SIGKILL) })
@@ -264,7 +264,7 @@ func TestHookCompletion_BackgroundedGrandchildKilled(t *testing.T) {
 
 // freshRepoConfig isolates the per-test config dir via AGENT_FACTORY_HOME,
 // writes a repo config with the given post-worktree commands, and returns a
-// repo path the test should hand to RunPostWorktreeHooksAsyncWithEnvironment. The repo path
+// repo path the test should hand to runPostWorktreeHooks. The repo path
 // itself never needs to exist on disk — hooks.go only passes it through
 // RepoIDFromRoot to locate the per-repo config file.
 func freshRepoConfig(t *testing.T, postCmds []string) string {

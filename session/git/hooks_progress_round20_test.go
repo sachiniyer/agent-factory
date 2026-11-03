@@ -26,7 +26,7 @@ func TestHookProgressMainCheckoutRunsAndRecordsIdentity(t *testing.T) {
 		t.Fatalf("main-checkout fixture does not have a .git directory: %v", err)
 	}
 
-	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repo, repo, nil)
+	done := runPostWorktreeHooks(context.Background(), hookRun{repoPath: repo, worktreePath: repo, passthrough: nil})
 	waitForClosed(t, done, 5*time.Second, "main-checkout hook did not finish")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("main-checkout hook did not run: %v", err)
@@ -50,7 +50,7 @@ func TestHookProgressMissingGitIdentityDoesNotBlockRun(t *testing.T) {
 		t.Fatalf("identity-free fixture unexpectedly has .git: %v", err)
 	}
 
-	done := RunPostWorktreeHooksAsyncWithEnvironment(context.Background(), repo, tree, nil)
+	done := runPostWorktreeHooks(context.Background(), hookRun{repoPath: repo, worktreePath: tree, passthrough: nil})
 	waitForClosed(t, done, 5*time.Second, "identity-free hook did not finish")
 	if _, err := os.Stat(marker); err != nil {
 		t.Fatalf("identity-free hook did not run: %v", err)
