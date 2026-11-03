@@ -179,15 +179,17 @@ func (i *Instance) ReattachSandbox() error {
 	// reason verbatim, and an empty one would read as a healthy reprovision.
 	// The skipped agent-config list is the same class of provision evidence
 	// (#6337): nothing re-staged the account scope, so the recorded skips are
-	// still true of it.
+	// still true of it. The setup-hook failure note is the same class too
+	// (#6667): no new hook ran, so the prior note is still the truth.
 	priorCallbackReason := i.callbackUnavailable
 	priorAgentConfigSkipped := append([]string(nil), i.agentConfigSkipped...)
+	priorSetupHookFailed := i.setupHookFailed
 	i.mu.Unlock()
 	if !stillCurrent {
 		p.abandonUnadoptedTunnel()
 		return ErrReattachIneligible
 	}
-	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason, AgentConfigSkipped: priorAgentConfigSkipped}); err != nil {
+	if err := i.bindProvisionResult(ProvisionResult{Backend: b, Endpoint: endpoint, Teardown: p.reap, CallbackUnavailable: priorCallbackReason, AgentConfigSkipped: priorAgentConfigSkipped, SetupHookFailed: priorSetupHookFailed}); err != nil {
 		p.abandonUnadoptedTunnel()
 		return fmt.Errorf("reattach %q: %w", i.Title, err)
 	}
