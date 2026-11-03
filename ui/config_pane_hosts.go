@@ -269,9 +269,13 @@ func (c *ConfigPane) handleHostKey(msg tea.KeyMsg) bool {
 	if c.hostBusy(row.Name) {
 		// A probing row rests its VERBS, not the pane: navigation, esc and the
 		// rest still fall through to the ordinary switch so a slow ssh never
-		// locks the overlay.
+		// locks the overlay. 'e' still opens the reader — it is a view, not a
+		// verb, and it says the probe is in flight.
 		switch msg.String() {
 		case "enter", "d", "D":
+			return true
+		case "e":
+			c.beginHostExplain(row)
 			return true
 		}
 		return false
@@ -279,6 +283,9 @@ func (c *ConfigPane) handleHostKey(msg tea.KeyMsg) bool {
 	switch msg.String() {
 	case "enter":
 		c.requestHostCheck([]HostRow{*row})
+		return true
+	case "e":
+		c.beginHostExplain(row)
 		return true
 	case "d":
 		c.removeHost(row)
@@ -347,9 +354,7 @@ func (c *ConfigPane) TakeHostCheckRequest() (string, bool) {
 func (c *ConfigPane) SetHostCheckResults(requested string, results []daemon.HostCheckResult, err error) {
 	delete(c.hosts.busy, requested)
 	if err != nil {
-		c.hosts.status = err.Error()
-		c.hosts.statusIsError = true
-		c.hosts.statusFromCheck = true
+		c.setHostStatus(err.Error(), true, true)
 		return
 	}
 	if c.hosts.checks == nil {
@@ -361,30 +366,43 @@ func (c *ConfigPane) SetHostCheckResults(requested string, results []daemon.Host
 		delete(c.hosts.pending, r.Name)
 	}
 	if len(results) == 0 {
-		c.hosts.status = "no hosts saved; add one below"
-		c.hosts.statusIsError = false
-		c.hosts.statusFromCheck = true
+		c.setHostStatus("no hosts saved; add one below", false, true)
 		return
 	}
 	if c.hosts.statusFromCheck && c.hosts.statusIsError {
-		c.hosts.status = ""
-		c.hosts.statusIsError = false
-		c.hosts.statusFromCheck = false
+		c.clearHostStatus()
 	}
 }
 
-// HostStatusLine reports the section's own status for the pane's footer, where
-// it wins the line while set — it is the newer event.
+// HostStatusLine reports the section's own channel outcome — a probe the
+// daemon refused, the empty-list answer, or a refused write. The shared
+// status line is a separate slot every channel's writer feeds; this is the
+// section's own bookkeeping.
 func (c *ConfigPane) HostStatusLine() (string, bool) {
 	return c.hosts.status, c.hosts.statusIsError
 }
 
+// setHostStatus records a Hosts-section outcome on its channel and takes the
+// status line — the newest event wins whichever section produced it (#5571
+// review). fromCheck marks a probe outcome so a successful retry can retire
+// it; a write refusal is left alone (it is not a check outcome).
+func (c *ConfigPane) setHostStatus(text string, isError, fromCheck bool) {
+	c.hosts.status = text
+	c.hosts.statusIsError = isError
+	c.hosts.statusFromCheck = fromCheck
+	c.statusLine = statusEvent{text: text, isError: isError, from: statusFromHosts}
+}
+
 // clearHostStatus retires the check outcome — a write's echo is the newer
-// event, so the pane's own status line should win from here.
+// event, so the pane's own status line should win from here. The line blanks
+// only when the hosts channel owns what it shows.
 func (c *ConfigPane) clearHostStatus() {
 	c.hosts.status = ""
 	c.hosts.statusIsError = false
 	c.hosts.statusFromCheck = false
+	if c.statusLine.from == statusFromHosts {
+		c.statusLine = statusEvent{}
+	}
 }
 
 // removeHost applies one hosts_edit remove through the pane's save seam —
@@ -397,9 +415,7 @@ func (c *ConfigPane) removeHost(row *HostRow) {
 	edit := config.HostsEdit{Op: config.HostsEditRemove, Name: row.Name, ClearDefault: row.IsDefault}
 	result, notice, err := c.editHosts(edit)
 	if err != nil {
-		c.status = err.Error()
-		c.statusIsError = true
-		c.restartNotice = ""
+		c.setStatus(err.Error(), true, "")
 		return
 	}
 	// The writer answered with the whole table's canonical value — reflect it
@@ -411,12 +427,11 @@ func (c *ConfigPane) removeHost(row *HostRow) {
 	}
 	delete(c.hosts.checks, row.Name)
 	delete(c.hosts.pending, row.Name)
-	c.status = "removed host " + row.Name
+	outcome := "removed host " + row.Name
 	if edit.ClearDefault {
-		c.status += " (the default was cleared)"
+		outcome += " (the default was cleared)"
 	}
-	c.statusIsError = false
-	c.restartNotice = notice
+	c.setStatus(outcome, false, notice)
 	c.rebuildRows()
 }
 
@@ -430,15 +445,11 @@ func (c *ConfigPane) makeHostDefault(row *HostRow) {
 	c.clearHostStatus()
 	result, notice, err := c.save("default_host", row.Name)
 	if err != nil {
-		c.status = err.Error()
-		c.statusIsError = true
-		c.restartNotice = ""
+		c.setStatus(err.Error(), true, "")
 		return
 	}
 	c.setEntryValue("default_host", result.Value)
-	c.status = fmt.Sprintf("set %s = %s", result.Key, result.Value)
-	c.statusIsError = false
-	c.restartNotice = notice
+	c.setStatus(fmt.Sprintf("set %s = %s", result.Key, result.Value), false, notice)
 	c.rebuildRows()
 }
 
@@ -508,6 +519,62 @@ func (c *ConfigPane) hostVerdictLines(row HostRow) []string {
 		return nil
 	}
 	return daemon.HostCheckLines(check.result, check.entry, c.globalHostPosture(), HostCheckOrigin(), "check it again")
+}
+
+// beginHostExplain opens the selected host's detail as a scrollable reader —
+// the explain view's own swap, pointed at a host instead of a key (#5571
+// review). A long verdict and its wrapped remedy can exceed the list window
+// in a short overlay, and the window pins the oversized row it cannot split:
+// the row keeps what fits, and 'e' reads the whole of it here.
+func (c *ConfigPane) beginHostExplain(row *HostRow) {
+	host := *row // snapshot — rebuilds replace the row list under the open view
+	c.savedScrollTop = c.scrollTop
+	c.scrollTop = 0
+	c.explainKey = host.Name
+	c.explainValue = nil
+	c.explainHost = &host
+	c.explainLines = c.wrappedHostExplainLines(host)
+	c.explaining = true
+	c.clearStatus()
+}
+
+// wrappedHostExplainLines lays out the host explain view: the saved entry and
+// the posture a probe would run under, then the full verdict — the same
+// daemon.HostCheckLines the row shows until the window runs out. Every line
+// passes explainSafe first: verdict text quotes what the probe saw, and a
+// free-form path or problem string can carry escapes the compositor would
+// emit verbatim.
+func (c *ConfigPane) wrappedHostExplainLines(row HostRow) []string {
+	var logical []string
+	logical = append(logical, "destination: "+config.DescribeHost(row.Entry))
+	if row.IsDefault {
+		logical = append(logical, "the default host")
+	}
+	if detail := hostRowDetail(row); detail != "" {
+		logical = append(logical, detail)
+	}
+	if posture := c.effectiveHostPosture(row.Entry); posture == "" {
+		logical = append(logical, "host key: decided by your ssh_config")
+	} else {
+		logical = append(logical, "host key: "+posture)
+	}
+	verdict := c.hostVerdictLines(row)
+	if len(verdict) > 0 {
+		logical = append(logical, "")
+		logical = append(logical, verdict...)
+	}
+	switch {
+	case c.hostBusy(row.Name):
+		logical = append(logical, "", "a probe is running…")
+	case len(verdict) == 0:
+		logical = append(logical, "", "no verdict yet — enter on the row probes this host")
+	}
+	var lines []string
+	for _, l := range logical {
+		wrapped := configValueStyle.Width(c.width - 2).Render(explainSafe(l))
+		lines = append(lines, strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n")...)
+	}
+	return lines
 }
 
 // --- the add form ---
@@ -626,9 +693,7 @@ func (c *ConfigPane) commitHostAdd() {
 	name := text(hostFieldName)
 	parsed, err := config.ParseHostDestination(text(hostFieldDestination))
 	if err != nil {
-		c.hosts.status = err.Error()
-		c.hosts.statusIsError = true
-		c.hosts.statusFromCheck = false
+		c.setHostStatus(err.Error(), true, false)
 		return
 	}
 	// Every HostConfig field is assigned by NAME here, not carried inside the
@@ -644,9 +709,7 @@ func (c *ConfigPane) commitHostAdd() {
 	c.clearHostStatus()
 	result, notice, err := c.editHosts(edit)
 	if err != nil {
-		c.hosts.status = err.Error()
-		c.hosts.statusIsError = true
-		c.hosts.statusFromCheck = false
+		c.setHostStatus(err.Error(), true, false)
 		return
 	}
 
@@ -670,13 +733,9 @@ func (c *ConfigPane) commitHostAdd() {
 		}
 	}
 	if defaultErr != "" {
-		c.status = defaultErr
-		c.statusIsError = true
-		c.restartNotice = ""
+		c.setStatus(defaultErr, true, "")
 	} else {
-		c.status = fmt.Sprintf("saved host %s (%s)%s", name, desc, map[bool]string{true: " as the default", false: ""}[madeDefault])
-		c.statusIsError = false
-		c.restartNotice = notice
+		c.setStatus(fmt.Sprintf("saved host %s (%s)%s", name, desc, map[bool]string{true: " as the default", false: ""}[madeDefault]), false, notice)
 	}
 	c.rebuildRows()
 
@@ -752,9 +811,9 @@ func (c *ConfigPane) renderHostRow(i int, row HostRow) string {
 	return out.String()
 }
 
-// hostRowPurpose is the verbs line under the selected host — what enter, d and
-// D do to THIS row. Removing the default is named up front, the same decision
-// the web's "Remove and clear the default" button and the CLI's
+// hostRowPurpose is the verbs line under the selected host — what enter, e, d
+// and D do to THIS row. Removing the default is named up front, the same
+// decision the web's "Remove and clear the default" button and the CLI's
 // --clear-default flag carry.
 func hostRowPurpose(row HostRow) string {
 	remove := "d remove"
@@ -765,7 +824,7 @@ func hostRowPurpose(row HostRow) string {
 	if !row.IsDefault {
 		makeDefault = " · D make default"
 	}
-	return "enter check · " + remove + makeDefault
+	return "enter check · e detail · " + remove + makeDefault
 }
 
 // hostRowDetail names the entry's optional fields when set — the parts
