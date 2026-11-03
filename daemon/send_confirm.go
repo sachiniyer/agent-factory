@@ -90,6 +90,14 @@ func (m *Manager) armUnverifiedSendAfter(repoID string, instance *session.Instan
 // whose verdict is already delivered or never attempted never arms — the send
 // either provably landed or provably did not.
 func (m *Manager) armUnverifiedSendWatch(key string, instance *session.Instance, taskID string, attemptedAt time.Time, watch *task.TurnWatch) {
+	m.armUnverifiedSendWatchUntil(key, instance, taskID, attemptedAt, attemptedAt.Add(sendReverifyWindow), watch)
+}
+
+// armUnverifiedSendWatchUntil is armUnverifiedSendWatch with an explicit
+// evidence deadline — the boot re-arm rebuilds on a boundary strictly later
+// than the send's true attempt, so it must also expire strictly inside the
+// true window rather than ride the extra slack.
+func (m *Manager) armUnverifiedSendWatchUntil(key string, instance *session.Instance, taskID string, attemptedAt, expiresAt time.Time, watch *task.TurnWatch) {
 	if watch == nil || taskID == "" || attemptedAt.IsZero() {
 		return
 	}
@@ -115,7 +123,7 @@ func (m *Manager) armUnverifiedSendWatch(key string, instance *session.Instance,
 	}
 	byTask[taskID] = &unverifiedSendWatch{
 		attemptedAt: attemptedAt,
-		expiresAt:   attemptedAt.Add(sendReverifyWindow),
+		expiresAt:   expiresAt,
 		agent:       agent,
 		watch:       watch,
 	}
@@ -254,6 +262,10 @@ func (m *Manager) unverifiedSendWatchPending(key string) bool {
 // Called once per sweep from RefreshStatuses beside sweepTaskRunTurnWatches;
 // m.mu and pausedMu are taken separately, never nested.
 func (m *Manager) sweepUnverifiedSendWatches() {
+	// The watch is memory-only while its verdict row is durable: a restart
+	// dropped every watch it was still feeding, so rows still inside their
+	// window re-arm once here (#6590).
+	m.sendReverifyRearmOnce.Do(m.rearmUnverifiedSendWatches)
 	m.pausedMu.Lock()
 	size := len(m.unverifiedSendWatches)
 	m.pausedMu.Unlock()
@@ -283,5 +295,65 @@ func (m *Manager) sweepUnverifiedSendWatches() {
 		if len(byTask) == 0 {
 			delete(m.unverifiedSendWatches, key)
 		}
+	}
+}
+
+// rearmUnverifiedSendWatches rebuilds re-verification after a restart for task
+// sends whose durable verdict still reads sent-unverified inside the evidence
+// window (#6590). The rebuilt contract can only be stricter than the lost
+// watch's, never weaker:
+//
+//   - the boundary is the verdict's own last_run_at — the write, which lands
+//     within the verdict slack of the attempt, so it sits strictly AFTER the
+//     send's true instant and can only reject turns the original watch would
+//     have accepted, never accept ones it would have rejected;
+//   - the window is bounded the same way — last_run_at + window − slack is
+//     inside the send's true window, so no evidence the original watch could
+//     not have used is ever fed.
+//
+// A row whose target no longer exists, whose verdict moved on, or whose window
+// already closed stays frozen — a turn that far out was never attributable to
+// the send.
+func (m *Manager) rearmUnverifiedSendWatches() {
+	tasks, err := task.LoadTasks()
+	if err != nil {
+		m.warn().Printf("send re-verification: could not load task rows for the boot re-arm: %v", err)
+		return
+	}
+	now := nowFunc()
+	type pendingRearm struct {
+		key      string
+		inst     *session.Instance
+		taskID   string
+		boundary time.Time
+		expires  time.Time
+	}
+	var rearms []pendingRearm
+	m.mu.Lock()
+	for _, t := range tasks {
+		if t.LastRunStatus != TaskStatusSentUnverified || t.LastRunAt == nil || t.TargetSession == "" {
+			continue
+		}
+		boundary := *t.LastRunAt
+		expires := boundary.Add(sendReverifyWindow - unverifiedVerdictWriteSlack)
+		if !now.Before(expires) {
+			continue
+		}
+		inst := m.instances[daemonInstanceKey(t.RepoID, t.TargetSession)]
+		if inst == nil {
+			continue
+		}
+		rearms = append(rearms, pendingRearm{
+			key:      stableSessionKey(t.RepoID, inst),
+			inst:     inst,
+			taskID:   t.ID,
+			boundary: boundary,
+			expires:  expires,
+		})
+	}
+	m.mu.Unlock()
+	for _, r := range rearms {
+		m.armUnverifiedSendWatchUntil(r.key, r.inst, r.taskID, r.boundary, r.expires,
+			task.NewTurnWatch(r.inst.ResolvedAgent(), r.boundary))
 	}
 }
