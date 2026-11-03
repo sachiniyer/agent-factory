@@ -153,6 +153,63 @@ func titlesOf(insts []session.InstanceData) []string {
 	return out
 }
 
+// The credential-bound caller answers through the whole registration window,
+// not only after the row commits (#6690): a still-provisioning create is not
+// in m.instances yet, but its provisional row is in pendingCreates carrying the
+// final stable id the credential was minted for, so the snapshot projects it
+// and an in-sandbox --self resolves instead of waiting the window out. And a
+// credential whose owner is in NEITHER map is gone, not still registering —
+// the wire says so (CallerGone) so the client fails fast instead of polling a
+// window that cannot close.
+func TestSandboxScope_SnapshotResolvesPendingCallerAndFlagsGone(t *testing.T) {
+	f := newScopeFixture(t)
+	snap := func(token string) SnapshotResponse {
+		code, out := f.call(t, token, "/v1/Snapshot", `{}`)
+		require.Equal(t, http.StatusOK, code, out)
+		var env struct {
+			Data SnapshotResponse `json:"data"`
+		}
+		require.NoError(t, json.Unmarshal([]byte(out), &env))
+		return env.Data
+	}
+	idsOf := func(insts []session.InstanceData) []string {
+		var out []string
+		for _, d := range insts {
+			out = append(out, d.ID)
+		}
+		return out
+	}
+
+	// A pending create: not in m.instances, already carrying the final id.
+	const pendingID = "pending-caller-id"
+	f.mgr.mu.Lock()
+	f.mgr.pendingCreates[daemonInstanceKey(f.repoA, "newbie")] = session.InstanceData{
+		ID: pendingID, Title: "newbie", Status: session.Loading, InFlightOp: session.OpCreating,
+	}
+	f.mgr.mu.Unlock()
+	pendingSecret, err := f.mgr.sandboxTokens.mint(pendingID)
+	require.NoError(t, err)
+	got := snap(pendingSecret)
+	assert.Equal(t, pendingID, got.Caller)
+	assert.False(t, got.CallerGone, "a pending owner is still registering, not gone")
+	assert.Contains(t, idsOf(got.Instances), pendingID,
+		"the pending row must project so the caller's --self resolves mid-window")
+
+	// A credential whose owner is in neither map: killed, removed, or lost
+	// with a create that never committed.
+	goneSecret, err := f.mgr.sandboxTokens.mint("ghost-caller-id")
+	require.NoError(t, err)
+	gone := snap(goneSecret)
+	assert.Equal(t, "ghost-caller-id", gone.Caller)
+	assert.True(t, gone.CallerGone, "an untracked owner must be flagged gone, not left ambiguous")
+	assert.Empty(t, gone.Instances)
+
+	// The ordinary case is unchanged: a tracked owner still answers with no flag.
+	live := snap(f.secret)
+	assert.Equal(t, f.me.ID, live.Caller)
+	assert.False(t, live.CallerGone)
+}
+
 func TestSandboxScope_SnapshotIsTheOwnersProjectOnly(t *testing.T) {
 	f := newScopeFixture(t)
 	snap := func(token string) SnapshotResponse {

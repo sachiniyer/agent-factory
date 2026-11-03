@@ -119,6 +119,15 @@ type SnapshotResponse struct {
 	// projection withholds. Empty for an operator credential, so every existing
 	// client and the local path are unchanged.
 	Caller string `json:"caller,omitempty"`
+	// CallerGone reports that the session Caller names is not tracked by this
+	// daemon — neither a materialized row nor a still-registering pending
+	// create — so its row will never appear in a later snapshot: it was killed
+	// or removed, or the create that minted the credential never committed.
+	// It lets an in-sandbox --self fail fast with the accurate answer instead
+	// of polling out a registration-race window that cannot close (#6690).
+	// Sent only alongside Caller for a sandbox credential; omitted for older
+	// peers, which keep the ambiguous wait-and-see.
+	CallerGone bool `json:"caller_gone,omitempty"`
 	// BootID is the same per-process daemon identity reported by Ping. A changed
 	// value proves requests admitted by the previous process can no longer run.
 	BootID string `json:"boot_id,omitempty"`
@@ -544,6 +553,11 @@ func (s *controlServer) snapshot(ctx context.Context, req SnapshotRequest, resp 
 	if isSandbox {
 		instances = projectRowsForSandbox(instances, sandboxProjectID, sandboxProjectErr == nil)
 		resp.Caller = sandboxOwnerID
+		// An owner in neither the materialized rows nor the pending-create
+		// projections is gone, not still registering — say so on the wire so
+		// the caller's --self can fail fast with the accurate answer instead
+		// of polling out a window that cannot close (#6690).
+		resp.CallerGone = sandboxProjectErr != nil
 		// Project only what the sandbox scope HONORS, not the operator's full
 		// triple: every bit here is a promise that the daemon honors that wire
 		// field for this credential, and the client's preflight refuses a pick

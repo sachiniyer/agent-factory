@@ -88,14 +88,26 @@ type sandboxProject struct {
 }
 
 // sandboxProjectOf finds the owner's own tracked row and returns its project.
+// A still-provisioning create counts too: its provisional row lives in
+// m.pendingCreates and already carries the final stable id the credential was
+// minted for (the pending row publishes before the credential reaches the
+// sandbox), so the owner's project is answerable through the whole
+// registration window — the window the row's late landing in m.instances left
+// open for in-sandbox --self calls (#6690).
 func (m *Manager) sandboxProjectOf(owner string) (sandboxProject, error) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	inst, rid := m.trackedSessionByIDLocked(owner)
-	if inst == nil {
-		return sandboxProject{}, sandboxRefusal("the credential's session is no longer tracked")
+	if inst != nil {
+		return sandboxProject{repoID: rid, path: inst.Path}, nil
 	}
-	return sandboxProject{repoID: rid, path: inst.Path}, nil
+	for key, pending := range m.pendingCreates {
+		if pending.ID == owner {
+			rid, _ = splitDaemonInstanceKey(key)
+			return sandboxProject{repoID: rid, path: pending.Path}, nil
+		}
+	}
+	return sandboxProject{}, sandboxRefusal("the credential's session is no longer tracked")
 }
 
 // authorizeSandboxSession resolves the session a sandbox request names and

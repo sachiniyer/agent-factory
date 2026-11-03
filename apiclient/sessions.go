@@ -104,6 +104,16 @@ func classifyLocalSnapshotFailure(err error) error {
 // through to the tmux-name path otherwise.
 var ErrCallerRowNotRegistered = errors.New("the calling session is not yet registered with the daemon")
 
+// ErrCallerSessionGone is returned by CallerNoSpawn when the daemon reports a
+// bound caller AND asserts the session is no longer tracked (SnapshotResponse
+// .CallerGone): it was killed or removed, or the create that minted the
+// credential never committed. Unlike ErrCallerRowNotRegistered it is NOT the
+// registration race — the row will never land — so the caller fails fast with
+// the accurate answer instead of polling out the whole window (#6690). An
+// older daemon never sends the flag; its caller-missing answer keeps the
+// ambiguous not-registered shape and the bounded poll.
+var ErrCallerSessionGone = errors.New("the calling session is no longer tracked by the daemon")
+
 // CallerNoSpawn returns the session a sandbox credential is bound to together
 // with that session's (narrowed) row (#5571 W3.2). ok is false when the daemon
 // reports no bound caller — an operator credential, an older daemon, or no
@@ -132,6 +142,13 @@ func CallerNoSpawn(ctx context.Context) (row session.InstanceData, ok bool, err 
 		if d.ID == resp.Caller {
 			return d, true, nil
 		}
+	}
+	if resp.CallerGone {
+		// The daemon asserts the bound caller's session is not tracked —
+		// killed, removed, or lost with a create that never committed. The
+		// row will never land, so this is not the registration race: fail
+		// fast with the accurate answer (#6690).
+		return session.InstanceData{}, false, ErrCallerSessionGone
 	}
 	// The daemon reports a bound caller but the row is not yet in the
 	// snapshot — the registration race (#6586). Distinguish this from the
