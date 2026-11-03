@@ -532,9 +532,14 @@ func captureWarningLog(t *testing.T) *logtest.Buffer {
 // initTempGitRepo initializes an empty git repo in a temp directory and
 // returns its absolute path. Used by best-effort Kill tests that need a
 // real repo path for git worktree commands to dispatch against.
+//
+// CanonicalTempDir, not t.TempDir: tests compare this path against what a
+// subprocess reports (pwd in setup_commands, git's resolved paths), and on
+// macOS t.TempDir() hands back the /var/… spelling while the physical path
+// is /private/var/… (#6673, same fix createGitRepo took for #1918).
 func initTempGitRepo(t *testing.T) string {
 	t.Helper()
-	repoRoot := filepath.Join(t.TempDir(), "repo")
+	repoRoot := filepath.Join(testguard.CanonicalTempDir(t), "repo")
 	require.NoError(t, os.MkdirAll(repoRoot, 0755))
 	cmd := exec.Command("git", "init")
 	cmd.Dir = repoRoot
