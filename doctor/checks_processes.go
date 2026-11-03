@@ -513,7 +513,7 @@ func (ctx *scanContext) markedProcessOwnership(p proctree.Process) processOwners
 		}
 		return processOwnership{verdict: ownershipForeignEnv, marker: marker, foreignHome: ownHome}
 	}
-	switch res := ctx.ancestorHomeProof(p); res.verdict {
+	switch res := ancestorWalk(ctx, p); res.verdict {
 	case ancestryForeign:
 		return processOwnership{verdict: ownershipForeignAncestor, marker: marker,
 			foreignHome: res.home, ancestorPID: res.pid}
@@ -799,6 +799,12 @@ func declaredAgentFactoryHome(pid int) (string, bool, bool) {
 // to each recorded ancestor — a var so a test can script an identity that
 // changes mid-scan rather than race a real exec (#6704).
 var ancestorIdentity = proctree.SameIdentity
+
+// ancestorWalk is the classifier's call into the ancestor proof — a var so a
+// test can hand the classifier a verdict nobody produced (#6716).
+var ancestorWalk = func(ctx *scanContext, p proctree.Process) ancestryResult {
+	return ctx.ancestorHomeProof(p)
+}
 
 // ancestorHopLimit bounds the ancestor chain — a var so a test can shrink it
 // rather than spawn a chain past the production bound (#6704).

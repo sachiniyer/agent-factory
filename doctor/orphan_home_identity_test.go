@@ -199,6 +199,9 @@ func TestOrphanedProcessKill_RelativeMarkerNeverArmed(t *testing.T) {
 		"the finding must name the relative marker: %s", foreign[0].Detail)
 	require.NotContains(t, foreign[0].Detail, "another agent-factory home",
 		"a relative marker is unproven, not a confirmed foreign home: %s", foreign[0].Detail)
+	require.Equal(t,
+		"inspect the process's launching frame to identify which install its relative AF_HOME names",
+		foreign[0].Remediation, "the relative-marker remedy must be exactly the true one (#6716)")
 	require.False(t, foreign[0].Actionable,
 		"an unproven-ownership orphan must not drive the exit code")
 	require.Zero(t, report.UnresolvedCount(),
