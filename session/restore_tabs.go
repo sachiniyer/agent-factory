@@ -103,6 +103,13 @@ func (i *Instance) materializeRestorableTabs() {
 		}
 		if len(i.Tabs) == 0 {
 			i.Tabs = []*Tab{newRemoteAgentTab()}
+			// Carry the reload's recorded resume handle onto the seeded tab so
+			// both the adoption launch (AgentConversation) and the checkpoint
+			// write (toInstanceDataLocked) keep it — mirroring the seeding in
+			// remoteAgentBackend.Launch (#5826).
+			if i.reportedConversation.HasID() && i.setAgentConversationLocked(i.reportedConversation) {
+				i.conversationUnpersisted = true
+			}
 		}
 		if _, have := i.tabIndexByIDLocked(td.ID); have {
 			continue

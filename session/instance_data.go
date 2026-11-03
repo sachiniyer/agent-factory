@@ -250,6 +250,12 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	}
 	if len(i.Tabs) > 0 {
 		data.AgentConversation = conversationDataPtr(i.Tabs[0].Conversation)
+		// A reattach seeds an empty agent tab before the recorded handle is
+		// applied; fall back to the reported handle so a checkpoint cannot
+		// launder the resume handle out of instances.json (#5826).
+		if data.AgentConversation == nil && i.reportedConversation.HasID() {
+			data.AgentConversation = conversationDataPtr(i.reportedConversation)
+		}
 	} else if i.reportedConversation.HasID() {
 		// A reloaded off-box row has no agent tab until Launch seeds one, but it
 		// still holds the conversation its agent-server reported (#5826): writing
