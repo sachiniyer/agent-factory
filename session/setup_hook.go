@@ -311,15 +311,24 @@ func openVerifiedStagingRoot(home string) (*os.Root, string, error) {
 // within this session's own payload tree (all of which is being removed
 // anyway), never into a sibling's — the shared-root check alone would let a
 // swapped interior link reach a neighbor the sweep's keep set protects.
-// Entries are removed leaves-first so a non-empty directory never blocks the
-// walk.
+//
+// Removal keeps going past a stuck entry — a file inside a read-only dir the
+// setup script copied in, say — so later siblings (which may hold secrets)
+// are not stranded by one failure; the first error is what the caller sees.
+// A vanished entry is not an error for files, the same tolerance the
+// directory loop applies. Entries are removed leaves-first so a non-empty
+// directory never blocks the walk.
 func removeAllWithinRoot(root *os.Root, name string) error {
 	info, err := root.Lstat(name)
 	if err != nil {
 		return err
 	}
 	if !info.IsDir() {
-		return root.Remove(name)
+		err := root.Remove(name)
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil
+		}
+		return err
 	}
 	sub, err := root.OpenRoot(name)
 	if err != nil {
@@ -329,10 +338,17 @@ func removeAllWithinRoot(root *os.Root, name string) error {
 	if st, err := sub.Stat("."); err != nil || !os.SameFile(info, st) {
 		return errNotRealDir
 	}
+	var firstErr error
+	note := func(err error) {
+		if err != nil && !errors.Is(err, fs.ErrNotExist) && firstErr == nil {
+			firstErr = err
+		}
+	}
 	var dirs []string
 	err = fs.WalkDir(sub.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
-			return err
+			note(err)
+			return nil // keep walking past an unreadable entry
 		}
 		if p == "." {
 			return nil
@@ -341,19 +357,17 @@ func removeAllWithinRoot(root *os.Root, name string) error {
 			dirs = append(dirs, p)
 			return nil
 		}
-		return sub.Remove(p)
+		note(sub.Remove(p))
+		return nil
 	})
-	if err != nil {
-		return err
-	}
+	note(err)
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := sub.Remove(dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
-			return err
-		}
+		note(sub.Remove(dirs[i]))
 	}
 	// The emptied dir goes through the PARENT root: if name was swapped for
 	// a link mid-removal, Remove takes the link itself, not its target.
-	return root.Remove(name)
+	note(root.Remove(name))
+	return firstErr
 }
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
@@ -390,6 +404,17 @@ func DiscardLocalSetupPayload(title, sessionID string) {
 	home := filepath.Dir(filepath.Dir(dir))
 	root, rootPath, err := openVerifiedStagingRoot(home)
 	switch {
+	case errors.Is(err, errNotRealDir):
+		// Staging refuses to write under a linked root, so the usual case
+		// here is that nothing was ever staged — and a settled kill would
+		// then log this refusal twice (the kill and the record delete) for
+		// a hazard that does not exist. Log only when the session dir under
+		// the link actually exists: there IS a payload to reclaim, and the
+		// operator needs to learn why af will not touch it.
+		if _, lerr := os.Lstat(filepath.Join(rootPath, sessionID)); lerr == nil {
+			log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s: %v", title, dir, rootPath, err)
+		}
+		return
 	case err != nil:
 		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s: %v", title, dir, rootPath, err)
 		return
