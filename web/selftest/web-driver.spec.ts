@@ -9047,6 +9047,8 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
         .poll(firstRows, { message: "the tall peer must own the grid before returning it to local size" })
         .toBeGreaterThan(60);
       await second.setViewportSize(localViewport!);
+      await awaitFrame(second, "the peer restoring the first host's viewport size");
+      await awaitFrame(first, "the first client repainting the echoed grid");
       await expect
         .poll(firstRows, { message: "the peer's second resize must already match the first host's local rows" })
         .toBe(localRows);
@@ -10444,6 +10446,7 @@ test("#2219/#3981: phone tab scrolling never moves the header's new-tab buttons"
   }
   await row(page, SESSION_ORDER).click();
   await page.setViewportSize({ width: 375, height: 700 });
+  await awaitFrame(page, "the 375px viewport change");
   await expect(page.locator(".af-app")).toHaveClass(/af-session-first/);
   const terminal = page.locator(".af-appbar .af-term-new-shell");
   await expect(terminal).toBeVisible();
@@ -10457,6 +10460,7 @@ test("#2219/#3981: phone tab scrolling never moves the header's new-tab buttons"
   await page.keyboard.press("Escape");
   await expect(page.locator(".af-appbar-more")).toBeFocused();
   await page.setViewportSize({ width: 1280, height: 720 });
+  await awaitFrame(page, "the desktop viewport change");
   await expect(page.locator(".af-app")).not.toHaveClass(/af-session-first/);
 });
 
@@ -10549,6 +10553,7 @@ test("#2224/#3981: desktop keeps title + tabs; phone consolidates session contro
               await expect(more).toBeFocused();
               await expect(panel).toBeHidden();
               await p.setViewportSize({ width: 1280, height: 720 });
+              await awaitFrame(p, "the desktop viewport change");
               await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
               await expect(p.locator(".af-term-head .af-term-title")).toBeVisible();
               await expect(p.locator(".af-term-head .af-tabbar")).toBeVisible();
@@ -12930,6 +12935,29 @@ async function horizontalOverflow(p: Page): Promise<number> {
   });
 }
 
+/** One rendered frame must follow any viewport change: ResizeObserver delivery,
+ *  matchMedia change events, and xterm's rAF row renderer all go silent with the
+ *  same compositor stall, so every paint-gated predicate after `setViewportSize`
+ *  would otherwise die on an opaque timeout on the wrong assertion — exactly what
+ *  the 15s row-count timeout in run 41592002500 was (#6215). A stalled browser
+ *  still answers `evaluate`, so a single armed rAF plus a plain property read is
+ *  enough to name the real fault: no frame, not no refit. */
+async function awaitFrame(p: Page, note: string): Promise<void> {
+  await p.evaluate(() => {
+    const w = window as unknown as { __afFrame?: number };
+    w.__afFrame = 0;
+    requestAnimationFrame((t) => {
+      w.__afFrame = t;
+    });
+  });
+  await expect
+    .poll(() => p.evaluate(() => (window as unknown as { __afFrame?: number }).__afFrame ?? 0), {
+      message: `browser produced no frame after ${note} — the compositor stalled (see #6215)`,
+      timeout: 10_000,
+    })
+    .toBeGreaterThan(0);
+}
+
 /** Waits on the browser's own drawer/descendant animation timeline, then captures the
  *  CURRENT row and all relevant geometry in one page task. Live session events rebuild
  *  the rail with replaceChildren(); resolving action locators and later measuring a row
@@ -13110,6 +13138,7 @@ test("#3981 mobile: session-first budget and drawer navigation survive viewport 
         await expect.poll(rows, { message: "the selected mobile tab has fitted terminal rows" }).toBeGreaterThan(0);
         const beforeResizeRows = await rows();
         await p.setViewportSize({ width, height: height + 120 });
+        await awaitFrame(p, `the ${width}px viewport growing to height ${height + 120}`);
         await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
         await expect
           .poll(rows, { message: "a taller mobile viewport refits the active terminal without manual recovery" })
@@ -13532,15 +13561,18 @@ test("#3981: a split terminal fills the phone and restores both panes on desktop
     await expect(p.locator(".af-pane")).toHaveCount(2);
     for (const width of [360, 390, 430]) {
       await p.setViewportSize({ width, height: 812 });
+      await awaitFrame(p, `the ${width}px viewport change`);
       await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
       await expect(p.locator(".af-pane:visible")).toHaveCount(1);
       await expect(p.locator(".af-pane-head:visible")).toHaveCount(0);
       await expect.poll(() => p.locator(".af-pane-focused .xterm").evaluate(el => el.getBoundingClientRect().height / visualViewport!.height)).toBeGreaterThanOrEqual(0.85);
     }
     await p.setViewportSize({ width: 1280, height: 812 });
+    await awaitFrame(p, "the desktop viewport change");
     await expect(p.locator(".af-app")).not.toHaveClass(/af-session-first/);
     await expect(p.locator(".af-pane:visible")).toHaveCount(2);
     await p.setViewportSize({ width: 360, height: 812 });
+    await awaitFrame(p, "the 360px viewport change");
     await expect(p.locator(".af-app")).toHaveClass(/af-session-first/);
     await openSessionActions(p);
     await p.getByRole("button", { name: "Hide pane", exact: true }).click();
@@ -13588,6 +13620,7 @@ test("320px focused keybar keeps its last button inside the viewport", async ({ 
     await openTokenless(p);
     await row(p, SESSION_A).click();
     await p.setViewportSize({ width: 320, height: 812 });
+    await awaitFrame(p, "the 320px viewport change");
     await p.locator(".af-pane-host .xterm").first().click();
     const arrows = p.locator(".af-terminal-keybar:visible").getByRole("button", { name: "Arrows", exact: true });
     await expect(arrows).toBeVisible();
