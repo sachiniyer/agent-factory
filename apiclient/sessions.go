@@ -113,14 +113,16 @@ var ErrCallerRowNotRegistered = errors.New("the calling session is not yet regis
 // ErrCallerRowNotRegistered so the caller can retry within a bounded window
 // rather than collapsing that race into a silent "no bound caller" and falling
 // through to the tmux-name path, which the sandbox projection makes unusable
-// (it strips TmuxName from every row). It never starts a daemon.
-func CallerNoSpawn() (row session.InstanceData, ok bool, err error) {
+// (it strips TmuxName from every row). It never starts a daemon. ctx bounds the
+// round-trip itself: the caller's retry loop can thus be bounded in wall time
+// even where the transport carries no deadline of its own (the local socket).
+func CallerNoSpawn(ctx context.Context) (row session.InstanceData, ok bool, err error) {
 	c, err := NewTargeted()
 	if err != nil {
 		return session.InstanceData{}, false, err
 	}
 	var resp daemon.SnapshotResponse
-	if err := c.callCtx(context.Background(), "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
+	if err := c.callCtx(ctx, "Snapshot", daemon.SnapshotRequest{}, &resp); err != nil {
 		return session.InstanceData{}, false, err
 	}
 	if resp.Caller == "" {

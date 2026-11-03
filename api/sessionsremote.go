@@ -170,21 +170,17 @@ func remoteSelfRefusal(flag string) error {
 // row is visible in the daemon snapshot, and the daemon reports the caller even
 // while the row is missing. ErrCallerRowNotRegistered distinguishes that race
 // from an operator credential (no bound caller), which gets the refusal — the
-// credential does not name a session at all.
+// credential does not name a session at all. The poll is bounded by
+// selfResolveDeadline in wall time as well as by the attempt budget.
 func resolveCredentialSelf() (*session.InstanceData, error) {
-	for attempt := 0; ; attempt++ {
-		row, ok, err := callerSessionFn()
-		if err == nil {
-			if !ok {
-				return nil, remoteSelfRefusal("--self")
-			}
-			return &row, nil
-		}
-		if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) || attempt == selfResolveAttempts-1 {
-			return nil, err
-		}
-		selfResolveSleep(selfResolvePoll)
+	row, ok, err := pollCredentialBoundCaller()
+	if err != nil {
+		return nil, err
 	}
+	if !ok {
+		return nil, remoteSelfRefusal("--self")
+	}
+	return &row, nil
 }
 
 // remoteCreateInputs is the client-side half of a create against a REMOTE
@@ -240,13 +236,19 @@ func remoteCreateInputs(inPlace bool) (workspace, program string, err error) {
 // Snapshot route that credential is admitted to. It is false for an operator
 // token, for no token, and when the daemon cannot be asked, so every caller keeps
 // its "name the project explicitly" rule unless the daemon itself vouches for the
-// binding.
+// binding. It rides the same registration-race retry as --self: a bound caller
+// the daemon reports while the row is still landing must not collapse into the
+// "--repo is required" refusal a sandbox credential cannot answer — and once a
+// bound caller has been seen, the binding is proven however the poll ends.
 func credentialBoundCaller() bool {
 	if !apiclient.IsRemoteTarget() || !apiclient.HasDaemonToken() {
 		return false
 	}
-	_, ok, err := callerSessionFn()
-	return err == nil && ok
+	_, ok, err := pollCredentialBoundCaller()
+	if err != nil {
+		return errors.Is(err, errBoundCaller)
+	}
+	return ok
 }
 
 func routedCreateSession(req daemon.CreateSessionRequest) (*session.InstanceData, error) {

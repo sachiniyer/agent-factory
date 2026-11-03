@@ -1,18 +1,24 @@
 package api
 
 import (
+	"context"
 	"errors"
+	"net/http"
+	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-func stubCallerSession(t *testing.T, fn func() (session.InstanceData, bool, error)) {
+func stubCallerSession(t *testing.T, fn func(context.Context) (session.InstanceData, bool, error)) {
 	t.Helper()
 	prev := callerSessionFn
 	callerSessionFn = fn
@@ -23,7 +29,7 @@ func stubCallerSession(t *testing.T, fn func() (session.InstanceData, bool, erro
 // sandbox row carries no TmuxName to match (#5571 W3.2).
 func TestResolveSelfSessionUsesCredentialBoundCaller(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		return session.InstanceData{ID: "sess-1", Title: "mine"}, true, nil
 	})
 	stubCurrentTmuxName(t, func() (string, error) { return "", errors.New("must not consult tmux") })
@@ -36,7 +42,7 @@ func TestResolveSelfSessionUsesCredentialBoundCaller(t *testing.T) {
 // With no token (the local path) the credential lookup is never attempted.
 func TestResolveSelfSessionLocalPathSkipsCallerLookup(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "")
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		t.Fatal("caller lookup must not run without a daemon token")
 		return session.InstanceData{}, false, nil
 	})
@@ -67,7 +73,7 @@ func TestResolveSelfSessionHonoursTokenFlagAndEnv(t *testing.T) {
 	} {
 		t.Run(name, func(t *testing.T) {
 			setup(t)
-			stubCallerSession(t, func() (session.InstanceData, bool, error) { return row, true, nil })
+			stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) { return row, true, nil })
 			stubCurrentTmuxName(t, func() (string, error) { return "", errors.New("must not consult tmux") })
 			got, err := resolveSelfSession()
 			require.NoError(t, err)
@@ -182,7 +188,7 @@ func TestResolveSelfSessionGivesUpOnARowThatNeverRegisters(t *testing.T) {
 func TestResolveSelfSessionRetriesCredentialBoundCallerThroughRace(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	calls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		calls++
 		if calls < 3 {
 			// The daemon reports a bound caller but the row is not yet
@@ -213,7 +219,7 @@ func TestResolveSelfSessionRetriesCredentialBoundCallerThroughRace(t *testing.T)
 func TestResolveSelfSessionCredentialRaceDoesNotReachTmuxPath(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	callerCalls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		callerCalls++
 		if callerCalls < 2 {
 			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
@@ -244,7 +250,7 @@ func TestResolveSelfSessionCredentialRaceDoesNotReachTmuxPath(t *testing.T) {
 func TestResolveSelfSessionCredentialRaceBoundedGiveUp(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	calls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		calls++
 		return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
 	})
@@ -267,7 +273,7 @@ func TestResolveSelfSessionCredentialRaceBoundedGiveUp(t *testing.T) {
 func TestResolveSelfSessionOperatorCredentialFallsThroughToTmux(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	callerCalls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		callerCalls++
 		// Operator credential: the daemon reports no bound caller.
 		return session.InstanceData{}, false, nil
@@ -283,13 +289,41 @@ func TestResolveSelfSessionOperatorCredentialFallsThroughToTmux(t *testing.T) {
 	require.Equal(t, 1, callerCalls, "operator credential: single-shot, then fall through to tmux")
 }
 
-// A non-race error from the credential-bound lookup (transport, auth) surfaces
-// immediately rather than being silently swallowed and retried — it is not the
-// registration race and the caller should see the real failure.
-func TestResolveSelfSessionCredentialNonRaceErrorSurfaces(t *testing.T) {
+// With AF_DAEMON_TOKEN set but NO remote target, a failed credential-bound
+// lookup must leave the tmux/disk resolution unchanged: on the local unix
+// socket no credential can bind (the client sends no token and the daemon
+// trusts the peer), so the lookup can only ever return ok=false or an error —
+// and a stopped, warming or absent local daemon is exactly what the tmux/disk
+// fallback exists for. Hard-failing here would regress whoami,
+// attention --self, archive --self and the proposal self-fallback to a raw dial
+// error whenever the token is exported (the pre-#6586 behavior is restored).
+func TestResolveSelfSessionLocalCallerFailureKeepsTmuxDiskResolution(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	calls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		return session.InstanceData{}, false, errors.New("dial unix /run/af/daemon-http.sock: connect: no such file or directory")
+	})
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{ID: "s1", Title: "mine", TmuxName: "af_op"}}, nil
+	})
+	stubCurrentTmuxName(t, func() (string, error) { return "af_op", nil })
+
+	got, err := resolveSelfSession()
+	require.NoError(t, err, "a failed local caller lookup must not cost the tmux/disk resolution")
+	require.Equal(t, "s1", got.ID)
+	require.Equal(t, 1, calls, "a failed local caller lookup is single-shot, then the tmux/disk resolution runs unchanged")
+}
+
+// A non-race error from the credential-bound lookup against a REMOTE daemon
+// (transport, auth) surfaces immediately rather than being silently swallowed,
+// retried, or masked by a same-machine resolution — there is no local disk to
+// fall back to and a bad token's 401 must reach the caller.
+func TestResolveSelfSessionRemoteCredentialNonRaceErrorSurfaces(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		calls++
 		return session.InstanceData{}, false, errors.New("401 from the remote daemon")
 	})
@@ -312,7 +346,7 @@ func TestResolveCredentialSelfRetriesThroughRace(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	remoteTarget(t)
 	calls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		calls++
 		if calls < 2 {
 			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
@@ -334,7 +368,7 @@ func TestResolveCredentialSelfRetriesThroughRace(t *testing.T) {
 func TestResolveCredentialSelfRefusesOperatorCredential(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	remoteTarget(t)
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		return session.InstanceData{}, false, nil
 	})
 
@@ -348,7 +382,7 @@ func TestResolveCredentialSelfCredentialRaceBoundedGiveUp(t *testing.T) {
 	t.Setenv("AF_DAEMON_TOKEN", "tok")
 	remoteTarget(t)
 	calls := 0
-	stubCallerSession(t, func() (session.InstanceData, bool, error) {
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
 		calls++
 		return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
 	})
@@ -359,4 +393,241 @@ func TestResolveCredentialSelfCredentialRaceBoundedGiveUp(t *testing.T) {
 	_, err := resolveCredentialSelf()
 	require.ErrorIs(t, err, apiclient.ErrCallerRowNotRegistered)
 	require.Equal(t, selfResolveAttempts, calls)
+}
+
+// --- Fail-closed once a bound caller has been seen (defence in depth) --------
+
+// Once the daemon reports a bound caller, a later "no bound caller" answer
+// fails closed instead of dropping to the tmux lookup: the credential did not
+// change between polls, so the daemon's answer did — and the tmux path can only
+// resolve a DIFFERENT session (the sandbox projection withholds TmuxName, so a
+// match is impossible anyway). Pinned on the LOCAL path deliberately: even the
+// path that normally falls through must not fall through after a bound report.
+func TestResolveSelfSessionBoundCallerVanishedFailsClosed(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		if calls == 1 {
+			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+		}
+		return session.InstanceData{}, false, nil // bound, then unbound
+	})
+	stubCurrentTmuxName(t, func() (string, error) {
+		t.Fatal("a bound caller that vanishes must fail closed, not consult tmux")
+		return "", nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	_, err := resolveSelfSession()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.ErrorContains(t, err, "then reported none")
+	require.Equal(t, 2, calls)
+}
+
+// resolveCredentialSelf treats the same vanished-answer inconsistency as a
+// failure, not as the operator-credential refusal — the credential DID name a
+// session when the daemon first answered.
+func TestResolveCredentialSelfBoundCallerVanishedFailsClosed(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		if calls == 1 {
+			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+		}
+		return session.InstanceData{}, false, nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	_, err := resolveCredentialSelf()
+	require.ErrorIs(t, err, errBoundCaller)
+	require.NotContains(t, err.Error(), "needs a sandbox credential",
+		"a vanished bound caller is not the operator-credential refusal")
+}
+
+// --- The poll is bounded in wall time, not only in sleeps --------------------
+
+// A call that HANGS — a wedged daemon that accepts the connection and never
+// answers — is cancelled by the deadline across the loop: selfResolveAttempts
+// calls at up to the remote request timeout (5m) each would otherwise turn a
+// ~1.5s window into a ~50-minute hang (#6698 review).
+func TestPollCredentialBoundCallerDeadlineCancelsAHangingCall(t *testing.T) {
+	prev := selfResolveDeadline
+	selfResolveDeadline = 100 * time.Millisecond
+	t.Cleanup(func() { selfResolveDeadline = prev })
+	calls := 0
+	stubCallerSession(t, func(ctx context.Context) (session.InstanceData, bool, error) {
+		calls++
+		<-ctx.Done() // a wedged call: returns only when the poll's deadline cancels it
+		return session.InstanceData{}, false, ctx.Err()
+	})
+
+	started := time.Now()
+	_, _, err := pollCredentialBoundCaller()
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+	require.Equal(t, 1, calls, "the first hung call is cancelled; nothing retries after it")
+	require.Less(t, time.Since(started), 10*time.Second)
+}
+
+// --- credentialBoundCaller (remote create's --repo gate) ---------------------
+
+// The --repo gate rides the same retry: a bound caller mid-registration still
+// answers true — a single racy snapshot must not produce a "--repo is required"
+// refusal a sandbox credential cannot answer.
+func TestCredentialBoundCallerRetriesTheRace(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	calls := 0
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		calls++
+		if calls < 2 {
+			return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+		}
+		return session.InstanceData{ID: "s1", Title: "mine"}, true, nil
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	require.True(t, credentialBoundCaller())
+	require.Equal(t, 2, calls, "the gate retried through the registration race")
+}
+
+// A bound caller whose row never lands is still a bound credential: the
+// downstream verb is refused by the daemon with the accurate reason, while a
+// false here would demand --repo from a credential that cannot name paths.
+func TestCredentialBoundCallerBoundButNeverRegisteredStaysTrue(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		return session.InstanceData{}, false, apiclient.ErrCallerRowNotRegistered
+	})
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	require.True(t, credentialBoundCaller())
+}
+
+// An operator credential (no bound caller) and a lookup that never got a bound
+// answer keep the "name the project explicitly" rule.
+func TestCredentialBoundCallerOperatorAndUnreachableStayFalse(t *testing.T) {
+	t.Setenv("AF_DAEMON_TOKEN", "tok")
+	remoteTarget(t)
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		return session.InstanceData{}, false, nil
+	})
+	require.False(t, credentialBoundCaller())
+
+	stubCallerSession(t, func(context.Context) (session.InstanceData, bool, error) {
+		return session.InstanceData{}, false, errors.New("dial tcp: connection refused")
+	})
+	require.False(t, credentialBoundCaller(), "a lookup that never answered cannot vouch for the binding")
+}
+
+// --- The REAL client against a fake daemon -----------------------------------
+
+// callerRaceServer is a fake remote daemon that answers /v1/Snapshot exactly as
+// the real one does during the registration race: the credential is bound from
+// the first answer (Caller set) while the row it names registers only later —
+// no rows, then a sibling only, then the sibling and the caller together. It
+// records the bearer token of every request so the test can prove the same
+// credential rode each retry.
+type callerRaceServer struct {
+	srv    *httptest.Server
+	mu     sync.Mutex
+	calls  int
+	tokens []string
+}
+
+func newCallerRaceServer(t *testing.T) *callerRaceServer {
+	t.Helper()
+	s := &callerRaceServer{}
+	s.srv = httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if r.URL.Path != "/v1/Snapshot" {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+		s.calls++
+		s.tokens = append(s.tokens, agentproto.BearerToken(r.Header.Get(agentproto.AuthHeader)))
+		caller := session.InstanceData{ID: "caller-id", Title: "me"}
+		sibling := session.InstanceData{ID: "sibling-id", Title: "sib"}
+		resp := daemon.SnapshotResponse{Caller: caller.ID}
+		switch s.calls {
+		case 1: // bound, but the caller's row is not yet registered
+		case 2:
+			// A sibling's row lands first — the projection still lacks the
+			// caller's own row.
+			resp.Instances = []session.InstanceData{sibling}
+		default:
+			resp.Instances = []session.InstanceData{sibling, caller}
+		}
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(resp))
+	}))
+	t.Cleanup(s.srv.Close)
+	return s
+}
+
+// remoteFlags points the real target resolver at srv for the duration of a
+// test, so the unstubbed callerSessionFn round-trips a real remote client.
+func remoteFlags(t *testing.T, url, token string) {
+	t.Helper()
+	oldURL, oldTok := apiclient.FlagDaemonURL, apiclient.FlagDaemonToken
+	apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = url, token
+	t.Cleanup(func() { apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = oldURL, oldTok })
+}
+
+// The retry poll through the REAL client (callerSessionFn unstubbed): the
+// caller's row lands on the third request of the race sequence, and the same
+// token goes out on every request — the wiring the faked callerSessionFn tests
+// above cannot cover.
+func TestResolveCredentialSelfRealClientRetriesThroughRace(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	fake := newCallerRaceServer(t)
+	remoteFlags(t, fake.srv.URL, "tok-abc")
+	prev := selfResolveSleep
+	selfResolveSleep = func(time.Duration) {}
+	t.Cleanup(func() { selfResolveSleep = prev })
+
+	got, err := resolveCredentialSelf()
+	require.NoError(t, err)
+	require.Equal(t, "caller-id", got.ID)
+	fake.mu.Lock()
+	defer fake.mu.Unlock()
+	require.Equal(t, 3, fake.calls, "the caller's row appears on the third request")
+	require.Equal(t, []string{"tok-abc", "tok-abc", "tok-abc"}, fake.tokens,
+		"the same token goes out on every request of the poll")
+}
+
+// A REAL 401 from the daemon surfaces through the real client — the credential
+// is wrong or revoked, which is neither the registration race nor an operator
+// answer, and must reach the caller as the daemon's own refusal after a single
+// attempt rather than being retried or misreported.
+func TestResolveCredentialSelfReal401Surfaces(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	var mu sync.Mutex
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		mu.Lock()
+		calls++
+		mu.Unlock()
+		w.WriteHeader(http.StatusUnauthorized)
+		_ = apiproto.WriteEnvelope(w, apiproto.Failure("unauthorized"))
+	}))
+	t.Cleanup(srv.Close)
+	remoteFlags(t, srv.URL, "bad-tok")
+
+	_, err := resolveCredentialSelf()
+	require.ErrorContains(t, err, "unauthorized")
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, 1, calls, "a 401 is not the registration race and is not retried")
 }

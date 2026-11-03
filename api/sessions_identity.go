@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -91,34 +92,31 @@ var errSelfNotFound = errors.New("no Agent Factory session found")
 // falls through to the tmux path otherwise — the tmux path is unreachable for a
 // sandbox credential (the projection strips TmuxName) but stays for operator
 // tokens and older daemons.
+//
+// Target decides what a failed lookup costs. On a LOCAL target no credential
+// can bind — the unix socket carries no token and the daemon trusts the peer —
+// so the lookup can only ever answer ok=false or fail (the daemon stopped,
+// warming or absent), and either way the tmux/disk resolution below must run
+// unchanged: hard-failing here would turn an exported AF_DAEMON_TOKEN into a
+// raw dial error for whoami, attention --self, archive --self and the proposal
+// self-fallback. On a REMOTE target a non-race failure is real (transport, a
+// bad token's 401) and surfaces. A poll that saw a bound caller fails closed
+// everywhere: the credential is then proven to be a sandbox credential, so the
+// tmux path could only resolve a DIFFERENT session.
 func resolveSelfSession() (*session.InstanceData, error) {
 	if apiclient.HasDaemonToken() {
-		for attempt := 0; ; attempt++ {
-			row, ok, err := callerSessionFn()
-			if err == nil {
-				if ok {
-					return &row, nil
-				}
-				// Operator credential / older daemon: the daemon reported no
-				// bound caller, so there is no row to wait for. Fall through to
-				// the tmux-name path.
-				break
-			}
-			// The daemon reported a bound caller but the row is not yet in the
-			// snapshot — the registration race (#6586). Retry within the same
-			// bounded window the tmux-name path uses, since the credential-bound
-			// lookup is the only path that can resolve a sandbox credential and
-			// the row is expected to register within this window. A non-race
-			// error (transport, auth) is not retried here — it surfaces so the
-			// caller sees the real failure rather than a misleading tmux miss.
-			if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) {
-				return nil, err
-			}
-			if attempt == selfResolveAttempts-1 {
-				return nil, err
-			}
-			selfResolveSleep(selfResolvePoll)
+		row, ok, err := pollCredentialBoundCaller()
+		switch {
+		case err == nil && ok:
+			return &row, nil
+		case errors.Is(err, errBoundCaller):
+			return nil, err
+		case err != nil && apiclient.IsRemoteTarget():
+			return nil, err
 		}
+		// Otherwise: an operator credential (no bound caller to wait for) or a
+		// local-target lookup that could never bind — the tmux/disk resolution
+		// is unchanged.
 	}
 	tmuxName, err := currentTmuxName()
 	if err != nil {
@@ -151,7 +149,72 @@ const (
 	selfResolvePoll     = 150 * time.Millisecond
 )
 
+// selfResolveDeadline bounds the credential-bound poll in WALL TIME — attempts
+// bound only the sleep budget, and a single call can otherwise block for the
+// whole remote request timeout (5m), turning a ~1.5s window into a ~50-minute
+// hang on a wedged daemon. It is a var (not a const) so a test can shrink it
+// and prove the bound fires — the same pattern remote.go's timeout vars use.
+var selfResolveDeadline = 30 * time.Second
+
 var selfResolveSleep = time.Sleep
+
+// errBoundCaller marks every credential-bound poll failure that happens AFTER
+// the daemon first reported the credential bound to a session. The binding is
+// then proven — a sandbox credential's Caller is set unconditionally — so no
+// outcome may fall back to a path that could resolve a DIFFERENT session (the
+// tmux-name path) or report "no bound caller". errors.Is(err, errBoundCaller)
+// is the "a bound caller was seen" test; the immediate cause stays reachable
+// through the same wrap chain.
+var errBoundCaller = errors.New("the daemon reported the credential bound to a session")
+
+// pollCredentialBoundCaller runs the credential-bound lookup through the
+// registration race (#6586) and returns its outcome:
+//
+//   - (row, true, nil): the bound session's row appeared in a snapshot.
+//   - (zero, false, nil): the daemon reports no bound caller — an operator
+//     credential or an older daemon, with no row to wait for.
+//   - (zero, false, err): ErrCallerRowNotRegistered once the bounded window
+//     closes with the row still absent; any other failure verbatim when no
+//     bound caller was ever seen; and — once a bound caller HAS been seen —
+//     every failure wrapped in errBoundCaller so a bound answer can never be
+//     silently un-resolved (bound, then "no caller", or bound then a dead
+//     daemon, is an inconsistent answer to fail closed on, not a tmux cue).
+//
+// The poll is bounded twice: selfResolveAttempts×selfResolvePoll caps the sleep
+// budget, and selfResolveDeadline caps wall time including an in-flight call.
+func pollCredentialBoundCaller() (session.InstanceData, bool, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), selfResolveDeadline)
+	defer cancel()
+	sawBound := false
+	for attempt := 0; ; attempt++ {
+		row, ok, err := callerSessionFn(ctx)
+		if err == nil {
+			if !ok && sawBound {
+				// The credential did not change between polls, so the
+				// daemon's answer did — an inconsistency that fails closed
+				// rather than dropping to a lookup that can only resolve a
+				// different session.
+				return session.InstanceData{}, false, fmt.Errorf("%w, then reported none", errBoundCaller)
+			}
+			return row, ok, nil
+		}
+		if !errors.Is(err, apiclient.ErrCallerRowNotRegistered) {
+			if sawBound {
+				return session.InstanceData{}, false, fmt.Errorf("%w, then the lookup failed: %v", errBoundCaller, err)
+			}
+			return session.InstanceData{}, false, err
+		}
+		sawBound = true
+		if attempt == selfResolveAttempts-1 || ctx.Err() != nil {
+			// A row that never registered is gone or never coming — the
+			// wire cannot tell a still-registering row from an archived or
+			// stopped session (the daemon reports the bound caller and an
+			// empty projection either way), so say both.
+			return session.InstanceData{}, false, fmt.Errorf("%w: %w — it may have been archived or stopped before it registered", errBoundCaller, err)
+		}
+		selfResolveSleep(selfResolvePoll)
+	}
+}
 
 // insideAfTmuxSession reports whether this command runs in a tmux session af
 // spawned — the af_ prefix is af's own marker, so it names only sessions af
@@ -163,5 +226,6 @@ func insideAfTmuxSession() bool {
 }
 
 // callerSessionFn resolves the credential-bound session; a var so tests can
-// substitute the daemon.
+// substitute the daemon. The context bounds the round-trip, so the retry loop
+// above is bounded in wall time and not only in sleeps.
 var callerSessionFn = apiclient.CallerNoSpawn
