@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -62,7 +63,12 @@ func (m *Manager) deleteSessionRecord(repoID, title, stableID string, teardownEr
 	// longer be consumed by a rebuild — reclaim it at the exit rather than
 	// leaving it (secrets, usually) for the next daemon-start sweep. This is
 	// the ghost path's only reach: a live kill already dropped it through
-	// Instance.Kill, so the call below is a no-op there.
-	session.DiscardLocalSetupPayload(title, stableID)
+	// Instance.Kill, so the call below is a no-op there. A legacy ghost row
+	// reaches deleteSessionRecord with an EMPTY stableID (the delete falls
+	// back to title matching); without an id there is no dir name to reclaim —
+	// the sweep gets it — and logging the refusal would be noise.
+	if strings.TrimSpace(stableID) != "" {
+		session.DiscardLocalSetupPayload(title, stableID)
+	}
 	return true, nil
 }

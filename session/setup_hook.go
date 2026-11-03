@@ -2,7 +2,9 @@ package session
 
 import (
 	"context"
+	"errors"
 	"fmt"
+	"io/fs"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -97,6 +99,17 @@ func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind,
 		// file operations and af copies the payload in once it finishes — the
 		// documented "no AF_SSH ⇒ AF_SETUP_DEST is a daemon path" contract.
 		dest = localSetupPayloadDir(opts.ID)
+		// Staging and reclaim must agree on a linked af-setup root: every
+		// removal path refuses to delete through the link, so writing through
+		// it here would strand secrets in the link's target forever. Refuse
+		// visibly — the operator learns why the payload never arrived.
+		// dest is <home>/af-setup/<id>/payload; the root is two dirs up.
+		stagingRoot := filepath.Dir(filepath.Dir(dest))
+		if info, lerr := os.Lstat(stagingRoot); lerr == nil && !info.IsDir() {
+			note := fmt.Sprintf("the setup staging root %s is not a real directory; refusing to stage the payload — remove the link or point it at a directory af owns", stagingRoot)
+			log.WarningLog.Printf("setup_commands: %s", note)
+			return note
+		}
 		if mkErr := config.MkdirAllUnderAFHome(dest, 0o700); mkErr != nil {
 			log.ErrorLog.Printf("setup_commands: cannot create staging dir %s: %v", dest, mkErr)
 			return fmt.Sprintf("cannot create staging dir %s: %v", dest, mkErr)
@@ -252,21 +265,95 @@ func localSetupPayloadSessionDir(sessionID string) (string, bool) {
 	return filepath.Join(home, setupStagingRootName, sessionID), true
 }
 
-// setupStagingRootForDelete returns the af-setup root only when it exists as
-// a REAL directory. Every destructive path gates on this: ReadDir and
-// RemoveAll both follow a symlink at the root, and af never creates that
-// link — but an operator can (af-setup moved to a data disk, or shared
-// between two homes). Removing "stale" entries under a linked root empties
-// the shared TARGET, taking every other home's payload — and any unrelated
-// dir beside them — with it. A symlinked AF home path itself stays allowed;
-// only this one entry is checked.
-func setupStagingRootForDelete(home string) (string, bool) {
+// openVerifiedStagingRoot opens the af-setup root for confined removals, and
+// only when it is a REAL directory: Lstat must say dir (a symlinked root — an
+// operator moved af-setup to a data disk or shared it between two homes —
+// would have every removal under it empty the shared TARGET, taking other
+// homes' payloads with it), and the opened handle must name the same inode
+// the check approved (os.SameFile), closing the swap window between the
+// check and the first removal. A symlinked AF home path itself stays
+// allowed; only this one entry is checked.
+//
+// Returns (nil, root, nil) when the entry is missing — the common
+// nothing-staged case — and (nil, root, errNotRealDir) when it exists but is
+// not usable, so the caller's refusal log can name the real path either way.
+var errNotRealDir = errors.New("not a real directory")
+
+func openVerifiedStagingRoot(home string) (*os.Root, string, error) {
 	root := filepath.Join(home, setupStagingRootName)
 	info, err := os.Lstat(root)
-	if err != nil || !info.IsDir() {
-		return "", false
+	if err != nil {
+		if errors.Is(err, fs.ErrNotExist) {
+			return nil, root, nil
+		}
+		return nil, root, err
 	}
-	return root, true
+	if !info.IsDir() {
+		return nil, root, errNotRealDir
+	}
+	opened, err := os.OpenRoot(root)
+	if err != nil {
+		return nil, root, err
+	}
+	if st, err := opened.Stat("."); err != nil || !os.SameFile(info, st) {
+		opened.Close()
+		return nil, root, errNotRealDir
+	}
+	return opened, root, nil
+}
+
+// removeAllWithinRoot removes the entry name — a single path element inside
+// an opened, verified staging root — with every path operation confined to
+// the entry's own inode: the per-entry root is SameFile-confirmed against the
+// Lstat-approved dir, enumeration walks its FS, and each Remove resolves
+// against the open handle. Confining to name's inode rather than the shared
+// root matters: a component swapped for a symlink mid-walk resolves only
+// within this session's own payload tree (all of which is being removed
+// anyway), never into a sibling's — the shared-root check alone would let a
+// swapped interior link reach a neighbor the sweep's keep set protects.
+// Entries are removed leaves-first so a non-empty directory never blocks the
+// walk.
+func removeAllWithinRoot(root *os.Root, name string) error {
+	info, err := root.Lstat(name)
+	if err != nil {
+		return err
+	}
+	if !info.IsDir() {
+		return root.Remove(name)
+	}
+	sub, err := root.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+	if st, err := sub.Stat("."); err != nil || !os.SameFile(info, st) {
+		return errNotRealDir
+	}
+	var dirs []string
+	err = fs.WalkDir(sub.FS(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if p == "." {
+			return nil
+		}
+		if d.IsDir() {
+			dirs = append(dirs, p)
+			return nil
+		}
+		return sub.Remove(p)
+	})
+	if err != nil {
+		return err
+	}
+	for i := len(dirs) - 1; i >= 0; i-- {
+		if err := sub.Remove(dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return err
+		}
+	}
+	// The emptied dir goes through the PARENT root: if name was swapped for
+	// a link mid-removal, Remove takes the link itself, not its target.
+	return root.Remove(name)
 }
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
@@ -301,16 +388,16 @@ func DiscardLocalSetupPayload(title, sessionID string) {
 		return
 	}
 	home := filepath.Dir(filepath.Dir(dir))
-	root, ok := setupStagingRootForDelete(home)
-	if !ok {
-		// No real af-setup root means nothing under it is af's to delete — a
-		// missing root is the common case and a linked one is the refusal.
-		if _, err := os.Lstat(root); err == nil {
-			log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s is not a real directory", title, dir, root)
-		}
+	root, rootPath, err := openVerifiedStagingRoot(home)
+	switch {
+	case err != nil:
+		log.ErrorLog.Printf("session %q: refusing to remove the setup staging dir %s: %s: %v", title, dir, rootPath, err)
 		return
+	case root == nil:
+		return // no af-setup root: nothing staged, nothing to delete
 	}
-	if err := os.RemoveAll(dir); err != nil {
+	defer root.Close()
+	if err := removeAllWithinRoot(root, sessionID); err != nil && !errors.Is(err, fs.ErrNotExist) {
 		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", title, dir, err)
 	}
 }

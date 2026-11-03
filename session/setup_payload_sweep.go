@@ -1,10 +1,7 @@
 package session
 
 import (
-	"errors"
 	"io/fs"
-	"os"
-	"path/filepath"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/log"
@@ -38,19 +35,20 @@ func SweepStaleSetupPayloads(keep map[string]bool) {
 	// ReadDir and RemoveAll both follow a symlink at af-setup, and an operator
 	// can legitimately link it (moved to a data disk, or shared between two
 	// homes) — deleting "stale" entries under the link would empty the shared
-	// TARGET, taking other homes' payloads with it.
-	root, ok := setupStagingRootForDelete(home)
-	if !ok {
-		if _, lerr := os.Lstat(filepath.Join(home, setupStagingRootName)); lerr == nil {
-			log.WarningLog.Printf("setup payload sweep: refusing to run: %s is not a real directory", filepath.Join(home, setupStagingRootName))
-		}
+	// TARGET, taking other homes' payloads with it. Enumeration and removal
+	// then stay confined to the verified directory through the opened handle.
+	root, rootPath, err := openVerifiedStagingRoot(home)
+	switch {
+	case err != nil:
+		log.WarningLog.Printf("setup payload sweep: refusing to run: %s: %v", rootPath, err)
+		return
+	case root == nil:
 		return
 	}
-	entries, err := os.ReadDir(root)
+	defer root.Close()
+	entries, err := fs.ReadDir(root.FS(), ".")
 	if err != nil {
-		if !errors.Is(err, fs.ErrNotExist) {
-			log.WarningLog.Printf("setup payload sweep: cannot list %s: %v", root, err)
-		}
+		log.WarningLog.Printf("setup payload sweep: cannot list %s: %v", rootPath, err)
 		return
 	}
 	for _, entry := range entries {
@@ -65,7 +63,7 @@ func SweepStaleSetupPayloads(keep map[string]bool) {
 		if keep[entry.Name()] {
 			continue
 		}
-		if err := os.RemoveAll(dir); err != nil {
+		if err := removeAllWithinRoot(root, entry.Name()); err != nil {
 			log.WarningLog.Printf("setup payload sweep: could not remove %s: %v", dir, err)
 			continue
 		}

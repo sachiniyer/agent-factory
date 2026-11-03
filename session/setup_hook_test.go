@@ -1,6 +1,7 @@
 package session
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -14,6 +15,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // setup_commands (#6667) run on the daemon's machine after a session's
@@ -648,9 +650,17 @@ func TestDiscardLocalSetupPayloadRefusesMalformedIDs(t *testing.T) {
 
 // A symlinked af-setup ROOT is refused the same way the sweep refuses it:
 // the per-session discard must not delete through the link either, or it
-// would empty the shared target one entry at a time.
+// would empty the shared target one entry at a time. And the refusal must be
+// VISIBLE: an earlier shape of this check dropped the root path on the floor
+// and logged nothing, leaving the operator no way to learn why the payload
+// survived.
 func TestDiscardLocalSetupPayloadRefusesSymlinkedRoot(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	var errs bytes.Buffer
+	prev := log.ErrorLog.Writer()
+	log.ErrorLog.SetOutput(&errs)
+	t.Cleanup(func() { log.ErrorLog.SetOutput(prev) })
+
 	home, err := config.GetConfigDir()
 	require.NoError(t, err)
 	target := t.TempDir()
@@ -662,6 +672,35 @@ func TestDiscardLocalSetupPayloadRefusesSymlinkedRoot(t *testing.T) {
 	i.discardLocalSetupPayload()
 	_, statErr := os.Stat(victim)
 	assert.NoError(t, statErr, "a linked af-setup root must be refused — the linked target's tree is not af's to delete")
+	assert.Contains(t, errs.String(), "not a real directory",
+		"the refusal must log: a silent refuse leaves the operator no way to learn why the payload survived")
+	assert.Contains(t, errs.String(), filepath.Join(home, "af-setup"),
+		"the refusal names the real root path")
+}
+
+// Staging and reclaim agree on a linked af-setup root: reclaim refuses to
+// delete through the link, so staging must refuse to WRITE through it —
+// otherwise the payload lands in the link's target and stays there forever.
+// The refusal is a session-visible note, not a silent skip.
+func TestSetupHookRefusesStagingUnderLinkedRoot(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repoRoot := initTempGitRepo(t)
+	writeSetupCommandsConfig(t, repoRoot, `setup_commands = [ "echo payload > \"$AF_SETUP_DEST/secret\"" ]
+`)
+
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	target := t.TempDir()
+	require.NoError(t, os.Symlink(target, filepath.Join(home, "af-setup")))
+
+	opts := InstanceOptions{ID: "sess-linked", Title: "sess", Path: repoRoot}
+	note := runSessionSetupHook(opts, repoRoot, BackendLocal, &LocalBackend{}, false)
+	assert.Contains(t, note, "not a real directory",
+		"staging under a linked af-setup root must refuse with a session-visible note")
+
+	entries, err := os.ReadDir(target)
+	require.NoError(t, err)
+	assert.Empty(t, entries, "nothing may be staged through the link")
 }
 
 // A failed create that leaves no record reclaims its payload at the exit:
