@@ -304,10 +304,15 @@ func openVerifiedStagingRoot(home string) (*os.Root, string, error) {
 
 // removeAllWithinRoot removes the entry name — a single path element inside
 // an opened, verified staging root — with every path operation confined to
-// that root: enumeration walks the root's own FS and each Remove resolves
-// against the open handle, so no link or swapped component can carry the
-// delete outside it. Entries are removed leaves-first so a non-empty
-// directory never blocks the walk.
+// the entry's own inode: the per-entry root is SameFile-confirmed against the
+// Lstat-approved dir, enumeration walks its FS, and each Remove resolves
+// against the open handle. Confining to name's inode rather than the shared
+// root matters: a component swapped for a symlink mid-walk resolves only
+// within this session's own payload tree (all of which is being removed
+// anyway), never into a sibling's — the shared-root check alone would let a
+// swapped interior link reach a neighbor the sweep's keep set protects.
+// Entries are removed leaves-first so a non-empty directory never blocks the
+// walk.
 func removeAllWithinRoot(root *os.Root, name string) error {
 	info, err := root.Lstat(name)
 	if err != nil {
@@ -316,26 +321,39 @@ func removeAllWithinRoot(root *os.Root, name string) error {
 	if !info.IsDir() {
 		return root.Remove(name)
 	}
+	sub, err := root.OpenRoot(name)
+	if err != nil {
+		return err
+	}
+	defer sub.Close()
+	if st, err := sub.Stat("."); err != nil || !os.SameFile(info, st) {
+		return errNotRealDir
+	}
 	var dirs []string
-	err = fs.WalkDir(root.FS(), name, func(p string, d fs.DirEntry, err error) error {
+	err = fs.WalkDir(sub.FS(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
+		}
+		if p == "." {
+			return nil
 		}
 		if d.IsDir() {
 			dirs = append(dirs, p)
 			return nil
 		}
-		return root.Remove(p)
+		return sub.Remove(p)
 	})
 	if err != nil {
 		return err
 	}
 	for i := len(dirs) - 1; i >= 0; i-- {
-		if err := root.Remove(dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
+		if err := sub.Remove(dirs[i]); err != nil && !errors.Is(err, fs.ErrNotExist) {
 			return err
 		}
 	}
-	return nil
+	// The emptied dir goes through the PARENT root: if name was swapped for
+	// a link mid-removal, Remove takes the link itself, not its target.
+	return root.Remove(name)
 }
 
 // discardLocalSetupPayload removes the session's daemon-side staging dir —
