@@ -16,10 +16,37 @@ import (
 // window. A turn the agent demonstrably began after the send promotes the
 // recorded verdict to sent; anything else leaves it unverified.
 
-// reverifyTurnRow is claude's in-turn status row: interrupt hint and elapsed
-// timer on one row (task/submitted_turn.go's timed vocabulary).
-func reverifyTurnRow(elapsed string) string {
-	return "✻ Working… (" + elapsed + " · esc to interrupt)\n❯ \n"
+// reverifyBusyRow is claude's real mid-turn pane (task/testdata's working
+// fixtures): the elapsed timer rides on the status row above the composer
+// rules and "esc to interrupt" lives on a separate footer — never one row
+// holding both fragments.
+func reverifyBusyRow(elapsed string) string {
+	return "❯ transcript\n" +
+		"* Bloviating… (" + elapsed + " · ↓ 108 tokens)\n" +
+		"────────────────────────────────\n" +
+		"❯ \n" +
+		"────────────────────────────────\n" +
+		"  ⏸ manual mode on · esc to interrupt · ← 2 agents\n"
+}
+
+// reverifyIdleRow is the settled pane: the finished turn's done summary in the
+// transcript, an idle composer, no hint anywhere.
+func reverifyIdleRow() string {
+	return "❯ transcript\n" +
+		"✻ Cogitated for 26s · done 11:09 PM\n" +
+		"────────────────────────────────\n" +
+		"❯ \n" +
+		"────────────────────────────────\n"
+}
+
+// reverifyDraftRow stages text inside the live composer — the withheld-Enter
+// draft a busy target keeps staged.
+func reverifyDraftRow(draft string) string {
+	return "❯ transcript\n" +
+		"✻ Cogitated for 26s · done 11:09 PM\n" +
+		"────────────────────────────────\n" +
+		"❯ " + draft + "\n" +
+		"────────────────────────────────\n"
 }
 
 // unverifiedSendBackend stages the #6590 steady state: every preview shows an
@@ -30,7 +57,7 @@ type unverifiedSendBackend struct {
 }
 
 func (b *unverifiedSendBackend) Preview(*session.Instance) (string, error) {
-	return reverifyTurnRow("9m 0s"), nil
+	return reverifyBusyRow("9m 0s"), nil
 }
 
 func (b *unverifiedSendBackend) SendPromptCommandWithStatus(*session.Instance, string) (session.PromptDeliveryStatus, error) {
@@ -68,10 +95,10 @@ func TestTaskSendArmsReverifyOnUnverified(t *testing.T) {
 
 	// The send's own turn keeps ticking — never evidence — then ends, and the
 	// queued draft's turn begins and ticks: the task's verdict promotes.
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("9m 1s"), Captured: true}, attemptedAt.Add(time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: "❯ \n", Captured: true}, attemptedAt.Add(2*time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("1s"), Captured: true}, attemptedAt.Add(3*time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("2s"), Captured: true}, attemptedAt.Add(4*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("9m 1s"), Captured: true}, attemptedAt.Add(time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyIdleRow(), Captured: true}, attemptedAt.Add(2*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("1s"), Captured: true}, attemptedAt.Add(3*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("2s"), Captured: true}, attemptedAt.Add(4*time.Second))
 	stored, err := task.GetTask("feed6595")
 	require.NoError(t, err)
 	require.Equal(t, "sent", stored.LastRunStatus,
@@ -122,17 +149,17 @@ func TestUnverifiedSendPromotesOnPostSendTurn(t *testing.T) {
 		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
 	}
 	// The turn running at send time keeps ticking; its clock outdates the send.
-	captured(reverifyTurnRow("9m 1s"), attemptedAt.Add(time.Second))
-	captured(reverifyTurnRow("9m 2s"), attemptedAt.Add(2*time.Second))
+	captured(reverifyBusyRow("9m 1s"), attemptedAt.Add(time.Second))
+	captured(reverifyBusyRow("9m 2s"), attemptedAt.Add(2*time.Second))
 	stored, err := task.GetTask("feed6590")
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
 		"a turn older than the send must not promote its verdict")
 
 	// That turn ends and a new one begins — the queued prompt's work.
-	captured("❯ \n", attemptedAt.Add(3*time.Second))
-	captured(reverifyTurnRow("1s"), attemptedAt.Add(4*time.Second))
-	captured(reverifyTurnRow("2s"), attemptedAt.Add(5*time.Second))
+	captured(reverifyIdleRow(), attemptedAt.Add(3*time.Second))
+	captured(reverifyBusyRow("1s"), attemptedAt.Add(4*time.Second))
+	captured(reverifyBusyRow("2s"), attemptedAt.Add(5*time.Second))
 	stored, err = task.GetTask("feed6590")
 	require.NoError(t, err)
 	require.Equal(t, "sent", stored.LastRunStatus,
@@ -153,7 +180,7 @@ func TestUnverifiedSendNeverTakenNeverPromotes(t *testing.T) {
 	// Idle composer, then a draft that stayed staged: no turn ever begins.
 	for i := 0; i < 5; i++ {
 		m.noteUnverifiedSendEvidence(key, inst,
-			session.Observation{Content: "❯ staged draft text\n", Captured: true},
+			session.Observation{Content: reverifyDraftRow("staged draft text"), Captured: true},
 			attemptedAt.Add(time.Duration(i+1)*time.Second))
 	}
 	stored, err := task.GetTask("feed6591")
@@ -166,7 +193,7 @@ func TestUnverifiedSendNeverTakenNeverPromotes(t *testing.T) {
 	expiredAttempt := attemptedAt.Add(-2 * sendReverifyWindow)
 	m.armUnverifiedSendWatch(key, inst, "feed6591", expiredAttempt, task.NewTurnWatch("claude", expiredAttempt))
 	m.noteUnverifiedSendEvidence(key, inst,
-		session.Observation{Content: "❯ \n", Captured: true}, time.Now())
+		session.Observation{Content: reverifyIdleRow(), Captured: true}, time.Now())
 	m.pausedMu.Lock()
 	_, still := m.unverifiedSendWatches[key]
 	m.pausedMu.Unlock()
@@ -189,9 +216,9 @@ func TestUnverifiedSendPromotionNeverClobbersNewerOutcome(t *testing.T) {
 	_, err := task.UpdateTaskStatus("feed6592", &now, "errored: target gone")
 	require.NoError(t, err)
 
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: "❯ \n", Captured: true}, attemptedAt.Add(time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("1s"), Captured: true}, attemptedAt.Add(2*time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("2s"), Captured: true}, attemptedAt.Add(3*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyIdleRow(), Captured: true}, attemptedAt.Add(time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("1s"), Captured: true}, attemptedAt.Add(2*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("2s"), Captured: true}, attemptedAt.Add(3*time.Second))
 	stored, err := task.GetTask("feed6592")
 	require.NoError(t, err)
 	require.Equal(t, "errored: target gone", stored.LastRunStatus,
@@ -216,9 +243,9 @@ func TestUnverifiedSendNeverPromotesAnotherDelivery(t *testing.T) {
 	_, err := task.UpdateTaskStatus("feed6596", &newer, TaskStatusSentUnverified)
 	require.NoError(t, err)
 
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: "❯ \n", Captured: true}, attemptedAt.Add(time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("1s"), Captured: true}, attemptedAt.Add(2*time.Second))
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyTurnRow("2s"), Captured: true}, attemptedAt.Add(3*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyIdleRow(), Captured: true}, attemptedAt.Add(time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("1s"), Captured: true}, attemptedAt.Add(2*time.Second))
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyBusyRow("2s"), Captured: true}, attemptedAt.Add(3*time.Second))
 	stored, err := task.GetTask("feed6596")
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
@@ -245,9 +272,9 @@ func TestUnverifiedSendFiredEvidenceSurvivesLateVerdictWrite(t *testing.T) {
 	}
 	// The send's turn fires BEFORE the verdict is recorded — the CAS must
 	// refuse, and the evidence must bank for retry rather than be lost.
-	captured("❯ \n", attemptedAt.Add(time.Second))
-	captured(reverifyTurnRow("1s"), attemptedAt.Add(2*time.Second))
-	captured(reverifyTurnRow("2s"), attemptedAt.Add(3*time.Second))
+	captured(reverifyIdleRow(), attemptedAt.Add(time.Second))
+	captured(reverifyBusyRow("1s"), attemptedAt.Add(2*time.Second))
+	captured(reverifyBusyRow("2s"), attemptedAt.Add(3*time.Second))
 	stored, err := task.GetTask("feed6597")
 	require.NoError(t, err)
 	require.Empty(t, stored.LastRunStatus)
@@ -257,7 +284,7 @@ func TestUnverifiedSendFiredEvidenceSurvivesLateVerdictWrite(t *testing.T) {
 	now := time.Now()
 	_, err = task.UpdateTaskStatus("feed6597", &now, TaskStatusSentUnverified)
 	require.NoError(t, err)
-	captured("❯ \n", attemptedAt.Add(4*time.Second))
+	captured(reverifyIdleRow(), attemptedAt.Add(4*time.Second))
 	stored, err = task.GetTask("feed6597")
 	require.NoError(t, err)
 	require.Equal(t, "sent", stored.LastRunStatus,
@@ -287,9 +314,9 @@ func TestUnverifiedSendRetargetSupersedesEarlierWatch(t *testing.T) {
 	capturedA := func(content string, at time.Time) {
 		m.noteUnverifiedSendEvidence(keyA, instA, session.Observation{Content: content, Captured: true}, at)
 	}
-	capturedA("❯ \n", attemptedAt.Add(time.Second))
-	capturedA(reverifyTurnRow("1s"), attemptedAt.Add(2*time.Second))
-	capturedA(reverifyTurnRow("2s"), attemptedAt.Add(3*time.Second))
+	capturedA(reverifyIdleRow(), attemptedAt.Add(time.Second))
+	capturedA(reverifyBusyRow("1s"), attemptedAt.Add(2*time.Second))
+	capturedA(reverifyBusyRow("2s"), attemptedAt.Add(3*time.Second))
 
 	// The task is retargeted and re-sends unverified to the other session:
 	// its watch is the only one that may ever promote again.
@@ -306,7 +333,7 @@ func TestUnverifiedSendRetargetSupersedesEarlierWatch(t *testing.T) {
 	now := later.Add(time.Second)
 	_, err := task.UpdateTaskStatus("feed6598", &now, TaskStatusSentUnverified)
 	require.NoError(t, err)
-	capturedA("❯ \n", attemptedAt.Add(5*time.Second))
+	capturedA(reverifyIdleRow(), attemptedAt.Add(5*time.Second))
 	stored, err := task.GetTask("feed6598")
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus,
@@ -316,9 +343,9 @@ func TestUnverifiedSendRetargetSupersedesEarlierWatch(t *testing.T) {
 	capturedB := func(content string, at time.Time) {
 		m.noteUnverifiedSendEvidence(keyB, instB, session.Observation{Content: content, Captured: true}, at)
 	}
-	capturedB("❯ \n", later.Add(time.Second))
-	capturedB(reverifyTurnRow("1s"), later.Add(2*time.Second))
-	capturedB(reverifyTurnRow("2s"), later.Add(3*time.Second))
+	capturedB(reverifyIdleRow(), later.Add(time.Second))
+	capturedB(reverifyBusyRow("1s"), later.Add(2*time.Second))
+	capturedB(reverifyBusyRow("2s"), later.Add(3*time.Second))
 	stored, err = task.GetTask("feed6598")
 	require.NoError(t, err)
 	require.Equal(t, "sent", stored.LastRunStatus,
@@ -359,7 +386,7 @@ func TestUnverifiedSendEvidenceFencesPreSendAndUncaptured(t *testing.T) {
 	key := stableSessionKey(repoID, inst)
 	m.armUnverifiedSendWatch(key, inst, "feed6594", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
 
-	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: "❯ \n", Captured: true},
+	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: reverifyIdleRow(), Captured: true},
 		attemptedAt.Add(-time.Millisecond))
 	m.noteUnverifiedSendEvidence(key, inst, session.Observation{Captured: false}, attemptedAt.Add(time.Second))
 	m.pausedMu.Lock()
@@ -370,4 +397,86 @@ func TestUnverifiedSendEvidenceFencesPreSendAndUncaptured(t *testing.T) {
 	stored, err := task.GetTask("feed6594")
 	require.NoError(t, err)
 	require.Equal(t, TaskStatusSentUnverified, stored.LastRunStatus)
+}
+
+// A restart drops the in-memory watch, but the verdict row is durable: a
+// sent-unverified row still inside its window re-arms on the first sweep. The
+// rebuilt boundary is the verdict's own write stamp — strictly later than the
+// lost attempt instant — so the contract can only miss, never weaken (#6590).
+func TestUnverifiedSendReArmsFromVerdictRowOnBoot(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6599", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
+	}))
+	lastRun := time.Now().Add(-time.Minute)
+	_, err := task.UpdateTaskStatus("feed6599", &lastRun, TaskStatusSentUnverified)
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches() // the boot sweep re-arms in-window rows
+
+	key := stableSessionKey(repoID, inst)
+	m.pausedMu.Lock()
+	entry := m.unverifiedSendWatches[key]["feed6599"]
+	m.pausedMu.Unlock()
+	require.NotNil(t, entry, "a sent-unverified row inside its window must re-arm after restart")
+	require.True(t, entry.attemptedAt.Equal(lastRun),
+		"the verdict's own write stamp is the rebuilt evidence boundary")
+
+	// The rebuilt watch promotes on the same contract: a turn demonstrably
+	// beginning after the stamp.
+	captured := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
+	}
+	captured(reverifyIdleRow(), lastRun.Add(2*time.Second))
+	captured(reverifyBusyRow("1s"), lastRun.Add(3*time.Second))
+	captured(reverifyBusyRow("2s"), lastRun.Add(4*time.Second))
+	stored, err := task.GetTask("feed6599")
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"a re-armed watch must still promote on post-send turn evidence")
+}
+
+// A row already past its window stays frozen: a turn that far out was never
+// attributable to the send, so the sweep leaves the verdict unverified rather
+// than arming a watch it could not honestly feed.
+func TestUnverifiedSendReArmSkipsExpiredRow(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6600", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
+	}))
+	lastRun := time.Now().Add(-2 * sendReverifyWindow)
+	_, err := task.UpdateTaskStatus("feed6600", &lastRun, TaskStatusSentUnverified)
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches()
+
+	key := stableSessionKey(repoID, inst)
+	m.pausedMu.Lock()
+	armed := m.unverifiedSendWatches[key]["feed6600"]
+	m.pausedMu.Unlock()
+	require.Nil(t, armed, "a verdict already past its window must stay frozen")
+}
+
+// A row whose status already moved on — delivered, errored, retried — is not
+// re-armed: only a row still reading sent-unverified carries an open verdict.
+func TestUnverifiedSendReArmSkipsSettledRows(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6601", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
+	}))
+	lastRun := time.Now().Add(-time.Minute)
+	_, err := task.UpdateTaskStatus("feed6601", &lastRun, "sent")
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches()
+
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	require.Empty(t, m.unverifiedSendWatches, "a settled verdict must not arm a re-verification watch")
 }

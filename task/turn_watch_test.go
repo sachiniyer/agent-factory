@@ -12,6 +12,33 @@ import (
 // the watch, only a turn that BEGAN after its boundary may fire it (#5221
 // review) — two post-boundary frames of a pre-boundary turn prove nothing.
 
+// claudeFrame composes the pane claude really draws: a status-slot row above
+// the composer rules, then the composer pair and an optional footer line. Its
+// elapsed timer rides on that status row while "esc to interrupt" lives on a
+// separate footer below the composer — no row ever carries both fragments
+// (#6590).
+func claudeFrame(statusRow, composer, footer string) string {
+	return "❯ earlier turn\n" + statusRow +
+		"────────────────────────────────\n" +
+		composer +
+		"────────────────────────────────\n" + footer
+}
+
+// claudeWorkingPane renders a mid-turn claude frame the way the fixtures draw
+// it (claude_working_tool.ansi): a spinner-glyph row with the elapsed timer in
+// the status slot, an idle composer, and the interrupt hint on the footer.
+func claudeWorkingPane(elapsed string) string {
+	return claudeFrame("* Bloviating… ("+elapsed+" · ↓ 108 tokens)\n", "❯ \n",
+		"  ⏸ manual mode on · esc to interrupt · ← 2 agents\n")
+}
+
+// claudeIdlePane renders a settled claude frame: the finished turn's done
+// summary stays in the transcript ("✻ Cogitated for 26s · done 11:09 PM") —
+// transcript text, not a status row.
+func claudeIdlePane() string {
+	return claudeFrame("✻ Cogitated for 26s · done 11:09 PM\n", "❯ \n", "")
+}
+
 // The review's shape at pane level (the MHW-852 trace): the prompt's own echo
 // plus ACP-init and skill-discovery lines render seconds after Enter as
 // ordinary Updated churn. None of it is the agent mid-turn, and none of it may
@@ -71,9 +98,47 @@ func TestTurnWatch_DevinTickingRowFires(t *testing.T) {
 
 func TestTurnWatch_ClaudeTickingRowFires(t *testing.T) {
 	w := NewTurnWatch("claude", time.Now().Add(-time.Minute))
-	w.Observe("transcript\n✻ Whirring… (1s · esc to interrupt)\n❯ ", time.Now())
-	if !w.Observe("transcript\n✻ Whirring… (2s · esc to interrupt)\n❯ ", time.Now()) {
+	w.Observe(claudeWorkingPane("1s"), time.Now())
+	if !w.Observe(claudeWorkingPane("2s"), time.Now()) {
 		t.Fatal("claude's advancing elapsed timer is its in-turn chrome")
+	}
+}
+
+// The pane claude really draws splits the contract the same-row vocabulary
+// assumed: the timer rides on the composer-scoped status row and the
+// interrupt hint sits on a separate footer. A heartbeat-length turn must
+// still fire — its scoped row ticking is the same evidence (#6590).
+func TestTurnWatch_ClaudeScopedStatusRowFires(t *testing.T) {
+	boundary := time.Now().Add(-time.Minute)
+	w := NewTurnWatch("claude", boundary)
+	w.Observe(claudeIdlePane(), boundary.Add(30*time.Second))
+	w.Observe(claudeWorkingPane("1s"), boundary.Add(45*time.Second))
+	if !w.Observe(claudeWorkingPane("2s"), boundary.Add(46*time.Second)) {
+		t.Fatal("claude's scoped status row ticking inside the boundary's age is its in-turn chrome")
+	}
+}
+
+// A turn running BEFORE the boundary keeps ticking on the same scoped row —
+// but its own elapsed clock outdates the send, so it can never fire, real
+// pane shape or not.
+func TestTurnWatch_ClaudeScopedPreBoundaryTurnNeverFires(t *testing.T) {
+	boundary := time.Now()
+	w := NewTurnWatch("claude", boundary)
+	for i, elapsed := range []string{"9m 1s", "9m 2s", "9m 3s"} {
+		if w.Observe(claudeWorkingPane(elapsed), boundary.Add(time.Duration(i+1)*time.Second)) {
+			t.Fatalf("elapsed %s exceeds the boundary's age: a pre-boundary turn is not the prompt's", elapsed)
+		}
+	}
+}
+
+// The finished turn's done summary is transcript text: it must never fire the
+// watch, and a turn that already ended cannot launder a later one either.
+func TestTurnWatch_ClaudeDoneRowNeverFires(t *testing.T) {
+	w := NewTurnWatch("claude", time.Now().Add(-time.Minute))
+	for i := 0; i < 3; i++ {
+		if w.Observe(claudeIdlePane(), time.Now()) {
+			t.Fatalf("capture %d: a done summary in the transcript is not a running turn", i)
+		}
 	}
 }
 
