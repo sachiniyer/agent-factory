@@ -614,6 +614,14 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 	close(doneCh)
 	_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
 
+	// Determine the command outcome immediately after Wait, before the
+	// filesystem I/O of CloseAndReadTail. If that read, timestamp update, or
+	// close crosses the deadline, a later ctx.Err() check would otherwise
+	// record a timeout and retain a failure log even though Wait returned
+	// success; snapshotting here distinguishes a process the deadline killed
+	// from one that exited cleanly.
+	timedOut := ctx.Err() != nil
+
 	// Close the launcher's descriptor and read a bounded tail. The
 	// best-effort completion-time refresh makes completion the retention
 	// clock for kept output; the success path then removes the file, matching
@@ -625,7 +633,7 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 		log.WarningLog.Printf("setup_commands %q output tail could not be read from %s: %v", commandForLog, outputPath, outputReadErr)
 	}
 
-	if ctx.Err() != nil {
+	if timedOut {
 		note := fmt.Sprintf("entry %d timed out after %s; full output: %s", index+1, setupCommandTimeout, outputPath)
 		log.ErrorLog.Printf("setup_commands %q timed out after %s (full output: %s)%s", commandForLog, setupCommandTimeout, outputPath, hooklog.Excerpt(outputTail))
 		return note
@@ -636,11 +644,45 @@ func runSetupCommand(index int, cmdStr, dir string, env []string) string {
 		return note
 	}
 	// Success: remove the completed log so retained success output does not
-	// erode the per-kind retention quota protecting failed-run evidence.
-	if outputReadErr == nil {
+	// erode the per-kind retention quota protecting failed-run evidence. A
+	// setup command that daemonized a child into a new session/process group
+	// (e.g. via setsid) survives the process-group kill above and keeps the
+	// inherited descriptor's flock alive; unlike the post-worktree runner
+	// this path has no systemd-scope teardown confirmation, so the lock is
+	// the only live-writer proof — confirm it is free before unlinking so an
+	// escaped descendant does not grow an inaccessible file past retention.
+	if outputReadErr == nil && setupHookLogQuiescent(outputPath) {
 		if removeErr := hooklog.Remove(outputPath); removeErr != nil && !os.IsNotExist(removeErr) {
 			log.WarningLog.Printf("setup_commands %q completed but its output log %s could not be removed: %v", commandForLog, outputPath, removeErr)
 		}
 	}
 	return ""
+}
+
+// setupHookLogQuiescent reports whether the completed hook log at path is no
+// longer held by an inherited descriptor. After CloseAndReadTail closes the
+// launcher's copy, the only remaining lock holder is a descendant that escaped
+// the process-group kill (e.g. via setsid) while inheriting stdout/stderr. A
+// non-blocking exclusive flock succeeds only when no such descendant keeps the
+// lock, in which case unlinking is safe; a held lock leaves the file to
+// retention rather than unlinking an inode a live writer still grows.
+func setupHookLogQuiescent(path string) bool {
+	file, err := os.OpenFile(path, os.O_RDWR|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return true
+		}
+		log.WarningLog.Printf("setup_commands output log %s could not be re-checked for live writers before removal: %v", path, err)
+		return false
+	}
+	defer file.Close()
+	if err := syscall.Flock(int(file.Fd()), syscall.LOCK_EX|syscall.LOCK_NB); err != nil {
+		if errors.Is(err, syscall.EWOULDBLOCK) {
+			log.WarningLog.Printf("setup_commands output log %s is still held by an escaped descendant; leaving it to retention", path)
+		} else {
+			log.WarningLog.Printf("setup_commands output log %s lock check failed before removal: %v", path, err)
+		}
+		return false
+	}
+	return true
 }
