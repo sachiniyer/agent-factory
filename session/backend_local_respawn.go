@@ -305,6 +305,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			rebuilt = true
 			log.InfoLog.Printf("recover: rebuilt missing worktree for session %q at %s from branch %s", i.Title, workDir, gw.GetBranchName())
 		}
+		// Either rebuild may have hit a setup-payload collision — non-blocking,
+		// but the row must say so (#6667).
+		if s := gw.SetupOverlayError(); s != "" {
+			i.noteSetupHookFailure(s)
+		}
 	}
 
 	// A rebuild gives the worktree a new identity, so any tmux session that

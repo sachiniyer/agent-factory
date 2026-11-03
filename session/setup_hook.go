@@ -84,7 +84,10 @@ func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind,
 	route := setupSSHRouteFor(b, mode)
 
 	dest := ""
-	if mode == "local" {
+	if mode == "local" || route.docker != nil {
+		// Docker has no ssh route: the script stages daemon-locally with plain
+		// file operations and af copies the payload in once it finishes — the
+		// documented "no AF_SSH ⇒ AF_SETUP_DEST is a daemon path" contract.
 		dest = localSetupPayloadDir(opts.ID)
 		if mkErr := config.MkdirAllUnderAFHome(dest, 0o700); mkErr != nil {
 			log.ErrorLog.Printf("setup_commands: cannot create staging dir %s: %v", dest, mkErr)
@@ -108,7 +111,36 @@ func runSessionSetupHook(opts InstanceOptions, absPath string, kind BackendKind,
 			failures = append(failures, note)
 		}
 	}
+	if route.docker != nil && dest != "" {
+		if note := transferDockerSetupPayload(route.docker, dest); note != "" {
+			failures = append(failures, note)
+		}
+	}
 	return strings.Join(failures, "; ")
+}
+
+// transferDockerSetupPayload delivers a docker session's daemon-staged payload
+// to the overlay dir inside the container — dirname(i.Path)+"/af-setup", the
+// same convention the in-container worktree reads ("/af-setup" for the
+// "/workspace" repo). Returns a failure note for the session row, "" on
+// success.
+func transferDockerSetupPayload(p *dockerProvisioner, localPayload string) string {
+	// Clean the double slash dirname("/workspace") produces — the overlay's
+	// string-built path collapses to the same directory either way, but the
+	// docker CLI parses a cleaner path.
+	containerDest := filepath.Clean(filepath.Dir(dockerWorkspaceDir) + "/" + setupStagingRootName)
+	if _, err := p.execSh(30*time.Second, "mkdir -p -- "+shellQuote(containerDest)); err != nil {
+		note := fmt.Sprintf("cannot create container staging dir %s: %v", containerDest, err)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	// `docker cp src/. dst` copies the payload CONTENTS into the staging dir.
+	if _, err := p.docker(60*time.Second, "cp", localPayload+"/.", p.containerID+":"+containerDest+"/"); err != nil {
+		note := fmt.Sprintf("cannot copy setup payload into container: %v", err)
+		log.ErrorLog.Printf("setup_commands: %s", note)
+		return note
+	}
+	return ""
 }
 
 // localSetupPayloadDir is where a LOCAL session's setup payload stages. The
@@ -120,6 +152,23 @@ func localSetupPayloadDir(sessionID string) string {
 		return ""
 	}
 	return filepath.Join(home, setupStagingRootName, sessionID, "payload")
+}
+
+// discardLocalSetupPayload removes the session's daemon-side staging dir —
+// the <AF home>/af-setup/<id> tree holding payload — at permanent-deletion
+// points (#6667). It must NOT run while the row still lives: a rebuild can
+// still consume the payload, so callers gate on a settled teardown. A hosted
+// session stages beside its workspace instead and is untouched here — the
+// sandbox teardown owns that tree. Best-effort: a leftover is scratch space,
+// not a correctness hazard, so a removal failure only logs.
+func (i *Instance) discardLocalSetupPayload() {
+	dir := localSetupPayloadDir(i.ID)
+	if dir == "" {
+		return
+	}
+	if err := os.RemoveAll(filepath.Dir(dir)); err != nil {
+		log.WarningLog.Printf("session %q: could not remove setup staging dir %s: %v", i.Title, filepath.Dir(dir), err)
+	}
 }
 
 // setupOverlayDirFor names the payload directory a session's worktree checks
@@ -138,12 +187,16 @@ func setupOverlayDirFor(i *Instance) string {
 // setupSSHRoute is the session's ssh transport broken out for the script:
 // the full command, and — when af composed it and the destination token is
 // identifiable — the transport and destination separately. provisioner, when
-// present, is the live connection the remote staging dir is created through.
+// present, is the live connection the remote staging dir is created through;
+// docker, when present, is the container runtime af stages through instead —
+// it has no ssh route, so its payload is staged daemon-locally and af copies
+// it in with docker cp.
 type setupSSHRoute struct {
 	full        string
 	transport   string
 	dest        string
 	provisioner *sandboxProvisioner
+	docker      *dockerProvisioner
 }
 
 // setupSSHRouteFor extracts the route from the backend provisioning returned.
@@ -161,6 +214,11 @@ func setupSSHRouteFor(b Backend, mode string) setupSSHRoute {
 		p, composed = backend.provisioner, true
 	case *sandboxBackend:
 		p = backend.provisioner
+	case *dockerBackend:
+		if backend.provisioner != nil {
+			return setupSSHRoute{docker: backend.provisioner}
+		}
+		return setupSSHRoute{}
 	default:
 		return setupSSHRoute{}
 	}

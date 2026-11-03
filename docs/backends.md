@@ -917,17 +917,22 @@ destination and no ssh variables.
   source checkout — also the working directory), `AF_SETUP_MODE`
   (`local`|`remote`), `AF_SETUP_HOST` (the picked host name, when set), and
   `AF_SETUP_DEST` — a payload staging dir whose contents af copies into the
-  fresh worktree before hooks run. For a remote session it is a path ON THE
-  HOST, created through the session's own ssh connection; reach it through
-  the route below rather than assuming a filesystem you share.
+  fresh worktree before hooks run. For a remote session with an ssh route
+  it is a path ON THE HOST, created through the session's own connection;
+  reach it through the route below rather than assuming a filesystem you
+  share. When NO `AF_SSH` route is exported — every local session, and an
+  off-box runtime with no ssh transport such as `backend = "docker"` — it
+  is a daemon-local path af transports itself, so plain `cp`/`mkdir` against
+  it is always safe.
 - **ssh route:** the same `AF_SSH` / `AF_SSH_DEST` / `AF_SSH_FULL` contract
   `move_cmd` uses — the session's own connection, for host commands and
   `rsync -e` alike. Only an af-composed transport (`backend = "ssh"`) earns
   the `AF_SSH`/`AF_SSH_DEST` split; a free-form `sandbox.ssh` command sets
   `AF_SSH_FULL` alone, and a session with no ssh transport (local, docker,
-  hook) sets none. See the move-script contract above for the quoting
-  idioms — the variables are shell command lines, never expand them
-  unquoted.
+  hook) sets none — for docker, af copies the daemon-local `AF_SETUP_DEST`
+  into the container once the script finishes. See the move-script contract
+  above for the quoting idioms — the variables are shell command lines,
+  never expand them unquoted.
 - **failure:** a failing entry does not block the session. It is recorded on
   the session row as `af setup hook failed: <entry>: <status>` — on every
   surface like the callback notice — with the full output retained in a hook

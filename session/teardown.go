@@ -418,6 +418,13 @@ func (i *Instance) teardownTabs(mode teardownMode) error {
 		errs = append(errs, worktreeRetentionError(err, title))
 		return errors.Join(errs...)
 	}
+	// A settled KILL deletes the record — the session's daemon-side setup
+	// payload (#6667) loses its only handle and would accumulate under the AF
+	// home. Other modes (archive, release) keep the row restorable and keep
+	// the payload for its rebuilds.
+	if _, killing := mode.(teardownKill); killing {
+		i.discardLocalSetupPayload()
+	}
 
 	i.mu.Lock()
 	mode.finalize(i, closed, gw)
