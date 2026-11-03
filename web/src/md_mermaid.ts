@@ -340,8 +340,8 @@ const RENDER_TIMEOUT_MS = 20_000;
 // diagram queued behind it.
 let renderQueue: Promise<unknown> = Promise.resolve();
 
-function renderSerialized(source: string): Promise<string> {
-  const job = renderQueue.then(() => renderOne(source));
+function renderSerialized(source: string, theme: Record<string, string>): Promise<string> {
+  const job = renderQueue.then(() => renderOne(source, theme));
   renderQueue = job.catch(() => {});
   return job;
 }
@@ -351,13 +351,13 @@ function renderSerialized(source: string): Promise<string> {
  *  this render was dispatched on, so a dead frame's late timer can never
  *  kill a healthier replacement. The timer is cleared on settle so success
  *  carries no pending teardown. */
-async function renderOne(source: string): Promise<string> {
+async function renderOne(source: string, theme: Record<string, string>): Promise<string> {
   const m = await loadMermaidChunk();
   const frame = renderFrame;
   let timer: ReturnType<typeof setTimeout> | undefined;
   try {
     return await Promise.race([
-      m.renderMermaidDiagram(source, mermaidThemeVars()),
+      m.renderMermaidDiagram(source, theme),
       new Promise<never>((_, reject) => {
         timer = setTimeout(() => reject(new RenderTimeoutError()), RENDER_TIMEOUT_MS);
       }),
@@ -372,7 +372,7 @@ async function renderOne(source: string): Promise<string> {
   }
 }
 
-function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
+function renderCached(source: string, mode: "light" | "dark", theme: Record<string, string>): Promise<string> {
   const key = mode + "\n" + source;
   const hit = svgCache.get(key);
   if (hit) {
@@ -380,7 +380,7 @@ function renderCached(source: string, mode: "light" | "dark"): Promise<string> {
     svgCache.set(key, hit);
     return hit;
   }
-  const p = renderSerialized(source).catch((e: unknown) => {
+  const p = renderSerialized(source, theme).catch((e: unknown) => {
     svgCache.delete(key);
     throw e;
   });
@@ -408,7 +408,10 @@ async function paint(el: HTMLElement): Promise<void> {
   const gen = ++h.gen;
   try {
     const mode = themeMode();
-    const svg = sanitizeSvg(await renderCached(h.source, mode));
+    // Mode and palette are snapshotted together here: reading the variables
+    // at dispatch would let a mid-queue theme flip store one mode's palette
+    // under the other's cache key.
+    const svg = sanitizeSvg(await renderCached(h.source, mode, mermaidThemeVars()));
     if (gen !== h.gen || !el.isConnected) return;
     el.classList.remove("cm-md-mermaid-bad");
     el.dataset.mmdTheme = mode;
