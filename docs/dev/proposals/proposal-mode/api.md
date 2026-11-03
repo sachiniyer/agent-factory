@@ -177,9 +177,10 @@ Shapes:
 
 - `writer` and `seq` are optional. `writer` names one editor (a Docs tab's
   sync) and `seq` counts its saves upward. A save whose `seq` is not above
-  the highest the daemon has seen from that `writer` for the doc is refused
-  with 409 `proposal_stale_save` and commits nothing. Both omitted: no
-  fence.
+  the highest the daemon has saved from that `writer` for the doc is refused
+  with 409 `proposal_stale_save` and commits nothing. Fencing requires a
+  nonempty `writer` and a positive `seq`; an empty `writer`, a zero `seq`,
+  or omitting both leaves the save unfenced.
 - `base` is the `commit` from the last read or save of this doc. It is
   required, and it must be a lowercase hex commit id (7 to 64 characters). Any
   other value, such as a ref name, fails with `unknown base commit`.
@@ -204,8 +205,10 @@ Shapes:
 
 - `commit` in a 200 reply is the new head. When nothing changed, no commit is
   made and `commit` is the current head. Send it as the next `base`.
-- After a 409, the tab resolves the conflict and saves again with `base` set
-  to `head` from the 409 reply.
+- After a 409 `proposal_conflict`, the tab resolves the conflict and saves
+  again with `base` set to `head` from the 409 reply. A 409
+  `proposal_stale_save` carries `data: null` (no `head`) and is a terminal
+  refusal, not a merge conflict: do not retry it with `base` set to `head`.
 
 ### Event
 
