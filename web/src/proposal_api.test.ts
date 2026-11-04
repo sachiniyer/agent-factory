@@ -171,23 +171,45 @@ test("listProposals posts the session id and parses each summary row", async () 
   ]);
 });
 
-test("start and attach post slug + session id only, and carry the tab fields of the reply", async () => {
+test("start and attach post slug + session id + deliver_rules, and carry the tab fields of the reply", async () => {
   let calls = recordFetch(200, { data: { slug: "auth", docs: ["goals"], tab: "auth (proposal)", tab_error: "" }, error: null });
   const started = await startProposal("s1", "auth", "tok");
   assert.equal(calls[0]!.url, "/v1/StartProposal");
-  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "auth" }, "no docs field — empty IS the built-in template default");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "auth", deliver_rules: true },
+    "the web opts in to the daemon briefing the agent; no docs field — empty IS the built-in template default");
   assert.equal(started.tab, "auth (proposal)");
 
   calls = recordFetch(200, { data: { slug: "api-rework", docs: ["api"], attached_sessions: ["s1"], tab: "", tab_error: "tmux is gone" }, error: null });
   const attached = await attachProposal("s1", "api-rework", "tok");
   assert.equal(calls[0]!.url, "/v1/AttachProposal");
-  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "api-rework" });
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "api-rework", deliver_rules: true });
   assert.equal(attached.tabError, "tmux is gone", "a failed Docs tab is a partial outcome the modal must surface");
 
   calls = recordFetch(200, { data: { slug: "api-rework", detached: true }, error: null });
   assert.deepEqual(await detachProposal("s1", "tok"), { slug: "api-rework", detached: true });
   assert.equal(calls[0]!.url, "/v1/DetachProposal");
   assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1" });
+});
+
+// rules_delivery is the briefing outcome the daemon reports for a
+// deliver_rules request: "delivered" is a confirmed paste, "unconfirmed" may
+// have landed, "held" means the pane cannot take it yet and the daemon owes
+// the delivery. The UI must surface every non-delivered one instead of
+// implying the agent was briefed (#6755).
+test("the summary carries rules_delivery and rules_error so the caller can report them", async () => {
+  const calls = recordFetch(200, {
+    data: { slug: "auth", docs: ["goals"], rules_delivery: "held", rules_error: "the agent is busy" },
+    error: null,
+  });
+  const started = await startProposal("s1", "auth", "tok");
+  assert.equal(started.rulesDelivery, "held");
+  assert.equal(started.rulesError, "the agent is busy");
+  assert.equal(calls.length, 1);
+
+  recordFetch(200, { data: { slug: "auth", docs: ["goals"], rules_delivery: "unconfirmed" }, error: null });
+  const attached = await attachProposal("s1", "auth", "tok");
+  assert.equal(attached.rulesDelivery, "unconfirmed");
+  assert.equal(attached.rulesError, "");
 });
 
 test("a malformed workflow reply is an ApiError, not a silent default", async () => {

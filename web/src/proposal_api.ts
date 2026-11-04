@@ -61,10 +61,15 @@ export interface ProposalChange {
   author: string;
 }
 
+/** What a `deliver_rules` request did with the agent's working contract:
+ *  "delivered" is a confirmed paste, "unconfirmed" may have landed, "held" is
+ *  still owed to the agent, "failed" could not be queued. */
+export type RulesDelivery = "delivered" | "unconfirmed" | "held" | "failed";
+
 /** One proposal row from ListProposals, and the reply of Start/Attach
  *  (proposal.Summary). `rules` is the agent's working contract — the CLI prints
- *  it; the web shows nothing of it because the agent reads it inside its own
- *  session, where `af proposal start` runs. */
+ *  it inside the agent's session; the web instead asks the daemon to deliver
+ *  it (`deliver_rules`) and reports `rules_delivery`. */
 export interface ProposalSummary {
   slug: string;
   docs: string[];
@@ -75,6 +80,11 @@ export interface ProposalSummary {
   tab: string;
   /** Why no Docs tab opened despite the attach succeeding; "" on success. */
   tabError: string;
+  /** The briefing outcome; undefined when the daemon did not report one (it
+   *  predates deliver_rules, so the agent was not briefed). */
+  rulesDelivery?: RulesDelivery;
+  /** Why the contract did not reach the agent yet. */
+  rulesError?: string;
 }
 
 function parseProposalSummary(d: unknown): ProposalSummary {

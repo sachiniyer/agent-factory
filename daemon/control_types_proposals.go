@@ -34,6 +34,11 @@ type StartProposalRequest struct {
 	Slug      string `json:"slug"`
 	// Docs lists the doc names to create; empty means the built-in templates.
 	Docs []string `json:"docs,omitempty"`
+	// DeliverRules asks the daemon to deliver the proposal's rules to the
+	// session's agent as a prompt, the way a CLI run inside the session shows
+	// them. The web sets it; a request without it gets the rules back in the
+	// reply only, and rules_delivery reports what the delivery did.
+	DeliverRules bool `json:"deliver_rules,omitempty"`
 }
 
 type StartProposalResponse = proposal.Summary
@@ -42,6 +47,8 @@ type AttachProposalRequest struct {
 	SessionID string `json:"session_id"`
 	// Slug is the proposal to attach to; empty reports the current one.
 	Slug string `json:"slug,omitempty"`
+	// DeliverRules is StartProposal's flag: the daemon briefs the agent itself.
+	DeliverRules bool `json:"deliver_rules,omitempty"`
 }
 
 type AttachProposalResponse = proposal.Summary

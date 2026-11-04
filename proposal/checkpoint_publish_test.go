@@ -7,7 +7,7 @@ import (
 
 func TestCheckpointPublishesTheAgentCommit(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}

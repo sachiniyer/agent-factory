@@ -188,7 +188,7 @@ func (s *controlServer) StartProposal(req StartProposalRequest, resp *StartPropo
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	out, err := s.manager.proposalService().Start(req.SessionID, req.Slug, req.Docs)
+	out, err := s.manager.proposalService().Start(req.SessionID, req.Slug, req.Docs, req.DeliverRules)
 	if err != nil {
 		return err
 	}
@@ -200,7 +200,7 @@ func (s *controlServer) AttachProposal(req AttachProposalRequest, resp *AttachPr
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	out, err := s.manager.proposalService().Attach(req.SessionID, req.Slug)
+	out, err := s.manager.proposalService().Attach(req.SessionID, req.Slug, req.DeliverRules)
 	if err != nil {
 		return err
 	}

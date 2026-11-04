@@ -148,7 +148,7 @@ func TestServiceTargetRepoPath(t *testing.T) {
 
 func TestServiceStartAttachDetachTabs(t *testing.T) {
 	svc, host, _ := newTestService(t)
-	info, err := svc.Start(sessA, "p", nil)
+	info, err := svc.Start(sessA, "p", nil, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -158,16 +158,16 @@ func TestServiceStartAttachDetachTabs(t *testing.T) {
 	if !slices.Equal(info.AttachedSessions, []string{"alpha"}) {
 		t.Fatalf("attached_sessions = %v, want [alpha]", info.AttachedSessions)
 	}
-	if _, err := svc.Start(sessB, "q", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessB, "q", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Attach(sessA, "q"); err != nil {
+	if _, err := svc.Attach(sessA, "q", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := host.tabs[sessA+"/p"]; ok {
 		t.Fatal("attaching to another proposal must close the old Docs tab")
 	}
-	again, err := svc.Attach(sessA, "")
+	again, err := svc.Attach(sessA, "", false)
 	if err != nil || again.Slug != "q" {
 		t.Fatalf("attach with no slug = %+v, %v; want q", again, err)
 	}
@@ -178,21 +178,21 @@ func TestServiceStartAttachDetachTabs(t *testing.T) {
 	if _, ok := host.tabs[sessA+"/q"]; ok {
 		t.Fatal("detach must close the Docs tab")
 	}
-	if _, err := svc.Attach(sessA, ""); err == nil || !strings.Contains(err.Error(), "existing proposals: p, q") {
+	if _, err := svc.Attach(sessA, "", false); err == nil || !strings.Contains(err.Error(), "existing proposals: p, q") {
 		t.Fatalf("attach with no slug when detached = %v, want the slug list", err)
 	}
 }
 
 func TestServiceTabCloseFailureKeepsAttachment(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := svc.Start(sessB, "q", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessB, "q", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	host.closeErr = errors.New("session is archived")
-	if _, err := svc.Attach(sessA, "q"); err == nil {
+	if _, err := svc.Attach(sessA, "q", false); err == nil {
 		t.Fatal("attach must fail when the old Docs tab cannot close")
 	}
 	if _, err := svc.Detach(sessA); err == nil {
@@ -202,7 +202,7 @@ func TestServiceTabCloseFailureKeepsAttachment(t *testing.T) {
 		t.Fatalf("attached = %q, want p kept so a retry closes its tab", got)
 	}
 	host.closeErr = nil
-	if _, err := svc.Attach(sessA, "q"); err != nil {
+	if _, err := svc.Attach(sessA, "q", false); err != nil {
 		t.Fatal(err)
 	}
 	if _, ok := host.tabs[sessA+"/p"]; ok {
@@ -221,17 +221,17 @@ func TestServiceTabCloseFailureKeepsAttachment(t *testing.T) {
 
 func TestServiceRefusesOffBoxSessions(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessB, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessB, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	host.sessions[sessA] = Session{ID: sessA, Title: "alpha", RepoID: testRepoID, OffBox: true}
-	if _, err := svc.Start(sessA, "q", []string{"goals"}); err == nil || !strings.Contains(err.Error(), "off-box") {
+	if _, err := svc.Start(sessA, "q", []string{"goals"}, false); err == nil || !strings.Contains(err.Error(), "off-box") {
 		t.Fatalf("start = %v, want the off-box refusal", err)
 	}
 	if err := store.RequireSlug("q"); err == nil {
 		t.Fatal("a refused start must not create the proposal")
 	}
-	if _, err := svc.Attach(sessA, "p"); err == nil || !strings.Contains(err.Error(), "off-box") {
+	if _, err := svc.Attach(sessA, "p", false); err == nil || !strings.Contains(err.Error(), "off-box") {
 		t.Fatalf("attach = %v, want the off-box refusal", err)
 	}
 	if got, _ := store.Attached(sessA); got != "" || len(host.tabs) != 1 {
@@ -242,7 +242,7 @@ func TestServiceRefusesOffBoxSessions(t *testing.T) {
 func TestServiceAttachReportsTabError(t *testing.T) {
 	svc, host, _ := newTestService(t)
 	host.tabErr = errors.New("session is not started")
-	info, err := svc.Start(sessA, "p", []string{"goals"})
+	info, err := svc.Start(sessA, "p", []string{"goals"}, false)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -253,7 +253,7 @@ func TestServiceAttachReportsTabError(t *testing.T) {
 
 func TestServiceAuthors(t *testing.T) {
 	svc, _, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Write(byRepo(), "p", "goals", "x\n", AuthorAgent); err == nil {
@@ -281,7 +281,7 @@ func TestServiceAuthors(t *testing.T) {
 
 func TestServiceGetDetail(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"api", "goals", "notes"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"api", "goals", "notes"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Write(byRepo(), "p", "api", "> [!question] Expire tokens?\n\n>[!QUESTION] And refresh?\n> [!todo] x\n", AuthorExternal); err != nil {
@@ -337,7 +337,7 @@ func readFor(t *testing.T, svc *Service, doc string) *ReadResult {
 
 func TestSavePlain(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	r := readFor(t, svc, "goals")
@@ -369,7 +369,7 @@ func TestSavePlain(t *testing.T) {
 
 func TestSaveMergesCleanly(t *testing.T) {
 	svc, _, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Write(byRepo(), "p", "goals", "one\ntwo\nthree\nfour\nfive\n", AuthorExternal); err != nil {
@@ -401,7 +401,7 @@ func TestSaveMergesCleanly(t *testing.T) {
 
 func TestSaveConflictCommitsNothing(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	r := readFor(t, svc, "goals")
@@ -437,7 +437,7 @@ func TestSaveConflictCommitsNothing(t *testing.T) {
 
 func TestSaveNeedsAKnownBase(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := svc.Save(byRepo(), "p", "goals", "x", ""); err == nil {
@@ -450,7 +450,7 @@ func TestSaveNeedsAKnownBase(t *testing.T) {
 
 func TestSaveRejectsABaseThatIsNotACommitID(t *testing.T) {
 	svc, _, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	head, err := store.Head()
@@ -474,7 +474,7 @@ func TestSaveRejectsABaseThatIsNotACommitID(t *testing.T) {
 
 func TestSaveDocAddedAfterBase(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	base := readFor(t, svc, "goals").Commit
@@ -489,7 +489,7 @@ func TestSaveDocAddedAfterBase(t *testing.T) {
 
 func TestReadSnapshotsTheDoc(t *testing.T) {
 	svc, _, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}, false); err != nil {
 		t.Fatal(err)
 	}
 	editOnDisk(t, store, "p", "goals.md", "edited\n")
@@ -517,7 +517,7 @@ func bumpMtime(t *testing.T, path string) {
 
 func TestScanPublishesDiskEdits(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorExternal}); err != nil {
@@ -566,7 +566,7 @@ func TestScanPublishesDiskEdits(t *testing.T) {
 
 func TestScanSkipsTheDaemonsOwnWrites(t *testing.T) {
 	svc, host, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}
@@ -585,7 +585,7 @@ func TestScanSkipsTheDaemonsOwnWrites(t *testing.T) {
 
 func TestReadPublishesTheDiskEditItSnapshots(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}
@@ -634,7 +634,7 @@ func TestReadPublishesTheDiskEditItSnapshots(t *testing.T) {
 
 func TestScanFollowsAttachChanges(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}
@@ -667,7 +667,7 @@ func TestSaveFenceRefusesALateSaveThatWouldMergeCleanly(t *testing.T) {
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			svc, _, _ := newTestService(t)
-			if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+			if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 				t.Fatal(err)
 			}
 			r := readFor(t, svc, "goals")
@@ -698,7 +698,7 @@ func TestSaveFenceRefusesALateSaveThatWouldMergeCleanly(t *testing.T) {
 
 func TestSaveFenceIsPerWriterAndPerDocAndOptional(t *testing.T) {
 	svc, _, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals", "api"}, false); err != nil {
 		t.Fatal(err)
 	}
 	g := readFor(t, svc, "goals")
@@ -758,7 +758,7 @@ func TestFenceTableForgetsTheOldestWriter(t *testing.T) {
 func TestSaveFenceDoesNotAdvanceOnAConflict(t *testing.T) {
 	svc, _, store := newTestService(t)
 	target := Target{SessionID: sessA}
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	r := readFor(t, svc, "goals")
@@ -785,7 +785,7 @@ func TestSaveFenceDoesNotAdvanceOnAConflict(t *testing.T) {
 func TestSaveFenceUnderConcurrentSavesNeverGoesBackwards(t *testing.T) {
 	svc, _, store := newTestService(t)
 	target := Target{SessionID: sessA}
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	const writers, perWriter = 8, 6

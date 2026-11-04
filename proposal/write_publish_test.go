@@ -8,7 +8,7 @@ import (
 
 func TestRejectedWritePublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals", "technical"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals", "technical"}, false); err != nil {
 		t.Fatal(err)
 	}
 	svc.Scan(WatchInput{RepoIDs: []string{testRepoID}})
@@ -30,7 +30,7 @@ func TestRejectedWritePublishesTheSnapshotItTakes(t *testing.T) {
 
 func TestRejectedSavePublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	lines := "one\ntwo\nthree\nfour\nfive\nsix\n"
@@ -57,7 +57,7 @@ func TestRejectedSavePublishesTheSnapshotItTakes(t *testing.T) {
 
 func TestNoOpWritePublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}

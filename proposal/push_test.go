@@ -138,7 +138,7 @@ type pushRig struct {
 func newPushRig(t *testing.T) *pushRig {
 	t.Helper()
 	svc, host, _ := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	rig := &pushRig{t: t, svc: svc, host: host, clock: pushT0, ready: true, mode: PushAuto}

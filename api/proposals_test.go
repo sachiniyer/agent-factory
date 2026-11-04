@@ -107,14 +107,14 @@ func stubProposalDaemon(t *testing.T) (*proposalTestHost, *[]string) {
 			if err != nil {
 				return nil, err
 			}
-			return svc.Start(r.SessionID, r.Slug, r.Docs)
+			return svc.Start(r.SessionID, r.Slug, r.Docs, r.DeliverRules)
 		},
 		"AttachProposal": func(raw []byte) (any, error) {
 			r, err := decodeInto[daemon.AttachProposalRequest](raw)
 			if err != nil {
 				return nil, err
 			}
-			return svc.Attach(r.SessionID, r.Slug)
+			return svc.Attach(r.SessionID, r.Slug, r.DeliverRules)
 		},
 		"DetachProposal": func(raw []byte) (any, error) {
 			r, err := decodeInto[daemon.DetachProposalRequest](raw)
