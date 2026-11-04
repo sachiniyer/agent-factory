@@ -1,6 +1,7 @@
 package proposal
 
 import (
+	"errors"
 	"fmt"
 	"time"
 )
@@ -77,13 +78,16 @@ func (s *Service) brief(r *resolved, slug string, info *Summary) {
 	case !s.claimBrief(r.session.ID):
 		info.RulesDelivery, info.RulesError = "held", "the contract is already being delivered"
 	default:
-		delivery, err := s.sendBrief(r.session.ID)
+		delivery, err := s.sendBrief(r.session.ID, false)
 		switch {
-		case err == nil && delivery == DeliveryConfirmed:
+		case delivery == DeliveryConfirmed:
 			info.RulesDelivery = "delivered"
-		case err == nil && delivery == DeliveryUnconfirmed:
+		case delivery == DeliveryUnconfirmed:
 			info.RulesDelivery = "unconfirmed"
 			info.RulesError = "the prompt was sent but the pane did not confirm it; the contract may still have landed"
+			if err != nil {
+				info.RulesError = fmt.Sprintf("the contract prompt may have landed but its send reported a problem (%v); to avoid a double paste it will not be retried", err)
+			}
 		default:
 			info.RulesDelivery, info.RulesError = "failed", briefSendError(err)
 		}
@@ -101,7 +105,11 @@ func briefSendError(err error) string {
 // in-flight slot (claimBrief). A marker that is already settled or gone — a
 // repeat attach's done state, a detach's cleared ref — sends nothing and
 // reports confirmed, so a late-running send never revives a settled debt.
-func (s *Service) runBrief(sessionID string) (Delivery, error) {
+// The pane's state is rechecked here, at the send boundary, because a client
+// hold or a busy spell can start after the caller picked this session;
+// forced shares a user-requested send's override of the pane hold (Send now
+// pushes past a TUI attach the same way).
+func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
 	r, err := s.sessionTarget(sessionID)
 	if err != nil {
 		return DeliveryFailed, err
@@ -113,10 +121,19 @@ func (s *Service) runBrief(sessionID string) (Delivery, error) {
 	if slug == "" || state != BriefOwed {
 		return DeliveryConfirmed, nil
 	}
+	switch {
+	case r.session.NoAgent:
+		return DeliveryFailed, errors.New("the session has no live agent")
+	case r.session.Paused && !forced:
+		return DeliveryFailed, errors.New("a client holds the session's pane")
+	case !r.session.Ready:
+		return DeliveryFailed, errors.New("the agent is busy")
+	}
 	delivery, sendErr := s.host.SendPrompt(r.session.ID, Rules(slug, r.store.SlugPath(slug)))
-	if sendErr == nil && delivery != DeliveryFailed {
-		// Confirmed and unconfirmed alike settle the debt: the unconfirmed paste
-		// may have landed, and a second copy is worse than a lost one.
+	if delivery != DeliveryFailed {
+		// Confirmed and unconfirmed alike settle the debt, whatever sendErr
+		// reports: the paste may have landed, and a second copy is worse than
+		// a lost one.
 		if err := r.store.MarkBriefDone(r.session.ID, slug); err != nil {
 			return delivery, err
 		}
@@ -127,8 +144,8 @@ func (s *Service) runBrief(sessionID string) (Delivery, error) {
 // sendBrief releases the in-flight slot after runBrief and backs a failed
 // send off PushQuiet, so the next tick retries instead of hammering a pane
 // that just refused input.
-func (s *Service) sendBrief(sessionID string) (Delivery, error) {
-	delivery, sendErr := s.runBrief(sessionID)
+func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
+	delivery, sendErr := s.runBrief(sessionID, forced)
 	now := s.now()
 	s.mu.Lock()
 	if e := s.briefs[sessionID]; e != nil {

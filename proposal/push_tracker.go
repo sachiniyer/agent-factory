@@ -215,7 +215,7 @@ func (s *Service) PushTick(targets []PushTarget) {
 	s.mu.Unlock()
 	s.publishPush(publish)
 	for _, id := range briefs {
-		s.spawn(func() { _, _ = s.sendBrief(id) })
+		s.spawn(func() { _, _ = s.sendBrief(id, false) })
 	}
 	for _, id := range sends {
 		s.spawn(func() { _ = s.runPush(id) })
@@ -350,6 +350,18 @@ func (s *Service) pushRoute(t PushTarget, fn func(e *pushEntry) bool) (*PushStat
 	e.apply(t)
 	s.refreshUnsentLocked(r.store, id, e, now)
 	send := fn(e) && DecidePush(e.input(), now).Send
+	forced := e.sendNow
+	briefFirst := false
+	if send && s.briefOwedLocked(r.store, id, slug) {
+		// An owed contract goes first, like on the poll tick: the rules must
+		// reach the agent before the first edit prompt it is asked to act on.
+		be := s.briefEntryLocked(id)
+		if !be.sending && !now.Before(be.notBefore) {
+			be.sending = true
+			briefFirst = true
+		}
+		send = false
+	}
 	if send {
 		e.sending = true
 	}
@@ -357,6 +369,19 @@ func (s *Service) pushRoute(t PushTarget, fn func(e *pushEntry) bool) (*PushStat
 	s.mu.Unlock()
 	if changed {
 		s.publishPush([]PushStatus{st})
+	}
+	if briefFirst {
+		if delivery, _ := s.sendBrief(id, forced); delivery == DeliveryFailed {
+			return &st, nil
+		}
+		// The contract reached the agent (or may have): the send the caller
+		// asked for follows it now.
+		s.mu.Lock()
+		if e := s.push[id]; e != nil && !e.sending && DecidePush(e.input(), s.now()).Send {
+			e.sending = true
+			send = true
+		}
+		s.mu.Unlock()
 	}
 	if !send {
 		return &st, nil

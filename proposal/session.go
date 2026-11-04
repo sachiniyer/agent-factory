@@ -180,7 +180,10 @@ func (s *Store) Attachments() (map[string]string, error) {
 
 // Attach attaches session sessionID to proposal slug. A session holds at most
 // one proposal, so this replaces an earlier attachment. Attaching again to the
-// same slug keeps the cursor, so no unread change is skipped.
+// same slug keeps the cursor, so no unread change is skipped, and keeps the
+// briefing marker, so a repeated attach is not a new briefing. Attaching a
+// different slug drops the marker: a later re-attach of the first slug owes
+// its contract again.
 func (s *Store) Attach(slug, sessionID string) error {
 	if err := validateSessionID(sessionID); err != nil {
 		return err
@@ -211,7 +214,8 @@ func (s *Store) Attach(slug, sessionID string) error {
 			return err
 		}
 		tx := "update " + attachRefPrefix + sessionID + " " + strings.TrimSpace(blob) + "\n" +
-			"update " + cursorRefPrefix + sessionID + " " + head + "\n"
+			"update " + cursorRefPrefix + sessionID + " " + head + "\n" +
+			"delete " + briefRefPrefix + sessionID + "\n"
 		_, err = s.git([]byte(tx), "update-ref", "--stdin")
 		return err
 	})

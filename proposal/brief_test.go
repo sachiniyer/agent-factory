@@ -184,6 +184,7 @@ func TestServiceBriefWaitsForAnIdleAgent(t *testing.T) {
 	if n := len(promptList(host)); n != 0 {
 		t.Fatalf("the tick delivered while the agent was busy: %d prompts", n)
 	}
+	paneReady(host, sessA)
 	briefTick(svc, sessA, true, false)
 	prompts := promptList(host)
 	if len(prompts) != 1 || !strings.Contains(prompts[0], "af proposal checkpoint") {
@@ -208,6 +209,7 @@ func TestServiceBriefNeverPastesOverTheUsersInput(t *testing.T) {
 	if n := len(promptList(host)); n != 0 {
 		t.Fatalf("the contract pasted over an in-use pane: %d prompts", n)
 	}
+	paneReady(host, sessA)
 	briefTick(svc, sessA, true, false)
 	if n := len(promptList(host)); n != 1 {
 		t.Fatalf("the contract did not land once the pane was free: %d prompts", n)
@@ -309,6 +311,7 @@ func TestServiceBriefSurvivesAServiceRestart(t *testing.T) {
 	// durable: a fresh service over the same store must still deliver it.
 	restarted := NewService(host)
 	restarted.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
 	restarted.PushTick([]PushTarget{{RepoID: testRepoID, SessionID: sessA, Ready: true}})
 	prompts := promptList(host)
 	if len(prompts) != 1 || !strings.Contains(prompts[0], "af proposal checkpoint") {
@@ -343,6 +346,7 @@ func TestServiceBriefAheadOfPendingEdits(t *testing.T) {
 		t.Fatal(err)
 	}
 	clock = clock.Add(PushQuiet + time.Second)
+	paneReady(host, sessA)
 	target := PushTarget{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"p": PushAuto}, Ready: true}
 	svc.PushTick([]PushTarget{target})
 	prompts := promptList(host)
@@ -354,5 +358,119 @@ func TestServiceBriefAheadOfPendingEdits(t *testing.T) {
 	prompts = promptList(host)
 	if len(prompts) != 2 || !strings.HasPrefix(prompts[1], "Proposal p: the user edited") {
 		t.Fatalf("the pending edit push did not follow the contract: %v", prompts)
+	}
+}
+
+func TestServiceBriefUnconfirmedWithAnErrorStillSettles(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
+	// The transport may have pasted but reports a problem: retrying could put
+	// a second copy in front of the agent, so the debt settles anyway.
+	host.delivery, host.sendErr = DeliveryUnconfirmed, errors.New("pane observation lost")
+
+	info, err := svc.Start(sessA, "p", []string{"goals"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RulesDelivery != "unconfirmed" {
+		t.Fatalf("rules_delivery = %q, want unconfirmed", info.RulesDelivery)
+	}
+	briefTick(svc, sessA, true, false)
+	briefTick(svc, sessA, true, false)
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("an unconfirmed send with an error was resent: %d prompts", n)
+	}
+}
+
+func TestServiceBriefSlugSwapThroughCLIReArms(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Start(sessB, "q", []string{"goals"}, false); err != nil {
+		t.Fatal(err)
+	}
+	// A CLI attach moves the session to q without a briefing request; coming
+	// back to p over the web is a fresh attach, not a resync.
+	if _, err := svc.Attach(sessA, "q", false); err != nil {
+		t.Fatal(err)
+	}
+	info, err := svc.Attach(sessA, "p", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RulesDelivery != "delivered" {
+		t.Fatalf("re-attach after a swap: rules_delivery = %q, want delivered", info.RulesDelivery)
+	}
+	prompts := promptList(host)
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "proposal p") {
+		t.Fatalf("re-attaching p after the swap must brief it again: %v", prompts)
+	}
+}
+
+func TestServiceBriefSendNowSendsContractFirst(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneBusy(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	read, err := svc.Read(Target{SessionID: sessA}, "p", "goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Save(Target{SessionID: sessA}, "p", "goals", "user edit\n", read.Commit); err != nil {
+		t.Fatal(err)
+	}
+	paneReady(host, sessA)
+	// The user clicks Send now before the next poll tick: the contract still
+	// goes out first, and the queued edit follows it in the same request.
+	target := PushTarget{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"p": PushAuto}, Ready: true}
+	if _, err := svc.SendNow(target); err != nil {
+		t.Fatal(err)
+	}
+	prompts := promptList(host)
+	if len(prompts) != 2 ||
+		!strings.Contains(prompts[0], "You are working on proposal p") ||
+		!strings.HasPrefix(prompts[1], "Proposal p: the user edited") {
+		t.Fatalf("Send now must send the contract before the edits: %v", prompts)
+	}
+}
+
+func TestServiceBriefRechecksThePaneAtSendTime(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	var spawned []func()
+	svc.spawn = func(f func()) { spawned = append(spawned, f) }
+	clock := pushT0
+	svc.now = func() time.Time { return clock }
+	paneBusy(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	// The agent idles and the tick picks the session — then a client takes
+	// the pane before the spawned send runs.
+	paneReady(host, sessA)
+	briefTick(svc, sessA, true, false)
+	if len(spawned) != 1 {
+		t.Fatalf("the tick did not queue a briefing send: %d", len(spawned))
+	}
+	paneHeld(host, sessA)
+	spawned[0]()
+	if n := len(promptList(host)); n != 0 {
+		t.Fatalf("the contract pasted into a pane a client took: %d prompts", n)
+	}
+	// The debt is still owed: freeing the pane lets the next tick deliver.
+	clock = clock.Add(PushQuiet + time.Second)
+	paneReady(host, sessA)
+	briefTick(svc, sessA, true, false)
+	if len(spawned) != 2 {
+		t.Fatalf("the freeing tick did not retry the owed contract: %d sends", len(spawned))
+	}
+	spawned[1]()
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("the refused send did not stay owed: %d prompts", n)
 	}
 }
