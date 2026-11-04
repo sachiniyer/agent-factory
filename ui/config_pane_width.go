@@ -126,6 +126,40 @@ func (c *ConfigPane) editRowSplit(key string) (keyBudget, fieldWidth int) {
 	return keyBudget, fieldWidth
 }
 
+// accountRowSplit divides a register row's width between the LABEL and the
+// name FIELD, mirroring editRowSplit for the value editor. The field is served
+// first — it is the task while registering — and the label yields when the pane
+// is too narrow for both, the same way editRowSplit yields the key.
+//
+// The row's chrome is the selection marker (2), the label "+ register a {agent}
+// account", the gap before the field (2), the field's prompt, and the cursor
+// cell a focused textinput renders past its Width (editFieldCursorWidth). The
+// marker and the gap are entryRowChromeWidth; the prompt and cursor are
+// fieldChrome — the same terms editRowSplit uses.
+//
+// Called from sizeAccountField (which runs on every resize, so a resize
+// mid-registration reaches here) and from renderAccountRow, where the selected
+// agent is what the field is open for.
+func (c *ConfigPane) accountRowSplit(agent string) (labelBudget, fieldWidth int) {
+	labelWidth := lipgloss.Width("+ register a " + agent + " account")
+	fieldChrome := lipgloss.Width(c.accounts.input.Prompt) + editFieldCursorWidth
+	available := c.width - entryRowChromeWidth
+	labelBudget = available - minEditFieldWidth - fieldChrome
+	if labelBudget > labelWidth {
+		labelBudget = labelWidth
+	}
+	if labelBudget < 0 {
+		labelBudget = 0
+	}
+	fieldWidth = available - labelBudget - fieldChrome
+	// The floor keeps the field usable at a pane too narrow for any split to fit;
+	// fitPaneLine then clips the row, so the floor cannot reintroduce an overflow.
+	if fieldWidth < minEditFieldWidth {
+		fieldWidth = minEditFieldWidth
+	}
+	return labelBudget, fieldWidth
+}
+
 // entryRowChromeWidth is the fixed chrome every entry row carries: the
 // two-cell selection cursor plus the two-cell gap between key and value.
 const entryRowChromeWidth = 4
