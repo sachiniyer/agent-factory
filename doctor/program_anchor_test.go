@@ -554,4 +554,40 @@ func TestRelativeOverrideUntracked_HelperContract(t *testing.T) {
 	require.False(t, relativeOverrideUntracked(filepath.Join(t.TempDir(), "no-such-repo"),
 		"bin/claude", tracked),
 		"a git probe failure is conservative, not a downgrade")
+
+	// A relative target behind a leading VAR=value assignment is still
+	// cwd-dependent: `FOO=x bin/untracked` launches bin/untracked, which is
+	// untracked, so the helper must downgrade (not read only the first token).
+	require.True(t, relativeOverrideUntracked(repo, "FOO=x bin/untracked", untracked),
+		"a relative override behind a leading assignment is still cwd-dependent and untracked")
+
+	// A relative target behind an `env` wrapper is still cwd-dependent.
+	require.True(t, relativeOverrideUntracked(repo, "env bin/untracked", untracked),
+		"a relative override behind an `env` wrapper is still cwd-dependent and untracked")
+}
+
+// TestCommandDependsOnCwd pins that leading VAR=value assignments and an `env`
+// wrapper are skipped before the cwd-dependence test, so `FOO=x bin/claude`
+// and `env bin/claude` count as cwd-dependent while bare names and absolute
+// paths do not (#6499).
+func TestCommandDependsOnCwd(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    bool
+	}{
+		{"bin/claude", true},
+		{"./venv/bin/claude", true},
+		{"FOO=x bin/claude", true},
+		{"FOO=x BAR=y bin/claude", true},
+		{"env bin/claude", true},
+		{"env FOO=x bin/claude", true},
+		{"claude", false},
+		{"env claude", false},
+		{"/usr/bin/codex", false},
+		{"FOO=x /usr/bin/codex", false},
+		{"", false},
+	} {
+		require.Equal(t, tc.want, commandDependsOnCwd(tc.command),
+			"commandDependsOnCwd(%q) = %v, want %v", tc.command, !tc.want, tc.want)
+	}
 }

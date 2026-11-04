@@ -6,6 +6,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/preflight"
@@ -47,18 +48,66 @@ func checkProgramCommand(repoWorkspace string, repoErr error, command string) (*
 // executable — a path containing a separator that is not absolute, e.g.
 // "bin/claude" or "./venv/bin/claude" — is cwd-dependent: a bare name like
 // "claude" resolves through PATH and an absolute path like "/usr/bin/codex"
-// resolves the same way regardless of cwd. Outside a repo the doctor can only
-// misresolve the cwd-dependent case, so the honest no-anchor message is
-// reserved for it (#6487).
+// resolves the same way regardless of cwd. Leading VAR=value assignments and
+// an `env` wrapper do not change the launched executable — preflight.CheckCommand
+// resolves the agent past both — so commandToken skips them before the test,
+// otherwise `FOO=x bin/claude` or `env bin/claude` would read only the first
+// token and report cwd-independence while the resolved target is still relative
+// (#6499). Outside a repo the doctor can only misresolve the cwd-dependent
+// case, so the honest no-anchor message is reserved for it (#6487).
 func commandDependsOnCwd(command string) bool {
-	first := strings.TrimSpace(command)
-	if i := strings.IndexAny(first, " \t"); i >= 0 {
-		first = first[:i]
-	}
+	first := commandToken(command)
 	if first == "" || filepath.IsAbs(first) {
 		return false
 	}
 	return strings.ContainsAny(first, `/\`)
+}
+
+// commandToken returns the executable token command launches — the first shell
+// word after any leading VAR=value assignments and an optional `env` wrapper,
+// which may itself be followed by further assignments. It is a deliberately
+// coarse split on whitespace, matching the resolution model the doctor already
+// assumes for program_overrides; the untracked-relative check is advisory, not
+// a correctness-critical gate, so quoted values with interior spaces are out
+// of scope. Mirrors preflight.shellExecutable's leading-assignment skip.
+func commandToken(command string) string {
+	fields := strings.Fields(command)
+	i := 0
+	for i < len(fields) && isShellAssignment(fields[i]) {
+		i++
+	}
+	if i < len(fields) && filepath.Base(fields[i]) == "env" {
+		i++
+		for i < len(fields) && isShellAssignment(fields[i]) {
+			i++
+		}
+	}
+	if i < len(fields) {
+		return fields[i]
+	}
+	return ""
+}
+
+// isShellAssignment reports whether word is a leading VAR=value shell
+// assignment, the same shape preflight.command_parse skips before the
+// executable. Mirrored here so doctor's advisory check stays self-contained.
+func isShellAssignment(word string) bool {
+	name, _, ok := strings.Cut(word, "=")
+	if !ok || name == "" {
+		return false
+	}
+	for pos, r := range name {
+		if pos == 0 {
+			if r != '_' && !unicode.IsLetter(r) {
+				return false
+			}
+			continue
+		}
+		if r != '_' && !unicode.IsLetter(r) && !unicode.IsDigit(r) {
+			return false
+		}
+	}
+	return true
 }
 
 // noAnchorMessage is the honest failure message for a program check the doctor
@@ -106,14 +155,17 @@ func relativeOverrideUntracked(workspace, command, resolvedPath string) bool {
 // untrackedOverrideMessage is the advisory warning for a relative
 // program_overrides path that resolves in the main checkout but is untracked:
 // session worktrees are clean checkouts of the committed tree, so the override
-// will be absent at launch. It names the two supported remedies (commit the file,
-// or provision it in each session via setup_commands / the setup overlay)
-// rather than claiming the command is broken — the file does run in this
-// checkout, it just will not be in the worktree the session launches in.
+// is absent at launch unless it is provisioned into each session (via
+// setup_commands / the setup overlay, which applies after `git worktree add`).
+// It names the two supported remedies (commit the file, or provision it in
+// each session) rather than claiming the command is broken — the file does run
+// in this checkout, it just will not be in the worktree the session launches in
+// unless one of those remedies provides it.
 func untrackedOverrideMessage(command, resolvedPath string) string {
 	return fmt.Sprintf("%q resolves to %s in this checkout, but that path is untracked — "+
-		"session worktrees are clean checkouts of the committed tree and will not contain it, "+
-		"so the override will be absent at launch", command, resolvedPath)
+		"session worktrees are clean checkouts of the committed tree and will not contain it "+
+		"unless setup_commands provisions it there, so the override will be absent at launch "+
+		"without that provisioning", command, resolvedPath)
 }
 
 const untrackedOverrideRemediation = "commit the file so it is part of the tree the session checks out, " +
