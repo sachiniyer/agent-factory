@@ -579,6 +579,49 @@ func TestServiceBriefIdleTickReadsTheMarkerOnce(t *testing.T) {
 	}
 }
 
+func TestServiceBriefFailedMarkerReadIsNotCached(t *testing.T) {
+	svc, host, store := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	// A corrupt marker makes the read fail: the tick must not remember the
+	// failure as "no debt" — a transient problem has to be re-read.
+	if err := store.withLock(func() error {
+		return store.writeBriefLocked(sessA, "p", "bogus")
+	}); err != nil {
+		t.Fatal(err)
+	}
+	briefTick(svc, sessA, true, false)
+	be := svc.briefs[sessA]
+	if be == nil {
+		t.Fatal("no brief entry for the attached session")
+	}
+	if be.markerSet {
+		t.Fatal("a failed marker read was cached as an answer")
+	}
+	loads := be.markerLoads
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("premise: a second contract went out: %d prompts", n)
+	}
+	// Once the marker reads cleanly again — owed, as a repaired debt would
+	// be — the very next tick picks it up and delivers.
+	if err := store.withLock(func() error {
+		return store.writeBriefLocked(sessA, "p", BriefOwed)
+	}); err != nil {
+		t.Fatal(err)
+	}
+	briefTick(svc, sessA, true, false)
+	if be.markerLoads != loads+1 {
+		t.Fatalf("the failed read was cached: the repaired marker was never re-read (%d -> %d)", loads, be.markerLoads)
+	}
+	prompts := promptList(host)
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "proposal p") {
+		t.Fatalf("the owed contract did not go out once the marker read recovered: %v", prompts)
+	}
+}
+
 func TestServiceBriefUnconfirmedHoldsTheNextContract(t *testing.T) {
 	svc, host, store := newTestService(t)
 	svc.spawn = func(f func()) { f() }
