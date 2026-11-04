@@ -509,9 +509,29 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 	// with no .git entry cannot be a checkout at all, so it carries no
 	// checkout marker. That is independent filesystem evidence, the same
 	// shortcut projectRootHasCheckoutIDContext takes when its binding probe
-	// fails — a registered project's root always has a .git entry. Every
-	// other failure stays an unknown and propagates.
-	if _, statErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(statErr, os.ErrNotExist) {
+	// fails — a registered project's root always has a .git entry. The stat
+	// is parked and waited on under the caller's remaining budget like the
+	// marker read itself: a workspace on an unresponsive filesystem must not
+	// turn this last observation into an unbounded in-process block. When it
+	// cannot answer in time — and on every other outcome — the probe's
+	// unknown stays unknown and propagates.
+	wait := parent
+	if _, bounded := wait.Deadline(); !bounded {
+		var cancel context.CancelFunc
+		wait, cancel = context.WithTimeout(wait, registeredProjectProbeTimeout)
+		defer cancel()
+	}
+	obs := observeWorkspaceGitEntry(root)
+	select {
+	case <-obs.done:
+	case <-wait.Done():
+		select {
+		case <-obs.done:
+		default:
+			return "", false, err
+		}
+	}
+	if errors.Is(obs.err, os.ErrNotExist) {
 		return "", false, nil
 	}
 	return "", false, err
@@ -523,6 +543,37 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 func callerBudgetRemains(ctx context.Context) bool {
 	_, bounded := ctx.Deadline()
 	return bounded && ctx.Err() == nil
+}
+
+// workspaceGitEntryFlights bounds an unresponsive .git observation to one
+// uncancellable os.Lstat per root — the same contract
+// checkoutMarkerReadFlights gives marker reads. Callers may time out
+// independently, and a later probe joins the parked stat instead of stranding
+// another goroutine on the same dead filesystem.
+var workspaceGitEntryFlights sync.Map
+
+type workspaceGitEntryObservation struct {
+	done chan struct{}
+	err  error
+}
+
+func observeWorkspaceGitEntry(root string) *workspaceGitEntryObservation {
+	obs := &workspaceGitEntryObservation{done: make(chan struct{})}
+	actual, loaded := workspaceGitEntryFlights.LoadOrStore(root, obs)
+	if loaded {
+		return actual.(*workspaceGitEntryObservation)
+	}
+	go func() {
+		if workspaceGitEntryHookForTest != nil {
+			workspaceGitEntryHookForTest()
+		}
+		_, obs.err = os.Lstat(filepath.Join(root, ".git"))
+		// Delete before waking waiters, same as the marker flight: a waiter
+		// that immediately re-probes must not consume this stale observation.
+		workspaceGitEntryFlights.CompareAndDelete(root, obs)
+		close(obs.done)
+	}()
+	return obs
 }
 
 func checkoutIDProbeAttempt(ctx, parent context.Context, root string) (string, bool, error) {
@@ -722,6 +773,11 @@ func ResolveProjectSelector(selector string) (Project, error) {
 // directory moved (#3530 review id 3919604357). Nothing else can hold that
 // window open.
 var registeredProjectProofRaceHookForTest func()
+
+// workspaceGitEntryHookForTest delays the parked .git stat inside
+// observeWorkspaceGitEntry, standing in for a workspace on an unresponsive
+// filesystem — the shape no local path can reproduce.
+var workspaceGitEntryHookForTest func()
 
 // SetRegisteredProjectProofRaceHookForTest installs hook for the duration of a
 // test in another package, and clears it afterwards.

@@ -110,3 +110,42 @@ func TestResolveConfigAwaitsAParkedMarkerRead(t *testing.T) {
 	assert.Equal(t, "gemini", resolved.DefaultProgram,
 		"the configured personal layer must apply: a slow read is not an absent marker")
 }
+
+// TestResolveConfigPropagatesWhenTheGitEntryStatOutlivesTheScan covers the
+// fallback's own wedge shape: the .git existence check that disproves a
+// checkout after a failed probe is parked like the marker read, because a
+// workspace on an unresponsive filesystem stalls a synchronous os.Lstat just
+// as dead as the probe itself. When that observation cannot answer inside
+// the caller's budget the lookup stays unknown and propagates — it must not
+// hang the resolve and must not fabricate "no checkout marker" either.
+func TestResolveConfigPropagatesWhenTheGitEntryStatOutlivesTheScan(t *testing.T) {
+	_, repoRoot, project := registeredTestProject(t)
+	writePersonalConfig(t, project.ID, "default_program = \"gemini\"\n")
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	installFakeGit(t, "#!/bin/sh\nsleep 3\nexec \""+realGit+"\" \"$@\"\n")
+
+	// The hook parks the stat goroutine past the scan deadline — the shape a
+	// dead mount gives the lstat itself.
+	entered := make(chan struct{})
+	release := make(chan struct{})
+	workspaceGitEntryHookForTest = func() {
+		close(entered)
+		<-release
+	}
+	t.Cleanup(func() {
+		close(release)
+		workspaceGitEntryHookForTest = nil
+	})
+
+	resolved, err := ResolveConfig(repoRoot)
+	select {
+	case <-entered:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the .git observation never ran")
+	}
+	require.Error(t, err, "a .git observation that cannot answer inside the budget must propagate, not hang")
+	require.Nil(t, resolved)
+	require.ErrorIs(t, err, context.DeadlineExceeded)
+}
