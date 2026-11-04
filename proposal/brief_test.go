@@ -538,6 +538,134 @@ func TestStoreAttachArmsTheDebtInItsOwnCommit(t *testing.T) {
 	}
 }
 
+func TestServiceBriefIdleTickReadsTheMarkerOnce(t *testing.T) {
+	svc, host, store := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	// The contract is settled; an attached session idling on the poll must
+	// not launch a git subprocess to relearn that, tick after tick.
+	briefTick(svc, sessA, true, false)
+	be := svc.briefs[sessA]
+	if be == nil {
+		t.Fatal("no brief entry for the attached session")
+	}
+	loads := be.markerLoads
+	for i := 0; i < 3; i++ {
+		briefTick(svc, sessA, true, false)
+	}
+	if be.markerLoads != loads {
+		t.Fatalf("idle ticks re-read the marker: %d -> %d loads", loads, be.markerLoads)
+	}
+	// An attach invalidates the cache: the next tick reads once, then caches
+	// the new settled marker again.
+	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Attach(sessA, "q", true); err != nil {
+		t.Fatal(err)
+	}
+	briefTick(svc, sessA, true, false)
+	if be.markerLoads != loads+1 {
+		t.Fatalf("the attach did not invalidate the marker cache: %d -> %d loads", loads, be.markerLoads)
+	}
+	for i := 0; i < 3; i++ {
+		briefTick(svc, sessA, true, false)
+	}
+	if be.markerLoads != loads+1 {
+		t.Fatalf("the new settled marker did not stay cached: %d loads", be.markerLoads)
+	}
+}
+
+func TestServiceBriefUnconfirmedHoldsTheNextContract(t *testing.T) {
+	svc, host, store := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	clock := pushT0
+	svc.now = func() time.Time { return clock }
+	paneReady(host, sessA)
+	host.delivery = DeliveryUnconfirmed
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
+		t.Fatal(err)
+	}
+	host.delivery = DeliveryConfirmed
+	// p's contract may still sit unsubmitted in the pane; q's must not splice
+	// into it — the pane's window guards a further contract whichever
+	// proposal it is for.
+	info, err := svc.Attach(sessA, "q", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RulesDelivery != "held" {
+		t.Fatalf("rules_delivery = %q, want held inside the quiet window", info.RulesDelivery)
+	}
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("the second contract spliced into the first: %d prompts", n)
+	}
+	clock = clock.Add(PushQuiet + time.Second)
+	briefTick(svc, sessA, true, false)
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("a tick pasted the second contract inside the window: %d prompts", n)
+	}
+	clock = clock.Add(PushUnconfirmedTimeout)
+	briefTick(svc, sessA, true, false)
+	prompts := promptList(host)
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "proposal q") {
+		t.Fatalf("q's contract did not go out once the window expired: %v", prompts)
+	}
+}
+
+func TestServiceBriefUnconfirmedEditHoldsTheContract(t *testing.T) {
+	svc, host, store := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	clock := pushT0
+	svc.now = func() time.Time { return clock }
+	paneReady(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
+		t.Fatal(err)
+	}
+	// An edit push that comes back unconfirmed opens the same pane window:
+	// the contract for the freshly attached proposal waits it out too.
+	read, err := svc.Read(Target{SessionID: sessA}, "p", "goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Save(Target{SessionID: sessA}, "p", "goals", "user edit\n", read.Commit); err != nil {
+		t.Fatal(err)
+	}
+	host.delivery = DeliveryUnconfirmed
+	clock = clock.Add(PushQuiet + time.Second)
+	svc.PushTick([]PushTarget{{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"p": PushAuto}, Ready: true}})
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("premise: the edit push did not go out: %d prompts", n)
+	}
+	host.delivery = DeliveryConfirmed
+	info, err := svc.Attach(sessA, "q", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RulesDelivery != "held" {
+		t.Fatalf("rules_delivery = %q, want held inside the edit's quiet window", info.RulesDelivery)
+	}
+	svc.PushTick([]PushTarget{{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"q": PushAuto}, Ready: true}})
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("the contract spliced into the unconfirmed edit: %d prompts", n)
+	}
+	clock = clock.Add(PushUnconfirmedTimeout)
+	svc.PushTick([]PushTarget{{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"q": PushAuto}, Ready: true}})
+	prompts := promptList(host)
+	if len(prompts) != 2 || !strings.Contains(prompts[1], "proposal q") {
+		t.Fatalf("q's contract did not go out once the window expired: %v", prompts)
+	}
+}
+
 func TestServiceBriefQueuedSendNowOverridesTheHold(t *testing.T) {
 	svc, host, _ := newTestService(t)
 	svc.spawn = func(f func()) { f() }

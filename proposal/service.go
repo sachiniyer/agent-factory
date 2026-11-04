@@ -401,6 +401,7 @@ func (s *Service) attach(r *resolved, slug string, deliverRules bool) (*Summary,
 	if err != nil {
 		return nil, err
 	}
+	s.invalidateBrief(r.session.ID)
 	s.publishSnapshot(r, before, "")
 	info, err := s.summary(r, slug)
 	if err != nil {
@@ -438,6 +439,7 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 		if _, err := r.store.Detach(r.session.ID); err != nil {
 			return nil, err
 		}
+		s.invalidateBrief(r.session.ID)
 		return &DetachResult{Detached: true}, nil
 	}
 	if err != nil {
@@ -453,6 +455,7 @@ func (s *Service) Detach(sessionID string) (*DetachResult, error) {
 	if _, err := r.store.Detach(r.session.ID); err != nil {
 		return nil, err
 	}
+	s.invalidateBrief(r.session.ID)
 	return res, nil
 }
 
