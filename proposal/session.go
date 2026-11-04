@@ -107,42 +107,12 @@ func (s *Store) briefLocked(sessionID string) (string, BriefState, error) {
 	return "", "", fmt.Errorf("corrupt proposal briefing marker of session %s: state %q", sessionID, f[1])
 }
 
-// OweBrief arms the briefing marker of sessionID for slug and returns the
-// marker's resulting state. An attach that names a different slug re-arms; a
-// repeated attach of the same slug leaves an owed or done marker alone, so
-// the contract still goes exactly once. When the session has since attached
-// a different proposal — an attach request that raced this one — the debt
-// belongs to the newer attachment, so nothing is written and the existing
-// marker's state comes back instead.
-func (s *Store) OweBrief(sessionID, slug string) (BriefState, error) {
-	if err := validateSessionID(sessionID); err != nil {
-		return "", err
-	}
-	if err := ValidateSlug(slug); err != nil {
-		return "", err
-	}
-	state := BriefOwed
-	err := s.withLock(func() error {
-		if attached, err := s.attachedLocked(sessionID); err == nil && attached != slug {
-			_, cur, berr := s.briefLocked(sessionID)
-			if berr == nil && cur != "" {
-				state = cur
-			}
-			return nil
-		}
-		got, cur, err := s.briefLocked(sessionID)
-		if err != nil {
-			// A corrupt marker cannot say what was delivered; overwriting it
-			// re-briefs, the same repair attach does for attachments.
-			got = ""
-		}
-		if got == slug {
-			state = cur
-			return nil
-		}
-		return s.writeBriefLocked(sessionID, slug, BriefOwed)
-	})
-	return state, err
+// AttachOwing is Attach plus the briefing debt, in the same transaction:
+// the request asked the daemon to deliver the contract, so the marker is
+// armed (or kept, on a same-slug resync) at the moment the attachment becomes
+// visible — the push machinery can never see one without the other.
+func (s *Store) AttachOwing(slug, sessionID string) error {
+	return s.attachOwing(slug, sessionID, true)
 }
 
 // MarkBriefDone settles the session's briefing marker for slug after a send:
@@ -207,6 +177,10 @@ func (s *Store) Attachments() (map[string]string, error) {
 // different slug drops the marker: a later re-attach of the first slug owes
 // its contract again.
 func (s *Store) Attach(slug, sessionID string) error {
+	return s.attachOwing(slug, sessionID, false)
+}
+
+func (s *Store) attachOwing(slug, sessionID string, owe bool) error {
 	if err := validateSessionID(sessionID); err != nil {
 		return err
 	}
@@ -222,7 +196,19 @@ func (s *Store) Attach(slug, sessionID string) error {
 			return err
 		}
 		if current == slug {
-			return s.ensureCursor(sessionID)
+			if err := s.ensureCursor(sessionID); err != nil {
+				return err
+			}
+			if !owe {
+				return nil
+			}
+			// A same-slug resync keeps a settled marker — the contract still
+			// goes exactly once — but re-arms a missing or corrupt one.
+			got, _, err := s.briefLocked(sessionID)
+			if err == nil && got == slug {
+				return nil
+			}
+			return s.writeBriefLocked(sessionID, slug, BriefOwed)
 		}
 		if _, err := s.snapshot(); err != nil {
 			return err
@@ -236,8 +222,16 @@ func (s *Store) Attach(slug, sessionID string) error {
 			return err
 		}
 		tx := "update " + attachRefPrefix + sessionID + " " + strings.TrimSpace(blob) + "\n" +
-			"update " + cursorRefPrefix + sessionID + " " + head + "\n" +
-			"delete " + briefRefPrefix + sessionID + "\n"
+			"update " + cursorRefPrefix + sessionID + " " + head + "\n"
+		if owe {
+			brief, err := s.git([]byte(slug+" "+string(BriefOwed)+"\n"), "hash-object", "-w", "--stdin")
+			if err != nil {
+				return err
+			}
+			tx += "update " + briefRefPrefix + sessionID + " " + strings.TrimSpace(brief) + "\n"
+		} else {
+			tx += "delete " + briefRefPrefix + sessionID + "\n"
+		}
 		_, err = s.git([]byte(tx), "update-ref", "--stdin")
 		return err
 	})

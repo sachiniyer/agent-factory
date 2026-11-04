@@ -56,15 +56,20 @@ func (s *Service) claimBrief(sessionID string) bool {
 	return true
 }
 
-// brief reports what a deliver_rules request did with the contract on info,
-// arming the durable debt first. It runs on the request's goroutine: the send
-// is a pane write like a push route's, so a slow paste does not outlive the
-// reply it belongs to.
+// brief reports what a deliver_rules request did with the contract on info.
+// The attach armed the durable debt in its own commit, so this only reads the
+// marker back. It runs on the request's goroutine: the send is a pane write
+// like a push route's, so a slow paste does not outlive the reply it belongs
+// to.
 func (s *Service) brief(r *resolved, slug string, info *Summary) {
-	state, err := r.store.OweBrief(r.session.ID, slug)
+	got, state, err := r.store.Brief(r.session.ID)
 	switch {
-	case err != nil:
-		info.RulesDelivery, info.RulesError = "failed", fmt.Sprintf("recording the contract owed to the agent: %v", err)
+	case err != nil || got != slug || state == "":
+		errText := "the marker is missing"
+		if err != nil {
+			errText = err.Error()
+		}
+		info.RulesDelivery, info.RulesError = "failed", fmt.Sprintf("recording the contract owed to the agent: %s", errText)
 	case state == BriefDone:
 		// Already delivered for this attachment: a repeated attach of the same
 		// proposal is a resync, not a new briefing.

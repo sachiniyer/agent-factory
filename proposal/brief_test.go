@@ -464,7 +464,7 @@ func TestServiceBriefUnconfirmedRepeatsHonestlyOnReattach(t *testing.T) {
 	}
 }
 
-func TestStoreOweBriefDoesNotArmASupersededAttach(t *testing.T) {
+func TestStoreAttachArmsTheDebtInItsOwnCommit(t *testing.T) {
 	store, _ := newTestStore(t)
 	if err := store.Create("p", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
 		t.Fatal(err)
@@ -472,24 +472,30 @@ func TestStoreOweBriefDoesNotArmASupersededAttach(t *testing.T) {
 	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
 		t.Fatal(err)
 	}
-	// Two attaches race: p's request opens the Docs tab before arming its debt,
-	// and q's whole request lands in between. p's OweBrief arrives last but
-	// must not replace q's debt — the marker follows the live attachment.
-	if err := store.Attach("p", sessA); err != nil {
-		t.Fatal(err)
-	}
-	if err := store.Attach("q", sessA); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.OweBrief(sessA, "q"); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := store.OweBrief(sessA, "p"); err != nil {
+	// The debt commits with the attachment, so the push machinery can never
+	// see one without the other — and a later attach replaces both together,
+	// never leaving a marker for a proposal the session no longer holds.
+	if err := store.AttachOwing("p", sessA); err != nil {
 		t.Fatal(err)
 	}
 	slug, state, err := store.Brief(sessA)
+	if err != nil || slug != "p" || state != BriefOwed {
+		t.Fatalf("attach owing = %q %q, %v; want p owed", slug, state, err)
+	}
+	if err := store.AttachOwing("q", sessA); err != nil {
+		t.Fatal(err)
+	}
+	slug, state, err = store.Brief(sessA)
 	if err != nil || slug != "q" || state != BriefOwed {
-		t.Fatalf("a superseded attach clobbered the briefing debt: %q %q %v", slug, state, err)
+		t.Fatalf("the newer attach must carry its own debt: %q %q %v", slug, state, err)
+	}
+	// A same-slug resync keeps the armed marker exactly once.
+	if err := store.AttachOwing("q", sessA); err != nil {
+		t.Fatal(err)
+	}
+	slug, state, err = store.Brief(sessA)
+	if err != nil || slug != "q" || state != BriefOwed {
+		t.Fatalf("a resync must not re-arm or drop the debt: %q %q %v", slug, state, err)
 	}
 }
 

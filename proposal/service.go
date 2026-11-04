@@ -391,7 +391,14 @@ func (s *Service) attach(r *resolved, slug string, deliverRules bool) (*Summary,
 	if err != nil {
 		return nil, err
 	}
-	if err := r.store.Attach(slug, r.session.ID); err != nil {
+	if deliverRules {
+		// The attachment and the briefing debt commit together, so the push
+		// machinery can never see an attach whose contract is not yet owed.
+		err = r.store.AttachOwing(slug, r.session.ID)
+	} else {
+		err = r.store.Attach(slug, r.session.ID)
+	}
+	if err != nil {
 		return nil, err
 	}
 	s.publishSnapshot(r, before, "")
