@@ -1,13 +1,14 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
-	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -420,6 +421,15 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// hooksReseedTimeout bounds the hooks pane's on-open re-read. The read is
+// ordinary file I/O (global/legacy/checked-in/personal TOML) that an
+// unavailable mount can stall indefinitely; bounding it keeps a stuck read
+// from freezing the Bubble Tea update loop when the user opens Hooks. Mirrors
+// refreshDefaultProgram's localDefaultProgramTimeout — the same bounded
+// synchronous read the event loop already uses for live config probes — and a
+// var so tests can shorten it.
+var hooksReseedTimeout = 10 * time.Second
+
 // showHooksOverlay opens the post-worktree hooks editor as a modal overlay
 // (#1024 PR 4: hooks lost their persistent sidebar slot). The editor opens
 // with input focus so its key loop (n add, enter edit, D delete, esc close)
@@ -435,8 +445,16 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // repo config with no error. A dirty pane is left untouched: it holds an
 // in-memory-only edit from a failed save (#1001) that lives nowhere on disk,
 // and reloading would discard the very edit the user is trying to save.
+//
+// A re-read that fails is surfaced and the overlay is NOT opened: the save
+// path writes only the in-repo key, so a stale pane opened for editing could
+// save successfully and overwrite newer on-disk hooks without ever surfacing
+// the read failure. Refusing to open until a fresh snapshot is obtained is the
+// same "do not edit onto a broken read" contract showConfigEditor applies.
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
-	m.reseedHooksFromDisk()
+	if err := m.reseedHooksFromDisk(); err != nil {
+		return m, m.handleError(err)
+	}
 	m.hooksPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateHooks
@@ -457,33 +475,40 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // committed baseline and dirty flag, so a clean re-read leaves the pane
 // non-dirty and ready to edit the live list.
 //
-// Skipped in remote mode: the project's in-repo config is on the daemon's
-// host, so resolving it from this machine would read an unrelated (or
-// absent) file. The pane is already read-only in remote mode
+// The read runs under hooksReseedTimeout via ResolveConfigForRepoContext, the
+// bounded variant of ResolveConfigForRepo: the unbounded call could block
+// indefinitely on a slow or unavailable mount and freeze the Bubble Tea update
+// loop on every Hooks open. This matches refreshDefaultProgram's bounded
+// synchronous read on the event loop.
+//
+// Skipped (returns nil) in remote mode: the project's in-repo config is on the
+// daemon's host, so resolving it from this machine would read an unrelated
+// (or absent) file. The pane is already read-only in remote mode
 // (switchProject/home_model set the reason at startup), so there is nothing
-// to clobber and nothing to re-read. A read failure is logged and the stale
-// copy is kept: the pane still shows something editable, and the next save
-// surfaces the error rather than silently clobbering.
-func (m *home) reseedHooksFromDisk() {
+// to clobber and nothing to re-read. A read failure is returned so the caller
+// can surface it rather than open an editable stale pane (see showHooksOverlay).
+func (m *home) reseedHooksFromDisk() error {
 	hp := m.hooksPane
 	if hp.IsDirty() {
-		return
+		return nil
 	}
 	if isRemoteTarget() || m.repoRoot == "" {
-		return
+		return nil
 	}
 	repo := &config.RepoContext{
 		Root:         m.repoRoot,
 		IdentityRoot: m.repoIdentityRoot,
 		ID:           m.repoID,
 	}
-	repoCfg, err := config.ResolveConfigForRepo(repo)
+	ctx, cancel := context.WithTimeout(m.ctx, hooksReseedTimeout)
+	defer cancel()
+	repoCfg, err := config.ResolveConfigForRepoContext(ctx, repo)
 	if err != nil {
-		log.WarningLog.Printf("hooks overlay: failed to re-resolve repo config for %s: %v", m.repoRoot, err)
-		return
+		return fmt.Errorf("hooks overlay: failed to re-resolve repo config for %s: %w", m.repoRoot, err)
 	}
 	hp.SetCommands(repoCfg.PostWorktreeCommands)
 	m.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
+	return nil
 }
 
 // showConfigEditor opens the global config editor overlay, reading config fresh
