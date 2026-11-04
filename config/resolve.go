@@ -567,15 +567,26 @@ func projectPersonalDocumentForRoots(identityRoot, workspaceRoot string, strict 
 // projectPersonalDocumentFromLookup turns a project-registry lookup into the
 // SourceProjectPersonal document.
 //
-// Unless strict, a registry that cannot be listed (a corrupt or newer-schema
-// record) degrades to "no personal layer" with a one-time warning rather than
-// failing config resolution for every repo — including repos that have no
-// personal config at all. Before this layer existed, ResolveConfig never
-// touched the registry, and one bad project record must not now break session
-// creation everywhere. The explicit `af config --project` / `af projects` paths
-// still surface the real error, because they call the registry directly.
+// A registry that cannot be LISTED (a corrupt or newer-schema record) degrades
+// to "no personal layer" with a one-time warning rather than failing config
+// resolution for every repo — including repos that have no personal config at
+// all. Before this layer existed, ResolveConfig never touched the registry,
+// and one bad project record must not now break session creation everywhere.
+// The explicit `af config --project` / `af projects` paths still surface the
+// real error, because they call the registry directly, and strict callers —
+// ResolveConfigForIdentityDecisionFromGlobal's credential selection — refuse
+// even that degrade.
+//
+// The degrade ends where "unreadable" ends. A checkout-identity probe that
+// could not answer — most often a deadline the box could not meet — is
+// UNKNOWN, never "no personal layer" (#6746): resolving the lower layers as
+// if the user had configured none silently rewrote per-project
+// default_program/program_overrides/root_agent for the rest of the process.
+// The caller's budget already bounded the asking; whatever outlives it is
+// propagated so the caller fails or narrates the resolve instead of launching
+// a session on fabricated absence.
 func projectPersonalDocumentFromLookup(project Project, found bool, err error, strict bool) (sourceDocument, error) {
-	if err != nil && strict {
+	if err != nil && (strict || !isProjectRegistryReadError(err)) {
 		return sourceDocument{}, err
 	}
 	if err != nil {

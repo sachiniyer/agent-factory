@@ -488,12 +488,48 @@ func listProjectsWithoutRootProbes() ([]Project, error) {
 }
 
 func checkoutIDForWorkspaceContext(parent context.Context, root string) (string, bool, error) {
+	// One attempt gets a fixed probe slice of the caller's budget; a slice that
+	// lapses while the caller's own deadline is still live failed an attempt,
+	// not the lookup — slow is not absent (#6746). The retry runs under the
+	// caller's remaining budget rather than another fixed slice: the slice
+	// already proved too short, and the scan's spare time is exactly what a
+	// loaded box needs. A boundless caller (context.Background) stated no
+	// budget to spend, so it keeps the single-attempt contract — the probe
+	// error's completion channel is how it waits on a parked read anyway.
 	ctx, cancel := context.WithTimeout(parent, registeredProjectProbeTimeout)
-	defer cancel()
+	id, ok, err := checkoutIDProbeAttempt(ctx, parent, root)
+	cancel()
+	if err != nil && errors.Is(err, context.DeadlineExceeded) && callerBudgetRemains(parent) {
+		id, ok, err = checkoutIDProbeAttempt(parent, parent, root)
+	}
+	if err == nil {
+		return id, ok, nil
+	}
+	// Git's answer is not the only way to settle the marker question: a path
+	// with no .git entry cannot be a checkout at all, so it carries no
+	// checkout marker. That is independent filesystem evidence, the same
+	// shortcut projectRootHasCheckoutIDContext takes when its binding probe
+	// fails — a registered project's root always has a .git entry. Every
+	// other failure stays an unknown and propagates.
+	if _, statErr := os.Lstat(filepath.Join(root, ".git")); errors.Is(statErr, os.ErrNotExist) {
+		return "", false, nil
+	}
+	return "", false, err
+}
+
+// callerBudgetRemains reports whether the caller's context is both bounded and
+// still live — the only state in which spending more of its budget is honest.
+// A boundless caller stated no budget, and an expired one has none left.
+func callerBudgetRemains(ctx context.Context) bool {
+	_, bounded := ctx.Deadline()
+	return bounded && ctx.Err() == nil
+}
+
+func checkoutIDProbeAttempt(ctx, parent context.Context, root string) (string, bool, error) {
 	cmd := exec.CommandContext(ctx, "git", "-C", root, "rev-parse", "--git-common-dir")
-	// This probe runs under registeredProjectProbeTimeout inside the scan's own
-	// budget, so its drain allowance is derived from that deadline rather than
-	// from the unbounded default (#3503).
+	// This probe runs under registeredProjectProbeTimeout inside the caller's
+	// own budget, so its drain allowance is derived from that deadline rather
+	// than from the unbounded default (#3503).
 	cmd.WaitDelay = repoProbeWaitDelay(ctx)
 	out, err := cmd.Output()
 	if err != nil {
@@ -511,30 +547,46 @@ func checkoutIDForWorkspaceContext(parent context.Context, root string) (string,
 		return "", false, err
 	}
 	flight := checkoutMarkerRead(filepath.Join(commonDir, checkoutMarkerDirName, markerName))
+	id, ok, err := awaitCheckoutMarkerRead(ctx, root, flight)
+	if err == nil || !errors.Is(err, context.DeadlineExceeded) || !callerBudgetRemains(parent) {
+		return id, ok, err
+	}
+	// The probe's slice lapsed with the uncancellable read still parked: the
+	// deadline ended this attempt's wait, never the read. Spend the caller's
+	// remaining budget on the answer already in flight rather than reporting
+	// it dead and leaving the next probe to wait on the same read anyway
+	// (#6746).
+	return awaitCheckoutMarkerRead(parent, root, flight)
+}
+
+// awaitCheckoutMarkerRead waits on one parked marker read under waitCtx. The
+// read is uncancellable, so the deadline ends only the WAIT — the returned
+// error still carries the flight's completion, the caller's handle for
+// listening longer. A read finishing as the deadline lands wins: its result
+// is preferred over reporting the tie as a timeout.
+func awaitCheckoutMarkerRead(waitCtx context.Context, root string, flight *checkoutMarkerReadFlight) (string, bool, error) {
 	select {
 	case <-flight.done:
-		marker := flight.result
-		if marker.err != nil {
-			return "", false, &checkoutMarkerProbeError{err: marker.err}
-		}
-		return marker.id, marker.exists, nil
-	case <-ctx.Done():
-		// Prefer a completed read when it raced the deadline. Only a reader that
-		// is still alive belongs in the error's completion handle.
+		return checkoutMarkerFlightResult(flight)
+	case <-waitCtx.Done():
 		select {
 		case <-flight.done:
-			marker := flight.result
-			if marker.err != nil {
-				return "", false, &checkoutMarkerProbeError{err: marker.err}
-			}
-			return marker.id, marker.exists, nil
+			return checkoutMarkerFlightResult(flight)
 		default:
 			return "", false, &checkoutMarkerProbeError{
-				err:        fmt.Errorf("read checkout marker for %s: %w", root, ctx.Err()),
+				err:        fmt.Errorf("read checkout marker for %s: %w", root, waitCtx.Err()),
 				completion: flight.done,
 			}
 		}
 	}
+}
+
+func checkoutMarkerFlightResult(flight *checkoutMarkerReadFlight) (string, bool, error) {
+	marker := flight.result
+	if marker.err != nil {
+		return "", false, &checkoutMarkerProbeError{err: marker.err}
+	}
+	return marker.id, marker.exists, nil
 }
 
 func checkoutMarkerProbeFailure(ctx context.Context, root string, err error) error {
