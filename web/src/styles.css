@@ -4593,6 +4593,13 @@ button[class], input[class], select[class], textarea[class] { font-size: var(--a
 
 .af-docs-editor .cm-content {
   max-width: 80ch;
+  /* The scroller is a flex container, so this is a flex item: min-width:auto
+     floors it at the document's min-content, and an unbreakable line — a
+     fenced block's white-space:pre source, a long URL, a wide rendered
+     table — then widens the WHOLE document inside the scroller (max-width
+     only clamps it to 80ch, still wider than a narrow pane). Zero the floor:
+     the content sizes to the pane and the block scrolls inside itself. */
+  min-width: 0;
   padding: var(--af-space-3);
   caret-color: var(--af-ink);
 }

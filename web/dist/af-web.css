@@ -4003,6 +4003,7 @@ textarea[class] {
 }
 .af-docs-editor .cm-content {
   max-width: 80ch;
+  min-width: 0;
   padding: var(--af-space-3);
   caret-color: var(--af-ink);
 }
