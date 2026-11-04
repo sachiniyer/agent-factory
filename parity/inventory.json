@@ -1743,16 +1743,16 @@
         "pointer": ""
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/ui.ts Proposal action → index.ts doProposal → web/src/proposal_modal.ts + web/src/proposal_api.ts listProposals/startProposal/attachProposal/detachProposal → POST /v1/{List,Start,Attach,Detach}Proposal (daemon/proposals.go)"
       },
       "cli": {
         "status": "yes",
         "pointer": "api/proposals.go proposalStartCmd/proposalAttachCmd/proposalDetachCmd/proposalChangesCmd/proposalCheckpointCmd \u2192 POST /v1/{Start,Attach,Detach}Proposal, PullProposalChanges, CheckpointProposal (daemon/proposals.go)"
       },
-      "verdict": "real-gap",
-      "issue": "TBD",
-      "notes": "Step 2a (docs/dev/proposals/proposal-mode/api.md) put these verbs on daemon routes, which the CLI calls and the web can call. The remaining gap is web-only: step 2b adds the web Docs tab, which start and attach open beside the agent. The tui cell is n/a rather than a gap: goals.md's non-goals state 'The TUI does not get an editor. The Docs tab is web only.', so the TUI has no proposal-editing analogue by design; future.md's read-only TUI view is a different, later capability, not this one."
+      "verdict": "deliberate",
+      "issue": "#6753",
+      "notes": "The web's Proposal modal (the session Actions menu) starts a proposal, attaches the session to an existing one over ListProposals, or detaches it — the same daemon routes the CLI verbs call, so the surfaces cannot disagree (#6753 closed the step-2b web gap). PullProposalChanges and CheckpointProposal stay unwebbed on purpose: they are the agent's cursor verbs (`af proposal changes|checkpoint` run inside the session), and the human↔agent sync direction is already the web's push chip (proposal.push). The web addresses the project by session_id like every proposal route it calls (field_coverage.web_rpcs). The tui cell is n/a rather than a gap: goals.md's non-goals state 'The TUI does not get an editor. The Docs tab is web only.', so the TUI has no proposal-editing analogue by design; future.md's read-only TUI view is a different, later capability, not this one."
     },
     {
       "id": "proposal.docs",
@@ -2077,7 +2077,11 @@
       "ReadProposalDoc": "proposal.docs",
       "RemoveProposalDoc": "proposal.docs",
       "HoldProposalPush": "proposal.push",
-      "SendProposalChanges": "proposal.push"
+      "SendProposalChanges": "proposal.push",
+      "ListProposals": "proposal.docs",
+      "StartProposal": "proposal.agent-workflow",
+      "AttachProposal": "proposal.agent-workflow",
+      "DetachProposal": "proposal.agent-workflow"
     },
     "cli_flags": {
       "af --daemon": "meta.internal",
@@ -3088,6 +3092,19 @@
         },
         "repo_path": {
           "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        }
+      },
+      "ListProposals": {
+        "repo_id": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        },
+        "repo_path": {
+          "ok": "The web names a proposal by session_id and the daemon resolves its repo from that session; repo_id and repo_path address a repo for a caller with no session (the CLI's `af proposal` verbs run from a checkout), which the Docs tab never is."
+        }
+      },
+      "StartProposal": {
+        "docs": {
+          "ok": "The web start form takes only the slug: the daemon's empty docs IS the CLI's no-flag default (the full built-in template set), and no route serves the template enum for a picker to offer subsets — hardcoding a doc list in the client is exactly the drift the enum derivations exist to prevent."
         }
       }
     }

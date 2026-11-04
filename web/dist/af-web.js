@@ -6756,6 +6756,9 @@ function isPendingManualSwapDeliveryConfirmable(s) {
 function canHandoff(s) {
   return s.can_handoff === true;
 }
+function canProposal(s) {
+  return !isArchived(s) && !isOffBoxWorkspace(s);
+}
 function isRootSession(s) {
   return s.is_root === true;
 }
@@ -7052,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "9a9c06576af5";
+var CLIENT_VERSION = "3d96b3edae9a";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8128,6 +8131,9 @@ function terminalChrome(opts) {
   deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
+  const proposal = action("Proposal", "", opts.proposal);
+  proposal.title = "Start a proposal, attach the session to one, or detach it";
+  proposal.hidden = true;
   const copy = action("Copy link", "af-copy-link", opts.copyLink);
   copy.title = "Copy link to this session";
   const fontDecrease = action("A\u2212", "af-term-zoom", () => opts.fontSizeStep?.(-1));
@@ -8140,10 +8146,10 @@ function terminalChrome(opts) {
   tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions2, closePane);
+  menu.panel.append(placement, tabUnavailable, copy, handoff, proposal, deliver, actions2, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions: actions2, newTabs, newTerminal, newVSCode, docsShortcuts: docsShortcuts2, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, proposal, closePane, actions: actions2, newTabs, newTerminal, newVSCode, docsShortcuts: docsShortcuts2, tabUnavailable, menu, dispose: menu.dispose };
 }
 function attentionChip(onDismiss) {
   const label = h("span", { class: "af-term-attention-label" }, "Attention");
@@ -19491,6 +19497,8 @@ var AppShell = class {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   handoffBtn = null;
   handoffVisible = false;
+  proposalBtn = null;
+  proposalVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -20432,6 +20440,7 @@ var AppShell = class {
       placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      proposal: () => this.actions.proposal(),
       newTab: (kind) => {
         if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
         this.actions.newTab(kind);
@@ -20455,6 +20464,9 @@ var AppShell = class {
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
+    this.proposalBtn = chrome.proposal;
+    this.proposalVisible = canProposal(selected);
+    chrome.proposal.hidden = !this.proposalVisible;
     this.headActions = chrome.actions;
     this.headActionSig = "";
     const tabBar = chrome.tabs;
@@ -21016,6 +21028,11 @@ var AppShell = class {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
     }
+    const nowProposal = canProposal(selected);
+    if (this.proposalBtn && nowProposal !== this.proposalVisible) {
+      this.proposalVisible = nowProposal;
+      this.proposalBtn.hidden = !nowProposal;
+    }
   }
   /** Keeps management reachable when the selected session's rail row is filtered
    *  out, and only then. Capability and row visibility are both positive evidence:
@@ -21346,6 +21363,38 @@ function captureTabDeleteTarget(target) {
 }
 
 // src/proposal_api.ts
+function parseProposalSummary(d) {
+  if (!isRecord(d)) {
+    throw new ApiError(500, "the daemon sent a proposal without fields");
+  }
+  const names = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
+  return {
+    slug: str(d.slug),
+    docs: names(d.docs),
+    attachedSessions: names(d.attached_sessions),
+    lastEdit: str(d.last_edit),
+    tab: str(d.tab),
+    tabError: str(d.tab_error)
+  };
+}
+async function listProposals(sessionId, token2) {
+  const d = await af("ListProposals", { session_id: sessionId }, token2);
+  const rows = isRecord(d) && Array.isArray(d.proposals) ? d.proposals : [];
+  return rows.map(parseProposalSummary);
+}
+async function startProposal(sessionId, slug, token2) {
+  return parseProposalSummary(await af("StartProposal", { session_id: sessionId, slug }, token2));
+}
+async function attachProposal(sessionId, slug, token2) {
+  return parseProposalSummary(await af("AttachProposal", { session_id: sessionId, slug }, token2));
+}
+async function detachProposal(sessionId, token2) {
+  const d = await af("DetachProposal", { session_id: sessionId }, token2);
+  if (!isRecord(d)) {
+    throw new ApiError(500, "the daemon sent a detach reply without fields");
+  }
+  return { slug: str(d.slug), detached: d.detached === true };
+}
 function isRecord(v) {
   return typeof v === "object" && v !== null && !Array.isArray(v);
 }
@@ -21384,6 +21433,105 @@ function parseProposalChange(ev) {
     return null;
   }
   return { repoId: str(d.repo_id), slug, doc: str(d.doc), commit: str(d.commit), author: str(d.author) };
+}
+
+// src/proposal_modal.ts
+function proposalModal(opts) {
+  const { handle, body, confirmBtn } = modalChrome({
+    title: `Proposal \xB7 ${opts.sessionTitle}`,
+    confirmLabel: "Start",
+    confirmClass: "af-primary",
+    onCancel: opts.onCancel
+  });
+  let busy = false;
+  const actionButtons = [];
+  const slugInput = h("input", {
+    type: "text",
+    class: "af-input",
+    placeholder: "auth-rework",
+    autocomplete: "off"
+  });
+  slugInput.setAttribute("aria-label", "New proposal name");
+  const syncSubmit = () => {
+    confirmBtn.disabled = busy || slugInput.value.trim() === "";
+    for (const btn of actionButtons) {
+      btn.disabled = busy || btn.dataset.current === "true";
+    }
+  };
+  const chromeSetBusy = handle.setBusy.bind(handle);
+  handle.setBusy = (b) => {
+    busy = b;
+    chromeSetBusy(b);
+    syncSubmit();
+  };
+  slugInput.addEventListener("input", syncSubmit);
+  if (opts.attached.length > 0) {
+    const detachBtn = h("button", { type: "button", class: "af-ghost af-prop-detach" }, "Detach");
+    detachBtn.title = "Remove this session's proposal attachment and close its Proposal tab";
+    detachBtn.addEventListener("click", () => opts.onDetach());
+    actionButtons.push(detachBtn);
+    body.append(
+      h(
+        "p",
+        { class: "af-modal-text af-prop-attached" },
+        `Attached to ${opts.attached.map((s) => `\u201C${s}\u201D`).join(", ")} \xB7 starting or attaching another moves the session `,
+        detachBtn
+      )
+    );
+  }
+  const list = h("div", { class: "af-prop-list", role: "listbox" });
+  list.setAttribute("aria-label", "Existing proposals");
+  const listNote = h("p", { class: "af-prop-note", role: "status" }, "Loading\u2026");
+  const renderRows = (rows) => {
+    actionButtons.length = opts.attached.length > 0 ? 1 : 0;
+    list.replaceChildren();
+    for (const row of rows) {
+      const current = opts.attached.includes(row.slug);
+      const item = h(
+        "button",
+        { type: "button", class: "af-prop-item", role: "option" },
+        h(
+          "span",
+          { class: "af-prop-name" },
+          h("span", { class: "af-prop-text" }, row.slug)
+        ),
+        h(
+          "span",
+          { class: "af-prop-meta" },
+          `${row.docs.length} doc${row.docs.length === 1 ? "" : "s"}` + (row.attachedSessions.length > 0 ? ` \xB7 ${row.attachedSessions.join(", ")}` : "") + (current ? " \xB7 attached" : "")
+        )
+      );
+      item.dataset.current = String(current);
+      item.setAttribute("aria-selected", String(current));
+      item.addEventListener("click", () => opts.onAttach(row.slug));
+      actionButtons.push(item);
+      list.append(h("div", { class: "af-prop-row" }, item));
+    }
+    listNote.textContent = rows.length === 0 ? "No proposals yet \u2014 start one above." : "";
+    syncSubmit();
+  };
+  void opts.loadProposals().then(renderRows).catch((e) => {
+    listNote.textContent = `Could not load proposals: ${errorText(e)}`;
+  });
+  body.append(
+    field("New proposal", slugInput),
+    h("p", { class: "af-modal-hint" }, "Creates the proposal from the doc templates and attaches the session \u2014 its docs open beside the agent."),
+    h("span", { class: "af-modal-label" }, "Attach an existing proposal"),
+    list,
+    listNote
+  );
+  asForm(handle.el.firstElementChild, () => {
+    const slug = slugInput.value.trim();
+    if (slug === "") {
+      handle.setError("Name the proposal.");
+      return;
+    }
+    handle.setError(null);
+    opts.onStart(slug);
+  });
+  syncSubmit();
+  queueMicrotask(() => slugInput.focus());
+  return handle;
 }
 
 // src/viewport-insets.ts
@@ -23395,6 +23543,48 @@ function doHandoff() {
     })
   );
 }
+function doProposal() {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id || !canProposal(sel)) {
+    return;
+  }
+  const sessionId = sel.id;
+  const attached = sessionTabs(sel).filter((t) => t.kind === TabKind.Docs && typeof t.proposal === "string" && t.proposal !== "").map((t) => t.proposal);
+  const run = (verb, describe2) => {
+    const tok = token;
+    if (tok === null || !modal) {
+      return;
+    }
+    const m = modal;
+    m.setBusy(true);
+    void verb(tok).then((r) => {
+      if (modal === m) closeModal();
+      requestResync();
+      const note = describe2(r);
+      if (note !== null) surfaceNotice(note);
+    }).catch((e) => {
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      m.setBusy(false);
+      m.setError(errorText(e));
+    });
+  };
+  const attachNote = (verbName) => (r) => "tabError" in r && r.tabError !== "" ? `${verbName} \u2014 the Docs tab did not open: ${r.tabError}` : null;
+  const loadProposalList = () => token === null ? Promise.reject(new Error("not authorized")) : listProposals(sessionId, token);
+  openModal(proposalModal({
+    sessionTitle: sel.title,
+    attached,
+    loadProposals: loadProposalList,
+    onStart: (slug) => run((tok) => startProposal(sessionId, slug, tok), attachNote("Proposal started")),
+    onAttach: (slug) => run((tok) => attachProposal(sessionId, slug, tok), attachNote("Attached")),
+    onDetach: () => run((tok) => detachProposal(sessionId, tok), () => null),
+    onCancel: closeModal
+  }));
+}
 function doRemoveTask(task) {
   const tok = token;
   if (tok === null) {
@@ -23466,6 +23656,7 @@ var actions = {
   clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
+  proposal: doProposal,
   switchTab,
   layoutChanged: () => splitView.refit(),
   closePane: () => splitView.closeFocusedPane(),

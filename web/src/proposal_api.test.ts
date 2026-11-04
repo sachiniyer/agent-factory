@@ -3,10 +3,13 @@ import { afterEach, test } from "node:test";
 import { ApiError } from "./api.js";
 import {
   addDoc,
+  attachProposal,
   changeNamesDoc,
+  detachProposal,
   getDoc,
   getProposal,
   holdPush,
+  listProposals,
   parseDocText,
   parsePushStatus,
   parseProposalPush,
@@ -16,6 +19,7 @@ import {
   putDoc,
   resetFenceSupport,
   sendChanges,
+  startProposal,
 } from "./proposal_api.js";
 
 const realFetch = globalThis.fetch;
@@ -142,6 +146,56 @@ test("push routes post the session and parse the status", async () => {
   ]);
   recordFetch(200, { data: {}, error: null });
   await assert.rejects(sendChanges("s1", ""), /push status/);
+});
+
+// The workflow verbs (#6753): the web's proposal.agent-workflow half. Every one
+// names the session and nothing else — the daemon resolves the repo from it,
+// which is why repo_id/repo_path stay unsent (field_coverage.web_rpcs says so).
+test("listProposals posts the session id and parses each summary row", async () => {
+  const calls = recordFetch(200, {
+    data: {
+      proposals: [
+        { slug: "auth-rework", docs: ["goals", "api"], attached_sessions: ["planner"], last_edit: "2026-10-20T10:00:00Z" },
+        { slug: "empty", docs: [], attached_sessions: null },
+      ],
+    },
+    error: null,
+  });
+  const rows = await listProposals("s1", "tok");
+  assert.equal(calls[0]!.url, "/v1/ListProposals");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1" });
+  assert.equal((calls[0]!.init.headers as Record<string, string>).Authorization, "Bearer tok");
+  assert.deepEqual(rows, [
+    { slug: "auth-rework", docs: ["goals", "api"], attachedSessions: ["planner"], lastEdit: "2026-10-20T10:00:00Z", tab: "", tabError: "" },
+    { slug: "empty", docs: [], attachedSessions: [], lastEdit: "", tab: "", tabError: "" },
+  ]);
+});
+
+test("start and attach post slug + session id only, and carry the tab fields of the reply", async () => {
+  let calls = recordFetch(200, { data: { slug: "auth", docs: ["goals"], tab: "auth (proposal)", tab_error: "" }, error: null });
+  const started = await startProposal("s1", "auth", "tok");
+  assert.equal(calls[0]!.url, "/v1/StartProposal");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "auth" }, "no docs field — empty IS the built-in template default");
+  assert.equal(started.tab, "auth (proposal)");
+
+  calls = recordFetch(200, { data: { slug: "api-rework", docs: ["api"], attached_sessions: ["s1"], tab: "", tab_error: "tmux is gone" }, error: null });
+  const attached = await attachProposal("s1", "api-rework", "tok");
+  assert.equal(calls[0]!.url, "/v1/AttachProposal");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1", slug: "api-rework" });
+  assert.equal(attached.tabError, "tmux is gone", "a failed Docs tab is a partial outcome the modal must surface");
+
+  calls = recordFetch(200, { data: { slug: "api-rework", detached: true }, error: null });
+  assert.deepEqual(await detachProposal("s1", "tok"), { slug: "api-rework", detached: true });
+  assert.equal(calls[0]!.url, "/v1/DetachProposal");
+  assert.deepEqual(JSON.parse(calls[0]!.init.body as string), { session_id: "s1" });
+});
+
+test("a malformed workflow reply is an ApiError, not a silent default", async () => {
+  recordFetch(200, { data: "nope", error: null });
+  await assert.rejects(startProposal("s1", "p", "tok"), /proposal without fields/);
+  await assert.rejects(detachProposal("s1", "tok"), /detach reply without fields/);
+  recordFetch(200, { data: { proposals: "nope" }, error: null });
+  assert.deepEqual(await listProposals("s1", "tok"), [], "a non-array proposals field lists nothing");
 });
 
 test("putDoc sends keepalive only when the serialized body fits the browser's 64 KiB cap", async () => {

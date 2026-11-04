@@ -478,6 +478,21 @@ export function canHandoff(s: SessionData): boolean {
   return s.can_handoff === true;
 }
 
+/** True when the session's Proposal action is reachable — the gate for the
+ *  start/attach/detach modal (#6753). The daemon owns the verb-level rules and
+ *  states them in one place: start/attach refuse a session whose workspace is
+ *  off-box (refuseOffBox, proposal/service.go — the agent inside a docker/ssh/
+ *  sandbox workspace cannot open the proposal docs, which live on the daemon
+ *  host). isOffBoxWorkspace is the web's projected equivalent of that check,
+ *  so the button hides exactly where the primary verbs would refuse rather
+ *  than re-deriving the rule. The other half the client can pre-answer is
+ *  archival: an archived session is not loaded, so the session_id lookup
+ *  cannot resolve. Everything else — a taken slug, a dead tmux, a tab that
+ *  fails to open — the daemon answers itself and the modal shows verbatim. */
+export function canProposal(s: SessionData): boolean {
+  return !isArchived(s) && !isOffBoxWorkspace(s);
+}
+
 
 /**
  * Whether a session is the reserved root agent (#2513). The web CONSUMES the

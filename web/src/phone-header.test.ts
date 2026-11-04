@@ -94,7 +94,7 @@ test("phone overflow has native keyboard activation and Escape returns focus to 
 
 test("truncated session title retains the complete name for pointer and accessible text", () => {
   const title = "Review the focused-session header across all phone widths";
-  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
+  const chrome = components.terminalChrome({ title, copyLink() {}, handoff() {}, proposal() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
   assert.equal(chrome.title.title, title, "ellipsis must have a full-name route");
   assert.equal(chrome.title.textContent, title);
   assert.equal(chrome.title.getAttribute("aria-label"), title);
@@ -194,7 +194,7 @@ test("hiding the last phone control moves focus out before the menu hides", () =
 
 test("the second click of a double-click does not create a second tab", () => {
   const kinds: string[] = [];
-  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab(kind) { kinds.push(kind); } });
+  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, proposal() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab(kind) { kinds.push(kind); } });
   const click = (detail: number) => Object.assign(new Event("click"), { detail });
   chrome.newTerminal.dispatchEvent(click(1));
   chrome.newTerminal.dispatchEvent(click(2));
@@ -204,7 +204,7 @@ test("the second click of a double-click does not create a second tab", () => {
 });
 
 test("the second press of a double-click does not take focus from the new terminal", () => {
-  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
+  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, proposal() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
   const press = (detail: number) => Object.assign(new Event("mousedown", { cancelable: true }), { detail });
   const first = press(1);
   chrome.newTerminal.dispatchEvent(first);
@@ -232,7 +232,7 @@ test("attention chip shows only while the agent asks, and only its × dismisses 
 });
 
 test("the session header carries the attention chip, hidden until a request exists", () => {
-  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
+  const chrome = components.terminalChrome({ title: "s", copyLink() {}, handoff() {}, proposal() {}, retry() {}, markDelivered() {}, clearAttention() {}, newTab() {} });
   assert.ok((chrome.head as unknown as Element).children.includes(chrome.attention.el as unknown as Element));
   assert.equal((chrome.attention.el as unknown as Element).hidden, true);
   chrome.dispose();
