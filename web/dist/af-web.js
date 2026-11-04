@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "3d96b3edae9a";
+var CLIENT_VERSION = "868cf741dc2b";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21444,7 +21444,8 @@ function proposalModal(opts) {
     onCancel: opts.onCancel
   });
   let busy = false;
-  const actionButtons = [];
+  const rowButtons = [];
+  let detachBtn = null;
   const slugInput = h("input", {
     type: "text",
     class: "af-input",
@@ -21454,7 +21455,10 @@ function proposalModal(opts) {
   slugInput.setAttribute("aria-label", "New proposal name");
   const syncSubmit = () => {
     confirmBtn.disabled = busy || slugInput.value.trim() === "";
-    for (const btn of actionButtons) {
+    if (detachBtn) {
+      detachBtn.disabled = busy;
+    }
+    for (const btn of rowButtons) {
       btn.disabled = busy || btn.dataset.current === "true";
     }
   };
@@ -21465,28 +21469,37 @@ function proposalModal(opts) {
     syncSubmit();
   };
   slugInput.addEventListener("input", syncSubmit);
-  if (opts.attached.length > 0) {
-    const detachBtn = h("button", { type: "button", class: "af-ghost af-prop-detach" }, "Detach");
+  let attached = [...opts.attached];
+  const attachedSlot = h("div");
+  const renderAttached = () => {
+    detachBtn = null;
+    attachedSlot.replaceChildren();
+    if (attached.length === 0) {
+      return;
+    }
+    detachBtn = h("button", { type: "button", class: "af-ghost af-prop-detach" }, "Detach");
     detachBtn.title = "Remove this session's proposal attachment and close its Proposal tab";
     detachBtn.addEventListener("click", () => opts.onDetach());
-    actionButtons.push(detachBtn);
-    body.append(
+    attachedSlot.append(
       h(
         "p",
         { class: "af-modal-text af-prop-attached" },
-        `Attached to ${opts.attached.map((s) => `\u201C${s}\u201D`).join(", ")} \xB7 starting or attaching another moves the session `,
+        `Attached to ${attached.map((s) => `\u201C${s}\u201D`).join(", ")} \xB7 starting or attaching another moves the session `,
         detachBtn
       )
     );
-  }
+    syncSubmit();
+  };
   const list = h("div", { class: "af-prop-list", role: "listbox" });
   list.setAttribute("aria-label", "Existing proposals");
   const listNote = h("p", { class: "af-prop-note", role: "status" }, "Loading\u2026");
   const renderRows = (rows) => {
-    actionButtons.length = opts.attached.length > 0 ? 1 : 0;
+    attached = rows.filter((r) => r.attachedSessions.includes(opts.sessionTitle) || r.attachedSessions.includes(opts.sessionId)).map((r) => r.slug);
+    renderAttached();
+    rowButtons.length = 0;
     list.replaceChildren();
     for (const row of rows) {
-      const current = opts.attached.includes(row.slug);
+      const current = attached.includes(row.slug);
       const item = h(
         "button",
         { type: "button", class: "af-prop-item", role: "option" },
@@ -21504,7 +21517,7 @@ function proposalModal(opts) {
       item.dataset.current = String(current);
       item.setAttribute("aria-selected", String(current));
       item.addEventListener("click", () => opts.onAttach(row.slug));
-      actionButtons.push(item);
+      rowButtons.push(item);
       list.append(h("div", { class: "af-prop-row" }, item));
     }
     listNote.textContent = rows.length === 0 ? "No proposals yet \u2014 start one above." : "";
@@ -21514,12 +21527,14 @@ function proposalModal(opts) {
     listNote.textContent = `Could not load proposals: ${errorText(e)}`;
   });
   body.append(
+    attachedSlot,
     field("New proposal", slugInput),
     h("p", { class: "af-modal-hint" }, "Creates the proposal from the doc templates and attaches the session \u2014 its docs open beside the agent."),
     h("span", { class: "af-modal-label" }, "Attach an existing proposal"),
     list,
     listNote
   );
+  renderAttached();
   asForm(handle.el.firstElementChild, () => {
     const slug = slugInput.value.trim();
     if (slug === "") {
@@ -23577,6 +23592,7 @@ function doProposal() {
   const loadProposalList = () => token === null ? Promise.reject(new Error("not authorized")) : listProposals(sessionId, token);
   openModal(proposalModal({
     sessionTitle: sel.title,
+    sessionId,
     attached,
     loadProposals: loadProposalList,
     onStart: (slug) => run((tok) => startProposal(sessionId, slug, tok), attachNote("Proposal started")),
