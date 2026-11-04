@@ -66,6 +66,15 @@ type ConfigPane struct {
 	statusIsError bool
 	restartNotice string
 
+	// statusLine is the one line renderStatus draws: the NEWEST outcome any
+	// section produced. Every writer feeds it through its channel's setter, so
+	// a stale outcome can never hide a newer one by precedence order — the
+	// rule a pairwise precedence between the three channels could not hold
+	// both ways (#5571 review). The per-channel status fields stay for their
+	// own readers (the add form's footer, the account-outcome accessor); this
+	// is what the shared line shows.
+	statusLine statusEvent
+
 	width    int
 	height   int
 	hasFocus bool
@@ -93,10 +102,15 @@ type ConfigPane struct {
 	// list for the key's full candidate trace — which layer won, which were
 	// shadowed, absent, or disallowed. savedScrollTop holds the list's scroll
 	// offset so esc returns the reader to the row they explained.
-	explaining     bool
-	explainKey     string
-	explainLines   []string
-	explainValue   *config.ResolvedValue
+	explaining   bool
+	explainKey   string
+	explainLines []string
+	explainValue *config.ResolvedValue
+	// explainHost holds the row a host-check explain is showing (#5571): the
+	// view is the explain view's scrollable reader pointed at a host verdict
+	// instead of a key trace, so explainValue is nil for it and SetSize
+	// rewraps through wrappedHostExplainLines.
+	explainHost    *HostRow
 	savedScrollTop int
 
 	// accounts is the Accounts section (#3385): agent identities, rendered below
@@ -124,6 +138,9 @@ type ConfigPane struct {
 	// to open one and closes.
 	assistantRequested bool
 }
+
+// The statusLine field and its setStatus/clearStatus/renderStatus machinery
+// live in config_pane_status.go — one line, fed by every channel's setter.
 
 // configRow is one line of the flattened view: either a tier heading or an
 // entry. Headings are rows rather than render-time decoration so that
@@ -220,8 +237,12 @@ func (c *ConfigPane) SetSize(width, height int) {
 	// budgets against the old count, leaving parts of it unreachable. Keep
 	// the resolved value and rewrap it so the line math stays exact (#4803
 	// review).
-	if resized && c.explaining && c.explainValue != nil {
-		c.explainLines = c.wrappedExplainLines(*c.explainValue)
+	if resized && c.explaining {
+		if c.explainValue != nil {
+			c.explainLines = c.wrappedExplainLines(*c.explainValue)
+		} else if c.explainHost != nil {
+			c.explainLines = c.wrappedHostExplainLines(*c.explainHost)
+		}
 		c.scrollTop = min(max(0, len(c.explainLines)-1), c.scrollTop)
 	}
 }
@@ -251,14 +272,12 @@ func (c *ConfigPane) SetFocus(focus bool) {
 		c.hosts.busy = nil
 		c.hosts.pending = nil
 		c.hosts.checkAsked = false
-		c.hosts.status = ""
-		c.hosts.statusIsError = false
-		c.hosts.statusFromCheck = false
-		c.accounts.status = ""
-		c.accounts.statusIsError = false
+		c.clearHostStatus()
+		c.clearAccountStatus()
 		c.explaining = false
 		c.explainLines = nil
 		c.explainValue = nil
+		c.explainHost = nil
 		c.clearStatus()
 		// A pending request is consumed the moment the app opens the assistant, so
 		// one that survives to a close was never taken (the pane was dismissed
@@ -487,23 +506,11 @@ func (c *ConfigPane) beginEdit() {
 		return
 	}
 	c.editing = true
-	c.status = ""
-	c.restartNotice = ""
+	c.clearStatus()
 	c.sizeEditField()
 	c.input.SetValue(entry.Value)
 	c.input.CursorEnd()
 	c.input.Focus()
-}
-
-// clearStatus drops the last write's echo, its restart notice, and any error.
-//
-// All three must go together: leaving statusIsError set while clearing the text
-// would render an empty error line, and leaving the notice would tell a user to
-// restart for an edit they cannot see.
-func (c *ConfigPane) clearStatus() {
-	c.status = ""
-	c.statusIsError = false
-	c.restartNotice = ""
 }
 
 func (c *ConfigPane) cancelEdit() {
@@ -563,29 +570,25 @@ func (c *ConfigPane) commitEdit() {
 
 	result, notice, err := c.save(entry.Key, value)
 	// The write produced an outcome either way, so it retires the Hosts
-	// section's status: one line reports the LATEST event, and a stale check
-	// outcome must never sit in front of the validator's refusal or the
+	// section's status too: one line reports the LATEST event, and a stale
+	// check outcome must never sit in front of the validator's refusal or the
 	// save's echo and notice (#6718 review).
 	c.clearHostStatus()
 	if err != nil {
 		// Stay in edit mode on a rejection: the bad value is still in the field
 		// for the user to correct, which is the whole point of validating before
 		// the write rather than after.
-		c.status = err.Error()
-		c.statusIsError = true
-		c.restartNotice = ""
+		c.setStatus(err.Error(), true, "")
 		return
 	}
 
 	c.cancelEdit()
 	// Echo what was actually written, from the write path's own result — not
 	// from what this pane believes it sent. Same contract as `af config set`
-	// and the config agent.
-	c.status = fmt.Sprintf("set %s = %s", result.Key, result.Value)
-	c.statusIsError = false
-	// The per-key effect notice (#2480): live now, next daemon start, or next af
-	// launch — the honest answer for THIS key, computed by the write path.
-	c.restartNotice = notice
+	// and the config agent. The per-key effect notice (#2480) rides along:
+	// live now, next daemon start, or next af launch — the honest answer for
+	// THIS key, computed by the write path.
+	c.setStatus(fmt.Sprintf("set %s = %s", result.Key, result.Value), false, notice)
 
 	// Reflect the canonical value back into the row so the list shows what the
 	// file holds, not what was typed.
@@ -860,49 +863,6 @@ func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
 	return b.String()
 }
 
-// renderStatus renders the echo of the last write, or the validator's error,
-// plus the restart notice.
-//
-// The notice is shown AT THE MOMENT OF THE EDIT rather than on close or in a
-// banner: a user who sets a value and looks away has been told exactly when they
-// were in a position to act on it.
-func (c *ConfigPane) renderStatus() string {
-	// The host check outcome wins the line while it is set: it is the newest
-	// event, and the one the user is waiting on — a probe request the daemon
-	// refused, or the empty-list answer.
-	if c.hosts.status != "" {
-		if c.hosts.statusIsError {
-			return c.wrap(c.hosts.status, configErrorStyle)
-		}
-		return c.wrap(c.hosts.status, configOKStyle)
-	}
-	// The account outcome wins the line while it is set: it is the newer event,
-	// and it is the one the user is waiting on — a register that was refused, or
-	// the report from a login that just handed the terminal back.
-	if c.accounts.status != "" {
-		if c.accounts.statusIsError {
-			return c.wrap(c.accounts.status, configErrorStyle)
-		}
-		return c.wrap(c.accounts.status, configOKStyle)
-	}
-	if c.status == "" {
-		return ""
-	}
-	// Wrapped for the same reason the purpose is: these are the longest strings
-	// on screen (a validator error runs to 200+ characters), and an unwrapped one
-	// makes countLines undercount the footer, which steals the window's budget.
-	var b strings.Builder
-	if c.statusIsError {
-		b.WriteString(c.wrap(c.status, configErrorStyle))
-		return b.String()
-	}
-	b.WriteString(c.wrap(c.status, configOKStyle))
-	if c.restartNotice != "" {
-		b.WriteString(c.wrap(c.restartNotice, configNoticeStyle))
-	}
-	return b.String()
-}
-
 // wrap renders text wrapped to the pane width, one fragment per line, always
 // ending in a newline so countLines stays exact.
 func (c *ConfigPane) wrap(text string, style lipgloss.Style) string {
@@ -958,12 +918,19 @@ func (c *ConfigPane) renderHints() string {
 		} else if c.hostBusy(host.Name) {
 			verb = "probing…"
 		}
-		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+		hints := []configHint{
 			{text: "↑/↓ move", drop: 2},
 			{text: verb, drop: 3},
-			{text: "C assistant", drop: 4},
-			{text: "esc close"},
-		})) + "\n"
+		}
+		if host.Action == "" {
+			// The verdict reader — a saved host's own verb; the action rows
+			// have no verdict to explain.
+			hints = append(hints, configHint{text: "e detail", drop: 4})
+		}
+		hints = append(hints,
+			configHint{text: "C assistant", drop: 5},
+			configHint{text: "esc close"})
+		return "\n" + configHintStyle.Render(c.fitHints(hints)) + "\n"
 	}
 	advanced := "a show advanced"
 	if c.showAdvanced {

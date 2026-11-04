@@ -562,8 +562,7 @@ func TestConfigPaneNeverRendersALineWiderThanThePane(t *testing.T) {
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
-	c.status = `update_channel must be one of [stable, preview], got "nightly". To preserve a custom path or flags, set it to the agent name and move the command into program_overrides.`
-	c.statusIsError = true
+	c.setStatus(`update_channel must be one of [stable, preview], got "nightly". To preserve a custom path or flags, set it to the agent name and move the command into program_overrides.`, true, "")
 
 	for step := 0; step < 40; step++ {
 		for _, line := range strings.Split(c.String(), "\n") {
@@ -808,8 +807,7 @@ func TestConfigPaneFitsItsBoxAtEveryWidth(t *testing.T) {
 			c.SetFocus(true)
 			c.showAdvanced = true
 			c.rebuildRows()
-			c.status = `update_channel must be one of [stable, preview], got "nightly".`
-			c.statusIsError = true
+			c.setStatus(`update_channel must be one of [stable, preview], got "nightly".`, true, "")
 
 			assertFits := func(step int, state string) {
 				t.Helper()
@@ -1191,7 +1189,7 @@ func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
-	c.status = `vscode_server_binary は "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin" に設定されました — 変更は次回の起動時に反映されます 🎉`
+	c.setStatus(`vscode_server_binary は "/Users/田中太郎/项目目录/代理工厂/二进制文件/code-server-version-1.2.3/bin" に設定されました — 変更は次回の起動時に反映されます 🎉`, false, "")
 
 	for step := 0; step < 40; step++ {
 		for _, line := range strings.Split(c.String(), "\n") {

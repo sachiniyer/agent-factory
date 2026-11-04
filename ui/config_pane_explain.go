@@ -35,15 +35,14 @@ func (c *ConfigPane) beginExplain() {
 		// Surface the refusal where a status belongs — the remote daemon does
 		// not know the route (version skew), the key is unknown to it, or it
 		// is unreachable. Never fabricate an empty trace.
-		c.status = err.Error()
-		c.statusIsError = true
-		c.restartNotice = ""
+		c.setStatus(err.Error(), true, "")
 		return
 	}
 	c.savedScrollTop = c.scrollTop
 	c.scrollTop = 0
 	c.explainKey = entry.Key
 	c.explainValue = value
+	c.explainHost = nil
 	c.explainLines = c.wrappedExplainLines(*value)
 	c.explaining = true
 	c.clearStatus()
@@ -58,6 +57,7 @@ func (c *ConfigPane) handleExplainKey(msg tea.KeyMsg) bool {
 		c.explaining = false
 		c.explainLines = nil
 		c.explainValue = nil
+		c.explainHost = nil
 		c.scrollTop = c.savedScrollTop
 	case "up", "k":
 		c.scrollTop = max(0, c.scrollTop-1)
@@ -84,10 +84,16 @@ func (c *ConfigPane) explainBudget() int {
 
 // renderExplainView lays out the trace through the same header/window/footer
 // assembly as the list view, so the scroll cues and the box behave identically.
+// A host explain reads the probe's verdict instead of a key trace (#5571).
 func (c *ConfigPane) renderExplainView() string {
-	header := c.fitPaneLine(configTitleStyle.Render("Explain")+
+	title, note := "Explain", "on-disk sources · the running daemon's value was not checked"
+	if c.explainHost != nil {
+		title = "Host check"
+		note = "the daemon's probe of the saved entry · enter on the row re-runs it"
+	}
+	header := c.fitPaneLine(configTitleStyle.Render(title)+
 		configLocationStyle.Render("  "+c.explainKey)) + "\n" +
-		c.wrap("on-disk sources · the running daemon's value was not checked", configHintStyle)
+		c.wrap(note, configHintStyle)
 	footer := "\n" + configHintStyle.Render(c.fitHints([]configHint{
 		{text: "↑/↓ scroll", drop: 1},
 		{text: "esc back"},

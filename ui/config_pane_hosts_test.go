@@ -669,6 +669,154 @@ func TestConfigPaneHostStatusRetiresForNewerOutcome(t *testing.T) {
 	}
 }
 
+// The status line reports the LATEST event whichever section produced it —
+// one rule, not a precedence between channels (#5571 review: the account
+// channel kept precedence over a newer host WRITE's outcome the same way the
+// check channel once hid the config write's). The ordering must run every
+// way: accounts → host write → host check → accounts again.
+func TestConfigPaneLatestOutcomeWinsAcrossSections(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.SetAccountStatus("registration refused by the daemon", true)
+	if view := c.String(); !strings.Contains(view, "registration refused by the daemon") {
+		t.Fatal("the account outcome lands on the line")
+	}
+
+	// A host write's outcome is NEWER — it must displace the account status
+	// even though that status is still populated.
+	c.editHosts = func(edit config.HostsEdit) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: "hosts", Value: `{"box2":{"host":"box2.tail.example"}}`}, "", nil
+	}
+	selectHostRow(t, c, "box1")
+	pressKey(c, "d")
+	view := c.String()
+	if !strings.Contains(view, "removed host box1") {
+		t.Error("the host write's outcome must take the line")
+	}
+	if strings.Contains(view, "registration refused") {
+		t.Error("a stale account outcome must not hide the newer host write")
+	}
+
+	// A still-later check outcome on the hosts channel displaces the write.
+	selectHostRow(t, c, "box2")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	c.SetHostCheckResults("box2", nil, errors.New("check refused again"))
+	if view := c.String(); !strings.Contains(view, "check refused again") {
+		t.Error("the check outcome takes the line over the write echo")
+	}
+
+	// And the account channel takes it back — the rule runs every direction.
+	c.SetAccountStatus("login finished", false)
+	view = c.String()
+	if !strings.Contains(view, "login finished") {
+		t.Error("the newer account outcome takes the line back")
+	}
+	if strings.Contains(view, "check refused again") {
+		t.Error("a stale check error must not hide it")
+	}
+}
+
+// A long verdict and its wrapped remedy exceed a short overlay's list window,
+// and the window pins the oversized row it cannot split. 'e' opens the
+// scrollable reader so the whole of it is reachable (#5571 review).
+func TestConfigPaneHostExplainReadsWholeVerdict(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	c.SetSize(64, 12)
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	c.SetHostCheckResults("box1", []daemon.HostCheckResult{{
+		Name:      "box1",
+		Probed:    true,
+		Reachable: true,
+		Complete:  true,
+		Problems: []string{
+			"git is not on PATH or its version could not be read — install git so af can create and refresh worktrees",
+			"tmux answered `tmux -V` with an old version — sessions need a newer one for the control mode af drives",
+		},
+		Warnings: []string{
+			"gh answered but is not authenticated — run gh auth login on the host before sessions that open pull requests",
+		},
+	}}, nil)
+
+	// The row's render cannot hold the whole verdict in this window. ("requests"
+	// is the verdict tail's last word — asserted as a single token so a wrap
+	// cannot split the check.)
+	list := c.String()
+	if strings.Contains(list, "requests") {
+		t.Fatal("the scenario does not exercise the bug — the tail already shows")
+	}
+
+	// 'e' opens the reader; scrolling reaches the verdict's last line.
+	pressKey(c, "e")
+	if !c.explaining {
+		t.Fatal("'e' on a host row opens the verdict reader")
+	}
+	for i := 0; i < 20; i++ {
+		pressKey(c, "down")
+	}
+	view := c.String()
+	for _, want := range []string{"Host check", "requests"} {
+		if !strings.Contains(view, want) {
+			t.Errorf("the scrolled reader shows %q; got %q", want, view)
+		}
+	}
+
+	// esc returns to the list where the row was left.
+	pressKey(c, "esc")
+	if c.explaining {
+		t.Error("esc closes the reader")
+	}
+	if row := c.rows[c.selectedIdx].host; row == nil || row.Name != "box1" {
+		t.Error("the reader returns to the host row it opened from")
+	}
+}
+
+// The reader's lines are a snapshot: opened while a probe is in flight, it
+// must regenerate when the result lands — a verdict, or the request-level
+// error — rather than report "a probe is running…" forever (#6733 review).
+func TestConfigPaneHostExplainRefreshesWhenProbeLands(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+
+	// 'e' during the probe: the reader opens on the busy note.
+	pressKey(c, "e")
+	if !c.explaining {
+		t.Fatal("'e' on a probing host still opens the reader")
+	}
+	if view := c.String(); !strings.Contains(view, "a probe is running") {
+		t.Fatalf("the open reader shows the busy note; got %q", view)
+	}
+
+	// The verdict landing must refresh the open reader in place.
+	c.SetHostCheckResults("box1", []daemon.HostCheckResult{{
+		Name:     "box1",
+		Probed:   true,
+		Problems: []string{"git is not on PATH — install git so af can create worktrees"},
+	}}, nil)
+	view := c.String()
+	if strings.Contains(view, "a probe is running") {
+		t.Error("the landed verdict must retire the busy note")
+	}
+	if !strings.Contains(view, "could not be probed") {
+		t.Errorf("the open reader shows the delivered verdict; got %q", view)
+	}
+
+	// A request-level failure refreshes it too — the error is on the status
+	// line, and the reader drops the busy note rather than stall.
+	pressKey(c, "esc")
+	selectHostRow(t, c, "box2")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	pressKey(c, "e")
+	c.SetHostCheckResults("box2", nil, errors.New("daemon unreachable"))
+	if view = c.String(); strings.Contains(view, "a probe is running") {
+		t.Error("a request-level failure must retire the busy note too")
+	}
+}
+
 // Esc abandons the form with nothing sent.
 func TestConfigPaneHostAddEsc(t *testing.T) {
 	c := newHostTestPane(t, twoHosts(), "")

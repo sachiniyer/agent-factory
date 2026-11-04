@@ -186,15 +186,31 @@ func (c *ConfigPane) TakeAccountRequest() AccountRequest {
 // failure stays visible in the pane the user is still looking at, rather than
 // behind an overlay that has already closed.
 func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
-	if text != "" {
-		// A real outcome retires the Hosts section's status too: one line
-		// reports the latest event — never a stale check outcome in front of
-		// it (#6718 review). An empty clear produces nothing, so it retires
-		// nothing: a check error the user has not seen answered stays.
-		c.clearHostStatus()
-	}
 	c.accounts.status = text
 	c.accounts.statusIsError = isError
+	if text != "" {
+		// A real outcome takes the status line and retires the Hosts
+		// section's status too: one line reports the latest event — never a
+		// stale check outcome in front of it (#6718 review). An empty clear
+		// produces nothing, so it retires nothing: a check error the user has
+		// not seen answered stays.
+		c.clearHostStatus()
+		c.statusLine = statusEvent{text: text, isError: isError, from: statusFromAccounts}
+	} else if c.statusLine.from == statusFromAccounts {
+		// A silent clear retires the line only when the account channel owns
+		// what it shows — it must not erase a newer outcome it does not own.
+		c.statusLine = statusEvent{}
+	}
+}
+
+// clearAccountStatus retires the account outcome — and the status line when
+// the account channel is what it shows.
+func (c *ConfigPane) clearAccountStatus() {
+	c.accounts.status = ""
+	c.accounts.statusIsError = false
+	if c.statusLine.from == statusFromAccounts {
+		c.statusLine = statusEvent{}
+	}
 }
 
 // AccountStatus returns the current feedback so a late result can preserve a
@@ -278,8 +294,7 @@ func (c *ConfigPane) handleAccountKey(msg tea.KeyMsg) bool {
 func (c *ConfigPane) beginRegister(agent string) {
 	c.accounts.registering = true
 	c.accounts.registerFor = agent
-	c.accounts.status = ""
-	c.accounts.statusIsError = false
+	c.clearAccountStatus()
 	c.clearStatus()
 	c.accounts.input = textinput.New()
 	c.accounts.input.Placeholder = "account name"
