@@ -241,18 +241,22 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 // It runs per attached session on every poll tick under s.mu, so the marker
 // read — a git subprocess, two when the marker is missing — is cached on the
 // brief entry and re-read only after an attach, detach, or send invalidated
-// it. A stale cache can only defer a send by one tick, never send the wrong
-// contract: the cached slug must still match the live attachment.
+// it. A failed read is never cached: the next tick retries rather than
+// treating a transient error as a settled absence. A stale cache can only
+// defer a send by one tick, never send the wrong contract: the cached slug
+// must still match the live attachment.
 func (s *Service) briefOwedLocked(store *Store, sessionID, slug string) bool {
 	be := s.briefEntryLocked(sessionID)
 	if !be.markerSet {
 		be.markerLoads++
 		got, state, err := store.Brief(sessionID)
-		be.markerSet = true
 		if err != nil {
-			got, state = "", ""
+			// A failed read is not an answer: leave the cache empty so the
+			// next tick retries rather than remembering a transient problem
+			// as "no debt" and stranding an owed contract.
+			return false
 		}
-		be.markerSlug, be.markerState = got, state
+		be.markerSet, be.markerSlug, be.markerState = true, got, state
 	}
 	return be.markerSlug == slug && be.markerState == BriefOwed
 }
