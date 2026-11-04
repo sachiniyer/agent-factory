@@ -61,6 +61,69 @@ export interface ProposalChange {
   author: string;
 }
 
+/** One proposal row from ListProposals, and the reply of Start/Attach
+ *  (proposal.Summary). `rules` is the agent's working contract — the CLI prints
+ *  it; the web shows nothing of it because the agent reads it inside its own
+ *  session, where `af proposal start` runs. */
+export interface ProposalSummary {
+  slug: string;
+  docs: string[];
+  /** Titles of the sessions attached to the proposal. */
+  attachedSessions: string[];
+  lastEdit: string;
+  /** The session's Docs tab name after start/attach; "" when none was made. */
+  tab: string;
+  /** Why no Docs tab opened despite the attach succeeding; "" on success. */
+  tabError: string;
+}
+
+function parseProposalSummary(d: unknown): ProposalSummary {
+  if (!isRecord(d)) {
+    throw new ApiError(500, "the daemon sent a proposal without fields");
+  }
+  const names = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
+  return {
+    slug: str(d.slug),
+    docs: names(d.docs),
+    attachedSessions: names(d.attached_sessions),
+    lastEdit: str(d.last_edit),
+    tab: str(d.tab),
+    tabError: str(d.tab_error),
+  };
+}
+
+/** Every proposal of the session's project, newest edit first — the attach
+ *  picker's catalog. session_id doubles as the project target: the daemon
+ *  resolves the repo from the session, so the web never sends repo_id/repo_path. */
+export async function listProposals(sessionId: string, token: string): Promise<ProposalSummary[]> {
+  const d = await af<unknown>("ListProposals", { session_id: sessionId }, token);
+  const rows = isRecord(d) && Array.isArray(d.proposals) ? d.proposals : [];
+  return rows.map(parseProposalSummary);
+}
+
+/** `af proposal start <slug>`: create the proposal from the built-in templates,
+ *  attach the session, and open its Docs tab beside the agent. The daemon's
+ *  empty `docs` IS the CLI's default --docs set, so the web form asks only for
+ *  the slug. */
+export async function startProposal(sessionId: string, slug: string, token: string): Promise<ProposalSummary> {
+  return parseProposalSummary(await af<unknown>("StartProposal", { session_id: sessionId, slug }, token));
+}
+
+/** `af proposal attach <slug>`: attach the session to an existing proposal. */
+export async function attachProposal(sessionId: string, slug: string, token: string): Promise<ProposalSummary> {
+  return parseProposalSummary(await af<unknown>("AttachProposal", { session_id: sessionId, slug }, token));
+}
+
+/** `af proposal detach`: drop the session's attachment and cursor and close its
+ *  Docs tabs for the slug. */
+export async function detachProposal(sessionId: string, token: string): Promise<{ slug: string; detached: boolean }> {
+  const d = await af<unknown>("DetachProposal", { session_id: sessionId }, token);
+  if (!isRecord(d)) {
+    throw new ApiError(500, "the daemon sent a detach reply without fields");
+  }
+  return { slug: str(d.slug), detached: d.detached === true };
+}
+
 export const DOC_NAME_PATTERN = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 function isRecord(v: unknown): v is Record<string, unknown> {

@@ -124,7 +124,7 @@ import { SplitView } from "./split.js";
 import { archiveKey, archiveFromSnapshot, archiveNeedsFirstPage, emptyArchive } from "./archive.js";
 import { settleLookup } from "./route_lookup.js";
 import { reconcileWindow } from "./archive_window.js";
-import { canHandoff, isArchived, operatorKind, type OperatorKind } from "./status.js";
+import { canHandoff, canProposal, isArchived, operatorKind, type OperatorKind } from "./status.js";
 import { isRenameableTab, tabDisplayLabel } from "./tablabel.js";
 import { PendingRestores, type RestoreEvidence } from "./pending_restores.js";
 import { CreateSelectionIntent, OptimisticSessions } from "./optimistic.js";
@@ -166,7 +166,8 @@ import { createLatestWriter } from "./project_color_writes.js";
 import { captureTabDeleteTarget } from "./tab_delete_target.js";
 import { type AccountsResponse, type DaemonHealth, type HostEntry, type SessionData, type SkippedRepo, TabKind, type TaskData, type WireEvent } from "./types.js";
 import { publishProposalChange, publishProposalPush, publishProposalResync } from "./docs_tab.js";
-import { parseProposalChange, parseProposalPush } from "./proposal_api.js";
+import { attachProposal, detachProposal, listProposals, parseProposalChange, parseProposalPush, startProposal, type ProposalSummary } from "./proposal_api.js";
+import { proposalModal } from "./proposal_modal.js";
 import { trackViewportInsets } from "./viewport-insets.js";
 
 // Boot stamp (redesign PR1): apply the saved theme choice to <html> BEFORE the app
@@ -3394,6 +3395,84 @@ function doHandoff(): void {
   );
 }
 
+/**
+ * The web's entry to `af proposal start|attach|detach` (#6753, the
+ * proposal.agent-workflow parity gap): opens the proposal modal, which lists the
+ * session's attachments and the project's proposals and submits the three verbs
+ * over the same daemon routes the CLI calls (daemon/proposals.go). Start and
+ * attach make the daemon open a Docs tab for the session; the roster event that
+ * publishes it flows through the normal snapshot path and the auto-split places
+ * it beside the agent — nothing client-side manufactures a tab.
+ *
+ * Gated on canProposal — the button only appears for a live session whose
+ * workspace is on this daemon (start/attach refuse off-box workspaces, where
+ * the agent cannot open the daemon-host proposal docs) — and re-checked here
+ * so a stale click does nothing rather than acting. The session's Docs tabs
+ * name its current attachments; the modal needs no read for them.
+ */
+function doProposal(): void {
+  const sel = selectedSessionData();
+  if (!sel || !sel.id || !canProposal(sel)) {
+    return;
+  }
+  const sessionId = sel.id;
+  const attached = sessionTabs(sel)
+    .filter((t) => t.kind === TabKind.Docs && typeof t.proposal === "string" && t.proposal !== "")
+    .map((t) => t.proposal as string);
+
+  // One submit path for the three verbs: busy the modal, run the RPC, and close
+  // on success — the roster event that repaints is the same one every tab
+  // mutation relies on. A committed-but-unacked reply takes the doHandoff path
+  // (close, resync, confirm notice) so a retry never double-submits; every other
+  // failure reopens the modal's error line with the daemon's words and the
+  // typed slug still there.
+  const run = (verb: (tok: string) => Promise<ProposalSummary | { slug: string; detached: boolean }>, describe: (r: ProposalSummary | { slug: string; detached: boolean }) => string | null): void => {
+    // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
+    const tok = token;
+    if (tok === null || !modal) {
+      return;
+    }
+    const m = modal;
+    m.setBusy(true);
+    void verb(tok).then((r) => {
+      if (modal === m) closeModal();
+      requestResync();
+      const note = describe(r);
+      if (note !== null) surfaceNotice(note);
+    }).catch((e) => {
+      if (isMutationCommittedError(e)) {
+        if (modal === m) closeModal();
+        requestResync();
+        surfaceMutationError(e, "confirmed");
+        return;
+      }
+      m.setBusy(false);
+      m.setError(errorText(e));
+    });
+  };
+
+  // The verb's reply carries tab_error when the attach succeeded but the Docs
+  // tab could not open — a partial outcome the user must see (the agent is
+  // attached and can see the docs; the human's editor just did not appear).
+  const attachNote = (verbName: string) => (r: ProposalSummary | { slug: string; detached: boolean }): string | null =>
+    "tabError" in r && r.tabError !== "" ? `${verbName} — the Docs tab did not open: ${r.tabError}` : null;
+
+  // Same null-token rule as loadPrograms/loadCreateAccounts above: null is
+  // logged out (reject), "" is the authorized-tokenless credential (#1696).
+  const loadProposalList = (): Promise<ProposalSummary[]> =>
+    token === null ? Promise.reject(new Error("not authorized")) : listProposals(sessionId, token);
+
+  openModal(proposalModal({
+    sessionTitle: sel.title,
+    attached,
+    loadProposals: loadProposalList,
+    onStart: (slug) => run((tok) => startProposal(sessionId, slug, tok), attachNote("Proposal started")),
+    onAttach: (slug) => run((tok) => attachProposal(sessionId, slug, tok), attachNote("Attached")),
+    onDetach: () => run((tok) => detachProposal(sessionId, tok), () => null),
+    onCancel: closeModal,
+  }));
+}
+
 /** Removes a task (RemoveTask), then refetches. Keys off the stable id. */
 function doRemoveTask(task: TaskData): void {
   const tok = token;
@@ -3478,6 +3557,7 @@ const actions = {
   clearAttention: doClearAttention,
   markDelivered: doMarkDelivered,
   handoff: doHandoff,
+  proposal: doProposal,
   switchTab,
   layoutChanged: () => splitView.refit(),
   closePane: () => splitView.closeFocusedPane(),

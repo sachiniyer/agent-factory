@@ -49,6 +49,7 @@ import {
   hasAttention,
   callbackUnavailableText,
   canHandoff,
+  canProposal,
   compareSessionsForRail,
   isArchived,
   hasInFlightOp,
@@ -432,6 +433,11 @@ export interface Actions {
    *  handoff-capable selection (canHandoff), and DOES confirm (via the picker
    *  modal) because it stops a working agent, unlike the no-confirm Retry. */
   handoff(): void;
+  /** Opens the proposal modal for the selected session (#6753) — the web's entry
+   *  to `af proposal start|attach|detach`: start a proposal from the doc
+   *  templates, attach to an existing one, or detach. Offered only for a
+   *  proposal-capable selection (canProposal): a live, local-worktree session. */
+  proposal(): void;
   /** Switches the selected session's active tab WITHOUT attaching — the keyboard
    *  stays in rail nav mode (the 1-9 keys, mirroring the TUI). */
   switchTab(index: number): void;
@@ -1147,6 +1153,8 @@ export class AppShell {
   // change, so patchMainHead toggles it rather than deciding once at build time.
   private handoffBtn: HTMLElement | null = null;
   private handoffVisible = false;
+  private proposalBtn: HTMLElement | null = null;
+  private proposalVisible = false;
   // The tab bar for the selected session, (re)created per selection and patched in
   // place when the tab list or active tab changes (#1592 Phase 5 PR7). null when
   // nothing is selected (the empty state has no tabs).
@@ -2588,6 +2596,7 @@ export class AppShell {
       placement: { detail: placementDetail(selected), remote: selected.placement?.kind === "remote" },
       copyLink: () => this.actions.copyLink(),
       handoff: () => this.actions.handoff(),
+      proposal: () => this.actions.proposal(),
       newTab: (kind) => {
         if (this.appControls.trigger.getAttribute("aria-expanded") === "true") this.appControls.dismiss();
         this.actions.newTab(kind);
@@ -2611,6 +2620,9 @@ export class AppShell {
     this.handoffBtn = chrome.handoff;
     this.handoffVisible = canHandoff(selected);
     chrome.handoff.hidden = !this.handoffVisible;
+    this.proposalBtn = chrome.proposal;
+    this.proposalVisible = canProposal(selected);
+    chrome.proposal.hidden = !this.proposalVisible;
     this.headActions = chrome.actions;
     this.headActionSig = "";
     const tabBar = chrome.tabs;
@@ -3350,6 +3362,15 @@ export class AppShell {
     if (this.handoffBtn && nowHandoff !== this.handoffVisible) {
       this.handoffVisible = nowHandoff;
       this.handoffBtn.hidden = !nowHandoff;
+    }
+
+    // Same in-place treatment as Handoff for Proposal (#6753): archiving or
+    // re-hosting the selected session from another client flips proposal
+    // reachability without a selection change.
+    const nowProposal = canProposal(selected);
+    if (this.proposalBtn && nowProposal !== this.proposalVisible) {
+      this.proposalVisible = nowProposal;
+      this.proposalBtn.hidden = !nowProposal;
     }
   }
 

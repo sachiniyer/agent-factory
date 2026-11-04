@@ -17,6 +17,7 @@ import {
   otherAttentionCount,
   callbackUnavailableText,
   canHandoff,
+  canProposal,
   type DotKind,
   idleReasonDetail,
   isArchived,
@@ -662,6 +663,23 @@ test("canHandoff fails closed when the projection omits the field", () => {
     false,
     "the web must not INFER handoff-capability from liveness — that is the daemon's decision to project",
   );
+});
+
+// canProposal gates the web's Proposal action (#6753). It mirrors the daemon's
+// own refuseOffBox check (proposal/service.go): a session whose workspace is
+// off-box — docker/ssh/sandbox, projected as backend_type — is refused because
+// the agent inside it cannot open the proposal docs on the daemon host, while a
+// local-worktree session keeps its proposals on this daemon. Archived sessions
+// cannot resolve the session_id at all.
+test("canProposal refuses only the two shapes the daemon cannot service", () => {
+  assert.equal(canProposal(sess({ liveness: Liveness.Ready })), true);
+  assert.equal(canProposal(sess({ placement: { kind: "remote", host: "box" }, backend_type: "local" })), true,
+    "the gate reads the workspace (backend_type), not placement — refuseOffBox keys on workspace ownership");
+  for (const b of ["docker", "ssh", "sandbox", "remote"]) {
+    assert.equal(canProposal(sess({ backend_type: b })), false, `off-box backend ${b}`);
+  }
+  assert.equal(canProposal(sess({ liveness: Liveness.Archived })), false, "an archived session is not loaded");
+  assert.equal(canProposal(sess({ status: Status.Archived })), false);
 });
 
 /** Builds an RFC3339 timestamp for today at the given local hour/min so the

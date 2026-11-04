@@ -162,7 +162,7 @@ export function applyTerminalPlacement(el: Pick<HTMLElement, "textContent" | "ti
 }
 
 /** One stable title/tab row; patching it never reparents a terminal. */
-export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; retry(): void; markDelivered(): void; clearAttention(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
+export function terminalChrome(opts: { title: string; placement?: { detail: string; remote: boolean }; copyLink(): void; handoff(): void; proposal(): void; retry(): void; markDelivered(): void; clearAttention(): void; newTab(kind: "shell" | "vscode"): void; closePane?(): void; fontSizeStep?(delta: number): void }) {
   const menu = actionsDisclosure("More session actions");
   menu.trigger.replaceChildren(icon("ellipsis"));
   menu.trigger.title = "More session actions";
@@ -212,6 +212,9 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   deliver.hidden = true;
   const handoff = action("Handoff", "", opts.handoff);
   handoff.title = "Continue this session under another agent or account";
+  const proposal = action("Proposal", "", opts.proposal);
+  proposal.title = "Start a proposal, attach the session to one, or detach it";
+  proposal.hidden = true;
   const copy = action("Copy link", "af-copy-link", opts.copyLink);
   copy.title = "Copy link to this session";
   // The desktop font-size pair (#5500): terminal text only, beside the other
@@ -229,10 +232,10 @@ export function terminalChrome(opts: { title: string; placement?: { detail: stri
   tabUnavailable.hidden = true;
   const closePane = action("Hide pane", "af-phone-pane-close", () => opts.closePane?.());
   closePane.hidden = true;
-  menu.panel.append(placement, tabUnavailable, copy, handoff, deliver, actions, closePane);
+  menu.panel.append(placement, tabUnavailable, copy, handoff, proposal, deliver, actions, closePane);
   const attention = attentionChip(opts.clearAttention);
   const head = h("div", { class: "af-term-head" }, titleBox, tabs, newTabs, attention.el, fontDecrease, fontIncrease, retry, menu.el);
-  return { head, title, placement, tabs, attention, retry, deliver, handoff, closePane, actions, newTabs, newTerminal, newVSCode, docsShortcuts, tabUnavailable, menu, dispose: menu.dispose };
+  return { head, title, placement, tabs, attention, retry, deliver, handoff, proposal, closePane, actions, newTabs, newTerminal, newVSCode, docsShortcuts, tabUnavailable, menu, dispose: menu.dispose };
 }
 
 /** The agent's open request for the user. Only the × clears it, so looking at the
