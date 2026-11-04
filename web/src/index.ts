@@ -3408,7 +3408,8 @@ function doHandoff(): void {
  * workspace is on this daemon (start/attach refuse off-box workspaces, where
  * the agent cannot open the daemon-host proposal docs) — and re-checked here
  * so a stale click does nothing rather than acting. The session's Docs tabs
- * name its current attachments; the modal needs no read for them.
+ * seed the modal's attachment line optimistically; the loaded catalog's
+ * attached_sessions reconciles it against the store.
  */
 function doProposal(): void {
   const sel = selectedSessionData();
@@ -3416,6 +3417,9 @@ function doProposal(): void {
     return;
   }
   const sessionId = sel.id;
+  // Optimistic seed only — a closed or never-opened Docs tab lies about the
+  // attachment, and an unattached session's Docs tab lies the other way. The
+  // modal reconciles against the store's attached_sessions once it loads.
   const attached = sessionTabs(sel)
     .filter((t) => t.kind === TabKind.Docs && typeof t.proposal === "string" && t.proposal !== "")
     .map((t) => t.proposal as string);
@@ -3464,6 +3468,7 @@ function doProposal(): void {
 
   openModal(proposalModal({
     sessionTitle: sel.title,
+    sessionId,
     attached,
     loadProposals: loadProposalList,
     onStart: (slug) => run((tok) => startProposal(sessionId, slug, tok), attachNote("Proposal started")),
