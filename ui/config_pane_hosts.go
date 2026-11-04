@@ -353,6 +353,7 @@ func (c *ConfigPane) TakeHostCheckRequest() (string, bool) {
 // own rule — while a write refusal is left alone (it is not a check outcome).
 func (c *ConfigPane) SetHostCheckResults(requested string, results []daemon.HostCheckResult, err error) {
 	delete(c.hosts.busy, requested)
+	defer c.refreshHostExplain(requested)
 	if err != nil {
 		c.setHostStatus(err.Error(), true, true)
 		return
@@ -372,6 +373,23 @@ func (c *ConfigPane) SetHostCheckResults(requested string, results []daemon.Host
 	if c.hosts.statusFromCheck && c.hosts.statusIsError {
 		c.clearHostStatus()
 	}
+}
+
+// refreshHostExplain regenerates the open host reader when the probe it was
+// watching lands — the reader's lines are a snapshot, so without this a "a
+// probe is running…" note would outlive the verdict indefinitely (#6733
+// review). A finished check-all touches every host's busy mark, so it
+// refreshes whichever host is open. The scroll offset clamps to the new
+// content, which can be shorter than the busy view.
+func (c *ConfigPane) refreshHostExplain(requested string) {
+	if !c.explaining || c.explainHost == nil {
+		return
+	}
+	if requested != "" && requested != c.explainHost.Name {
+		return
+	}
+	c.explainLines = c.wrappedHostExplainLines(*c.explainHost)
+	c.scrollTop = min(c.scrollTop, max(0, len(c.explainLines)-1))
 }
 
 // HostStatusLine reports the section's own channel outcome — a probe the

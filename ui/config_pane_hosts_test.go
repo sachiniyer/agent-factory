@@ -772,6 +772,51 @@ func TestConfigPaneHostExplainReadsWholeVerdict(t *testing.T) {
 	}
 }
 
+// The reader's lines are a snapshot: opened while a probe is in flight, it
+// must regenerate when the result lands — a verdict, or the request-level
+// error — rather than report "a probe is running…" forever (#6733 review).
+func TestConfigPaneHostExplainRefreshesWhenProbeLands(t *testing.T) {
+	c := newHostTestPane(t, twoHosts(), "")
+	selectHostRow(t, c, "box1")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+
+	// 'e' during the probe: the reader opens on the busy note.
+	pressKey(c, "e")
+	if !c.explaining {
+		t.Fatal("'e' on a probing host still opens the reader")
+	}
+	if view := c.String(); !strings.Contains(view, "a probe is running") {
+		t.Fatalf("the open reader shows the busy note; got %q", view)
+	}
+
+	// The verdict landing must refresh the open reader in place.
+	c.SetHostCheckResults("box1", []daemon.HostCheckResult{{
+		Name:     "box1",
+		Probed:   true,
+		Problems: []string{"git is not on PATH — install git so af can create worktrees"},
+	}}, nil)
+	view := c.String()
+	if strings.Contains(view, "a probe is running") {
+		t.Error("the landed verdict must retire the busy note")
+	}
+	if !strings.Contains(view, "could not be probed") {
+		t.Errorf("the open reader shows the delivered verdict; got %q", view)
+	}
+
+	// A request-level failure refreshes it too — the error is on the status
+	// line, and the reader drops the busy note rather than stall.
+	pressKey(c, "esc")
+	selectHostRow(t, c, "box2")
+	pressKey(c, "enter")
+	c.TakeHostCheckRequest()
+	pressKey(c, "e")
+	c.SetHostCheckResults("box2", nil, errors.New("daemon unreachable"))
+	if view = c.String(); strings.Contains(view, "a probe is running") {
+		t.Error("a request-level failure must retire the busy note too")
+	}
+}
+
 // Esc abandons the form with nothing sent.
 func TestConfigPaneHostAddEsc(t *testing.T) {
 	c := newHostTestPane(t, twoHosts(), "")
