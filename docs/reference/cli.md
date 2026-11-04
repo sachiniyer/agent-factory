@@ -2295,7 +2295,9 @@ workspace stays on its host, owned by the archived row, and the output names whe
 hook sessions always push. Restoring a session archived without a push
 reattaches that workspace — the tree, index and ignored files come back exactly as
 archived and the agent resumes its conversation; nothing is cloned, pushed or
-re-hooked. If the host proves the workspace gone, restore re-provisions onto the
+re-hooked. A session run under a synced account starts a fresh conversation
+on that restore instead, since that account directory is removed on archive.
+If the host proves the workspace gone, restore re-provisions onto the
 recorded branch or fails. In-place (--here) sessions cannot be archived because af does not own
 their worktree. Local archives print the relocated worktree path on success.
 
