@@ -267,6 +267,124 @@ func paneNotice(notice, listenerAddr string, warnings []string) string {
 	return notice
 }
 
+// applyingHostsEdit applies ONE per-entry edit of the host table (add or
+// remove) on whichever daemon this session is attached to — the hosts_edit arm
+// of the same SetConfigValue write path the pane's scalar saves already use
+// (#5855). It is the save seam behind the pane's Hosts section (#5571 W10.5),
+// injected like applyingConfigSet so a test that swaps it drives the pane's
+// plumbing rather than a second writer.
+//
+// The local half is daemon.EditGlobalHosts — the same client `af hosts
+// add|remove` rides, which Pings the running daemon for the ConfigHostsEdit bit
+// itself before sending. The remote half performs that Ping-before-send itself
+// (the health read is FRESH, not the section's cached arm state — exactly the
+// gate the request type's comment prescribes and the web's hostsHealthNow
+// runs): a daemon that predates SetConfigValueRequest.HostsEdit tolerates the
+// unknown field and writes an EMPTY hosts table in its place, so the bit must
+// be re-read at send time and an absent or unreadable bit refuses.
+func applyingHostsEdit(edit config.HostsEdit) (*config.SetResult, string, error) {
+	if !apiclient.IsRemoteTarget() {
+		return localHostsEdit(edit)
+	}
+	return remoteHostsEdit(edit)
+}
+
+// localHostsEdit is the pane's local arm of applyingHostsEdit: the running
+// daemon's own admission-gated hosts_edit when it answers, the file-locked
+// local edit when it does not — the fallback is inside daemon.EditGlobalHosts,
+// the same place `af hosts` gets it.
+func localHostsEdit(edit config.HostsEdit) (*config.SetResult, string, error) {
+	resp, err := daemon.EditGlobalHosts(edit)
+	if err != nil {
+		return nil, "", err
+	}
+	// Same warning selection as localConfigSet: the apply-time notices win when
+	// the daemon applied the write, the write's own warnings otherwise.
+	warnings := resp.Warnings
+	if len(warnings) == 0 && resp.Result != nil {
+		warnings = resp.Result.Warnings
+	}
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, warnings), nil
+}
+
+func remoteHostsEdit(edit config.HostsEdit) (*config.SetResult, string, error) {
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return nil, "", err
+	}
+	defer client.CloseIdleConnections()
+
+	health, healthErr := client.Health(context.Background())
+	if healthErr != nil || !health.ConfigHostsEdit {
+		return nil, "", fmt.Errorf(
+			"the daemon at %s (%s) cannot apply a host-list edit atomically; upgrade that daemon, then retry (nothing was written)",
+			apiclient.RemoteTargetURL(), client.DaemonVersionPhrase(context.Background()))
+	}
+	resp, err := client.SetConfigValue(daemon.SetConfigValueRequest{
+		Key:       "hosts",
+		HostsEdit: &edit,
+	})
+	if err != nil {
+		return nil, "", remoteConfigRefusal(client, "change config on", "SetConfigValue", "Nothing was written", err)
+	}
+	// Same empty-result guard as remoteConfigSet: a remote target is whatever
+	// answers the URL, and the pane echoes fields of Result.
+	if resp.Result == nil {
+		return nil, "", fmt.Errorf("the daemon at %s reported the config change succeeded but returned no result; "+
+			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
+	}
+	warnings := resp.Warnings
+	if len(warnings) == 0 {
+		warnings = resp.Result.Warnings
+	}
+	return resp.Result, paneNotice(resp.RestartNotice, resp.ListenerAddr, warnings), nil
+}
+
+// CheckHostForEditor asks whichever daemon this session is attached to to probe
+// a listed host — an empty name probes every listed host — and to record its
+// readiness, the check half of the pane's Hosts section. The probe runs where
+// the host list lives and the ssh would be composed: the local control socket
+// for a local session, the targeted daemon's /v1/CheckHost under
+// --daemon-url/AF_DAEMON_URL — never this machine's daemon for a remote
+// target, which is the whole doctrine of this file.
+//
+// It is a dial, not a read, so the app runs it on an async command rather than
+// the Update goroutine (contrast with the synchronous config writes, which are
+// already bounded socket/HTTP calls).
+func CheckHostForEditor(name string) (daemon.CheckHostResponse, error) {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.CheckHost(daemon.CheckHostRequest{Host: name})
+	}
+	client, err := apiclient.NewTargeted()
+	if err != nil {
+		return daemon.CheckHostResponse{}, err
+	}
+	defer client.CloseIdleConnections()
+
+	resp, err := client.CheckHost(daemon.CheckHostRequest{Host: name})
+	if err != nil {
+		if apiclient.IsRouteNotServed(err) {
+			return daemon.CheckHostResponse{}, fmt.Errorf(
+				"the daemon at %s (%s) does not serve the CheckHost route; the host was not probed — af never probes from this machine for a remote target. "+
+					"Upgrade the daemon, or run `af hosts check` on the daemon host",
+				apiclient.RemoteTargetURL(), client.DaemonVersionPhrase(context.Background()))
+		}
+		return daemon.CheckHostResponse{}, err
+	}
+	return resp, nil
+}
+
+// HostCheckOrigin is the "from X" phrase a probe verdict names — where the
+// probe ran from the user's seat. The pane renders daemon.HostCheckLines with
+// it: "the daemon host" under a remote target (the ssh is composed and dialed
+// over there), "this machine" locally, matching `af hosts check`'s copy.
+func HostCheckOrigin() string {
+	if apiclient.IsRemoteTarget() {
+		return "the daemon host"
+	}
+	return "this machine"
+}
+
 // remoteConfigLocation renders the pane header's label for a remote target: the
 // daemon, then the daemon's own path verbatim.
 //

@@ -56,7 +56,7 @@ func TestParseHostDestinationForms(t *testing.T) {
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			got, err := parseHostDestination(tc.in)
+			got, err := config.ParseHostDestination(tc.in)
 			if tc.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tc.wantErr)
@@ -80,7 +80,7 @@ func TestSSHRemedyCommandForBracketedIPv6(t *testing.T) {
 	t.Cleanup(func() { hostsPosture = globalHostKeyPosture })
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	entry, err := parseHostDestination("ssh://ubuntu@[2001:db8::1]:2222")
+	entry, err := config.ParseHostDestination("ssh://ubuntu@[2001:db8::1]:2222")
 	require.NoError(t, err)
 	printed := sshRemedyCommand(entry)
 	assert.NotContains(t, printed, "[", "brackets are URL syntax, not part of the ssh host")

@@ -443,8 +443,9 @@ func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
 // opening an editor onto a broken or absent config and letting the user "fix"
 // one key would write the rest of that state back.
 func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
-	m.accountGeneration++ // discard account results from an earlier opening
-	m.quotaGeneration++   // discard usage results from an earlier opening
+	m.accountGeneration++   // discard account results from an earlier opening
+	m.quotaGeneration++     // discard usage results from an earlier opening
+	m.hostCheckGeneration++ // discard host probes from an earlier opening
 	entries, location, err := ui.ReadConfigForEditor()
 	if err != nil {
 		return m, m.handleError(err)
@@ -498,6 +499,12 @@ func (m *home) handleStateConfigEditor(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			m.state = stateDefault
 		}
 		return m, cmd
+	}
+	// The Hosts section's check verb (#5571 W10.5): the pane records the request
+	// — it cannot run an ssh probe on the Update goroutine — and the app runs it
+	// on a tea.Cmd. Taking it consumes it, so one keypress is one probe.
+	if name, asked := m.configPane.TakeHostCheckRequest(); asked {
+		return m, m.hostCheckCmd(name)
 	}
 	if !m.configPane.HasFocus() {
 		m.state = stateDefault

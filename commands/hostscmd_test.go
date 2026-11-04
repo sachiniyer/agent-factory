@@ -102,11 +102,11 @@ func TestParseHostDestination(t *testing.T) {
 		"2001:db8::1":          {Host: "2001:db8::1"},
 	}
 	for in, want := range cases {
-		got, err := parseHostDestination(in)
+		got, err := config.ParseHostDestination(in)
 		require.NoError(t, err, in)
 		assert.Equal(t, want, got, in)
 	}
-	_, err := parseHostDestination("box:notaport")
+	_, err := config.ParseHostDestination("box:notaport")
 	assert.Error(t, err)
 }
 

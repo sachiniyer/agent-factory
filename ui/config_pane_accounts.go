@@ -186,6 +186,13 @@ func (c *ConfigPane) TakeAccountRequest() AccountRequest {
 // failure stays visible in the pane the user is still looking at, rather than
 // behind an overlay that has already closed.
 func (c *ConfigPane) SetAccountStatus(text string, isError bool) {
+	if text != "" {
+		// A real outcome retires the Hosts section's status too: one line
+		// reports the latest event — never a stale check outcome in front of
+		// it (#6718 review). An empty clear produces nothing, so it retires
+		// nothing: a check error the user has not seen answered stays.
+		c.clearHostStatus()
+	}
 	c.accounts.status = text
 	c.accounts.statusIsError = isError
 }

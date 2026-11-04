@@ -309,6 +309,9 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case quotaLoadedMsg:
 		m.handleQuotaLoaded(msg)
 		return m, nil
+	case hostCheckDoneMsg:
+		m.handleHostCheckDone(msg)
+		return m, nil
 	case accountRegisteredMsg:
 		return m, m.handleAccountRegistered(msg)
 	case accountLoginStartedMsg:

@@ -4,9 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"net/url"
 	"sort"
-	"strconv"
 	"strings"
 
 	"github.com/spf13/cobra"
@@ -15,7 +13,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
-	"github.com/sachiniyer/agent-factory/session"
 )
 
 // `af hosts` (#5571 W10.5): add a sandbox host in one command.
@@ -97,12 +94,7 @@ func globalHostKeyPosture() string {
 // is valid as printed. Never `ssh user@host:port`, which OpenSSH reads as the
 // hostname "host:port" on port 22 (#5852).
 func sshRemedyCommand(entry config.HostConfig) string {
-	cmd, err := session.OperatorSSHCommand(entry, hostsPosture())
-	if err != nil {
-		// An entry that cannot compose cannot be saved either (ValidateHostEntry).
-		return "ssh <the saved host> true"
-	}
-	return cmd + " true"
+	return daemon.HostRemedyCommand(entry, hostsPosture())
 }
 
 func loadGlobalHosts() (map[string]config.HostConfig, string, error) {
@@ -120,119 +112,10 @@ func loadGlobalHosts() (map[string]config.HostConfig, string, error) {
 	return hosts, load.Config.DefaultHost, nil
 }
 
-// parseHostDestination splits `[user@]host[:port]`, or an `ssh://[user@]host[:port]`
-// URL, into the entry's fields. The stored host is always the bare hostname or
-// address: brackets around an IPv6 literal are URL syntax, not part of the host
-// (ssh takes `-p 2222 user@2001:db8::1`, which is how af composes its argv), and
-// the port is split out. A bare IPv6 literal without brackets (more than one
-// colon) is a host, not host:port.
-func parseHostDestination(dest string) (config.HostConfig, error) {
-	dest = strings.TrimSpace(dest)
-	if strings.HasPrefix(dest, "ssh://") {
-		return parseSSHURLDestination(dest)
-	}
-	var h config.HostConfig
-	if user, rest, ok := strings.Cut(dest, "@"); ok {
-		h.User, dest = user, rest
-	}
-	dest = strings.TrimSuffix(dest, "/")
-	if strings.HasPrefix(dest, "[") {
-		return finishBracketedHost(h, dest)
-	}
-	if strings.Count(dest, ":") == 1 {
-		host, port, _ := strings.Cut(dest, ":")
-		n, err := hostPort(port, dest)
-		if err != nil {
-			return h, err
-		}
-		h.Port, dest = n, host
-	}
-	h.Host = dest
-	return h, nil
-}
-
-// finishBracketedHost reads `[address]` or `[address]:port` (no scheme).
-func finishBracketedHost(h config.HostConfig, dest string) (config.HostConfig, error) {
-	end := strings.IndexByte(dest, ']')
-	if end < 0 {
-		return h, fmt.Errorf("%q has an opening [ with no closing ]", dest)
-	}
-	h.Host = dest[1:end]
-	switch rest := dest[end+1:]; {
-	case rest == "":
-	case strings.HasPrefix(rest, ":"):
-		n, err := hostPort(rest[1:], dest)
-		if err != nil {
-			return h, err
-		}
-		h.Port = n
-	default:
-		return h, fmt.Errorf("%q: only a :port may follow the closing ]", dest)
-	}
-	return h, nil
-}
-
-// parseSSHURLDestination parses an ssh:// URL with net/url, which owns the
-// bracketed-IPv6 and port rules.
-func parseSSHURLDestination(dest string) (config.HostConfig, error) {
-	var h config.HostConfig
-	if err := refuseUnbracketedIPv6URL(dest); err != nil {
-		return h, err
-	}
-	u, err := url.Parse(dest)
-	if err != nil {
-		return h, fmt.Errorf("%q is not a valid ssh:// URL: %w", dest, err)
-	}
-	if u.Path != "" && u.Path != "/" || u.RawQuery != "" || u.Fragment != "" {
-		return h, fmt.Errorf("%q: an ssh:// destination is [user@]host[:port], with no path, query or fragment", dest)
-	}
-	if u.User != nil {
-		if _, hasPassword := u.User.Password(); hasPassword {
-			return h, fmt.Errorf("%q: put no password in a host destination; ssh authenticates with keys", dest)
-		}
-		h.User = u.User.Username()
-	}
-	h.Host = u.Hostname()
-	if port := u.Port(); port != "" {
-		n, err := hostPort(port, dest)
-		if err != nil {
-			return h, err
-		}
-		h.Port = n
-	}
-	return h, nil
-}
-
-// refuseUnbracketedIPv6URL refuses an ssh:// destination whose host part has a
-// colon outside brackets and more than one colon overall. RFC 3986 puts an IPv6
-// literal in brackets, so `ssh://user@2001:db8::1` is not a URL authority:
-// net/url would read the last group as a port and af would save, and probe, a
-// different machine (#6067). Refusing is the only reading that cannot guess
-// wrong. A single colon (`host:port`) is still a port, and the scheme-less
-// `user@2001:db8::1` keeps its documented whole-address reading.
-func refuseUnbracketedIPv6URL(dest string) error {
-	authority := strings.TrimPrefix(dest, "ssh://")
-	if i := strings.IndexAny(authority, "/?#"); i >= 0 {
-		authority = authority[:i]
-	}
-	userinfo := ""
-	if i := strings.LastIndexByte(authority, '@'); i >= 0 {
-		userinfo, authority = authority[:i+1], authority[i+1:]
-	}
-	if strings.HasPrefix(authority, "[") || strings.Count(authority, ":") < 2 {
-		return nil
-	}
-	return fmt.Errorf("%q has an IPv6 address outside brackets, which a URL cannot express; "+
-		"put it in brackets and add the port after them, for example ssh://%s[%s]:22", dest, userinfo, authority)
-}
-
-func hostPort(port, dest string) (int, error) {
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return 0, fmt.Errorf("the port in %q must be a number from 1 to 65535", dest)
-	}
-	return n, nil
-}
+// The destination parser lives in config.ParseHostDestination: one grammar
+// shared by this command and the TUI config pane's host add form (its move
+// comment names the drift it prevents). A bare IPv6 literal without brackets
+// (more than one colon) is a host, not host:port.
 
 // applyHostsEdit sends one per-entry edit of the host list to the writer, which
 // performs the read, the exists/default checks and the write as ONE
@@ -303,7 +186,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 			return hostsFailJSON(cmd, err)
 		}
 		name := strings.TrimSpace(args[0])
-		entry, err := parseHostDestination(args[1])
+		entry, err := config.ParseHostDestination(args[1])
 		if err != nil {
 			return hostsFailJSON(cmd, err)
 		}
@@ -360,14 +243,7 @@ its fix. The entry is kept either way; use --no-check to skip the probe.`,
 }
 
 func describeHost(h config.HostConfig) string {
-	s := h.Host
-	if h.User != "" {
-		s = h.User + "@" + s
-	}
-	if h.Port != 0 {
-		s += ":" + strconv.Itoa(h.Port)
-	}
-	return s
+	return config.DescribeHost(h)
 }
 
 // hostReady reports a probed host that answered recognisably (git, tmux and gh
@@ -376,42 +252,16 @@ func describeHost(h config.HostConfig) string {
 // not ready — the same contract doctor honors (#5841). Absent from an older
 // daemon's reply, Complete decodes false, so it too reads as not ready.
 func hostReady(r daemon.HostCheckResult) bool {
-	return r.Probed && r.Reachable && r.Complete && len(r.Problems) == 0
+	return daemon.HostCheckReady(r)
 }
 
 // renderHostCheck prints one host's probe result and, for anything short of
 // ready, the exact remedy. Problems already carry their fix (git, tmux); an
-// unreachable host gets the operator-owned-connectivity remedy.
+// unreachable host gets the operator-owned-connectivity remedy. The arms are
+// daemon.HostCheckLines — the one rendering every surface shares.
 func renderHostCheck(w io.Writer, r daemon.HostCheckResult, entry config.HostConfig) {
-	switch {
-	case !r.Probed:
-		fmt.Fprintf(w, "  %s: another probe is already running (cached state: %s); rerun in a moment\n", r.Name, r.Readiness)
-	case !r.Reachable:
-		fmt.Fprintf(w, "  %s: could not be probed", r.Name)
-		if r.Error != "" {
-			fmt.Fprintf(w, ": %s", r.Error)
-		}
-		fmt.Fprintf(w, "\n    fix: make `%s` succeed from this machine (bring the tailnet or VPN up, load your key, trust the host key), then run `af hosts check %s`. af opens no tunnel and edits no ssh config.\n", sshRemedyCommand(entry), r.Name)
-	case len(r.Problems) > 0:
-		fmt.Fprintf(w, "  %s: cannot run a session yet\n", r.Name)
-		for _, p := range r.Problems {
-			fmt.Fprintf(w, "    fix: %s\n", p)
-		}
-		fmt.Fprintf(w, "    then run `af hosts check %s`\n", r.Name)
-	case !r.Complete:
-		// The host answered something af could not read (truncated/garbled
-		// output, banner or profile noise on a probe line, a broken tmux -V).
-		// That is unknown, never ready — the same arm doctor renders (#5841).
-		fmt.Fprintf(w, "  %s: unknown: the host answered but not with a recognisable git, tmux and gh report", r.Name)
-		if r.Readiness != "" {
-			fmt.Fprintf(w, "; cached state: %s", r.Readiness)
-		}
-		fmt.Fprintf(w, "\n    fix: check that a non-interactive `%s` prints no banner or extra output for a plain command, then run `af hosts check %s`\n", sshRemedyCommand(entry), r.Name)
-	default:
-		fmt.Fprintf(w, "  %s: ready (git, tmux and gh answered)\n", r.Name)
-	}
-	for _, warn := range r.Warnings {
-		fmt.Fprintf(w, "    note: %s\n", warn)
+	for _, line := range daemon.HostCheckLines(r, entry, hostsPosture(), "this machine", "run `af hosts check "+r.Name+"`") {
+		fmt.Fprintln(w, line)
 	}
 }
 

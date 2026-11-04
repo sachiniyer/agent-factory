@@ -233,7 +233,7 @@ func TestSSHRemedyCommandParsesWithSSHG(t *testing.T) {
 	}
 	for name, tc := range cases {
 		t.Run(name, func(t *testing.T) {
-			entry, err := parseHostDestination(tc.dest)
+			entry, err := config.ParseHostDestination(tc.dest)
 			require.NoError(t, err)
 			require.NoError(t, config.ValidateHostEntry("box", entry), "the list must accept this shape")
 			printed := sshRemedyCommand(entry)
