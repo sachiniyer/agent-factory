@@ -98,6 +98,103 @@ _expect_tab_delete_consent() {
     )
 }
 
+# --- #6750 regression: a close helper may report "closed" only on positive ---
+# evidence the surface is gone — never on a footer fragment's absence and never
+# on a frame captured before its key took effect. The old af_close_config sent
+# one Escape and returned on the first capture lacking `esc close`; the field
+# editor's footer is `↵ save · esc cancel`, so the PRE-Escape frame already
+# satisfied the check and the helper returned while a live field still held the
+# screen. The caller's next global key then typed into it (the issue's
+# `> emacs,,,,`).
+#
+# This stub needs no TUI: the "screen" is a state machine whose frames are the
+# editor's rounded dialog at each level, and it exercises BOTH orderings that
+# defeat a negative-evidence check — late_escape, the send lands only after
+# the first capture has been read, and eaten_escape, the first Escape never
+# lands at all (how the field stayed in edit mode through four "closes").
+# shellcheck disable=SC2317
+_expect_close_config_really_closes() {
+    local AF_DRIVER_POLL=0.02
+    (
+        local variant probe actual state field swallowed globals
+        # Stub state lives in files: af_capture/af_send run inside command
+        # substitutions, where shell-variable mutations do not survive (the
+        # _expect_empty_tasks_over_empty_workspace pattern).
+        probe="$(mktemp -d)"
+        trap 'rm -rf "$probe"' EXIT
+        af_capture() {
+            case "$(cat "$probe/displayed")" in
+                field_edit) printf '%s\n' \
+'╭──────────────────────────────────────────────╮' \
+'│  Config  /sandbox/home/config.toml           │' \
+'│  › default_program   > emacs                 │' \
+'│                                              │' \
+'│  ↵ save · esc cancel                         │' \
+'╰──────────────────────────────────────────────╯' ;;
+                list) printf '%s\n' \
+'╭─────────────────────────────────────────────────╮' \
+'│  Config  /sandbox/home/config.toml              │' \
+'│  › default_program   emacs                      │' \
+'│                                                 │' \
+'│  ↑/↓ move · ↵ edit · C assistant · esc close    │' \
+'╰─────────────────────────────────────────────────╯' ;;
+                closed) printf '%s\n' \
+' Agent Factory' \
+' n new · ? help · q quit' ;;
+            esac
+            # A send's effect is only visible from the NEXT capture — this
+            # capture showed the pre-send frame, exactly the #6750 ordering.
+            cat "$probe/actual" > "$probe/displayed"
+        }
+        af_send() {
+            actual="$(cat "$probe/actual")"
+            if [ "${1:-}" = Escape ]; then
+                printf 'x\n' >> "$probe/escapes"
+                case "$actual" in
+                    field_edit)
+                        # late: every send lands; eaten: the FIRST send is
+                        # swallowed whole, later ones land — either way the
+                        # transition is visible only from the next capture.
+                        if [ "$variant" = late_escape ] || [ "$(wc -l < "$probe/escapes")" -gt 1 ]; then
+                            printf 'list' > "$probe/actual"
+                        fi ;;
+                    list) printf 'closed' > "$probe/actual" ;;
+                esac
+                return 0
+            fi
+            case "$actual" in
+                field_edit) printf '%s' "$1" >> "$probe/field" ;;
+                list) printf '%s' "$1" >> "$probe/swallowed" ;;
+                closed) printf '%s' "$1" >> "$probe/globals" ;;
+            esac
+            return 0
+        }
+        for variant in late_escape eaten_escape; do
+            printf 'field_edit' > "$probe/actual"
+            printf 'field_edit' > "$probe/displayed"
+            printf '> emacs' > "$probe/field"
+            : > "$probe/swallowed"
+            : > "$probe/globals"
+            : > "$probe/escapes"
+            af_close_config || return 1
+            # The next key a caller sends is a GLOBAL key — the `,` that
+            # reopened this editor in the issue. After a REAL close it reaches
+            # the host; under the false close it lands inside the still-live
+            # dialog — typed into the field (eaten) or swallowed by the list
+            # (late).
+            af_send ','
+            state="$(cat "$probe/actual")"; field="$(cat "$probe/field")"
+            globals="$(cat "$probe/globals")"; swallowed="$(cat "$probe/swallowed")"
+            if [ "$field" != '> emacs' ] || [ -n "$swallowed" ] || \
+               [ "$globals" != ',' ] || [ "$state" != closed ]; then
+                _af_fail "#6750(${variant}): af_close_config reported 'closed' leaving the screen at '${state}' — the next global key reached '${globals:-nothing}' (field='${field}' swallowed='${swallowed}')"
+                return 1
+            fi
+        done
+        return 0
+    )
+}
+
 # Every ERE metacharacter must stay literal in session/title assertions (#4037).
 # shellcheck disable=SC2317
 _expect_regex_escape_literal() {
@@ -1020,6 +1117,7 @@ SELFTEST_BASE_ROWS="$AF_DRIVER_ROWS"
 # Start from a clean slate so the run is deterministic even in a reused
 # container (scoped to the sandbox; fails closed on a non-sandbox home).
 step "tab deletion requires confirmation (#4017/#4054)" _expect_tab_delete_consent
+step "config close returns only on proof the editor is gone (#6750)" _expect_close_config_really_closes
 step "literal plus (#4037)" _expect_regex_escape_literal 'a+b' 'ab'
 step "literal dot (#4037)" _expect_regex_escape_literal 'x.y' 'xay'
 step "literal brackets (#4037)" _expect_regex_escape_literal '[tag]' 't'
@@ -1554,8 +1652,17 @@ _expect_config_editor_rejects() {
         printf 'a REJECTED value reached config.toml\n'
         return 1
     }
+    # #6750: this close must be REAL, not merely "esc close absent" — the
+    # rejected field edit is still in edit mode, so the close needs the
+    # abandon-then-dismiss sequence. Prove the surface is actually gone — no
+    # modal frame — then prove the next GLOBAL key reaches the host: `,`
+    # reopens the editor instead of typing into a still-open field (the
+    # issue's `> emacs,,,,`).
     af_close_config || return 1
-    af_close_config 2>/dev/null || true
+    af_assert_no_overlay 'after af_close_config on the rejected edit (#6750)' || return 1
+    af_open_config || return 1
+    af_close_config || return 1
+    af_assert_no_overlay 'after the final config close (#6750)' || return 1
     return 0
 }
 
