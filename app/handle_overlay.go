@@ -4,8 +4,10 @@ import (
 	"fmt"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -422,11 +424,66 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 // (#1024 PR 4: hooks lost their persistent sidebar slot). The editor opens
 // with input focus so its key loop (n add, enter edit, D delete, esc close)
 // is live immediately.
+//
+// The pane is re-read from disk on every open unless it is dirty — the same
+// no-stale-copy contract showConfigEditor applies to the global config editor
+// (a stale editor would "silently overwrite the newer file"). config.toml is
+// hand-editable by design, and the daemon resolves hook commands fresh from
+// disk at every hook-run, so an out-of-band edit (a second TUI, a hand edit)
+// is live immediately — the pane must show it as it is NOW rather than the
+// startup snapshot, or any save clobbers the out-of-band hooks from the
+// repo config with no error. A dirty pane is left untouched: it holds an
+// in-memory-only edit from a failed save (#1001) that lives nowhere on disk,
+// and reloading would discard the very edit the user is trying to save.
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
+	m.reseedHooksFromDisk()
 	m.hooksPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateHooks
 	return m, nil
+}
+
+// reseedHooksFromDisk re-reads the repo's post-worktree hooks from the on-disk
+// config into the hooks pane, so the editor shows the config as it is now
+// rather than the startup snapshot. It is the hooks-pane half of the
+// no-stale-copy contract showConfigEditor applies to the global config
+// editor: an editor showing a stale copy would silently overwrite a newer
+// file on save, deleting hooks added out-of-band (a hand edit, a second TUI
+// session, an `af config set`) since the TUI started.
+//
+// The re-read is gated on !IsDirty: a dirty pane holds an in-memory-only edit
+// from a failed save (#1001) that lives nowhere on disk, so reloading would
+// discard the very edit the user is retrying. SetCommands resets the pane's
+// committed baseline and dirty flag, so a clean re-read leaves the pane
+// non-dirty and ready to edit the live list.
+//
+// Skipped in remote mode: the project's in-repo config is on the daemon's
+// host, so resolving it from this machine would read an unrelated (or
+// absent) file. The pane is already read-only in remote mode
+// (switchProject/home_model set the reason at startup), so there is nothing
+// to clobber and nothing to re-read. A read failure is logged and the stale
+// copy is kept: the pane still shows something editable, and the next save
+// surfaces the error rather than silently clobbering.
+func (m *home) reseedHooksFromDisk() {
+	hp := m.hooksPane
+	if hp.IsDirty() {
+		return
+	}
+	if isRemoteTarget() || m.repoRoot == "" {
+		return
+	}
+	repo := &config.RepoContext{
+		Root:         m.repoRoot,
+		IdentityRoot: m.repoIdentityRoot,
+		ID:           m.repoID,
+	}
+	repoCfg, err := config.ResolveConfigForRepo(repo)
+	if err != nil {
+		log.WarningLog.Printf("hooks overlay: failed to re-resolve repo config for %s: %v", m.repoRoot, err)
+		return
+	}
+	hp.SetCommands(repoCfg.PostWorktreeCommands)
+	m.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
 }
 
 // showConfigEditor opens the global config editor overlay, reading config fresh

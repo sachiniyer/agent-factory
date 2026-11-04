@@ -35,6 +35,13 @@ type home struct {
 	// repoRoot is the main-worktree root of the repo this TUI run is scoped
 	// to. Used to resolve and persist the in-repo .agent-factory/config.json.
 	repoRoot string
+	// repoIdentityRoot is the identity root (normally == repoRoot; the bare
+	// directory for a bare repo's linked worktree, #3358) used to re-resolve
+	// repo-scoped config — notably the hooks pane's post_worktree_commands —
+	// without a fresh git probe. Preserved alongside repoID/repoRoot so a
+	// re-read (showHooksOverlay) reconstructs the same RepoContext the
+	// initial seed used, keeping the legacy per-repo fallback correct.
+	repoIdentityRoot string
 	// remote caches the target's registry and tasks in remote mode (W9.7); the
 	// poll refreshes it off the event loop.
 	remote remoteCache
@@ -538,10 +545,11 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 	// opens in registry mode with no active project, and the user selects one
 	// from the Projects section. An empty repoID makes the cold-start snapshot an
 	// all-repos fetch, and an empty repoRoot skips the repo-scoped config below.
-	var repoID, repoRoot string
+	var repoID, repoRoot, repoIdentityRoot string
 	if repo != nil {
 		repoID = repo.ID
 		repoRoot = repo.Root
+		repoIdentityRoot = repo.IdentityRoot
 	}
 	// Load application config
 	appConfig, err := config.LoadConfig()
@@ -599,6 +607,7 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 		programChoice:               newProgramChoice(program, configuredDefault, appConfig),
 		repoID:                      repoID,
 		repoRoot:                    repoRoot,
+		repoIdentityRoot:            repoIdentityRoot,
 		projectPathResolutions:      make(map[string]projectPathResolution),
 		registeredProjectIdentities: make(map[string]registeredProjectIdentity),
 		state:                       stateDefault,
