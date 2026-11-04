@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -204,15 +205,17 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	if repoErr == nil {
 		workspace = repo.Root
 	}
-	effective, backend, resolveErr := resolveEffectiveConfig(cfg, repo)
+	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
 	if resolveErr != nil {
 		// A repo whose in-repo config exists but cannot be resolved refuses
 		// session creation with this same error (#5801). Report it as an
 		// actionable finding instead of checking a command the session would
-		// never launch.
+		// never launch. The resolver error names the offending layer, so the
+		// remediation stays layer-neutral rather than unconditionally pointing
+		// at the checked-in in-repo file.
 		report.addActionableFinding(Finding{
 			Check: "agent-program",
-			Detail: fmt.Sprintf("could not resolve the in-repo config at %s — fix the in-repo config (.agent-factory/config.toml) and rerun `af doctor --setup`: %v",
+			Detail: fmt.Sprintf("could not resolve the in-repo config at %s — fix the config layer named in this error and rerun `af doctor --setup`: %v",
 				repo.Root, resolveErr),
 		})
 		return
@@ -225,6 +228,33 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 		return
 	}
 	if !isLocalBackend(backend) {
+		// Validate the selector and the backend's config the way session
+		// creation does. An unknown backend value (e.g. `backend = "dokcer"`)
+		// is a misconfiguration af refuses at create time, not a remote backend
+		// to skip host checks for; and a supported but misconfigured one
+		// (docker without docker.image, ssh without ssh.host, hook without
+		// remote_hooks) is rejected by BackendConfigError. Either way report an
+		// actionable finding instead of a silent skip that exits cleanly for a
+		// repo whose every default create would fail.
+		kind, kerr := session.ParseBackendKind(backend)
+		if kerr != nil {
+			report.addActionableFinding(Finding{
+				Check: "agent-program",
+				Detail: fmt.Sprintf("unknown backend %q in the in-repo config: %v — set `backend` to one of %s in the in-repo config (.agent-factory/config.toml) and rerun `af doctor --setup`",
+					backend, kerr, config.SupportedBackendsString()),
+			})
+			return
+		}
+		if resolved != nil {
+			if reason := session.BackendConfigError(kind, resolved); reason != nil {
+				report.addActionableFinding(Finding{
+					Check: "agent-program",
+					Detail: fmt.Sprintf("backend %q is not usable for sessions in this repo: %v — address the missing config key named above and rerun `af doctor --setup`",
+						backend, reason),
+				})
+				return
+			}
+		}
 		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
 		// host's agent binaries are not prerequisites for them — mirroring
 		// daemon.createNeedsDaemonHostPrereqs. Report a non-actionable row so

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -142,23 +143,25 @@ func currentRepoRoot() (string, error) {
 // the way session launch does (config.ResolveConfigForRepoInspectionWithGlobal),
 // so the doctor verifies the same command a session's tmux pane will actually
 // execute, not the global layer alone. It returns the effective config, the
-// effective `backend` runtime selector (empty meaning local), and any error
-// from resolving the in-repo layer. Outside a repo (repo == nil) the global
-// cfg is returned with a local backend and no error — that is the only layer
-// sessions could launch under there. A nil global config returns
-// (nil, local, nil); callers must nil-check the config before using it.
-func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*config.Config, string, error) {
+// effective `backend` runtime selector (empty meaning local), the full
+// resolved config (non-nil only when a repo layer was actually resolved, so
+// callers can run session-creation's backend precondition checks), and any
+// error from resolving the in-repo layer. Outside a repo (repo == nil) the
+// global cfg is returned with a local backend and no error — that is the only
+// layer sessions could launch under there. A nil global config returns
+// (nil, local, nil, nil); callers must nil-check the config before using it.
+func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*config.Config, string, *config.ResolvedConfig, error) {
 	if global == nil {
-		return nil, config.BackendLocal, nil
+		return nil, config.BackendLocal, nil, nil
 	}
 	if repo == nil {
-		return global, config.BackendLocal, nil
+		return global, config.BackendLocal, nil, nil
 	}
 	resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return &resolved.Config, resolved.Backend, nil
+	return &resolved.Config, resolved.Backend, resolved, nil
 }
 
 // isLocalBackend reports whether a repo's resolved backend runs the agent on
@@ -258,21 +261,54 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	if repoErr == nil {
 		workspace = repo.Root
 	}
-	effective, backend, resolveErr := resolveEffectiveConfig(cfg, repo)
+	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
 	if resolveErr != nil {
 		// A repo whose in-repo config exists but cannot be resolved refuses
 		// session creation with this same error (#5801): the backend is
 		// undeterminable, and guessing local could run the agent somewhere
 		// other than the isolation the repo chose. Report it as an actionable
 		// config failure instead of checking a command the session would
-		// never launch.
+		// never launch. The resolver error itself names the offending layer
+		// (checked-in, legacy, or personal-project), so the remediation stays
+		// layer-neutral rather than unconditionally pointing at the checked-in
+		// in-repo file — a malformed personal-project config reaches this
+		// branch too, and "fix .agent-factory/config.toml" would not clear it.
 		report.AddHeader("agents", "n/a (repo config unresolved)")
 		report.Fail(sectionConfig, "agent-config",
 			fmt.Sprintf("could not resolve the in-repo config at %s: %v", repo.Root, resolveErr),
-			"fix the in-repo config (.agent-factory/config.toml) and rerun `af doctor`")
+			"fix the config layer named in the error above and rerun `af doctor`")
 		return
 	}
 	if !isLocalBackend(backend) {
+		// Validate the selector the way session creation does (ParseBackendKind):
+		// an unknown value such as `backend = "dokcer"` is a misconfiguration
+		// session creation refuses, not a remote backend to skip host checks for.
+		// Without this, both doctor profiles would skip the agent checks and exit
+		// cleanly while claiming sessions run on a backend af itself rejects.
+		kind, kerr := session.ParseBackendKind(backend)
+		if kerr != nil {
+			report.AddHeader("agents", fmt.Sprintf("n/a (unknown backend %q)", backend))
+			report.Fail(sectionConfig, "agent-config",
+				fmt.Sprintf("unknown backend %q in the in-repo config: %v", backend, kerr),
+				"set `backend` to one of "+config.SupportedBackendsString()+" in the in-repo config (.agent-factory/config.toml) and rerun `af doctor`")
+			return
+		}
+		// A supported non-local backend still has to be USABLE for a session in
+		// this repo: config resolution accepts `backend = "docker"` without
+		// docker.image, `backend = "ssh"` without ssh.host, or
+		// `backend = "hook"` without remote_hooks, while session creation
+		// rejects them through BackendConfigError. Run that same side-effect-free
+		// config-key validation before reporting a skip, so the doctor does not
+		// exit cleanly for a repo whose every default create would fail.
+		if resolved != nil {
+			if reason := session.BackendConfigError(kind, resolved); reason != nil {
+				report.AddHeader("agents", fmt.Sprintf("n/a (backend %q misconfigured)", backend))
+				report.Fail(sectionConfig, "agent-config",
+					fmt.Sprintf("backend %q is not usable for sessions in this repo: %v", backend, reason),
+					"address the missing config key named above and rerun `af doctor`")
+				return
+			}
+		}
 		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
 		// host's agent binaries are not prerequisites for them — mirroring
 		// daemon.createNeedsDaemonHostPrereqs, which skips LocalSessionPrereqs

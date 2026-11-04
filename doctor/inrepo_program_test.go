@@ -338,11 +338,15 @@ func TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal(t *testin
 // whose in-repo config selects a non-local backend (docker) does not check the
 // daemon host for the agent binary: the session runs in a container, so the
 // host's binary is not a prerequisite. Mirrors daemon.createNeedsDaemonHostPrereqs.
+// The in-repo config supplies a valid docker.image so the backend's
+// session-creation precondition (BackendConfigError) is satisfied and the skip
+// path is the one exercised — a misconfigured remote backend is covered by
+// TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips.
 func TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupDoctorRepo(t)
 	// No claude binary exists anywhere — on a docker backend that is fine.
-	writeInRepoConfig(t, repo, "backend = \"docker\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	writeInRepoConfig(t, repo, "backend = \"docker\"\n[docker]\nimage = \"af-runtime:latest\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
 	chdir(t, repo)
 
 	cfg := globalConfigWithoutOverrides()
@@ -364,14 +368,77 @@ func TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks(t *testing.T) {
 		"a remote-backend skip must not drive the exit code")
 }
 
+// TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips verifies
+// that a repo whose in-repo config selects a supported non-local backend that
+// session creation would reject (docker without docker.image) is reported as an
+// actionable config failure instead of a silent skip. Without the precondition
+// check both doctor profiles would exit cleanly for a repo whose every default
+// create fails in BackendConfigError.
+func TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"docker\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"a misconfigured remote backend must FAIL, not silently skip host checks")
+	require.True(t, row.Problem, "the misconfigured remote backend must be actionable")
+	require.Contains(t, row.Detail, "docker")
+	require.Contains(t, row.Detail, "docker.image")
+	require.Contains(t, agentsHeaderValue(rep), "misconfigured")
+	// No per-agent binary rows ran: the session would refuse to launch.
+	for _, c := range rep.Checks {
+		require.NotEqual(t, tmux.ProgramClaude, c.Name,
+			"no per-agent binary row should run when the remote backend is misconfigured")
+	}
+	require.NotZero(t, rep.UnresolvedCount(),
+		"a misconfigured remote backend must drive the exit code")
+}
+
+// TestCheckAgentBinaries_UnknownBackend_FailsNotSkipped verifies that an
+// unknown `backend` value (e.g. a "dokcer" typo) is reported as an actionable
+// config failure instead of being classified as a remote backend and silently
+// skipping the agent checks. Session creation rejects the same value through
+// ParseBackendKind; the doctor must not exit cleanly for a repo af would refuse
+// to launch a session in.
+func TestCheckAgentBinaries_UnknownBackend_FailsNotSkipped(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"dokcer\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"an unknown backend value must FAIL, not be treated as a remote backend to skip")
+	require.True(t, row.Problem, "the unknown backend must be actionable")
+	require.Contains(t, row.Detail, `unknown backend "dokcer"`)
+	require.Contains(t, agentsHeaderValue(rep), "unknown backend")
+	for _, c := range rep.Checks {
+		require.NotEqual(t, tmux.ProgramClaude, c.Name,
+			"no per-agent binary row should run when the backend is unknown")
+	}
+	require.NotZero(t, rep.UnresolvedCount(),
+		"an unknown backend must drive the exit code")
+}
+
 // TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks is the setup-path twin
 // of TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks: a repo on a docker
 // backend must not report the daemon host's missing agent binary as a setup
-// finding.
+// finding. The in-repo config supplies a valid docker.image so the backend's
+// session-creation precondition is satisfied and the skip path is exercised.
 func TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupDoctorRepo(t)
-	writeInRepoConfig(t, repo, "backend = \"docker\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	writeInRepoConfig(t, repo, "backend = \"docker\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n[docker]\nimage = \"af-runtime:latest\"\n")
 	chdir(t, repo)
 
 	cfg := globalConfigWithoutOverrides()
@@ -384,6 +451,47 @@ func TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	require.Equal(t, StatusPass, row.Status,
 		"a remote-backend skip is recorded as a non-actionable pass row")
 	require.Contains(t, row.Detail, "docker")
+}
+
+// TestCheckAgentPrograms_RemoteBackend_Misconfigured_Actionable is the setup-path
+// twin of TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips: a
+// docker backend without docker.image must produce an actionable agent-program
+// finding rather than silently skipping the host check.
+func TestCheckAgentPrograms_RemoteBackend_Misconfigured_Actionable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"docker\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	findings := findByCheck(rep, "agent-program")
+	require.NotEmpty(t, findings, "a misconfigured remote backend must produce a finding")
+	require.Contains(t, findings[0].Detail, "docker.image")
+	require.True(t, rep.UnresolvedCount() > 0,
+		"a misconfigured remote backend must drive the exit code")
+}
+
+// TestCheckAgentPrograms_UnknownBackend_Actionable is the setup-path twin of
+// TestCheckAgentBinaries_UnknownBackend_FailsNotSkipped: an unknown backend
+// value must produce an actionable agent-program finding.
+func TestCheckAgentPrograms_UnknownBackend_Actionable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"dokcer\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	findings := findByCheck(rep, "agent-program")
+	require.NotEmpty(t, findings, "an unknown backend must produce a finding")
+	require.Contains(t, findings[0].Detail, `unknown backend "dokcer"`)
+	require.True(t, rep.UnresolvedCount() > 0,
+		"an unknown backend must drive the exit code")
 }
 
 // TestCheckAgentPrograms_MalformedInRepoConfig_Actionable is the setup-path twin
