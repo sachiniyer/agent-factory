@@ -1186,21 +1186,31 @@ _af_wait_for_tasks_overlay_state() {
 #
 # This is the #6750 close contract: "closed" is POSITIVE evidence that the
 # surface's frame is off the screen, never the absence of one footer fragment
-# and never a frame captured before its key took effect. Each Escape lands
-# exactly one level — a sub-mode's Escape abandons to the dialog's list, a
-# list-level Escape closes it — so the loop simply sends while the surface is
-# up, with one poll of settle per send. A send that never landed is retried;
-# sends past the close are harmless (nav mode binds no Escape). On budget or
-# send-cap exhaustion it dumps the screen and returns 1.
+# and never a frame captured before its key took effect. The frame check is
+# symmetric for the same reason: a capture can predate the last send's
+# repaint, so a surface must persist on two CONSECUTIVE sightings before an
+# Escape is (re)sent — otherwise one send would fire on the stale frame and
+# land AFTER the close, on whatever surface replaced it. Each landing Escape
+# closes exactly one level — a sub-mode's Escape abandons to the dialog's
+# list, a list-level Escape closes it — so the loop sends while the surface
+# stays up, retrying a send that never landed. On budget or send-cap
+# exhaustion it dumps the screen and returns 1.
 _af_dismiss_overlays() {
     local predicate="$1" label="$2" budget="${3:-12}" max_sends="${4:-6}"
-    local screen sends=0 clean=0 deadline
+    local screen sends=0 clean=0 up=0 deadline
     deadline=$(( $(_af_now) + budget ))
     while :; do
         screen="$(af_capture)"
         if "$predicate" <<<"$screen"; then
             clean=0
+            up=$((up + 1))
+            if [ "$up" -gt 1 ] && [ "$sends" -lt "$max_sends" ]; then
+                af_send Escape
+                sends=$((sends + 1))
+                up=0
+            fi
         else
+            up=0
             clean=$((clean + 1))
             [ "$clean" -ge 2 ] && return 0
         fi
@@ -1208,10 +1218,6 @@ _af_dismiss_overlays() {
             _af_log "TIMEOUT ${budget}s dismissing ${label} (${sends} Escape(s) sent; the surface is still up)"
             printf '%s\n' "$screen" >&2
             return 1
-        fi
-        if [ "$clean" -eq 0 ] && [ "$sends" -lt "$max_sends" ]; then
-            af_send Escape
-            sends=$((sends + 1))
         fi
         sleep "$AF_DRIVER_POLL"
     done
@@ -1225,12 +1231,24 @@ af_open_tasks() {
     _af_wait_for_tasks_overlay_state 1 "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
+# _af_tasks_surface_up — the task surface still holds focus: the task dialog
+# itself OR any modal frame on top of it — `D` raises the shared deletion
+# confirmation, whose `n/esc cancel` footer none of the task markers
+# recognize. Without the frame clause an af_close_tasks during a pending
+# delete returned "closed" while a dialog one `y` away from deleting a task
+# still held the screen.
+_af_tasks_surface_up() {
+    local screen; screen="$(cat)"
+    _af_task_dialog_open <<<"$screen" || _af_dialog_frame_present <<<"$screen"
+}
+
 # af_close_tasks — dismiss the tasks overlay (Escape). The overlay is
 # two-level — in edit mode the first Escape drops back to the titled list, so
-# a second Escape closes it — and the dismiss loop syncs on the task dialog's
-# framed marker going away, retrying an Escape that never landed.
+# a second Escape closes it; a pending deletion confirmation takes a cancel
+# Escape back to the list first — and the dismiss loop syncs on the surface
+# being gone, retrying an Escape that never landed.
 af_close_tasks() {
-    _af_dismiss_overlays _af_task_dialog_open 'tasks overlay' 12 4 || return 1
+    _af_dismiss_overlays _af_tasks_surface_up 'tasks overlay' 12 4 || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key
