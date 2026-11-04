@@ -668,7 +668,14 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
 		// A preserved unpushed archive keeps its handle on purpose (#5867): its
 		// workspace is still on the host, and a kill of the row must reap it.
-		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
+		// The unknown flag alone — e.g. a fail-closed reload whose handle was
+		// nil, or a legacy record that never carried one — is the same
+		// obligation without a handle to rebuild from, so the same gate admits
+		// it: the restoration call rejects the nil handle and installs the
+		// fail-closed sentinel instead of loading the row inert and letting a
+		// later kill run the no-op-success path that orphans the preserved
+		// workspace (#5867).
+		preservedArchive := liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() && (hadPersistedCleanupHandle || data.RuntimeCleanupStateUnknown)
 		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanupWithAccount(data.Title, data.BackendType, data.RuntimeCleanup,
 				restoredAccount{Name: data.Account, Agent: data.AccountAgent, Program: data.Program})

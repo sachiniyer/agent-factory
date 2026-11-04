@@ -863,6 +863,28 @@ func TestFailClosedPreservedArchiveWithNilHandleKeepsUnknownFlag(t *testing.T) {
 	if nonPreservedStored.RuntimeCleanupStateUnknown {
 		t.Fatal("ForStorage kept RuntimeCleanupStateUnknown for a non-preserved archive; only the preserved carve-out should retain the flag")
 	}
+
+	// The durable flag must drive a reload too, not just survive on disk. A
+	// preserved archive that reaches FromInstanceData with the unknown flag set
+	// and no handle to rebuild from must still fail closed: the restoration
+	// call rejects the nil handle and installs the unknown-state sentinel so a
+	// kill retains the record. Pre-fix, the archived restoration gate required
+	// a persisted handle, so this row loaded inert (nil teardown) and a kill
+	// ran the no-op-success path that deletes the only record naming the
+	// preserved still-un-reaped workspace (#5867).
+	restoredUnknown, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatalf("restore a preserved archive with the unknown flag and no handle: %v", err)
+	}
+	if restoredUnknown.runtimeTeardown == nil {
+		t.Fatal("a preserved archive with the unknown flag and no handle loaded a nil teardown; the reload must fail closed so a kill retains the record instead of running the no-op-success path")
+	}
+	if err := restoredUnknown.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a preserved archive with the unknown flag and no handle returned teardown %v, not ErrWorkspaceStateUnknown; the reload must fail closed", err)
+	}
+	if !restoredUnknown.runtimeCleanupStateUnknown {
+		t.Fatal("a preserved archive with the unknown flag and no handle did not re-arm runtimeCleanupStateUnknown; the next checkpoint would drop the durable retry obligation")
+	}
 }
 
 // TestOrdinarySandboxRowFencedForPreviousRelease pins the rollback-compatibility
