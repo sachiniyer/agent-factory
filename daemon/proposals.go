@@ -42,8 +42,21 @@ func (h proposalHost) Session(id string) (proposal.Session, error) {
 	if instance == nil && data != nil {
 		title = data.Title
 	}
-	offBox := instance != nil && instance.Capabilities().Workspace != session.WorkspaceLocalWorktree
-	return proposal.Session{ID: resolvedID, Title: title, RepoID: repoID, OffBox: offBox}, nil
+	out := proposal.Session{ID: resolvedID, Title: title, RepoID: repoID}
+	if instance == nil {
+		// On disk but not loaded: there is no pane to brief (#6755).
+		out.NoAgent = true
+		return out, nil
+	}
+	out.OffBox = instance.Capabilities().Workspace != session.WorkspaceLocalWorktree
+	switch instance.GetLiveness() {
+	case session.LiveReady:
+		out.Ready = true
+	case session.LiveLost, session.LiveDead, session.LiveArchived:
+		out.NoAgent = true
+	}
+	out.Paused = h.m.isPollPaused(repoID, title, resolvedID)
+	return out, nil
 }
 
 func (h proposalHost) SessionTitles(repoID string) map[string]string {
@@ -188,7 +201,7 @@ func (s *controlServer) StartProposal(req StartProposalRequest, resp *StartPropo
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	out, err := s.manager.proposalService().Start(req.SessionID, req.Slug, req.Docs)
+	out, err := s.manager.proposalService().Start(req.SessionID, req.Slug, req.Docs, req.DeliverRules)
 	if err != nil {
 		return err
 	}
@@ -200,7 +213,7 @@ func (s *controlServer) AttachProposal(req AttachProposalRequest, resp *AttachPr
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
-	out, err := s.manager.proposalService().Attach(req.SessionID, req.Slug)
+	out, err := s.manager.proposalService().Attach(req.SessionID, req.Slug, req.DeliverRules)
 	if err != nil {
 		return err
 	}

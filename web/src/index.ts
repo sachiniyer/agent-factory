@@ -3457,9 +3457,36 @@ function doProposal(): void {
 
   // The verb's reply carries tab_error when the attach succeeded but the Docs
   // tab could not open — a partial outcome the user must see (the agent is
-  // attached and can see the docs; the human's editor just did not appear).
-  const attachNote = (verbName: string) => (r: ProposalSummary | { slug: string; detached: boolean }): string | null =>
-    "tabError" in r && r.tabError !== "" ? `${verbName} — the Docs tab did not open: ${r.tabError}` : null;
+  // attached and can see the docs; the human's editor just did not appear) —
+  // and rules_delivery for what the daemon's briefing of the agent did (#6755):
+  // anything short of "delivered" (including an older daemon's silent ignore of
+  // deliver_rules, which leaves it undefined) must surface rather than imply
+  // the agent was briefed.
+  const attachNote = (verbName: string) => (r: ProposalSummary | { slug: string; detached: boolean }): string | null => {
+    if (!("docs" in r)) {
+      return null; // The detach shape; the verbs that carry this note are start/attach.
+    }
+    const notes: string[] = [];
+    if (r.tabError !== "") {
+      notes.push(`the Docs tab did not open: ${r.tabError}`);
+    }
+    switch (r.rulesDelivery) {
+      case "delivered":
+        break;
+      case "unconfirmed":
+        notes.push("the working rules were sent to the agent but its pane did not confirm them — they may still have landed");
+        break;
+      case "held":
+        notes.push(`the working rules are still owed to the agent: ${r.rulesError || "its pane cannot take them yet"}`);
+        break;
+      case "failed":
+        notes.push(`the working rules could not reach the agent: ${r.rulesError || "delivery failed"}`);
+        break;
+      default:
+        notes.push(`the agent was not briefed — this daemon predates rules delivery; run "af proposal attach" inside the session to show it the rules`);
+    }
+    return notes.length ? `${verbName} — ${notes.join("; ")}` : null;
+  };
 
   // Same null-token rule as loadPrograms/loadCreateAccounts above: null is
   // logged out (reject), "" is the authorized-tokenless credential (#1696).

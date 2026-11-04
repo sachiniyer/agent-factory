@@ -29,7 +29,7 @@ func TestSaveRestoresTheDocWhenCommitFails(t *testing.T) {
 
 func TestChangesPublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}

@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "868cf741dc2b";
+var CLIENT_VERSION = "2275d9472bad";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21363,12 +21363,13 @@ function captureTabDeleteTarget(target) {
 }
 
 // src/proposal_api.ts
+var RULES_DELIVERIES = ["delivered", "unconfirmed", "held", "failed"];
 function parseProposalSummary(d) {
   if (!isRecord(d)) {
     throw new ApiError(500, "the daemon sent a proposal without fields");
   }
   const names = (v) => Array.isArray(v) ? v.filter((x) => typeof x === "string") : [];
-  return {
+  const out = {
     slug: str(d.slug),
     docs: names(d.docs),
     attachedSessions: names(d.attached_sessions),
@@ -21376,6 +21377,11 @@ function parseProposalSummary(d) {
     tab: str(d.tab),
     tabError: str(d.tab_error)
   };
+  if (typeof d.rules_delivery === "string" && RULES_DELIVERIES.includes(d.rules_delivery)) {
+    out.rulesDelivery = d.rules_delivery;
+    out.rulesError = str(d.rules_error);
+  }
+  return out;
 }
 async function listProposals(sessionId, token2) {
   const d = await af("ListProposals", { session_id: sessionId }, token2);
@@ -21383,10 +21389,10 @@ async function listProposals(sessionId, token2) {
   return rows.map(parseProposalSummary);
 }
 async function startProposal(sessionId, slug, token2) {
-  return parseProposalSummary(await af("StartProposal", { session_id: sessionId, slug }, token2));
+  return parseProposalSummary(await af("StartProposal", { session_id: sessionId, slug, deliver_rules: true }, token2));
 }
 async function attachProposal(sessionId, slug, token2) {
-  return parseProposalSummary(await af("AttachProposal", { session_id: sessionId, slug }, token2));
+  return parseProposalSummary(await af("AttachProposal", { session_id: sessionId, slug, deliver_rules: true }, token2));
 }
 async function detachProposal(sessionId, token2) {
   const d = await af("DetachProposal", { session_id: sessionId }, token2);
@@ -23588,7 +23594,31 @@ function doProposal() {
       m.setError(errorText(e));
     });
   };
-  const attachNote = (verbName) => (r) => "tabError" in r && r.tabError !== "" ? `${verbName} \u2014 the Docs tab did not open: ${r.tabError}` : null;
+  const attachNote = (verbName) => (r) => {
+    if (!("docs" in r)) {
+      return null;
+    }
+    const notes = [];
+    if (r.tabError !== "") {
+      notes.push(`the Docs tab did not open: ${r.tabError}`);
+    }
+    switch (r.rulesDelivery) {
+      case "delivered":
+        break;
+      case "unconfirmed":
+        notes.push("the working rules were sent to the agent but its pane did not confirm them \u2014 they may still have landed");
+        break;
+      case "held":
+        notes.push(`the working rules are still owed to the agent: ${r.rulesError || "its pane cannot take them yet"}`);
+        break;
+      case "failed":
+        notes.push(`the working rules could not reach the agent: ${r.rulesError || "delivery failed"}`);
+        break;
+      default:
+        notes.push(`the agent was not briefed \u2014 this daemon predates rules delivery; run "af proposal attach" inside the session to show it the rules`);
+    }
+    return notes.length ? `${verbName} \u2014 ${notes.join("; ")}` : null;
+  };
   const loadProposalList = () => token === null ? Promise.reject(new Error("not authorized")) : listProposals(sessionId, token);
   openModal(proposalModal({
     sessionTitle: sel.title,

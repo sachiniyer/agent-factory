@@ -12,7 +12,7 @@ import (
 // tells attached Docs tabs about it (#5594).
 func TestAddDocPublishesTheSnapshotItTakes(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	in := WatchInput{RepoIDs: []string{testRepoID}}

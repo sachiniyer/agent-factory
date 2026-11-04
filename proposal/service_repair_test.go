@@ -4,11 +4,11 @@ import "testing"
 
 func TestServiceAttachAndDetachRepairACorruptAttachment(t *testing.T) {
 	svc, _, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	plantAttachment(t, store, sessA, ".")
-	if _, err := svc.Attach(sessA, "p"); err != nil {
+	if _, err := svc.Attach(sessA, "p", false); err != nil {
 		t.Fatalf("attach over a corrupt attachment: %v", err)
 	}
 	if slug, err := store.Attached(sessA); err != nil || slug != "p" {

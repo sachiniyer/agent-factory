@@ -20,6 +20,14 @@ type Session struct {
 	// OffBox is true when the session's workspace is not on the daemon host
 	// (docker, ssh, sandbox), so its agent cannot open the store's files.
 	OffBox bool
+	// Ready means the agent is idle and its pane takes input.
+	Ready bool
+	// Paused means a client holds the pane's delivery hold (an attached TUI
+	// or a mid-line draft), so a paste could splice into the user's input.
+	Paused bool
+	// NoAgent means the session has no live pane to deliver into (dead, lost,
+	// archived, or not loaded): a delivery is owed until the agent is back.
+	NoAgent bool
 }
 
 // Host is the daemon side of the service: session lookup, the session's Docs
@@ -74,6 +82,14 @@ type Summary struct {
 	Rules            string   `json:"rules,omitempty"`
 	Tab              string   `json:"tab,omitempty"`
 	TabError         string   `json:"tab_error,omitempty"`
+	// RulesDelivery reports what a request that asked for the contract to be
+	// delivered to the agent did with it: "delivered", "unconfirmed", "held"
+	// (still owed to the agent), or "failed". It is empty when the request did
+	// not ask for delivery.
+	RulesDelivery string `json:"rules_delivery,omitempty"`
+	// RulesError is why the contract did not reach the agent for the
+	// "held"/"unconfirmed"/"failed" states above.
+	RulesError string `json:"rules_error,omitempty"`
 }
 
 // DetachResult is the result of Service.Detach.
@@ -115,9 +131,12 @@ type Service struct {
 	watch   watchState
 	lastSet map[string]map[string][]string
 	// push maps session id → push state.
-	push  map[string]*pushEntry
-	now   func() time.Time
-	spawn func(func())
+	push map[string]*pushEntry
+	// briefs maps session id → briefing send state (the durable debt lives on
+	// the session's briefing marker; this is only the in-flight send's guard).
+	briefs map[string]*briefEntry
+	now    func() time.Time
+	spawn  func(func())
 	// fence refuses a save that arrives after a later save of the same writer.
 	fence fenceTable
 }
@@ -125,7 +144,7 @@ type Service struct {
 // NewService returns a service that uses host.
 func NewService(host Host) *Service {
 	return &Service{
-		host: host, watch: newWatchState(), push: map[string]*pushEntry{},
+		host: host, watch: newWatchState(), push: map[string]*pushEntry{}, briefs: map[string]*briefEntry{},
 		now: time.Now, spawn: func(f func()) { go f() },
 	}
 }
@@ -291,8 +310,10 @@ func (s *Service) Get(t Target, slug string) (*Detail, error) {
 }
 
 // Start creates proposal slug for the session, attaches the session, and opens
-// its Docs tab.
-func (s *Service) Start(sessionID, slug string, docs []string) (*Summary, error) {
+// its Docs tab. deliverRules asks the service to deliver the rules to the
+// agent as a prompt (the web's start); a plain false only returns them for
+// the caller to show (the CLI's start).
+func (s *Service) Start(sessionID, slug string, docs []string, deliverRules bool) (*Summary, error) {
 	if err := ValidateSlug(slug); err != nil {
 		return nil, err
 	}
@@ -316,12 +337,13 @@ func (s *Service) Start(sessionID, slug string, docs []string) (*Summary, error)
 	if own, err := r.store.Head(); err == nil {
 		s.publishSnapshot(r, before, own)
 	}
-	return s.attach(r, slug)
+	return s.attach(r, slug, deliverRules)
 }
 
 // Attach attaches the session to proposal slug and opens its Docs tab. With
-// an empty slug it reports the current proposal again.
-func (s *Service) Attach(sessionID, slug string) (*Summary, error) {
+// an empty slug it reports the current proposal again. deliverRules delivers
+// the rules to the agent as a prompt like Start's flag.
+func (s *Service) Attach(sessionID, slug string, deliverRules bool) (*Summary, error) {
 	r, err := s.sessionTarget(sessionID)
 	if err != nil {
 		return nil, err
@@ -336,7 +358,7 @@ func (s *Service) Attach(sessionID, slug string) (*Summary, error) {
 		}
 		slug = current
 	}
-	return s.attach(r, slug)
+	return s.attach(r, slug, deliverRules)
 }
 
 func refuseOffBox(r *resolved) error {
@@ -346,7 +368,7 @@ func refuseOffBox(r *resolved) error {
 	return fmt.Errorf("session %q runs off-box (docker/ssh/sandbox), so its agent cannot open the proposal docs on the daemon host: start or attach the proposal from a session with a local worktree", r.session.Title)
 }
 
-func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
+func (s *Service) attach(r *resolved, slug string, deliverRules bool) (*Summary, error) {
 	if err := refuseOffBox(r); err != nil {
 		return nil, err
 	}
@@ -369,7 +391,14 @@ func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := r.store.Attach(slug, r.session.ID); err != nil {
+	if deliverRules {
+		// The attachment and the briefing debt commit together, so the push
+		// machinery can never see an attach whose contract is not yet owed.
+		err = r.store.AttachOwing(slug, r.session.ID)
+	} else {
+		err = r.store.Attach(slug, r.session.ID)
+	}
+	if err != nil {
 		return nil, err
 	}
 	s.publishSnapshot(r, before, "")
@@ -383,6 +412,9 @@ func (s *Service) attach(r *resolved, slug string) (*Summary, error) {
 		info.TabError = err.Error()
 	} else {
 		info.Tab = tab
+	}
+	if deliverRules {
+		s.brief(r, slug, info)
 	}
 	return info, nil
 }

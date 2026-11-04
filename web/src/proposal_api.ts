@@ -61,10 +61,15 @@ export interface ProposalChange {
   author: string;
 }
 
+/** What a `deliver_rules` request did with the agent's working contract:
+ *  "delivered" is a confirmed paste, "unconfirmed" may have landed, "held" is
+ *  still owed to the agent, "failed" could not be queued. */
+export type RulesDelivery = "delivered" | "unconfirmed" | "held" | "failed";
+
 /** One proposal row from ListProposals, and the reply of Start/Attach
  *  (proposal.Summary). `rules` is the agent's working contract — the CLI prints
- *  it; the web shows nothing of it because the agent reads it inside its own
- *  session, where `af proposal start` runs. */
+ *  it inside the agent's session; the web instead asks the daemon to deliver
+ *  it (`deliver_rules`) and reports `rules_delivery`. */
 export interface ProposalSummary {
   slug: string;
   docs: string[];
@@ -75,14 +80,21 @@ export interface ProposalSummary {
   tab: string;
   /** Why no Docs tab opened despite the attach succeeding; "" on success. */
   tabError: string;
+  /** The briefing outcome; undefined when the daemon did not report one (it
+   *  predates deliver_rules, so the agent was not briefed). */
+  rulesDelivery?: RulesDelivery;
+  /** Why the contract did not reach the agent yet. */
+  rulesError?: string;
 }
+
+const RULES_DELIVERIES: readonly string[] = ["delivered", "unconfirmed", "held", "failed"];
 
 function parseProposalSummary(d: unknown): ProposalSummary {
   if (!isRecord(d)) {
     throw new ApiError(500, "the daemon sent a proposal without fields");
   }
   const names = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-  return {
+  const out: ProposalSummary = {
     slug: str(d.slug),
     docs: names(d.docs),
     attachedSessions: names(d.attached_sessions),
@@ -90,6 +102,14 @@ function parseProposalSummary(d: unknown): ProposalSummary {
     tab: str(d.tab),
     tabError: str(d.tab_error),
   };
+  // An unknown or missing rules_delivery — a daemon that predates
+  // deliver_rules, or one that cannot say what the send did — stays undefined,
+  // so the caller reports "the agent was not briefed" instead of a guess.
+  if (typeof d.rules_delivery === "string" && RULES_DELIVERIES.includes(d.rules_delivery)) {
+    out.rulesDelivery = d.rules_delivery as RulesDelivery;
+    out.rulesError = str(d.rules_error);
+  }
+  return out;
 }
 
 /** Every proposal of the session's project, newest edit first — the attach
@@ -104,14 +124,18 @@ export async function listProposals(sessionId: string, token: string): Promise<P
 /** `af proposal start <slug>`: create the proposal from the built-in templates,
  *  attach the session, and open its Docs tab beside the agent. The daemon's
  *  empty `docs` IS the CLI's default --docs set, so the web form asks only for
- *  the slug. */
+ *  the slug. `deliver_rules` opts in to the daemon briefing the agent itself —
+ *  the web's start never runs `af proposal start` inside the pane — and the
+ *  reply's `rules_delivery` says what the briefing did (#6755). */
 export async function startProposal(sessionId: string, slug: string, token: string): Promise<ProposalSummary> {
-  return parseProposalSummary(await af<unknown>("StartProposal", { session_id: sessionId, slug }, token));
+  return parseProposalSummary(await af<unknown>("StartProposal", { session_id: sessionId, slug, deliver_rules: true }, token));
 }
 
-/** `af proposal attach <slug>`: attach the session to an existing proposal. */
+/** `af proposal attach <slug>`: attach the session to an existing proposal.
+ *  `deliver_rules` is startProposal's flag — the daemon owes the agent the
+ *  rules it never saw the CLI print. */
 export async function attachProposal(sessionId: string, slug: string, token: string): Promise<ProposalSummary> {
-  return parseProposalSummary(await af<unknown>("AttachProposal", { session_id: sessionId, slug }, token));
+  return parseProposalSummary(await af<unknown>("AttachProposal", { session_id: sessionId, slug, deliver_rules: true }, token));
 }
 
 /** `af proposal detach`: drop the session's attachment and cursor and close its

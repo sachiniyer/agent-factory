@@ -50,6 +50,13 @@ type PushStatus struct {
 // through the daemon marked it stale.
 const pushUnsentMaxAge = 30 * time.Second
 
+// briefSend is a briefing the tick claimed: the session to send and whether a
+// queued Send now lets it override the pane hold.
+type briefSend struct {
+	id     string
+	forced bool
+}
+
 type pushEntry struct {
 	repoID, slug  string
 	mode          PushMode
@@ -133,6 +140,12 @@ func (s *Service) entryLocked(sessionID, repoID, slug string) *pushEntry {
 	e := s.push[sessionID]
 	if e == nil || e.repoID != repoID || e.slug != slug {
 		e = &pushEntry{repoID: repoID, slug: slug, mode: PushAuto}
+		if be := s.briefs[sessionID]; be != nil {
+			// A contract sent unconfirmed before this entry existed still owes
+			// the pane its quiet window, or the next edit prompt could splice
+			// into the unsubmitted paste.
+			e.unconfirmedAt = be.unconfirmedAt
+		}
 		s.push[sessionID] = e
 	}
 	return e
@@ -163,11 +176,14 @@ func (s *Service) publishPush(statuses []PushStatus) {
 
 // PushTick runs the push rules for every session the daemon knows. The poll
 // loop calls it on each tick. A send runs in the background, so a slow
-// delivery does not hold the poll loop.
+// delivery does not hold the poll loop. An owed contract briefing (#6755)
+// takes the session's send slot ahead of its edits: the rules must reach the
+// agent before the first "the user edited" prompt asks it to act on them.
 func (s *Service) PushTick(targets []PushTarget) {
 	now := s.now()
 	var publish []PushStatus
 	var sends []string
+	var briefs []briefSend
 	s.mu.Lock()
 	live := map[string]bool{}
 	for _, t := range targets {
@@ -186,7 +202,16 @@ func (s *Service) PushTick(targets []PushTarget) {
 		e := s.entryLocked(t.SessionID, t.RepoID, slug)
 		e.apply(t)
 		s.refreshUnsentLocked(store, t.SessionID, e, now)
-		if DecidePush(e.input(), now).Send {
+		if s.briefOwedLocked(store, t.SessionID, slug) {
+			be := s.briefEntryLocked(t.SessionID)
+			// A queued Send now overrides the pane hold for the briefing just
+			// like for the edits it precedes; a held pane otherwise strands it.
+			forced := e.sendNow
+			if t.Ready && (!t.Attached || forced) && !be.sending && !now.Before(be.notBefore) {
+				be.sending = true
+				briefs = append(briefs, briefSend{id: t.SessionID, forced: forced})
+			}
+		} else if DecidePush(e.input(), now).Send {
 			e.sending = true
 			sends = append(sends, t.SessionID)
 		}
@@ -199,8 +224,16 @@ func (s *Service) PushTick(targets []PushTarget) {
 			delete(s.push, id)
 		}
 	}
+	for id, e := range s.briefs {
+		if !live[id] && !e.sending {
+			delete(s.briefs, id)
+		}
+	}
 	s.mu.Unlock()
 	s.publishPush(publish)
+	for _, b := range briefs {
+		s.spawn(func() { _, _ = s.sendBrief(b.id, b.forced) })
+	}
 	for _, id := range sends {
 		s.spawn(func() { _ = s.runPush(id) })
 	}
@@ -334,6 +367,18 @@ func (s *Service) pushRoute(t PushTarget, fn func(e *pushEntry) bool) (*PushStat
 	e.apply(t)
 	s.refreshUnsentLocked(r.store, id, e, now)
 	send := fn(e) && DecidePush(e.input(), now).Send
+	forced := e.sendNow
+	briefFirst := false
+	if send && s.briefOwedLocked(r.store, id, slug) {
+		// An owed contract goes first, like on the poll tick: the rules must
+		// reach the agent before the first edit prompt it is asked to act on.
+		be := s.briefEntryLocked(id)
+		if !be.sending && !now.Before(be.notBefore) {
+			be.sending = true
+			briefFirst = true
+		}
+		send = false
+	}
 	if send {
 		e.sending = true
 	}
@@ -341,6 +386,19 @@ func (s *Service) pushRoute(t PushTarget, fn func(e *pushEntry) bool) (*PushStat
 	s.mu.Unlock()
 	if changed {
 		s.publishPush([]PushStatus{st})
+	}
+	if briefFirst {
+		if delivery, _ := s.sendBrief(id, forced); delivery == DeliveryFailed {
+			return &st, nil
+		}
+		// The contract reached the agent (or may have): the send the caller
+		// asked for follows it now.
+		s.mu.Lock()
+		if e := s.push[id]; e != nil && !e.sending && DecidePush(e.input(), s.now()).Send {
+			e.sending = true
+			send = true
+		}
+		s.mu.Unlock()
 	}
 	if !send {
 		return &st, nil

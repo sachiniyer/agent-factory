@@ -7,7 +7,7 @@ import (
 
 func TestStartAttachAndCheckpointPublishTheirSnapshots(t *testing.T) {
 	svc, host, store := newTestService(t)
-	if _, err := svc.Start(sessA, "p", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorExternal}); err != nil {
@@ -33,13 +33,13 @@ func TestStartAttachAndCheckpointPublishTheirSnapshots(t *testing.T) {
 	}
 
 	edit("before start\n")
-	if _, err := svc.Start(sessA, "r", []string{"goals"}); err != nil {
+	if _, err := svc.Start(sessA, "r", []string{"goals"}, false); err != nil {
 		t.Fatal(err)
 	}
 	expectQ("start")
 
 	edit("before attach\n")
-	if _, err := svc.Attach(sessA, "p"); err != nil {
+	if _, err := svc.Attach(sessA, "p", false); err != nil {
 		t.Fatal(err)
 	}
 	expectQ("attach")

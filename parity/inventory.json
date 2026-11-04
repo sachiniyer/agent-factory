@@ -2501,6 +2501,20 @@
           }
         }
       },
+      "AttachProposalRequest": {
+        "cli": {
+          "deliver_rules": {
+            "ok": "Web-only (#6755). `af proposal attach` runs INSIDE the agent's pane and prints the rules to its stdout — that print IS the delivery, so asking the daemon to also paste them would brief the agent twice. The web's attach never runs af in the pane, so it sets the flag and the daemon owes the delivery instead."
+          }
+        }
+      },
+      "StartProposalRequest": {
+        "cli": {
+          "deliver_rules": {
+            "ok": "Web-only (#6755). `af proposal start` runs INSIDE the agent's pane and prints the rules to its stdout — that print IS the delivery, so asking the daemon to also paste them would brief the agent twice. The web's start never runs af in the pane, so it sets the flag and the daemon owes the delivery instead."
+          }
+        }
+      },
       "CreateTabRequest": {
         "cli": {
           "id": {
