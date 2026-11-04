@@ -3,6 +3,7 @@ package doctor
 import (
 	"errors"
 	"fmt"
+	"os/exec"
 	"path/filepath"
 	"strings"
 
@@ -72,3 +73,48 @@ func noAnchorMessage(command string) string {
 		"A relative program_overrides path resolves in each session's workspace; run `af doctor` from inside "+
 		"the session's repo to verify it against the directory the session will launch in.", command)
 }
+
+// relativeOverrideUntracked reports whether command is a relative path whose
+// resolved executable is present in the main checkout but untracked — and so
+// absent from the clean-checkout linked worktree a session launches in. Only
+// cwd-dependent commands (relative paths with a separator) are affected: a
+// bare name resolves through PATH and an absolute path resolves the same way
+// in any worktree, so neither is sensitive to the clean-checkout difference.
+// Returns false when the command is not cwd-dependent, the resolved path is
+// not inside the workspace, or the tracked-status probe cannot answer — so a
+// git failure never downgrades a PASS on its own. The repo-root anchor
+// genuinely predicts the worktree for tracked relative paths, so the current
+// PASS is kept only for those.
+func relativeOverrideUntracked(workspace, command, resolvedPath string) bool {
+	if workspace == "" || !commandDependsOnCwd(command) {
+		return false
+	}
+	rel, err := filepath.Rel(workspace, resolvedPath)
+	if err != nil || rel == "" || rel == "." || filepath.IsAbs(rel) {
+		return false
+	}
+	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+		return false // resolved outside the repo; the worktree check does not apply
+	}
+	out, err := exec.Command("git", "-C", workspace, "ls-files", "--", rel).Output()
+	if err != nil {
+		return false // probe failed; be conservative and keep the PASS
+	}
+	return strings.TrimSpace(string(out)) == ""
+}
+
+// untrackedOverrideMessage is the advisory warning for a relative
+// program_overrides path that resolves in the main checkout but is untracked:
+// session worktrees are clean checkouts of the committed tree, so the override
+// will be absent at launch. It names the two supported remedies (commit the file,
+// or provision it in each session via setup_commands / the setup overlay)
+// rather than claiming the command is broken — the file does run in this
+// checkout, it just will not be in the worktree the session launches in.
+func untrackedOverrideMessage(command, resolvedPath string) string {
+	return fmt.Sprintf("%q resolves to %s in this checkout, but that path is untracked — "+
+		"session worktrees are clean checkouts of the committed tree and will not contain it, "+
+		"so the override will be absent at launch", command, resolvedPath)
+}
+
+const untrackedOverrideRemediation = "commit the file so it is part of the tree the session checks out, " +
+	"or provision it in each session via setup_commands or the setup overlay"
