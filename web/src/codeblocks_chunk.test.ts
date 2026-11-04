@@ -42,6 +42,15 @@ test("languageFor returns null for Object.prototype member names", () => {
   }
 });
 
+// Pathological nesting is document text: this source blows the markdown
+// parser's stack (RangeError: Maximum call stack size exceeded), and a fence
+// whose source the grammar cannot survive must degrade to plain code — the
+// highlight step may never throw into the paint.
+test("a source too deep for the parser resolves to plain code", () => {
+  const poison = "*".repeat(10_000) + "x" + "*".repeat(10_000);
+  assert.equal(highlightRanges(poison, "md"), null);
+});
+
 test("a go block gets keyword, string and comment spans over real text", () => {
   const src = `// hello\npackage main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi", 42)\n}\n`;
   const spans = highlightRanges(src, "go");

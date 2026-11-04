@@ -108,19 +108,25 @@ export function languageFor(lang: string): Language | null {
 }
 
 /** Token-coloured ranges over `source` for `lang` — ordered, non-overlapping,
- *  adjacent same-class runs merged. Null when the language is unknown or the
- *  source exceeds the highlight bound. */
+ *  adjacent same-class runs merged. Null when the language is unknown, the
+ *  source exceeds the highlight bound, or the parser cannot survive it —
+ *  pathological nesting can blow a grammar's stack, and a block that cannot
+ *  be highlighted renders as plain code, never an error. */
 export function highlightRanges(source: string, lang: string): HighlightSpan[] | null {
   const language = languageFor(lang);
   if (!language || source.length > MAX_HIGHLIGHT_CHARS) return null;
   const spans: HighlightSpan[] = [];
-  highlightTree(language.parser.parse(source), [classHighlighter, extraClasses], (from, to, classes) => {
-    const last = spans[spans.length - 1];
-    if (last && last.to === from && last.cls === classes) {
-      last.to = to;
-    } else {
-      spans.push({ from, to, cls: classes });
-    }
-  });
+  try {
+    highlightTree(language.parser.parse(source), [classHighlighter, extraClasses], (from, to, classes) => {
+      const last = spans[spans.length - 1];
+      if (last && last.to === from && last.cls === classes) {
+        last.to = to;
+      } else {
+        spans.push({ from, to, cls: classes });
+      }
+    });
+  } catch {
+    return null;
+  }
   return spans;
 }

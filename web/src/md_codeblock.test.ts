@@ -7,8 +7,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { EditorView } from "@codemirror/view";
+import * as codeblocksChunk from "./codeblocks_chunk.js";
 import { FakeElement, FakeEvent, installFakeDom } from "./fakedom.js";
-import { buildCodeNodes, CodeBlockWidget } from "./md_codeblock.js";
+import { buildCodeNodes, CodeBlockWidget, highlightedNodes, setCodeblocksChunkForTest } from "./md_codeblock.js";
 
 function fakeView(seen: { pos?: number }): EditorView {
   return {
@@ -55,6 +56,37 @@ test("a click inside the block puts the cursor in the fence", () => {
     assert.equal(seen.pos, 7, "mousedown must move the cursor inside the fence");
   } finally {
     restore();
+  }
+});
+
+// A grammar can fail on document text — this source blows the markdown
+// parser's stack — and highlightedNodes is the cache's contract: the promise
+// it stores must RESOLVE to null (plain code), never hold a rejection that
+// toDOM would re-throw as an unhandled rejection on every mount.
+test("a source the parser cannot survive resolves null, never a rejection", async () => {
+  setCodeblocksChunkForTest(codeblocksChunk);
+  try {
+    const poison = "*".repeat(10_000) + "x" + "*".repeat(10_000);
+    assert.equal(await highlightedNodes("md", poison), null);
+    assert.equal(await highlightedNodes("md", poison), null, "the cached result is the same resolved promise");
+  } finally {
+    setCodeblocksChunkForTest(null);
+  }
+});
+
+// The same contract covers any other failure in the chain — here a grammar
+// that throws outright, not just a parse the chunk already swallows.
+test("a throwing grammar resolves null, never a rejection", async () => {
+  setCodeblocksChunkForTest({
+    ...codeblocksChunk,
+    highlightRanges: () => {
+      throw new RangeError("Maximum call stack size exceeded");
+    },
+  });
+  try {
+    assert.equal(await highlightedNodes("md", "x"), null);
+  } finally {
+    setCodeblocksChunkForTest(null);
   }
 });
 

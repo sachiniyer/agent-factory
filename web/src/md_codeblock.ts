@@ -55,19 +55,34 @@ export function buildCodeNodes(source: string, spans: readonly { from: number; t
 const rendered = new Map<string, Promise<Node[] | null>>();
 const RENDERED_MAX = 32;
 
-function highlightedNodes(lang: string, source: string): Promise<Node[] | null> {
+/** Highlighted nodes for a block, or null to leave it as plain code. The
+ *  catch is the contract the cache relies on: any failure — a chunk that
+ *  never loads, a grammar that cannot parse the source, a paint that throws —
+ *  resolves to null, so the cached promise never holds a rejection that
+ *  toDOM would re-throw as an unhandled rejection on every mount. */
+export function highlightedNodes(lang: string, source: string): Promise<Node[] | null> {
   const key = lang + "\n" + source;
   let hit = rendered.get(key);
   if (hit !== undefined) return hit;
-  hit = loadCodeblocksChunk().then((m) => {
-    const spans = m?.highlightRanges(source, lang);
-    return spans ? buildCodeNodes(source, spans) : null;
-  });
+  hit = loadCodeblocksChunk()
+    .then((m) => {
+      const spans = m?.highlightRanges(source, lang);
+      return spans ? buildCodeNodes(source, spans) : null;
+    })
+    .catch(() => null);
   rendered.set(key, hit);
   if (rendered.size > RENDERED_MAX) {
     rendered.delete(rendered.keys().next().value as string);
   }
   return hit;
+}
+
+/** Test seam: substitutes the loaded chunk and clears the render cache, so a
+ *  test can drive highlightedNodes against a real or throwing grammar; null
+ *  restores the unloaded state. */
+export function setCodeblocksChunkForTest(m: CodeblocksModule | null): void {
+  chunk = m ? Promise.resolve(m) : null;
+  rendered.clear();
 }
 
 /** The block widget that owns one fenced block's rendered output. Its code
