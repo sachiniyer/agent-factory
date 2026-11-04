@@ -51,14 +51,23 @@ test("the build wipes stale dist artifacts so the embedded set is a pure functio
 // The Docs tab's CodeMirror bundle loads on demand (docs_tab.ts). The shell must not
 // carry it, and must not import anything at startup: the service worker caches only
 // the shell files, so a static import of another file breaks the offline shell.
+// #6731: the Docs build shares its CodeMirror core with the code-fence grammars
+// through esbuild splitting, so CodeMirror itself may live in the chunk-*.js both
+// entries import — the docs set is docs-editor.js plus those chunks.
 test("the Docs editor is a separate lazy bundle that the shell does not import", () => {
   execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
   const shell = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
   const lazy = readFileSync(join(webRoot, "dist", "lazy", "docs-editor.js"), "utf8");
+  const docsSet =
+    lazy +
+    readdirSync(join(webRoot, "dist", "lazy"))
+      .filter((f) => f.startsWith("chunk-") && f.endsWith(".js"))
+      .map((f) => readFileSync(join(webRoot, "dist", "lazy", f), "utf8"))
+      .join("");
   assert.ok(shell.includes('"./lazy/docs-editor.js"'), "the shell must load the Docs bundle by its path");
   assert.doesNotMatch(shell, /^\s*import\s[^(]/m, "the shell must have no static imports");
   assert.ok(!shell.includes("cm-scroller"), "CodeMirror must not be in the shell");
-  assert.ok(lazy.includes("cm-scroller"), "CodeMirror must be in the Docs bundle");
+  assert.ok(docsSet.includes("cm-scroller"), "CodeMirror must be in the Docs lazy set");
   assert.match(lazy, /export\s*\{[^}]*DocsPane/, "the Docs bundle must export DocsPane");
 });
 
@@ -81,6 +90,21 @@ test("the Mermaid renderer is its own lazy chunk set, outside the shell and the 
     .map((f) => readFileSync(join(webRoot, "dist", "lazy", f), "utf8"))
     .join("");
   assert.ok(set.includes("dagre"), "the Mermaid library must live in the lazy chunk set");
+});
+
+// #6731: the syntax grammars for ``` fences render through dist/lazy/codeblocks.js,
+// fetched by the Docs bundle by URL only when a previewed doc's fence names a
+// language — never the shell, never eagerly. It shares the Docs build's esbuild
+// splitting so the CodeMirror core both need is not duplicated across the two.
+test("the code-fence grammars are their own lazy chunk, outside the shell and named by the Docs bundle", () => {
+  execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
+  const shell = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
+  const docs = readFileSync(join(webRoot, "dist", "lazy", "docs-editor.js"), "utf8");
+  const entry = join(webRoot, "dist", "lazy", "codeblocks.js");
+  assert.ok(existsSync(entry), "the codeblocks entry chunk must be built into dist/lazy");
+  assert.ok(docs.includes("./codeblocks.js"), "the Docs bundle must name the chunk it lazy-loads");
+  assert.ok(!shell.includes("codeblocks"), "the shell must carry no codeblock grammar chunk");
+  assert.match(readFileSync(entry, "utf8"), /export\s*\{[^}]*highlightRanges/, "the entry must export the highlighter");
 });
 
 // af() (src/api.ts) sends X-AF-Client-Version on every /v1/ request so the daemon

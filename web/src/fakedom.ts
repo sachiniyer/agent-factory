@@ -55,6 +55,9 @@ class FakeNode {
     const sibs = this.parentNode?.childNodes ?? [];
     return sibs[sibs.indexOf(this) + 1] ?? null;
   }
+  cloneNode(_deep?: boolean): FakeNode {
+    throw new Error("cloneNode is not implemented for this node kind");
+  }
   remove(): void {
     this.parentNode?.removeChild(this);
   }
@@ -66,6 +69,9 @@ class FakeText extends FakeNode {
   }
   override get textContent(): string {
     return this.data;
+  }
+  override cloneNode(): FakeText {
+    return new FakeText(this.doc, this.data);
   }
 }
 
@@ -206,6 +212,12 @@ export class FakeElement extends FakeNode {
 
   get children(): FakeElement[] {
     return this.childNodes.filter((n): n is FakeElement => n instanceof FakeElement);
+  }
+  override cloneNode(deep?: boolean): FakeElement {
+    const copy = new FakeElement(this.doc, this.tagName);
+    for (const [k, v] of this.attrs) copy.attrs.set(k, v);
+    if (deep) copy.append(...this.childNodes.map((n) => n.cloneNode(true)));
+    return copy;
   }
   get firstChild(): FakeNode | null {
     return this.childNodes[0] ?? null;

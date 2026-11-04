@@ -42,18 +42,23 @@ await build({
 });
 
 // The Docs tab (docs_pane.ts and the CodeMirror editor) is its own build, loaded
-// by docs_tab.ts with a dynamic import the first time a Docs tab opens. A separate build rather than
-// esbuild code splitting: splitting would move any module the two share into a
-// chunk that af-web.js imports at startup, outside the service worker's shell set.
-// Minified because it is almost all vendored CodeMirror, which nobody reads in the
-// committed diff.
+// by docs_tab.ts with a dynamic import the first time a Docs tab opens — and so
+// is the code-fence grammar chunk (#6731, codeblocks_chunk.ts), fetched by the
+// Docs bundle only when a previewed doc holds a fenced block with a language.
+// They are ONE build with splitting on, so the CodeMirror core both need
+// (@codemirror/language pulls in view/state) lands in the shared chunk-*.js
+// instead of being duplicated into codeblocks.js. af-web.js is untouched either
+// way — nothing it shares is promoted into a startup fetch. Minified because it
+// is almost all vendored CodeMirror, which nobody reads in the committed diff.
 await build({
-  entryPoints: ["src/docs_pane.ts"],
+  entryPoints: { "docs-editor": "src/docs_pane.ts", codeblocks: "src/codeblocks_chunk.ts" },
   bundle: true,
   format: "esm",
   platform: "browser",
   target: "es2022",
-  outfile: "dist/lazy/docs-editor.js",
+  outdir: "dist/lazy",
+  splitting: true,
+  chunkNames: "chunk-[hash]",
   sourcemap: false,
   minify: true,
   legalComments: "none",
@@ -85,6 +90,10 @@ await build({
   legalComments: "none",
   logLevel: "info",
 });
+
+// The code-fence grammars (#6731) ship as dist/lazy/codeblocks.js, built above
+// alongside the Docs bundle. Naming stays `codeblocks*` so the perf harness
+// budgets it under its own keys, like mermaid's.
 
 // Stamp the web client's X-AF-Client-Version value into the bundle.
 //

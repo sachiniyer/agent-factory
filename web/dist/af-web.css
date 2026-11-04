@@ -4150,6 +4150,95 @@ textarea[class] {
   color: var(--af-dead);
   font-size: var(--af-type-caption);
 }
+.af-docs-editor .cm-md-fence {
+  padding: var(--af-space-1) 0;
+  cursor: text;
+}
+.af-docs-editor .cm-md-fence-lang {
+  padding: var(--af-space-1) var(--af-space-2) 0;
+  background: var(--af-surface-raised);
+  color: var(--af-ink-muted);
+  font-size: var(--af-type-caption);
+  text-align: right;
+}
+.af-docs-editor .cm-md-fence-code {
+  margin: 0;
+  padding: var(--af-space-2);
+  background: var(--af-surface-raised);
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  white-space: pre;
+  overflow-x: auto;
+}
+.af-docs-editor .cm-md-fence-code .tok-keyword,
+.af-docs-editor .cm-md-fence-code .tok-labelName {
+  color: var(--af-callout-todo);
+}
+.af-docs-editor .cm-md-fence-code .tok-atom,
+.af-docs-editor .cm-md-fence-code .tok-bool,
+.af-docs-editor .cm-md-fence-code .tok-constant,
+.af-docs-editor .cm-md-fence-code .tok-literal,
+.af-docs-editor .cm-md-fence-code .tok-number {
+  color: var(--af-callout-question);
+}
+.af-docs-editor .cm-md-fence-code .tok-string {
+  color: var(--af-callout-decision);
+}
+.af-docs-editor .cm-md-fence-code .tok-string2 {
+  color: var(--af-attention);
+}
+.af-docs-editor .cm-md-fence-code .tok-builtin,
+.af-docs-editor .cm-md-fence-code .tok-className,
+.af-docs-editor .cm-md-fence-code .tok-macroName,
+.af-docs-editor .cm-md-fence-code .tok-namespace,
+.af-docs-editor .cm-md-fence-code .tok-typeName {
+  color: var(--af-limit-reached);
+}
+.af-docs-editor .cm-md-fence-code .tok-function,
+.af-docs-editor .cm-md-fence-code .tok-propertyName {
+  color: var(--af-accent);
+}
+.af-docs-editor .cm-md-fence-code .tok-comment {
+  color: var(--af-ink-muted);
+  font-style: italic;
+}
+.af-docs-editor .cm-md-fence-code .tok-meta {
+  color: var(--af-lost);
+}
+.af-docs-editor .cm-md-fence-code .tok-invalid {
+  color: var(--af-dead);
+}
+.af-docs-editor .cm-md-fence-code .tok-inserted {
+  color: var(--af-callout-decision);
+}
+.af-docs-editor .cm-md-fence-code .tok-deleted {
+  color: var(--af-dead);
+}
+.af-docs-editor .cm-md-fence-code .tok-changed,
+.af-docs-editor .cm-md-fence-code .tok-variableName2 {
+  color: var(--af-attention);
+}
+.af-docs-editor .cm-md-fence-code .tok-quote {
+  color: var(--af-ink-muted);
+}
+.af-docs-editor .cm-md-fence-code .tok-heading {
+  color: var(--af-accent);
+  font-weight: 600;
+}
+.af-docs-editor .cm-md-fence-code .tok-link,
+.af-docs-editor .cm-md-fence-code .tok-url {
+  color: var(--af-accent);
+  text-decoration: underline;
+}
+.af-docs-editor .cm-md-fence-code .tok-emphasis {
+  font-style: italic;
+}
+.af-docs-editor .cm-md-fence-code .tok-strong {
+  font-weight: 600;
+}
+.af-docs-editor .cm-md-fence-code .tok-strikethrough {
+  text-decoration: line-through;
+}
 @media (max-width: 768px) {
   .af-docs-head {
     flex-wrap: wrap;
