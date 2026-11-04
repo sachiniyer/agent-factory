@@ -69,6 +69,11 @@ func (s *Service) brief(r *resolved, slug string, info *Summary) {
 		// Already delivered for this attachment: a repeated attach of the same
 		// proposal is a resync, not a new briefing.
 		info.RulesDelivery = "delivered"
+	case state == BriefUnconfirmed:
+		// An earlier send may not have landed; it still counts as settled, but
+		// a repeat attach repeats the honest answer rather than "delivered".
+		info.RulesDelivery = "unconfirmed"
+		info.RulesError = "the contract prompt may not have reached the agent on the earlier attach; it is not resent, to avoid a double paste"
 	case r.session.NoAgent:
 		info.RulesDelivery, info.RulesError = "held", "the session has no live agent yet: the contract is owed and will be delivered once it is back and idle"
 	case r.session.Paused:
@@ -133,8 +138,8 @@ func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
 	if delivery != DeliveryFailed {
 		// Confirmed and unconfirmed alike settle the debt, whatever sendErr
 		// reports: the paste may have landed, and a second copy is worse than
-		// a lost one.
-		if err := r.store.MarkBriefDone(r.session.ID, slug); err != nil {
+		// a lost one. The marker keeps the distinction for honest reporting.
+		if err := r.store.MarkBriefDone(r.session.ID, slug, delivery); err != nil {
 			return delivery, err
 		}
 	}

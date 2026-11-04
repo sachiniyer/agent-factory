@@ -26,6 +26,10 @@ const (
 	// BriefDone means the contract was delivered for this attachment (a send
 	// that may have landed counts; a double paste is worse than a lost one).
 	BriefDone BriefState = "done"
+	// BriefUnconfirmed means the send may have landed but the pane never
+	// confirmed it. It settles like done — never resent — but reports itself
+	// honestly when a repeated attach asks what happened.
+	BriefUnconfirmed BriefState = "unconfirmed"
 )
 
 // ErrNotAttached means the session has no proposal.
@@ -97,6 +101,8 @@ func (s *Store) briefLocked(sessionID string) (string, BriefState, error) {
 		return f[0], BriefOwed, nil
 	case BriefDone:
 		return f[0], BriefDone, nil
+	case BriefUnconfirmed:
+		return f[0], BriefUnconfirmed, nil
 	}
 	return "", "", fmt.Errorf("corrupt proposal briefing marker of session %s: state %q", sessionID, f[1])
 }
@@ -104,7 +110,10 @@ func (s *Store) briefLocked(sessionID string) (string, BriefState, error) {
 // OweBrief arms the briefing marker of sessionID for slug and returns the
 // marker's resulting state. An attach that names a different slug re-arms; a
 // repeated attach of the same slug leaves an owed or done marker alone, so
-// the contract still goes exactly once.
+// the contract still goes exactly once. When the session has since attached
+// a different proposal — an attach request that raced this one — the debt
+// belongs to the newer attachment, so nothing is written and the existing
+// marker's state comes back instead.
 func (s *Store) OweBrief(sessionID, slug string) (BriefState, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return "", err
@@ -114,6 +123,13 @@ func (s *Store) OweBrief(sessionID, slug string) (BriefState, error) {
 	}
 	state := BriefOwed
 	err := s.withLock(func() error {
+		if attached, err := s.attachedLocked(sessionID); err == nil && attached != slug {
+			_, cur, berr := s.briefLocked(sessionID)
+			if berr == nil && cur != "" {
+				state = cur
+			}
+			return nil
+		}
 		got, cur, err := s.briefLocked(sessionID)
 		if err != nil {
 			// A corrupt marker cannot say what was delivered; overwriting it
@@ -129,10 +145,12 @@ func (s *Store) OweBrief(sessionID, slug string) (BriefState, error) {
 	return state, err
 }
 
-// MarkBriefDone settles the session's briefing marker for slug. It does
-// nothing when the marker no longer owes slug, so a delivery finishing late
-// never retires a debt that is not its own.
-func (s *Store) MarkBriefDone(sessionID, slug string) error {
+// MarkBriefDone settles the session's briefing marker for slug after a send:
+// confirmed deliveries record done, unconfirmed ones record unconfirmed, so a
+// later attach repeats the honest state instead of claiming a delivery that
+// was never verified. It does nothing when the marker no longer owes slug,
+// so a delivery finishing late never retires a debt that is not its own.
+func (s *Store) MarkBriefDone(sessionID, slug string, d Delivery) error {
 	if err := validateSessionID(sessionID); err != nil {
 		return err
 	}
@@ -141,7 +159,11 @@ func (s *Store) MarkBriefDone(sessionID, slug string) error {
 		if err != nil || got != slug || cur != BriefOwed {
 			return err
 		}
-		return s.writeBriefLocked(sessionID, slug, BriefDone)
+		state := BriefDone
+		if d == DeliveryUnconfirmed {
+			state = BriefUnconfirmed
+		}
+		return s.writeBriefLocked(sessionID, slug, state)
 	})
 }
 

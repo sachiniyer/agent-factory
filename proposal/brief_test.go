@@ -440,6 +440,95 @@ func TestServiceBriefSendNowSendsContractFirst(t *testing.T) {
 	}
 }
 
+func TestServiceBriefUnconfirmedRepeatsHonestlyOnReattach(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneReady(host, sessA)
+	host.delivery = DeliveryUnconfirmed
+
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	// The first send may not have landed: a resync attach must keep saying so
+	// rather than upgrading the answer to "delivered" — while still never
+	// sending a second copy.
+	again, err := svc.Attach(sessA, "p", true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if again.RulesDelivery != "unconfirmed" {
+		t.Fatalf("repeat attach after an unconfirmed send: rules_delivery = %q, want unconfirmed", again.RulesDelivery)
+	}
+	if n := len(promptList(host)); n != 1 {
+		t.Fatalf("a repeat attach resent the contract: %d prompts", n)
+	}
+}
+
+func TestStoreOweBriefDoesNotArmASupersededAttach(t *testing.T) {
+	store, _ := newTestStore(t)
+	if err := store.Create("p", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Create("q", []string{"goals"}, Committer{Author: AuthorHuman}); err != nil {
+		t.Fatal(err)
+	}
+	// Two attaches race: p's request opens the Docs tab before arming its debt,
+	// and q's whole request lands in between. p's OweBrief arrives last but
+	// must not replace q's debt — the marker follows the live attachment.
+	if err := store.Attach("p", sessA); err != nil {
+		t.Fatal(err)
+	}
+	if err := store.Attach("q", sessA); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OweBrief(sessA, "q"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := store.OweBrief(sessA, "p"); err != nil {
+		t.Fatal(err)
+	}
+	slug, state, err := store.Brief(sessA)
+	if err != nil || slug != "q" || state != BriefOwed {
+		t.Fatalf("a superseded attach clobbered the briefing debt: %q %q %v", slug, state, err)
+	}
+}
+
+func TestServiceBriefQueuedSendNowOverridesTheHold(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	paneBusy(host, sessA)
+	if _, err := svc.Start(sessA, "p", []string{"goals"}, true); err != nil {
+		t.Fatal(err)
+	}
+	read, err := svc.Read(Target{SessionID: sessA}, "p", "goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Save(Target{SessionID: sessA}, "p", "goals", "user edit\n", read.Commit); err != nil {
+		t.Fatal(err)
+	}
+	// Send now while the agent is busy: the request queues, like DecidePush's
+	// sendNow contract promises — including over a held pane.
+	if _, err := svc.SendNow(PushTarget{RepoID: testRepoID, SessionID: sessA, Ready: false}); err != nil {
+		t.Fatal(err)
+	}
+	// The agent idles but a TUI holds the pane. A queued Send now overrides
+	// that hold for the edits — and the briefing queued ahead of them gets
+	// the same override instead of stranding both.
+	paneHeld(host, sessA)
+	briefTick(svc, sessA, true, true)
+	prompts := promptList(host)
+	if len(prompts) != 1 || !strings.Contains(prompts[0], "You are working on proposal p") {
+		t.Fatalf("the held pane stranded the queued send's contract: %v", prompts)
+	}
+	// The edits the user asked for follow on the next tick.
+	briefTick(svc, sessA, true, true)
+	prompts = promptList(host)
+	if len(prompts) != 2 || !strings.HasPrefix(prompts[1], "Proposal p: the user edited") {
+		t.Fatalf("the queued edits did not follow the contract: %v", prompts)
+	}
+}
+
 func TestServiceBriefRechecksThePaneAtSendTime(t *testing.T) {
 	svc, host, _ := newTestService(t)
 	var spawned []func()

@@ -50,6 +50,13 @@ type PushStatus struct {
 // through the daemon marked it stale.
 const pushUnsentMaxAge = 30 * time.Second
 
+// briefSend is a briefing the tick claimed: the session to send and whether a
+// queued Send now lets it override the pane hold.
+type briefSend struct {
+	id     string
+	forced bool
+}
+
 type pushEntry struct {
 	repoID, slug  string
 	mode          PushMode
@@ -169,7 +176,8 @@ func (s *Service) publishPush(statuses []PushStatus) {
 func (s *Service) PushTick(targets []PushTarget) {
 	now := s.now()
 	var publish []PushStatus
-	var sends, briefs []string
+	var sends []string
+	var briefs []briefSend
 	s.mu.Lock()
 	live := map[string]bool{}
 	for _, t := range targets {
@@ -190,9 +198,12 @@ func (s *Service) PushTick(targets []PushTarget) {
 		s.refreshUnsentLocked(store, t.SessionID, e, now)
 		if s.briefOwedLocked(store, t.SessionID, slug) {
 			be := s.briefEntryLocked(t.SessionID)
-			if t.Ready && !t.Attached && !be.sending && !now.Before(be.notBefore) {
+			// A queued Send now overrides the pane hold for the briefing just
+			// like for the edits it precedes; a held pane otherwise strands it.
+			forced := e.sendNow
+			if t.Ready && (!t.Attached || forced) && !be.sending && !now.Before(be.notBefore) {
 				be.sending = true
-				briefs = append(briefs, t.SessionID)
+				briefs = append(briefs, briefSend{id: t.SessionID, forced: forced})
 			}
 		} else if DecidePush(e.input(), now).Send {
 			e.sending = true
@@ -214,8 +225,8 @@ func (s *Service) PushTick(targets []PushTarget) {
 	}
 	s.mu.Unlock()
 	s.publishPush(publish)
-	for _, id := range briefs {
-		s.spawn(func() { _, _ = s.sendBrief(id, false) })
+	for _, b := range briefs {
+		s.spawn(func() { _, _ = s.sendBrief(b.id, b.forced) })
 	}
 	for _, id := range sends {
 		s.spawn(func() { _ = s.runPush(id) })
