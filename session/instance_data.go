@@ -102,6 +102,19 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// persistKillTombstone copy that flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
+		// A fail-closed reload of a preserved archive retains the rejected
+		// handle on the instance (failedRuntimeCleanup) because the inert
+		// backend's runtimeCleanupData() is nil. Stage it here so the next
+		// ForStorage can republish it and a later restart retries the rebuild
+		// instead of laundering the handle into the orphan the marker exists
+		// to prevent (#5867). Scoped to preserved archives: a non-archived
+		// row's ForStorage default branch already preserves the unknown flag
+		// across generations, so the handle is not needed for durability
+		// there; and a non-preserved archive owes nothing to reap.
+		if data.runtimeCleanup == nil && i.failedRuntimeCleanup != nil &&
+			data.Liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() {
+			data.runtimeCleanup = i.failedRuntimeCleanup.clone()
+		}
 		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
 		// session whose off-box runtime POSITIVELY owes no teardown. The two
 		// conditions are deliberately independent and BOTH must hold:
@@ -690,6 +703,17 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 					// this same fail-closed rebuild instead of laundering the rejected
 					// handle into the orphan the marker exists to prevent.
 					instance.runtimeCleanupStateUnknown = true
+					// Retain the raw rejected handle on the instance so the next
+					// checkpoint can republish it for a preserved archive. The inert
+					// backend's runtimeCleanupData() is nil, so without this retention
+					// toInstanceDataLocked stages nothing and ForStorage's archived
+					// branch erases both the handle and the unknown flag — the exact
+					// laundering write #5867 exists to prevent. A non-archived row's
+					// ForStorage default branch already preserves the unknown flag
+					// across generations, so the retention only matters for the
+					// preserved-archive carve-out; staging it is gated on the
+					// preserved-archive shape in toInstanceDataLocked (#5867).
+					instance.failedRuntimeCleanup = data.RuntimeCleanup.clone()
 				}
 			} else {
 				instance.backend = backend
