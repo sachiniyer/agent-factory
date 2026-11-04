@@ -33,45 +33,49 @@ const tomlLanguage = StreamLanguage.define(toml);
 const diffLanguage = StreamLanguage.define(diff);
 
 /** Alias → grammar, normalised to lowercase before lookup. Aliases are the
- *  names people actually write after the ```: go/golang, js/node, tsx, bash. */
-const LANGS: Record<string, Language> = {
-  go: goLanguage,
-  golang: goLanguage,
-  js: javascriptLanguage,
-  javascript: javascriptLanguage,
-  mjs: javascriptLanguage,
-  cjs: javascriptLanguage,
-  node: javascriptLanguage,
-  jsx: jsxLanguage,
-  ts: typescriptLanguage,
-  typescript: typescriptLanguage,
-  mts: typescriptLanguage,
-  cts: typescriptLanguage,
-  tsx: tsxLanguage,
-  py: pythonLanguage,
-  python: pythonLanguage,
-  python3: pythonLanguage,
-  sh: shellLanguage,
-  bash: shellLanguage,
-  zsh: shellLanguage,
-  shell: shellLanguage,
-  console: shellLanguage,
-  json: jsonLanguage,
-  jsonc: jsonLanguage,
-  yaml: yamlLanguage,
-  yml: yamlLanguage,
-  toml: tomlLanguage,
-  html: htmlLanguage,
-  htm: htmlLanguage,
-  css: cssLanguage,
-  sql: StandardSQL.language,
-  rs: rustLanguage,
-  rust: rustLanguage,
-  diff: diffLanguage,
-  patch: diffLanguage,
-  md: markdownLanguage,
-  markdown: markdownLanguage,
-};
+ *  names people actually write after the ```: go/golang, js/node, tsx, bash.
+ *  A Map, not an object literal: a document names the key, so an info string
+ *  like "constructor" or "__proto__" must resolve to nothing — through an
+ *  object it would hit Object.prototype and come back truthy-but-not-a-
+ *  grammar, an error the "unknown means plain code" contract forbids. */
+const LANGS = new Map<string, Language>([
+  ["go", goLanguage],
+  ["golang", goLanguage],
+  ["js", javascriptLanguage],
+  ["javascript", javascriptLanguage],
+  ["mjs", javascriptLanguage],
+  ["cjs", javascriptLanguage],
+  ["node", javascriptLanguage],
+  ["jsx", jsxLanguage],
+  ["ts", typescriptLanguage],
+  ["typescript", typescriptLanguage],
+  ["mts", typescriptLanguage],
+  ["cts", typescriptLanguage],
+  ["tsx", tsxLanguage],
+  ["py", pythonLanguage],
+  ["python", pythonLanguage],
+  ["python3", pythonLanguage],
+  ["sh", shellLanguage],
+  ["bash", shellLanguage],
+  ["zsh", shellLanguage],
+  ["shell", shellLanguage],
+  ["console", shellLanguage],
+  ["json", jsonLanguage],
+  ["jsonc", jsonLanguage],
+  ["yaml", yamlLanguage],
+  ["yml", yamlLanguage],
+  ["toml", tomlLanguage],
+  ["html", htmlLanguage],
+  ["htm", htmlLanguage],
+  ["css", cssLanguage],
+  ["sql", StandardSQL.language],
+  ["rs", rustLanguage],
+  ["rust", rustLanguage],
+  ["diff", diffLanguage],
+  ["patch", diffLanguage],
+  ["md", markdownLanguage],
+  ["markdown", markdownLanguage],
+]);
 
 // classHighlighter maps a tag to the tok-<name> of its nearest mapped
 // ancestor, which leaves function calls, builtins, constants, quotes and
@@ -100,7 +104,7 @@ export interface HighlightSpan {
 /** The grammar `lang` resolves to, or null for an unknown/missing language —
  *  a block like that renders as plain code, never an error. */
 export function languageFor(lang: string): Language | null {
-  return LANGS[lang.trim().toLowerCase()] ?? null;
+  return LANGS.get(lang.trim().toLowerCase()) ?? null;
 }
 
 /** Token-coloured ranges over `source` for `lang` — ordered, non-overlapping,

@@ -23,6 +23,11 @@ func main() {
 
 const UNKNOWN = `z z z z — this language does not exist, so the block is plain code`;
 
+// "constructor" is an Object.prototype member name: an object-literal lookup
+// would hand back something truthy that is not a grammar. It must render as
+// plain code, never an error.
+const PROTOTYPE_NAMED = `this fence's info string is an inherited member name — plain code, never an error`;
+
 const PLAIN = `no language here — just <plain> text & symbols`;
 
 const MERMAID = `flowchart LR
@@ -72,7 +77,7 @@ test("docs codeblocks: fences render as highlighted blocks, only when a doc name
   // and the grammar chunk must stay unfetched until the b-code tab is chosen.
   const pane = await openDocs(page, request, "codeblocks-probe", "codeblocks-plan", {
     "a-plain": `# Plain\n\nA fence with no language needs no grammars:\n\n${fence("", PLAIN)}\n`,
-    "b-code": `# Code\n\nThe shape of the change:\n\n${fence("go", GO)}\n\n${fence("brainfuck", UNKNOWN)}\n\n${fence("mermaid", MERMAID)}\n\nShip it.\n`,
+    "b-code": `# Code\n\nThe shape of the change:\n\n${fence("go", GO)}\n\n${fence("brainfuck", UNKNOWN)}\n\n${fence("constructor", PROTOTYPE_NAMED)}\n\n${fence("mermaid", MERMAID)}\n\nShip it.\n`,
   });
   await expect(pane.locator(".af-docs-tab")).toHaveText(["a-plain", "b-code"]);
   await expect(pane.locator(".cm-content")).toContainText("no language here");
@@ -84,7 +89,7 @@ test("docs codeblocks: fences render as highlighted blocks, only when a doc name
 
   await pane.locator(".af-docs-tab", { hasText: "b-code" }).click();
   const blocks = pane.locator(".cm-md-fence");
-  await expect(blocks).toHaveCount(2); // go and brainfuck — mermaid is its own widget
+  await expect(blocks).toHaveCount(3); // go, brainfuck, constructor — mermaid is its own widget
   expect(chunkLoads, "the grammar chunk loads once, on demand").toHaveLength(1);
 
   // The go block: badge, and highlighted spans once the chunk lands.
@@ -94,19 +99,25 @@ test("docs codeblocks: fences render as highlighted blocks, only when a doc name
   await expect(go.locator(".cm-md-fence-code .tok-comment", { hasText: "greet the world" })).toHaveCount(1);
   await expect(go.locator(".cm-md-fence-code code")).toContainText("fmt.Println");
 
-  // The unknown language: same finished block, badge, but plain — the chunk
-  // resolving to no grammar is not an error.
-  const unknown = blocks.nth(1);
-  await expect(unknown.locator(".cm-md-fence-lang")).toHaveText("brainfuck");
-  await expect(unknown.locator(".cm-md-fence-code code")).toContainText("this language does not exist");
-  await expect(unknown.locator(".cm-md-fence-code span[class*=tok-]")).toHaveCount(0);
+  // The unknown languages: same finished block, badge, but plain — the chunk
+  // resolving to no grammar is not an error, and neither is an info string
+  // that happens to be an Object.prototype member name.
+  for (const [nth, lang, text] of [
+    [1, "brainfuck", "this language does not exist"],
+    [2, "constructor", "inherited member name"],
+  ] as const) {
+    const unknown = blocks.nth(nth);
+    await expect(unknown.locator(".cm-md-fence-lang")).toHaveText(lang);
+    await expect(unknown.locator(".cm-md-fence-code code")).toContainText(text);
+    await expect(unknown.locator(".cm-md-fence-code span[class*=tok-]")).toHaveCount(0);
+  }
 
   // The mermaid fence beside them still renders its diagram.
   await expect(pane.locator(".cm-md-mermaid svg")).toBeVisible({ timeout: 30_000 });
 
   // Cursor inside a fence shows its source, the way tables already behave.
   await go.click();
-  await expect(pane.locator(".cm-md-fence")).toHaveCount(1, "the brainfuck block still renders; the go fence is source");
+  await expect(pane.locator(".cm-md-fence")).toHaveCount(2, "the unknown-language blocks still render; the go fence is source");
   await expect(pane.locator(".cm-line", { hasText: "func main()" })).toBeVisible();
   // Cursor back out re-renders the finished block.
   await pane.locator(".cm-line", { hasText: "Ship it." }).click();

@@ -31,6 +31,17 @@ test("languageFor returns null for unknown and empty languages", () => {
   }
 });
 
+// A fence's info string is document text, and every Object.prototype member
+// name lowercases onto the map keys — "constructor", "__proto__", "toString".
+// The lookup must return null for them, never a truthy non-grammar that
+// highlightRanges would then try to parse with.
+test("languageFor returns null for Object.prototype member names", () => {
+  for (const lang of ["constructor", "__proto__", "toString", "hasOwnProperty", "valueOf", "CONSTRUCTOR"]) {
+    assert.equal(languageFor(lang), null, lang);
+    assert.equal(highlightRanges("code", lang), null, `${lang} stays plain code`);
+  }
+});
+
 test("a go block gets keyword, string and comment spans over real text", () => {
   const src = `// hello\npackage main\n\nimport "fmt"\n\nfunc main() {\n\tfmt.Println("hi", 42)\n}\n`;
   const spans = highlightRanges(src, "go");
