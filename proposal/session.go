@@ -12,6 +12,20 @@ import (
 const (
 	attachRefPrefix = "refs/af/attach/"
 	cursorRefPrefix = "refs/af/cursor/"
+	briefRefPrefix  = "refs/af/brief/"
+)
+
+// BriefState is the state of the briefing marker a session holds for one
+// attachment (#6755). The marker's blob is "<slug> <state>".
+type BriefState string
+
+const (
+	// BriefOwed means a request asked the daemon to brief the agent and the
+	// contract prompt has not reached it yet.
+	BriefOwed BriefState = "owed"
+	// BriefDone means the contract was delivered for this attachment (a send
+	// that may have landed counts; a double paste is worse than a lost one).
+	BriefDone BriefState = "done"
 )
 
 // ErrNotAttached means the session has no proposal.
@@ -50,6 +64,95 @@ func (s *Store) attachedLocked(sessionID string) (string, error) {
 // errBadAttachment marks an attachment ref whose blob names no valid slug.
 // Attach and Detach replace or drop such a ref; everything else refuses it.
 var errBadAttachment = errors.New("corrupt proposal attachment; run af proposal attach or detach to repair it")
+
+// Brief returns the slug and state of the session's briefing marker, or
+// "", "" when it has none.
+func (s *Store) Brief(sessionID string) (string, BriefState, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return "", "", err
+	}
+	if ok, err := s.present(); !ok || err != nil {
+		return "", "", err
+	}
+	return s.briefLocked(sessionID)
+}
+
+func (s *Store) briefLocked(sessionID string) (string, BriefState, error) {
+	out, err := s.git(nil, "cat-file", "blob", briefRefPrefix+sessionID)
+	if err != nil {
+		if _, verr := s.git(nil, "rev-parse", "--verify", "--quiet", briefRefPrefix+sessionID); verr != nil {
+			return "", "", nil
+		}
+		return "", "", fmt.Errorf("proposal briefing marker of session %s: %w", sessionID, err)
+	}
+	f := strings.Fields(out)
+	if len(f) != 2 {
+		return "", "", fmt.Errorf("corrupt proposal briefing marker of session %s: %q", sessionID, strings.TrimSpace(out))
+	}
+	if err := ValidateSlug(f[0]); err != nil {
+		return "", "", fmt.Errorf("corrupt proposal briefing marker of session %s: %v", sessionID, err)
+	}
+	switch BriefState(f[1]) {
+	case BriefOwed:
+		return f[0], BriefOwed, nil
+	case BriefDone:
+		return f[0], BriefDone, nil
+	}
+	return "", "", fmt.Errorf("corrupt proposal briefing marker of session %s: state %q", sessionID, f[1])
+}
+
+// OweBrief arms the briefing marker of sessionID for slug and returns the
+// marker's resulting state. An attach that names a different slug re-arms; a
+// repeated attach of the same slug leaves an owed or done marker alone, so
+// the contract still goes exactly once.
+func (s *Store) OweBrief(sessionID, slug string) (BriefState, error) {
+	if err := validateSessionID(sessionID); err != nil {
+		return "", err
+	}
+	if err := ValidateSlug(slug); err != nil {
+		return "", err
+	}
+	state := BriefOwed
+	err := s.withLock(func() error {
+		got, cur, err := s.briefLocked(sessionID)
+		if err != nil {
+			// A corrupt marker cannot say what was delivered; overwriting it
+			// re-briefs, the same repair attach does for attachments.
+			got = ""
+		}
+		if got == slug {
+			state = cur
+			return nil
+		}
+		return s.writeBriefLocked(sessionID, slug, BriefOwed)
+	})
+	return state, err
+}
+
+// MarkBriefDone settles the session's briefing marker for slug. It does
+// nothing when the marker no longer owes slug, so a delivery finishing late
+// never retires a debt that is not its own.
+func (s *Store) MarkBriefDone(sessionID, slug string) error {
+	if err := validateSessionID(sessionID); err != nil {
+		return err
+	}
+	return s.withLock(func() error {
+		got, cur, err := s.briefLocked(sessionID)
+		if err != nil || got != slug || cur != BriefOwed {
+			return err
+		}
+		return s.writeBriefLocked(sessionID, slug, BriefDone)
+	})
+}
+
+func (s *Store) writeBriefLocked(sessionID, slug string, state BriefState) error {
+	blob, err := s.git([]byte(slug+" "+string(state)+"\n"), "hash-object", "-w", "--stdin")
+	if err != nil {
+		return err
+	}
+	_, err = s.git(nil, "update-ref", briefRefPrefix+sessionID, strings.TrimSpace(blob))
+	return err
+}
 
 // Attachments maps each attached session ID to its slug.
 func (s *Store) Attachments() (map[string]string, error) {
@@ -130,8 +233,8 @@ func (s *Store) ensureCursor(sessionID string) error {
 	return err
 }
 
-// Detach removes the attachment and cursor of session sessionID. It returns
-// the slug it was attached to, or "" when it had none.
+// Detach removes the attachment, cursor and briefing marker of session
+// sessionID. It returns the slug it was attached to, or "" when it had none.
 func (s *Store) Detach(sessionID string) (string, error) {
 	if err := validateSessionID(sessionID); err != nil {
 		return "", err
@@ -148,7 +251,7 @@ func (s *Store) Detach(sessionID string) (string, error) {
 		if err != nil {
 			return err
 		}
-		for _, ref := range []string{attachRefPrefix + sessionID, cursorRefPrefix + sessionID} {
+		for _, ref := range []string{attachRefPrefix + sessionID, cursorRefPrefix + sessionID, briefRefPrefix + sessionID} {
 			if _, err := s.git(nil, "update-ref", "-d", ref); err != nil {
 				return err
 			}

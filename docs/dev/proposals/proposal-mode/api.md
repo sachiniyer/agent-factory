@@ -117,8 +117,8 @@ or `api.md`). Replies always use the file name (`api.md`).
 |---|---|---|
 | `POST /v1/ListProposals` | target | `{proposals: [proposal]}`, newest edit first |
 | `POST /v1/GetProposal` | target, `slug` | `proposal detail` |
-| `POST /v1/StartProposal` | `session_id`, `slug`, `docs` | `attached proposal` |
-| `POST /v1/AttachProposal` | `session_id`, `slug` (optional) | `attached proposal` |
+| `POST /v1/StartProposal` | `session_id`, `slug`, `docs`, `deliver_rules` (optional) | `attached proposal` |
+| `POST /v1/AttachProposal` | `session_id`, `slug` (optional), `deliver_rules` (optional) | `attached proposal` |
 | `POST /v1/DetachProposal` | `session_id` | `{slug, detached, tab}` |
 | `POST /v1/AddProposalDoc` | target, `slug`, `name`, `author` | `{slug, doc, path, commit}` |
 | `POST /v1/RemoveProposalDoc` | target, `slug`, `doc`, `author` | `{slug, doc, path, commit}`; the doc stays in history |
@@ -147,7 +147,8 @@ Shapes:
 // attached proposal (StartProposal, AttachProposal)
 {"slug": "auth-rework", "path": "…", "docs": ["goals.md"],
  "attached_sessions": ["auth-planner"], "rules": "You are working on …",
- "tab": "docs"}
+ "tab": "docs",
+ "rules_delivery": "delivered", "rules_error": ""}
 ```
 
 - `templates` lists the template names (built-in and user) that the proposal
@@ -165,6 +166,20 @@ Shapes:
   attachment does not change, so a retry closes them.
 - `docs` in `StartProposal` is a list of doc names. Empty means all
   built-in templates.
+- `deliver_rules` is optional on start and attach. Set it (the web does) when
+  the caller cannot show `rules` to the agent itself the way the CLI's printed
+  reply does: the daemon then owes the agent one delivery of the rules as a
+  prompt — server-generated from the daemon's own slug/path — sent only into a
+  pane that can take it (ready agent, no client holding the pane), ahead of
+  any queued proposal-edit push, and retried on the poll tick until it lands
+  or settles. `rules_delivery` in the reply reports `delivered` (confirmed
+  paste), `unconfirmed` (may have landed; never resent), `held` (still owed —
+  the pane cannot take it yet, or the session has no live agent), or `failed`
+  (the send refused it; still owed, retried), and `rules_error` says why for
+  the last three. The debt is durable, so a repeated attach of the same slug
+  pastes nothing and a daemon restart still delivers; detach clears it, so
+  re-attach briefs again. Without `deliver_rules` nothing is delivered and the
+  fields are absent.
 - `author` is `human`, `agent` or `external`. `agent` needs `session_id`, and
   the commit records that session. The Docs tab sends `human`.
 - `ReadProposalDoc` first commits uncommitted edits of that doc as `external`,

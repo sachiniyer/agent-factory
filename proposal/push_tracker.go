@@ -163,11 +163,13 @@ func (s *Service) publishPush(statuses []PushStatus) {
 
 // PushTick runs the push rules for every session the daemon knows. The poll
 // loop calls it on each tick. A send runs in the background, so a slow
-// delivery does not hold the poll loop.
+// delivery does not hold the poll loop. An owed contract briefing (#6755)
+// takes the session's send slot ahead of its edits: the rules must reach the
+// agent before the first "the user edited" prompt asks it to act on them.
 func (s *Service) PushTick(targets []PushTarget) {
 	now := s.now()
 	var publish []PushStatus
-	var sends []string
+	var sends, briefs []string
 	s.mu.Lock()
 	live := map[string]bool{}
 	for _, t := range targets {
@@ -186,7 +188,13 @@ func (s *Service) PushTick(targets []PushTarget) {
 		e := s.entryLocked(t.SessionID, t.RepoID, slug)
 		e.apply(t)
 		s.refreshUnsentLocked(store, t.SessionID, e, now)
-		if DecidePush(e.input(), now).Send {
+		if s.briefOwedLocked(store, t.SessionID, slug) {
+			be := s.briefEntryLocked(t.SessionID)
+			if t.Ready && !t.Attached && !be.sending && !now.Before(be.notBefore) {
+				be.sending = true
+				briefs = append(briefs, t.SessionID)
+			}
+		} else if DecidePush(e.input(), now).Send {
 			e.sending = true
 			sends = append(sends, t.SessionID)
 		}
@@ -199,8 +207,16 @@ func (s *Service) PushTick(targets []PushTarget) {
 			delete(s.push, id)
 		}
 	}
+	for id, e := range s.briefs {
+		if !live[id] && !e.sending {
+			delete(s.briefs, id)
+		}
+	}
 	s.mu.Unlock()
 	s.publishPush(publish)
+	for _, id := range briefs {
+		s.spawn(func() { _, _ = s.sendBrief(id) })
+	}
 	for _, id := range sends {
 		s.spawn(func() { _ = s.runPush(id) })
 	}

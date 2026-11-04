@@ -502,14 +502,14 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/StartProposal",
-		Description: "Create a proposal from templates, attach the session to it, open its Proposal tab, and return the rules for the agent.",
+		Description: "Create a proposal from templates, attach the session to it, open its Proposal tab, and return the rules for the agent. deliver_rules additionally delivers the rules to the agent as a prompt (reported in rules_delivery).",
 		requestType: reflect.TypeOf(StartProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.StartProposal) },
 	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/AttachProposal",
-		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Proposal tab, and return the rules.",
+		Description: "Attach the session to a proposal (or, with no slug, report its current one), open its Proposal tab, and return the rules. deliver_rules additionally delivers the rules to the agent as a prompt (reported in rules_delivery).",
 		requestType: reflect.TypeOf(AttachProposalRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.AttachProposal) },
 	},

@@ -131,9 +131,12 @@ type Service struct {
 	watch   watchState
 	lastSet map[string]map[string][]string
 	// push maps session id → push state.
-	push  map[string]*pushEntry
-	now   func() time.Time
-	spawn func(func())
+	push map[string]*pushEntry
+	// briefs maps session id → briefing send state (the durable debt lives on
+	// the session's briefing marker; this is only the in-flight send's guard).
+	briefs map[string]*briefEntry
+	now    func() time.Time
+	spawn  func(func())
 	// fence refuses a save that arrives after a later save of the same writer.
 	fence fenceTable
 }
@@ -141,7 +144,7 @@ type Service struct {
 // NewService returns a service that uses host.
 func NewService(host Host) *Service {
 	return &Service{
-		host: host, watch: newWatchState(), push: map[string]*pushEntry{},
+		host: host, watch: newWatchState(), push: map[string]*pushEntry{}, briefs: map[string]*briefEntry{},
 		now: time.Now, spawn: func(f func()) { go f() },
 	}
 }
@@ -402,6 +405,9 @@ func (s *Service) attach(r *resolved, slug string, deliverRules bool) (*Summary,
 		info.TabError = err.Error()
 	} else {
 		info.Tab = tab
+	}
+	if deliverRules {
+		s.brief(r, slug, info)
 	}
 	return info, nil
 }
