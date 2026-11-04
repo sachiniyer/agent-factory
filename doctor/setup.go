@@ -194,7 +194,18 @@ func checkTmux(report *Report) {
 }
 
 func checkAgentPrograms(cfg *config.Config, report *Report) {
-	if cfg.DefaultProgram == "" {
+	// Resolve the effective config the way session launch does: when the doctor
+	// is inside a git repo, merge the in-repo layer over the global config so
+	// the setup profile verifies the first session's actual prerequisites, not
+	// the global layer alone. Outside a repo the global config is the only
+	// layer sessions could launch under, so it is kept unchanged.
+	repo, repoErr := currentRepoContext()
+	workspace := ""
+	if repoErr == nil {
+		workspace = repo.Root
+	}
+	effective := resolveEffectiveConfig(cfg, repo)
+	if effective == nil || effective.DefaultProgram == "" {
 		report.addActionableFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("default_program is empty — set it to one of %s in ~/.agent-factory/config.toml", tmux.SupportedProgramsString()),
@@ -209,10 +220,9 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	// repo the launch directory cannot be determined, so today's CheckCommand
 	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	workspace, repoErr := currentRepoRoot()
-	checkOneProgram(workspace, repoErr, "default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
-	for _, agent := range sortedKeys(cfg.ProgramOverrides) {
-		command := strings.TrimSpace(cfg.ProgramOverrides[agent])
+	checkOneProgram(workspace, repoErr, "default_program", effective.DefaultProgram, config.ResolveProgram(effective, effective.DefaultProgram), report)
+	for _, agent := range sortedKeys(effective.ProgramOverrides) {
+		command := strings.TrimSpace(effective.ProgramOverrides[agent])
 		if command == "" {
 			continue
 		}

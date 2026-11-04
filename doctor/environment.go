@@ -122,16 +122,38 @@ func checkStorageDir(report *Report, path, name string) {
 	}
 }
 
-func currentRepoRoot() (string, error) {
+func currentRepoContext() (*config.RepoContext, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	repo, err := config.RepoFromPath(cwd)
+	return config.RepoFromPath(cwd)
+}
+
+func currentRepoRoot() (string, error) {
+	repo, err := currentRepoContext()
 	if err != nil {
 		return "", err
 	}
 	return repo.Root, nil
+}
+
+// resolveEffectiveConfig merges the in-repo config layer over the global cfg
+// the way session launch does (config.ResolveConfigForRepoInspectionWithGlobal),
+// so the doctor verifies the same command a session's tmux pane will actually
+// execute, not the global layer alone. Outside a repo (repo == nil), or when
+// the in-repo layer cannot be loaded, the global cfg is returned unchanged —
+// that is the only layer sessions could launch under there. A nil global config
+// is returned as nil.
+func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) *config.Config {
+	if global == nil || repo == nil {
+		return global
+	}
+	resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	if err != nil {
+		return global
+	}
+	return &resolved.Config
 }
 
 func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
@@ -202,22 +224,34 @@ func checkTmuxEnvironment(report *Report) {
 }
 
 func checkAgentBinaries(cfg *config.Config, report *Report) {
+	// Resolve the effective config the way session launch does: when the doctor
+	// is inside a git repo, merge the in-repo layer over the global config
+	// (config.ResolveConfigForRepoInspectionWithGlobal) so the command and
+	// severity reflect what a session's tmux pane will actually execute, not
+	// the global layer alone. Outside a repo the global config is the only
+	// layer sessions could launch under, so it is kept unchanged.
+	//
 	// Anchor relative program_overrides to the session's launch directory (the
 	// repo the doctor is inside), mirroring the daemon-side #5779 fix that
 	// passes repo.WorkspacePath() to preflight.LocalSessionPrereqsAt. The doctor
 	// used the cwd-fallback CheckCommand instead, so a relative override flipped
 	// between PASS and FAIL purely on where `af doctor` was invoked. Outside any
-	// repo the launch directory cannot be determined, so today's CheckCommand is
-	// kept and any failure is reported with an honest message instead of
+	// repo the launch directory cannot be determined, so today's CheckCommand
+	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	workspace, repoErr := currentRepoRoot()
+	repo, repoErr := currentRepoContext()
+	workspace := ""
+	if repoErr == nil {
+		workspace = repo.Root
+	}
+	effective := resolveEffectiveConfig(cfg, repo)
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		command := agent
 		configured := false
-		if cfg != nil {
-			command = config.ResolveProgram(cfg, agent)
-			configured = cfg.DefaultProgram == agent || strings.TrimSpace(cfg.ProgramOverrides[agent]) != ""
+		if effective != nil {
+			command = config.ResolveProgram(effective, agent)
+			configured = effective.DefaultProgram == agent || strings.TrimSpace(effective.ProgramOverrides[agent]) != ""
 		}
 		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
 		if err == nil {
