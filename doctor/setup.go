@@ -204,12 +204,33 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	if repoErr == nil {
 		workspace = repo.Root
 	}
-	effective := resolveEffectiveConfig(cfg, repo)
+	effective, backend, resolveErr := resolveEffectiveConfig(cfg, repo)
+	if resolveErr != nil {
+		// A repo whose in-repo config exists but cannot be resolved refuses
+		// session creation with this same error (#5801). Report it as an
+		// actionable finding instead of checking a command the session would
+		// never launch.
+		report.addActionableFinding(Finding{
+			Check: "agent-program",
+			Detail: fmt.Sprintf("could not resolve the in-repo config at %s — fix the in-repo config (.agent-factory/config.toml) and rerun `af doctor --setup`: %v",
+				repo.Root, resolveErr),
+		})
+		return
+	}
 	if effective == nil || effective.DefaultProgram == "" {
 		report.addActionableFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("default_program is empty — set it to one of %s in ~/.agent-factory/config.toml", tmux.SupportedProgramsString()),
 		})
+		return
+	}
+	if !isLocalBackend(backend) {
+		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
+		// host's agent binaries are not prerequisites for them — mirroring
+		// daemon.createNeedsDaemonHostPrereqs. Report a non-actionable row so
+		// the setup profile records why no binary check ran.
+		report.Pass(sectionEnvironment, "agent-program",
+			fmt.Sprintf("host agent binaries not checked — this repo's sessions run on the %q backend", backend))
 		return
 	}
 	// Anchor relative program_overrides to the session's launch directory (the

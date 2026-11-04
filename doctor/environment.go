@@ -141,19 +141,33 @@ func currentRepoRoot() (string, error) {
 // resolveEffectiveConfig merges the in-repo config layer over the global cfg
 // the way session launch does (config.ResolveConfigForRepoInspectionWithGlobal),
 // so the doctor verifies the same command a session's tmux pane will actually
-// execute, not the global layer alone. Outside a repo (repo == nil), or when
-// the in-repo layer cannot be loaded, the global cfg is returned unchanged —
-// that is the only layer sessions could launch under there. A nil global config
-// is returned as nil.
-func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) *config.Config {
-	if global == nil || repo == nil {
-		return global
+// execute, not the global layer alone. It returns the effective config, the
+// effective `backend` runtime selector (empty meaning local), and any error
+// from resolving the in-repo layer. Outside a repo (repo == nil) the global
+// cfg is returned with a local backend and no error — that is the only layer
+// sessions could launch under there. A nil global config returns
+// (nil, local, nil); callers must nil-check the config before using it.
+func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*config.Config, string, error) {
+	if global == nil {
+		return nil, config.BackendLocal, nil
+	}
+	if repo == nil {
+		return global, config.BackendLocal, nil
 	}
 	resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
 	if err != nil {
-		return global
+		return nil, "", err
 	}
-	return &resolved.Config
+	return &resolved.Config, resolved.Backend, nil
+}
+
+// isLocalBackend reports whether a repo's resolved backend runs the agent on
+// the daemon's own host — the only case where the daemon host's tmux and agent
+// binary decide whether a create succeeds. docker/ssh/hook/sandbox run the
+// agent elsewhere, so the daemon host's binaries are not prerequisites for
+// them. Mirrors daemon.createNeedsDaemonHostPrereqs.
+func isLocalBackend(backend string) bool {
+	return backend == "" || backend == config.BackendLocal
 }
 
 func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
@@ -244,7 +258,30 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	if repoErr == nil {
 		workspace = repo.Root
 	}
-	effective := resolveEffectiveConfig(cfg, repo)
+	effective, backend, resolveErr := resolveEffectiveConfig(cfg, repo)
+	if resolveErr != nil {
+		// A repo whose in-repo config exists but cannot be resolved refuses
+		// session creation with this same error (#5801): the backend is
+		// undeterminable, and guessing local could run the agent somewhere
+		// other than the isolation the repo chose. Report it as an actionable
+		// config failure instead of checking a command the session would
+		// never launch.
+		report.AddHeader("agents", "n/a (repo config unresolved)")
+		report.Fail(sectionConfig, "agent-config",
+			fmt.Sprintf("could not resolve the in-repo config at %s: %v", repo.Root, resolveErr),
+			"fix the in-repo config (.agent-factory/config.toml) and rerun `af doctor`")
+		return
+	}
+	if !isLocalBackend(backend) {
+		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
+		// host's agent binaries are not prerequisites for them — mirroring
+		// daemon.createNeedsDaemonHostPrereqs, which skips LocalSessionPrereqs
+		// for non-local backends.
+		report.AddHeader("agents", fmt.Sprintf("skipped (repo backend: %s)", backend))
+		report.Info(sectionEnvironment, "agents",
+			fmt.Sprintf("host agent binaries not checked — this repo's sessions run on the %q backend", backend))
+		return
+	}
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		command := agent

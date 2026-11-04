@@ -300,3 +300,109 @@ func TestDoctor_InRepoOverride_MissingBinary_EndToEnd(t *testing.T) {
 	require.NotZero(t, report.UnresolvedCount(),
 		"a FAIL row must drive the exit code")
 }
+
+// TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal verifies
+// that when the in-repo config exists but cannot be resolved (a TOML syntax
+// error), the sweep reports an actionable config failure instead of silently
+// falling back to the global layer. Session creation refuses the same repo
+// with this error (#5801), so a silent global fallback would let `af doctor`
+// PASS for a repo `af` itself would not launch a session in.
+func TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	// Invalid TOML: an unclosed string table value. The in-repo loader turns
+	// this into a parse error that ResolveConfigForRepoInspectionWithGlobal
+	// surfaces.
+	writeInRepoConfig(t, repo, "backend = \"docker\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"an unresolvable in-repo config must FAIL, not silently fall back to global")
+	require.True(t, row.Problem, "the unresolved in-repo config must be actionable")
+	require.Contains(t, row.Detail, "could not resolve the in-repo config")
+	// No per-agent binary rows ran: the session would refuse to launch, so the
+	// doctor must not pretend to have checked a command.
+	for _, c := range rep.Checks {
+		require.NotEqual(t, tmux.ProgramClaude, c.Name,
+			"no per-agent binary row should run when the in-repo config is unresolvable")
+	}
+	require.Contains(t, agentsHeaderValue(rep), "repo config unresolved")
+}
+
+// TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks verifies that a repo
+// whose in-repo config selects a non-local backend (docker) does not check the
+// daemon host for the agent binary: the session runs in a container, so the
+// host's binary is not a prerequisite. Mirrors daemon.createNeedsDaemonHostPrereqs.
+func TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	// No claude binary exists anywhere — on a docker backend that is fine.
+	writeInRepoConfig(t, repo, "backend = \"docker\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	require.Contains(t, agentsHeaderValue(rep), "skipped (repo backend: docker)",
+		"the agents header must record that host checks were skipped for a remote backend")
+	row := findCheckByName(t, rep, "agents")
+	require.Equal(t, StatusInfo, row.Status,
+		"a remote-backend skip is an observation, not a pass/fail")
+	require.NotZero(t, row.Detail, "docker")
+	// No per-agent binary rows: the daemon host is not checked.
+	for _, c := range rep.Checks {
+		require.NotEqual(t, tmux.ProgramClaude, c.Name,
+			"no per-agent binary row should run on a remote backend")
+	}
+	require.Zero(t, rep.UnresolvedCount(),
+		"a remote-backend skip must not drive the exit code")
+}
+
+// TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks is the setup-path twin
+// of TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks: a repo on a docker
+// backend must not report the daemon host's missing agent binary as a setup
+// finding.
+func TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"docker\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	require.Zero(t, rep.UnresolvedCount(),
+		"a remote-backend skip must not produce an actionable finding: %+v", rep.Findings)
+	row := findCheck(t, rep, "agent-program")
+	require.Equal(t, StatusPass, row.Status,
+		"a remote-backend skip is recorded as a non-actionable pass row")
+	require.Contains(t, row.Detail, "docker")
+}
+
+// TestCheckAgentPrograms_MalformedInRepoConfig_Actionable is the setup-path twin
+// of TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal: an
+// unresolvable in-repo config must produce an actionable agent-program finding
+// rather than silently checking the global-layer command.
+func TestCheckAgentPrograms_MalformedInRepoConfig_Actionable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "default_program = \"claude\n")
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	findings := findByCheck(rep, "agent-program")
+	require.NotEmpty(t, findings, "an unresolvable in-repo config must produce a finding")
+	require.Contains(t, findings[0].Detail, "could not resolve the in-repo config")
+	require.True(t, rep.UnresolvedCount() > 0,
+		"an unresolvable in-repo config must drive the exit code")
+}
