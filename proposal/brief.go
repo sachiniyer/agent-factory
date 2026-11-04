@@ -26,15 +26,28 @@ import (
 
 // briefEntry is the in-memory half of a session's briefing: the durable
 // marker says a contract is owed, this says whether a send is in flight,
-// when a failed one may try again, and when an unconfirmed one came back.
-// The last seeds the push entry's own delivery guard, which exists on the
-// push side — a briefing sent before the session had any edits predates its
-// push entry entirely. Losing the entry (a restart) is safe — the marker
-// re-derives owed/debt state.
+// when a failed one may try again, when an unconfirmed one came back, and
+// what the marker read last. unconfirmedAt seeds the push entry's own
+// delivery guard, which exists on the push side — a briefing sent before
+// the session had any edits predates its push entry entirely. The marker
+// cache keeps an idle tick from launching a git subprocess per attached
+// session; attach, detach, and every send attempt invalidate it. Losing the
+// entry (a restart) is safe — the next tick reads the marker once.
 type briefEntry struct {
 	sending       bool
 	notBefore     time.Time
 	unconfirmedAt time.Time
+	markerSet     bool
+	markerSlug    string
+	markerState   BriefState
+	markerLoads   int
+}
+
+// withinUnconfirmed reports whether now is inside the quiet window an
+// unconfirmed delivery opened at at — the window in which a further prompt
+// could splice into the still-unsubmitted paste.
+func withinUnconfirmed(at, now time.Time) bool {
+	return !at.IsZero() && now.Sub(at) < PushUnconfirmedTimeout
 }
 
 func (s *Service) briefEntryLocked(sessionID string) *briefEntry {
@@ -58,6 +71,34 @@ func (s *Service) claimBrief(sessionID string) bool {
 	}
 	e.sending = true
 	return true
+}
+
+// invalidateBrief drops the session's cached briefing marker after an
+// attach, detach, or recorded delivery changed what the ref holds, so the
+// next owed check reads it once instead of trusting the stale copy.
+func (s *Service) invalidateBrief(sessionID string) {
+	s.mu.Lock()
+	if be := s.briefs[sessionID]; be != nil {
+		be.markerSet = false
+	}
+	s.mu.Unlock()
+}
+
+// briefGuarded reports whether the session's pane is inside an unconfirmed
+// delivery's quiet window — whether the send that opened it was a contract
+// or an edit push, and whichever proposal it was for. A further contract
+// waits for the window to expire, the same way a further edit push does.
+func (s *Service) briefGuarded(sessionID string) bool {
+	now := s.now()
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if be := s.briefs[sessionID]; be != nil && withinUnconfirmed(be.unconfirmedAt, now) {
+		return true
+	}
+	if e := s.push[sessionID]; e != nil && withinUnconfirmed(e.unconfirmedAt, now) {
+		return true
+	}
+	return false
 }
 
 // brief reports what a deliver_rules request did with the contract on info.
@@ -89,6 +130,8 @@ func (s *Service) brief(r *resolved, slug string, info *Summary) {
 		info.RulesDelivery, info.RulesError = "held", "a client is holding the session's pane (a TUI attach or an unfinished prompt): the contract is owed and will be delivered once the pane is free"
 	case !r.session.Ready:
 		info.RulesDelivery, info.RulesError = "held", "the agent is busy: the contract is owed and will be delivered once it is idle"
+	case s.briefGuarded(r.session.ID):
+		info.RulesDelivery, info.RulesError = "held", "an earlier prompt to this pane is still unconfirmed: the contract is owed and goes out once the pane's quiet window expires"
 	case !s.claimBrief(r.session.ID):
 		info.RulesDelivery, info.RulesError = "held", "the contract is already being delivered"
 	default:
@@ -143,6 +186,11 @@ func (s *Service) runBrief(sessionID string, forced bool) (Delivery, error) {
 	case !r.session.Ready:
 		return DeliveryFailed, errors.New("the agent is busy")
 	}
+	if s.briefGuarded(sessionID) {
+		// The window can open between the claim and now — an edit push that
+		// started before the debt existed can finish unconfirmed mid-flight.
+		return DeliveryFailed, errors.New("an earlier prompt to this pane is still unconfirmed")
+	}
 	delivery, sendErr := s.host.SendPrompt(r.session.ID, Rules(slug, r.store.SlugPath(slug)))
 	if delivery != DeliveryFailed {
 		// Confirmed and unconfirmed alike settle the debt, whatever sendErr
@@ -164,6 +212,9 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 	s.mu.Lock()
 	if e := s.briefs[sessionID]; e != nil {
 		e.sending = false
+		// The attempt may have recorded a delivery or left the debt owed;
+		// either way the cached marker is stale.
+		e.markerSet = false
 		if sendErr != nil || delivery == DeliveryFailed {
 			e.notBefore = now.Add(PushQuiet)
 		}
@@ -187,7 +238,21 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 
 // briefOwedLocked reports whether sessionID's briefing marker still owes the
 // contract for slug — the debt that has to go out before any edit push may.
+// It runs per attached session on every poll tick under s.mu, so the marker
+// read — a git subprocess, two when the marker is missing — is cached on the
+// brief entry and re-read only after an attach, detach, or send invalidated
+// it. A stale cache can only defer a send by one tick, never send the wrong
+// contract: the cached slug must still match the live attachment.
 func (s *Service) briefOwedLocked(store *Store, sessionID, slug string) bool {
-	got, state, err := store.Brief(sessionID)
-	return err == nil && got == slug && state == BriefOwed
+	be := s.briefEntryLocked(sessionID)
+	if !be.markerSet {
+		be.markerLoads++
+		got, state, err := store.Brief(sessionID)
+		be.markerSet = true
+		if err != nil {
+			got, state = "", ""
+		}
+		be.markerSlug, be.markerState = got, state
+	}
+	return be.markerSlug == slug && be.markerState == BriefOwed
 }

@@ -139,13 +139,17 @@ func (s *Service) changedLocked(sessionID string, e *pushEntry, now time.Time) (
 func (s *Service) entryLocked(sessionID, repoID, slug string) *pushEntry {
 	e := s.push[sessionID]
 	if e == nil || e.repoID != repoID || e.slug != slug {
-		e = &pushEntry{repoID: repoID, slug: slug, mode: PushAuto}
-		if be := s.briefs[sessionID]; be != nil {
-			// A contract sent unconfirmed before this entry existed still owes
-			// the pane its quiet window, or the next edit prompt could splice
-			// into the unsubmitted paste.
-			e.unconfirmedAt = be.unconfirmedAt
+		// The pane's quiet window outlives the entry: an attach swap or a
+		// fresh entry must not let the next paste splice into whatever send —
+		// contract or edit — came back unconfirmed on the same pane.
+		var guard time.Time
+		if e != nil {
+			guard = e.unconfirmedAt
 		}
+		if be := s.briefs[sessionID]; be != nil && be.unconfirmedAt.After(guard) {
+			guard = be.unconfirmedAt
+		}
+		e = &pushEntry{repoID: repoID, slug: slug, mode: PushAuto, unconfirmedAt: guard}
 		s.push[sessionID] = e
 	}
 	return e
@@ -206,8 +210,11 @@ func (s *Service) PushTick(targets []PushTarget) {
 			be := s.briefEntryLocked(t.SessionID)
 			// A queued Send now overrides the pane hold for the briefing just
 			// like for the edits it precedes; a held pane otherwise strands it.
+			// Either side's unconfirmed send — a contract or an edit push —
+			// still guards the pane, or the next contract splices into it.
 			forced := e.sendNow
-			if t.Ready && (!t.Attached || forced) && !be.sending && !now.Before(be.notBefore) {
+			if t.Ready && (!t.Attached || forced) && !be.sending && !now.Before(be.notBefore) &&
+				!withinUnconfirmed(be.unconfirmedAt, now) && !withinUnconfirmed(e.unconfirmedAt, now) {
 				be.sending = true
 				briefs = append(briefs, briefSend{id: t.SessionID, forced: forced})
 			}
@@ -225,7 +232,9 @@ func (s *Service) PushTick(targets []PushTarget) {
 		}
 	}
 	for id, e := range s.briefs {
-		if !live[id] && !e.sending {
+		// A live unconfirmed window must survive a session dropping off the
+		// target list, or a reappearing session could splice the next paste.
+		if !live[id] && !e.sending && !withinUnconfirmed(e.unconfirmedAt, now) {
 			delete(s.briefs, id)
 		}
 	}
@@ -372,8 +381,11 @@ func (s *Service) pushRoute(t PushTarget, fn func(e *pushEntry) bool) (*PushStat
 	if send && s.briefOwedLocked(r.store, id, slug) {
 		// An owed contract goes first, like on the poll tick: the rules must
 		// reach the agent before the first edit prompt it is asked to act on.
+		// The pane's unconfirmed window gates the contract send the same way —
+		// the edit stays queued too, since the contract still precedes it.
 		be := s.briefEntryLocked(id)
-		if !be.sending && !now.Before(be.notBefore) {
+		if !be.sending && !now.Before(be.notBefore) &&
+			!withinUnconfirmed(be.unconfirmedAt, now) && !withinUnconfirmed(e.unconfirmedAt, now) {
 			be.sending = true
 			briefFirst = true
 		}
