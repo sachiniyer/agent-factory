@@ -297,6 +297,45 @@ func TestServiceBriefUnconfirmedIsDeliveredOnce(t *testing.T) {
 	}
 }
 
+func TestServiceBriefUnconfirmedHoldsEditsForTheQuietWindow(t *testing.T) {
+	svc, host, _ := newTestService(t)
+	svc.spawn = func(f func()) { f() }
+	clock := pushT0
+	svc.now = func() time.Time { return clock }
+	paneReady(host, sessA)
+	host.delivery = DeliveryUnconfirmed
+	info, err := svc.Start(sessA, "p", []string{"goals"}, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.RulesDelivery != "unconfirmed" {
+		t.Fatalf("rules_delivery = %q, want unconfirmed", info.RulesDelivery)
+	}
+	host.delivery = DeliveryConfirmed
+	// The contract may still sit unsubmitted in the pane; a human save now
+	// must wait out the same quiet window an unconfirmed push would owe it —
+	// and the session has no push entry yet, so the debt rides the briefing.
+	read, err := svc.Read(Target{SessionID: sessA}, "p", "goals")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := svc.Save(Target{SessionID: sessA}, "p", "goals", "user edit\n", read.Commit); err != nil {
+		t.Fatal(err)
+	}
+	target := PushTarget{RepoID: testRepoID, SessionID: sessA, Modes: map[string]PushMode{"p": PushAuto}, Ready: true}
+	clock = clock.Add(PushQuiet + time.Second)
+	svc.PushTick([]PushTarget{target})
+	if prompts := promptList(host); len(prompts) != 1 {
+		t.Fatalf("the edit spliced into an unconfirmed contract paste: %v", prompts)
+	}
+	clock = clock.Add(PushUnconfirmedTimeout)
+	svc.PushTick([]PushTarget{target})
+	prompts := promptList(host)
+	if len(prompts) != 2 || !strings.HasPrefix(prompts[1], "Proposal p: the user edited") {
+		t.Fatalf("the edit did not follow once the pane was provably free: %v", prompts)
+	}
+}
+
 func TestServiceBriefSurvivesAServiceRestart(t *testing.T) {
 	svc, host, store := newTestService(t)
 	svc.spawn = func(f func()) { f() }

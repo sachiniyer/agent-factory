@@ -140,6 +140,12 @@ func (s *Service) entryLocked(sessionID, repoID, slug string) *pushEntry {
 	e := s.push[sessionID]
 	if e == nil || e.repoID != repoID || e.slug != slug {
 		e = &pushEntry{repoID: repoID, slug: slug, mode: PushAuto}
+		if be := s.briefs[sessionID]; be != nil {
+			// A contract sent unconfirmed before this entry existed still owes
+			// the pane its quiet window, or the next edit prompt could splice
+			// into the unsubmitted paste.
+			e.unconfirmedAt = be.unconfirmedAt
+		}
 		s.push[sessionID] = e
 	}
 	return e

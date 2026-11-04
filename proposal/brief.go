@@ -25,12 +25,16 @@ import (
 // landed must never turn into a second copy.
 
 // briefEntry is the in-memory half of a session's briefing: the durable
-// marker says a contract is owed, this says whether a send is in flight and
-// when a failed one may try again. Losing it (a restart) is safe — the marker
-// re-derives it.
+// marker says a contract is owed, this says whether a send is in flight,
+// when a failed one may try again, and when an unconfirmed one came back.
+// The last seeds the push entry's own delivery guard, which exists on the
+// push side — a briefing sent before the session had any edits predates its
+// push entry entirely. Losing the entry (a restart) is safe — the marker
+// re-derives owed/debt state.
 type briefEntry struct {
-	sending   bool
-	notBefore time.Time
+	sending       bool
+	notBefore     time.Time
+	unconfirmedAt time.Time
 }
 
 func (s *Service) briefEntryLocked(sessionID string) *briefEntry {
@@ -162,6 +166,19 @@ func (s *Service) sendBrief(sessionID string, forced bool) (Delivery, error) {
 		e.sending = false
 		if sendErr != nil || delivery == DeliveryFailed {
 			e.notBefore = now.Add(PushQuiet)
+		}
+	}
+	if delivery == DeliveryUnconfirmed {
+		// The contract may still be sitting unsubmitted in the pane, so edit
+		// prompts queue behind the same quiet window an unconfirmed push gets:
+		// the next paste must not splice into it. The brief entry keeps the
+		// timestamp for push entries created later — a contract sent before
+		// the session had edits predates them.
+		if e := s.briefs[sessionID]; e != nil {
+			e.unconfirmedAt = now
+		}
+		if e := s.push[sessionID]; e != nil {
+			e.unconfirmedAt = now
 		}
 	}
 	s.mu.Unlock()
