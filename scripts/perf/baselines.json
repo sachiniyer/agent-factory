@@ -99,24 +99,44 @@
         "margin": 350.6397233333334
     },
     "lazy_raw_bytes": {
-        "baseline": 378577,
+        "baseline": 397628,
         "samples": [
-            378577,
-            378577,
-            378577
+            397628,
+            397628,
+            397628
         ],
         "stddev": 0,
-        "margin": 18928.85
+        "margin": 19881.4
     },
     "lazy_gzip_bytes": {
-        "baseline": 122689,
+        "baseline": 129634,
         "samples": [
-            122689,
-            122689,
-            122689
+            129634,
+            129634,
+            129634
         ],
         "stddev": 0,
-        "margin": 6162.85
+        "margin": 6481.7
+    },
+    "codeblocks_raw_bytes": {
+        "baseline": 321641,
+        "samples": [
+            321641,
+            321641,
+            321641
+        ],
+        "stddev": 0,
+        "margin": 16082.05
+    },
+    "codeblocks_gzip_bytes": {
+        "baseline": 125499,
+        "samples": [
+            125499,
+            125499,
+            125499
+        ],
+        "stddev": 0,
+        "margin": 6274.95
     },
     "mermaid_raw_bytes": {
         "baseline": 5187694,

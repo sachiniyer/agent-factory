@@ -115,11 +115,18 @@ test("a table that holds the cursor shows its source", () => {
   assert.deepEqual(lineClasses(s, specs).get(3), ["cm-md-table-source"]);
 });
 
-test("fenced code is left as source", () => {
+test("a fenced block away from the cursor becomes one codeblock spec", () => {
   const doc = "```\n## not a heading\n*no*\n```" + tail;
   const { specs, s } = specsFor(doc);
-  assert.deepEqual(hidden(s, specs), []);
-  assert.deepEqual(lineClasses(s, specs).get(2), ["cm-md-codeblock"]);
+  const blocks = specs.filter((x) => x.type === "codeblock");
+  assert.equal(blocks.length, 1);
+  const b = blocks[0]!;
+  assert.ok(b.type === "codeblock");
+  assert.equal(b.lang, "");
+  assert.equal(b.source, "## not a heading\n*no*");
+  assert.equal(s.doc.lineAt(b.from).number, 1);
+  assert.equal(s.doc.lineAt(b.to).number, 4, "the widget replaces the whole fence, markers included");
+  assert.equal(lineClasses(s, specs).size, 0, "the fence's lines are not styled as a code block");
 });
 
 test("a mermaid fence away from the cursor becomes one mermaid spec with its source", () => {
@@ -149,11 +156,38 @@ test("the mermaid info string tolerates case, spacing and the tilde fence", () =
   }
 });
 
-test("other languages still render as code blocks", () => {
+test("a fenced block carries its language, first word of the info string", () => {
   const doc = "```go\nfunc main() {}\n```" + tail;
+  const { specs } = specsFor(doc);
+  const blocks = specs.filter((x) => x.type === "codeblock");
+  assert.equal(blocks.length, 1);
+  assert.ok(blocks[0]!.type === "codeblock");
+  assert.equal(blocks[0]!.lang, "go");
+  assert.equal(blocks[0]!.source, "func main() {}");
+});
+
+test("a fenced block that holds the cursor shows its source", () => {
+  const doc = "```go\nfunc main() {}\n```" + tail;
+  const { specs, s } = specsFor(doc, doc.indexOf("main"));
+  assert.equal(specs.filter((x) => x.type === "codeblock").length, 0);
+  assert.deepEqual(lineClasses(s, specs).get(1), ["cm-md-codeblock"]);
+  assert.deepEqual(lineClasses(s, specs).get(3), ["cm-md-codeblock"], "the markers reappear on the cursor's lines");
+});
+
+test("an unknown or extra-word language still renders as a code block", () => {
+  for (const [fence, want] of [["```brainfuck", "brainfuck"], ["``` go linenos", "go"], ["```GO", "go"]] as const) {
+    const { specs } = specsFor(`${fence}\nx\n\`\`\`${tail}`);
+    const b = specs.filter((x) => x.type === "codeblock")[0];
+    assert.ok(b && b.type === "codeblock", fence);
+    assert.equal(b.lang, want, fence);
+  }
+});
+
+test("an indented code block stays source-styled", () => {
+  const doc = "para\n\n    indented code\n    more" + tail;
   const { specs, s } = specsFor(doc);
-  assert.equal(specs.filter((x) => x.type === "mermaid").length, 0);
-  assert.deepEqual(lineClasses(s, specs).get(2), ["cm-md-codeblock"]);
+  assert.equal(specs.filter((x) => x.type === "codeblock").length, 0);
+  assert.deepEqual(lineClasses(s, specs).get(3), ["cm-md-codeblock"]);
 });
 
 test("an empty mermaid fence still becomes a mermaid spec", () => {

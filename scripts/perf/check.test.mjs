@@ -35,3 +35,11 @@ test("the mermaid chunk is measured apart from the Docs lazy bundle", () => {
   assert.equal(sum.raw_bytes, 0);
   assert.ok(sum.mermaid_gzip_bytes > 0);
 });
+
+test("the codeblocks chunk is measured apart from the Docs lazy bundle", () => {
+  const sum = bundleBytes([["lazy/docs-editor.js", Buffer.from("aa")], ["lazy/codeblocks.js", Buffer.from("bbb")]]);
+  assert.equal(sum.lazy_raw_bytes, 2);
+  assert.equal(sum.codeblocks_raw_bytes, 3);
+  assert.equal(sum.mermaid_raw_bytes, 0);
+  assert.ok(sum.codeblocks_gzip_bytes > 0);
+});

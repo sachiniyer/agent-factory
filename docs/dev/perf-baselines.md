@@ -97,12 +97,14 @@ under the `perf-baselines` artifact.
 
 | Metric | Mean | Min–max | SD | Budget |
 | --- | ---: | ---: | ---: | ---: |
-| raw_bytes | 1377536.000 | 1377536.000–1377536.000 | 0.000 | 1446412.800 |
-| gzip_bytes | 315696.000 | 315696.000–315696.000 | 0.000 | 331480.800 |
-| lazy_raw_bytes | 378577.000 | 378577.000–378577.000 | 0.000 | 397505.850 |
-| lazy_gzip_bytes | 123257.000 | 123257.000–123257.000 | 0.000 | 129419.850 |
+| raw_bytes | 1212950.000 | 1212950.000–1212950.000 | 0.000 | 1281826.800 |
+| gzip_bytes | 275801.000 | 275801.000–275801.000 | 0.000 | 291585.800 |
+| lazy_raw_bytes | 397628.000 | 397628.000–397628.000 | 0.000 | 417509.400 |
+| lazy_gzip_bytes | 129634.000 | 129634.000–129634.000 | 0.000 | 136115.700 |
+| codeblocks_raw_bytes | 321641.000 | 321641.000–321641.000 | 0.000 | 337723.050 |
+| codeblocks_gzip_bytes | 125499.000 | 125499.000–125499.000 | 0.000 | 131773.950 |
 | mermaid_raw_bytes | 5187694.000 | 5187694.000–5187694.000 | 0.000 | 5447078.700 |
-| mermaid_gzip_bytes | 1512569.000 | 1512569.000–1512569.000 | 0.000 | 1588197.450 |
+| mermaid_gzip_bytes | 1500355.000 | 1500355.000–1500355.000 | 0.000 | 1575983.450 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -154,6 +156,31 @@ the new `.cm-md-mermaid` CSS adds 787), `gzip_bytes` to 315,696 (master 315,607
 +89), `lazy_raw_bytes` to 378,577 (master 371,254 +7,323 of widget, frame
 loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
 123,257 (120,175 +3,082). Every timing and layout-shift baseline is unchanged.
+
+### Code-fence grammar lazy chunk provenance (#6731)
+
+A ```lang fence in a proposal doc renders as a finished code block in the Docs
+view's live preview, syntax-highlighted when its language is known. The
+grammars — a curated set of CodeMirror 6 languages and legacy stream modes —
+ship as `web/dist/lazy/codeblocks.js`, fetched by the Docs bundle only when a
+previewed doc holds a fenced block whose info string names a language. The
+shell carries none of it, and a doc with no language-named fence never pays for
+it.
+
+`codeblocks.js` is not a standalone build: the Docs bundle and the grammar
+entry are built together with esbuild code splitting, so the CodeMirror core
+both need (`@codemirror/language` pulls in `view`/`state`) lands in a shared
+`lazy/chunk-*.js` instead of being duplicated into the grammar file. The
+`codeblocks_*` entries therefore measure `lazy/codeblocks.js` alone — the bytes
+a doc with a code fence newly pays, the shared core already having arrived with
+the Docs bundle — while `lazy_*` now measures `docs-editor.js` plus the shared
+chunk: 397,628 raw / 129,634 gzip, up from 378,577 / 122,689. The shell
+entries move within their existing budgets (+2,635 raw / +805 gzip of widget
+and token CSS), so they are not rebaselined. Committed values are
+deterministic, three identical samples, margin baseline x 0.05, same as the
+other byte budgets, computed with `bundleBytes` from `scripts/perf/check.mjs`
+over the PR's rebuilt `web/dist`. Not recorded with `make perf-container`; the
+figures are byte-exact.
 
 ### Lazy bundle provenance (proposal Docs tab)
 

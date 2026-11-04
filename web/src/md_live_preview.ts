@@ -11,6 +11,7 @@ import { Decoration, type DecorationSet, EditorView, WidgetType } from "@codemir
 import { ensureSyntaxTree, syntaxTree } from "@codemirror/language";
 import type { SyntaxNode } from "@lezer/common";
 import { CALLOUT_LABELS, type CalloutKind, calloutKindOfLine } from "./callouts.js";
+import { CodeBlockWidget } from "./md_codeblock.js";
 import { MermaidWidget } from "./md_mermaid.js";
 
 export type Align = "" | "left" | "center" | "right";
@@ -22,7 +23,8 @@ export type PreviewSpec =
   | { type: "bullet"; from: number; to: number }
   | { type: "callout-label"; from: number; to: number; kind: CalloutKind }
   | { type: "table"; from: number; to: number; rows: string[][]; align: Align[] }
-  | { type: "mermaid"; from: number; to: number; source: string };
+  | { type: "mermaid"; from: number; to: number; source: string }
+  | { type: "codeblock"; from: number; to: number; lang: string; source: string };
 
 const PARSE_BUDGET_MS = 50;
 
@@ -196,13 +198,19 @@ export function previewSpecs(state: EditorState, active: ReadonlySet<number>): P
           return;
         case "FencedCode": {
           // A ```mermaid fence off the cursor renders as its diagram (the
-          // widget lives in md_mermaid.ts); on the cursor's lines it is an
-          // ordinary code block so its source can be edited.
+          // widget lives in md_mermaid.ts); any other fence renders as a
+          // finished code block (md_codeblock.ts), highlighted when the lazy
+          // chunk knows its language. On the cursor's lines a fence shows
+          // its source so it can be edited.
           const info = childrenNamed(node, "CodeInfo")[0];
-          const lang = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
-          if (lang === "mermaid" && !rangeActive(node.from, node.to)) {
+          const infoText = info ? doc.sliceString(info.from, info.to).trim().toLowerCase() : "";
+          if (!rangeActive(node.from, node.to)) {
             const source = childrenNamed(node, "CodeText").map((c) => doc.sliceString(c.from, c.to)).join("");
-            specs.push({ type: "mermaid", from: node.from, to: node.to, source });
+            if (infoText === "mermaid") {
+              specs.push({ type: "mermaid", from: node.from, to: node.to, source });
+            } else {
+              specs.push({ type: "codeblock", from: node.from, to: node.to, lang: infoText.split(/\s/, 1)[0], source });
+            }
           } else {
             lineClasses(node.from, node.to, () => "cm-md-codeblock");
           }
@@ -335,6 +343,9 @@ export function specsToDecorations(specs: readonly PreviewSpec[]): DecorationSet
         break;
       case "mermaid":
         ranges.push(Decoration.replace({ widget: new MermaidWidget(s.source), block: true }).range(s.from, s.to));
+        break;
+      case "codeblock":
+        ranges.push(Decoration.replace({ widget: new CodeBlockWidget(s.source, s.lang), block: true }).range(s.from, s.to));
         break;
     }
   }
