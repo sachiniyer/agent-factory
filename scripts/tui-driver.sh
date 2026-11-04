@@ -822,13 +822,32 @@ af_send_line() {
 
 # af_attach — attach the selected instance full-screen (`o`). Precondition: an
 # instance is selected. Records the attach-client baseline so af_detach can
-# prove the client was reaped. Syncs on the TUI chrome vanishing.
+# prove the client was reaped. Syncs on the TUI chrome vanishing — AND on the
+# nav status bar vanishing with it (#6750 lesson: absence of one marker is not
+# a state). 'Agent Factory' is only the rail's title chip, clipped entirely at
+# a narrow rail, so its absence alone cannot vouch for the attach; only the
+# raw attach proxy owns the WHOLE terminal, status bar and all — a modal that
+# covered the chrome would still leave the status bar behind, and nothing else
+# erases it.
 af_attach() {
     af_ensure_nav
     af_focus_tree || return 1
     _af_client_count > "$AF_DRIVER_STATE_DIR/attach_baseline"
     af_send o
     af_wait_gone 'Agent Factory' "$AF_DRIVER_TIMEOUT" 'full-screen attach' || return 1
+    local deadline screen menu
+    deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while :; do
+        screen="$(af_capture)"
+        menu="$(printf '%s\n' "$screen" | _af_menu_row)"
+        [ -z "$menu" ] && break
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log 'attach: chrome is gone but the nav status bar never left — not a real attach'
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
     # Attach intentionally discards terminal probe bytes for ~50ms; let that
     # window pass so an immediate scripted af_detach is not swallowed.
     sleep "$AF_DRIVER_POLL"
@@ -1103,6 +1122,17 @@ _af_task_dialog_open() {
     _af_tasks_overlay_visible <<<"$screen" || _af_tasks_list_visible <<<"$screen"
 }
 
+# _af_dialog_frame_present — a COMPLETE rounded modal frame holds the screen:
+# one ╭─…─╮ top edge, its matching ╰─…─╯ bottom edge at the same column and
+# width, and text between them. Dialogs are the only rounded chrome
+# (radius-dialog=1; panes and controls stay square), so this is
+# content-independent "some modal is up" — the positive form of
+# af_assert_no_overlay's second clause and the only close evidence a footer
+# fragment can never fake (#6750).
+_af_dialog_frame_present() {
+    _af_tasks_dialog_has '[[:alnum:]]'
+}
+
 # af_assert_no_overlay [label] — fail, printing the screen, when ANY rounded
 # modal frame holds the view at the CURRENT size (#6017). Every step that is
 # about to send a global key (C, ",", m, n, …) calls this first, so an overlay
@@ -1113,7 +1143,7 @@ _af_task_dialog_open() {
 af_assert_no_overlay() {
     local label="${1:-before a global key}" screen
     screen="$(af_capture)"
-    if _af_task_dialog_open <<<"$screen" || _af_tasks_dialog_has '[[:alnum:]]' <<<"$screen"; then
+    if _af_task_dialog_open <<<"$screen" || _af_dialog_frame_present <<<"$screen"; then
         _af_log "an overlay holds focus ${label} (${AF_DRIVER_COLS:-?}x${AF_DRIVER_ROWS:-?}):"
         printf '%s\n' "$screen" >&2
         _af_fail "an overlay holds focus ${label} — a global key would be swallowed by it"
@@ -1121,15 +1151,16 @@ af_assert_no_overlay() {
     fi
 }
 
-# _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
-# dialog-specific frame/footer pair to disappear or appear.
-_af_wait_for_tasks_overlay_state() {
-    local expected="$1" timeout="${2:-$AF_DRIVER_TIMEOUT}" label="${3:-tasks overlay}" screen visible
+# _af_wait_for_screen_state <predicate> <0|1> <timeout_s> <label> — poll the
+# capture until <predicate> (a function that reads a screen on stdin and
+# answers "the surface is up") reports <expected>.
+_af_wait_for_screen_state() {
+    local predicate="$1" expected="$2" timeout="$3" label="$4" screen visible
     local deadline; deadline=$(( $(_af_now) + timeout ))
     while :; do
         screen="$(af_capture)"
         visible=0
-        _af_task_dialog_open <<<"$screen" && visible=1
+        "$predicate" <<<"$screen" && visible=1
         if [ "$visible" -eq "$expected" ]; then
             return 0
         fi
@@ -1137,6 +1168,50 @@ _af_wait_for_tasks_overlay_state() {
             _af_log "TIMEOUT ${timeout}s waiting for: $label"
             printf '%s\n' "$screen" >&2
             return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+
+# _af_wait_for_tasks_overlay_state <0|1> [timeout_s] [label] — wait for the
+# dialog-specific frame/footer pair to disappear or appear.
+_af_wait_for_tasks_overlay_state() {
+    _af_wait_for_screen_state _af_task_dialog_open "$@" || return 1
+}
+
+# _af_dismiss_overlays <predicate> <label> [budget_s] [max_sends] — Escape away
+# a modal surface until <predicate> (reads a screen on stdin, answers "the
+# surface is still up") reports it gone — and require the gone state on TWO
+# consecutive captures so a torn mid-repaint frame cannot pass for closed.
+#
+# This is the #6750 close contract: "closed" is POSITIVE evidence that the
+# surface's frame is off the screen, never the absence of one footer fragment
+# and never a frame captured before its key took effect. Each Escape lands
+# exactly one level — a sub-mode's Escape abandons to the dialog's list, a
+# list-level Escape closes it — so the loop simply sends while the surface is
+# up, with one poll of settle per send. A send that never landed is retried;
+# sends past the close are harmless (nav mode binds no Escape). On budget or
+# send-cap exhaustion it dumps the screen and returns 1.
+_af_dismiss_overlays() {
+    local predicate="$1" label="$2" budget="${3:-12}" max_sends="${4:-6}"
+    local screen sends=0 clean=0 deadline
+    deadline=$(( $(_af_now) + budget ))
+    while :; do
+        screen="$(af_capture)"
+        if "$predicate" <<<"$screen"; then
+            clean=0
+        else
+            clean=$((clean + 1))
+            [ "$clean" -ge 2 ] && return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT ${budget}s dismissing ${label} (${sends} Escape(s) sent; the surface is still up)"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        if [ "$clean" -eq 0 ] && [ "$sends" -lt "$max_sends" ]; then
+            af_send Escape
+            sends=$((sends + 1))
         fi
         sleep "$AF_DRIVER_POLL"
     done
@@ -1150,57 +1225,51 @@ af_open_tasks() {
     _af_wait_for_tasks_overlay_state 1 "$AF_DRIVER_TIMEOUT" 'tasks overlay' || return 1
 }
 
-# af_close_tasks — dismiss the tasks overlay (Escape). When the overlay opened
-# in edit mode the first Escape drops back to the titled list, so a second
-# Escape closes it; both cases sync on the framed footer going away.
+# af_close_tasks — dismiss the tasks overlay (Escape). The overlay is
+# two-level — in edit mode the first Escape drops back to the titled list, so
+# a second Escape closes it — and the dismiss loop syncs on the task dialog's
+# framed marker going away, retrying an Escape that never landed.
 af_close_tasks() {
-    local deadline screen
-    af_send Escape
-    deadline=$(( $(_af_now) + 4 ))
-    while :; do
-        screen="$(af_capture)"
-        if ! _af_task_dialog_open <<<"$screen"; then
-            return 0
-        fi
-        [ "$(_af_now)" -ge "$deadline" ] && break
-        sleep "$AF_DRIVER_POLL"
-    done
-    af_send Escape
-    _af_wait_for_tasks_overlay_state 0 8 'tasks overlay closed' || return 1
+    _af_dismiss_overlays _af_task_dialog_open 'tasks overlay' 12 4 || return 1
 }
 
 # The config editor's own marker. Anchored on the hint row rather than a key
 # name so it cannot match arbitrary pane text (the #1757 lesson): "esc close" is
 # the editor's last footer fragment, and the leading separator keeps it from
-# matching a session whose output happens to contain the words.
+# matching a session whose output happens to contain the words. It identifies
+# the editor ONLY at its list level — a value field edit and the pane's other
+# sub-modes each print their own footer — and it is meaningless outside the
+# editor's rounded frame, so helpers never match it bare (#6750).
 : "${_AF_CONFIG_HINT:=(^|[^[:alnum:]])esc close}"
 
+# _af_config_list_visible — the config editor's `esc close` footer INSIDE its
+# complete rounded frame: "open at the dismissable list level" as positive
+# evidence rather than a bare fragment anywhere on screen (#6750 — a foreign
+# dialog's footer or copied pane text could carry the same words).
+_af_config_list_visible() {
+    _af_tasks_dialog_has "$_AF_CONFIG_HINT"
+}
+
 # af_open_config — open the global config editor overlay (","). Syncs on the
-# editor's footer hint rather than sleeping.
+# editor's list footer inside its frame rather than sleeping.
 af_open_config() {
     af_ensure_nav
     af_send ','
-    af_wait_for "$_AF_CONFIG_HINT" "$AF_DRIVER_TIMEOUT" 'config editor' || return 1
+    _af_wait_for_screen_state _af_config_list_visible 1 "$AF_DRIVER_TIMEOUT" 'config editor' || return 1
 }
 
-# af_close_config — dismiss the config editor (Escape). When a value field is
-# open the first Escape only abandons the edit (the editor stays up, still
-# showing its hints), so a second Escape closes it — the same two-level escape
-# af_close_tasks handles.
+# af_close_config — dismiss the config editor (Escape). "Closed" means the
+# editor's rounded FRAME is off the screen, verified on two consecutive
+# captures — never merely that `esc close` is absent (#6750). The footer is
+# the wrong marker for this: a value field's footer is `↵ save · esc cancel`,
+# so the capture taken right after the send — before the Escape took effect —
+# already lacked `esc close`, and the old helper returned "closed" while a live
+# field still held the screen. Every later "global" key then typed into it —
+# the issue's `> emacs,,,,`. The editor is two-level like the tasks overlay —
+# a sub-mode Escape abandons to the list, a list-level Escape closes — so the
+# shared dismiss loop drives it.
 af_close_config() {
-    local deadline screen
-    af_send Escape
-    deadline=$(( $(_af_now) + 4 ))
-    while :; do
-        screen="$(af_capture)"
-        if ! printf '%s\n' "$screen" | grep -qE -- "$_AF_CONFIG_HINT"; then
-            return 0
-        fi
-        [ "$(_af_now)" -ge "$deadline" ] && break
-        sleep "$AF_DRIVER_POLL"
-    done
-    af_send Escape
-    af_wait_gone "$_AF_CONFIG_HINT" 8 'config editor closed' || return 1
+    _af_dismiss_overlays _af_dialog_frame_present 'config editor' 12 6 || return 1
 }
 
 # af_add_task <name> — seed a minimal valid cron task through the overlay's
@@ -1267,11 +1336,15 @@ af_set_config() {
     printf '%s\n' "$1" > "$AGENT_FACTORY_HOME/config.toml"
 }
 
-# af_quit — quit the TUI back to a shell prompt. Dismisses any overlay and
-# interactive mode first, then syncs on the on-quit log line.
+# af_quit — quit the TUI back to a shell prompt. Dismisses interactive mode,
+# status-bar forms (the naming form draws no rounded frame — the first Escape
+# below cancels it) and any overlay FOR REAL first — one Escape may only
+# abandon an overlay's sub-mode, leaving `q` to type into a live field instead
+# of quitting (#6750) — then syncs on the on-quit log line.
 af_quit() {
     af_ensure_nav
     af_send Escape
+    _af_dismiss_overlays _af_dialog_frame_present 'pre-quit overlay' 4 4 || true
     af_send q
     af_wait_for 'wrote logs to|\$ *$' 10 'shell prompt after quit' || return 1
 }
