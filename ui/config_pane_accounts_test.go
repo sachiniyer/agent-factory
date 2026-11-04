@@ -2,10 +2,12 @@ package ui
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -369,5 +371,274 @@ func TestAccountsRemoteLoginRefusalStaysInSection(t *testing.T) {
 	pane.HandleKeyPress(accountKey("enter"))
 	if req := pane.TakeAccountRequest(); req.Kind != AccountRequestLogin {
 		t.Fatalf("clearing remote policy did not restore local login: %+v", req)
+	}
+}
+
+// openRegisterFieldAt builds a pane at the given size with the register field
+// open for agent and name typed into it — the state the width bug lives in.
+// The pane carries one config key so the Accounts section renders below the
+// tiers, exactly as it does in production.
+func openRegisterFieldAt(t *testing.T, w, h int, agent, name string) *ConfigPane {
+	t.Helper()
+	c := NewConfigPane()
+	c.SetSize(w, h)
+	c.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
+	}}, "/tmp/config.toml")
+	c.SetAccounts(nil, []string{agent}, nil)
+	c.SetFocus(true)
+	selectAccount(t, c, agent, "")
+	c.HandleKeyPress(accountKey("enter"))
+	if !c.accounts.registering {
+		t.Fatal("enter on the register row did not open the name field")
+	}
+	for _, r := range name {
+		c.HandleKeyPress(accountKey(string(r)))
+	}
+	return c
+}
+
+// registerRowFromView finds the selected register row in the rendered view by
+// its selection cursor, failing if it is absent.
+func registerRowFromView(t *testing.T, c *ConfigPane) string {
+	t.Helper()
+	for _, line := range strings.Split(c.String(), "\n") {
+		if strings.Contains(line, "› ") {
+			return line
+		}
+	}
+	t.Fatal("the register row did not render at all")
+	return ""
+}
+
+// TestAccountsRegisterFieldFitsItsRowWithoutClipping tests accountRowSplit's
+// arithmetic directly, WITHOUT the fitPaneLine backstop in the way — the same
+// assertion TestConfigPaneEditFieldFitsItsRowWithoutClipping makes for the value
+// editor.
+//
+// A field one cell too wide still leaves the pane fitting its box — the backstop
+// clips the row — so the width sweep passes while the user loses the tail of the
+// name they are typing. This catches exactly that: the composed register row
+// (marker + label + gap + input view) must fit within the pane at every width,
+// without relying on fitPaneLine to clip it.
+func TestAccountsRegisterFieldFitsItsRowWithoutClipping(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
+			c := openRegisterFieldAt(t, w, paneHeight, "claude", strings.Repeat("x", 45))
+			labelBudget, _ := c.accountRowSplit("claude")
+			row := entryRowChromeWidth + labelBudget + lipgloss.Width(c.accounts.input.View())
+			if row > w {
+				t.Errorf("w=%d: the open register field composes a %d-cell row — the pane clips it, so the name loses its tail (labelBudget=%d, input.Width=%d, view=%d)",
+					w, row, labelBudget, c.accounts.input.Width, lipgloss.Width(c.accounts.input.View()))
+			}
+			if c.accounts.input.Width < minEditFieldWidth {
+				t.Errorf("w=%d: the register field was squeezed to %d cells, below the %d-cell floor",
+					w, c.accounts.input.Width, minEditFieldWidth)
+			}
+		})
+	}
+}
+
+// TestAccountsRegisterRowNeverWiderThanPane is the width invariant for the
+// accounts register row — the same property TestConfigPaneNeverRendersALineWider
+// ThanThePane guards for config entry rows, extended to the register field that
+// the original sweep never exercised (it calls SetEntries, never SetAccounts).
+//
+// The register row is the one inline input the pane's width tests did not cover:
+// it was sized independently of the row it renders into, so the composed row was
+// always wider than the pane and fitPaneLine silently clipped the tail. This
+// sweeps every width with the field open and a long name typed, demanding no
+// rendered line exceed the pane.
+func TestAccountsRegisterRowNeverWiderThanPane(t *testing.T) {
+	for _, w := range configPaneSweepWidths {
+		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
+			c := openRegisterFieldAt(t, w, paneHeight, "claude", strings.Repeat("x", 45))
+			for _, line := range strings.Split(c.String(), "\n") {
+				if got := lipgloss.Width(line); got > w {
+					t.Fatalf("w=%d: rendered a %d-cell line into a %d-cell pane — the frame wraps it, which makes the height window's line count a lie.\n  line: %q",
+						w, got, w, line)
+				}
+			}
+		})
+	}
+}
+
+// TestAccountsRegisterFieldSurvivesTheTightestRow is the accounts analogue of
+// TestConfigPaneEditFieldSurvivesTheTightestRow: at af's supported minimum (a
+// 40-column terminal, which app/render.go turns into 34 content cells), the
+// register field must still be visible — its prompt and the typed value — even
+// if the label yields to make room for it.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: at width 34 the entire typed name is
+// invisible from the first character; only the "> " prompt survives the clip.
+func TestAccountsRegisterFieldSurvivesTheTightestRow(t *testing.T) {
+	const (
+		w     = 34 // a 40-column terminal, af's supported minimum
+		agent = "claude"
+	)
+	c := openRegisterFieldAt(t, w, paneHeight, agent, "work")
+
+	row := registerRowFromView(t, c)
+	if got := lipgloss.Width(row); got > w {
+		t.Errorf("the register row is %d cells in a %d-cell pane: %q", got, w, row)
+	}
+	// The field must be there: its prompt, and the value it was filled with.
+	if !strings.Contains(row, c.accounts.input.Prompt) {
+		t.Errorf("the register field's prompt was clipped away — the user cannot see what they are editing: %q", row)
+	}
+	if !strings.Contains(row, "work") {
+		t.Errorf("the typed name was clipped away, so the field is invisible while focused: %q", row)
+	}
+}
+
+// TestAccountsRegisterFieldReflowsOnResize is the accounts analogue of
+// TestConfigPaneEditFieldReflowsOnResize: narrowing the terminal
+// mid-registration must reflow the field's viewport, not leave it describing the
+// old width.
+//
+// textinput recomputes its horizontal viewport in handleOverflow, which runs
+// from SetValue and SetCursor and NOT from a bare Width assignment. So without
+// sizeAccountField's CursorEnd/SetCursor reflow dance, narrowing 72 -> 38
+// updated Width while offset/offsetRight still described the old width: View()
+// kept rendering the old, wider slice, fitPaneLine clipped it from the right,
+// and the name's tail and the cursor vanished until the next keystroke.
+//
+// The assertion is on the FIELD, not the row: the row fits either way because the
+// backstop clips it, which is exactly why this needs its own test.
+func TestAccountsRegisterFieldReflowsOnResize(t *testing.T) {
+	long := strings.Repeat("very-long-", 5) + "name" // 50 chars
+
+	for _, tc := range []struct {
+		name  string
+		posOf func(n int) int
+	}{
+		{name: "cursor at the start", posOf: func(int) int { return 0 }},
+		{name: "cursor in the interior", posOf: func(n int) int { return n / 2 }},
+		{name: "cursor at the end", posOf: func(n int) int { return n }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := openRegisterFieldAt(t, 72, paneHeight, "claude", long)
+			pos := tc.posOf(len(c.accounts.input.Value()))
+			c.accounts.input.SetCursor(pos)
+
+			// The terminal narrows while the registration is open. SetSize is
+			// what a resize calls.
+			c.SetSize(38, paneHeight)
+
+			budget := c.accounts.input.Width + lipgloss.Width(c.accounts.input.Prompt) + editFieldCursorWidth
+			if got := lipgloss.Width(c.accounts.input.View()); got > budget {
+				t.Fatalf("after narrowing to 38 with the %s, the field renders %d cells for a %d-cell budget (Width=%d) — the viewport still describes the old width, so the row gets clipped and the name's tail and cursor disappear",
+					tc.name, got, budget, c.accounts.input.Width)
+			}
+			if c.accounts.input.Position() != pos {
+				t.Errorf("the reflow moved the cursor: position %d, want %d", c.accounts.input.Position(), pos)
+			}
+		})
+	}
+}
+
+// TestAccountsRegisterFieldUnboundedWhileUnsized is the accounts analogue of
+// TestConfigPaneEditFieldUnboundedWhileUnsized: an unsized pane constrains
+// nothing, and a pane that loses its size goes back to unbounded rather than
+// keeping a stale width.
+func TestAccountsRegisterFieldUnboundedWhileUnsized(t *testing.T) {
+	c := NewConfigPane()
+	c.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Tier: 1,
+	}}, "/tmp/config.toml")
+	c.SetAccounts(nil, []string{"claude"}, nil)
+	c.SetFocus(true)
+	selectAccount(t, c, "claude", "")
+	c.HandleKeyPress(accountKey("enter"))
+	if !c.accounts.registering {
+		t.Fatal("enter did not open the register field")
+	}
+	if c.accounts.input.Width != 0 {
+		t.Errorf("an unsized pane bounded its register field to %d cells", c.accounts.input.Width)
+	}
+
+	// A sized pane bounds the field.
+	c.SetSize(72, paneHeight)
+	if c.accounts.input.Width == 0 {
+		t.Fatal("a sized pane left the register field unbounded")
+	}
+
+	// And a pane that loses its size goes back to unbounded rather than keeping
+	// a stale width.
+	c.SetSize(0, 0)
+	if c.accounts.input.Width != 0 {
+		t.Errorf("a pane resized to nothing kept a %d-cell register field width", c.accounts.input.Width)
+	}
+}
+
+// TestAccountsRegisterFieldShowsTypedValueAtWidePane checks the specific
+// scenario from the bug report: at width 72 with agent "claude", a name longer
+// than the old field's visible budget (38 characters) is accepted into the field
+// but must be SHOWN — not silently clipped by fitPaneLine while the field
+// holds the full value.
+//
+// PRE-FIX BEHAVIOR THIS REPRODUCES: a 45-character name at width 72 was
+// accepted (input.Value() holds all 45) but only 38 characters survived the
+// row clip; enter submitted a name the user could not fully see.
+func TestAccountsRegisterFieldShowsTypedValueAtWidePane(t *testing.T) {
+	const w = 72
+	name := strings.Repeat("x", 45) // 45 chars; the old field at width 72 showed only 38
+	c := openRegisterFieldAt(t, w, paneHeight, "claude", name)
+
+	// The field holds the full value — it always did, because textinput has no
+	// CharLimit (the same reason the value editor preserves long values).
+	if got := c.accounts.input.Value(); got != name {
+		t.Fatalf("the field holds %q, want %q — the field must not truncate what it holds", got, name)
+	}
+
+	// The rendered row must not be wider than the pane — the field is sized to
+	// fit the row, not clipped by fitPaneLine.
+	row := registerRowFromView(t, c)
+	if got := lipgloss.Width(row); got > w {
+		t.Errorf("the register row is %d cells in a %d-cell pane: %q", got, w, row)
+	}
+
+	// And the field's own View() must fit within its budget — the viewport
+	// scrolled to follow the cursor rather than rendering a stale-wide slice.
+	budget := c.accounts.input.Width + lipgloss.Width(c.accounts.input.Prompt) + editFieldCursorWidth
+	if got := lipgloss.Width(c.accounts.input.View()); got > budget {
+		t.Errorf("the field's View() is %d cells for a %d-cell budget (Width=%d) — the viewport did not scroll to fit",
+			got, budget, c.accounts.input.Width)
+	}
+}
+
+// TestAccountsRegisterFieldWidthMatchesRowChrome verifies that the field width
+// is derived from the row's actual chrome (marker + label + gap + prompt +
+// cursor), not a flat constant. At a wide pane the field gets the full
+// remaining budget; at a narrow pane the field floors at minEditFieldWidth and
+// the label yields.
+func TestAccountsRegisterFieldWidthMatchesRowChrome(t *testing.T) {
+	agent := "claude"
+	labelWidth := lipgloss.Width("+ register a " + agent + " account")
+	fieldChrome := lipgloss.Width("> ") + editFieldCursorWidth
+
+	// At a wide pane, the field gets everything left after the chrome.
+	const wideW = 72
+	c := openRegisterFieldAt(t, wideW, paneHeight, agent, "x")
+	wantField := wideW - entryRowChromeWidth - labelWidth - fieldChrome
+	if c.accounts.input.Width != wantField {
+		t.Errorf("w=%d: field width = %d, want %d (pane - chrome - label - fieldChrome)",
+			wideW, c.accounts.input.Width, wantField)
+	}
+
+	// At a narrow pane, the field floors at minEditFieldWidth and the label
+	// yields.
+	const narrowW = 34
+	c2 := openRegisterFieldAt(t, narrowW, paneHeight, agent, "x")
+	if c2.accounts.input.Width < minEditFieldWidth {
+		t.Errorf("w=%d: field width = %d, below the %d-cell floor",
+			narrowW, c2.accounts.input.Width, minEditFieldWidth)
+	}
+	// The label must have been truncated: the full label (27 cells) does not
+	// fit alongside an 8-cell field in 34 cells.
+	labelBudget, _ := c2.accountRowSplit(agent)
+	if labelBudget >= labelWidth {
+		t.Errorf("w=%d: the label was not truncated (budget=%d, full label=%d) — the field cannot have room",
+			narrowW, labelBudget, labelWidth)
 	}
 }

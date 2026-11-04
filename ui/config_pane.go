@@ -232,6 +232,7 @@ func (c *ConfigPane) SetSize(width, height int) {
 	c.height = height
 	c.sizeEditField()
 	c.sizeHostFields()
+	c.sizeAccountField()
 	// An open trace was wrapped for the old width: lines emitted wider than
 	// the pane wrap or clamp in the dialog while the scroll window still
 	// budgets against the old count, leaving parts of it unreachable. Keep

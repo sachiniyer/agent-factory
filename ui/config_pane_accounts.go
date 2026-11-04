@@ -298,16 +298,38 @@ func (c *ConfigPane) beginRegister(agent string) {
 	c.clearStatus()
 	c.accounts.input = textinput.New()
 	c.accounts.input.Placeholder = "account name"
-	c.accounts.input.Width = c.accountInputWidth()
+	c.sizeAccountField()
 	c.accounts.input.Focus()
 }
 
-func (c *ConfigPane) accountInputWidth() int {
-	width := c.width - 24
-	if width < 12 {
-		width = 12
+// sizeAccountField sizes the register name field from the row it actually
+// renders into — the same job sizeEditField does for the value editor and
+// sizeHostFields does for the hosts form.
+//
+// It used to be a flat width-24, which ignored the row's own chrome (marker +
+// label + gap + prompt + cursor), so the composed register row was always
+// wider than the pane and fitPaneLine clipped the field's tail — hiding the
+// typed characters and the cursor the user is looking at.
+//
+// Called from SetSize (which runs on every render, so a resize
+// mid-registration reaches here) and from beginRegister, where the field
+// was just opened. The CursorEnd/SetCursor reflow dance is the same one
+// sizeEditField documents: assigning Width does not reflow textinput's
+// horizontal viewport, so a resize mid-registration would leave
+// offset/offsetRight describing the OLD width and View() rendering the old,
+// wider slice — which fitPaneLine then clips from the right.
+func (c *ConfigPane) sizeAccountField() {
+	if !c.accounts.registering {
+		return
 	}
-	return width
+	width := 0
+	if c.width > 0 {
+		_, width = c.accountRowSplit(c.accounts.registerFor)
+	}
+	c.accounts.input.Width = width
+	pos := c.accounts.input.Position()
+	c.accounts.input.CursorEnd()
+	c.accounts.input.SetCursor(pos)
 }
 
 // cancelRegister abandons the name field without creating anything.
@@ -366,12 +388,22 @@ func (c *ConfigPane) renderAccountRow(i int, account AccountRow) string {
 		if c.accounts.busy {
 			return c.renderBusyAccountRow(label, cursor)
 		}
+		fieldOpen := selected && c.accounts.registering && c.accounts.registerFor == account.Agent
+		if fieldOpen {
+			// The field is the task while registering; the label yields when the
+			// pane is too narrow for both — see accountRowSplit. Clipped as plain
+			// text before styling, so the truncation never lands inside an escape
+			// sequence, the same way the edit row clips its key.
+			if budget, _ := c.accountRowSplit(account.Agent); budget < lipgloss.Width(label) {
+				label = fitLine(label, budget)
+			}
+		}
 		if selected {
 			b.WriteString(configSelectedStyle.Render(label))
 		} else {
 			b.WriteString(accountRegisterStyle.Render(label))
 		}
-		if selected && c.accounts.registering && c.accounts.registerFor == account.Agent {
+		if fieldOpen {
 			b.WriteString(configSelectedStyle.Render("  "))
 			b.WriteString(renderConfigInput(&c.accounts.input))
 		}
