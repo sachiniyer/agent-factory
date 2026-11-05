@@ -328,15 +328,17 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
+	files, err := codexRolloutFiles(c.srcHome)
+	if err != nil {
+		return "af could not enumerate the previous account's rollout store"
+	}
 	launchDir := workDir
 	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
 		launchDir = launch.WorkingDir
 	}
-	switch checkCodexRecordedStaleness(filepath.Join(c.srcHome, c.transcript), c.srcHome, pathutil.ResolveForCompare(launchDir)) {
+	switch checkCodexRecordedStaleness(filepath.Join(c.srcHome, c.transcript), files, pathutil.ResolveForCompare(launchDir)) {
 	case codexRolloutRecordedGone:
 		return "its rollout is missing from the previous account's home"
-	case codexRolloutStoreUnreadable:
-		return "af could not enumerate the previous account's rollout store"
 	case codexRolloutStale:
 		return staleCarryReason
 	case codexRolloutUncorrelated:

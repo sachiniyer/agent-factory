@@ -297,17 +297,30 @@ func (i *Instance) staleRecordedCodexReason(program, id string) string {
 	if err != nil || strings.TrimSpace(home) == "" {
 		return "af cannot resolve the Codex home this session writes to"
 	}
-	recordedPath := CodexRolloutPathByID(home, id)
+	files, err := codexRolloutFiles(home)
+	if err != nil {
+		return "af could not verify the recorded conversation against the Codex home this session uses"
+	}
+	var recordedPath string
+	for file := range files {
+		if strings.EqualFold(codexConversationIDFromPath(file), id) {
+			if recordedPath != "" {
+				// Two rollouts claim the same id: "current" cannot be proven.
+				return "af could not confirm the recorded conversation is still the newest one in this worktree"
+			}
+			recordedPath = file
+		}
+	}
 	if recordedPath == "" {
 		return "the recorded conversation's rollout is missing from the Codex home this session uses"
 	}
-	switch checkCodexRecordedStaleness(recordedPath, home, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
 	case codexRolloutStale:
 		return staleCarryReason
 	case codexRolloutUncorrelated:
 		return "af could not confirm the recorded conversation is still the newest one in this worktree"
-	case codexRolloutStoreUnreadable, codexRolloutRecordedGone:
-		return "af could not verify the recorded conversation against the Codex home this session uses"
+	case codexRolloutRecordedGone:
+		return "the recorded conversation's rollout is missing from the Codex home this session uses"
 	}
 	return ""
 }
@@ -321,22 +334,18 @@ const (
 	codexRolloutStale
 	codexRolloutUncorrelated
 	codexRolloutRecordedGone
-	codexRolloutStoreUnreadable
 )
 
 // checkCodexRecordedStaleness is the mechanical half shared by the restore
-// guard and the carry staleness check: stat the recorded rollout, walk the
-// store, keep files strictly newer than it, and correlate those to launchDir —
+// guard and the carry staleness check: stat the recorded rollout, keep the
+// enumerated files strictly newer than it, and correlate those to launchDir —
 // an empty launchDir leaves every newer top-level file a candidate, which the
-// callers' fail-closed reading treats correctly.
-func checkCodexRecordedStaleness(recordedPath, home, launchDir string) codexStalenessVerdict {
+// callers' fail-closed reading treats correctly. files is the store listing
+// the caller already took, so a check never walks the store twice.
+func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string) codexStalenessVerdict {
 	recorded, err := os.Lstat(recordedPath)
 	if err != nil {
 		return codexRolloutRecordedGone
-	}
-	files, err := codexRolloutFiles(home)
-	if err != nil {
-		return codexRolloutStoreUnreadable
 	}
 	var newer []string
 	for path := range files {
