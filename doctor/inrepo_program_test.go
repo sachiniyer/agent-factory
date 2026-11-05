@@ -67,6 +67,7 @@ func TestCheckAgentBinaries_InRepoOverride_PresentBinary_Passes(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	writeInRepoConfig(t, repo, "[program_overrides]\nclaude = \"bin/claude\"\n")
 	chdir(t, repo)
 
@@ -126,6 +127,7 @@ func TestCheckAgentBinaries_InRepoOverride_WinsOverGlobal(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	writeInRepoConfig(t, repo, "[program_overrides]\nclaude = \"bin/claude\"\n")
 	chdir(t, repo)
 
@@ -180,6 +182,7 @@ func TestCheckAgentPrograms_InRepoOverride_PresentBinary_Passes(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	writeInRepoConfig(t, repo, "[program_overrides]\nclaude = \"bin/claude\"\n")
 	chdir(t, repo)
 
@@ -246,6 +249,7 @@ func TestDoctor_InRepoOverride_EndToEnd(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	writeInRepoConfig(t, repo, "[program_overrides]\nclaude = \"bin/claude\"\n")
 	chdir(t, repo)
 
