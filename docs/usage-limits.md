@@ -448,11 +448,17 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   about that window's wall, not proof it is below; and the indexer only
   scans each account's newest few rollouts —
   content the cap leaves unexamined reads as unknown only while it
-  could still hold a newer record than the newest found claim (a record
-  can postdate its file's mtime, but not beyond the still-appending
-  horizon), so an account whose usage history exceeds that window keeps
-  its wall only while that unexamined content could still beat the
-  reading. A proof
+  could still hold a newer record than the newest found claim. The
+  indexer bounds that with an assumed horizon, not a guarantee: a
+  record can postdate its file's mtime only within the still-appending
+  horizon, and a conversation resumed past it, or a record skewed beyond
+  it, falls outside the bound — so skipped content could then hide the
+  truly-newest claim and the reading lags one file. Exceeding the
+  rollout window no longer reads as unknown once the missed content is
+  irrelevant; the wall itself persists until a proof retracts it, which
+  a reading that is hot, incomplete, zero/future-dated, or silent on a
+  window the account is subject to never supplies, and which must clear
+  every wall's ordering margin. A proof
   dated in the future is quarantined permanently — dropped from the ledger
   rather than suspended — so an ordinary clock correction can never let one
   count later. Records an account inherited from a copied transcript prefix
