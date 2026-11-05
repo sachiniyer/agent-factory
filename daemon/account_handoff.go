@@ -9,6 +9,7 @@ package daemon
 // [account_handoff] mode is "shadow".
 
 import (
+	"errors"
 	"strings"
 	"sync"
 	"time"
@@ -585,31 +586,36 @@ func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 		m.warn().Printf("account-handoff report recipient %s is gone — dropped", key)
 		return reportDropped
 	}
+	// The attach/composer revalidation runs INSIDE sendPromptGuarded's
+	// guard — i.e. under the recipient's operation lock, immediately
+	// before the liveness gate and the submit (#6818 round-3 review): a
+	// user who attaches and starts typing while the request waits on
+	// that lock cannot be pasted over. The cheap pre-checks still run
+	// first so a recipient that never frees up returns held without
+	// queueing on the lock at all.
 	if m.isPollPaused(repoID, target.Title, target.ID) {
 		return reportHeld
 	}
-	if !target.Started() {
-		return reportHeld // no runtime ⇒ no provable-empty composer
-	}
-	// The composer check runs on a FRESH capture immediately before the
-	// send (#6818 round-2 review): a report's C-u clears whatever the
-	// composer holds, so a non-empty OR unprovable composer holds the
-	// report for the next flush — never paste over a draft the attach
-	// lease could not see. The capture uses the same observation lock the
-	// guarded send waits on, so a delivery already in flight settles
-	// before this read.
-	obs, _, _, _, _, err := target.SnapshotAgent()
-	if err != nil || !obs.Captured {
-		return reportHeld
-	}
-	if draft, provable := tmux.ComposerDraftPresent(obs.Content); draft || !provable {
-		return reportHeld
+	guard := func(inst *session.Instance, rid string) error {
+		if m.isPollPaused(rid, inst.Title, inst.ID) {
+			return errReportHeld
+		}
+		if !inst.Started() {
+			return errReportHeld // no runtime ⇒ no provable-empty composer
+		}
+		if !reportComposerProvableEmpty(inst) {
+			return errReportHeld
+		}
+		return nil
 	}
 	status, err := m.sendPromptGuarded(SendPromptRequest{
 		ID: target.ID, Title: target.Title, RepoID: repoID,
 		Prompt: text, TaskOrigin: true,
-	}, nil)
+	}, guard)
 	if err != nil {
+		if errors.Is(err, errReportHeld) {
+			return reportHeld
+		}
 		m.warn().Printf("account-handoff report to %q: %v", target.Title, err)
 		return reportDropped
 	}
@@ -617,4 +623,34 @@ func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 		m.warn().Printf("account-handoff report to %q: delivery status %s", target.Title, status)
 	}
 	return reportSent
+}
+
+// errReportHeld marks a guard veto that means "wait", not "drop" — the
+// worker keeps the rows for the next flush.
+var errReportHeld = errors.New("account-handoff report held")
+
+// reportComposerProvableEmpty reads the recipient's composer through a
+// NON-consuming preview (#6818 round-3 review): SnapshotAgent would
+// swallow the status poll's change notification, so the poll's churn
+// accounting and first-update detection must not ride on this read. A
+// capture failure, a missing agent tab, or a non-empty OR unprovable
+// composer all answer false — the report's C-u would otherwise erase a
+// draft the attach lease could not see.
+func reportComposerProvableEmpty(inst *session.Instance) bool {
+	tabID := ""
+	for _, t := range inst.GetTabs() {
+		if t.Kind == session.TabKindAgent {
+			tabID = t.ID
+			break
+		}
+	}
+	if tabID == "" {
+		return false
+	}
+	snap, err := inst.AgentServer().PreviewByID(tabID, false)
+	if err != nil {
+		return false
+	}
+	draft, provable := tmux.ComposerDraftPresent(snap.Content)
+	return !draft && provable
 }
