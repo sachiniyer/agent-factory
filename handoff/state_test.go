@@ -184,6 +184,21 @@ func TestNoteAndClearReportsHeld(t *testing.T) {
 	}
 }
 
+// The daemon's startup reconcile calls ClearReportsHeld on every home,
+// including ones the machinery never touched. A no-op clear must not write
+// the file into existence — its mere presence opts the quota mover line
+// in for a home that never enabled handoff (#6776).
+func TestClearReportsHeldLeavesAbsentFileAbsent(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	if err := store.ClearReportsHeld(); err != nil {
+		t.Fatalf("ClearReportsHeld on untouched home: %v", err)
+	}
+	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
+		t.Fatalf("ClearReportsHeld materialized %s — absent is itself the "+
+			"'nothing recorded' answer (stat err=%v)", store.Path(), err)
+	}
+}
+
 func TestReportsHeldWithoutSinceFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instances", StateFileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {

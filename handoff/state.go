@@ -239,8 +239,19 @@ func (s *Store) NoteReportsHeld(since time.Time) error {
 }
 
 // ClearReportsHeld drops the held record when the last held backlog
-// drains or dies — a cleared hold must not keep warning.
+// drains or dies — a cleared hold must not keep warning. It never
+// materializes the file: absent IS the "nothing held" answer, and the
+// daemon's startup reconcile runs on every home — writing a state file
+// onto an untouched one would opt its quota mover line in for a feature
+// it never enabled (#6776, "absent table ≡ off ≡ today").
 func (s *Store) ClearReportsHeld() error {
+	state, err := s.Load()
+	if err != nil {
+		return err
+	}
+	if state.ReportsHeld == nil {
+		return nil
+	}
 	return s.mutate(func(state *State) error {
 		state.ReportsHeld = nil
 		return nil

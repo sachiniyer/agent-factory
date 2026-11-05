@@ -136,6 +136,24 @@ func TestCollect_TablePresentReadsAccountWindows(t *testing.T) {
 	}
 }
 
+// An EMPTY state file is no more opt-in than an absent one: nothing recorded
+// means nothing to report. This is the shape a no-op durable write leaves
+// behind (e.g. a startup reconcile on a home that never enabled handoff), and
+// it must not enrol the home in the section.
+func TestCollect_EmptyStateFileRendersNothing(t *testing.T) {
+	home := fakeHome(t)
+	writeStateFile(t, home, `{"schema_version":1}`)
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if result.Accounts != nil || result.Mover != nil {
+		t.Fatalf("section materialized off a record-free state file: accounts=%+v mover=%+v",
+			result.Accounts, result.Mover)
+	}
+}
+
 func TestCollect_EnabledWithNoAccountsStillReportsMover(t *testing.T) {
 	home := fakeHome(t)
 	writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")

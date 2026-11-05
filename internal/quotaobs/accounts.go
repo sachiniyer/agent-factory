@@ -1,8 +1,6 @@
 package quotaobs
 
 import (
-	"os"
-
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
@@ -16,12 +14,12 @@ import (
 //
 // It is key-gated on the auto-handoff machinery being engaged — an enabled
 // [account_handoff] mode in the global config, OR an auto-handoff state file
-// that machinery already wrote. With neither, it does nothing: a mode of
-// "off" — absent table, materialized default, or written out by hand — stays
-// byte-identical to before the feature existed (#6776, "absent table ≡ off ≡
-// today"). The state file alone still triggers it, because a halt recorded
-// there must surface even after the mode returns to "off" — a halted mover is
-// never silent (R16).
+// that machinery already wrote RECORDS to. With neither, it does nothing: a
+// mode of "off" — absent table, materialized default, or written out by hand
+// — stays byte-identical to before the feature existed (#6776, "absent table
+// ≡ off ≡ today"). A state file that carries a record still engages it,
+// because a halt recorded there must surface even after the mode returns to
+// "off" — a halted mover is never silent (R16).
 //
 // Every read failure degrades honestly rather than hiding: an unreadable
 // account list or state file is reported through the Result's warning fields
@@ -43,16 +41,22 @@ func collectAccountEvidence(result *Result) {
 
 	var state handoff.State
 	var stateErr error
-	stateExists := false
 	if store, err := handoff.DefaultStore(); err == nil {
-		if _, err := os.Stat(store.Path()); err == nil {
-			stateExists = true
-		}
 		state, stateErr = store.Load()
 	}
 
-	if !enabled && !stateExists {
-		// Nothing opted this af home in and the machinery never ran here.
+	// A file engages the section only when it carries evidence — a halt,
+	// held reports, move/backoff records, carry watermarks — or when it
+	// exists but cannot be read (an unreadable file IS the evidence). A
+	// missing file decodes to an empty state without error, and an empty
+	// file records nothing either: both answer "the machinery never ran
+	// here", so neither opts the section in. That matters because a no-op
+	// durable write (e.g. an older daemon's startup reconcile) must not
+	// enrol a home in a feature it never enabled.
+	recorded := stateErr != nil || state.Halted != nil ||
+		state.ReportsHeld != nil || len(state.RecentMoves) > 0 ||
+		len(state.RefusedUntil) > 0 || len(state.CarriedPrefixes) > 0
+	if !enabled && !recorded {
 		// ConfigUnreadable (if set) still warns: an unreadable config does
 		// not establish that handoff is disabled, and hiding that failure
 		// would silently omit a section the operator may have enabled.
