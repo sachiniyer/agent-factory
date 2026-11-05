@@ -57,6 +57,14 @@ type AccountSwapData struct {
 	CarriedLaunchStarted    bool                 `json:"carried_launch_started,omitempty"`
 	ReplacementPanesStarted bool                 `json:"replacement_panes_started,omitempty"`
 	MissionDeliveryStatus   PromptDeliveryStatus `json:"mission_delivery_status,omitempty"`
+	// MissionDeliveryAttemptAt is the send-attempt instant that produced
+	// MissionDeliveryStatus — the durable boundary the daemon's re-verification
+	// watch binds pane turn evidence to, so a turn the agent began after the
+	// send can retire an ambiguous notice verdict without an operator
+	// attestation (#6767). Zero beside an ambiguous verdict means the evidence
+	// predates this field and cannot be re-verified; the operator exits still
+	// apply.
+	MissionDeliveryAttemptAt time.Time `json:"mission_delivery_attempt_at,omitempty"`
 	// OriginalStartupStateUnknown preserves the real lifecycle value while
 	// ForStorage projects a pending replacement through the startup-unknown
 	// fence understood by the immediately previous release. A current reader

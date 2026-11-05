@@ -437,13 +437,13 @@ export function isPendingAgentHandoffDeliveryConfirmable(s: SessionData): boolea
   );
 }
 
-/** True when a manual account swap's pending mission can be retired on the
+/** True when an account swap's pending mission can be retired on the
  * operator's attestation that it already landed — the account-swap half of
- * #4429's confirm verb. Unlike the retry gate this admits startup-unknown and
- * an orphaned respawn fence: the daemon probes the pane before honoring the
- * attestation. Mirrors
- * session.Instance.CanConfirmPendingManualAccountSwapDelivery. */
-export function isPendingManualSwapDeliveryConfirmable(s: SessionData): boolean {
+ * #4429's confirm verb, for a swap of either kind (#6767). Unlike the retry
+ * gate this admits startup-unknown and an orphaned respawn fence: the daemon
+ * probes the pane before honoring the attestation. Mirrors
+ * session.Instance.CanConfirmPendingAccountSwapDelivery. */
+export function isPendingSwapDeliveryConfirmable(s: SessionData): boolean {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
@@ -451,7 +451,8 @@ export function isPendingManualSwapDeliveryConfirmable(s: SessionData): boolean 
     liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
   const status = pending?.mission_delivery_status;
   return (
-    pending?.manual === true &&
+    pending !== undefined &&
+    pending !== null &&
     pending.replacement_panes_started === true &&
     confirmableHandoffDelivery(status) &&
     s.user_killed !== true &&

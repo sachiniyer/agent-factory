@@ -282,7 +282,7 @@ func TestHandleLimitRetry_ManualSwapAtLimitOffersHonestRetrySendLabel(t *testing
 		"fixture: the mission verdict is ambiguous")
 	require.True(t, inst.CanRetryPendingManualAccountSwapDelivery(),
 		"the fix: the limit wall admits the explicit retry because the manual-swap resume re-sends the mission")
-	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery(),
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest

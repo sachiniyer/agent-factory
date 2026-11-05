@@ -68,9 +68,10 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	}
 
 	// Admission before the locks: this verb covers both pending obligations —
-	// the agent-handoff mission and the manual account swap's notice. Neither
-	// is eligible without a recorded ambiguous-or-positive verdict.
-	if !instance.CanConfirmPendingHandoffDelivery() && !instance.CanConfirmPendingManualAccountSwapDelivery() {
+	// the agent-handoff mission and the account swap's notice (either kind
+	// since #6767). Neither is eligible without a recorded ambiguous-or-
+	// positive verdict.
+	if !instance.CanConfirmPendingHandoffDelivery() && !instance.CanConfirmPendingAccountSwapDelivery() {
 		return false, fmt.Errorf("session %q has no unconfirmed handoff delivery to settle — inspect `af sessions get %s` for its delivery state", title, title)
 	}
 
@@ -103,7 +104,7 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	mission := instance.PendingHandoffMission()
 	confirmAgent := mission != "" && instance.CanConfirmPendingHandoffDelivery()
 	from, to, swapPending := instance.PendingAccountSwap()
-	confirmSwap := swapPending && instance.CanConfirmPendingManualAccountSwapDelivery()
+	confirmSwap := swapPending && instance.CanConfirmPendingAccountSwapDelivery()
 	if !confirmAgent && !confirmSwap {
 		return false, nil
 	}
@@ -128,7 +129,7 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	case confirmAgent:
 		err = instance.ConfirmPendingHandoffDelivery(mission)
 	case confirmSwap:
-		err = instance.ConfirmPendingManualAccountSwapDelivery(from, to)
+		err = instance.ConfirmPendingAccountSwapDelivery(from, to)
 	}
 	if err != nil {
 		return false, err

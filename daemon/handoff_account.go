@@ -256,7 +256,10 @@ func accountSwapResumeEligible(instance *session.Instance) bool {
 // recovery. An explicit retry remains the operator's override after inspecting
 // the pane, but the scheduler may retry only when delivery was not attempted or
 // was positively observed absent; could-not-confirm may already have submitted.
+// The verdict check covers the automatic swap's own durable notice verdict too
+// (#6767): the same ambiguity that holds a manual mission off the scheduler
+// holds an automatic notice off it.
 func accountSwapScheduledResumeEligible(instance *session.Instance) bool {
 	return accountSwapResumeEligible(instance) &&
-		!instance.PendingManualAccountSwapDeliveryUnconfirmed()
+		!instance.PendingAccountSwapDeliveryUnconfirmed()
 }

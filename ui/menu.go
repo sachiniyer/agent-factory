@@ -436,7 +436,7 @@ func (m *Menu) addInstanceOptions() {
 		canRetryHandoff = m.instance.CanRetryPendingManualAccountSwapDelivery() ||
 			m.instance.CanRetryPendingHandoffMissionDelivery() ||
 			m.instance.CanConfirmPendingHandoffDelivery() ||
-			m.instance.CanConfirmPendingManualAccountSwapDelivery()
+			m.instance.CanConfirmPendingAccountSwapDelivery()
 	}
 	if lifecycleAction == session.LifecycleActionNone && !canRetryHandoff {
 		m.options = []keys.KeyName{keys.KeyNew}

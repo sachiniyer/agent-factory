@@ -592,6 +592,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// complete. ResumeLimitedSessions owns this row later in the same tick; a
 		// normal status probe must not rewrite its checkpointed liveness and route
 		// it through ordinary recovery. Manual checkpoints can also be healthy.
+		// Its pane still feeds the notice re-verification watch (#6767): the one
+		// observation this row needs while every other consumer stays skipped.
+		m.notePendingSwapNoticeEvidence(repoID, key, instance)
 		m.clearRemoteLoss(key)
 		instance.ClearUnreachable()
 		return

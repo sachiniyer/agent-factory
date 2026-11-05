@@ -6745,13 +6745,13 @@ function isPendingAgentHandoffDeliveryConfirmable(s) {
   const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
   return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Replacing) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
-function isPendingManualSwapDeliveryConfirmable(s) {
+function isPendingSwapDeliveryConfirmable(s) {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
   const op = s.in_flight_op ?? InFlightOp.None;
   const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
   const status = pending?.mission_delivery_status;
-  return pending?.manual === true && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
+  return pending !== void 0 && pending !== null && pending.replacement_panes_started === true && confirmableHandoffDelivery(status) && s.user_killed !== true && !dead && (op === InFlightOp.None || op === InFlightOp.Respawning) && (s.startup_state_unknown === true || liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached);
 }
 function canHandoff(s) {
   return s.can_handoff === true;
@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "2275d9472bad";
+var CLIENT_VERSION = "923b9450ed17";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -18937,7 +18937,7 @@ function patchRetryButton(button, action) {
   }
 }
 function markDeliveredActionForSession(s) {
-  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingManualSwapDeliveryConfirmable(s)) {
+  if (isPendingAgentHandoffDeliveryConfirmable(s) || isPendingSwapDeliveryConfirmable(s)) {
     return {
       kind: "handoff",
       label: "Mark delivered",

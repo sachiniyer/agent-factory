@@ -26,7 +26,7 @@ import {
   isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
-  isPendingManualSwapDeliveryConfirmable,
+  isPendingSwapDeliveryConfirmable,
   isWorking,
   type OperatorKind,
   operatorKind,
@@ -607,7 +607,7 @@ test("confirmable pending deliveries mirror the session predicates", () => {
   );
   // The account-swap half: an orphaned OpRespawning fence does not block it.
   assert.equal(
-    isPendingManualSwapDeliveryConfirmable(sess({
+    isPendingSwapDeliveryConfirmable(sess({
       liveness: Liveness.Ready,
       in_flight_op: InFlightOp.Respawning,
       pending_account_swap: {
@@ -619,7 +619,7 @@ test("confirmable pending deliveries mirror the session predicates", () => {
     true,
   );
   assert.equal(
-    isPendingManualSwapDeliveryConfirmable(sess({
+    isPendingSwapDeliveryConfirmable(sess({
       liveness: Liveness.Ready,
       pending_account_swap: {
         manual: true,
@@ -630,8 +630,10 @@ test("confirmable pending deliveries mirror the session predicates", () => {
     false,
     "not-delivered belongs to the resend path",
   );
+  // Either swap kind is attestable (#6767): an automatic notice whose
+  // re-verification window closed unanswered still owns the operator exit.
   assert.equal(
-    isPendingManualSwapDeliveryConfirmable(sess({
+    isPendingSwapDeliveryConfirmable(sess({
       liveness: Liveness.Ready,
       pending_account_swap: {
         manual: false,
@@ -639,8 +641,8 @@ test("confirmable pending deliveries mirror the session predicates", () => {
         mission_delivery_status: "sent-unverified",
       },
     })),
-    false,
-    "an automatic swap is not the operator's to attest",
+    true,
+    "an ambiguous automatic notice stays confirmable",
   );
 });
 

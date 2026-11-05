@@ -60,7 +60,7 @@ import {
   isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
-  isPendingManualSwapDeliveryConfirmable,
+  isPendingSwapDeliveryConfirmable,
   OPERATOR_KIND_LABELS,
   placementDetail,
   placementShort,
@@ -236,7 +236,7 @@ function patchRetryButton(button: HTMLElement, action: RetryActionPresentation |
 export function markDeliveredActionForSession(s: SessionData): RetryActionPresentation | null {
   if (
     isPendingAgentHandoffDeliveryConfirmable(s) ||
-    isPendingManualSwapDeliveryConfirmable(s)
+    isPendingSwapDeliveryConfirmable(s)
   ) {
     return {
       kind: "handoff",

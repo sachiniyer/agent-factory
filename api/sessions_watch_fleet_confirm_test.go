@@ -38,7 +38,7 @@ func TestFleetWatcher_ConfirmedDeliveryReadsAsWorking(t *testing.T) {
 	midSwap := swapInst.ToInstanceData()
 	require.Equal(t, watchWorking, mustReason(classifyWatchStop(midSwap)),
 		"fixture: the pending-swap row is the working baseline")
-	require.NoError(t, swapInst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+	require.NoError(t, swapInst.ConfirmPendingAccountSwapDelivery("work", "personal"))
 	swapConfirmed := swapInst.ToInstanceData()
 	require.Nil(t, swapConfirmed.PendingAccountSwap)
 	require.Equal(t, session.LiveRunning, swapConfirmed.Liveness,
