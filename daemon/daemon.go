@@ -889,11 +889,20 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		// so both feed the same provenance + restore path: a repo the loader
 		// neither enumerated (!ok) nor flagged missing is exactly the
 		// directory-deleted set, and its preserved-by-absence sessions are
-		// precisely what the preserve loop's ok==false arm carries.
+		// precisely what the preserve loop's ok==false arm carries. A repo that
+		// the loader could not READ (transient failure) is also absent from
+		// allInstances, but it is NOT a deletion: its file still exists, so it is
+		// tracked in unreadableRepos and must NOT accrue absence provenance —
+		// otherwise restoreMissingRecordsLocked would checkpoint the in-memory
+		// instances over a file that was never missing (overwriting newer
+		// fields), or retry a misleading missing-record restore every poll on a
+		// persistent failure. Unreadable repos are still preserved in memory by
+		// the preserve loop's ok==false arm below without provenance, exactly as
+		// they were before this change.
 		for key := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
 			_, observedRepo := allInstances[repoID]
-			if missing[repoID] || !observedRepo {
+			if missing[repoID] || (!observedRepo && !unreadableRepos[repoID]) {
 				preservedMissingFileRepos.oweLocked(repoID, key)
 			}
 		}

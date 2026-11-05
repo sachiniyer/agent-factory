@@ -298,6 +298,78 @@ func TestManager_RefreshLocked_DirectoryDeletionPreservesTaskRunSlotAgainstCap(t
 		"a saturated cap must still refuse a replacement run after the directory vanishes")
 }
 
+// TestRefreshDaemonInstances_UnreadableRepoNotAccruedAsDirectoryDeletion pins
+// the Codex review fix: a repo the loader reports in load.Skipped after a
+// transient read failure is also absent from allInstances, but it is NOT a
+// directory deletion — its file still exists on disk. Before the fix, the
+// !observedRepo arm accrued provenance for it too, so restoreMissingRecordsLocked
+// checkpointed the in-memory instances over a file that was never missing
+// (overwriting newer fields), or retried a misleading missing-record restore
+// every poll on a persistent failure. The unreadable repo is still PRESERVED in
+// memory by the preserve loop's ok==false arm (the existing #736/#4783
+// behavior), but it must NOT enter the missing-file provenance set, and the
+// unreadable file on disk must be left untouched.
+func TestRefreshDaemonInstances_UnreadableRepoNotAccruedAsDirectoryDeletion(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	silenceWarnings(t)
+	resetPreservedMissingFileReposForTest()
+	t.Cleanup(resetPreservedMissingFileReposForTest)
+
+	prevFromInstance := fromInstanceDataForRefresh
+	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
+	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
+
+	repoID := "unreadable-not-deleted-repo"
+	rows, err := json.Marshal([]session.InstanceData{{Title: "sess-a"}, {Title: "sess-b"}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances(repoID, rows))
+	keyA := daemonInstanceKey(repoID, "sess-a")
+	keyB := daemonInstanceKey(repoID, "sess-b")
+	instA, instB := &session.Instance{}, &session.Instance{}
+	existing := map[string]*session.Instance{keyA: instA, keyB: instB}
+
+	// The file is present on disk; only the read fails this poll (a transient
+	// read failure, the #4783 shape — not a deletion).
+	stagedPath, err := config.RepoInstancesPath(repoID)
+	require.NoError(t, err)
+	_, statErr := os.Stat(stagedPath)
+	require.NoError(t, statErr, "fixture: the unreadable repo's file must exist on disk")
+	baseline, err := os.ReadFile(stagedPath)
+	require.NoError(t, err)
+	lift := stageUnreadableRepoForRefresh(t, repoID)
+
+	// Poll: both sessions are preserved in memory (the ok==false arm carries
+	// them, exactly as before this PR), but provenance must NOT be accrued —
+	// the file was never missing, only unreadable.
+	got, _, _, _, err := refreshDaemonInstances(existing)
+	require.NoError(t, err)
+	require.Same(t, instA, got[keyA], "an unreadable repo's live sessions are still preserved in memory")
+	require.Same(t, instB, got[keyB], "an unreadable repo's live sessions are still preserved in memory")
+	require.False(t, preservedMissingFileRepos.observed()[repoID],
+		"an unreadable repo must not accrue missing-file provenance; its file was never missing, only unreadable, so the restore checkpoint must not fire against it")
+
+	// The restore checkpoint is a no-op for the unreadable repo: the file on
+	// disk must still be byte-for-byte the original, untouched.
+	(&Manager{}).restoreMissingRecordsLocked(got)
+	onDisk, err := os.ReadFile(stagedPath)
+	require.NoError(t, err)
+	require.Equal(t, string(baseline), string(onDisk),
+		"the restore checkpoint must not overwrite an unreadable repo's file that was never missing")
+	require.False(t, preservedMissingFileRepos.observed()[repoID],
+		"the episode must not be opened for an unreadable repo")
+
+	// When the read failure lifts, the next poll loads the rows normally and
+	// the in-memory sessions reconcile to disk — no provenance was owed.
+	lift()
+	got2, _, _, _, err := refreshDaemonInstances(got)
+	require.NoError(t, err)
+	require.Contains(t, got2, keyA, "the re-read repo's session materializes once the read succeeds")
+	require.False(t, preservedMissingFileRepos.observed()[repoID],
+		"no provenance was ever owed for the unreadable repo, so none lingers after the read succeeds")
+}
+
 // TestRestoreMissingRecords_DirectoryDeletionFiresRestoreCheckpoint pins that
 // the restore checkpoint — which writes preserved sessions' records back to disk
 // so preservation ends durably instead of hanging on a single targeted write —
