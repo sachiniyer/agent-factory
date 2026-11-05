@@ -534,22 +534,38 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 	}
 }
 
+// codexRolloutFilesForWorkingDir selects the rollouts that can be the
+// launch's own top-level conversation: correlated to workingDir when it is
+// bound, and never a provable sub-agent thread — Codex writes one rollout per
+// sub-agent in the parent's directory, marked by its session_meta source, and
+// a sub-agent's file is not a capture candidate, receipt evidence, or a newer
+// thread for carry staleness (#6766). uncorrelated counts files whose
+// session_meta cannot be classified at all: a bound snapshot must keep
+// waiting on them rather than decide around a header Codex has not finished
+// writing. An unbound snapshot keeps its historical contract — every
+// unclassifiable file stays a candidate — except for provable sub-agents,
+// which no correlation rule can excuse.
 func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string, int) {
-	if workingDir == "" {
-		return paths, 0
-	}
-	if !filepath.IsAbs(workingDir) {
+	if workingDir != "" && !filepath.IsAbs(workingDir) {
 		return nil, len(paths)
 	}
 	var matches []string
 	uncorrelated := 0
 	for _, path := range paths {
-		cwd, ok := codexRolloutWorkingDir(path)
-		if !ok {
-			uncorrelated++
-			continue
-		}
-		if pathutil.ResolveForCompare(cwd) == workingDir {
+		cwd, subagent, ok := codexRolloutSessionMeta(path)
+		switch {
+		case !ok:
+			if workingDir == "" {
+				// Unclassified is not proven a sub-agent: an unbound
+				// snapshot treats every file as a candidate.
+				matches = append(matches, path)
+			} else {
+				uncorrelated++
+			}
+		case subagent:
+			// Provably a sub-agent thread: never this session's own
+			// top-level conversation, whatever the correlation.
+		case workingDir == "" || pathutil.ResolveForCompare(cwd) == workingDir:
 			matches = append(matches, path)
 		}
 	}
@@ -557,25 +573,48 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {
-	return codexRolloutSessionMeta(path)
+	cwd, _, ok := codexRolloutSessionMeta(path)
+	return cwd, ok
 }
 
-func codexRolloutSessionMeta(path string) (cwd string, ok bool) {
+// codexRolloutSessionMeta classifies a rollout's session_meta record — always
+// the first JSONL line. ok reports only that the header is complete enough to
+// judge; subagent reports whether its source PROVES the file is a sub-agent
+// thread, which can never be the session's own top-level conversation (#6766).
+func codexRolloutSessionMeta(path string) (cwd string, subagent, ok bool) {
 	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
-		return "", false
+		return "", false, false
 	}
 	var metadata struct {
 		Type    string `json:"type"`
 		Payload struct {
-			Cwd string `json:"cwd"`
+			Cwd    string          `json:"cwd"`
+			Source json.RawMessage `json:"source"`
 		} `json:"payload"`
 	}
 	if err := json.Unmarshal(line, &metadata); err != nil ||
 		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", false
+		return "", false, false
 	}
-	return metadata.Payload.Cwd, true
+	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true
+}
+
+// codexRolloutIsSubagentSource reports whether a session_meta source proves the
+// rollout is a sub-agent thread. Codex serializes SessionSource as a bare
+// string for top-level launches (cli, exec, vscode, …) and as a one-key object
+// for data-bearing variants — a sub-agent's is {"subagent":…}. Only that shape
+// is a positive verdict: an absent source (rollouts predate the field) or a
+// shape af does not know stays top-level — unknown is not proven foreign
+// (#6766). Deliberately NOT a check for source == "cli": exec and vscode
+// launches are top-level conversations too, and af itself launches codex exec.
+func codexRolloutIsSubagentSource(source json.RawMessage) bool {
+	var variant map[string]json.RawMessage
+	if err := json.Unmarshal(source, &variant); err != nil {
+		return false
+	}
+	_, isSub := variant["subagent"]
+	return isSub
 }
 
 func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {

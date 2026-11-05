@@ -36,10 +36,10 @@ type PruneSessionsRequest struct {
 	RepoID string `json:"repo_id,omitempty"`
 	// All selects every project the daemon holds records for.
 	All bool `json:"all,omitempty"`
-	// OlderThan is a Go duration ("720h", "24h") measured from each session's
-	// archive time — never from arbitrary record mutation. Required; prune has
-	// no default retention because the owner chose an opt-in command, not a
-	// policy (#5136).
+	// OlderThan is a duration measured from each session's archive time —
+	// never from arbitrary record mutation. Day and week units work alongside
+	// Go's ("30d", "2w", "720h"). Required; prune has no default retention
+	// because the owner chose an opt-in command, not a policy (#5136).
 	OlderThan string `json:"older_than"`
 	// Apply deletes what the verdict lists (#5189). Without it the call is the
 	// strictly read-only dry run.
@@ -139,9 +139,9 @@ func (m *Manager) PruneSessions(req PruneSessionsRequest) (PruneSessionsResponse
 	if olderThan == "" {
 		return resp, fmt.Errorf("older_than is required — prune is deliberately opt-in and never guesses a retention period")
 	}
-	duration, err := time.ParseDuration(olderThan)
+	duration, err := session.ParseAgeDuration(olderThan)
 	if err != nil || duration <= 0 {
-		return resp, fmt.Errorf("older_than %q is not a positive Go duration (for example \"720h\" for thirty days)", req.OlderThan)
+		return resp, fmt.Errorf("older_than %q is not a positive duration (for example \"30d\" or \"720h\" for thirty days)", req.OlderThan)
 	}
 	resp.OlderThan = olderThan
 	resp.ArchivedBefore = time.Now().Add(-duration)

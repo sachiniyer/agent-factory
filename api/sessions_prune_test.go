@@ -301,12 +301,12 @@ func TestSessionsPrune_SurfacesDaemonError(t *testing.T) {
 	resetPruneFlags(t)
 	sessionsPruneOlderThanStr = "720h"
 	stubPruneDaemon(t, func(daemon.PruneSessionsRequest) (daemon.PruneSessionsResponse, error) {
-		return daemon.PruneSessionsResponse{}, errors.New("older_than \"abc\" is not a positive Go duration")
+		return daemon.PruneSessionsResponse{}, errors.New("older_than \"abc\" is not a positive duration")
 	})
 
 	_, err := runCmdCaptureStdout(t, sessionsPruneCmd, nil)
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not a positive Go duration")
+	assert.Contains(t, err.Error(), "not a positive duration")
 }
 
 // TestSessionsPrune_DaemonUnavailableIsAnActionableError: a read-only listing

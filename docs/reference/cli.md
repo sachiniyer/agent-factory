@@ -2642,7 +2642,7 @@ af sessions list [flags]
 | `--all` |  | List sessions across every project instead of only the current one |
 | `--limit` | `int` | Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded) (default `0`) |
 | `--live` |  | Exclude archived sessions |
-| `--max-age` | `duration` | Only list sessions created within this duration (for example 24h) (default `0s`) |
+| `--max-age` | `duration` | Only list sessions created within this duration (for example 24h or 7d) (default `0s`) |
 | `--status` | `stringArray` | Filter by lifecycle status; repeat for more than one (running, ready, lost, dead, archived, limit-reached). Matches each row's liveness_name; status_name names the legacy status integer and is not a filter value |
 
 **Global flags**
@@ -2754,7 +2754,7 @@ af sessions prune --older-than <duration> [--repo <path> | --all] [--apply [--ye
 |------|------|-------------|
 | `--all` |  | Span every project instead of only the current/--repo one |
 | `--apply` |  | Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone) |
-| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 720h for thirty days) |
+| `--older-than` | `string` | Report sessions archived longer than this duration ago (required, for example 30d or 720h for thirty days) |
 | `--yes` |  | With --apply: skip the confirmation prompt (required when stdin is not a terminal) |
 
 **Global flags**
