@@ -1,11 +1,12 @@
 package daemon
 
 // account_handoff_test.go pins the shadow engine's daemon-level "off is off"
-// contract (#6817 review): with no [account_handoff] table anywhere, the
-// status-poll observation hook stores nothing, and the ticker does no work
-// beyond the cheap check of the already-loaded global config — no per-repo
-// resolution, no input walk. The discovery rescan still runs on its slower
-// cadence so a personal project's opt-in is found within the interval.
+// contract (#6817 round-2 review): with no [account_handoff] table anywhere,
+// the status-poll observation hook stores nothing and the ticker does LITERALLY
+// nothing — no input walk, no per-repo resolution, and no periodic rescan.
+// Discovery runs only at daemon start and on config apply; a hand-edited
+// personal-project file takes effect on the next `af config` write or daemon
+// restart, never on a timer.
 
 import (
 	"testing"
@@ -37,23 +38,27 @@ func TestAccountHandoffDisabledDoesNoWork(t *testing.T) {
 		t.Fatalf("observation stored while account-handoff is off")
 	}
 
-	// A tick inside the rescan window is the cheap path alone: no input
-	// walk, no per-repo resolution.
-	m.handoffLastScan = nowFunc()
-	m.accountHandoffTick()
+	// A tick while inactive is NOTHING — the rescan timer is gone (#6817
+	// round-2 review): no input walk, no per-repo resolution, ever.
+	for i := 0; i < 3; i++ {
+		m.accountHandoffTick()
+	}
 	if resolved != 0 {
 		t.Fatalf("disabled tick resolved configs %d times", resolved)
 	}
 
-	// A stale scan does run discovery — that is how a personal project's
-	// opt-in is found — and finds nothing here, keeping the engine inactive.
-	m.handoffLastScan = nowFunc().Add(-2 * accountHandoffRescanInterval)
-	m.accountHandoffTick()
+	// Discovery — the only way a project opt-in is found — resolves the live
+	// sessions' roots; finding nothing keeps the engine inactive.
+	m.accountHandoffDiscover()
 	if resolved != 1 {
-		t.Fatalf("discovery scan resolved %d times, want 1", resolved)
+		t.Fatalf("discovery resolved %d times, want 1", resolved)
 	}
 	if m.handoffActive.Load() {
 		t.Fatalf("engine reported active with nothing governed")
+	}
+	m.accountHandoffTick()
+	if resolved != 1 {
+		t.Fatalf("post-discovery inactive tick resolved configs %d times", resolved)
 	}
 
 	// While the engine IS active the hook stores again — the gate is the
@@ -65,23 +70,35 @@ func TestAccountHandoffDisabledDoesNoWork(t *testing.T) {
 	}
 }
 
-func TestAccountHandoffGlobalOptInTicksEveryPass(t *testing.T) {
-	resolved := 0
+func TestAccountHandoffActiveTickWaitsForCaptures(t *testing.T) {
+	ticked := 0
 	m := &Manager{
 		cfg:       &config.Config{AccountHandoff: config.AccountHandoffConfig{Mode: config.AccountHandoffModeShadow}},
-		instances: map[string]*session.Instance{},
+		instances: map[string]*session.Instance{"k": {Title: "t", Path: "/repo"}},
 	}
 	m.handoffEngine = handoffengine.New(handoffengine.Deps{
 		Now: nowFunc,
 		ResolveConfig: func(root string) (*config.ResolvedConfig, error) {
-			resolved++
+			ticked++
 			return &config.ResolvedConfig{}, nil
 		},
 	})
-	m.handoffLastScan = nowFunc()
+	m.handoffActive.Store(true)
+
+	// No poll observation has landed since activation — the tick waits so a
+	// walled session's first verdict never logs a false "draft unprovable"
+	// (#6817 round-2 review).
 	m.accountHandoffTick()
-	if !m.handoffActive.Load() {
-		t.Fatalf("global shadow mode left the engine inactive")
+	if ticked != 0 {
+		t.Fatalf("engine ticked with no captures on record")
+	}
+
+	// Once the poll records one observation — even a failed capture — the
+	// tick runs the input walk.
+	m.noteHandoffObservation("k", false, "")
+	m.accountHandoffTick()
+	if ticked != 1 {
+		t.Fatalf("tick ran %d resolves after first observation, want 1", ticked)
 	}
 }
 
@@ -137,5 +154,20 @@ func TestReportPendingDropsOnVanishAndSpecChange(t *testing.T) {
 	}
 	if len(pending["k1"].rows) != reportPendingCap {
 		t.Fatalf("backlog exceeded cap: %d", len(pending["k1"].rows))
+	}
+}
+
+// #6818 round-2 review: a report never delivers over a composer af cannot
+// read — a fresh capture right before the send must prove it empty. A
+// recipient with no live runtime is the unprovable case: the send is held
+// for a later flush rather than pasted over an unseen draft.
+func TestDeliverHandoffReportHoldsOnUnprovableComposer(t *testing.T) {
+	inst := &session.Instance{ID: "sess-2", Title: "observer", Path: "/repo"}
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{"r/observer": inst},
+	}
+	if got := m.deliverHandoffReport("sess-2", "[af handoff] kind=x"); got != reportHeld {
+		t.Fatalf("unprovable-composer recipient outcome = %v, want reportHeld", got)
 	}
 }

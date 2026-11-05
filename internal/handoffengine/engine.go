@@ -114,6 +114,11 @@ type governed struct {
 	cfg *config.ResolvedConfig
 }
 
+// moverRowKey is the edge-tracker/row key for mover-level events — the
+// halted announcement is the mover's own, not any one session's (#6818
+// round-2 review).
+const moverRowKey = "mover"
+
 // namespace is the evidence shared by every session in one agent's account
 // registry: who is registered, who still-excluding evidence marks limited.
 type namespace struct {
@@ -159,6 +164,10 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	for _, g := range gov {
 		liveKeys[g.in.Key] = true
 	}
+	// The mover-level row keeps its edge alive alongside the sessions'
+	// (a pruned "mover" edge would re-announce a persistent halt every
+	// tick — the N-immediate-prompts bug of #6818 round-2 review).
+	liveKeys[moverRowKey] = true
 	// Pruning commits immediately — a dropped edge is the safe direction
 	// (the returning session re-announces rather than staying suppressed).
 	e.edges.Prune(liveKeys)
@@ -232,8 +241,37 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	var rows []handoff.EventRow
 	reportRows := map[string][]handoff.EventRow{} // report_to spec → emitted rows
 	specByKey := map[string]string{}
+	specs := map[string]bool{}
 	for _, g := range gov {
 		specByKey[g.in.Key] = g.cfg.AccountHandoff.ReportTo
+		if g.cfg.AccountHandoff.ReportTo != "" {
+			specs[g.cfg.AccountHandoff.ReportTo] = true
+		}
+	}
+	// A halt is a MOVER-level event (#6818 round-2 review): one row while
+	// the rails say stopped — edge-triggered on the mover key, so a
+	// persistent halt announces once per episode, not once per walled
+	// session per tick. It rides every report_to spec too — the mover's
+	// alert is exactly what the recipient channel exists for.
+	if state.Halted != nil {
+		ev := handoff.Event{
+			Kind:   handoff.EventHalted,
+			Reason: handoff.ReasonMoverHalted,
+			Params: map[string]string{
+				"halt_reason": state.Halted.Reason,
+				"halted_at":   state.Halted.At.UTC().Format(time.RFC3339),
+			},
+		}
+		for _, ev := range pending.Filter(moverRowKey, []handoff.Event{ev}, now, Reannounce) {
+			row := handoff.EventRow{
+				TS: now, Kind: ev.Kind, SessionKey: moverRowKey,
+				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
+			}
+			rows = append(rows, row)
+			for spec := range specs {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
+		}
 	}
 	for _, g := range gov {
 		// The leaf's Phase-A scope gates run here BEFORE any evidence read:
@@ -277,25 +315,44 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	if e.deps.DeliverReport == nil {
 		return len(gov), nil
 	}
-	for spec, specRows := range reportRows {
+	// Every resolved recipient is excluded from EVERY payload, not only its
+	// own spec's (#6818 round-2 review): with two projects pointed at each
+	// other's sessions, A's report prompts a turn in B-sess whose events B's
+	// spec would report back into A-sess — a ping-pong of report prompts.
+	// Rows authored by ANY recipient are starved, so the loop cannot carry.
+	recipientKeys := map[string]bool{}
+	specResolved := map[string]struct {
+		recipient SessionInput
+		found     bool
+		live      bool
+	}{}
+	for spec := range reportRows {
 		recipient, found, live := resolveRecipient(spec, sessions)
+		specResolved[spec] = struct {
+			recipient SessionInput
+			found     bool
+			live      bool
+		}{recipient, found, live}
+		if found && live {
+			recipientKeys[recipient.Key] = true
+		}
+	}
+	for spec, specRows := range reportRows {
+		r := specResolved[spec]
 		switch {
-		case !found:
+		case !r.found:
 			e.warnf("report_to %q matched no session or was ambiguous — skipped", spec)
-		case !live:
+		case !r.live:
 			e.warnf("report_to %q resolved to a session that is not live — skipped", spec)
 		default:
-			// A governed recipient never reads its own rows back (#6818
-			// review): near its own limit, a report-triggered turn would
-			// feed the very events it reports.
 			var own []handoff.EventRow
 			for _, row := range specRows {
-				if row.SessionKey != recipient.Key {
+				if !recipientKeys[row.SessionKey] {
 					own = append(own, row)
 				}
 			}
 			if len(own) > 0 {
-				e.deps.DeliverReport(spec, recipient, own)
+				e.deps.DeliverReport(spec, r.recipient, own)
 			}
 		}
 	}

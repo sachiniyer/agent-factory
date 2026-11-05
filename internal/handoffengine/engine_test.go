@@ -29,7 +29,9 @@ type depCounts struct {
 	rows                                                     []handoff.EventRow
 	mode                                                     string
 	reportTo                                                 string
+	reportToByRoot                                           map[string]string
 	stateErr                                                 error
+	haltState                                                handoff.State
 	reports                                                  []reportCall
 	warns                                                    []string
 	exclude                                                  []string
@@ -51,7 +53,7 @@ func (d *depCounts) deps() Deps {
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
 				MaxMovesWindow: "30m", ExcludeSessions: d.exclude,
-				ReportTo: d.reportTo,
+				ReportTo: d.reportToFor(root),
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
 			return cfg, nil
@@ -61,7 +63,9 @@ func (d *depCounts) deps() Deps {
 			if d.stateErr != nil {
 				return handoff.State{}, d.stateErr
 			}
-			return handoff.State{SchemaVersion: 1}, nil
+			s := d.haltState
+			s.SchemaVersion = 1
+			return s, nil
 		},
 		Registered: func(agent string) ([]string, error) {
 			d.registered++
@@ -103,6 +107,15 @@ func (d *depCounts) deps() Deps {
 		ResetGrace:  time.Minute,
 		ProofMargin: 30 * time.Minute,
 	}
+}
+
+// reportToFor resolves the spec a root's config carries — the map overrides
+// the single-spec field for multi-project tests (#6818 round-2 ping-pong).
+func (d *depCounts) reportToFor(root string) string {
+	if d.reportToByRoot != nil {
+		return d.reportToByRoot[root]
+	}
+	return d.reportTo
 }
 
 func shadowSession() SessionInput {
@@ -421,5 +434,101 @@ func TestTickSessionLeavingReannouncesOnReturn(t *testing.T) {
 	_, _ = e.Tick([]SessionInput{in})
 	if d.writes != 2 {
 		t.Fatalf("returned session did not re-announce: %d writes", d.writes)
+	}
+}
+
+// #6818 round-2 review: a halt is a MOVER-level event — one "halted" row per
+// episode, not one per walled session it defers. Two walled sessions under a
+// halt must produce exactly one halted row, and a second tick while the halt
+// persists must produce zero more (edge-triggered on the mover key).
+func TestTickHaltEmitsOncePerMover(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		haltState: handoff.State{Halted: &handoff.Halt{
+			At: testNow.Add(-time.Hour), Reason: "move-failed"}},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	b := shadowSession()
+	b.Key, b.Title = "sess-2", "other"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	halted := 0
+	for _, row := range d.rows {
+		if row.Kind == handoff.EventHalted {
+			halted++
+			if row.SessionKey != "mover" {
+				t.Fatalf("halted row keyed %q, want mover-level", row.SessionKey)
+			}
+		}
+	}
+	if halted != 1 {
+		t.Fatalf("halted rows = %d, want exactly 1 mover-level", halted)
+	}
+	d.rows = nil
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	for _, row := range d.rows {
+		if row.Kind == handoff.EventHalted {
+			t.Fatalf("persistent halt re-announced on tick 2")
+		}
+	}
+}
+
+// #6818 round-2 review: two projects pointing report_to at each other's
+// sessions must not ping-pong — a report prompt's turn would emit events the
+// other spec reports back, forever. Rows authored by ANY resolved recipient
+// are dropped from EVERY payload, starving both directions.
+func TestTickReportRecipientRowsAreStarvedEverywhere(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		reportToByRoot: map[string]string{
+			"/repoA": "repoB/beta",
+			"/repoB": "repoA/alpha",
+		},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	a.Key, a.Title, a.RepoID, a.RepoRoot = "sess-A", "alpha", "repoA", "/repoA"
+	b := shadowSession()
+	b.Key, b.Title, b.RepoID, b.RepoRoot = "sess-B", "beta", "repoB", "/repoB"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("ping-pong delivered %d reports, want 0 (recipient rows starved)", len(d.reports))
+	}
+}
+
+// The mover-level halt row rides every report_to spec — the alert is exactly
+// what the recipient channel exists for (#6818 round-2 review).
+func TestTickHaltRowRidesReportSpec(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow", reportTo: "observer",
+		haltState: handoff.State{Halted: &handoff.Halt{
+			At: testNow.Add(-time.Hour), Reason: "move-failed"}},
+	}
+	e := New(d.deps())
+	walled := shadowSession()
+	observer := SessionInput{
+		Key: "obs", Title: "observer", RepoID: "r", RepoRoot: "/repo",
+		Started: true, Live: true,
+	}
+	if _, err := e.Tick([]SessionInput{walled, observer}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(d.reports))
+	}
+	found := false
+	for _, row := range d.reports[0].rows {
+		if row.Kind == handoff.EventHalted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("halted row missing from the report payload")
 	}
 }

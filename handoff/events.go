@@ -22,8 +22,10 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 	"unicode"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
@@ -121,17 +123,21 @@ func (l *EventLog) Append(rows []EventRow) error {
 		}
 		if err := config.WithFileLockTimeout(file, config.RepoInstancesLockTimeout, func() error {
 			// A symlinked day file is never ours to write through (#6817
-			// review): Lstat refuses it outright, and the SameFile recheck
-			// after open closes the window where the path is swapped between
-			// the check and the append.
+			// review): Lstat refuses it outright, O_NOFOLLOW pins the open to
+			// a real file, and the SameFile recheck after open closes the
+			// window where the path is swapped between the check and the
+			// append.
 			before, statErr := os.Lstat(file)
 			if statErr == nil && before.Mode()&os.ModeSymlink != 0 {
 				return fmt.Errorf("refusing to append through symlink %s", file)
 			}
 			if statErr == nil && before.Size() >= eventDayMaxBytes {
-				return nil // past the day cap: drop rather than grow unbounded
+				// An error, not a silent drop (#6817 round-2 review): the
+				// caller's edge must stay uncommitted so the suppressed row
+				// re-announces on a later tick instead of vanishing.
+				return fmt.Errorf("event file %s at %d-byte day cap: row held for retry", file, eventDayMaxBytes)
 			}
-			f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
+			f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 			if err != nil {
 				return err
 			}
@@ -198,16 +204,25 @@ func (l *EventLog) prune() error {
 	})
 }
 
-// sanitizeEventLabel caps and control-strips a data field (title, key).
+// sanitizeEventLabel caps and strips a data field (title, key). Stripped:
+// control characters, Unicode FORMAT characters (bidi overrides, zero-width
+// spaces, joiners — category Cf, which IsControl misses), and the U+2028/
+// U+2029 line separators a JSONL consumer treats as a line break (#6818
+// round-2 review). The cap cuts on a RUNE boundary — a mid-rune byte slice
+// would smuggle invalid UTF-8 into the row.
 func sanitizeEventLabel(s string) string {
 	s = strings.Map(func(r rune) rune {
-		if unicode.IsControl(r) {
+		if unicode.IsControl(r) || unicode.Is(unicode.Cf, r) || r == '\u2028' || r == '\u2029' {
 			return -1
 		}
 		return r
 	}, s)
 	if len(s) > eventLabelCap {
-		s = s[:eventLabelCap]
+		cut := eventLabelCap
+		for cut > 0 && !utf8.ValidString(s[:cut]) {
+			cut--
+		}
+		s = s[:cut]
 	}
 	return s
 }

@@ -9,6 +9,7 @@ package daemon
 // [account_handoff] mode is "shadow".
 
 import (
+	"strings"
 	"sync"
 	"time"
 
@@ -30,10 +31,15 @@ var accountHandoffEngineInterval = 45 * time.Second
 
 // startAccountHandoffEngineLoop runs the shadow engine on its own ticker
 // goroutine, registered on the shutdown wait group like the proof reconcile's.
+// Discovery — "is shadow opted in anywhere" — runs ONCE here at start and on
+// every config apply, never on a timer (#6817 round-2 review): an opted-out
+// box must not pay a periodic instance walk, lstat chain, or config resolve
+// for machinery it never asked for.
 func startAccountHandoffEngineLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		manager.accountHandoffDiscover()
 		ticker := time.NewTicker(accountHandoffEngineInterval)
 		defer ticker.Stop()
 		for {
@@ -57,15 +63,6 @@ type handoffObservation struct {
 	content  string
 }
 
-// accountHandoffRescanInterval bounds how often an INACTIVE engine re-runs
-// config resolution to discover a project-level opt-in (#6817 review). While
-// nothing anywhere engages shadow, a tick must cost no more than reading the
-// already-loaded global config; a personal project's [account_handoff] can
-// still switch shadow on, and this rescan is how it is found. The interval
-// trades a bounded discovery delay for the property that an opted-out box
-// spends nothing on machinery it never asked for.
-var accountHandoffRescanInterval = 5 * time.Minute
-
 // noteHandoffObservation records the capture verdict of one status probe for
 // the engine's fact assembly. A failed probe is recorded too — "could not
 // capture" is itself a fact (composer state unprovable → draft-blocked). The
@@ -84,31 +81,73 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 	m.handoffObserved[key] = handoffObservation{captured: captured, at: nowFunc(), content: content}
 }
 
+// accountHandoffDiscover recomputes "is shadow opted in anywhere" from the
+// already-loaded global config plus each live session's resolved project
+// config — the ONLY inputs an opt-in can arrive through (#6817 round-2
+// review). It runs at daemon start and on config apply, so a hand-edited
+// personal-project file takes effect on the next `af config` write or
+// daemon restart — documented, never polled.
+func (m *Manager) accountHandoffDiscover() {
+	active := false
+	if cfg := m.Config(); cfg != nil && cfg.AccountHandoffEnabled() {
+		active = true
+	}
+	if !active {
+		m.mu.Lock()
+		roots := make([]string, 0, len(m.instances))
+		for _, inst := range m.instances {
+			if inst == nil {
+				continue
+			}
+			root := inst.GetRepoPath()
+			if root == "" {
+				root = inst.Path
+			}
+			if root != "" {
+				roots = append(roots, root)
+			}
+		}
+		m.mu.Unlock()
+		seen := map[string]bool{}
+		for _, root := range roots {
+			if seen[root] {
+				continue
+			}
+			seen[root] = true
+			cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
+			if err == nil && cfg != nil && cfg.AccountHandoff.Mode == config.AccountHandoffModeShadow {
+				active = true
+				break
+			}
+		}
+	}
+	m.handoffActive.Store(active)
+}
+
 // accountHandoffTick is one shadow pass: gather the session inputs from the
 // manager's own records, run the engine, warn on failure. Every leg failing
 // is a warn-and-retry — the next tick assembles fresh facts from scratch.
 //
-// The gate is the review's "off isn't off" property. A globally opted-in
-// [account_handoff] (the already-loaded config — no disk) runs every tick;
-// so does any tick while governed sessions were last seen. Otherwise the
-// full input walk + per-repo resolution happens at most once per
-// accountHandoffRescanInterval — that scan is the only way to learn a
-// personal project table switched shadow on.
+// The gate is the review's "off isn't off" property: inactive ticks do
+// literally nothing — no walk, no resolution — because discovery at start
+// and on apply is the only way active turns on. A tick right after
+// activation also waits for the poll's first observations, so a walled
+// session's first verdict never logs a false "draft unprovable".
 func (m *Manager) accountHandoffTick() {
-	global := false
-	if cfg := m.Config(); cfg != nil {
-		global = cfg.AccountHandoffEnabled()
-	}
-	if !global && !m.handoffActive.Load() &&
-		nowFunc().Sub(m.handoffLastScan) < accountHandoffRescanInterval {
+	if !m.handoffActive.Load() {
 		return
 	}
-	m.handoffLastScan = nowFunc()
+	m.mu.Lock()
+	observed := len(m.handoffObserved) > 0
+	m.mu.Unlock()
+	if !observed {
+		return
+	}
 	governed, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs())
 	if err != nil {
 		m.warn().Printf("account-handoff engine tick: %v", err)
 	}
-	m.handoffActive.Store(global || governed > 0)
+	m.handoffActive.Store(m.handoffActive.Load() || governed > 0)
 }
 
 // accountHandoffEngine lazily builds the engine and its injected deps. Kept
@@ -264,7 +303,14 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 	m.mu.Unlock()
 	inputs := make([]handoffengine.SessionInput, 0, len(drafts))
 	for _, d := range drafts {
-		if d.in.Agent == tmux.ProgramCodex && d.in.Started && d.in.Live {
+		// RuntimeProgram evidence is the gate, not just the binding (#6817
+		// round-2 review): an empty runtime program means the row predates
+		// launch evidence, and SessionCodexHomeDir's fallback for that case
+		// is resolveLaunchProgramForInstance → RepoFromPath → UNTIMED GIT —
+		// which must never run on this ticker. A legacy row resolves "" and
+		// its drift fact reports unverifiable — the safe direction.
+		if d.in.Agent == tmux.ProgramCodex && d.in.Started && d.in.Live &&
+			strings.TrimSpace(d.inst.RuntimeProgram()) != "" {
 			d.in.HomeDir = d.inst.SessionCodexHomeDir()
 		}
 		inputs = append(inputs, d.in)
@@ -474,14 +520,26 @@ func (m *Manager) liveReportRows(entry *reportPending) []handoff.EventRow {
 		}
 	}
 	m.mu.Unlock()
+	// Resolve once per project root per flush (#6818 round-2 review): a
+	// backlog holds many rows from few emitters, and resolution walks the
+	// project's config file — per-row resolution is a disk read per line.
+	resolved := map[string]*config.ResolvedConfig{}
 	var out []handoff.EventRow
 	for _, row := range entry.rows {
 		root, ok := roots[row.SessionKey]
 		if !ok || root == "" {
 			continue
 		}
-		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
-		if err != nil || cfg == nil ||
+		cfg, seen := resolved[root]
+		if !seen {
+			var err error
+			cfg, err = config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
+			if err != nil {
+				cfg = nil
+			}
+			resolved[root] = cfg
+		}
+		if cfg == nil ||
 			cfg.AccountHandoff.Mode != config.AccountHandoffModeShadow ||
 			cfg.AccountHandoff.ReportTo != entry.spec {
 			continue
@@ -528,6 +586,20 @@ func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 		return reportDropped
 	}
 	if m.isPollPaused(repoID, target.Title, target.ID) {
+		return reportHeld
+	}
+	// The composer check runs on a FRESH capture immediately before the
+	// send (#6818 round-2 review): a report's C-u clears whatever the
+	// composer holds, so a non-empty OR unprovable composer holds the
+	// report for the next flush — never paste over a draft the attach
+	// lease could not see. The capture uses the same observation lock the
+	// guarded send waits on, so a delivery already in flight settles
+	// before this read.
+	obs, _, _, _, _, err := target.SnapshotAgent()
+	if err != nil || !obs.Captured {
+		return reportHeld
+	}
+	if draft, provable := tmux.ComposerDraftPresent(obs.Content); draft || !provable {
 		return reportHeld
 	}
 	status, err := m.sendPromptGuarded(SendPromptRequest{
