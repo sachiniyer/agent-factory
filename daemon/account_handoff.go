@@ -39,7 +39,7 @@ func startAccountHandoffEngineLoop(manager *Manager, stopCh <-chan struct{}, wg 
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		manager.accountHandoffDiscover()
+		accountHandoffDiscovery(manager)
 		ticker := time.NewTicker(accountHandoffEngineInterval)
 		defer ticker.Stop()
 		for {
@@ -81,6 +81,12 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 	m.handoffObserved[key] = handoffObservation{captured: captured, at: nowFunc(), content: content}
 }
 
+// accountHandoffDiscovery is the indirection a test uses to count discovery
+// invocations (#6817 final review): session create and materialise must
+// never trigger one — opt-in arrives only through `af config` writes, which
+// run discovery on apply.
+var accountHandoffDiscovery = (*Manager).accountHandoffDiscover
+
 // accountHandoffDiscover recomputes "is shadow opted in anywhere" from the
 // already-loaded global config plus each live session's resolved project
 // config — the ONLY inputs an opt-in can arrive through (#6817 round-2
@@ -88,6 +94,12 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 // personal-project file takes effect on the next `af config` write or
 // daemon restart — documented, never polled.
 func (m *Manager) accountHandoffDiscover() {
+	// Compute AND store under the one lock (#6817 final review): two
+	// discoveries queue in arrival order and each resolves config at its
+	// own lock time, so an older pass can never overwrite a newer apply's
+	// answer with a stale snapshot.
+	m.handoffDiscoverMu.Lock()
+	defer m.handoffDiscoverMu.Unlock()
 	active := false
 	if cfg := m.Config(); cfg != nil && cfg.AccountHandoffEnabled() {
 		active = true

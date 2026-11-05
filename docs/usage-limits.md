@@ -627,9 +627,11 @@ mode = "shadow"
   qualifying usage reading to move; a provably idle one may leave on the
   banner alone.
 - **Opt-in discovery is event-driven, not polled.** The daemon looks for
-  `mode = "shadow"` at startup, on every `af config` write, and when a
-  session is created — never on a timer. Hand-editing a personal project's
-  config file takes effect on the next `af config` write or daemon restart.
+  `mode = "shadow"` at startup and on every `af config` write — never on a
+  timer, and never on session create: `[account_handoff]` is rejected in
+  in-repo config, so an opt-in can only arrive through an applied write.
+  Hand-editing a personal project's config file takes effect on the next
+  `af config` write or daemon restart.
 - **`probe_ttl` currently has no effect.** There is no live usage probe in
   this version: wall confirmation uses the banner plus the account store's
   own `rate_limits` records. The leaf is staged configuration for a later

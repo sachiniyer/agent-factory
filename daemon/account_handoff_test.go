@@ -14,7 +14,10 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/handoffengine"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+	"github.com/stretchr/testify/require"
 )
 
 func TestAccountHandoffDisabledDoesNoWork(t *testing.T) {
@@ -137,5 +140,36 @@ func TestAccountHandoffTickNeverReactivatesAfterApplyConfig(t *testing.T) {
 	m.accountHandoffTick()
 	if m.handoffActive.Load() {
 		t.Fatalf("tick re-activated shadow after ApplyConfig turned it off")
+	}
+}
+
+// #6817 final review: session create and materialise must never run
+// account-handoff discovery — they resolve every repo's config while
+// holding the create's reservation and start lock, for users who never
+// opted in. [account_handoff] is rejected in in-repo config, and a global
+// or personal opt-in arrives through `af config` writes, which run
+// discovery on apply. Counting the seam proves create fires none.
+func TestCreateSessionWhileOffTriggersNoDiscovery(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+
+	calls := 0
+	old := accountHandoffDiscovery
+	accountHandoffDiscovery = func(*Manager) { calls++ }
+	t.Cleanup(func() { accountHandoffDiscovery = old })
+
+	_, err = manager.CreateSession(nil, CreateSessionRequest{
+		Title:    "no-discovery-on-create",
+		RepoPath: repoPath,
+		Program:  tmux.ProgramClaude,
+	})
+	require.NoError(t, err)
+	if calls != 0 {
+		t.Fatalf("session create triggered %d account-handoff discoveries", calls)
 	}
 }

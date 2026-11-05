@@ -134,4 +134,25 @@ func TestComposerDraftPresent(t *testing.T) {
 			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
 		}
 	})
+	// #6817 final review: block elements are never frame material — a draft
+	// drawn on its own line in block runes is a DRAFT, and any composer
+	// region content beyond the exact placeholder is draft or unprovable.
+	t.Run("block draft on its own line is a draft", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("❯\n████\n")
+		if !present || !provable {
+			t.Fatalf("got (%v,%v), want (true,true)", present, provable)
+		}
+	})
+	t.Run("boxed block-only row is a draft", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("╭─────────╮\n│ ❯       │\n│█████│\n╰─────────╯\n")
+		if !present || !provable {
+			t.Fatalf("got (%v,%v), want (true,true)", present, provable)
+		}
+	})
+	t.Run("placeholder plus a typed second line is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("› Ask Codex to do anything\nfix the flaky test\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
 }

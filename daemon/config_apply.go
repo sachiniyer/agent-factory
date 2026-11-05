@@ -557,7 +557,7 @@ func (m *Manager) ApplyConfig() (ApplyConfigResult, error) {
 	// Account-handoff discovery (#6817): a project-level [account_handoff]
 	// opt-in is picked up HERE — on config apply — or at daemon start, never
 	// on a ticker. Runs after the swap so ResolveConfig… sees the new global.
-	m.accountHandoffDiscover()
+	accountHandoffDiscovery(m)
 
 	return result, nil
 }
