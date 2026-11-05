@@ -1,0 +1,186 @@
+package throwawaysandbox
+
+import (
+	"errors"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+)
+
+func validMarker() *Marker {
+	return &Marker{Version: 1, Kind: "playtest", CreatedUnix: 1000, MaxLifetimeSeconds: 21600}
+}
+
+func TestMarkerValidate(t *testing.T) {
+	cases := []struct {
+		name   string
+		mutate func(*Marker)
+		want   bool
+	}{
+		{"valid minimal", func(*Marker) {}, true},
+		{"valid owner", func(m *Marker) { m.OwnerPID = 42; m.OwnerStartID = 7; m.OwnerBootID = "boot"; m.OwnerNsID = "ns" }, true},
+		{"bad version", func(m *Marker) { m.Version = 2 }, false},
+		{"zero version", func(m *Marker) { m.Version = 0 }, false},
+		{"missing created", func(m *Marker) { m.CreatedUnix = 0 }, false},
+		{"negative created", func(m *Marker) { m.CreatedUnix = -5 }, false},
+		{"lifetime too small", func(m *Marker) { m.MaxLifetimeSeconds = 0 }, false},
+		{"lifetime too large", func(m *Marker) { m.MaxLifetimeSeconds = MaxLifetimeSeconds + 1 }, false},
+		{"lifetime boundary", func(m *Marker) { m.MaxLifetimeSeconds = MaxLifetimeSeconds }, true},
+		{"lifetime one", func(m *Marker) { m.MaxLifetimeSeconds = 1 }, true},
+		{"negative owner", func(m *Marker) { m.OwnerPID = -1 }, false},
+		{"startid without pid", func(m *Marker) { m.OwnerStartID = 9 }, false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			m := validMarker()
+			tc.mutate(m)
+			if err := m.Validate(); (err == nil) != tc.want {
+				t.Fatalf("Validate() err=%v, want valid=%v", err, tc.want)
+			}
+		})
+	}
+}
+
+func TestMarkerExpiry(t *testing.T) {
+	m := validMarker() // created=1000, lifetime=21600 → deadline=22600
+	for _, tc := range []struct {
+		name    string
+		at      int64
+		expired bool
+	}{
+		{"young", 2000, false},
+		{"before deadline", 22599, false},
+		{"at deadline", 22600, true},
+		{"after deadline", 30000, true},
+		{"before creation (clock skew)", 999, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := m.Expired(time.Unix(tc.at, 0)); got != tc.expired {
+				t.Fatalf("Expired(%d)=%v, want %v", tc.at, got, tc.expired)
+			}
+		})
+	}
+}
+
+func TestLoadMarker(t *testing.T) {
+	home := t.TempDir()
+	if _, err := LoadMarker(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("missing marker: err=%v, want os.ErrNotExist", err)
+	}
+	m := validMarker()
+	m.OwnerPID, m.OwnerStartID, m.OwnerBootID = 123, 456, "b"
+	m.TmuxTmpdir, m.SandboxRoot = "/tmp/sbx/tmux", "/tmp/sbx"
+	if err := WriteMarker(home, m); err != nil {
+		t.Fatal(err)
+	}
+	got, err := LoadMarker(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if *got != *m {
+		t.Fatalf("round trip: got %+v, want %+v", *got, *m)
+	}
+}
+
+func TestLoadMarkerRejectsInvalid(t *testing.T) {
+	for _, tc := range []struct {
+		name, content string
+	}{
+		{"not json", "nope"},
+		{"partial json", `{"version": 1, `},
+		{"wrong version", `{"version": 9, "created_unix": 1, "max_lifetime_seconds": 1}`},
+		{"no created", `{"version": 1, "max_lifetime_seconds": 1}`},
+		{"bad lifetime", `{"version": 1, "created_unix": 1, "max_lifetime_seconds": 999999999999}`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			if err := os.WriteFile(MarkerPath(home), []byte(tc.content), 0o600); err != nil {
+				t.Fatal(err)
+			}
+			if _, err := LoadMarker(home); err == nil {
+				t.Fatal("invalid marker loaded without error")
+			}
+		})
+	}
+}
+
+func TestRegistryRoundTrip(t *testing.T) {
+	dir := RegistryDir(t.TempDir(), 4242)
+	if filepath.Base(dir) != registryDirPrefix+"4242" {
+		t.Fatalf("registry dir %q lacks per-uid prefix", dir)
+	}
+	homes, malformed, err := ReadRegistryHomes(dir)
+	if err != nil || len(homes) != 0 || malformed != 0 {
+		t.Fatalf("empty registry: homes=%v malformed=%d err=%v", homes, malformed, err)
+	}
+	homeA := "/tmp/sandboxes/a"
+	homeB := "/tmp/sandboxes/b"
+	if err := WriteRegistryEntry(dir, homeA); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRegistryEntry(dir, homeB); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode().Perm() != 0o700 {
+		t.Fatalf("registry dir mode %v, want 0700", info.Mode().Perm())
+	}
+	homes, malformed, err = ReadRegistryHomes(dir)
+	if err != nil || malformed != 0 {
+		t.Fatalf("read: malformed=%d err=%v", malformed, err)
+	}
+	if len(homes) != 2 || (homes[0] != homeA && homes[1] != homeA) {
+		t.Fatalf("homes=%v, want %s and %s", homes, homeA, homeB)
+	}
+	// Re-writing the same home must not create a second entry.
+	if err := WriteRegistryEntry(dir, homeA); err != nil {
+		t.Fatal(err)
+	}
+	homes, _, err = ReadRegistryHomes(dir)
+	if err != nil || len(homes) != 2 {
+		t.Fatalf("re-write: homes=%v err=%v", homes, err)
+	}
+	if err := RemoveRegistryEntry(dir, homeA); err != nil {
+		t.Fatal(err)
+	}
+	if err := RemoveRegistryEntry(dir, homeA); err != nil {
+		t.Fatalf("double remove should succeed: %v", err)
+	}
+	homes, _, err = ReadRegistryHomes(dir)
+	if err != nil || len(homes) != 1 || homes[0] != homeB {
+		t.Fatalf("after remove: homes=%v err=%v", homes, err)
+	}
+}
+
+func TestRegistrySkipsMalformed(t *testing.T) {
+	dir := RegistryDir(t.TempDir(), 1)
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRegistryEntry(dir, "/tmp/ok-home"); err != nil {
+		t.Fatal(err)
+	}
+	for name, content := range map[string]string{
+		"bad.json":         "not json",
+		"empty.json":       `{"version":1}`,
+		"not-an-entry.txt": `{"version":1,"home":"/tmp/ignored"}`,
+	} {
+		if err := os.WriteFile(filepath.Join(dir, name), []byte(content), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	homes, malformed, err := ReadRegistryHomes(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(homes) != 1 || homes[0] != "/tmp/ok-home" {
+		t.Fatalf("homes=%v, want only the valid entry", homes)
+	}
+	if malformed != 2 {
+		t.Fatalf("malformed=%d, want 2", malformed)
+	}
+}
