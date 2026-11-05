@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "864abb58471b";
+var CLIENT_VERSION = "f29ebbd1ee8e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -22246,7 +22246,7 @@ function newSession() {
           }
           m.setBusy(false);
           m.setError(errorText(e));
-          if (!modal && token === tok) {
+          if (!modal && !configAssistant && !accountLogin && token === tok) {
             openModal(m, true, invoker);
             m.el.querySelector(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")?.focus({ preventScroll: true });
           } else surfaceMutationError(e);
@@ -22341,7 +22341,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
         }
         m.setBusy(false);
         m.setError(errorText(e));
-        if (!modal) mountConfirmation(m);
+        if (!modal && !configAssistant && !accountLogin) mountConfirmation(m);
         else surfaceMutationError(e);
         return;
       }

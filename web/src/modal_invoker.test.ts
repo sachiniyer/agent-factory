@@ -72,7 +72,7 @@ for (const operation of ["kill", "archive"]) {
       requestResync() {}, errorText: (error: Error) => error.message,
       surfaceMutationError: () => assert.fail("must retain the rejected dialog"),
     };
-    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\nlet configAssistant = null, accountLogin = null;\n${handlers}`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
     }).outputText;
     runInNewContext(code, context);
@@ -135,7 +135,7 @@ for (const [name, committed, optimisticConfirmed] of [
       isMutationCommittedError: () => committed, isMutationOutcomeUncertain: () => !committed,
       requestResync() {}, errorText: (error: Error) => error.message, surfaceMutationError() {},
     };
-    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\nlet configAssistant = null, accountLogin = null;\n${handlers}`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
     }).outputText;
     runInNewContext(code, context);
@@ -294,7 +294,7 @@ for (const [name, supersede] of [
       optimisticSessions: { begin: () => null }, pendingRestores: { has: () => false },
       fetchKeptBranch: () => new Promise<object>((resolve) => { answer = resolve; }),
     };
-    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\n${handlers}`, {
+    const code = ts.transpileModule(`let modal = null, restoreModalFocus = null, stopModalProjectionWatch = null, modalGeneration = 0;\nlet configAssistant = null, accountLogin = null;\n${handlers}`, {
       compilerOptions: { target: ts.ScriptTarget.ES2022, module: ts.ModuleKind.None },
     }).outputText;
     runInNewContext(code, context);
