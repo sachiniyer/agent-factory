@@ -30,7 +30,7 @@ func confirmableManualSwap(status PromptDeliveryStatus) *Instance {
 // tabSpawnBlockedLocked refuses on either, so a confirm that left the plan
 // behind kept every new tab refused as "account swap in progress" until the
 // daemon restarted.
-func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
+func TestConfirmPendingAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 	for _, status := range []PromptDeliveryStatus{PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered} {
 		for _, lv := range []struct {
 			name string
@@ -43,9 +43,9 @@ func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 				inst := confirmableManualSwap(status)
 				inst.liveness = lv.lv
 				require.Error(t, inst.TabSpawnBlocked(), "fixture: the pending swap blocks tab creation")
-				require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
+				require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
 
-				require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+				require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
 
 				swapPending, _ := inst.PendingManualAccountSwap()
 				require.False(t, swapPending, "the confirm retires the pending swap")
@@ -66,16 +66,16 @@ func TestConfirmPendingManualAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 // not-idle to fleet watch, and ResumeLimitedSessions only owns rows still
 // carrying it — flattening it to LiveRunning would strand the session while an
 // attached client's paused poll never re-detects the wall.
-func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
+func TestConfirmPendingAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	inst := confirmableManualSwap(PromptSentUnverified)
 	inst.startupStateUnknown = true
 	inst.started = false
 	inst.inFlightOp = OpRespawning
 	inst.liveness = LiveLimitReached
 	inst.limitResetAt = time.Now().Add(time.Hour)
-	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
 
-	require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
 
 	require.False(t, inst.StartupStateUnknown(), "the probe-backed confirm resolves the unknown flag")
 	require.True(t, inst.Started(), "and restores the started bit the flag lowered")
@@ -89,7 +89,36 @@ func TestConfirmPendingManualAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	require.NoError(t, inst.TabSpawnBlocked())
 }
 
-func TestCanConfirmPendingManualAccountSwapDelivery(t *testing.T) {
+// The limit-wall settle splits on the swap's kind (#6767): a MANUAL swap may
+// be parked at the incoming identity's own wall and keeps it, but an
+// AUTOMATIC swap's wall belongs to the outgoing identity — a notice the
+// operator just confirmed delivered is already running on the new account's
+// quota, so the parked disposition retires with the transaction.
+func TestConfirmPendingAccountSwapDeliveryAutomaticClearsTheOutgoingWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	inst.pendingAccountSwap.Manual = false
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	inst.limitAgent = "claude"
+	inst.limitAccount = "work"
+	inst.taskRunIdleEdgeHeld = true
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
+
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the confirmed notice is already running on the incoming identity's quota")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the outgoing identity's wall retires with the swap")
+	}
+	require.False(t, inst.taskRunIdleEdgeHeld,
+		"a stale held edge must not swallow the run's real completion edge")
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Nil(t, inst.accountSwapLaunch)
+	require.NoError(t, inst.TabSpawnBlocked())
+}
+
+func TestCanConfirmPendingAccountSwapDelivery(t *testing.T) {
 	for _, tc := range []struct {
 		name   string
 		mutate func(*Instance)
@@ -102,10 +131,13 @@ func TestCanConfirmPendingManualAccountSwapDelivery(t *testing.T) {
 		{name: "limit reached", mutate: func(i *Instance) { i.liveness = LiveLimitReached }, want: true},
 		{name: "startup unknown", mutate: func(i *Instance) { i.startupStateUnknown = true; i.liveness = LivenessUnset }, want: true},
 		{name: "orphaned respawn fence", mutate: func(i *Instance) { i.inFlightOp = OpRespawning }, want: true},
+		// An automatic swap's ambiguous notice owns the same no-resend exit
+		// (#6767): the re-verification window may have closed unanswered or
+		// never armed, and the operator who can see it landed still attests.
+		{name: "automatic swap", mutate: func(i *Instance) { i.pendingAccountSwap.Manual = false }, want: true},
 
 		{name: "not delivered belongs to automatic recovery", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered }},
 		{name: "no verdict recorded", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = "" }},
-		{name: "automatic swap", mutate: func(i *Instance) { i.pendingAccountSwap.Manual = false }},
 		{name: "replacement panes never started", mutate: func(i *Instance) { i.pendingAccountSwap.ReplacementPanesStarted = false }},
 		{name: "no pending swap", mutate: func(i *Instance) { i.pendingAccountSwap = nil }},
 		{name: "kill tombstone", mutate: func(i *Instance) { i.userKilled = true }},
@@ -119,13 +151,13 @@ func TestCanConfirmPendingManualAccountSwapDelivery(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			inst := confirmableManualSwap(PromptSentUnverified)
 			tc.mutate(inst)
-			require.Equal(t, tc.want, inst.CanConfirmPendingManualAccountSwapDelivery())
+			require.Equal(t, tc.want, inst.CanConfirmPendingAccountSwapDelivery())
 		})
 	}
 }
 
 // TestCanRetryPendingManualAccountSwapDelivery is the retry-predicate
-// counterpart of TestCanConfirmPendingManualAccountSwapDelivery. Unlike the
+// counterpart of TestCanConfirmPendingAccountSwapDelivery. Unlike the
 // agent-handoff twin (CanRetryPendingHandoffMissionDelivery) it admits the
 // limit wall: the daemon's manual-swap ResumeFromLimit fork re-pastes the
 // pending mission (deliverManualAccountMission), so a row parked at the wall
@@ -173,7 +205,7 @@ func TestCanRetryPendingManualAccountSwapDelivery(t *testing.T) {
 
 // Every refusal leaves the transaction exactly as it was: a confirm that
 // fails must not half-retire the swap or its launch plan.
-func TestConfirmPendingManualAccountSwapDeliveryRefusals(t *testing.T) {
+func TestConfirmPendingAccountSwapDeliveryRefusals(t *testing.T) {
 	for _, tc := range []struct {
 		name     string
 		from, to string
@@ -181,7 +213,6 @@ func TestConfirmPendingManualAccountSwapDeliveryRefusals(t *testing.T) {
 	}{
 		{name: "different source account", from: "other", to: "personal", mutate: func(*Instance) {}},
 		{name: "different target account", from: "work", to: "other", mutate: func(*Instance) {}},
-		{name: "automatic swap", from: "work", to: "personal", mutate: func(i *Instance) { i.pendingAccountSwap.Manual = false }},
 		{name: "no replacement panes", from: "work", to: "personal", mutate: func(i *Instance) { i.pendingAccountSwap.ReplacementPanesStarted = false }},
 		{name: "not delivered", from: "work", to: "personal", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered }},
 		{name: "kill tombstone", from: "work", to: "personal", mutate: func(i *Instance) { i.userKilled = true }},
@@ -194,7 +225,7 @@ func TestConfirmPendingManualAccountSwapDeliveryRefusals(t *testing.T) {
 			pendingBefore := *inst.pendingAccountSwap
 			opBefore := inst.inFlightOp
 
-			require.Error(t, inst.ConfirmPendingManualAccountSwapDelivery(tc.from, tc.to))
+			require.Error(t, inst.ConfirmPendingAccountSwapDelivery(tc.from, tc.to))
 
 			require.NotNil(t, inst.pendingAccountSwap, "a refused confirm keeps the pending swap")
 			require.Equal(t, pendingBefore, *inst.pendingAccountSwap)
@@ -205,6 +236,6 @@ func TestConfirmPendingManualAccountSwapDeliveryRefusals(t *testing.T) {
 	t.Run("no pending swap", func(t *testing.T) {
 		inst := confirmableManualSwap(PromptSentUnverified)
 		inst.pendingAccountSwap = nil
-		require.Error(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+		require.Error(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
 	})
 }

@@ -508,7 +508,7 @@ func TestConfirmHandoffDelivery_ConfirmedAccountSwapReadsAsWorking(t *testing.T)
 	require.Equal(t, session.LiveReady, inst.GetLiveness())
 	_, _, pending := inst.PendingAccountSwap()
 	require.True(t, pending, "fixture: the failed delivery left the swap pending")
-	require.True(t, inst.CanConfirmPendingManualAccountSwapDelivery())
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
 
 	performed, err := manager.confirmHandoffDelivery(ConfirmHandoffDeliveryRequest{
 		ID: inst.ID, Title: inst.Title, RepoID: repoID,

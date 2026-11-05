@@ -362,7 +362,7 @@ func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, statu
 // SettlePendingAccountSwapNoticeDelivery retires the committed swap's notice
 // obligation on POSITIVE pane evidence — a turn the replacement agent provably
 // began after this notice's send attempt (#6767) — rather than on an
-// operator's attestation the way ConfirmPendingManualAccountSwapDelivery does.
+// operator's attestation the way ConfirmPendingAccountSwapDelivery does.
 // A recorded PromptDelivered verdict settles identically: it IS the proof, and
 // the pending record its crash-window settle never reached would otherwise
 // outlive the evidence for it. attemptedAt is the compare-and-set: the
@@ -443,32 +443,34 @@ func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
-// CanConfirmPendingManualAccountSwapDelivery reports whether an operator can
-// retire a pending manual account swap's mission on the attestation that it
+// CanConfirmPendingAccountSwapDelivery reports whether an operator can
+// retire a pending account swap's mission on the attestation that it
 // already landed — the same "it is already running" exit the agent-handoff
-// path gained in #4429. Unlike the retry predicate this DOES admit
-// startup-unknown and orphaned-fence rows: the daemon probes the pane before
-// honoring the attestation, which is the runtime proof those rows were missing.
-func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
+// path gained in #4429, and the exit an ambiguous AUTOMATIC notice needs when
+// its re-verification window closed unanswered or never armed (#6767). Unlike
+// the retry predicate this DOES admit startup-unknown and orphaned-fence rows:
+// the daemon probes the pane before honoring the attestation, which is the
+// runtime proof those rows were missing.
+func (i *Instance) CanConfirmPendingAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
 	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
 	return !i.userKilled && !dead && (i.startupStateUnknown || knownLive) &&
 		(i.inFlightOp == OpNone || i.inFlightOp == OpRespawning) &&
-		i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwap != nil &&
 		i.pendingAccountSwap.ReplacementPanesStarted &&
 		confirmableHandoffDelivery(i.pendingAccountSwap.MissionDeliveryStatus)
 }
 
-// ConfirmPendingManualAccountSwapDelivery retires the pending manual account
-// swap on the operator's attestation that its mission already landed (#4429).
-// It is the account-swap half of ConfirmPendingHandoffDelivery: the daemon has
-// already probed the pane alive, so this method re-checks the durable facts and
-// then clears the transaction and its admitted launch plan, lifts any orphaned
-// replacement fence, and resolves a startup-unknown flag the probe just
-// disproved — all in one critical section so no later reader can rebuild the
-// wedge.
+// ConfirmPendingAccountSwapDelivery retires the pending account swap on the
+// operator's attestation that its mission already landed (#4429; any swap kind
+// since #6767). It is the account-swap half of ConfirmPendingHandoffDelivery:
+// the daemon has already probed the pane alive, so this method re-checks the
+// durable facts and then clears the transaction and its admitted launch plan,
+// lifts any orphaned replacement fence, and resolves a startup-unknown flag
+// the probe just disproved — all in one critical section so no later reader
+// can rebuild the wedge.
 //
 // The attestation also decides the row's liveness (#5023): a mission the
 // replacement agent already received means the agent HAS work, including on a
@@ -479,24 +481,28 @@ func (i *Instance) CanConfirmPendingManualAccountSwapDelivery() bool {
 // delivered prompt leaves, and only the status monitor's own idle observation
 // — real pane evidence — moves it back.
 //
-// A row parked at its usage-limit wall is the one exception: LiveLimitReached
-// is already the honest state (the delivered mission cannot run until quota
-// resets), it already publishes not-idle to fleet watch, and
-// ResumeLimitedSessions only owns rows that still carry it — flattening it to
-// LiveRunning would strand a session whose poll is paused by an attach, since
-// nothing would re-detect the wall to re-park it.
-func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) error {
+// A row parked at its usage-limit wall splits on the swap's kind. A MANUAL
+// swap may be parked at the INCOMING identity's own wall (the replacement hit
+// its quota before its mission was even submitted — ParkManualAccountSwapAtLimit):
+// LiveLimitReached is still the honest state, it already publishes not-idle to
+// fleet watch, and ResumeLimitedSessions only owns rows that still carry it —
+// flattening it would strand a session whose poll is paused by an attach. An
+// AUTOMATIC swap can only ever park at the OUTGOING identity's wall, so a
+// confirmed notice means the incoming agent is already working on its own
+// quota: the parked disposition is stale and settles to LiveRunning exactly
+// the way the delivered send's own success path and the evidence settle do.
+func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	pending := i.pendingAccountSwap
-	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
-		return fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+	if pending == nil || pending.From != from || pending.To != to {
+		return fmt.Errorf("account swap from %q to %q is no longer pending", from, to)
 	}
 	if !pending.ReplacementPanesStarted {
-		return fmt.Errorf("manual account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
+		return fmt.Errorf("account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
 	}
 	if !confirmableHandoffDelivery(pending.MissionDeliveryStatus) {
-		return fmt.Errorf("manual account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
+		return fmt.Errorf("account swap from %q to %q has no ambiguous delivery to confirm (status %q); retry-limit owns the resend", from, to, pending.MissionDeliveryStatus)
 	}
 	if i.userKilled {
 		return fmt.Errorf("session %q has a pending kill", i.Title)
@@ -525,8 +531,22 @@ func (i *Instance) ConfirmPendingManualAccountSwapDelivery(from, to string) erro
 	// The confirmed mission is work the incoming agent already has (#5023):
 	// publish working — the same liveness a delivered prompt produces — and
 	// leave the settle back to Ready to the monitor's own pane evidence. A
-	// limit-blocked row keeps its wall so the resume pass can still own it.
-	if i.liveness != LiveLimitReached {
+	// limit-blocked row splits on kind (doc comment above): a manual swap may
+	// be parked at the incoming identity's own wall and keeps it, while an
+	// automatic swap's wall is the outgoing identity's and must retire with the
+	// transaction it justified.
+	if !pending.Manual {
+		i.taskRunIdleEdgeHeld = false
+		i.taskRunTurnGateHeld = false
+		if i.liveness == LiveLimitReached {
+			i.assignLivenessLocked(LiveRunning)
+			i.limitResetAt = time.Time{}
+			i.limitAgent = ""
+			i.limitAccount = ""
+		} else {
+			_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+		}
+	} else if i.liveness != LiveLimitReached {
 		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
 	}
 	i.touchLocked()

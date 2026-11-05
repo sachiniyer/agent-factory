@@ -38,6 +38,26 @@ func (m *Manager) deliverAutomaticAccountNotice(repoID, key string, instance *se
 	// exact verdict — and the attempt instant re-verification binds to —
 	// durable beside the obligation it describes.
 	recErr := instance.RecordPendingAccountSwapNoticeDelivery(swap.from, swap.to, status)
+	// An ambiguous verdict keeps its evidence contract armed past this call the
+	// same way a task send's does (#6590): the status poll feeds the watch in
+	// notePendingSwapNoticeEvidence, and only evidence bound to THIS attempt
+	// settles the obligation. The send's own ReverifyWatch carries the pre-send
+	// baseline a lazily-armed watch cannot rebuild — for the clockless agents a
+	// turn already running at the first poll would otherwise never produce the
+	// absent→present edge the contract requires. A nil watch means the agent
+	// draws no attributable chrome; nothing weaker may settle the notice.
+	if ambiguousSwapNoticeVerdict(status) && !attemptedAt.IsZero() {
+		if watch := confirmation.ReverifyWatch(); watch != nil {
+			m.pausedMu.Lock()
+			m.pendingSwapNoticeWatches[stableSessionKey(repoID, instance)] = &pendingSwapNoticeWatch{
+				attemptedAt: attemptedAt,
+				expiresAt:   attemptedAt.Add(sendReverifyWindow),
+				agent:       instance.ResolvedAgent(),
+				watch:       watch,
+			}
+			m.pausedMu.Unlock()
+		}
+	}
 	return errors.Join(handoffDeliveryResultError(status, err), recErr)
 }
 
@@ -173,7 +193,14 @@ func (m *Manager) settlePendingSwapNotice(repoID, key string, instance *session.
 		return // the obligation moved on (retry, confirm, kill) — its owner keeps it
 	}
 	m.info().Printf("account swap notice for %q promoted to delivered; the agent's turn began after the send (#6767)", instance.Title)
-	m.persistAndPublishInstance(repoID, instance)
+	// This is a SETTLEMENT write, not a checkpoint: the obligation is already
+	// retired in memory, so a lost write must stay retry-owed rather than let an
+	// unclean restart reload the stale ambiguous swap and park a row whose
+	// notice was proven delivered. persistSettlement enrolls exactly that
+	// (#2883); the announcement rides inside it.
+	if err := m.persistSettlement(repoID, daemonInstanceKey(repoID, instance.Title), instance); err != nil {
+		m.warn().Printf("account swap notice settlement for %q: %v", instance.Title, err)
+	}
 	m.pausedMu.Lock()
 	delete(m.pendingSwapNoticeWatches, key)
 	m.pausedMu.Unlock()
