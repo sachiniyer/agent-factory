@@ -343,6 +343,21 @@ func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 	}
 }
 
+// CapturesCodex reports whether this snapshot binds a Codex store at all —
+// false for the empty snapshot a non-Codex or unresolvable launch produces,
+// which a deferred arming must not confuse for a real baseline (#6769).
+func (s *ConversationCaptureSnapshot) CapturesCodex() bool {
+	return s != nil && strings.TrimSpace(s.codexHome) != ""
+}
+
+// CodexBaselineFailed reports whether the snapshot's before-image scan itself
+// failed: the map can no longer distinguish "new" from "pre-existing", so a
+// capture armed on it would guess. A re-arm that keeps a failed baseline would
+// only re-ask the same broken question; the baseline must be re-taken instead.
+func (s *ConversationCaptureSnapshot) CodexBaselineFailed() bool {
+	return s != nil && s.codexBeforeErr != nil
+}
+
 // CaptureAgentConversation waits until a supported provider exposes the
 // conversation id for a just-spawned tab. Unsupported providers return empty
 // data and nil error so callers gracefully keep existing --last/latest behavior.

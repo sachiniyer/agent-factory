@@ -377,3 +377,14 @@ func mergedAccountHandoff(global, personal AccountHandoffConfig, shape any) Acco
 	}
 	return merged
 }
+
+// AccountHandoffEnabled reports whether the resolved [account_handoff] mode
+// engages the auto-handoff machinery — the opt-in every automatic surface is
+// gated on (#6776). It is the MODE rather than the table's presence because
+// the materialized config.toml writes the table with its defaults, so file
+// presence alone cannot distinguish an opt-in from a first-run default. A
+// mode of "off" — absent table, materialized default, or written out by hand —
+// is exactly today's behavior.
+func (c *Config) AccountHandoffEnabled() bool {
+	return c != nil && c.AccountHandoff.Mode != "" && c.AccountHandoff.Mode != AccountHandoffModeOff
+}

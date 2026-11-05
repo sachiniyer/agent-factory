@@ -63,7 +63,11 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 	if actualAgent != tmux.ProgramCodex && launch.Agent != tmux.ProgramCodex {
 		return plan, nil
 	}
-	codexHome, err := tmux.CodexHomeFromCommand(program, workDir)
+	// The pane's CODEX_HOME arrives through the session environment for an
+	// account-scoped launch — the command text never names it — so the store
+	// this capture must watch is resolved the way the session sees it, not
+	// the way the bare command models it (#6769).
+	codexHome, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil {
 		return CreateLaunchPlan{}, fmt.Errorf(
 			"cannot prepare Codex conversation capture for session %q: %w; use literal CODEX_HOME/HOME values and supported env options",

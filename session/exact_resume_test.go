@@ -66,7 +66,14 @@ func TestAdoptedLaunchWithAnAbsentConversationResumesNothing(t *testing.T) {
 // the program is untouched here — the tmux layer then declines the account-wide
 // "latest" rewrite for a session marked exact-only.
 func TestRecoveryResumeNamesTheSessionsOwnConversation(t *testing.T) {
-	inst := &Instance{Title: "t", Tabs: []*Tab{{Conversation: AgentConversationData{Agent: "codex", ID: adoptedOlderID}}}}
+	workDir := t.TempDir()
+	inst := adoptInstanceAt(t, workDir)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: "codex", ID: adoptedOlderID}}}
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	// The restore guard proves the recorded rollout exists in the session's
+	// own store (#6769) — a named id that names nothing on disk is refused.
+	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+adoptedOlderID+".jsonl")
 	got := prepareResumeConversation(inst, "codex")
 	assert.Contains(t, got, "resume "+adoptedOlderID)
 

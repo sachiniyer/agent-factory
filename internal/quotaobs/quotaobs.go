@@ -26,10 +26,31 @@ import (
 // rather than in a log line nobody assembling the report reads.
 type Result struct {
 	Report quota.Report
+	// Accounts is the per-account evidence section — what af recorded in each
+	// registered account's own rollout files (#6776). Nil unless the
+	// [account_handoff] machinery is engaged on this af home (see
+	// collectAccountEvidence): the absent-table case must be identical to
+	// before the feature existed.
+	Accounts []quota.ObservedAccount
+	// Mover is the configured mover state plus any recorded halt — nil under
+	// the same gate as Accounts, so a nil Mover with nil Accounts renders no
+	// section at all.
+	Mover *quota.MoverStatus
 	// SkippedRepos are the repo IDs whose record files could not be read.
 	SkippedRepos []string
 	// UnreadableRecords counts record blobs that failed to parse.
 	UnreadableRecords int
+	// ConfigUnreadable reports that the config could not be loaded, so
+	// [account_handoff] presence could not be determined — meaningful only
+	// when the section rendered anyway (on the state file alone).
+	ConfigUnreadable bool
+	// HandoffUnreadable reports that the auto-handoff state file exists but
+	// would not decode: carried-prefix watermarks and the halt record are
+	// then unknowable.
+	HandoffUnreadable bool
+	// AccountsUnreadable reports that the registered-account list could not
+	// be read, so the ACCOUNTS section may be missing accounts.
+	AccountsUnreadable bool
 }
 
 // Warnings renders the completeness caveats as sentences. Every surface prints
@@ -47,6 +68,18 @@ func (r Result) Warnings() []string {
 			"%d project record file(s) could not be parsed and were skipped, so this report is INCOMPLETE",
 			r.UnreadableRecords))
 	}
+	if r.ConfigUnreadable {
+		warnings = append(warnings,
+			"af could not read its config, so the [account_handoff] mode is unknown")
+	}
+	if r.HandoffUnreadable {
+		warnings = append(warnings,
+			"the auto-handoff state file could not be read, so carried-prefix watermarks and any recorded mover halt are unknown")
+	}
+	if r.AccountsUnreadable {
+		warnings = append(warnings,
+			"the registered-account list could not be read, so the ACCOUNTS section may be missing accounts")
+	}
 	return warnings
 }
 
@@ -60,11 +93,13 @@ func Collect() (Result, error) {
 		return Result{}, fmt.Errorf("cannot read session records: %w", err)
 	}
 	states, unreadable := sessionStates(records)
-	return Result{
+	result := Result{
 		Report:            quota.Build(tmux.SupportedPrograms, states),
 		SkippedRepos:      skipped,
 		UnreadableRecords: unreadable,
-	}, nil
+	}
+	collectAccountEvidence(&result)
+	return result, nil
 }
 
 // sessionStates projects the raw per-repo record blobs onto the states Build

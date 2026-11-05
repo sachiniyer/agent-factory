@@ -39,6 +39,12 @@ Two different things, kept apart on purpose:
             wall, and the reset time recorded with it. Real signal even where the
             provider exposes nothing.
 
+With [account_handoff] mode enabled (or a state file its machinery left), a
+second section lists each registered account's recorded usage windows —
+evidence af read out of the account's own rollout files, still never a
+provider claim — and a mover: line reports the configured mode plus any halt
+the engine recorded.
+
 Read-only: it reads session records and starts nothing. With --daemon-url (or
 AF_DAEMON_URL) the report comes from the targeted daemon's host — the daemon
 serves the same records read, so the answer describes that machine, not yours.`,
@@ -63,6 +69,9 @@ serves the same records read, so the answer describes that machine, not yours.`,
 			if err := quota.RenderRows(cmd.OutOrStdout(), resp.Agents); err != nil {
 				return err
 			}
+			if err := quota.RenderAccountSection(cmd.OutOrStdout(), resp.Accounts, resp.Mover); err != nil {
+				return err
+			}
 			printQuotaWarnings(cmd, resp.Warnings)
 			return nil
 		}
@@ -72,6 +81,13 @@ serves the same records read, so the answer describes that machine, not yours.`,
 			return err
 		}
 		if err := quota.Render(cmd.OutOrStdout(), result.Report, time.Now()); err != nil {
+			return err
+		}
+		mover := ""
+		if result.Mover != nil {
+			mover = result.Mover.String()
+		}
+		if err := quota.RenderAccountSection(cmd.OutOrStdout(), quota.RenderAccounts(result.Accounts), mover); err != nil {
 			return err
 		}
 		// An under-read report must never look complete. A repo whose records

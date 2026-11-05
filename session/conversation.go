@@ -1,9 +1,12 @@
 package session
 
 import (
+	"fmt"
+	"os"
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -164,6 +167,44 @@ func (i *Instance) retireConversationsLocked() {
 	i.reportedConversation = AgentConversationData{}
 }
 
+// RetireConversationForFreshRuntime drops the agent tab's recorded
+// conversation when a refused resume committed a FRESH pane: the id that
+// could not be resumed cannot name the replacement's conversation, and
+// leaving it recorded would suppress every later capture arm — the next
+// restore would refuse it again and start fresh forever (#6769 review). The
+// clear is conditional on the exact id that was refused: a conversation
+// recorded between refusal and commit is newer evidence than the refusal and
+// is left for the next restore's staleness check to judge. snap is the
+// capture baseline taken BEFORE the fresh spawn, parked for the deferred arm
+// so the replacement's own rollout — which may already exist — is not
+// excluded from its own discovery.
+func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap ConversationCaptureSnapshot) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.Tabs) > 0 && i.Tabs[0].Conversation.ID == refusedID && refusedID != "" {
+		i.Tabs[0].Conversation = AgentConversationData{}
+		i.touchLocked()
+	}
+	if snap.CapturesCodex() {
+		s := snap
+		i.pendingConversationCapture = &s
+	}
+}
+
+// TakePendingConversationCapture hands a respawn-parked capture baseline to
+// the next deferred arming, consuming it. ok=false means the arm builds its
+// baseline the usual way.
+func (i *Instance) TakePendingConversationCapture() (ConversationCaptureSnapshot, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingConversationCapture == nil {
+		return ConversationCaptureSnapshot{}, false
+	}
+	snap := *i.pendingConversationCapture
+	i.pendingConversationCapture = nil
+	return snap, true
+}
+
 func prepareLaunchConversation(i *Instance, program string) string {
 	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
@@ -226,21 +267,36 @@ func planLaunchConversation(instanceID, program string) (string, AgentConversati
 }
 
 func prepareResumeConversation(i *Instance, program string) string {
-	if rewritten, ok := prepareExactResumeConversation(i, program); ok {
+	if rewritten, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return rewritten
 	}
 	return program
 }
 
-func prepareExactResumeConversation(i *Instance, program string) (string, bool) {
-	conv := i.resumableConversation()
+// prepareExactResumeConversation rewrites program to resume this session's own
+// recorded conversation, or refuses: a recorded Codex id that is missing,
+// provably stale (a newer top-level rollout for the same working directory
+// exists), or unconfirmable (a newer rollout cannot be correlated either way)
+// no longer names the conversation the pane is in, so a restore must start
+// fresh rather than continue a thread the user left (#6769). A refused
+// Codex resume comes back with the reason; every other non-resume case
+// (nothing recorded, the command cannot express a resume) stays reason-free
+// because there is nothing to warn about.
+func prepareExactResumeConversation(i *Instance, program string) (string, bool, string) {
+	conv, carried := i.resumableConversationAndSource()
 	if !conv.HasID() {
-		return program, false
+		return program, false, ""
 	}
-	if rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID); ok {
-		return rewritten, true
+	rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID)
+	if !ok {
+		return program, false, ""
 	}
-	return program, false
+	if !carried && conv.Agent == tmux.ProgramCodex {
+		if reason := i.staleRecordedCodexReason(program, conv.ID); reason != "" {
+			return program, false, reason
+		}
+	}
+	return rewritten, true, ""
 }
 
 // resumableConversation is the conversation a restore would resume: the
@@ -248,13 +304,170 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool) 
 // tab exists (an adopted workspace's archived one): the same exact id, never a
 // guess.
 func (i *Instance) resumableConversation() AgentConversationData {
-	conv := i.AgentConversation()
-	if !conv.HasID() {
-		i.mu.RLock()
-		conv = i.carriedConversation
-		i.mu.RUnlock()
-	}
+	conv, _ := i.resumableConversationAndSource()
 	return conv
+}
+
+// resumableConversationAndSource distinguishes the tab-recorded id — af's own
+// evidence about what the pane ran — from a carried id, which is a pin the
+// adopt/swap paths set before the tab exists. Only the former is the restore
+// staleness guard's business: a carried id's provenance was checked where it
+// was set.
+func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool) {
+	if conv := i.AgentConversation(); conv.HasID() {
+		return conv, false
+	}
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.carriedConversation, true
+}
+
+// staleRecordedCodexReason answers whether the recorded Codex conversation id
+// still names the pane's conversation: "" when af can prove it does or when
+// there is nothing newer to compare, a refusal reason when the rollout is
+// missing, a newer same-worktree top-level thread exists, or the newer set
+// cannot be correlated either way. Fail closed: "we cannot prove current"
+// and "provably stale" both refuse, because silently resuming the wrong
+// thread is the bug this guard exists to kill.
+func (i *Instance) staleRecordedCodexReason(program, id string) string {
+	workDir := i.GetWorktreePath()
+	home, err := i.codexHomeForLaunch(program, workDir)
+	if err != nil || strings.TrimSpace(home) == "" {
+		return "af cannot resolve the Codex home this session writes to"
+	}
+	files, err := codexRolloutFiles(home)
+	if err != nil {
+		return "af could not verify the recorded conversation against the Codex home this session uses"
+	}
+	var recordedPath string
+	for file := range files {
+		if strings.EqualFold(codexConversationIDFromPath(file), id) {
+			if recordedPath != "" {
+				// Two rollouts claim the same id: "current" cannot be proven.
+				return "af could not confirm the recorded conversation is still the newest one in this worktree"
+			}
+			recordedPath = file
+		}
+	}
+	if recordedPath == "" {
+		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+	}
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
+	case codexRolloutStale:
+		return staleCarryReason
+	case codexRolloutUncorrelated:
+		return "af could not confirm the recorded conversation is still the newest one in this worktree"
+	case codexRolloutRecordedGone:
+		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+	}
+	return ""
+}
+
+// codexStalenessVerdict is the outcome of comparing a recorded rollout against
+// the newer files in its store.
+type codexStalenessVerdict int
+
+const (
+	codexRolloutCurrent codexStalenessVerdict = iota
+	codexRolloutStale
+	codexRolloutUncorrelated
+	codexRolloutRecordedGone
+)
+
+// checkCodexRecordedStaleness is the mechanical half shared by the restore
+// guard and the carry staleness check: stat the recorded rollout, keep the
+// enumerated files strictly newer than it, and correlate those to launchDir —
+// an empty launchDir leaves every newer top-level file a candidate, which the
+// callers' fail-closed reading treats correctly. files is the store listing
+// the caller already took, so a check never walks the store twice.
+func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string) codexStalenessVerdict {
+	recorded, err := os.Lstat(recordedPath)
+	if err != nil {
+		return codexRolloutRecordedGone
+	}
+	var newer []string
+	for path := range files {
+		if path == recordedPath {
+			continue
+		}
+		if info, serr := os.Lstat(path); serr == nil && info.ModTime().After(recorded.ModTime()) {
+			newer = append(newer, path)
+		}
+	}
+	if len(newer) == 0 {
+		return codexRolloutCurrent
+	}
+	matches, uncorrelated := codexRolloutFilesForWorkingDir(newer, launchDir)
+	if len(matches) > 0 {
+		return codexRolloutStale
+	}
+	if uncorrelated > 0 {
+		return codexRolloutUncorrelated
+	}
+	return codexRolloutCurrent
+}
+
+// codexHomeForLaunch resolves the rollout store this session writes to the way
+// the pane sees it. An account-scoped session's CODEX_HOME rides in through the
+// session environment — never the command text — so the command model alone
+// resolves the ambient home and every store walk misses the account's dir.
+func (i *Instance) codexHomeForLaunch(program, workDir string) (string, error) {
+	if account, _ := i.AccountSelection(); strings.TrimSpace(account) != "" {
+		selected, err := selectAccountInNamespace(i.AccountAgent(), account)
+		if err != nil {
+			return "", fmt.Errorf("resolve account %q's Codex home: %w", account, err)
+		}
+		return selected.Dir, nil
+	}
+	return tmux.CodexHomeFromCommand(program, workDir)
+}
+
+// SessionCodexCaptureBaseline builds the capture snapshot a deferred arming
+// needs when the launch-time one is gone — after a daemon restart, or for a
+// session that predates capture. It binds the store and working directory to
+// the command that actually launched the live runtime — durable evidence a
+// program_overrides edit cannot move (#6769 review) — falling back to a fresh
+// resolution only for rows that predate runtime evidence.
+func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
+	program := i.RuntimeProgram()
+	if strings.TrimSpace(program) == "" {
+		program = resolveLaunchProgramForInstance(i).command
+	}
+	return i.sessionCodexCaptureBaselineFor(program)
+}
+
+// sessionCodexCaptureBaselineFor builds the snapshot against an explicit
+// launch command. Only a local workspace can answer it: a remote pane writes
+// its provider store inside its own sandbox, the daemon's account registry is
+// a DIFFERENT store, and a remote row's empty worktree would leave rollout
+// correlation unscoped — so a stray local rollout could be recorded as the
+// remote session's identity. Remote identities arrive through the
+// agent-server reporting path in conversation_remote.go (#6769 review).
+func (i *Instance) sessionCodexCaptureBaselineFor(program string) ConversationCaptureSnapshot {
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+		return ConversationCaptureSnapshot{}
+	}
+	workDir := i.GetWorktreePath()
+	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex || i.AgentProgram() != tmux.ProgramCodex {
+		return ConversationCaptureSnapshot{}
+	}
+	home, err := i.codexHomeForLaunch(program, workDir)
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ConversationCaptureSnapshot{}
+	}
+	return BeginConversationCaptureAtCodexHomeAndWorkingDir(home, LaunchCaptureWorkingDir(program, workDir))
+}
+
+// conversationResumableHere is ConversationResumableHere with the session's own
+// store resolution: an account-scoped codex session's rollout lives in the
+// account's registry dir, which the ambient command model cannot see.
+func (i *Instance) conversationResumableHere(program, workingDir string, conv AgentConversationData) bool {
+	account, _ := i.AccountSelection()
+	if strings.TrimSpace(account) == "" || strings.TrimSpace(conv.Agent) != tmux.ProgramCodex {
+		return ConversationResumableHere(program, workingDir, conv)
+	}
+	home, err := i.codexHomeForLaunch(program, workingDir)
+	return err == nil && CodexRolloutPathByID(home, conv.ID) != ""
 }
 
 // ExactResume reports whether a restore of this session would resume its own
@@ -271,8 +484,12 @@ func (i *Instance) ExactResume() (bool, string) {
 		return false, "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"
 	}
 	program := resolveLaunchProgramForInstance(i).command
-	if _, ok := prepareExactResumeConversation(i, program); ok {
+	_, ok, refusal := prepareExactResumeConversation(i, program)
+	if ok {
 		return true, ""
+	}
+	if refusal != "" {
+		return false, refusal
 	}
 	agent := tmux.DetectAgentFromCommand(program)
 	if agent == "" {
@@ -298,7 +515,7 @@ func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
 	}
 	program := resolveLaunchProgramForInstance(i).command
-	if _, ok := prepareExactResumeConversation(i, program); ok {
+	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return HandoffConversation{Carried: true}
 	}
 	if tmux.ProgramResumesConversation(program) {

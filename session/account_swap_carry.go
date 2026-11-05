@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -326,11 +325,6 @@ func (c *conversationCarry) staleReason(program, workDir string) string {
 }
 
 func (c *conversationCarry) staleCodexReason(program, workDir string) string {
-	recordedPath := filepath.Join(c.srcHome, c.transcript)
-	recorded, err := os.Lstat(recordedPath)
-	if err != nil {
-		return "its rollout is missing from the previous account's home"
-	}
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
@@ -338,27 +332,16 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 	if err != nil {
 		return "af could not enumerate the previous account's rollout store"
 	}
-	var newer []string
-	for path := range files {
-		if path == recordedPath {
-			continue
-		}
-		if info, err := os.Lstat(path); err == nil && info.ModTime().After(recorded.ModTime()) {
-			newer = append(newer, path)
-		}
-	}
-	if len(newer) == 0 {
-		return ""
-	}
 	launchDir := workDir
 	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
 		launchDir = launch.WorkingDir
 	}
-	matches, uncorrelated := codexRolloutFilesForWorkingDir(newer, pathutil.ResolveForCompare(launchDir))
-	switch {
-	case len(matches) > 0:
+	switch checkCodexRecordedStaleness(filepath.Join(c.srcHome, c.transcript), files, pathutil.ResolveForCompare(launchDir)) {
+	case codexRolloutRecordedGone:
+		return "its rollout is missing from the previous account's home"
+	case codexRolloutStale:
 		return staleCarryReason
-	case uncorrelated > 0:
+	case codexRolloutUncorrelated:
 		return "af could not confirm the recorded conversation is still the newest one in this worktree"
 	}
 	return ""

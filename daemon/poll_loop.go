@@ -66,6 +66,13 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 			// root title). Backoff-throttled per session, like root-ensure.
 			manager.RestoreLostSessions()
 
+			// Arm a conversation capture for any live Codex row that has none —
+			// the daemon restarted into it, or it predates capture (#6769).
+			// Runs after RestoreLostSessions so a row the pass just re-spawned
+			// is seen on its real liveness, and admission itself is cheap: the
+			// armed loop, not this pass, owns the per-attempt store walk.
+			manager.ArmConversationCaptures()
+
 			// Retry any SETTLEMENT write that did not land — the writes that record
 			// the outcome of an irreversible step (#2781, #2883). A no-op unless a
 			// write actually failed, and it holds each row's op-lock, so a session

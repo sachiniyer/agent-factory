@@ -10,6 +10,15 @@ func redactHandoffAccount(entry *session.AgentHandoff) {
 	if entry.ToAccount != "" {
 		entry.ToAccount = redactedMarker
 	}
+	// The ledger's carry-failure reason (#6768) is the same prose the pending
+	// record's CarryFallback gets the marker for: it can name the previous
+	// account ("the previous account %q is no longer registered"), and once
+	// that account is unregistered the registry scrub cannot find it — so the
+	// label would ship verbatim. Presence survives via Carried, the text does
+	// not.
+	if entry.Conversation.CarryFailure != "" {
+		entry.Conversation.CarryFailure = redactedMarker
+	}
 }
 
 func redactAccountSwapMission(pending *session.AccountSwapData) {
