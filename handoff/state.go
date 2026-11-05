@@ -154,6 +154,9 @@ func decodeState(path string, raw []byte) (State, error) {
 			return State{}, fmt.Errorf("%s refused_until carries an empty session key", path)
 		}
 	}
+	if state.Halted != nil && (state.Halted.At.IsZero() || state.Halted.Reason == "") {
+		return State{}, fmt.Errorf("%s halted is missing at or reason", path)
+	}
 	if state.ReportsHeld != nil && state.ReportsHeld.Since.IsZero() {
 		return State{}, fmt.Errorf("%s reports_held carries no since timestamp", path)
 	}
@@ -240,6 +243,146 @@ func (s *Store) NoteReportsHeld(since time.Time) error {
 func (s *Store) ClearReportsHeld() error {
 	return s.mutate(func(state *State) error {
 		state.ReportsHeld = nil
+		return nil
+	})
+}
+
+// RecordMove appends one committed automatic move. The live-mover slice is
+// the writer; the switch-loop rail (counted per SessionKey) and the
+// anti-pile-on credits (counted per Account) read entries inside
+// max_moves_window, so the record carries no verdict of its own.
+func (s *Store) RecordMove(sessionKey, account string, at time.Time) error {
+	if sessionKey == "" || account == "" || at.IsZero() {
+		return fmt.Errorf("recent move needs a session key, an account, and a timestamp, got %q / %q / %v",
+			sessionKey, account, at)
+	}
+	return s.mutate(func(state *State) error {
+		state.RecentMoves = append(state.RecentMoves,
+			RecentMove{SessionKey: sessionKey, Account: account, At: at})
+		return nil
+	})
+}
+
+// ClearMoves drops recent-move entries: just sessionKey's when it names one,
+// every entry when it is empty. Reports how many cleared — a reset that
+// matched nothing is still a truthful answer, never an error.
+func (s *Store) ClearMoves(sessionKey string) (int, error) {
+	cleared := 0
+	err := s.mutate(func(state *State) error {
+		kept := state.RecentMoves[:0]
+		for _, mv := range state.RecentMoves {
+			if sessionKey == "" || mv.SessionKey == sessionKey {
+				cleared++
+			} else {
+				kept = append(kept, mv)
+			}
+		}
+		if len(kept) == 0 {
+			kept = nil
+		}
+		state.RecentMoves = kept
+		return nil
+	})
+	return cleared, err
+}
+
+// SetRefusedUntil durably records that the session refused every candidate
+// and is to be left alone until the given instant. The live-mover slice is
+// the writer; an unexpired entry defers the session's next proposal.
+func (s *Store) SetRefusedUntil(sessionKey string, until time.Time) error {
+	if sessionKey == "" || until.IsZero() {
+		return fmt.Errorf("refusal backoff needs a session key and an until timestamp, got %q / %v",
+			sessionKey, until)
+	}
+	return s.mutate(func(state *State) error {
+		if state.RefusedUntil == nil {
+			state.RefusedUntil = map[string]time.Time{}
+		}
+		state.RefusedUntil[sessionKey] = until
+		return nil
+	})
+}
+
+// ClearRefused drops refusal-backoff entries: just sessionKey's when it
+// names one, every entry when it is empty. Reports how many cleared.
+func (s *Store) ClearRefused(sessionKey string) (int, error) {
+	cleared := 0
+	err := s.mutate(func(state *State) error {
+		if sessionKey == "" {
+			cleared = len(state.RefusedUntil)
+			state.RefusedUntil = nil
+			return nil
+		}
+		if _, ok := state.RefusedUntil[sessionKey]; ok {
+			cleared = 1
+			delete(state.RefusedUntil, sessionKey)
+		}
+		if len(state.RefusedUntil) == 0 {
+			state.RefusedUntil = nil
+		}
+		return nil
+	})
+	return cleared, err
+}
+
+// RecordHalt writes the durable mover halt (on_failure = "halt"): from this
+// instant engine-originated moves are stopped until an operator clears the
+// record. The live-mover slice is the writer; the reset surface and af quota
+// are the readers. A halt carries a reason — a reasonless halt would stop
+// the mover silently, which is the failure R16 exists to prevent.
+func (s *Store) RecordHalt(reason string, at time.Time) error {
+	if reason == "" || at.IsZero() {
+		return fmt.Errorf("halt needs a reason and a timestamp, got %q / %v", reason, at)
+	}
+	return s.mutate(func(state *State) error {
+		state.Halted = &Halt{At: at, Reason: reason}
+		return nil
+	})
+}
+
+// ClearHalt drops the halt record, returning the cleared record — nil when
+// no halt stood — so a reset can say what it removed rather than claiming a
+// clearance it did not perform.
+func (s *Store) ClearHalt() (*Halt, error) {
+	var cleared *Halt
+	err := s.mutate(func(state *State) error {
+		cleared = state.Halted
+		state.Halted = nil
+		return nil
+	})
+	return cleared, err
+}
+
+// PruneExpired drops records that can no longer matter: refusal backoffs
+// whose instant has passed, and recent-move entries outside window. window
+// <= 0 keeps moves entirely — the engine's counters only read in-window
+// entries, so an unbounded window makes every record permanent until an
+// operator clears it. Unexpired backoffs are kept even for sessions af no
+// longer tracks: the entry is the truth it recorded, and it dies at its own
+// deadline.
+func (s *Store) PruneExpired(window time.Duration, now time.Time) error {
+	return s.mutate(func(state *State) error {
+		for key, until := range state.RefusedUntil {
+			if !until.After(now) {
+				delete(state.RefusedUntil, key)
+			}
+		}
+		if len(state.RefusedUntil) == 0 {
+			state.RefusedUntil = nil
+		}
+		if window > 0 {
+			cutoff := now.Add(-window)
+			kept := state.RecentMoves[:0]
+			for _, mv := range state.RecentMoves {
+				if !mv.At.Before(cutoff) {
+					kept = append(kept, mv)
+				}
+			}
+			if len(kept) == 0 {
+				kept = nil
+			}
+			state.RecentMoves = kept
+		}
 		return nil
 	})
 }

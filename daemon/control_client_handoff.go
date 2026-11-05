@@ -88,3 +88,27 @@ func HandoffSession(req HandoffSessionRequest) (HandoffSessionResponse, error) {
 	}
 	return resp, err
 }
+
+// HandoffStatus reads the daemon host's auto-handoff rails state (#6776
+// slice 5) — the durable halt/backoff/move records plus whether the engine
+// is engaged, served so `af accounts handoff status` on any transport paints
+// the same answer.
+func HandoffStatus(req HandoffStatusRequest) (HandoffStatusResponse, error) {
+	var resp HandoffStatusResponse
+	if err := callDaemon("HandoffStatus", req, &resp); err != nil {
+		return HandoffStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// HandoffReset clears one named auto-handoff rail record through the daemon
+// (#6776 slice 5). It is a single RPC — the uncertain-outcome rule is the
+// caller's to honor: a client that never got an answer must not blindly
+// retry a mutation it cannot prove failed.
+func HandoffReset(req HandoffResetRequest) (HandoffResetResponse, error) {
+	var resp HandoffResetResponse
+	if err := callDaemon("HandoffReset", req, &resp); err != nil {
+		return HandoffResetResponse{}, err
+	}
+	return resp, nil
+}

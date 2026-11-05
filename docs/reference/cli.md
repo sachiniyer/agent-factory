@@ -11,6 +11,9 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts handoff`](#af-accounts-handoff) — Inspect and reset the automatic account-handoff rails
+- [`af accounts handoff reset`](#af-accounts-handoff-reset) — Clear one named automatic handoff record
+- [`af accounts handoff status`](#af-accounts-handoff-status) — Show the automatic account-handoff rails state
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
@@ -241,6 +244,7 @@ af accounts
 **Subcommands**
 
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts handoff`](#af-accounts-handoff) — Inspect and reset the automatic account-handoff rails
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 
@@ -266,6 +270,101 @@ settings may be seeded; notices explaining them are printed to stderr.
 
 ```
 af accounts add <agent> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff
+
+Inspect and reset the automatic account-handoff rails
+
+Inspect and reset the durable rails the automatic account handoff keeps.
+
+status shows the resolved mode, whether the daemon's engine is observing, the
+recorded halt, refusal backoffs, and the recent-move ledger the switch-loop
+rail and move credits count. reset clears the ONE record you name — halt,
+backoff, or moves — and nothing else, so clearing a halt can never silently
+take the loop history or a held report with it.
+
+The rails live in the daemon host's af home; both verbs go through the daemon
+API. With --daemon-url (or AF_DAEMON_URL) they act on the targeted daemon.
+
+```
+af accounts handoff
+```
+
+**Subcommands**
+
+- [`af accounts handoff reset`](#af-accounts-handoff-reset) — Clear one named automatic handoff record
+- [`af accounts handoff status`](#af-accounts-handoff-status) — Show the automatic account-handoff rails state
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff reset
+
+Clear one named automatic handoff record
+
+Clear one durable rail record, and only the one named:
+
+  af accounts handoff reset halt                    clear the recorded mover halt
+  af accounts handoff reset backoff [--session K]   clear refusal backoffs
+  af accounts handoff reset moves   [--session K]   clear recent-move entries
+
+--session scopes backoff and moves to one stable session key (see
+`af accounts handoff status`); halt is mover-level and takes none.
+A reset that matches nothing reports so — it is not an error. The change lands
+through the daemon, on the daemon the command targets.
+
+```
+af accounts handoff reset <halt|backoff|moves> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+| `--session` | `string` | Scope backoff/moves to one stable session key |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff status
+
+Show the automatic account-handoff rails state
+
+Show the durable rails the automatic account handoff keeps:
+
+the resolved account_handoff.mode (absent table ≡ off ≡ no machinery), whether
+the daemon's engine is observing, the recorded mover halt, refusal backoffs,
+and the recent-move ledger — the records the switch-loop rail (max_moves inside
+max_moves_window) and the anti-pile-on move credits count.
+
+The records are keyed by stable session identity, never by title; a live
+session's title is attached only as a label.
+
+```
+af accounts handoff status [flags]
 ```
 
 **Flags**

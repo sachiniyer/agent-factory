@@ -656,6 +656,46 @@ mode = "shadow"
   recovery land in later slices; until then `shadow` and `off` are the only
   accepted spellings.
 
+### Inspecting and resetting the rails
+
+The engine keeps its durable record — the mover halt, refusal backoffs, and
+the recent-move ledger the switch-loop rail (`max_moves` inside
+`max_moves_window`) and the anti-pile-on move credits count — in
+`~/.agent-factory/instances/auto-handoff-state.json`, keyed by stable session
+identity, never by title. Two operator verbs read and repair it:
+
+```
+af accounts handoff status
+af accounts handoff reset <halt|backoff|moves> [--session <key>]
+```
+
+- **status** prints the resolved `account_handoff.mode` (the absent table is
+  `off`, exactly the pre-feature behavior), whether the daemon's engine is
+  observing, the recorded halt with its reason and timestamp, live refusal
+  backoffs, and the recent-move entries alongside the `max_moves`/`window`
+  they are counted against. A corrupt state file is an error, not an empty
+  report — the rails fail closed.
+- **reset clears only the record you name.** `halt` clears the mover halt;
+  `backoff` and `moves` clear refusal backoffs and recent-move entries,
+  all of them or one session's with `--session`. Clearing a halt never
+  silently takes the loop history or a held report with it — each rail
+  protects the others from an impatient reset, and a reset that matched
+  nothing says so rather than claiming a clearance it did not perform.
+- **A halt stops only automatic moves.** `on_failure = "halt"` (the default)
+  is for the live-mover slice; nothing moves today. The recorded halt is
+  still honored on the surfaces: it appears on `af accounts handoff status`,
+  on `af quota`'s `mover:` line, and on the TUI and web Usage sections, so a
+  stopped mover is never silent. Ordinary wait-for-reset resume —
+  including a `limit_account_candidates` auto-swap — is *not* gated by the
+  halt record: it is a different mechanism with its own rails.
+- **The verbs are daemon calls on every transport.** Local runs use the
+  control socket; `--daemon-url`/`AF_DAEMON_URL` targets route over the
+  authenticated HTTP API (`POST /v1/HandoffStatus`, `POST /v1/HandoffReset`)
+  to the daemon the flag names — never to the local daemon's home by
+  accident. Neither route is reachable with a sandbox credential: the rails
+  name the operator's sessions and accounts with no per-session owner to
+  narrow to, and reset is operator authority over the mover itself.
+
 ## Hand off to another agent
 
 Waiting is not the only option. If the work should not sit until the window

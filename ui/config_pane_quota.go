@@ -41,8 +41,13 @@ type QuotaRow struct {
 // warnings, and the read's own failure state — an absent answer must render as
 // "af could not look", never as an empty section that reads as "all clear".
 type quotaSection struct {
-	rows        []QuotaRow
-	warnings    []string
+	rows     []QuotaRow
+	warnings []string
+	// mover is the served mover line — the configured auto-handoff mode
+	// plus any recorded halt (R16: a halted mover is never silent). Empty
+	// under the absent-table condition, so the line never materializes for
+	// a home the feature never touched.
+	mover       string
 	loaded      bool
 	loading     bool
 	unavailable string
@@ -51,18 +56,20 @@ type quotaSection struct {
 // SetQuota installs the daemon's report. A read failure becomes the section's
 // own message — the config view is still useful when usage cannot be read, and
 // an empty section would silently claim there is nothing parked.
-func (c *ConfigPane) SetQuota(rows []QuotaRow, warnings []string, err error) {
+func (c *ConfigPane) SetQuota(rows []QuotaRow, warnings []string, mover string, err error) {
 	c.quota.loading = false
 	c.quota.loaded = true
 	if err != nil {
 		c.quota.rows = nil
 		c.quota.warnings = nil
+		c.quota.mover = ""
 		c.quota.unavailable = err.Error()
 		c.rebuildRows()
 		return
 	}
 	c.quota.rows = rows
 	c.quota.warnings = warnings
+	c.quota.mover = mover
 	c.quota.unavailable = ""
 	c.rebuildRows()
 }

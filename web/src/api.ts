@@ -1647,7 +1647,7 @@ export async function listAccounts(token: string, repoPath = ""): Promise<Accoun
  *  re-deriving vocabulary from fields. */
 export async function quotaReport(token: string): Promise<QuotaReportResponse> {
   const resp = await af<QuotaReportResponse>("QuotaReport", {}, token);
-  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [], mover: resp?.mover ?? "" };
 }
 
 /** Creates an account's credential directory without logging in. Idempotent.

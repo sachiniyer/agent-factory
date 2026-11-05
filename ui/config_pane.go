@@ -709,6 +709,12 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 					lines = append(lines, strings.Split(c.renderQuotaUnavailable(), "\n")...)
 				default:
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaHeadingNote, configHintStyle), "\n"), "\n")...)
+					// The mover line is daemon-rendered and only present when
+					// the auto-handoff machinery is engaged or left records —
+					// a halt in it must surface here, never silently (#6776).
+					if c.quota.mover != "" {
+						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("mover: "+c.quota.mover, configHintStyle), "\n"), "\n")...)
+					}
 					if len(c.quota.rows) == 0 {
 						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("No agent CLIs are configured, so there is nothing to report.", configHintStyle), "\n"), "\n")...)
 					}

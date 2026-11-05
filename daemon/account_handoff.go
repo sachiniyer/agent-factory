@@ -157,6 +157,15 @@ func (m *Manager) accountHandoffTick() {
 	if !observed {
 		return
 	}
+	// The one-move-at-a-time rail (R14): when a move is in flight the tick
+	// skips rather than waits — a Lock here would let a minutes-long swap
+	// stack ticks behind it. Shadow mode moves nothing, so the lock is
+	// always free today; the live-mover slice acquires it for the duration
+	// of a swap, which is what makes this TryLock meaningful.
+	if !m.handoffMoveMu.TryLock() {
+		return
+	}
+	defer m.handoffMoveMu.Unlock()
 	// The tick NEVER stores handoffActive (#6817 round-3 review): discovery
 	// — start, config apply, session registration — is the only writer, so
 	// the most recent config decision always wins. A tick that began while

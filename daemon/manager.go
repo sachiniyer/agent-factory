@@ -650,6 +650,10 @@ type Manager struct {
 	// that began before a newer config apply cannot win the store with a
 	// stale answer — whoever computes under the lock sees the newest config.
 	handoffDiscoverMu sync.Mutex
+	// handoffMoveMu is the one-move-at-a-time rail (design R14): a mover in
+	// flight holds it across the swap and the tick only ever TryLocks, so a
+	// busy mover skips the tick instead of queueing behind it.
+	handoffMoveMu sync.Mutex
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
