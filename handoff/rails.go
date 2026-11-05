@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
-	"os"
 	"path/filepath"
 	"time"
 
@@ -61,6 +60,28 @@ type Rails struct {
 	// untrustworthy for retraction". The entry retires when a later carry
 	// records a watermark that covers the copied span.
 	UnrecordedCarries map[string]UnrecordedCarry `json:"unrecorded_carries,omitempty"`
+	// QuarantinedAccounts flags the account homes whose marker list was
+	// FULL when the next failed carry landed. Evicting a marker to make
+	// room would silently re-trust a poisoned file, so at the cap the
+	// quarantine fails closed the other way: the ACCOUNT that took the
+	// unrecordable carry is untrusted for retraction — none of its usage
+	// claims may free a wall — until a covering watermark retires the
+	// flag (Path/Covered name the carry that overflowed) or an operator
+	// repairs the rails file (#6852 review).
+	QuarantinedAccounts map[string]AccountQuarantine `json:"quarantined_accounts,omitempty"`
+}
+
+// AccountQuarantine is one overflowed account's distrust record. At is
+// the first overflow instant; Path+Covered name the carry the full
+// marker list could not hold, so ClearUnrecordedCarry retires the flag
+// by the same covering-watermark rule a marker follows. Path empty
+// means more than one carry overflowed this account — no single file's
+// watermark can honestly lift it, so the flag stands until the rails
+// file is reset or replaced.
+type AccountQuarantine struct {
+	At      time.Time `json:"at"`
+	Path    string    `json:"path,omitempty"`
+	Covered int64     `json:"covered,omitempty"`
 }
 
 // UnrecordedCarry is one quarantine marker: At is when the failed carry's
@@ -113,27 +134,31 @@ type RecentMove struct {
 // railsKeys are the top-level fields this binary models in the rails file;
 // a read-modify-write preserves every other key verbatim.
 var railsKeys = map[string]bool{
-	"schema_version":     true,
-	"recent_moves":       true,
-	"refused_until":      true,
-	"reports_held":       true,
-	"unrecorded_carries": true,
+	"schema_version":       true,
+	"recent_moves":         true,
+	"refused_until":        true,
+	"reports_held":         true,
+	"unrecorded_carries":   true,
+	"quarantined_accounts": true,
 }
 
 // liftedStateKeys are the mover records a pre-split build left in the
 // shared state file — lifted at load when no rails file exists yet, then
 // stripped from there by the next rails mutation.
 var liftedStateKeys = map[string]bool{
-	"recent_moves":       true,
-	"refused_until":      true,
-	"reports_held":       true,
-	"unrecorded_carries": true,
+	"recent_moves":         true,
+	"refused_until":        true,
+	"reports_held":         true,
+	"unrecorded_carries":   true,
+	"quarantined_accounts": true,
 }
 
 // unrecordedCarryCap bounds the quarantine list: a home whose watermark
-// file stays unwritable must not grow a second file without limit. Entries
-// past the cap retire oldest-first — a retired entry re-quarantines on the
-// next unrecorded carry of that path.
+// file stays unwritable must not grow a second file without limit. The
+// cap NEVER evicts a marker — a dropped marker re-trusts a file whose
+// poison span is still on disk (#6852 review). A carry that cannot get a
+// marker flags its account home in QuarantinedAccounts instead: the
+// account is then untrusted for retraction wholesale.
 const unrecordedCarryCap = 256
 
 // Snapshot is one consistent read of both durable files — the shared
@@ -173,6 +198,16 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 		}
 	}
 	return out
+}
+
+// AccountUntrusted reports whether the account home dir's carry
+// quarantine overflowed — the marker list was full when a carry failed
+// to record, so the home cannot name which rollout is poison and NONE
+// of the account's claims may free a wall (#6852 review: a full
+// quarantine fails closed rather than evicting).
+func (s Snapshot) AccountUntrusted(home string) bool {
+	_, ok := s.Rails.QuarantinedAccounts[filepath.Clean(home)]
+	return ok
 }
 
 // LoadSnapshot reads both durable record files into one Snapshot whose
@@ -239,6 +274,17 @@ func loadSnapshot(loadState func() (State, error), loadRails func() (Rails, erro
 			// Same worst-case merge as the watermarks: the wider span wins.
 			existing.Covered = marked.Covered
 			snap.Rails.UnrecordedCarries[path] = existing
+		}
+	}
+	for dir, quarantine := range r1.QuarantinedAccounts {
+		if _, ok := snap.Rails.QuarantinedAccounts[dir]; !ok {
+			// Union on absent — an account flag that either cut observed
+			// stands: unflagging an overflowed account is the unsafe
+			// direction, same as the markers themselves.
+			if snap.Rails.QuarantinedAccounts == nil {
+				snap.Rails.QuarantinedAccounts = map[string]AccountQuarantine{}
+			}
+			snap.Rails.QuarantinedAccounts[dir] = quarantine
 		}
 	}
 	return snap, nil, nil
@@ -374,6 +420,11 @@ func decodeRails(path string, raw []byte) (Rails, error) {
 	for key, marker := range rails.UnrecordedCarries {
 		if key == "" || marker.At.IsZero() || marker.Covered <= 0 {
 			return Rails{}, fmt.Errorf("%s unrecorded_carries carries an empty path, timestamp, or covered length", path)
+		}
+	}
+	for dir, quarantine := range rails.QuarantinedAccounts {
+		if dir == "" || quarantine.At.IsZero() || (quarantine.Path != "" && quarantine.Covered <= 0) {
+			return Rails{}, fmt.Errorf("%s quarantined_accounts carries an empty dir, timestamp, or a path without a covered length", path)
 		}
 	}
 	return rails, nil
@@ -632,24 +683,32 @@ func (s *RailsStore) mutateLiftTolerant(fn func(*Rails) error) error {
 // cannot be written, and that file holds no readable records to lose
 // (mutateLiftTolerant). A corrupt rails file still fails closed.
 //
-// At the entry bound an eviction is required; it is reported (never
-// silent — evicting re-trusts a file) and chosen fail-safe-first: a
-// marker whose file no longer exists protects nothing, so gone files
-// retire before the oldest live one.
-func (s *RailsStore) NoteUnrecordedCarry(path string, covered int64, at time.Time) (evicted string, err error) {
+// The entry bound NEVER evicts: a dropped marker re-trusts a file whose
+// poison span is still on disk, and evict-and-report still lets one bad
+// reading free a wall before anyone acts on the warning (#6852 review).
+// A carry that cannot get a marker flags its account home in
+// QuarantinedAccounts instead and reports quarantined=true — from then
+// on no claim from that account may free a wall, the maximally
+// conservative answer for a home that can no longer name its poisoned
+// file. accountDir is that account's home directory.
+func (s *RailsStore) NoteUnrecordedCarry(path, accountDir string, covered int64, at time.Time) (quarantined bool, err error) {
 	if path == "" || covered <= 0 || at.IsZero() {
-		return "", fmt.Errorf("unrecorded carry needs a path, a positive covered length, and a timestamp, got %q / %d / %v", path, covered, at)
+		return false, fmt.Errorf("unrecorded carry needs a path, a positive covered length, and a timestamp, got %q / %d / %v", path, covered, at)
+	}
+	if accountDir == "" {
+		return false, fmt.Errorf("unrecorded carry needs the account home the carry poisoned")
 	}
 	err = s.mutateLiftTolerant(func(rails *Rails) error {
 		if rails.UnrecordedCarries == nil {
 			rails.UnrecordedCarries = map[string]UnrecordedCarry{}
 		}
 		if existing, ok := rails.UnrecordedCarries[path]; !ok {
-			rails.UnrecordedCarries[path] = UnrecordedCarry{At: at, Covered: covered}
-			if len(rails.UnrecordedCarries) > unrecordedCarryCap {
-				evicted = evictUnrecordedCarry(rails.UnrecordedCarries, path)
-				delete(rails.UnrecordedCarries, evicted)
+			if len(rails.UnrecordedCarries) >= unrecordedCarryCap {
+				quarantined = true
+				noteAccountQuarantine(rails, filepath.Clean(accountDir), path, covered, at)
+				return nil
 			}
+			rails.UnrecordedCarries[path] = UnrecordedCarry{At: at, Covered: covered}
 		} else if covered > existing.Covered {
 			// A longer unrecorded copy extends the unaccounted span; the
 			// first marker's timestamp still says when quarantine began.
@@ -658,47 +717,64 @@ func (s *RailsStore) NoteUnrecordedCarry(path string, covered int64, at time.Tim
 		}
 		return nil
 	})
-	return evicted, err
+	return quarantined, err
 }
 
-// evictUnrecordedCarry picks the marker to retire: a path whose file is
-// gone (quarantining nothing), else the oldest entry — the residual
-// exposure lands on the stalest record, never the carry that just landed
-// (Codex review on the cap).
-func evictUnrecordedCarry(entries map[string]UnrecordedCarry, keep string) string {
-	var oldest string
-	var oldestAt time.Time
-	for path, marker := range entries {
-		if path == keep {
-			continue
-		}
-		if _, err := os.Stat(path); os.IsNotExist(err) {
-			return path
-		}
-		if oldest == "" || marker.At.Before(oldestAt) {
-			oldest, oldestAt = path, marker.At
-		}
+// noteAccountQuarantine writes the account-level overflow flag for dir.
+// The first overflow keeps its file and span so ClearUnrecordedCarry can
+// retire the flag by the same covering-watermark rule a marker follows;
+// a second overflow on a DIFFERENT file demotes the record to Path "" —
+// no single watermark then honestly lifts it, and the flag stands until
+// an operator repairs the rails. The earliest overflow instant always
+// stands (first-writer-wins, same as ReportsHeld).
+func noteAccountQuarantine(rails *Rails, dir, path string, covered int64, at time.Time) {
+	if rails.QuarantinedAccounts == nil {
+		rails.QuarantinedAccounts = map[string]AccountQuarantine{}
 	}
-	return oldest
+	q, ok := rails.QuarantinedAccounts[dir]
+	switch {
+	case !ok:
+		rails.QuarantinedAccounts[dir] = AccountQuarantine{At: at, Path: path, Covered: covered}
+	case q.Path == "":
+		// Already untrackable — nothing more precise to record.
+	case q.Path == path:
+		if covered > q.Covered {
+			q.Covered = covered
+			rails.QuarantinedAccounts[dir] = q
+		}
+	default:
+		q.Path, q.Covered = "", 0
+		rails.QuarantinedAccounts[dir] = q
+	}
 }
 
 // ClearUnrecordedCarry retires one quarantine marker when a recorded
 // watermark covers every byte the failed carry installed — the precise
-// prefix replaces the distrusted span. A watermark that falls SHORT of
-// the marker's covered length retires nothing: bytes past it are still
-// source-account claims the record cannot see (Codex review on #6852).
-// Returns false when the marker stays. No write when there is nothing to
-// retire or the watermark cannot cover it.
+// prefix replaces the distrusted span. An account-level overflow flag
+// that names this file retires by the same rule, and an overflow flag
+// whose Path is empty (an account that overflowed twice) is untrackable:
+// no single watermark can lift it. A watermark that falls SHORT of the
+// recorded span retires nothing: bytes past it are still source-account
+// claims the record cannot see (Codex review on #6852). Returns false
+// when distrust stays. No write when there is nothing to retire or the
+// watermark cannot cover it.
 func (s *RailsStore) ClearUnrecordedCarry(path string, watermark int64) (bool, error) {
 	rails, err := s.Load()
 	if err != nil {
 		return false, err
 	}
-	marker, ok := rails.UnrecordedCarries[path]
-	if !ok {
+	marker, hasMarker := rails.UnrecordedCarries[path]
+	overflowDir, overflow := "", AccountQuarantine{}
+	for dir, q := range rails.QuarantinedAccounts {
+		if q.Path == path {
+			overflowDir, overflow = dir, q
+			break
+		}
+	}
+	if !hasMarker && overflowDir == "" {
 		return true, nil
 	}
-	if watermark < marker.Covered {
+	if (hasMarker && watermark < marker.Covered) || (overflowDir != "" && watermark < overflow.Covered) {
 		return false, nil
 	}
 	if err := s.mutate(func(rails *Rails) error {
@@ -706,6 +782,14 @@ func (s *RailsStore) ClearUnrecordedCarry(path string, watermark int64) (bool, e
 			delete(rails.UnrecordedCarries, path)
 			if len(rails.UnrecordedCarries) == 0 {
 				rails.UnrecordedCarries = nil
+			}
+		}
+		if overflowDir != "" {
+			if q, ok := rails.QuarantinedAccounts[overflowDir]; ok && q.Path == path && watermark >= q.Covered {
+				delete(rails.QuarantinedAccounts, overflowDir)
+				if len(rails.QuarantinedAccounts) == 0 {
+					rails.QuarantinedAccounts = nil
+				}
 			}
 		}
 		return nil

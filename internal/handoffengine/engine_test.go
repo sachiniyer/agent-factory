@@ -743,6 +743,39 @@ func TestTickUnrecordedCarryQuarantinesTheWholeRollout(t *testing.T) {
 	}
 }
 
+// An account whose carry quarantine overflowed the marker cap is
+// untrusted for retraction wholesale: no claim from its home may free a
+// wall, so the engine never consults the usage reader for that dir at
+// all (#6852 review — the cap fails closed, never evicts). A trusted
+// account's home still reads normally.
+func TestTickSkipsUsageReadsForAQuarantinedAccount(t *testing.T) {
+	d := &depCounts{mode: "shadow"}
+	d.railsState.QuarantinedAccounts = map[string]handoff.AccountQuarantine{
+		"/home/codex/work": {At: testNow.Add(-time.Hour)},
+	}
+	var read []string
+	deps := d.deps()
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		read = append(read, dir)
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	e := New(deps)
+	trusted := shadowSession()
+	trusted.Key, trusted.Account = "sess-2", "personal"
+	trusted.LimitAccount, trusted.HomeDir = "personal", "/home/codex/personal"
+	if _, err := e.Tick([]SessionInput{shadowSession(), trusted}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	for _, dir := range read {
+		if dir == "/home/codex/work" {
+			t.Fatalf("the quarantined account's usage was consulted: %v", read)
+		}
+	}
+	if len(read) == 0 {
+		t.Fatal("the trusted account's usage was never consulted")
+	}
+}
+
 // Move credits key on agent + account — "work" on codex is a different seat
 // than "work" on claude, the same namespacing occupancy counts (#6776
 // review). A same-named credit on another provider must not push this

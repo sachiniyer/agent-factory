@@ -110,7 +110,8 @@ func collectAccountEvidence(result *Result) {
 	// The watermarks the indexer honors merge recorded carried prefixes
 	// with the unrecorded-carry quarantine — a carried file whose watermark
 	// never landed counts as fully poisoned (#6776 review).
-	carried := (handoff.Snapshot{State: state, Rails: rails}).EffectiveCarriedPrefixes()
+	snap := handoff.Snapshot{State: state, Rails: rails}
+	carried := snap.EffectiveCarriedPrefixes()
 	indexer := rateindex.New()
 	for _, name := range names {
 		dir, err := agentaccount.Dir(home, "codex", name)
@@ -121,10 +122,18 @@ func collectAccountEvidence(result *Result) {
 			result.AccountsUnreadable = true
 			continue
 		}
+		var reading rateindex.AccountReading
+		if snap.AccountUntrusted(dir) {
+			// The account's carry quarantine overflowed — the home cannot
+			// name which rollout is poison, so NO claim from it may free a
+			// wall and the read is skipped (#6852 review: the cap fails
+			// closed, never evicts).
+			reading = rateindex.AccountReading{Status: rateindex.StatusUnknown, Reason: "account quarantined"}
+		} else {
+			reading = indexer.Refresh(dir, rateindex.Options{CarriedPrefixes: carried})
+		}
 		result.Accounts = append(result.Accounts,
-			accountFromReading(name, indexer.Refresh(dir, rateindex.Options{
-				CarriedPrefixes: carried,
-			}), stateErr == nil && railsErr == nil))
+			accountFromReading(name, reading, stateErr == nil && railsErr == nil))
 	}
 }
 

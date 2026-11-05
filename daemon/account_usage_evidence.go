@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -91,6 +92,11 @@ type accountLimitProofInput struct {
 	home            string
 	wallPercent     int
 	carriedPrefixes map[string]int64
+	// quarantinedAccounts holds the account homes whose carry quarantine
+	// overflowed the marker cap — the home can no longer name which
+	// rollout is poison, so no claim from one may free a wall (#6852
+	// review: a full quarantine fails closed rather than evicting).
+	quarantinedAccounts map[string]bool
 }
 
 func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
@@ -137,10 +143,15 @@ func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
 		// pass cannot know which readings are poison (#6776 review).
 		return accountLimitProofInput{}, fmt.Errorf("handoff rails: %w", railsErr)
 	}
+	quarantined := make(map[string]bool, len(snap.Rails.QuarantinedAccounts))
+	for dir := range snap.Rails.QuarantinedAccounts {
+		quarantined[filepath.Clean(dir)] = true
+	}
 	return accountLimitProofInput{
-		home:            home,
-		wallPercent:     wallPercent,
-		carriedPrefixes: snap.EffectiveCarriedPrefixes(),
+		home:                home,
+		wallPercent:         wallPercent,
+		carriedPrefixes:     snap.EffectiveCarriedPrefixes(),
+		quarantinedAccounts: quarantined,
 	}, nil
 }
 
@@ -387,6 +398,11 @@ func (m *Manager) reconcileAccountLimitProofs() {
 		if err != nil {
 			// A walled identity with no readable account directory has no
 			// store to scan — no evidence, so nothing proves it.
+			continue
+		}
+		if inputs.quarantinedAccounts[filepath.Clean(dir)] {
+			// The account's carry quarantine overflowed — no claim from
+			// it may free a wall (#6852 review: the cap fails closed).
 			continue
 		}
 		provenAt, ok := usageReadingProof(

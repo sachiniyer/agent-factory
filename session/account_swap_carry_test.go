@@ -668,6 +668,61 @@ func TestConversationCarryWatermarksOnlyTheSourcePrefix(t *testing.T) {
 		"the verified prefix is the source's; the destination's tail is its own")
 }
 
+// When the quarantine list is already at its cap, the failed carry cannot
+// get a marker — and the cap NEVER evicts one to make room (#6852 review):
+// a dropped marker would re-trust a file whose poison span is still on
+// disk. The carry instead flags the ACCOUNT home the poison landed in as
+// untrusted for retraction: no claim from that account may free a wall
+// until a covering watermark retires the flag.
+func TestConversationCarryFlagsTheAccountWhenTheQuarantineIsFull(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(afHome, "instances"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances", "auto-handoff-state.json"),
+		[]byte("{not json"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim\n")
+
+	// Seed the rails file at the marker cap — every entry is someone
+	// else's poison and must survive.
+	full := map[string]any{"schema_version": 1, "unrecorded_carries": map[string]any{}}
+	for i := 0; i < 256; i++ {
+		full["unrecorded_carries"].(map[string]any)[fmt.Sprintf("/poisoned/%03d", i)] =
+			map[string]any{"at": "2026-11-05T18:00:00Z", "covered": 1}
+	}
+	raw, err := json.Marshal(full)
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(
+		filepath.Join(afHome, "instances", handoff.RailsFileName), raw, 0o600))
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carry.copy(),
+		"the copy succeeded — a record-keeping failure must not strand the user's context")
+	require.FileExists(t, filepath.Join(dstDir, rel))
+
+	rails, err := handoff.NewRailsStore(
+		filepath.Join(afHome, "instances", handoff.RailsFileName),
+		filepath.Join(afHome, "instances", handoff.StateFileName)).Load()
+	require.NoError(t, err)
+	require.Len(t, rails.UnrecordedCarries, 256,
+		"the cap never evicts — every standing marker survives the overflow")
+	require.NotContains(t, rails.UnrecordedCarries, filepath.Join(dstDir, rel),
+		"the overflowed carry got no marker of its own")
+	flag, ok := rails.QuarantinedAccounts[dstDir]
+	require.True(t, ok, "the overflow must flag the account that took the poison")
+	require.Equal(t, filepath.Join(dstDir, rel), flag.Path,
+		"the flag names the unrecorded rollout so a covering watermark can retire it")
+}
+
 // A corrupt watermark file must never cost the conversation (#6776 review):
 // the copy already landed, so the carry COMMITS and the rollout goes into
 // the rails file's unrecorded-carry quarantine — every claim in it distrusted

@@ -458,7 +458,13 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   account, and the usage reader ignores claims below it — a carry that
   cannot record its watermark still commits (the conversation is the user's
   context) but quarantines the copied span in the rails file instead, so no
-  claim inside it frees a wall until a covering watermark lands. Pane chrome, busy
+  claim inside it frees a wall until a covering watermark lands. The
+  quarantine ledger is bounded, and its cap never evicts a marker — a
+  dropped marker would re-trust a file whose poison span is still on
+  disk. A failed carry that cannot get a marker flags its account
+  instead: that account's usage claims are then untrusted for retraction
+  wholesale until a watermark covering the named rollout lands, or the
+  rails file is repaired. Pane chrome, busy
   indicators, a delivered prompt, and idle or attached pane state prove
   nothing either — none of them shows the account accepted a request. And
   because the proof must postdate a claimed reset too, retraction mainly
@@ -669,7 +675,8 @@ by title:
 - `auto-handoff-rails.json` — the records the mover keeps for itself:
   refusal backoffs, the recent-move ledger the switch-loop rail
   (`max_moves` inside `max_moves_window`) and the anti-pile-on move credits
-  count, held-report markers, and the unrecorded-carry quarantine. Keeping
+  count, held-report markers, the unrecorded-carry quarantine, and the
+  account-level flags a full quarantine records. Keeping
   these out of the shared file means a downgrade's carry rewrite cannot
   erase them.
 

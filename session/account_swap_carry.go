@@ -524,18 +524,19 @@ func (c *conversationCarry) quarantineUnrecorded(cause error, covered int64) {
 	store := handoff.NewRailsStore(
 		filepath.Join(instances, handoff.RailsFileName),
 		filepath.Join(instances, handoff.StateFileName))
-	evicted, err := store.NoteUnrecordedCarry(path, covered, time.Now())
+	quarantined, err := store.NoteUnrecordedCarry(path, c.dstHome, covered, time.Now())
 	if err != nil {
 		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v) or a quarantine record — rollout %s cannot be excluded from usage accounting: %v",
 			c.agent, c.id, cause, path, err)
 		return
 	}
+	if quarantined {
+		log.WarningLog.Printf("account swap quarantine is at its cap — account home %s is untrusted for wall retraction until a watermark covering rollout %s records, or the rails are repaired",
+			c.dstHome, path)
+		return
+	}
 	log.WarningLog.Printf("account swap carried %s conversation %s but its watermark could not be recorded (%v) — rollout %s is quarantined from usage accounting for the copied span",
 		c.agent, c.id, cause, path)
-	if evicted != "" {
-		log.WarningLog.Printf("account swap quarantine record for %s evicted at the entry bound — that rollout's claims are no longer excluded from usage accounting",
-			evicted)
-	}
 }
 
 func (c *conversationCarry) clone() *conversationCarry {

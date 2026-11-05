@@ -285,7 +285,15 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		if r, ok := readings[dir]; ok {
 			return r
 		}
-		r := e.deps.ReadUsage(dir, carried)
+		var r handoff.ReadingFacts
+		if snap.AccountUntrusted(dir) {
+			// The account's carry quarantine overflowed — no claim from
+			// this home may free a wall, so the read is skipped entirely
+			// (#6852 review: a full quarantine fails closed).
+			r = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
+		} else {
+			r = e.deps.ReadUsage(dir, carried)
+		}
 		readings[dir] = r
 		return r
 	}

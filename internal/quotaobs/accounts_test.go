@@ -253,6 +253,29 @@ func TestCollect_UnrecordedCarryQuarantinesWholeRollout(t *testing.T) {
 	}
 }
 
+// An account whose carry quarantine overflowed the marker cap is
+// untrusted for retraction wholesale — the home can no longer name which
+// rollout is poison, so its newest claim reports unknown with the
+// quarantine reason instead of an observed percentage that could free a
+// wall (#6852 review: the cap fails closed, never evicts).
+func TestCollect_QuarantinedAccountReportsUnknown(t *testing.T) {
+	home := fakeHome(t)
+	writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	dir := filepath.Join(home, "accounts", "codex", "work")
+	writeRailsFile(t, home, `{"schema_version":1,"quarantined_accounts":{"`+dir+`":{"at":"2026-11-06T09:00:00Z","path":"/poisoned.jsonl","covered":64}}}`)
+
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(result.Accounts) != 1 ||
+		result.Accounts[0].Observation != quota.AccountObservationUnknown ||
+		result.Accounts[0].Reason != "account quarantined" {
+		t.Fatalf("Accounts = %+v, want one unknown row with the quarantine reason", result.Accounts)
+	}
+}
+
 // R16: a halt recorded durably must surface even with no [account_handoff]
 // table — the state file alone engages the section, because a halted mover
 // must never be silent.

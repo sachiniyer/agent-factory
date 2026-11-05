@@ -325,7 +325,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(state.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/rollout-a", 64, time.Now()); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", "/acct", 64, time.Now()); err != nil {
 		t.Fatalf("the marker must outlive the corrupt watermark file: %v", err)
 	}
 	got := mustLoadRails(t, rails).UnrecordedCarries
@@ -336,7 +336,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(rails.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/rollout-b", 64, time.Now()); err == nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-b", "/acct", 64, time.Now()); err == nil {
 		t.Fatal("the marker rebuilt over a corrupt rails file")
 	}
 }
@@ -351,7 +351,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 func TestUnrecordedCarriesQuarantineTheCopiedSpan(t *testing.T) {
 	rails, state := railsFixture(t)
 	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	if _, err := rails.NoteUnrecordedCarry("/rollout-a", 200, at); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", "/acct", 200, at); err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
 	if err := state.RecordCarriedPrefix("/rollout-b", 64); err != nil {
@@ -403,17 +403,17 @@ func TestUnrecordedCarriesQuarantineTheCopiedSpan(t *testing.T) {
 func TestNoteUnrecordedCarryOnlyWidensTheSpan(t *testing.T) {
 	rails, _ := railsFixture(t)
 	first := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	if _, err := rails.NoteUnrecordedCarry("/r", 100, first); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/r", "/acct", 100, first); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/r", 300, first.Add(time.Hour)); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/r", "/acct", 300, first.Add(time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	got := mustLoadRails(t, rails).UnrecordedCarries["/r"]
 	if got.Covered != 300 || !got.At.Equal(first) {
 		t.Fatalf("marker = %+v, want covered 300 from %v", got, first)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/r", 50, first.Add(2*time.Hour)); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/r", "/acct", 50, first.Add(2*time.Hour)); err != nil {
 		t.Fatal(err)
 	}
 	if got := mustLoadRails(t, rails).UnrecordedCarries["/r"]; got.Covered != 300 {
@@ -449,20 +449,19 @@ func TestUnrecordedCarryDecodesTheLegacyTimestampForm(t *testing.T) {
 	}
 }
 
-// At the entry bound the evicted marker is reported, never silently
-// re-trusted — and a file that no longer exists retires before the
-// oldest live one (Codex review on the cap).
-func TestNoteUnrecordedCarryEvictsGoneFilesBeforeTheOldest(t *testing.T) {
+// At the entry bound the quarantine NEVER evicts — a dropped marker
+// re-trusts a file whose poison span is still on disk. The carry that
+// cannot get a marker flags its ACCOUNT home instead: every standing
+// marker stays, the overflowed file gets no marker, and the account is
+// untrusted for retraction wholesale until a covering watermark retires
+// the flag (#6852 review).
+func TestNoteUnrecordedCarryOverflowFlagsTheAccountNeverEvicts(t *testing.T) {
 	rails, _ := railsFixture(t)
-	// Seed the file at capacity: one entry whose rollout exists, the rest
-	// naming files that are gone.
-	live := filepath.Join(t.TempDir(), "live.jsonl")
-	if err := os.WriteFile(live, []byte("claim\n"), 0o600); err != nil {
-		t.Fatal(err)
-	}
+	liveDir := t.TempDir()
+	accountDir := filepath.Join(liveDir, "account-home")
 	oldest := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
-	entries := map[string]time.Time{live: oldest}
-	for i := 1; i < unrecordedCarryCap; i++ {
+	entries := map[string]time.Time{}
+	for i := 0; i < unrecordedCarryCap; i++ {
 		entries[fmt.Sprintf("/gone/%d", i)] = oldest.Add(time.Duration(i) * time.Minute)
 	}
 	raw, err := json.Marshal(map[string]any{
@@ -479,25 +478,122 @@ func TestNoteUnrecordedCarryEvictsGoneFilesBeforeTheOldest(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	// A marker over capacity retires a GONE file, not the live record.
-	// (The seeded bare timestamps are the legacy marker form — they decode
-	// with covered = MaxInt64.)
-	evicted, err := rails.NoteUnrecordedCarry("/new-carry", 64, time.Now())
+	// The carry that lands over capacity gets NO marker — and no marker
+	// is evicted to make room for one. (The seeded bare timestamps are
+	// the legacy marker form — they decode with covered = MaxInt64.)
+	newPath := filepath.Join(accountDir, "sessions", "new-carry.jsonl")
+	at := time.Now()
+	quarantined, err := rails.NoteUnrecordedCarry(newPath, accountDir, 64, at)
 	if err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
-	if evicted == "" || evicted == live || evicted == "/new-carry" {
-		t.Fatalf("eviction picked %q — a gone file or the new entry was not chosen", evicted)
+	if !quarantined {
+		t.Fatal("an overflowed carry must report the account quarantine")
 	}
-	got := mustLoadRails(t, rails).UnrecordedCarries
-	if _, ok := got[live]; !ok {
-		t.Fatal("the live rollout's marker was evicted over a dead one")
+	got := mustLoadRails(t, rails)
+	if len(got.UnrecordedCarries) != unrecordedCarryCap {
+		t.Fatalf("the cap evicted or admitted a marker: %d entries", len(got.UnrecordedCarries))
 	}
-	if _, ok := got["/new-carry"]; !ok {
-		t.Fatal("the carry that just landed lost its own marker")
+	if _, ok := got.UnrecordedCarries[newPath]; ok {
+		t.Fatal("the overflowed carry got a marker anyway")
 	}
-	if len(got) != unrecordedCarryCap {
-		t.Fatalf("quarantine grew past the bound: %d", len(got))
+	flag, ok := got.QuarantinedAccounts[filepath.Clean(accountDir)]
+	if !ok {
+		t.Fatalf("the account was not flagged: %+v", got.QuarantinedAccounts)
+	}
+	if flag.Path != newPath || flag.Covered != 64 || flag.At.IsZero() {
+		t.Fatalf("overflow flag = %+v, want path %q covered 64 with a timestamp", flag, newPath)
+	}
+	if !(Snapshot{Rails: got}).AccountUntrusted(accountDir) {
+		t.Fatal("AccountUntrusted did not see the overflow flag")
+	}
+}
+
+// The overflow flag's Path/Covered let a covering watermark retire it by
+// the same rule a marker follows — but a second overflow on a DIFFERENT
+// file makes the account's poison untrackable: the flag then survives
+// even a boundless watermark (nothing honest can name which file it
+// covered).
+func TestAccountQuarantineRetiresAndDemotesOnSecondOverflow(t *testing.T) {
+	rails, _ := railsFixture(t)
+	accountDir := filepath.Join(t.TempDir(), "account-home")
+	capEntries := map[string]time.Time{}
+	for i := 0; i < unrecordedCarryCap; i++ {
+		capEntries[fmt.Sprintf("/gone/%d", i)] = time.Now()
+	}
+	raw, err := json.Marshal(map[string]any{
+		"schema_version":     1,
+		"unrecorded_carries": capEntries,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(rails.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rails.Path(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	first := filepath.Join(accountDir, "rollout-1.jsonl")
+	if _, err := rails.NoteUnrecordedCarry(first, accountDir, 100, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+
+	// A watermark short of the overflow's span retires nothing; one that
+	// covers it lifts the account flag entirely.
+	if retired, err := rails.ClearUnrecordedCarry(first, 50); err != nil || retired {
+		t.Fatalf("short watermark retired the overflow: retired=%v err=%v", retired, err)
+	}
+	if !(Snapshot{Rails: mustLoadRails(t, rails)}).AccountUntrusted(accountDir) {
+		t.Fatal("account unflagged by a short watermark")
+	}
+	if retired, err := rails.ClearUnrecordedCarry(first, 150); err != nil || !retired {
+		t.Fatalf("covering watermark kept the flag: retired=%v err=%v", retired, err)
+	}
+	if (Snapshot{Rails: mustLoadRails(t, rails)}).AccountUntrusted(accountDir) {
+		t.Fatal("a covering watermark did not lift the account flag")
+	}
+
+	// Overflow twice on different files: the flag turns untrackable and
+	// no single-file watermark can lift it.
+	if _, err := rails.NoteUnrecordedCarry(first, accountDir, 10, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	second := filepath.Join(accountDir, "rollout-2.jsonl")
+	if _, err := rails.NoteUnrecordedCarry(second, accountDir, 20, time.Now()); err != nil {
+		t.Fatal(err)
+	}
+	flag := mustLoadRails(t, rails).QuarantinedAccounts[filepath.Clean(accountDir)]
+	if flag.Path != "" {
+		t.Fatalf("a second overflow kept a file boundary: %+v", flag)
+	}
+	// A per-path clear has nothing named to retire — and the untrackable
+	// account flag stands regardless of any watermark.
+	if _, err := rails.ClearUnrecordedCarry(first, math.MaxInt64); err != nil {
+		t.Fatalf("ClearUnrecordedCarry: %v", err)
+	}
+	if _, err := rails.ClearUnrecordedCarry(second, math.MaxInt64); err != nil {
+		t.Fatalf("ClearUnrecordedCarry: %v", err)
+	}
+	if !(Snapshot{Rails: mustLoadRails(t, rails)}).AccountUntrusted(accountDir) {
+		t.Fatal("an untrackable account flag was lifted by a watermark")
+	}
+}
+
+// The merged snapshot unions account overflow flags across the two reads
+// — an interleaved commit can only flag MORE accounts, never unflag one.
+func TestLoadSnapshotUnionsQuarantinedAccounts(t *testing.T) {
+	dir := t.TempDir()
+	railReads := []Rails{
+		{QuarantinedAccounts: map[string]AccountQuarantine{dir: {At: time.Now()}}},
+		{},
+	}
+	ri := 0
+	snap, _, _ := loadSnapshot(
+		func() (State, error) { return State{}, nil },
+		func() (Rails, error) { r := railReads[ri]; ri++; return r, nil })
+	if !snap.AccountUntrusted(dir) {
+		t.Fatal("an account flag present in the first cut was lost to the merge")
 	}
 }
 
@@ -643,7 +739,7 @@ func TestLoadSnapshotConsistentWhenNothingInterleaves(t *testing.T) {
 	if err := store.RecordCarriedPrefix("/r.jsonl", 42); err != nil {
 		t.Fatalf("RecordCarriedPrefix: %v", err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/q.jsonl", 77, time.Now()); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/q.jsonl", "/acct", 77, time.Now()); err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
 	snap, stateErr, railsErr := LoadSnapshot(store, rails)
