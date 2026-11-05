@@ -879,10 +879,21 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		// Record which repos we OBSERVED as missing this poll, so a file that is
 		// later recreated as an empty "[]" by a preserved session's targeted
 		// write stays protected on the next tick via provenance rather than by
-		// treating every present empty file as data loss.
+		// treating every present empty file as data loss. A deleted FILE is
+		// reported by the loader as present-but-empty with Missing[repoID]=true,
+		// while a deleted DIRECTORY is simply absent from allInstances (the
+		// loader only enumerates existing per-repo directories, so the repo is
+		// never enumerated and Missing[repoID] is never set). Both vanish-modes
+		// are recoverable disk inconsistencies with identical targeted-write
+		// recreation mechanics (an atomic write always MkdirAll's the parent),
+		// so both feed the same provenance + restore path: a repo the loader
+		// neither enumerated (!ok) nor flagged missing is exactly the
+		// directory-deleted set, and its preserved-by-absence sessions are
+		// precisely what the preserve loop's ok==false arm carries.
 		for key := range existing {
 			repoID, _ := splitDaemonInstanceKey(key)
-			if missing[repoID] {
+			_, observedRepo := allInstances[repoID]
+			if missing[repoID] || !observedRepo {
 				preservedMissingFileRepos.oweLocked(repoID, key)
 			}
 		}
