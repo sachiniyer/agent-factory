@@ -66,6 +66,41 @@ func TestLoadPersistedAccountLimitObservationsCarriesLegacyGhostLimit(t *testing
 	}
 }
 
+// A manual handoff off the default login persists a parked row whose account
+// is the committed replacement — pending_account_swap says so, limit_account
+// stays empty because the ambient identity owned the wall (#6764). Reading the
+// row's account as a pre-limit_account pin invents a target-account wall and
+// makes the healthy account look limited to every sibling scan.
+func TestLoadPersistedAccountLimitObservationsIgnoresCommittedSwapTarget(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	resetAt := time.Date(2026, 11, 3, 6, 34, 0, 0, time.UTC)
+	raw, err := json.Marshal([]session.InstanceData{{
+		Title:              "handoff-off-default-login",
+		Program:            "codex",
+		Account:            "target",
+		Liveness:           session.LiveLimitReached,
+		LimitAgent:         "codex",
+		LimitResetAt:       resetAt,
+		PendingAccountSwap: &session.AccountSwapData{Manual: true, From: "", To: "target"},
+	}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := config.SaveRepoInstances("committed-swap-limit-evidence", raw); err != nil {
+		t.Fatal(err)
+	}
+
+	observations, err := loadPersistedAccountLimitObservations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, obs := range observations {
+		if obs.Account == "target" {
+			t.Fatalf("sibling scan recorded the incoming identity as limited: %+v", obs)
+		}
+	}
+}
+
 func TestLoadAccountLimitEvidenceSnapshotReadsRowsBeforeLedger(t *testing.T) {
 	var reads []string
 	loadPersisted := func() ([]session.AccountLimitObservationData, error) {
