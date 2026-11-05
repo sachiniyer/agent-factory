@@ -64,14 +64,6 @@ function stubWindow() {
     timers,
     /** Delivers the pending rAF callback, if one is armed — or drops it (starved). */
     runFrame: () => { const cb = frames.values().next().value; frames.clear(); cb?.(); },
-    /** Delivers EVERY armed rAF in arming order — one live paint honouring all
-     *  queued callbacks, where runFrame models a single frame that starves the
-     *  rest. */
-    runAllFrames: () => {
-      const cbs = [...frames.values()];
-      frames.clear();
-      for (const cb of cbs) cb();
-    },
     runTimer: () => { const cb = timers.values().next().value; cb?.(); },
     restore: () => { (globalThis as { window?: unknown }).window = prior; },
   };
@@ -570,13 +562,7 @@ function stageEchoed() {
 // pass even though the pane was correctly fit. A foreign grid must therefore
 // never REST on a measurable host's emulator: the echo is applied per the
 // wire contract and the host's own fit is re-asserted in the same task.
-//
-// But the wire reclaim is a separate matter (Codex P2): an echo is a network
-// event and can land on an OCCLUDED page whose stale `parked === false` still
-// reads live. Writing on it would resize the shared PTY out from under the
-// active peer — so the reclaim's wire half defers to a fresh classification
-// even while the local refit stays synchronous.
-test("a foreign echo re-asserts the host's grid in the same task — and writes only after classification", async () => {
+test("a foreign authoritative echo on the active pane is reclaimed before the handler returns", async () => {
   const win = stubWindow();
   try {
     const { echo, term, calls, terminal } = stageEchoed();
@@ -584,69 +570,16 @@ test("a foreign echo re-asserts the host's grid in the same task — and writes 
     // moves the emulator off this host's 40x120 fit. On master the pane kept
     // displaying 104 rows until the scheduled-fit pair delivered a frame or
     // the 250ms twin fired; any DOM row count in that window sampled the
-    // foreign grid as this pane's own. The local reclaim lands synchronously.
+    // foreign grid as this pane's own. The reclaim now lands synchronously.
     echo(104, 68);
     assert.deepEqual([term.rows, term.cols], [40, 120],
       "the emulator is back on the host's fit before echo() returns");
-    // The wire write did NOT leave yet: the stale 'live' was downgraded to
-    // unclassified, and the classification pair — not a live-page assumption —
-    // is what flushes it.
-    assert.deepEqual(calls, ["fit"]);
-    assert.notEqual(terminal.visibleFitFrame, null);
-    assert.notEqual(terminal.visibleFitTimer, null);
-    // The starved twin's delivery classifies this page parked — the write
-    // stays withheld, and the wake probe alone owns the flush (no timer poll).
-    win.runFrame(); // drains the viewport-restore frame; eats the pair's rAF
-    win.runTimer();
-    assert.equal(terminal.parked, true);
-    assert.deepEqual(calls, ["fit"], "an occluded page never resizes the shared PTY");
-    assert.notEqual(terminal.visibleFitFrame, null);
-    assert.equal(terminal.visibleFitTimer, null);
-    // The probe's delivery — the un-occlusion — flushes the owed reclaim.
-    win.runFrame();
-    assert.equal(terminal.parked, false);
-    assert.deepEqual(calls, ["fit", "resize"]);
-    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
-  } finally {
-    win.restore();
-  }
-});
-
-// The live-page half of the same contract: when the classification pair's
-// frame actually delivers, the reclaim's write flushes one delivery later —
-// the local refit never waited for it.
-test("a live page's echo reclaim writes as soon as classification delivers", async () => {
-  const win = stubWindow();
-  try {
-    const { echo, term, calls, terminal } = stageEchoed();
-    echo(104, 68);
-    assert.deepEqual([term.rows, term.cols], [40, 120]);
-    assert.deepEqual(calls, ["fit"]);
-    win.runAllFrames(); // one live paint: restore frame + the pair's rAF
-    await Promise.resolve();
-    assert.equal(terminal.parked, false);
     assert.deepEqual(calls, ["fit", "resize"],
-      "the classified write is the only deferred part");
-  } finally {
-    win.restore();
-  }
-});
-
-// A page already classified parked keeps every other guarantee: the local
-// refit still lands synchronously, and the withheld write arms the frame
-// probe alone — never a timer that would poll a dormant page.
-test("a known-parked page's echo refits locally and arms only the wake probe", () => {
-  const win = stubWindow();
-  try {
-    const { echo, term, calls, terminal } = stageEchoed();
-    terminal.parked = true;
-    echo(104, 68);
-    assert.deepEqual([term.rows, term.cols], [40, 120],
-      "the local reclaim is still synchronous");
-    assert.deepEqual(calls, ["fit"], "nothing may leave the wire while parked");
-    assert.notEqual(terminal.visibleFitFrame, null);
+      "the host's claim left the wire in the same task");
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+    // No scheduled fit was armed — nothing is left owed.
+    assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
-    assert.equal(win.timers.size, 0);
   } finally {
     win.restore();
   }
@@ -683,9 +616,7 @@ test("the same foreign grid repeated inside the yield window is an insistent wri
   try {
     const { echo, term, calls, terminal } = stageEchoed();
     echo(24, 80);
-    // The reclaim's write waits on a fresh classification — one live paint
-    // delivers the pair's rAF and flushes it.
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize"]);
     // The foreign writer immediately re-asserts the same grid: the reclaim
@@ -724,13 +655,13 @@ test("the same foreign grid after the yield window is a fresh contest — one st
   try {
     const { echo, term, calls } = stageEchoed();
     echo(24, 80);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     echo(24, 80); // insistent: yielded, the pane stays on the foreign grid
     now += 1600;
     Object.assign(term, { rows: 40, cols: 120 }); // our own fit converged meanwhile
     echo(24, 80);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
@@ -756,7 +687,7 @@ test("the subscribe admission echo is not a contested sighting — the activatio
     // The broker's replayed authority lands: the emulator takes it and the
     // activation refit is owed — but no contest is recorded.
     echo(24, 80);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize"], "the admission echo still earns the host's claim");
     assert.deepEqual([term.rows, term.cols], [40, 120]);
@@ -765,7 +696,7 @@ test("the subscribe admission echo is not a contested sighting — the activatio
     // grid (on master this echo was consumed by the primed window and nothing
     // left the wire — the stranded-34 failure).
     echo(24, 80);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
     // Only NOW is a same-grid repeat insistence: it wins unchallenged.
@@ -786,10 +717,10 @@ test("alternating foreign grids cannot bypass the yield window — contest histo
     // every echoed grid looks new and every echo earns a reclaim — an
     // indefinite resize ping-pong (Codex P2 on #6628).
     echo(24, 80);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     echo(30, 90);
-    win.runAllFrames();
+    win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "each new foreign grid gets one reclaim");
     // A repeat of EITHER grid inside its own window is the same insistent
