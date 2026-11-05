@@ -35,6 +35,12 @@ func codexLoopTestInstance(t *testing.T) (*Manager, *session.Instance, string, s
 
 	manager, err := NewManager(config.DefaultConfig())
 	require.NoError(t, err)
+	// Join the capture workers before the timing-global cleanup runs: a loop
+	// still winding down reads conversationCaptureRearmInterval when it builds
+	// its next timer, and a surviving worker can also leak into the next test
+	// after its temporary store is gone (#6769 review). Registered after
+	// shrinkConversationCaptureForTest's cleanup so it runs first.
+	t.Cleanup(manager.stopAndWaitBackgroundMutationsForShutdown)
 	inst, err := session.NewInstance(session.InstanceOptions{
 		Title:   "codex-worker",
 		Path:    repoPath,

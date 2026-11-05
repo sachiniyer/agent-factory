@@ -336,7 +336,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 	}
 
-	program, proof := respawnLaunchProgram(
+	program, proof, refusedID := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	setLaunchProgram(ts, program, proof)
 	// A re-spawn resumes this session's own recorded conversation or starts fresh
@@ -357,6 +357,14 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		if err := gw.ReconfirmAdoptedWorktree(); err != nil {
 			return &WorktreeUnavailableError{Title: i.Title, WorktreePath: workDir, Err: err}
 		}
+	}
+	// A refused resume launches fresh below, and Codex can mint the
+	// replacement's rollout before the daemon's next deferred-arm snapshot —
+	// which would then permanently exclude the very file it must record.
+	// Baseline the store now, before the spawn (#6769 review).
+	var preSpawnCapture ConversationCaptureSnapshot
+	if refusedID != "" {
+		preSpawnCapture = i.sessionCodexCaptureBaselineFor(resolvedProgram)
 	}
 	if resume {
 		restoreResult, err = ts.RestoreWithResult(workDir)
@@ -389,6 +397,13 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// run rather than let the fresh agent's first idle edge complete it
 		// (#4222).
 		i.markAgentRuntimeReplaced(true)
+		// The fresh pane committed after a refused resume: retire the dead id
+		// and park the pre-spawn baseline so the next deferred arm can record
+		// this runtime's rollout instead of fencing on the stale record
+		// (#6769 review).
+		if refusedID != "" {
+			i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
+		}
 		// af just recreated the missing worktree AND started a fresh agent pane
 		// in it, which is the one event that makes a worktree-missing row
 		// deliverable again (#5102). Both halves matter: a pathname reappearing

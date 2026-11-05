@@ -513,6 +513,13 @@ type Instance struct {
 	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to
 	// carry it. Guarded by mu.
 	reportedConversation AgentConversationData
+
+	// pendingConversationCapture is a capture baseline parked by a respawn that
+	// retired a refused conversation id (#6769): the replacement's rollout may
+	// already exist by the time the daemon's deferred arm builds a fresh
+	// baseline, and a post-spawn before-image would permanently exclude the
+	// very file it must record. Consumed once by the next arm. Guarded by mu.
+	pendingConversationCapture *ConversationCaptureSnapshot
 	// conversationUnpersisted is set when a remote agent-server reported a
 	// conversation identity that changed the row and the change has not yet been
 	// durably written (#5826). The daemon's poll persistence reads it as a

@@ -167,6 +167,44 @@ func (i *Instance) retireConversationsLocked() {
 	i.reportedConversation = AgentConversationData{}
 }
 
+// RetireConversationForFreshRuntime drops the agent tab's recorded
+// conversation when a refused resume committed a FRESH pane: the id that
+// could not be resumed cannot name the replacement's conversation, and
+// leaving it recorded would suppress every later capture arm — the next
+// restore would refuse it again and start fresh forever (#6769 review). The
+// clear is conditional on the exact id that was refused: a conversation
+// recorded between refusal and commit is newer evidence than the refusal and
+// is left for the next restore's staleness check to judge. snap is the
+// capture baseline taken BEFORE the fresh spawn, parked for the deferred arm
+// so the replacement's own rollout — which may already exist — is not
+// excluded from its own discovery.
+func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap ConversationCaptureSnapshot) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if len(i.Tabs) > 0 && i.Tabs[0].Conversation.ID == refusedID && refusedID != "" {
+		i.Tabs[0].Conversation = AgentConversationData{}
+		i.touchLocked()
+	}
+	if snap.CapturesCodex() {
+		s := snap
+		i.pendingConversationCapture = &s
+	}
+}
+
+// TakePendingConversationCapture hands a respawn-parked capture baseline to
+// the next deferred arming, consuming it. ok=false means the arm builds its
+// baseline the usual way.
+func (i *Instance) TakePendingConversationCapture() (ConversationCaptureSnapshot, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingConversationCapture == nil {
+		return ConversationCaptureSnapshot{}, false
+	}
+	snap := *i.pendingConversationCapture
+	i.pendingConversationCapture = nil
+	return snap, true
+}
+
 func prepareLaunchConversation(i *Instance, program string) string {
 	rewritten, conversation := planCreateConversation(i, program)
 	if conversation.HasID() {
@@ -386,13 +424,29 @@ func (i *Instance) codexHomeForLaunch(program, workDir string) (string, error) {
 
 // SessionCodexCaptureBaseline builds the capture snapshot a deferred arming
 // needs when the launch-time one is gone — after a daemon restart, or for a
-// session that predates capture. It resolves the store and working directory
-// exactly as create does (effective launch command, account-aware Codex home,
-// the worktree path), so the re-armed loop correlates against the same
-// evidence the original capture would have.
+// session that predates capture. It binds the store and working directory to
+// the command that actually launched the live runtime — durable evidence a
+// program_overrides edit cannot move (#6769 review) — falling back to a fresh
+// resolution only for rows that predate runtime evidence.
 func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
-	resolution := resolveLaunchProgramForInstance(i)
-	program := resolution.command
+	program := i.RuntimeProgram()
+	if strings.TrimSpace(program) == "" {
+		program = resolveLaunchProgramForInstance(i).command
+	}
+	return i.sessionCodexCaptureBaselineFor(program)
+}
+
+// sessionCodexCaptureBaselineFor builds the snapshot against an explicit
+// launch command. Only a local workspace can answer it: a remote pane writes
+// its provider store inside its own sandbox, the daemon's account registry is
+// a DIFFERENT store, and a remote row's empty worktree would leave rollout
+// correlation unscoped — so a stray local rollout could be recorded as the
+// remote session's identity. Remote identities arrive through the
+// agent-server reporting path in conversation_remote.go (#6769 review).
+func (i *Instance) sessionCodexCaptureBaselineFor(program string) ConversationCaptureSnapshot {
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+		return ConversationCaptureSnapshot{}
+	}
 	workDir := i.GetWorktreePath()
 	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex || i.AgentProgram() != tmux.ProgramCodex {
 		return ConversationCaptureSnapshot{}

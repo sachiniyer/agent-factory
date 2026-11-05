@@ -245,7 +245,13 @@ func (m *Manager) ArmConversationCaptures() {
 		if armedToken, ok := armed[inst]; ok && armedToken == token {
 			continue
 		}
-		snap := inst.SessionCodexCaptureBaseline()
+		// A respawn that retired a refused conversation parks its pre-spawn
+		// baseline here (#6769 review): the replacement's rollout can already
+		// exist, and a fresh before-image would exclude the file it must find.
+		snap, parked := inst.TakePendingConversationCapture()
+		if !parked {
+			snap = inst.SessionCodexCaptureBaseline()
+		}
 		if !snap.CapturesCodex() {
 			continue
 		}
