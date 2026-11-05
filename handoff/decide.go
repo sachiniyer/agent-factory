@@ -417,6 +417,14 @@ func Decide(f Facts) Decision {
 			Event{Kind: EventIgnored, Reason: reasonCarryRefused})
 	}
 	if blockedReason != "" {
+		// A blocked session that is also drift-shorn logs both — emit the
+		// drift edges the candidate scan would have raised, in the same
+		// precedence the scan applies, then keep the blocked verdict.
+		for _, a := range f.Accounts {
+			if _, drift := classifyCandidate(f, a); drift != "" {
+				events = append(events, Event{Kind: EventConfigDrift, Reason: drift, To: a.Name})
+			}
+		}
 		return Decision{Kind: blockedKind, Reason: blockedReason, Events: events}
 	}
 
@@ -425,21 +433,9 @@ func Decide(f Facts) Decision {
 	var eligible []scoredAccount
 	var skipped []string
 	for i, a := range f.Accounts {
-		skip := ""
-		switch {
-		case a.Name == s.Account:
-			skip = "current"
-		case !a.Registered:
-			skip = "unregistered"
-		case a.Limited:
-			skip = "limited"
-		case a.Drift != "":
-			skip = "drift:" + a.Drift
-			events = append(events, Event{Kind: EventConfigDrift, Reason: a.Drift, To: a.Name})
-		case readingAtOrAbove(a.Reading, float64(cfg.WallPercent), f.Now, f.ResetGrace):
-			skip = "walled"
-		case readingStaleHigh(a.Reading, float64(cfg.WallPercent), f.Now, f.ResetGrace):
-			skip = "stale-high"
+		skip, drift := classifyCandidate(f, a)
+		if drift != "" {
+			events = append(events, Event{Kind: EventConfigDrift, Reason: drift, To: a.Name})
 		}
 		if skip != "" {
 			skipped = append(skipped, a.Name+"="+skip)
@@ -505,6 +501,31 @@ func Decide(f Facts) Decision {
 	}
 	events = append(events, Event{Kind: EventMove, Reason: moveReason, From: from, To: to, Params: params})
 	return Decision{Kind: KindMove, Reason: trigger, To: to, Candidates: ordered, Events: events}
+}
+
+// classifyCandidate applies the candidate filters in their precedence order
+// and answers the skip reason — "" when the account is eligible — plus the
+// drift key whenever the account REACHED the drift check and differed. The
+// precedence matters for the drift answer: a candidate already excluded as
+// current/unregistered/limited is not reported drifted, the same verdict the
+// filter loop applies when a blocker does not short-circuit the pass.
+func classifyCandidate(f Facts, a AccountFacts) (skip, drift string) {
+	s, cfg := f.Session, f.Config
+	switch {
+	case a.Name == s.Account:
+		return "current", ""
+	case !a.Registered:
+		return "unregistered", ""
+	case a.Limited:
+		return "limited", ""
+	case a.Drift != "":
+		return "drift:" + a.Drift, a.Drift
+	case readingAtOrAbove(a.Reading, float64(cfg.WallPercent), f.Now, f.ResetGrace):
+		return "walled", ""
+	case readingStaleHigh(a.Reading, float64(cfg.WallPercent), f.Now, f.ResetGrace):
+		return "stale-high", ""
+	}
+	return "", ""
 }
 
 // confirmWall decides whether a walled session's wall is proven well enough
@@ -642,33 +663,42 @@ func worstWindow(r ReadingFacts) (WindowFact, bool) {
 	return worst, found
 }
 
-// readingAtOrAbove reports whether the newest observed claim puts the worst
-// window at/above pct with the window still live — resets_at future or
-// unknown (± grace). A resets_at already past the grace is a stale claim,
-// not a current wall.
+// readingAtOrAbove reports whether the newest observed claim holds ANY
+// window at/above pct with that window still live — resets_at future or
+// unknown (± grace). Judging only the worst window is wrong: a hot weekly
+// window may be past its reset while the daily window above the threshold
+// still is not — the account is walled on the live one (Codex on #6815).
+// A resets_at already past the grace is a stale claim, not a current wall.
 func readingAtOrAbove(r ReadingFacts, pct float64, now time.Time, grace time.Duration) bool {
 	if r.Status != ReadingObserved {
 		return false
 	}
-	w, ok := worstWindow(r)
-	if !ok || w.UsedPercent < pct {
-		return false
+	for _, w := range r.Windows {
+		if w.UsedPercent < pct {
+			continue
+		}
+		if w.ResetsAt == nil || now.Before(w.ResetsAt.Add(grace)) {
+			return true
+		}
 	}
-	return w.ResetsAt == nil || now.Before(w.ResetsAt.Add(grace))
+	return false
 }
 
-// readingStaleHigh reports the stale-high shape: the newest claim sits at or
-// above the wall but its window has already reset — an account af skips
-// rather than treats as currently walled.
+// readingStaleHigh reports the stale-high shape: the newest claim carries an
+// above-wall window whose reset has already passed — an account af skips
+// rather than treats as currently walled. It runs only after
+// readingAtOrAbove has answered false, so "some hot window, none still
+// live" and "every hot window expired" coincide.
 func readingStaleHigh(r ReadingFacts, wallPct float64, now time.Time, grace time.Duration) bool {
 	if r.Status != ReadingObserved {
 		return false
 	}
-	w, ok := worstWindow(r)
-	if !ok || w.UsedPercent < wallPct || w.ResetsAt == nil {
-		return false
+	for _, w := range r.Windows {
+		if w.UsedPercent >= wallPct && w.ResetsAt != nil && !now.Before(w.ResetsAt.Add(grace)) {
+			return true
+		}
 	}
-	return !now.Before(w.ResetsAt.Add(grace))
+	return false
 }
 
 // readingBelowAllFresh is the refutation shape: an observed, COMPLETE reading
