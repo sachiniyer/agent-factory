@@ -185,14 +185,17 @@ func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
 	account, ok := i.LimitAccount()
 	require.True(t, ok)
 	require.Equal(t, "work", account)
-	want := []AccountLimitObservationData{{
-		Agent: tmux.ProgramCodex, Account: "work", ResetAt: resetAt,
-	}}
-	require.Equal(t, want, i.AccountLimitObservations(),
+	observations := i.AccountLimitObservations()
+	require.Len(t, observations, 1)
+	require.Equal(t, tmux.ProgramCodex, observations[0].Agent)
+	require.Equal(t, "work", observations[0].Account)
+	require.True(t, observations[0].ResetAt.Equal(resetAt),
 		"the handoff fence must publish the incoming identity's quota wall atomically")
+	require.False(t, observations[0].ObservedAt.IsZero(),
+		"the wall's sighting instant is its own event time (#6776 1d)")
 	stored := i.ToInstanceData().ForStorage()
 	require.Equal(t, "work", stored.LimitAccount)
-	require.Equal(t, want, stored.AccountLimitObservations,
+	require.Equal(t, observations, stored.AccountLimitObservations,
 		"killing or restarting the handoff must not lose its account quota evidence")
 }
 

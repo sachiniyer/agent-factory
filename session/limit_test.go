@@ -67,17 +67,20 @@ func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
 	i.SetLimitReached(reset)
 	i.ClearLimitReached()
 
-	want := []AccountLimitObservationData{{
-		Agent: tmux.ProgramClaude, Account: "work", ResetAt: reset,
-	}}
-	require.Equal(t, want, i.AccountLimitObservations(),
+	observations := i.AccountLimitObservations()
+	require.Len(t, observations, 1,
 		"clearing current liveness must not make an exhausted identity eligible")
+	require.Equal(t, tmux.ProgramClaude, observations[0].Agent)
+	require.Equal(t, "work", observations[0].Account)
+	require.True(t, observations[0].ResetAt.Equal(reset))
+	require.False(t, observations[0].ObservedAt.IsZero(),
+		"the wall's sighting instant is part of the evidence (#6776 1d)")
 
 	raw, err := json.Marshal(i.ToInstanceData().ForStorage())
 	require.NoError(t, err)
 	var stored InstanceData
 	require.NoError(t, json.Unmarshal(raw, &stored))
-	require.Equal(t, want, stored.AccountLimitObservations,
+	require.Equal(t, observations, stored.AccountLimitObservations,
 		"account limit evidence must survive the daemon restart boundary")
 }
 

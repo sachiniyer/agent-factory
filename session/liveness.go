@@ -686,19 +686,24 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	if agent == "" || account == "" {
 		return
 	}
+	sighted := instanceNow().UTC()
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		if observation.Agent == agent && observation.Account == account {
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
 			if !observation.ResetAt.Equal(retained) {
 				observation.ResetAt = retained
-				i.touchLocked()
 			}
+			// Re-sighting a wall is itself a fact: keep the last-seen instant
+			// so a retraction must postdate the freshest wall evidence, not
+			// merely the first (#6776 1d).
+			observation.ObservedAt = sighted
+			i.touchLocked()
 			return
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
-		Agent: agent, Account: account, ResetAt: resetAt,
+		Agent: agent, Account: account, ResetAt: resetAt, ObservedAt: sighted,
 	})
 	i.touchLocked()
 }

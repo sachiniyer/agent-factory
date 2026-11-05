@@ -108,6 +108,13 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 
 			manager.ResumeLimitedSessions()
 
+			// Fold the turn proofs this sweep's pane watches collected into
+			// durable retractions (#6776 1d): a session that demonstrably ran a
+			// turn under a named account is positive proof that account was
+			// serving, so wall evidence older than the proof may retire. Bounded
+			// to one durable scan per interval; a no-op when nothing proved.
+			manager.reconcileAccountLimitProofs()
+
 			// Report proposal docs that changed on disk to open Docs tabs. A stat
 			// of each watched doc; it commits nothing.
 			manager.ScanProposals()

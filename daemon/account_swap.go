@@ -68,7 +68,7 @@ func (s *autoAccountSwap) accountNamespace() string {
 	return s.agent
 }
 
-var loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+var loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
 	return loadAccountLimitEvidenceSnapshot(
 		loadPersistedAccountLimitObservations,
 		loadAccountLimitLedger,
@@ -119,17 +119,17 @@ func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetA
 // accountSwapOpportunityFromFacts again under the operation fence so a swap can
 // never commit from evidence that predates the destructive boundary.
 type accountLimitEvidencePass struct {
-	loaded       bool
-	observations []session.AccountLimitObservationData
-	err          error
+	loaded   bool
+	evidence accountLimitEvidence
+	err      error
 }
 
-func (p *accountLimitEvidencePass) load() ([]session.AccountLimitObservationData, error) {
+func (p *accountLimitEvidencePass) load() (accountLimitEvidence, error) {
 	if !p.loaded {
-		p.observations, p.err = loadAccountLimitEvidenceForSwap()
+		p.evidence, p.err = loadAccountLimitEvidenceForSwap()
 		p.loaded = true
 	}
-	return p.observations, p.err
+	return p.evidence, p.err
 }
 
 // committedAccountSwap recognizes a replacement whose identity checkpoint
@@ -866,18 +866,14 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 	m.mu.Unlock()
 	limitedSet := make(map[string]struct{})
 	now := nowFunc()
-	retained, err := loadEvidence()
+	evidence, err := loadEvidence()
 	if err != nil {
 		return nil, fmt.Errorf("load durable account-limit evidence: %w", err)
 	}
-	for _, observation := range retained {
-		if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
-			continue
+	for _, observation := range evidence.Observations {
+		if accountLimitObservationExcludes(observation, agent, evidence.Retractions, now) {
+			limitedSet[observation.Account] = struct{}{}
 		}
-		if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
-			continue
-		}
-		limitedSet[observation.Account] = struct{}{}
 	}
 	for _, other := range instances {
 		if other == nil {
@@ -904,13 +900,9 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 			}
 		}
 		for _, observation := range other.AccountLimitObservations() {
-			if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
-				continue
+			if accountLimitObservationExcludes(observation, agent, evidence.Retractions, now) {
+				limitedSet[observation.Account] = struct{}{}
 			}
-			if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
-				continue
-			}
-			limitedSet[observation.Account] = struct{}{}
 		}
 	}
 	limited := make([]string, 0, len(limitedSet))
@@ -918,4 +910,26 @@ func (m *Manager) limitedAccountsForSwap(agent string, loadEvidence accountLimit
 		limited = append(limited, account)
 	}
 	return limited, nil
+}
+
+// accountLimitObservationExcludes is the one rule every stored wall answers
+// to: it excludes account for agent when it carries a usable (non-expired)
+// wall that no retraction defeats. Retractions fold here — never into the
+// live-wall loop above, because a session parked at its wall IS current
+// evidence and a proof about another runtime cannot retire it; that session
+// keeps its own parked state while its stored observation is what a newer
+// proof may outdate (#6776 1d).
+func accountLimitObservationExcludes(observation session.AccountLimitObservationData, agent string, retractions []session.AccountLimitRetractionData, now time.Time) bool {
+	if observation.Agent != agent || strings.TrimSpace(observation.Account) == "" {
+		return false
+	}
+	if !observation.ResetAt.IsZero() && !now.Before(observation.ResetAt.Add(limitResumeGrace)) {
+		return false
+	}
+	for _, retraction := range retractions {
+		if session.AccountLimitObservationRetracted(observation, retraction) {
+			return false
+		}
+	}
+	return true
 }

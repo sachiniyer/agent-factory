@@ -79,4 +79,59 @@ type AccountLimitObservationData struct {
 	Agent   string    `json:"agent"`
 	Account string    `json:"account"`
 	ResetAt time.Time `json:"reset_at,omitempty"`
+	// ObservedAt is the last instant af SAW this wall — the fact's own event
+	// time, which is what a retraction is ordered against. ResetAt is the
+	// provider's claimed boundary and can be far from when the banner appeared
+	// (a lagging banner may claim a reset already past), so it cannot stand in
+	// for the sighting. Zero on rows written before the field existed; a
+	// time-claim-less observation orders against a retraction only through
+	// ResetAt — see AccountLimitObservationRetracted.
+	ObservedAt time.Time `json:"observed_at,omitempty"`
+}
+
+// AccountLimitRetractionData is durable positive proof that an account was
+// serving traffic at ProvenAt — a confirmed turn under it, or a reading
+// clearly below the wall after the claimed reset (#4404, epic #6776). It never
+// rewrites the observation: both facts are kept, and admission decides which
+// is newer by the time each happened. That ordering is what makes a retraction
+// safe against a fresh wall — the wall's own ObservedAt outranks an older
+// proof — and it is why a retraction is written only on positive proof, never
+// on absence of evidence, a timeout, or an unknown reading.
+type AccountLimitRetractionData struct {
+	Agent    string    `json:"agent"`
+	Account  string    `json:"account"`
+	ProvenAt time.Time `json:"proven_at"`
+}
+
+// AccountLimitObservationRetracted reports whether the retraction defeats the
+// observation: the newer fact wins by when it happened, never by write order.
+// The proof must postdate every time the observation claims:
+//   - ObservedAt — a wall sighted after the proof lands is the newer fact and
+//     survives;
+//   - ResetAt — a wall whose claimed reset is still in the future at proof
+//     time survives, because the proof did not happen "after the wall's
+//     reset" (#4404's condition); and a reset claimed in the past at sighting
+//     time is still ordered, since a wall observed after the proof may be
+//     reporting a window that lags.
+//
+// An observation missing one or both times has no ordering claim through the
+// missing field: a wall with no recorded sighting time is ordered only by its
+// claimed reset, and one with neither is ended by any positive proof — the
+// only exit the spec gives a no-reset observation, and safe because every
+// observation written by this binary carries both times. A zero ProvenAt
+// defeats nothing: a retraction with no event time orders against nothing.
+func AccountLimitObservationRetracted(observation AccountLimitObservationData, retraction AccountLimitRetractionData) bool {
+	if retraction.ProvenAt.IsZero() {
+		return false
+	}
+	if observation.Agent != retraction.Agent || observation.Account != retraction.Account {
+		return false
+	}
+	if !observation.ObservedAt.IsZero() && !retraction.ProvenAt.After(observation.ObservedAt) {
+		return false
+	}
+	if !observation.ResetAt.IsZero() && !retraction.ProvenAt.After(observation.ResetAt) {
+		return false
+	}
+	return true
 }
