@@ -104,6 +104,88 @@ func TestWorktreeHeadMatchesBranch(t *testing.T) {
 	require.Error(t, err, "a commit only the detached HEAD references is not on the kept branch")
 }
 
+// VerifyWorktreeHeadReflogReachableFromBranch closes the gap the
+// WorktreeHeadMatchesBranch guard cannot see: a commit made on a detached HEAD
+// and then abandoned by a checkout back to the branch tip passes the HEAD ==
+// branch-tip equality, but its only reachability root is the leaf's logs/HEAD
+// reflog, which prune deletes. The guard must refuse such rows, while passing
+// the common case (clean worktree) and not penalizing reset --hard (whose
+// dropped commit the branch reflog keeps).
+func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
+	t.Run("a clean worktree on the branch tip passes", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+	})
+
+	t.Run("a commit on the branch passes", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0o644))
+		gitIn(t, wt, "add", "c.txt")
+		gitIn(t, wt, "commit", "-qm", "on-branch work")
+		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+	})
+
+	t.Run("a detached-HEAD commit returned to the tip is refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		tip := gitIn(t, wt, "rev-parse", "HEAD")
+		gitIn(t, wt, "checkout", "--detach")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "d.txt"), []byte("d"), 0o644))
+		gitIn(t, wt, "add", "d.txt")
+		gitIn(t, wt, "commit", "-qm", "detached experiment")
+		detached := gitIn(t, wt, "rev-parse", "HEAD")
+		gitIn(t, wt, "checkout", "-q", tip)
+		// HEAD is back at the branch tip, so WorktreeHeadMatchesBranch passes…
+		head, err := WorktreeHeadMatchesBranch(wt, repo, "af/p")
+		require.NoError(t, err)
+		assert.Equal(t, tip, head)
+		// …but the reflog guard catches the abandoned detached commit.
+		err = VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), detached, "the refusal names the orphaned commit")
+		assert.Contains(t, err.Error(), "af/p")
+	})
+
+	t.Run("a currently-detached HEAD with an extra commit is refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		gitIn(t, wt, "checkout", "--detach")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "e.txt"), []byte("e"), 0o644))
+		gitIn(t, wt, "add", "e.txt")
+		gitIn(t, wt, "commit", "-qm", "still detached")
+		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+	})
+
+	t.Run("a reset --hard on the branch is not refused (the branch reflog keeps it)", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "r.txt"), []byte("r"), 0o644))
+		gitIn(t, wt, "add", "r.txt")
+		gitIn(t, wt, "commit", "-qm", "to be reset")
+		gitIn(t, wt, "reset", "--hard", "HEAD~1")
+		// HEAD == branch tip again, and the dropped commit is in the branch
+		// reflog, which prune never deletes.
+		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"),
+			"reset --hard is safe: the branch reflog keeps the commit")
+	})
+
+	t.Run("multiple detached commits all returned to the tip are caught", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		tip := gitIn(t, wt, "rev-parse", "HEAD")
+		gitIn(t, wt, "checkout", "--detach")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "m1.txt"), []byte("1"), 0o644))
+		gitIn(t, wt, "add", "m1.txt")
+		gitIn(t, wt, "commit", "-qm", "detached 1")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "m2.txt"), []byte("2"), 0o644))
+		gitIn(t, wt, "add", "m2.txt")
+		gitIn(t, wt, "commit", "-qm", "detached 2")
+		gitIn(t, wt, "checkout", "-q", tip)
+		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+	})
+
+	t.Run("a missing branch fails closed", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "no-such-branch"))
+	})
+}
+
 // Only the recorded leaf is removed, and only while it still carries the recorded
 // nonce: another session's stale registration (which `git worktree prune` would
 // drop) stays, and a replacement that now occupies the same path is left alone.
