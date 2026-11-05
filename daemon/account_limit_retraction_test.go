@@ -44,6 +44,20 @@ func stubAccountLimitEvidence(t *testing.T, evidence accountLimitEvidence, err e
 	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
 }
 
+// requireAccountLimitRetraction asserts a retraction exists for the identity
+// at the expected INSTANT. The ledger round-trips through JSON, which strips
+// monotonic clock and zone — only instant equality is meaningful, so compare
+// with Time.Equal, never require.Equal on the struct.
+func requireAccountLimitRetraction(t *testing.T, retractions []session.AccountLimitRetractionData, agent, account string, provenAt time.Time) {
+	t.Helper()
+	for _, retraction := range retractions {
+		if retraction.Agent == agent && retraction.Account == account && retraction.ProvenAt.Equal(provenAt) {
+			return
+		}
+	}
+	t.Fatalf("no %s/%s retraction proven at %v in %+v", agent, account, provenAt, retractions)
+}
+
 func ledgerBackedEvidence(observations ...session.AccountLimitObservationData) accountLimitEvidenceLoader {
 	return func() (accountLimitEvidence, error) {
 		evidence, err := loadAccountLimitLedger()
@@ -656,11 +670,10 @@ func TestReconcileAccountLimitProofsRetractsOnlyExcludedEvidence(t *testing.T) {
 
 	evidence, err := loadAccountLimitLedger()
 	require.NoError(t, err)
-	require.Equal(t, []session.AccountLimitRetractionData{{
-		Agent: tmux.ProgramCodex, Account: "work", ProvenAt: base.Add(-time.Minute),
-	}}, evidence.Retractions,
+	require.Len(t, evidence.Retractions, 1,
 		"only the account the stored record still excluded earns a tombstone: "+
 			"a fresh wall outranks the older proof, and a proof with no wall writes nothing")
+	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", base.Add(-time.Minute))
 	require.Empty(t, manager.pendingAccountLimitProofs(), "consumed proofs do not linger")
 
 	// The bounded cadence: a second pass inside the interval does not rescan.
@@ -757,9 +770,9 @@ func TestAccountTurnProofEndToEndRestoresTheAccount(t *testing.T) {
 
 	evidence, err := loadAccountLimitLedger()
 	require.NoError(t, err)
-	require.Equal(t, []session.AccountLimitRetractionData{{
-		Agent: tmux.ProgramCodex, Account: "work", ProvenAt: base,
-	}}, evidence.Retractions, "the turn's capture instant is the durable proof")
+	require.Len(t, evidence.Retractions, 1)
+	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", base)
+	// The tombstone carries the turn's capture instant as the durable proof.
 
 	// The loader used by admission sees the ledger's retraction fold the wall.
 	limited, err = manager.limitedAccountsForSwap(tmux.ProgramCodex, ledgerBackedEvidence(storedWall))
