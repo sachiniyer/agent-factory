@@ -185,8 +185,9 @@ func (i *Instance) RecordPendingManualAccountSwapMissionDelivery(from, to string
 	if !status.Valid() {
 		status = PromptCouldNotConfirm
 	}
-	if pending.MissionDeliveryStatus != status {
+	if pending.MissionDeliveryStatus != status || !pending.MissionDeliveryAttemptAt.Equal(i.lastPromptAttemptAt) {
 		pending.MissionDeliveryStatus = status
+		pending.MissionDeliveryAttemptAt = i.lastPromptAttemptAt
 		i.touchLocked()
 	}
 	return nil
@@ -245,11 +246,177 @@ func (i *Instance) PendingManualAccountSwapDeliveryUnconfirmed() bool {
 }
 
 func (i *Instance) pendingManualAccountSwapDeliveryUnconfirmedLocked() bool {
-	if i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual ||
-		!i.pendingAccountSwap.ReplacementPanesStarted || i.pendingAccountSwap.MissionDeliveryStatus == "" {
+	return i.pendingAccountSwap != nil && i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwapDeliveryUnconfirmedLocked()
+}
+
+// pendingAccountSwapDeliveryUnconfirmedLocked is the same verdict read for a
+// pending swap of either kind. An automatic swap's durable verdict gates its
+// scheduled retry the same way a manual swap's does (#6767): only positive
+// non-delivery — or a never-attempted send, the empty verdict — may authorize
+// the scheduler's resend; every other outcome may already have submitted and
+// belongs to evidence or the operator. Caller holds i.mu.
+func (i *Instance) pendingAccountSwapDeliveryUnconfirmedLocked() bool {
+	pending := i.pendingAccountSwap
+	if pending == nil || !pending.ReplacementPanesStarted || pending.MissionDeliveryStatus == "" {
 		return false
 	}
-	return i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered
+	return pending.MissionDeliveryStatus != PromptNotDelivered
+}
+
+// PendingAccountSwapDeliveryUnconfirmed reports whether a committed account
+// swap of either kind may already have delivered its replacement notice (#6767).
+func (i *Instance) PendingAccountSwapDeliveryUnconfirmed() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingAccountSwapDeliveryUnconfirmedLocked()
+}
+
+// PendingAccountSwapNoticeDelivery reports the committed swap's durable
+// notice-delivery verdict and the send-attempt instant that produced it — the
+// pair the daemon's re-verification watch re-reads before retiring the
+// obligation on pane evidence. ok is false when no verdict has been recorded.
+func (i *Instance) PendingAccountSwapNoticeDelivery() (from, to string, status PromptDeliveryStatus, attemptedAt time.Time, ok bool) {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.MissionDeliveryStatus == "" {
+		return "", "", "", time.Time{}, false
+	}
+	return pending.From, pending.To, pending.MissionDeliveryStatus, pending.MissionDeliveryAttemptAt, true
+}
+
+// BeginPendingAccountSwapNoticeDelivery is the automatic swap's half of
+// BeginPendingManualAccountSwapMissionDelivery (#6767): the same durable
+// replay gate — an ambiguous verdict replacing whatever admitted this
+// attempt — written before the composer is touched, so a crash reloads
+// could-not-confirm rather than permission to send the notice a second time.
+// It returns the displaced verdict AND its attempt instant so a failed
+// persistence can restore the pair atomically.
+func (i *Instance) BeginPendingAccountSwapNoticeDelivery(from, to string) (PromptDeliveryStatus, time.Time, error) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.From != from || pending.To != to {
+		return "", time.Time{}, fmt.Errorf("account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return "", time.Time{}, fmt.Errorf("account swap from %q to %q has no replacement panes", from, to)
+	}
+	previous := pending.MissionDeliveryStatus
+	previousAttempt := pending.MissionDeliveryAttemptAt
+	if previous != PromptCouldNotConfirm || !previousAttempt.IsZero() {
+		pending.MissionDeliveryStatus = PromptCouldNotConfirm
+		pending.MissionDeliveryAttemptAt = time.Time{}
+		i.touchLocked()
+	}
+	return previous, previousAttempt, nil
+}
+
+// RestorePendingAccountSwapNoticeDelivery rolls a begin boundary back to the
+// exact verdict/attempt pair it displaced when persistence failed before
+// submission began. Empty status is allowed for an initial attempt.
+func (i *Instance) RestorePendingAccountSwapNoticeDelivery(from, to string, status PromptDeliveryStatus, attemptedAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.From != from || pending.To != to {
+		return fmt.Errorf("account swap from %q to %q is no longer pending", from, to)
+	}
+	if status != "" && !status.Valid() {
+		return fmt.Errorf("invalid account swap notice delivery status %q", status)
+	}
+	if pending.MissionDeliveryStatus != status || !pending.MissionDeliveryAttemptAt.Equal(attemptedAt) {
+		pending.MissionDeliveryStatus = status
+		pending.MissionDeliveryAttemptAt = attemptedAt
+		i.touchLocked()
+	}
+	return nil
+}
+
+// RecordPendingAccountSwapNoticeDelivery binds the send's exact verdict to the
+// committed transaction, stamping the attempt instant the session's prompt
+// evidence already recorded — the boundary the re-verification watch binds
+// turn evidence to (#6767).
+func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, status PromptDeliveryStatus) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.From != from || pending.To != to {
+		return fmt.Errorf("account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("account swap from %q to %q has no replacement panes", from, to)
+	}
+	if !status.Valid() {
+		status = PromptCouldNotConfirm
+	}
+	if pending.MissionDeliveryStatus != status || !pending.MissionDeliveryAttemptAt.Equal(i.lastPromptAttemptAt) {
+		pending.MissionDeliveryStatus = status
+		pending.MissionDeliveryAttemptAt = i.lastPromptAttemptAt
+		i.touchLocked()
+	}
+	return nil
+}
+
+// SettlePendingAccountSwapNoticeDelivery retires the committed swap's notice
+// obligation on POSITIVE pane evidence — a turn the replacement agent provably
+// began after this notice's send attempt (#6767) — rather than on an
+// operator's attestation the way ConfirmPendingManualAccountSwapDelivery does.
+// attemptedAt is the compare-and-set: the evidence is bound to exactly the
+// send that produced the recorded verdict, so a newer attempt (its own verdict
+// already written or in flight) refuses the stale evidence rather than being
+// settled by it. The caller feeds the daemon's re-verification watch, which
+// never arms startup-unknown rows, so unlike the operator confirm this needs
+// no pane-probe bookkeeping — the evidence IS the runtime proof.
+func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attemptedAt time.Time) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.From != from || pending.To != to {
+		return fmt.Errorf("account swap from %q to %q is no longer pending", from, to)
+	}
+	if !pending.ReplacementPanesStarted {
+		return fmt.Errorf("account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
+	}
+	if !ambiguousHandoffDelivery(pending.MissionDeliveryStatus) {
+		return fmt.Errorf("account swap from %q to %q has no ambiguous notice delivery to settle on evidence (status %q)", from, to, pending.MissionDeliveryStatus)
+	}
+	if !pending.MissionDeliveryAttemptAt.Equal(attemptedAt) {
+		return fmt.Errorf("account swap from %q to %q has moved past the notice attempt this evidence belongs to", from, to)
+	}
+	if i.userKilled {
+		return fmt.Errorf("session %q has a pending kill", i.Title)
+	}
+	if i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived {
+		return fmt.Errorf("session %q has no live runtime to settle against (liveness %v); restore owns this row", i.Title, i.liveness)
+	}
+	if i.inFlightOp != OpNone {
+		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
+	}
+	lv, op, resetAt := i.lifecycleStateLocked()
+	i.pendingAccountSwap = nil
+	i.accountSwapLaunch = nil
+	i.taskRunIdleEdgeHeld = false
+	i.taskRunTurnGateHeld = false
+	if i.liveness == LiveLimitReached {
+		// An automatic swap's row is parked at the OUTGOING identity's wall —
+		// evidence that the incoming agent took its notice is also evidence
+		// the parked disposition is stale. Settle it the way the delivered
+		// send's own success path does.
+		i.assignLivenessLocked(LiveRunning)
+		i.limitResetAt = time.Time{}
+		i.limitAgent = ""
+		i.limitAccount = ""
+	} else {
+		// A confirmed notice is work the agent already has (#5023): publish
+		// working and leave the settle back to Ready to the monitor's own
+		// pane evidence.
+		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
+	}
+	i.touchLocked()
+	i.noteStateChangeLocked(lv, op, resetAt)
+	return nil
 }
 
 // CanRetryPendingManualAccountSwapDelivery reports whether an operator can

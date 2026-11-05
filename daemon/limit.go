@@ -808,6 +808,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	readinessSettled := false
 	if manual {
 		readinessSettlementAttempted, readinessSettled, serr = m.deliverManualAccountMission(repoID, key, instance, accountSwap, prompt)
+	} else if accountSwap != nil {
+		// The swap's notice carries the same durable obligation the manual
+		// mission does (#6767): the send's verdict — not merely its error —
+		// decides whether the pending swap and limit retire below.
+		serr = m.deliverAutomaticAccountNotice(repoID, key, instance, accountSwap, prompt)
 	} else {
 		_, serr = instance.SendPromptWithEvidence(prompt, nowFunc)
 	}

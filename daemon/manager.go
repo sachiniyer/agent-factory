@@ -606,6 +606,10 @@ type Manager struct {
 	// after the send promotes the recorded verdict to sent. Keyed by
 	// stableSessionKey then task ID. Guarded by pausedMu.
 	unverifiedSendWatches map[string]map[string]*unverifiedSendWatch
+	// pendingSwapNoticeWatches holds the poll-fed chrome watchers
+	// re-verifying ambiguous account-swap notice verdicts — one per committed
+	// swap, keyed by stableSessionKey like unverifiedSendWatches (#6767).
+	pendingSwapNoticeWatches map[string]*pendingSwapNoticeWatch
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
@@ -671,58 +675,6 @@ type Manager struct {
 	// lock-free.
 	infoLog  *stdlog.Logger
 	errorLog *stdlog.Logger
-}
-
-// warn returns the logger this Manager's warnings go to. Nil-safe on both the
-// receiver and the field, so a Manager built by any path — including the shells
-// that predate managerOptions — logs to the process-global sink exactly as
-// before.
-func (m *Manager) warn() *stdlog.Logger {
-	if m == nil {
-		return log.WarningLog
-	}
-	return warnLoggerOr(m.warnLog)
-}
-
-// info returns the logger this Manager's INFO lines go to (#3797), nil-safe on
-// both the receiver and the field.
-func (m *Manager) info() *stdlog.Logger {
-	if m == nil {
-		return log.InfoLog
-	}
-	return infoLoggerOr(m.infoLog)
-}
-
-// err returns the logger this Manager's ERROR lines go to (#3797), nil-safe on
-// both the receiver and the field.
-func (m *Manager) err() *stdlog.Logger {
-	if m == nil {
-		return log.ErrorLog
-	}
-	return errorLoggerOr(m.errorLog)
-}
-
-// The three resolvers below exist separately from the accessors for the callers
-// that need them before a Manager exists: the root-agent snapshot is built
-// inside the constructor, and its diagnostics are the ones #3787's race report
-// actually names. loggerOr carries the nil rule once so the three cannot drift.
-func loggerOr(logger, fallback *stdlog.Logger) *stdlog.Logger {
-	if logger == nil {
-		return fallback
-	}
-	return logger
-}
-
-func warnLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.WarningLog)
-}
-
-func infoLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.InfoLog)
-}
-
-func errorLoggerOr(logger *stdlog.Logger) *stdlog.Logger {
-	return loggerOr(logger, log.ErrorLog)
 }
 
 // managerOptions carries construction-time seams. Everything here has a
@@ -867,6 +819,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		remoteLossStates:          make(map[string]*remoteLossState),
 		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
 		unverifiedSendWatches:     make(map[string]map[string]*unverifiedSendWatch),
+		pendingSwapNoticeWatches:  make(map[string]*pendingSwapNoticeWatch),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),
