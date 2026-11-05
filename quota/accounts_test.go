@@ -45,6 +45,13 @@ func TestMoverStatus_String(t *testing.T) {
 		{"halted without reason", MoverStatus{
 			Halted: true, HaltAt: haltAt,
 		}, "halted since 2026-10-31T05:00:00Z"},
+		// An unreadable config must never render as "off" — af never saw the
+		// configured mode, so the line says so. A recorded halt still wins:
+		// the halt is a fact on disk, not a config claim.
+		{"unknown mode", MoverStatus{ModeUnknown: true}, "configured mode unknown"},
+		{"halted beats unknown mode", MoverStatus{
+			ModeUnknown: true, Halted: true, HaltReason: "x", HaltAt: haltAt,
+		}, "halted: x since 2026-10-31T05:00:00Z"},
 		// A state file that will not decode must beat every other rendering:
 		// reporting an unknowable mover as "off" would be the fabrication the
 		// mover line exists to prevent.

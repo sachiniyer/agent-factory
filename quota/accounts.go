@@ -74,6 +74,10 @@ type MoverStatus struct {
 	// HaltReason and HaltAt are the recorded halt's fields.
 	HaltReason string
 	HaltAt     time.Time
+	// ModeUnknown means the config could not be read, so the configured mode
+	// is unknowable — reporting "off" would be a guess. A recorded halt still
+	// wins: the halt is a fact on disk, not a config claim.
+	ModeUnknown bool
 	// StateUnreadable means the durable state file exists but would not
 	// decode — watermarks and the halt record are then unknowable, so this
 	// beats every other rendering: af must not report an unknowable mover
@@ -91,6 +95,8 @@ func (m MoverStatus) String() string {
 			return fmt.Sprintf("halted since %s", m.HaltAt.UTC().Format(time.RFC3339))
 		}
 		return fmt.Sprintf("halted: %s since %s", m.HaltReason, m.HaltAt.UTC().Format(time.RFC3339))
+	case m.ModeUnknown:
+		return "configured mode unknown"
 	case m.Mode == "":
 		return "off"
 	default:
