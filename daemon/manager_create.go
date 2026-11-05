@@ -473,6 +473,14 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// same pending row above and therefore must settle it on the same events plane.
 	m.publishEvent(agentproto.EventSessionCreated, data)
 
+	// A session created inside an already-shadow project must engage the
+	// account-handoff engine without waiting for an unrelated config write
+	// (#6817 review): while discovery is inactive, recompute it — a live
+	// instance list just changed under it.
+	if !m.handoffActive.Load() {
+		m.accountHandoffDiscover()
+	}
+
 	return data, nil
 }
 
@@ -946,12 +954,19 @@ func (m *Manager) keepUncertainCreate(repoID, title string, instance *session.In
 func (m *Manager) persistFailedCreate(repoID, title string, instance *session.Instance) error {
 	key := daemonInstanceKey(repoID, title)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.instances[key] = instance
-	if err := appendInstanceData(repoID, instance.ToInstanceData()); err != nil {
+	err := appendInstanceData(repoID, instance.ToInstanceData())
+	if err != nil {
 		delete(m.instances, key)
+		m.mu.Unlock()
 		return err
 	}
 	instance.PinStorageRepoID(repoID)
+	m.mu.Unlock()
+	// A session materializing into an already-shadow project must engage
+	// the engine without waiting for a config write (#6817 review).
+	if !m.handoffActive.Load() {
+		m.accountHandoffDiscover()
+	}
 	return nil
 }

@@ -94,6 +94,14 @@ func TestComposerDraftPresent(t *testing.T) {
 			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
 		}
 	})
+	// Codex #6817: a wrapped draft whose last line is a bare `>` must not
+	// certify empty — the glyph row above carries real draft text.
+	t.Run("draft ending in bare glyph is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("❯ explain this\n>\n──────────\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
 	t.Run("bare unrecognized glyph is unprovable", func(t *testing.T) {
 		present, provable := ComposerDraftPresent("»\n")
 		if present || provable {
