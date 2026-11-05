@@ -161,7 +161,7 @@ func FormatValue(v any) string {
 // allowed_hosts, limit_account_candidates, account_handoff.exclude_sessions).
 func FormatValueForKey(key string, v any) string {
 	if isCommaListKey(key) {
-		if joined, ok := commaJoinStringList(v); ok {
+		if joined, ok := commaJoinStringList(key, v); ok {
 			return joined
 		}
 	}
@@ -185,7 +185,7 @@ func FormatExplainValue(value any) string {
 // key it is identical to FormatExplainValue.
 func FormatExplainValueForKey(key string, value any) string {
 	if isCommaListKey(key) {
-		if joined, ok := commaJoinStringList(value); ok {
+		if joined, ok := commaJoinStringList(key, value); ok {
 			if joined == "" {
 				return `""`
 			}
@@ -200,37 +200,55 @@ func FormatExplainValueForKey(key string, value any) string {
 // decode) which produces []any rather than []string, so both spellings are
 // accepted. ok is false for any other type, leaving the caller to its fallback.
 //
-// ok is also false when any element itself contains a comma: the leaf setter
-// splits the input on commas, so joining such a value would print something the
-// setter parses back into a different list (silent corruption). A comma-bearing
-// title is only storable via the whole-table JSON escape hatch, so the get path
-// falls back to JSON for it — the unambiguous form that signals "use the
-// whole-table form to set this back" rather than a comma-joined string that
-// looks round-trippable but is not.
-func commaJoinStringList(v any) (string, bool) {
-	switch list := v.(type) {
+// ok is also false when the joined form would not round-trip back through the
+// leaf setter exactly: an element containing a comma (the setter splits on
+// commas), an element that splitListValue would alter (it trims surrounding
+// whitespace and drops empty elements, so " work " or "" would silently change
+// the list on the way back), or an element the per-key leaf validator rejects
+// (e.g. exclude_sessions titles containing brackets or quotes). The comma form
+// is returned only when re-splitting and re-validating the joined string
+// reproduces every original element; otherwise the caller falls back to JSON —
+// the unambiguous form that signals "use the whole-table form to set this back"
+// rather than a value that looks round-trippable but is not.
+func commaJoinStringList(key string, v any) (string, bool) {
+	var list []string
+	switch l := v.(type) {
 	case []string:
-		for _, s := range list {
-			if strings.ContainsRune(s, ',') {
-				return "", false
-			}
-		}
-		return strings.Join(list, ","), true
+		list = l
 	case []any:
-		parts := make([]string, len(list))
-		for i, elem := range list {
+		parts := make([]string, len(l))
+		for i, elem := range l {
 			s, ok := elem.(string)
 			if !ok {
 				return "", false
 			}
-			if strings.ContainsRune(s, ',') {
-				return "", false
-			}
 			parts[i] = s
 		}
-		return strings.Join(parts, ","), true
+		list = parts
+	default:
+		return "", false
 	}
-	return "", false
+	for _, s := range list {
+		if strings.ContainsRune(s, ',') {
+			return "", false
+		}
+	}
+	joined := strings.Join(list, ",")
+	roundTripped := splitListValue(joined)
+	if len(roundTripped) != len(list) {
+		return "", false
+	}
+	for i := range list {
+		if roundTripped[i] != list[i] {
+			return "", false
+		}
+	}
+	if _, leaf, spec, ok := resolveSettable(key); ok && spec.validate != nil {
+		if err := spec.validate(leaf, joined); err != nil {
+			return "", false
+		}
+	}
+	return joined, true
 }
 
 // UnknownConfigKeyError reports a key no manifest entry or root_agent leaf can

@@ -202,3 +202,37 @@ func TestCommaListFallsBackToJSONForCommaBearingElement(t *testing.T) {
 		t.Fatalf("comma-free list must still render comma-joined, got %q", got)
 	}
 }
+
+// TestCommaListFallsBackToJSONForNonRoundTrippableElement pins the second
+// silent-corruption guard from the round-trip review: the comma form is only
+// safe when re-splitting and re-validating the joined string reproduces every
+// original element. An element with surrounding whitespace would be trimmed by
+// splitListValue (" work " -> "work"), an empty element would be dropped, and a
+// bracket/quote-bearing exclude_sessions title would be rejected by the leaf
+// validator — each would otherwise print a value the leaf setter parses into a
+// different list (or refuses). Fall back to JSON in all of these cases.
+func TestCommaListFallsBackToJSONForNonRoundTrippableElement(t *testing.T) {
+	cases := []struct {
+		name string
+		list []string
+		want string
+	}{
+		{"whitespace-only trim-sensitive", []string{" work "}, `[" work "]`},
+		{"empty element", []string{""}, `[""]`},
+		{"bracket-bearing title", []string{"[work]"}, `["[work]"]`},
+		{"quote-bearing title", []string{`"work"`}, `["\"work\""]`},
+	}
+	for _, c := range cases {
+		if got := FormatValueForKey("account_handoff.exclude_sessions", c.list); got != c.want {
+			t.Fatalf("%s: get path must fall back to JSON, got %q want %q", c.name, got, c.want)
+		}
+		if got := FormatExplainValueForKey("account_handoff.exclude_sessions", c.list); got != c.want {
+			t.Fatalf("%s: explain path must fall back to JSON, got %q want %q", c.name, got, c.want)
+		}
+	}
+	// A clean list with no whitespace, commas, or special characters still
+	// renders comma-joined (the round-trip path).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("clean list must still render comma-joined, got %q", got)
+	}
+}

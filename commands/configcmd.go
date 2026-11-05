@@ -282,8 +282,10 @@ var configGetCmd = &cobra.Command{
 auto_update, update_channel). By default the current repository's legacy,
 checked-in, and personal layers participate; outside git, the command falls back
 to global defaults. Run "af config list" to see every key. Scalar values print
-bare; composite values (program_overrides, root_agents, limit_patterns, keys)
-print as JSON.
+bare; comma-list leaves (network.cors_allowed_origins, network.allowed_hosts,
+limit_account_candidates, account_handoff.exclude_sessions) print comma-joined
+in the form "af config set" accepts back; other composite values
+(program_overrides, root_agents, limit_patterns, keys) print as JSON.
 
 Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
