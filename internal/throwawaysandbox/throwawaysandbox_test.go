@@ -184,3 +184,88 @@ func TestRegistrySkipsMalformed(t *testing.T) {
 		t.Fatalf("malformed=%d, want 2", malformed)
 	}
 }
+
+// TestRegistryRefusesUntrusted pins LOW 2 of the independent review: the
+// sweep may only act on a registry the sandbox owner provably controls —
+// owned by this uid, owner-only mode, and never through a symlink. An
+// attacker-injected entry is how a reaper gets aimed at a real home.
+func TestRegistryRefusesUntrusted(t *testing.T) {
+	base := t.TempDir()
+	real := filepath.Join(base, "real")
+	if err := os.MkdirAll(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := WriteRegistryEntry(real, "/tmp/attacker-home"); err != nil {
+		t.Fatal(err)
+	}
+	t.Run("loose directory mode", func(t *testing.T) {
+		loose := filepath.Join(base, "loose")
+		if err := os.MkdirAll(loose, 0o777); err != nil {
+			t.Fatal(err)
+		}
+		if _, _, err := ReadRegistryHomes(loose); err == nil {
+			t.Fatal("a world-writable registry dir was trusted")
+		}
+	})
+	t.Run("directory is a symlink", func(t *testing.T) {
+		link := filepath.Join(base, "link")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skip("cannot create symlink fixture")
+		}
+		if _, _, err := ReadRegistryHomes(link); err == nil {
+			t.Fatal("a symlinked registry dir was trusted")
+		}
+	})
+	t.Run("write into symlinked dir refuses", func(t *testing.T) {
+		link := filepath.Join(base, "wlink")
+		if err := os.Symlink(real, link); err != nil {
+			t.Skip("cannot create symlink fixture")
+		}
+		if err := WriteRegistryEntry(link, "/tmp/victim-home"); err == nil {
+			t.Fatal("write through a symlinked registry dir was allowed")
+		}
+	})
+	t.Run("symlinked entry is skipped", func(t *testing.T) {
+		dir := filepath.Join(base, "entsym")
+		if err := os.MkdirAll(dir, 0o700); err != nil {
+			t.Fatal(err)
+		}
+		if err := WriteRegistryEntry(dir, "/tmp/ok-home"); err != nil {
+			t.Fatal(err)
+		}
+		forged := filepath.Join(base, "forged.json")
+		if err := os.WriteFile(forged, []byte(`{"version":1,"home":"/tmp/victim"}`+"\n"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if err := os.Symlink(forged, RegistryEntryPath(dir, "/tmp/victim")); err != nil {
+			t.Skip("cannot create symlink fixture")
+		}
+		homes, malformed, err := ReadRegistryHomes(dir)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if len(homes) != 1 || homes[0] != "/tmp/ok-home" {
+			t.Fatalf("homes=%v — a symlinked entry was read", homes)
+		}
+		if malformed != 1 {
+			t.Fatalf("malformed=%d, want 1 for the symlinked entry", malformed)
+		}
+	})
+}
+
+// TestLoadMarkerRefusesSymlink pins the same trust rule on the trust anchor
+// itself: a marker reachable only through a symlink is not a marker this
+// user wrote.
+func TestLoadMarkerRefusesSymlink(t *testing.T) {
+	home := t.TempDir()
+	real := filepath.Join(t.TempDir(), "m.json")
+	if err := os.WriteFile(real, []byte(`{"version":1,"created_unix":1,"max_lifetime_seconds":60}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, MarkerPath(home)); err != nil {
+		t.Skip("cannot create symlink fixture")
+	}
+	if m, err := LoadMarker(home); err == nil || m != nil {
+		t.Fatalf("a symlinked marker loaded: %+v", m)
+	}
+}

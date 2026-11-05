@@ -23,6 +23,7 @@ import (
 	"os"
 	"path/filepath"
 	"strconv"
+	"syscall"
 	"time"
 )
 
@@ -109,12 +110,62 @@ func (m *Marker) Deadline() time.Time {
 // Expired reports whether the sandbox is past its deadline at now.
 func (m *Marker) Expired(now time.Time) bool { return !now.Before(m.Deadline()) }
 
+// trustedFileOwner reports whether fi names a regular file owned by this
+// uid and reachable without crossing a symlink. A marker or registry entry
+// reachable only through a symlink — or owned by someone else — is not
+// evidence this user planted: it is refused, never parsed.
+func trustedFileOwner(fi os.FileInfo) error {
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return errors.New("path is a symlink")
+	}
+	if !fi.Mode().IsRegular() {
+		return errors.New("path is not a regular file")
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("path is owned by uid %d", st.Uid)
+	}
+	return nil
+}
+
+// trustedRegistryDir proves the registry directory itself is the one this
+// user created: a real directory (never a symlink), owned by this uid, and
+// owner-only. Anything looser is refused — an attacker who can write the
+// registry can aim a sweep at any home it names.
+func trustedRegistryDir(dir string) error {
+	fi, err := os.Lstat(dir)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("registry dir %s is a symlink", dir)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("registry path %s is not a directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("registry dir %s is owned by uid %d", dir, st.Uid)
+	}
+	if fi.Mode().Perm()&0o077 != 0 {
+		return fmt.Errorf("registry dir %s is not owner-only (mode %#o)", dir, fi.Mode().Perm())
+	}
+	return nil
+}
+
 // LoadMarker reads and validates home's marker. The error is os.ErrNotExist
 // when the home carries no marker; any parse or validation failure is also
 // returned as an error so callers can fail closed — an unreadable marker
-// never authorizes anything.
+// never authorizes anything. A marker reachable only through a symlink, or
+// owned by a different uid, is refused the same way: the marker is the trust
+// anchor, so it must be a file this user actually wrote.
 func LoadMarker(home string) (*Marker, error) {
 	path := MarkerPath(home)
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := trustedFileOwner(fi); err != nil {
+		return nil, fmt.Errorf("untrusted marker %s: %w", path, err)
+	}
 	data, err := os.ReadFile(path)
 	if err != nil {
 		return nil, err
@@ -175,9 +226,14 @@ func RegistryEntryPath(dir, home string) string {
 
 // WriteRegistryEntry records canonicalHome in the registry dir, creating the
 // directory private (0700) on first use. Writes are atomic so a sweep never
-// reads a half-written entry.
+// reads a half-written entry. A pre-existing dir that fails the trust check
+// — symlink, wrong owner, or group/world access — is refused: writing into
+// it would let whoever controls it redirect the next sweep.
 func WriteRegistryEntry(dir, canonicalHome string) error {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
+		return err
+	}
+	if err := trustedRegistryDir(dir); err != nil {
 		return err
 	}
 	data, err := json.Marshal(registryEntry{Version: markerVersion, Home: canonicalHome})
@@ -205,20 +261,31 @@ func WriteRegistryEntry(dir, canonicalHome string) error {
 	return os.Rename(tmpName, RegistryEntryPath(dir, canonicalHome))
 }
 
-// ReadRegistryHomes lists the homes named by readable registry entries.
-// Malformed files are counted and skipped, not fatal: one corrupt entry must
-// not hide the rest of the registry. A missing directory is not an error —
-// it simply means nothing has registered.
+// ReadRegistryHomes lists the homes named by trusted registry entries.
+// The directory must pass trustedRegistryDir — a registry anyone else could
+// have planted is not read at all. Within it, each entry must be a regular
+// file owned by this uid and not a symlink; untrusted or malformed entries
+// are counted and skipped, not fatal: one bad entry must not hide the rest
+// of the registry. A missing directory is not an error — it simply means
+// nothing has registered.
 func ReadRegistryHomes(dir string) (homes []string, malformed int, err error) {
-	entries, err := os.ReadDir(dir)
-	if err != nil {
+	if err := trustedRegistryDir(dir); err != nil {
 		if errors.Is(err, os.ErrNotExist) {
 			return nil, 0, nil
 		}
 		return nil, 0, err
 	}
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		return nil, 0, err
+	}
 	for _, entry := range entries {
 		if entry.IsDir() || filepath.Ext(entry.Name()) != ".json" {
+			continue
+		}
+		fi, err := entry.Info()
+		if err != nil || trustedFileOwner(fi) != nil {
+			malformed++
 			continue
 		}
 		data, err := os.ReadFile(filepath.Join(dir, entry.Name()))

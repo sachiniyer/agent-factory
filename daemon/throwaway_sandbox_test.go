@@ -348,45 +348,213 @@ func TestProcessBoundResolvesInTargetFrame(t *testing.T) {
 	}
 }
 
-func TestThrowawayBoundProcessesSelectsTrees(t *testing.T) {
+// TestProcessBoundRefusesProcfsFrames pins LOW 1 of the independent review:
+// an env path that only resolves inside the REAPER's procfs frame —
+// /proc/self, /proc/<pid> magic links, or a symlink that reaches one — is
+// not evidence of membership. The sigterm_fallback.go guards are reused,
+// not re-implemented.
+func TestProcessBoundRefusesProcfsFrames(t *testing.T) {
 	home := t.TempDir()
+	// /proc/self/cwd resolves in the REAPER's frame: with the test chdir'd
+	// into the home, the unguarded code would bind "self cwd" to it — the
+	// false-positive this test exists to refuse.
+	t.Chdir(home)
 	canonHome, err := canonicalDir(home)
 	if err != nil {
 		t.Fatal(err)
 	}
-	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: ""}
-	// Snapshot: bound driver (10) with children 11,12; unbound other (20)
-	// with child 21; self pid must be excluded even if bound.
+	selfUID := os.Getuid()
+	link := filepath.Join(t.TempDir(), "p")
+	if err := os.Symlink("/proc/self", link); err != nil {
+		t.Skip("cannot create symlink fixture")
+	}
+	for _, tc := range []struct {
+		name string
+		env  map[string]string
+	}{
+		{"self cwd spelling", map[string]string{"AGENT_FACTORY_HOME": "/proc/self/cwd"}},
+		{"numeric magic link", map[string]string{"AGENT_FACTORY_HOME": "/proc/1/cwd/state"}},
+		{"thread-self spelling", map[string]string{"AF_HOME": "/proc/thread-self/cwd"}},
+		{"dev-fd spelling", map[string]string{"AF_HOME": "/dev/fd/../cwd"}},
+		{"symlink into procfs", map[string]string{"AGENT_FACTORY_HOME": filepath.Join(link, "cwd")}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			oldUID, oldEnv := throwawayUIDFn, throwawayLookupEnvFn
+			throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+			throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+				v, ok := tc.env[key]
+				if !ok {
+					return "", proctree.EnvAbsent
+				}
+				return v, proctree.EnvFound
+			}
+			defer func() { throwawayUIDFn, throwawayLookupEnvFn = oldUID, oldEnv }()
+			if bound, _ := processBoundToThrowawayHome(1234, canonHome, ""); bound {
+				t.Fatalf("%s: procfs-relative env bound a process to the home", tc.name)
+			}
+		})
+	}
+	// A process under a different root/mount namespace cannot have its paths
+	// resolved in this frame at all — it is unproven, never bound.
+	t.Run("different process root is unproven", func(t *testing.T) {
+		old := throwawaySeams()
+		defer throwawayRestoreSeams(old)
+		throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+		throwawaySameRootFn = func(int) bool { return false }
+		throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+			if key == "AGENT_FACTORY_HOME" {
+				return home, proctree.EnvFound
+			}
+			return "", proctree.EnvAbsent
+		}
+		if bound, proven := processMemberOfSandbox(1234, proctree.Process{PID: 1234, StartedAt: time.Now()}, canonHome, "", time.Now().Unix()); bound || proven {
+			t.Fatal("a process in another root/mount namespace was evaluated as provable")
+		}
+	})
+}
+
+// TestThrowawayBoundProcessesSelectsMembers pins the independent-review
+// property: only a process whose OWN evidence places it inside this sandbox
+// instance is killed. Descent from a bound parent, a start before the marker
+// was written, or identity that moved on are each independently refused —
+// and a shared server the sandbox environment happened to spawn is never a
+// member.
+func TestThrowawayBoundProcessesSelectsMembers(t *testing.T) {
+	sandbox := t.TempDir()
+	home := filepath.Join(sandbox, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxDir := filepath.Join(sandbox, "tmux")
+	created := time.Now()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: created.Unix(), MaxLifetimeSeconds: 21600,
+		TmuxTmpdir: tmuxDir, SandboxRoot: sandbox,
+	}
 	self := os.Getpid()
 	snap := map[int]proctree.Process{
-		10:   {PID: 10, PPID: 1},
-		11:   {PID: 11, PPID: 10},
-		12:   {PID: 12, PPID: 11},
-		20:   {PID: 20, PPID: 1},
-		21:   {PID: 21, PPID: 20},
-		self: {PID: self, PPID: 10},
+		10:   {PID: 10, PPID: 1, StartID: 100, StartedAt: created},
+		11:   {PID: 11, PPID: 10, StartID: 110, StartedAt: created}, // own env — member
+		12:   {PID: 12, PPID: 10, StartID: 120, StartedAt: created}, // cleared env: descent is not proof
+		20:   {PID: 20, PPID: 1, StartID: 200, StartedAt: created},
+		30:   {PID: 30, PPID: 1, StartID: 300, StartedAt: created.Add(-time.Hour)}, // predates the marker
+		40:   {PID: 40, PPID: 1, StartID: 400, StartedAt: created},                 // shared tmux server
+		50:   {PID: 50, PPID: 1, StartID: 500, StartedAt: created},                 // ssh ControlMaster
+		60:   {PID: 60, PPID: 1, StartID: 600, StartedAt: created},                 // recycles under the scan
+		70:   {PID: 70, PPID: 1, StartID: 700, StartedAt: created},                 // private tmux server: member
+		self: {PID: self, PPID: 10, StartID: 1, StartedAt: created},
 	}
-	oldSnap, oldUID, oldEnv := throwawaySnapshotFn, throwawayUIDFn, throwawayLookupEnvFn
+	sshSock := filepath.Join(t.TempDir(), "master-x")
+	old := throwawaySeams()
 	throwawaySnapshotFn = func() (map[int]proctree.Process, error) { return snap, nil }
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawayLookupEnvFn = func(pid int, key string) (string, proctree.EnvStatus) {
 		if key != "AGENT_FACTORY_HOME" {
 			return "", proctree.EnvAbsent
 		}
-		if pid == 10 || pid == self {
+		switch pid {
+		case 10, 11, 30, 40, 50, 60, 70, self:
 			return home, proctree.EnvFound
 		}
 		return "", proctree.EnvAbsent
 	}
-	defer func() { throwawaySnapshotFn, throwawayUIDFn, throwawayLookupEnvFn = oldSnap, oldUID, oldEnv }()
+	throwawaySameRootFn = func(int) bool { return true }
+	throwawayIsTmuxServerFn = func(pid int) bool { return pid == 40 || pid == 70 }
+	throwawayArgvFn = func(pid int) []string {
+		if pid == 40 {
+			return []string{"tmux", "-S", "/tmp/tmux-1001/default", "new-session"}
+		}
+		if pid == 70 {
+			return []string{"tmux", "-S", filepath.Join(tmuxDir, "drive"), "new-session"}
+		}
+		return nil
+	}
+	throwawayUnixSocketPathsFn = func(pid int) ([]string, bool) {
+		switch pid {
+		case 40:
+			return []string{"/tmp/tmux-1001/default"}, true
+		case 50:
+			return []string{sshSock}, true
+		case 70:
+			return []string{filepath.Join(tmuxDir, "drive")}, true
+		}
+		return nil, true
+	}
+	throwawayLookupFn = func(pid int) (proctree.Process, error) {
+		if pid == 60 {
+			return proctree.Process{PID: 60, StartID: 999}, nil // recycled
+		}
+		return snap[pid], nil
+	}
+	defer throwawayRestoreSeams(old)
 	bound, _ := throwawayBoundProcesses(canonHome, m)
 	got := map[int]bool{}
 	for _, p := range bound {
 		got[p.PID] = true
 	}
-	for pid, want := range map[int]bool{10: true, 11: true, 12: true, 20: false, 21: false, self: false} {
-		if got[pid] != want {
-			t.Fatalf("pid %d bound=%v, want %v (all: %v)", pid, got[pid], want, got)
+	want := map[int]bool{
+		10: true, 11: true, // own-env members
+		70:   true,  // private tmux server whose socket is inside the sandbox
+		12:   false, // descent alone is not proof
+		20:   false, // never bound
+		30:   false, // started before the marker — a reused path cannot adopt it
+		40:   false, // a shared tmux server is never a member
+		50:   false, // a shared server holding a foreign socket is never a member
+		60:   false, // identity recycled mid-scan
+		self: false,
+	}
+	for pid, w := range want {
+		if got[pid] != w {
+			t.Fatalf("pid %d member=%v, want %v (all: %v)", pid, got[pid], w, got)
+		}
+	}
+}
+
+// TestSharedServerSurvivesTeardown is the independent-review regression: a
+// server the sandbox environment spawned — carrying its AGENT_FACTORY_HOME —
+// but whose socket is NOT the sandbox's private tmux dir must never enter
+// the kill set. PID 40 below is the default tmux server; killing it would
+// take every production pane with it.
+func TestSharedServerSurvivesTeardown(t *testing.T) {
+	sandbox := t.TempDir()
+	home := filepath.Join(sandbox, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 60}
+	created := time.Now()
+	snap := map[int]proctree.Process{
+		40: {PID: 40, StartID: 400, StartedAt: created},
+	}
+	old := throwawaySeams()
+	throwawaySnapshotFn = func() (map[int]proctree.Process, error) { return snap, nil }
+	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
+	throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+		if key == "AGENT_FACTORY_HOME" {
+			return home, proctree.EnvFound // spawned from the sandbox env — this is the hazard
+		}
+		return "", proctree.EnvAbsent
+	}
+	throwawaySameRootFn = func(int) bool { return true }
+	throwawayIsTmuxServerFn = func(int) bool { return true }
+	throwawayArgvFn = func(int) []string { return []string{"tmux", "new-session", "-d", "-s", "work"} }
+	throwawayUnixSocketPathsFn = func(int) ([]string, bool) {
+		return []string{"/tmp/tmux-1001/default"}, true // the production default socket
+	}
+	throwawayLookupFn = func(pid int) (proctree.Process, error) { return snap[pid], nil }
+	defer throwawayRestoreSeams(old)
+	bound, _ := throwawayBoundProcesses(canonHome, m)
+	for _, p := range bound {
+		if p.PID == 40 {
+			t.Fatal("the default tmux server was selected for teardown — its production panes would die with it")
 		}
 	}
 }
@@ -494,6 +662,57 @@ func TestThrowawayPrivateTmuxDir(t *testing.T) {
 	}
 }
 
+// TestThrowawayPrivateTmuxDirIsAnAllowlist is the independent-review
+// regression: the privacy proof must not depend on the reaper's own TMPDIR.
+// With TMPDIR=/var/tmp the old two-entry denylist let root=/tmp through,
+// aiming tmux kill-server at the production server on this box.
+func TestThrowawayPrivateTmuxDirIsAnAllowlist(t *testing.T) {
+	uid := strconv.Itoa(os.Getuid())
+	homeDir, err := os.UserHomeDir()
+	if err != nil {
+		t.Fatal(err)
+	}
+	sandbox := t.TempDir()
+	home := filepath.Join(sandbox, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := func(root, tmuxDir string) *throwawaysandbox.Marker {
+		return &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: tmuxDir, SandboxRoot: root}
+	}
+	for _, tmpdir := range []string{"/tmp", "/var/tmp"} {
+		t.Run("TMPDIR="+tmpdir, func(t *testing.T) {
+			t.Setenv("TMPDIR", tmpdir)
+			for _, tc := range []struct {
+				name    string
+				root    string
+				tmuxDir string
+			}{
+				{"the review's repro", "/tmp", "/tmp/tmux-" + uid},
+				{"root is the other tmp", "/var/tmp", "/var/tmp/x"},
+				{"tmp dir is a real socket dir", sandbox, "/tmp/tmux-" + uid},
+				{"tmp dir is an ancestor of a real socket dir", "/tmp", "/tmp"},
+				{"tmp dir is the user tmux dir", sandbox, filepath.Join(homeDir, ".tmux")},
+				{"tmp dir is the user home", sandbox, homeDir},
+				{"root is the user home", homeDir, filepath.Join(homeDir, "x")},
+				{"root is /", "/", "/tmux"},
+			} {
+				if dir, refuse := throwawayPrivateTmuxDir(canonHome, marker(tc.root, tc.tmuxDir)); dir != "" {
+					t.Fatalf("%s: shared shape accepted dir=%q (refuse=%q)", tc.name, dir, refuse)
+				}
+			}
+			// The sandbox-created shape is still the one case allowed.
+			if dir, refuse := throwawayPrivateTmuxDir(canonHome, marker(sandbox, filepath.Join(sandbox, "tmux"))); dir == "" {
+				t.Fatalf("sandbox-created tmux dir refused: %q", refuse)
+			}
+		})
+	}
+}
+
 func TestThrowawayWatchdogDeadlineFires(t *testing.T) {
 	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: time.Now().Unix() - 10, MaxLifetimeSeconds: 5}
 	fire := make(chan struct{})
@@ -538,4 +757,32 @@ func TestThrowawayWatchdogStopsCleanly(t *testing.T) {
 		t.Fatal("a stopped watchdog fired")
 	case <-time.After(50 * time.Millisecond):
 	}
+}
+
+// throwawaySeams snapshots every test seam this file pokes so a single defer
+// restores the production wiring. Add new seams here, not ad-hoc.
+type throwawaySeamSet struct {
+	snapshot  func() (map[int]proctree.Process, error)
+	uid       func(int) (int, bool)
+	env       func(int, string) (string, proctree.EnvStatus)
+	cwd       func(int) (string, bool)
+	lookup    func(int) (proctree.Process, error)
+	sameRoot  func(int) bool
+	tmuxSrv   func(int) bool
+	argv      func(int) []string
+	unixSocks func(int) ([]string, bool)
+}
+
+func throwawaySeams() throwawaySeamSet {
+	return throwawaySeamSet{
+		snapshot: throwawaySnapshotFn, uid: throwawayUIDFn, env: throwawayLookupEnvFn,
+		cwd: throwawayWorkingDirFn, lookup: throwawayLookupFn, sameRoot: throwawaySameRootFn,
+		tmuxSrv: throwawayIsTmuxServerFn, argv: throwawayArgvFn, unixSocks: throwawayUnixSocketPathsFn,
+	}
+}
+
+func throwawayRestoreSeams(s throwawaySeamSet) {
+	throwawaySnapshotFn, throwawayUIDFn, throwawayLookupEnvFn, throwawayWorkingDirFn = s.snapshot, s.uid, s.env, s.cwd
+	throwawayLookupFn, throwawaySameRootFn = s.lookup, s.sameRoot
+	throwawayIsTmuxServerFn, throwawayArgvFn, throwawayUnixSocketPathsFn = s.tmuxSrv, s.argv, s.unixSocks
 }

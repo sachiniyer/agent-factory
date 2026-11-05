@@ -324,11 +324,15 @@ Two safety nets share the marker:
 - **Self-enforcement.** A daemon serving a marked home arms a watchdog at
   startup: at the deadline — or within `AF_THROWAWAY_CHECK_INTERVAL` seconds
   (default 30) of the declared owner dying — it exits, and its unwind-time
-  teardown kills every process still environment-bound to the home
-  (`AGENT_FACTORY_HOME` or `AF_HOME` resolving to it, or `TMUX`/`TMUX_TMPDIR`
-  state under the recorded private dir), plus their process trees, and the
-  private tmux servers. That covers the driver and every agent even after
-  the daemon is reparented to init.
+  teardown kills every process that independently proves membership: its own
+  environment binds it to the home (`AGENT_FACTORY_HOME` or `AF_HOME`
+  resolving to it, or `TMUX`/`TMUX_TMPDIR` state under the recorded private
+  dir) AND it started no earlier than the marker. Descent from a member is
+  not proof, and neither is an environment a shared server merely inherited
+  — a tmux server whose socket is not inside the recorded private dir, or
+  any process holding a named unix socket outside the sandbox's storage, is
+  never a member. That covers the driver and every agent even after the
+  daemon is reparented to init, while leaving shared infrastructure alone.
 - **Next-start sweep.** A marked daemon also registers its home in a
   per-user registry under `/tmp`. On startup it reaps each registered home
   that is expired or whose declared owner is provably dead (pid gone,
@@ -339,6 +343,9 @@ Two safety nets share the marker:
 Scaffolds that want their driver process bound to the teardown should export
 `AGENT_FACTORY_HOME` (and `TMUX_TMPDIR`, when using a private tmux server)
 before launching it; the pane/agent layer binds itself through `AF_HOME`.
+`AF_SANDBOX_OWNER_PID`, when used, must name a durable process — the driver
+pane or a dedicated keeper — not `$$` inside the marking shell, which dies
+with the call and trips the owner-death watchdog immediately.
 
 Set `AF_PLAYTEST_AGENT=codex` (and optionally
 `AF_PLAYTEST_CODEX_RELEASE`) before the detached target to use the same real-agent

@@ -207,23 +207,27 @@ cat > "$AGENT_FACTORY_HOME/config.json" <<EOF
 EOF
 ```
 
-**Mark the sandbox as throwaway** (#6844) before first launch: the daemon
-serving this home then enforces the deadline itself and reaps ownerless
-siblings on the next marked start. `AF_SANDBOX_OWNER_PID=$$` optionally adds
-owner liveness; `AF_SANDBOX_MAX_LIFETIME=<seconds>` overrides six hours:
-
-```bash
-bash "$WORK/src/scripts/container/sandbox-lifetime.sh" mark "$AGENT_FACTORY_HOME" "$WORK" playtest-host
-```
-
 **Verify isolation before launching anything**: `"$AF" debug` must print
 paths under `$WORK` only. If it prints anything under the real home, STOP
 and fix the environment first.
 
-**Start the driver session and launch the TUI at 80x24**:
+**Start the driver session, then mark the sandbox as throwaway** (#6844)
+before launching the TUI in it: the daemon serving this home then enforces
+the deadline itself and reaps ownerless siblings on the next marked start.
+`AF_SANDBOX_OWNER_PID` optionally adds owner liveness — it must name a
+process that outlives the marking call; `$$` inside a tool shell dies with
+the call and trips the owner-death watchdog at once. The driver pane is the
+natural owner. `AF_SANDBOX_MAX_LIFETIME=<seconds>` overrides six hours:
 
 ```bash
 tmux -L "$SOCK" new-session -d -s drive -x 80 -y 24
+AF_SANDBOX_OWNER_PID="$(tmux -L "$SOCK" display-message -p -t drive '#{pane_pid}')" \
+    bash "$WORK/src/scripts/container/sandbox-lifetime.sh" mark "$AGENT_FACTORY_HOME" "$WORK" playtest-host
+```
+
+**Launch the TUI at 80x24**:
+
+```bash
 tmux -L "$SOCK" send-keys -t drive "cd $WORK/mock-repo && $AF" Enter
 sleep 2
 tmux -L "$SOCK" capture-pane -p -t drive   # read the screen

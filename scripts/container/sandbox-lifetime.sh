@@ -21,7 +21,12 @@
 #                             boot id, pid namespace) so a later start can
 #                             prove the owner is gone. An unreadable identity
 #                             degrades to a pid-only record — never a
-#                             fabricated one.
+#                             fabricated one. The owner must be a DURABLE
+#                             process — one that lives as long as the sandbox
+#                             should, such as the driver pane or a dedicated
+#                             keeper pid. "$$" inside a one-shot shell dies
+#                             with the call and trips the owner-death
+#                             watchdog immediately.
 
 throwaway_sandbox_lifetime() {
     local value="${1:-21600}"
