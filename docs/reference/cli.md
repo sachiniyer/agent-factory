@@ -2165,6 +2165,12 @@ Two different things, kept apart on purpose:
             wall, and the reset time recorded with it. Real signal even where the
             provider exposes nothing.
 
+With [account_handoff] mode enabled (or a state file its machinery left), a
+second section lists each registered account's recorded usage windows —
+evidence af read out of the account's own rollout files, still never a
+provider claim — and a mover: line reports the configured mode plus any halt
+the engine recorded.
+
 Read-only: it reads session records and starts nothing. With --daemon-url (or
 AF_DAEMON_URL) the report comes from the targeted daemon's host — the daemon
 serves the same records read, so the answer describes that machine, not yours.
