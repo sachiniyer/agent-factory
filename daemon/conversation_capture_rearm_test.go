@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -41,6 +42,11 @@ func codexLoopTestInstance(t *testing.T) (*Manager, *session.Instance, string, s
 	})
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSession("codex-worker", tmux.ProgramCodex))
+	// A real worktree: the deferred baseline resolves the launch directory
+	// through GetWorktreePath, which stays empty without one.
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, inst.Title, "main", "", false, true)
+	require.NoError(t, err)
+	inst.SetGitWorktreeForTest(gw)
 	inst.SetStatusForTest(session.Running)
 	key := daemonInstanceKey(repo.ID, inst.Title)
 	manager.mu.Lock()
