@@ -152,9 +152,11 @@ type Dialer func(ctx context.Context, since uint64) (Stream, error)
 // their own goroutines. gridMu guards the emulator grid between the run loop's
 // writes and Render's reads; connMu guards the current stream + cursor + desired
 // size between the loops and the event-loop mutators; resizeMu serializes the two
-// RESIZE senders so the newest size is always the one written last (assertSize).
-// resizeMu is ordered before connMu, and no lock here is ever held across stream
-// I/O. Close is safe to call more than once.
+// RESIZE senders so the newest size is always the one written last (assertSize);
+// inputMu guards the undelivered-input queue and flushMu serializes its senders.
+// resizeMu is ordered before connMu; flushMu is the only lock held across stream
+// I/O, and only across a SendInput bounded by writeTimeout. Close is safe to call
+// more than once.
 type TermPane struct {
 	gridMu sync.RWMutex
 	emu    *vt.Emulator
@@ -199,6 +201,19 @@ type TermPane struct {
 	// mean last-INTENT-wins; see assertSize. Ordered BEFORE connMu and never held
 	// the other way round.
 	resizeMu sync.Mutex
+
+	// inputMu guards inputQueue — user input the emulator already accepted but no
+	// stream has carried yet, in encoded order. sendPump appends every drained
+	// pipe write; the flushers take the whole pending prefix under inputMu, so
+	// bytes leave in the order the emulator produced them (#6848: a drained byte
+	// must never be silently discarded just because no stream exists to carry it).
+	inputMu    sync.Mutex
+	inputQueue []byte
+	// flushMu serializes flushInput callers — the send pump on each drained write
+	// and the run loop once per connect — so two flushers cannot interleave or
+	// reorder frames on the wire. It is the only lock here held across stream I/O,
+	// and what it serializes is bounded by writeTimeout.
+	flushMu sync.Mutex
 
 	ctx       context.Context
 	cancel    context.CancelFunc
@@ -297,6 +312,11 @@ func (t *TermPane) run() {
 		t.cursor = stream.StartSeq()
 		t.stream = stream
 		t.connMu.Unlock()
+
+		// Input accepted while disconnected is queued, never dropped — flush it
+		// onto the new stream before anything else rides it, so the pane sees
+		// the user's bytes in the order they were accepted (#6848).
+		t.flushInput(stream)
 
 		t.gridMu.Lock()
 		// Direction matters: a start ahead of our request crossed an unretained
@@ -406,25 +426,57 @@ func (t *TermPane) readStream(stream Stream) {
 // and writes them as INPUT frames to the CURRENT stream. It must ALWAYS drain the
 // pipe even while disconnected — the pipe is unbuffered and synchronous, so a
 // pump that stopped reading would block the next SendKey on the event loop forever
-// (the #1089 lesson). While disconnected it drops the bytes; reconnect is fast and
-// input to a disconnected pane is not meaningful.
+// (the #1089 lesson). Bytes drained with no stream to carry them are QUEUED, not
+// dropped: a WS drop does not change the pane's program, so input spanning a
+// reconnect gap must still reach the pane, in order, on the next stream — the
+// old drain-and-discard let a paste lose its head while the tail ran as a
+// different command (#6848).
 func (t *TermPane) sendPump() {
 	buf := make([]byte, 4096)
 	for {
 		n, rerr := t.emu.Read(buf)
 		if n > 0 {
+			t.inputMu.Lock()
+			t.inputQueue = append(t.inputQueue, buf[:n]...)
+			t.inputMu.Unlock()
 			t.connMu.Lock()
 			stream := t.stream
 			t.connMu.Unlock()
 			if stream != nil {
-				wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
-				_ = stream.SendInput(wctx, buf[:n])
-				cancel()
+				t.flushInput(stream)
 			}
 		}
 		if rerr != nil {
 			return
 		}
+	}
+}
+
+// flushInput pushes the queued input to stream in FIFO order and keeps whatever
+// a failed write could not deliver — the queue is a byte stream, so re-sending
+// the retained prefix after a dropped or wedged frame preserves order and never
+// turns an unconfirmed partial delivery into shell input (#6848). Bytes appended
+// mid-write stay queued for the next pass; the bounded write runs outside
+// inputMu.
+func (t *TermPane) flushInput(stream Stream) {
+	t.flushMu.Lock()
+	defer t.flushMu.Unlock()
+	for {
+		t.inputMu.Lock()
+		data := append([]byte(nil), t.inputQueue...)
+		t.inputMu.Unlock()
+		if len(data) == 0 {
+			return
+		}
+		wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
+		err := stream.SendInput(wctx, data)
+		cancel()
+		if err != nil {
+			return
+		}
+		t.inputMu.Lock()
+		t.inputQueue = t.inputQueue[len(data):]
+		t.inputMu.Unlock()
 	}
 }
 

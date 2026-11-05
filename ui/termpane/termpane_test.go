@@ -593,10 +593,99 @@ func TestDialFailureRetriesThenConnects(t *testing.T) {
 	waitForRender(t, tp, 30, 4, "late-connect")
 }
 
+// TestInputTypedBeforeFirstConnectIsDeliveredInOrder is the #6848 regression:
+// input accepted while the stream is down must reach the pane in full and in
+// order once it is up — sendPump used to drain-and-DISCARD bytes while
+// disconnected ("input to a disconnected pane is not meaningful"), so a paste
+// spanning a reconnect gap lost a contiguous run (the play-test pasted
+// `: "AF59B23214"; git status --short && echo STATUS_DONE` and bash executed
+// `tatus --short && echo STATUS_DONE`).
+//
+// Deterministic: the dialer is gated so the first dial cannot answer until the
+// test releases it. The emulator's input pipe is an io.Pipe — every SendKey
+// write returns only when sendPump's Read consumed it — so when SendKey returns
+// each rune has already been dropped (old code) or queued (fixed code); only a
+// straggler trailing check can fall after the release, which cannot rescue the
+// head either way.
+func TestInputTypedBeforeFirstConnectIsDeliveredInOrder(t *testing.T) {
+	gate := make(chan struct{})
+	s := newFakeStream(0)
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		select {
+		case <-gate:
+			return s, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	want := `: "AF59B23214"; git status --short && echo STATUS_DONE`
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(want)}))
+	close(gate)
+
+	require.Eventually(t, func() bool {
+		return s.sentInput() == want
+	}, 5*time.Second, 10*time.Millisecond,
+		"input accepted while the stream is down must be delivered in full, in order, on connect")
+}
+
+// TestInputAcrossReconnectKeepsByteOrder is the #6848 shape mid-session: a
+// dropped stream takes input routing down for the reconnect gap; keystrokes
+// accepted inside the gap must reach the next stream ahead of anything typed
+// after it — never silently discarded. The byte queue is FIFO, so the tail can
+// never leapfrog the head and get a truncated line executed.
+func TestInputAcrossReconnectKeepsByteOrder(t *testing.T) {
+	gate := make(chan struct{})
+	s1 := newFakeStream(0)
+	s2 := newFakeStream(0)
+	var dials atomic.Int64
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		if dials.Add(1) == 1 {
+			return s1, nil
+		}
+		select {
+		case <-gate:
+			return s2, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	s1.feed("ready")
+	waitForRender(t, tp, 40, 6, "ready")
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("head-")}))
+	require.Eventually(t, func() bool {
+		return s1.sentInput() == "head-"
+	}, 5*time.Second, 10*time.Millisecond, "input must reach the live stream")
+
+	// Drop the stream: Recv ends, the run loop clears t.stream and re-dials —
+	// parked on the gate, so the pane is disconnected on command.
+	_ = s1.Close()
+	require.Eventually(t, func() bool {
+		tp.connMu.Lock()
+		defer tp.connMu.Unlock()
+		return tp.stream == nil
+	}, 5*time.Second, 10*time.Millisecond, "the drop must take the stream down")
+
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("gap-")}))
+	close(gate)
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tail")}))
+
+	require.Eventually(t, func() bool {
+		return s2.sentInput() == "gap-tail"
+	}, 5*time.Second, 10*time.Millisecond,
+		"input queued during the gap must land before anything typed after reconnect")
+}
+
 // TestSendKeyNeverBlocksWhileDisconnected pins the pump-drain contract: the
 // emulator's input pipe is unbuffered, so if the send pump stopped draining while
 // disconnected, the next SendKey would block the event loop forever. With no live
-// stream the bytes are dropped, but SendKey must always return promptly.
+// stream the bytes are queued for the next stream (#6848), and SendKey must
+// always return promptly.
 func TestSendKeyNeverBlocksWhileDisconnected(t *testing.T) {
 	// A dialer that never connects, so the pane is permanently "reconnecting".
 	dial := func(ctx context.Context, _ uint64) (Stream, error) {
