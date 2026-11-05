@@ -447,9 +447,12 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   window the account is subject to, like `"secondary": null` — is silent
   about that window's wall, not proof it is below; and the indexer only
   scans each account's newest few rollouts —
-  an account whose usage history exceeds that window reads as unknown and
-  keeps its wall until a fresh reading exists (tracked as
-  [#6809](https://github.com/sachiniyer/agent-factory/issues/6809)). A proof
+  content the cap leaves unexamined reads as unknown only while it
+  could still hold a newer record than the newest found claim (a record
+  can postdate its file's mtime, but not beyond the still-appending
+  horizon), so an account whose usage history exceeds that window keeps
+  its wall only while that unexamined content could still beat the
+  reading. A proof
   dated in the future is quarantined permanently — dropped from the ledger
   rather than suspended — so an ordinary clock correction can never let one
   count later. Records an account inherited from a copied transcript prefix
