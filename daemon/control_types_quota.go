@@ -19,4 +19,13 @@ type QuotaReportResponse struct {
 	// read or parsed). A renderer must show them when present — an incomplete
 	// report that hides them reads as authoritative.
 	Warnings []string `json:"warnings,omitempty"`
+	// Accounts is the per-account evidence section — what af recorded in each
+	// registered account's own rollout files (#6776). Empty when neither an
+	// [account_handoff] table nor a handoff state file exists on the daemon's
+	// host: the absent-table shape is no section at all.
+	Accounts []quota.RenderedAccount `json:"accounts,omitempty"`
+	// Mover is the rendered mover line — the configured mode plus any halt
+	// the engine recorded (R16: a halted mover is never silent). Empty under
+	// the same absent-table condition as Accounts.
+	Mover string `json:"mover,omitempty"`
 }

@@ -4,6 +4,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/quotaobs"
+	"github.com/sachiniyer/agent-factory/quota"
 )
 
 // QuotaReport serves the per-agent usage/quota report (#2983) — the same
@@ -22,5 +23,9 @@ func (s *controlServer) QuotaReport(_ QuotaReportRequest, resp *QuotaReportRespo
 	}
 	resp.Agents = result.Report.Rendered(time.Now())
 	resp.Warnings = result.Warnings()
+	resp.Accounts = quota.RenderAccounts(result.Accounts)
+	if result.Mover != nil {
+		resp.Mover = result.Mover.String()
+	}
 	return nil
 }
