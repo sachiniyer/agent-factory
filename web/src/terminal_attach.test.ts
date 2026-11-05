@@ -652,6 +652,43 @@ test("a known-parked page's echo refits locally and arms only the wake probe", (
   }
 });
 
+// #6808/#6812 — the observation that reverted the classification gate: the
+// re-parked tab's DOM resting on the peer's grid (the old spec's "expected
+// 263" assertion). It was the leak's artifact, not a property of parking.
+// With the wire write gated on a fresh classification, a stale-'live' parked
+// page answers a foreign echo with its local refit alone, so it never
+// triggers the peer's re-claim and no second echo of that grid exists to
+// re-apply it. Resting on the foreign grid is reachable only through
+// applyEchoedSize itself: a repeat echo inside the yield window is an
+// insistent writer the contested guard lets stand. On the un-gated path the
+// first echo's leaked OpResize was what manufactured that repeat.
+test("a re-parked page rests on the peer's grid only via a second echo — the strand the leak manufactured", () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    echo(104, 68);
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+    assert.deepEqual(calls, ["fit"], "the echo-path reclaim wrote nothing");
+    // The withheld write owes the classification pair; the starved twin's
+    // delivery parks the page, and the emulator is STILL on the host's grid —
+    // no strand exists.
+    win.runTimer();
+    assert.equal(terminal.parked, true);
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+    // The counterfactual the old assertion encoded: the leaked OpResize made
+    // the live peer re-claim its grid, and that re-claim's echo landed inside
+    // the yield window — an insistent writer that stands unreclaimed. The DOM
+    // resting on the foreign grid is the second echo's signature; nothing
+    // parked-side produces it.
+    echo(104, 68);
+    assert.deepEqual([term.rows, term.cols], [104, 68],
+      "a repeat of the same foreign grid inside the yield window stands — the 263 the old spec asserted");
+    assert.deepEqual(calls, ["fit"], "the yielded strand writes nothing either");
+  } finally {
+    win.restore();
+  }
+});
+
 // The synchronous reclaim can only run when the host already measures: a
 // foreign echo that arrives while xterm's metrics are mid-invalidation falls
 // back to the scheduled-fit pair, whose retry budget carries the reclaim to
