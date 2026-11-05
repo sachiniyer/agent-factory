@@ -323,14 +323,17 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	// own spec's (#6818 round-2 review): with two projects pointed at each
 	// other's sessions, A's report prompts a turn in B-sess whose events B's
 	// spec would report back into A-sess — a ping-pong of report prompts.
-	// Rows authored by ANY recipient are starved, so the loop cannot carry.
+	// Resolution covers ALL configured specs, not only specs whose authors
+	// emitted rows this tick: a spec edge-suppressed into silence still
+	// names a recipient whose rows must be excluded, or alternating ticks
+	// restart the ping-pong (#6818 round-3 review).
 	recipientKeys := map[string]bool{}
 	specResolved := map[string]struct {
 		recipient SessionInput
 		found     bool
 		live      bool
 	}{}
-	for spec := range reportRows {
+	for spec := range specs {
 		recipient, found, live := resolveRecipient(spec, sessions)
 		specResolved[spec] = struct {
 			recipient SessionInput
@@ -459,6 +462,18 @@ func resolveRecipient(spec string, inputs []SessionInput) (recipient SessionInpu
 			continue
 		}
 		matches = append(matches, in)
+	}
+	if len(matches) == 0 && qualified {
+		// A session title may itself carry slashes ("feature/login") —
+		// title shape validation forbids control chars, not slashes
+		// (#6818 round-3 review). A spec that matched nothing under the
+		// project/title grammar retries as a bare title; ambiguity with
+		// a same-titled sibling is still a skip, never a guess.
+		for _, in := range inputs {
+			if in.Title == spec {
+				matches = append(matches, in)
+			}
+		}
 	}
 	if len(matches) != 1 {
 		return SessionInput{}, false, false // absent or ambiguous alike

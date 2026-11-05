@@ -532,3 +532,60 @@ func TestTickHaltRowRidesReportSpec(t *testing.T) {
 		t.Fatalf("halted row missing from the report payload")
 	}
 }
+
+// A session title may itself carry slashes ("feature/login"): a spec that
+// matches nothing under the project/title grammar falls back to a bare-title
+// match (#6818 round-3 review).
+func TestTickReportSlashTitleResolvesByBareFallback(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "feature/login"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.Title = "feature/login"
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("slash-titled recipient did not resolve: %+v", d.reports)
+	}
+}
+
+// A spec whose author emitted no rows this tick still names a recipient:
+// resolving recipients over reportRows alone lets an edge-suppressed spec
+// drop out of the exclusion set and alternating ticks restart the ping-pong
+// (#6818 round-3 review).
+func TestTickReportSilentSpecStillExcludesItsRecipient(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		reportToByRoot: map[string]string{
+			"/repoA": "repoB/beta",
+			"/repoB": "repoA/alpha",
+		},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	a.Key, a.Title, a.RepoID, a.RepoRoot = "sess-A", "alpha", "repoA", "/repoA"
+	b := shadowSession()
+	b.Key, b.Title, b.RepoID, b.RepoRoot = "sess-B", "beta", "repoB", "/repoB"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	d.reports = nil
+	rowsBefore := 0
+	for _, batch := range [][]handoff.EventRow{d.rows} {
+		rowsBefore += len(batch)
+	}
+	// Tick 2: A's verdict gains a new edge — a pinned session outside
+	// include_pinned emits EventPinnedIneligible — while B's verdict
+	// stays edge-suppressed.
+	a.Auto = false
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	newRows := len(d.rows) - rowsBefore
+	if newRows == 0 {
+		t.Fatalf("tick 2 emitted no rows — the exclusion path was never exercised")
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("suppressed spec's recipient got %d reports, want 0", len(d.reports))
+	}
+}
