@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // The explain surface (#2216): which config layers supplied an effective value.
@@ -204,9 +205,11 @@ func FormatExplainValueForKey(key string, value any) string {
 // leaf setter exactly: an element containing a comma (the setter splits on
 // commas), an element that splitListValue would alter (it trims surrounding
 // whitespace and drops empty elements, so " work " or "" would silently change
-// the list on the way back), or an element the per-key leaf validator rejects
-// (e.g. exclude_sessions titles containing brackets or quotes). The comma form
-// is returned only when re-splitting and re-validating the joined string
+// the list on the way back), an element the per-key leaf validator rejects
+// (e.g. exclude_sessions titles containing brackets or quotes), or an element
+// containing a control character (a whole-table value may carry one, and the
+// raw join would write terminal control sequences where JSON marshaling would
+// escape them). The comma form is returned only when re-splitting and re-validating the joined string
 // reproduces every original element; otherwise the caller falls back to JSON —
 // the unambiguous form that signals "use the whole-table form to set this back"
 // rather than a value that looks round-trippable but is not.
@@ -230,6 +233,16 @@ func commaJoinStringList(key string, v any) (string, bool) {
 	}
 	for _, s := range list {
 		if strings.ContainsRune(s, ',') {
+			return "", false
+		}
+		// A whole-table element may legally contain a control character (the
+		// exclude_sessions validator rejects only trim-empty titles), and
+		// emitting such a title raw would write terminal control sequences
+		// verbatim through `config get` and the explain table — JSON marshaling
+		// escapes them, and the TUI path strips them with explainSafe. Treat
+		// control-bearing elements as non-representable so they keep the JSON
+		// fallback instead of corrupting terminal output.
+		if strings.ContainsFunc(s, unicode.IsControl) {
 			return "", false
 		}
 	}

@@ -236,3 +236,27 @@ func TestCommaListFallsBackToJSONForNonRoundTrippableElement(t *testing.T) {
 		t.Fatalf("clean list must still render comma-joined, got %q", got)
 	}
 }
+
+// TestCommaListFallsBackToJSONForControlBearingElement pins the terminal-safety
+// guard from the round-trip review: a whole-table exclude_sessions element may
+// legally contain a control character (the validator rejects only trim-empty
+// titles), and emitting the raw joined string would write terminal control
+// sequences verbatim through `config get` and the explain table where JSON
+// marshaling would escape them. Fall back to JSON so a configured title cannot
+// manipulate or corrupt terminal output.
+func TestCommaListFallsBackToJSONForControlBearingElement(t *testing.T) {
+	const want = `["work\u001bX"]`
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"work\x1bX"}); got != want {
+		t.Fatalf("control-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []string{"work\x1bX"}); got != want {
+		t.Fatalf("explain path must fall back to JSON for control-bearing element, got %q want %q", got, want)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"work\x1bX"}); got != want {
+		t.Fatalf("[]any control-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	// A clean list with no control characters still renders comma-joined.
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("clean list must still render comma-joined, got %q", got)
+	}
+}
