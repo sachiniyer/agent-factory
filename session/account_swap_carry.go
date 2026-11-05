@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"os"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -408,8 +407,14 @@ func (c *conversationCarry) copy() error {
 		return err
 	}
 	if err := c.commitCarriedPrefix(outcome); err != nil {
+		// The commit failed: put back whatever the install displaced, or
+		// remove a fresh install — a failed carry leaves the destination
+		// exactly as it was (#6802 Codex review).
+		restoreCarryDisplacement(c.dstRoot, c.transcript, outcome)
 		return err
 	}
+	// The commit landed: the displaced original is gone for good now.
+	discardCarryDisplacement(c.dstRoot, c.transcript, outcome)
 	if c.aux == "" {
 		return nil
 	}
@@ -429,10 +434,10 @@ func (c *conversationCarry) copy() error {
 //
 // The watermark is part of the commit because the copied bytes are the
 // poison: a rollout whose source-account records could count for the target
-// must not outlive a failed record. When the copy installed the destination
-// file this call removes it on failure — the bytes it carried are
-// unverifiable source content — while a destination the carry only verified
-// is left untouched (it predates this carry and is not af's to delete).
+// must not outlive a failed record. On failure the caller unwinds the
+// install — the displaced destination is restored byte-for-byte, or a fresh
+// install is removed — while a destination the carry only verified is left
+// untouched (it predates this carry and is not af's to delete).
 func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error {
 	if c.agent != tmux.ProgramCodex || outcome.covered == 0 {
 		return nil
@@ -446,9 +451,6 @@ func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error 
 	// accounts/ tree the copy targeted.
 	store := handoff.NewStore(filepath.Join(c.dstRoot.base, "instances", handoff.StateFileName))
 	if err := store.RecordCarriedPrefix(path, outcome.covered); err != nil {
-		if outcome.installed {
-			_ = os.Remove(path)
-		}
 		return carryFailure("the carried-prefix watermark could not be recorded", err)
 	}
 	return nil

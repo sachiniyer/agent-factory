@@ -694,6 +694,69 @@ func TestConversationCarryUnwindsTheRolloutWhenTheWatermarkCannotBeRecorded(t *t
 		"the unrecorded rollout is unwound rather than left to mint a false retraction")
 }
 
+// A failed carry leaves the destination exactly as it was: when the copy
+// replaced a shorter matching transcript and the watermark then could not
+// be recorded, the displaced original comes back byte-for-byte — deleting
+// the install would take the account's own transcript with it (#6802 Codex
+// review, data loss).
+func TestConversationCarryRestoresADisplacedDestinationWhenTheWatermarkCannotBeRecorded(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	// instances exists as a FILE, so no state write can land beneath it.
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances"), []byte("x"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim one\nclaim two\n")
+	dstPath := writeCarryFile(t, dstDir, rel, "claim one\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.Error(t, carry.copy(), "a carry that cannot record its watermark is not a commit")
+
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err, "the pre-carry destination must still be there")
+	require.Equal(t, "claim one\n", string(got),
+		"the displaced original is restored byte-for-byte, not deleted with the failed install")
+	entries, err := os.ReadDir(filepath.Dir(dstPath))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "the restore consumes its backup — no carry debris beside the transcript")
+}
+
+// The happy path drops its backup too: a committed replace leaves only the
+// carried file, not the displaced original.
+func TestConversationCarryDiscardsTheDisplacementBackupOnCommit(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim one\nclaim two\n")
+	dstPath := writeCarryFile(t, dstDir, rel, "claim one\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carry.copy())
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	require.Equal(t, "claim one\nclaim two\n", string(got), "the committed carry holds the source's content")
+	entries, err := os.ReadDir(filepath.Dir(dstPath))
+	require.NoError(t, err)
+	require.Len(t, entries, 1, "a committed carry removes the displaced backup")
+}
+
 // Only codex leaves usage claims in its store — a claude carry commits no
 // watermark.
 func TestConversationCarrySkipsTheWatermarkForClaude(t *testing.T) {
