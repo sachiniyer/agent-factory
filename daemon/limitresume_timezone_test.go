@@ -21,7 +21,7 @@ func TestResumeLimitedSessions_ParsedTimezone(t *testing.T) {
 			oldNow := nowFunc
 			nowFunc = func() time.Time { return now }
 			t.Cleanup(func() { nowFunc = oldNow })
-			hit, reset, parsed := task.NewLimitDetector(nil).Check("Claude usage limit reached. Your limit will reset at 5pm ("+tc.zone+")", "claude", now)
+			hit, reset, parsed, _ := task.NewLimitDetector(nil).Check("Claude usage limit reached. Your limit will reset at 5pm ("+tc.zone+")", "claude", now)
 			if !hit || !parsed {
 				t.Fatal("banner not parsed")
 			}

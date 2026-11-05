@@ -96,10 +96,10 @@ func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time)
 	instance.SetLimitReached(resetAt)
 }
 
-func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, epoch uint64) bool {
+func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, epoch uint64) bool {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.SetLimitReachedAtEpoch(resetAt, epoch)
+	return instance.SetLimitReachedAtEpoch(resetAt, evidence, epoch)
 }
 
 func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time) error {

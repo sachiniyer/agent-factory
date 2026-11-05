@@ -257,7 +257,7 @@ func TestIsLimitContent(t *testing.T) {
 	matchers := resolveLimitMatchers(nil)
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			hit, resetAt, hasReset := isLimitContent(tc.content, tc.agent, matchers, now)
+			hit, resetAt, hasReset, _ := isLimitContent(tc.content, tc.agent, matchers, now)
 			if hit != tc.wantHit {
 				t.Fatalf("hit = %v, want %v", hit, tc.wantHit)
 			}
@@ -295,14 +295,14 @@ func TestIsLimitContentPatternOverride(t *testing.T) {
 	content := "PLAN LIMIT TRIPPED — reset at 3pm (America/New_York)"
 
 	// Without an override the built-in claude matcher does not detect it.
-	if hit, _, _ := isLimitContent(content, tmux.ProgramClaude, resolveLimitMatchers(nil), now); hit {
+	if hit, _, _, _ := isLimitContent(content, tmux.ProgramClaude, resolveLimitMatchers(nil), now); hit {
 		t.Fatalf("built-in matcher unexpectedly detected reworded banner")
 	}
 
 	// With the override the reworded banner is detected, and the built-in
 	// reset parser still resolves "reset at 3pm (America/New_York)".
 	overrides := map[string]string{tmux.ProgramClaude: `PLAN LIMIT TRIPPED`}
-	hit, resetAt, hasReset := isLimitContent(content, tmux.ProgramClaude, resolveLimitMatchers(overrides), now)
+	hit, resetAt, hasReset, _ := isLimitContent(content, tmux.ProgramClaude, resolveLimitMatchers(overrides), now)
 	if !hit {
 		t.Fatalf("override matcher did not detect reworded banner")
 	}
@@ -385,18 +385,18 @@ func TestResolveLimitMatchers(t *testing.T) {
 		t.Fatalf("devin override must stay detect-only: parseReset must remain nil")
 	}
 	// The override REPLACES detection: the user's pattern hits...
-	if hit, _, _ := isLimitContent("the provider says: RATE CEILING HIT", tmux.ProgramDevin, withDevin, now); !hit {
+	if hit, _, _, _ := isLimitContent("the provider says: RATE CEILING HIT", tmux.ProgramDevin, withDevin, now); !hit {
 		t.Fatalf("devin override pattern should detect the user-supplied banner")
 	}
 	// ...and the built-in default ("quota exhausted") no longer does.
-	if hit, _, _ := isLimitContent("Quota exhausted: usage quota has been exhausted", tmux.ProgramDevin, withDevin, now); hit {
+	if hit, _, _, _ := isLimitContent("Quota exhausted: usage quota has been exhausted", tmux.ProgramDevin, withDevin, now); hit {
 		t.Fatalf("devin override should REPLACE the built-in detect, not augment it")
 	}
 
 	// An uncompilable regex is dropped and the built-in default stands: the
 	// stock claude banner must still detect.
 	bad := resolveLimitMatchers(map[string]string{tmux.ProgramClaude: `(unclosed`})
-	hit, _, _ := isLimitContent("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, bad, now)
+	hit, _, _, _ := isLimitContent("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, bad, now)
 	if !hit {
 		t.Fatalf("invalid override should fall back to built-in claude matcher")
 	}
@@ -410,7 +410,7 @@ func TestLimitDetector(t *testing.T) {
 	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
 
 	det := NewLimitDetector(nil)
-	hit, resetAt, hasReset := det.Check("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, now)
+	hit, resetAt, hasReset, _ := det.Check("Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, now)
 	if !hit || !hasReset {
 		t.Fatalf("Check should detect the stock claude banner with a reset time; got hit=%v hasReset=%v", hit, hasReset)
 	}
@@ -420,13 +420,63 @@ func TestLimitDetector(t *testing.T) {
 	}
 
 	// gemini is API-key-metered — no matcher, so never a hit.
-	if hit, _, _ := det.Check("429 RESOURCE_EXHAUSTED", tmux.ProgramGemini, now); hit {
+	if hit, _, _, _ := det.Check("429 RESOURCE_EXHAUSTED", tmux.ProgramGemini, now); hit {
 		t.Fatalf("gemini must not produce a limit hit in v1")
 	}
 
 	// A config override on the detector is honored.
 	overridden := NewLimitDetector(map[string]string{tmux.ProgramClaude: `PLAN LIMIT TRIPPED`})
-	if hit, _, _ := overridden.Check("PLAN LIMIT TRIPPED at 3pm", tmux.ProgramClaude, now); !hit {
+	if hit, _, _, _ := overridden.Check("PLAN LIMIT TRIPPED at 3pm", tmux.ProgramClaude, now); !hit {
 		t.Fatalf("override detector should detect the reworded banner")
+	}
+}
+
+// TestCheckReturnsResetPhraseEvidence pins the evidence contract (#6765): the
+// detector reports the reset phrase it consumed so the poll's caller can tell
+// a re-read of an unchanged banner from a new reset observation. The phrase is
+// stable across parse instants even when the resolved reset time is not —
+// exactly the drift the session dedups on.
+func TestCheckReturnsResetPhraseEvidence(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+	det := NewLimitDetector(nil)
+
+	cases := []struct {
+		name         string
+		pane         string
+		agent        string
+		wantEvidence string
+	}{
+		{"claude time-only", "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, "reset at 2pm (America/New_York)"},
+		{"claude weekday", "⎿  Claude usage limit reached. Your limit will reset Monday at 9am (America/New_York)", tmux.ProgramClaude, "reset Monday at 9am (America/New_York)"},
+		{"codex dated", "■ You’ve hit your usage limit. Please try again at Sep 20th, 2026 9:16 AM.", tmux.ProgramCodex, "try again at Sep 20th, 2026 9:16 AM"},
+		{"codex time-only", "■ You've hit your usage limit. Please try again at 6:34 AM.", tmux.ProgramCodex, "try again at 6:34 AM"},
+		{"codex relative", "■ You've hit your usage limit, try again in 4 days 2 hours 46 minutes.", tmux.ProgramCodex, "try again in 4 days 2 hours 46 minutes."},
+	}
+	for _, tc := range cases {
+		hit, _, hasReset, evidence := det.Check(tc.pane, tc.agent, now)
+		if !hit || !hasReset {
+			t.Fatalf("%s: expected hit with parsed reset, got hit=%v hasReset=%v", tc.name, hit, hasReset)
+		}
+		if evidence != tc.wantEvidence {
+			t.Fatalf("%s: evidence = %q, want %q", tc.name, evidence, tc.wantEvidence)
+		}
+	}
+
+	// The sharp case: a relative phrase re-resolves to a later instant every
+	// parse, but the phrase itself — the re-read's identity — is unchanged.
+	pane := "■ You've hit your usage limit, try again in 4 days 2 hours 46 minutes."
+	_, reset1, _, ev1 := det.Check(pane, tmux.ProgramCodex, now)
+	_, reset2, _, ev2 := det.Check(pane, tmux.ProgramCodex, now.Add(time.Hour))
+	if reset1.Equal(reset2) {
+		t.Fatalf("a relative countdown must re-resolve against the later clock: %v == %v", reset1, reset2)
+	}
+	if ev1 != ev2 {
+		t.Fatalf("an unchanged banner must reproduce identical evidence: %q != %q", ev1, ev2)
+	}
+
+	// A banner with no parseable reset phrase carries no evidence.
+	if hit, _, hasReset, evidence := det.Check("Claude usage limit reached. Your limit will reset at some point soon.", tmux.ProgramClaude, now); !hit || hasReset || evidence != "" {
+		t.Fatalf("an unparseable reset clause must detect with no evidence: hit=%v hasReset=%v evidence=%q", hit, hasReset, evidence)
 	}
 }

@@ -779,8 +779,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch spec.limitReset {
 	case limitResetClear:
 		i.limitResetAt = time.Time{}
+		i.limitResetEvidence = ""
 	case limitResetFromEvent:
+		// The event's reset arrives without the phrase that produced it (the
+		// handoff wait path resolved it), so the evidence slot cannot keep
+		// describing an earlier wall's reset (#6765).
 		i.limitResetAt = ev.resetAt
+		i.limitResetEvidence = ""
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

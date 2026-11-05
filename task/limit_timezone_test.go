@@ -53,7 +53,7 @@ func TestClaudeResetParenTimezone(t *testing.T) {
 			for _, zone := range tc.zones {
 				banner += " (" + zone + ")"
 			}
-			hit, reset, parsed := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
+			hit, reset, parsed, _ := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
 			if !hit || !parsed || reset.Format(time.RFC3339) != tc.want {
 				t.Errorf("hit=%v parsed=%v reset=%s; want %s", hit, parsed, reset.Format(time.RFC3339), tc.want)
 			}
@@ -124,7 +124,7 @@ func TestClaudeResetTimezoneWeekdayCollision(t *testing.T) {
 			log.WarningLog.SetOutput(&warnings)
 			t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
 			banner := "Claude usage limit reached. Your limit will reset at 5pm (" + tc.zone + ")"
-			hit, reset, parsed := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
+			hit, reset, parsed, _ := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
 			if !hit || !parsed {
 				t.Fatalf("hit=%v parsed=%v reset=%s", hit, parsed, reset)
 			}
@@ -184,7 +184,7 @@ func TestClaudeResetTimezoneWeekdayCollision(t *testing.T) {
 			log.WarningLog.SetOutput(&warnings)
 			t.Cleanup(func() { log.WarningLog.SetOutput(previous) })
 			banner := "Claude usage limit reached. Your limit will reset " + tc.tail
-			hit, reset, parsed := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
+			hit, reset, parsed, _ := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
 			if !hit || !parsed {
 				t.Fatalf("hit=%v parsed=%v reset=%s", hit, parsed, reset)
 			}
