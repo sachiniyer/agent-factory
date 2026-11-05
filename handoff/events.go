@@ -12,10 +12,13 @@ package handoff
 //
 // Writes go through the same discipline the account-limit ledger uses: the
 // sibling file lock serializes every writer, and each row lands as one
-// append-mode write so a crash can tear at most the final partial line, which
-// readers skip.
+// append-mode write. A crash can still tear the final line — and an
+// unterminated tail would corrupt the NEXT row by concatenation — so the
+// append path repairs the tail under the same lock before writing
+// (#6817 review).
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -37,11 +40,47 @@ const EventFilePrefix = "auto-handoff-events-"
 const eventRetentionDays = 7
 
 // eventDayMaxBytes caps one day's file (#6817 review): a degraded caller that
-// emits rows every tick cannot grow the log without bound. Rows past the cap
-// are dropped for that day — the file is an operator-diff surface, not a
-// transport, and an unbounded one breaks the AF-home guard the same way a
-// bare MkdirAll did.
+// emits rows every tick cannot grow the log without bound. The append errors
+// past the cap — never a silent drop — so the caller's edge stays uncommitted
+// and the row retries instead of vanishing.
 const eventDayMaxBytes = 4 << 20
+
+// eventTailWindow bounds the backward scan for a newline when repairing a
+// crash-torn tail. A legit row is a few hundred bytes; a tail with no newline
+// anywhere in the window is pathological and refused rather than truncated
+// through unknown content.
+const eventTailWindow = 64 << 10
+
+// repairEventTail drops a trailing partial line: the file must end in '\n',
+// or the next append would concatenate onto torn JSON and corrupt both lines
+// (#6817 review). Truncates to just past the last newline — or to empty when
+// the whole file is one partial line — and refuses a tail that outruns the
+// window.
+func repairEventTail(f *os.File) error {
+	st, err := f.Stat()
+	if err != nil || st.Size() == 0 {
+		return err
+	}
+	size := st.Size()
+	n := int64(eventTailWindow)
+	if size < n {
+		n = size
+	}
+	buf := make([]byte, n)
+	if _, err := f.ReadAt(buf, size-n); err != nil {
+		return err
+	}
+	if buf[len(buf)-1] == '\n' {
+		return nil
+	}
+	if k := bytes.LastIndexByte(buf, '\n'); k >= 0 {
+		return f.Truncate(size - n + int64(k) + 1)
+	}
+	if n == size {
+		return f.Truncate(0)
+	}
+	return fmt.Errorf("unterminated event-file tail exceeds %d-byte repair window", eventTailWindow)
+}
 
 // eventLabelCap bounds the title field carried on a row — titles are data.
 const eventLabelCap = 120
@@ -137,7 +176,7 @@ func (l *EventLog) Append(rows []EventRow) error {
 				// re-announces on a later tick instead of vanishing.
 				return fmt.Errorf("event file %s at %d-byte day cap: row held for retry", file, eventDayMaxBytes)
 			}
-			f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+			f, err := os.OpenFile(file, os.O_RDWR|os.O_CREATE|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
 			if err != nil {
 				return err
 			}
@@ -151,6 +190,16 @@ func (l *EventLog) Append(rows []EventRow) error {
 					f.Close()
 					return fmt.Errorf("event file %s was replaced during open", file)
 				}
+			}
+			// A short write leaves an unterminated tail — the next row
+			// must never concatenate onto a partial line and corrupt
+			// itself (#6817 review). Repair by truncating back to the
+			// last newline; a file that is nothing but a partial line
+			// truncates to empty, and a tail longer than the window is
+			// refused rather than silently eaten.
+			if rerr := repairEventTail(f); rerr != nil {
+				f.Close()
+				return rerr
 			}
 			_, werr := f.WriteString(payload.String())
 			cerr := f.Close()

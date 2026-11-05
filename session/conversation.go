@@ -434,7 +434,11 @@ func (i *Instance) SessionCodexHomeDir() string {
 	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
 		return ""
 	}
-	if i.AgentProgram() != tmux.ProgramCodex {
+	// The provider is what the launch command resolves to, not the
+	// configured enum — resolvedAgentLocked is the #6811 resolver: a
+	// session whose program_overrides entry launches codex under another
+	// agent name still writes a codex home (#6817 review).
+	if i.ResolvedAgent() != tmux.ProgramCodex {
 		return ""
 	}
 	program := i.RuntimeProgram()

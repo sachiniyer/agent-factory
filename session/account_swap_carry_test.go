@@ -779,3 +779,81 @@ func TestConversationCarrySkipsTheWatermarkForClaude(t *testing.T) {
 	require.NoFileExists(t, filepath.Join(afHome, "instances", handoff.StateFileName),
 		"no usage claims live in a claude transcript — nothing to quarantine")
 }
+
+// #6817 review: the shadow engine's require_carry fact must be admission's
+// own predicate — a session with no recorded conversation can never carry,
+// and the provider is the launch command's resolution, not the enum.
+func TestAccountSwapCarryPossible(t *testing.T) {
+	uuid := "12345678-1234-1234-1234-1234567890ab"
+	conv := func(agent, id string) AgentConversationData {
+		return AgentConversationData{Agent: agent, ID: id}
+	}
+	tabs := func(c AgentConversationData) []*Tab {
+		return []*Tab{{Name: agentTabName, Kind: TabKindAgent, Conversation: c}}
+	}
+	cases := []struct {
+		name string
+		inst *Instance
+		want bool
+	}{
+		{"codex session, recorded codex conversation", &Instance{
+			Program: tmux.ProgramCodex, runtimeProgram: "codex",
+			Tabs: tabs(conv(tmux.ProgramCodex, uuid)),
+		}, true},
+		{"codex session, no recorded conversation", &Instance{
+			Program: tmux.ProgramCodex, runtimeProgram: "codex",
+			Tabs: tabs(AgentConversationData{}),
+		}, false},
+		{"conversation belongs to another provider", &Instance{
+			Program: tmux.ProgramCodex, runtimeProgram: "codex",
+			Tabs: tabs(conv(tmux.ProgramClaude, uuid)),
+		}, false},
+		{"override launching codex under the claude enum", &Instance{
+			Program: tmux.ProgramClaude, runtimeProgram: "/opt/bin/codex --full-auto",
+			Tabs: tabs(conv(tmux.ProgramCodex, uuid)),
+		}, true},
+		{"override launching a plain shell is not carry-capable", &Instance{
+			Program: tmux.ProgramCodex, runtimeProgram: "./bin/sidekick",
+			Tabs: tabs(conv(tmux.ProgramCodex, uuid)),
+		}, false},
+		{"gemini records no addressable conversation", &Instance{
+			Program: tmux.ProgramGemini, runtimeProgram: "gemini",
+			Tabs: tabs(conv(tmux.ProgramGemini, uuid)),
+		}, false},
+	}
+	for _, tc := range cases {
+		if got := tc.inst.AccountSwapCarryPossible(); got != tc.want {
+			t.Fatalf("%s: AccountSwapCarryPossible() = %v, want %v", tc.name, got, tc.want)
+		}
+	}
+}
+
+// #6817 review: the codex-home judgment follows the launch command, not the
+// enum — a program_overrides session running codex under another name still
+// writes a codex home worth reading.
+func TestSessionCodexHomeDirIdentifiesCodexFromTheLaunchCommand(t *testing.T) {
+	home := t.TempDir()
+	repo := initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, "t", "main", "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{
+		Program:        tmux.ProgramClaude, // enum lies: the launch runs codex
+		Path:           repo,
+		runtimeProgram: "env CODEX_HOME=" + home + " codex",
+	}
+	inst.SetGitWorktreeForTest(gw)
+	if got := inst.SessionCodexHomeDir(); got != home {
+		t.Fatalf("SessionCodexHomeDir() = %q, want %q", got, home)
+	}
+	// And the mirror: enum codex whose launch command is a plain shell has
+	// no codex home to read.
+	shell := &Instance{
+		Program:        tmux.ProgramCodex,
+		Path:           repo,
+		runtimeProgram: "./bin/sidekick",
+	}
+	shell.SetGitWorktreeForTest(gw)
+	if got := shell.SessionCodexHomeDir(); got != "" {
+		t.Fatalf("shell-launched session resolved a codex home: %q", got)
+	}
+}
