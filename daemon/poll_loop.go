@@ -115,11 +115,11 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 
 			manager.ResumeLimitedSessions()
 
-			// The turn proofs this sweep's pane watches collect are folded into
-			// durable retractions by a DEDICATED goroutine
-			// (startAccountLimitReconcileLoop), never here: the durable scan it
-			// owns is megabytes of instance rows and must never suspend this
-			// 1 Hz loop (#6776 1d, #6802 review).
+			// Usage-reading proofs for stored walls are folded into durable
+			// retractions by a DEDICATED goroutine
+			// (startAccountLimitReconcileLoop), never here: the durable scan
+			// and per-account rollout reads it owns are megabytes of work and
+			// must never suspend this 1 Hz loop (#6776 1d, #6802 review).
 
 			// Report proposal docs that changed on disk to open Docs tabs. A stat
 			// of each watched doc; it commits nothing.

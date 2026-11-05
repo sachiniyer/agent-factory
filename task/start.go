@@ -261,7 +261,7 @@ func WaitForReadyAndSubmitPrompt(
 		// so chrome in this window is this submission's work starting. A miss
 		// claims nothing; signatureless agents have no chrome to find, so
 		// they skip the watch as well.
-		if TurnSignaturedAgent(instance.ResolvedAgent()) &&
+		if turnSignaturedAgent(instance.ResolvedAgent()) &&
 			(status == session.PromptSentUnverified ||
 				(status == session.PromptDelivered && instance.RunGateActive())) &&
 			submittedTurnVisible(ctx, instanceReadinessTarget{inst: instance}) {

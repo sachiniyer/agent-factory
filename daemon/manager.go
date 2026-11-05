@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/rateindex"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
@@ -618,16 +619,12 @@ type Manager struct {
 	// re-verifying ambiguous account-swap notice verdicts — one per committed
 	// swap, keyed by stableSessionKey like unverifiedSendWatches (#6767).
 	pendingSwapNoticeWatches map[string]*pendingSwapNoticeWatch
-	// accountTurnWatches holds each named-account session's chrome watcher —
-	// the stateful detector that proves "the agent ran a turn under this
-	// account at <instant>" (#6776 1d). Keyed by stableSessionKey, rebuilt
-	// when the (agent, account) signature changes, reclaimed by
-	// sweepAccountTurnWatches. Guarded by pausedMu.
-	accountTurnWatches map[string]*accountTurnWatchEntry
-	// accountLimitProofs accumulates positive proof instants per (agent,
-	// account) until reconcileAccountLimitProofs folds them into durable
-	// retractions. Guarded by pausedMu.
-	accountLimitProofs map[accountLimitProofKey]time.Time
+	// rateIndexer is the bounded rollout-store reader the account-limit proof
+	// reconcile refreshes per walled account (#6776 1d). Its per-file memo is
+	// the reason an every-45s cadence is cheap: an unchanged file costs zero
+	// bytes on the next pass. Built lazily by usageIndexer and touched only
+	// from that goroutine — no lock.
+	rateIndexer *rateindex.Indexer
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
@@ -838,8 +835,6 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		taskRunTurnWatches:        make(map[string]*taskRunTurnWatchEntry),
 		unverifiedSendWatches:     make(map[string]map[string]*unverifiedSendWatch),
 		pendingSwapNoticeWatches:  make(map[string]*pendingSwapNoticeWatch),
-		accountTurnWatches:        make(map[string]*accountTurnWatchEntry),
-		accountLimitProofs:        make(map[accountLimitProofKey]time.Time),
 		instanceOpLocks:           make(map[string]*sync.Mutex),
 		pausedPolls:               make(map[string]map[string]time.Time),
 		taskRunProbeDue:           make(map[string]time.Time),

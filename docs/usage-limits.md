@@ -430,16 +430,23 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   when af currently observes one of its sessions at a limit; absence of that
   observation is not presented as a provider guarantee. A recorded wall ends
   exactly two ways: when its claimed reset passes (plus the short rolling-window
-  grace), or when the daemon watches a session under that exact account begin
-  a confirmed turn after the wall was last seen — positive proof it is serving
-  again, kept as a retraction in the same ledger so one stale sighting cannot
-  exclude a recovered account for days. A turn already in flight when the wall
-  was sighted never counts: the proof must be a request the account accepted
-  after it. And because the proof must postdate a claimed reset too, retraction
-  mainly frees walls that named none — a wall that named one cannot be
-  retracted before that instant, and by then it expires on its own. Nothing
-  else ends a wall: not an idle or uncaptured pane, not a timeout, and never
-  the mere absence of a wall. A wall sighted after the proof is the newer fact
+  grace), or when the account's own usage record — the `rate_limits` snapshot
+  codex writes into its rollout store — reports every window below the
+  configured wall at a record time after the wall was last seen, which is
+  positive proof it is serving again. That proof is kept as a retraction in the
+  same ledger so one stale sighting cannot exclude a recovered account for
+  days, and it is ordered by the record's own timestamp, never by when af
+  happened to read it. Only a verified usage reading counts: today that is
+  codex alone, so a claude, devin, or other agent's wall still ends at its
+  claimed reset — or never, when none was claimed. Records an account
+  inherited from a copied transcript prefix are the source account's numbers
+  and prove nothing here. Pane chrome, busy indicators, a delivered prompt,
+  and idle or attached pane state prove nothing either — none of them shows
+  the account accepted a request. And because the proof must postdate a
+  claimed reset too, retraction mainly frees walls that named none — a wall
+  that named one cannot be retracted before that instant, and by then it
+  expires on its own. Nothing else ends a wall: not a timeout, and never the
+  mere absence of a wall. A wall sighted after the proof is the newer fact
   and excludes again, and a session parked at its own `[limit]` stays parked —
   retraction clears the stored record admission consults, never a live wall.
 - **Visible in the session.** The first prompt after replacement names the old

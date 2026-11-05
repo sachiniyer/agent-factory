@@ -72,7 +72,7 @@ func BeginSendConfirmation(ctx context.Context, target ReadinessTarget) *SendCon
 	c := &SendConfirmation{target: target, sentAt: sentAt}
 	agent := target.ResolvedAgent()
 	c.agent = agent
-	if !TurnSignaturedAgent(agent) {
+	if !turnSignaturedAgent(agent) {
 		return c
 	}
 	before, err := target.PreviewContent(ctx)
@@ -145,7 +145,7 @@ func (c *SendConfirmation) Confirm(ctx context.Context) bool {
 // the send can never satisfy either contract, so nothing weaker is promoted.
 // Nil for an agent with no in-turn signature — there is nothing to prove.
 func (c *SendConfirmation) ReverifyWatch() *TurnWatch {
-	if c == nil || !TurnSignaturedAgent(c.agent) {
+	if c == nil || !turnSignaturedAgent(c.agent) {
 		return nil
 	}
 	if c.watch != nil && !c.seedStale {

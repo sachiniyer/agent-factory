@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -138,28 +139,36 @@ func readAccountLimitLedger(path string) (accountLimitEvidence, error) {
 			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit observation with an empty agent or account", path)
 		}
 	}
-	// A malformed retraction is treated exactly like a malformed wall: the
-	// file's integrity is in doubt, and "the ledger could not be read" must
-	// never collapse into "nothing is walled" — fail closed at admission.
+	// Observations and retractions get OPPOSITE failure postures, because
+	// they move admission in opposite directions: a damaged wall means the
+	// file's exclusions cannot be trusted — fail closed. A damaged or
+	// untrustworthy retraction can only ever FREE an account wrongly, so it
+	// loses its power instead — dropped from the read, never allowed to
+	// break it (#6802 review: failing the whole ledger on one questionable
+	// proof would block kills, handoffs and rotation on, e.g., an ordinary
+	// clock correction). Whatever survives the filter below is a well-formed
+	// claim; whatever does not can defeat nothing.
+	retractions := make([]session.AccountLimitRetractionData, 0, len(ledger.Retractions))
 	for idx := range ledger.Retractions {
-		retraction := &ledger.Retractions[idx]
+		retraction := ledger.Retractions[idx]
 		retraction.Agent = strings.TrimSpace(retraction.Agent)
 		retraction.Account = strings.TrimSpace(retraction.Account)
-		if retraction.Agent == "" || retraction.Account == "" {
-			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit retraction with an empty agent or account", path)
+		// An unscoped or untimed retraction cannot order against anything —
+		// the predicate already gives it no power, so keeping or dropping it
+		// is equivalent; dropping keeps the fold's input clean.
+		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
+			continue
 		}
-		if retraction.ProvenAt.IsZero() {
-			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit retraction with no proof time", path)
-		}
-		// A future-dated proof is impossible by construction — turn bounds are
-		// always in the past — so one on disk means a forward-jumped clock or a
-		// tampered file; either way its ordering claim is untrustworthy, and it
-		// must never get to defeat walls sighted before its fantasy instant.
+		// A future-dated proof is untrustworthy — a forward-jumped clock
+		// wrote it, or the clock corrected back after a well-formed write.
+		// Its ordering claim is unprovable, so it is ignored for freeing
+		// walls while the rest of the file still loads.
 		if retraction.ProvenAt.After(nowFunc()) {
-			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit retraction dated in the future", path)
+			continue
 		}
+		retractions = append(retractions, retraction)
 	}
-	return accountLimitEvidence{Observations: ledger.Observations, Retractions: ledger.Retractions}, nil
+	return accountLimitEvidence{Observations: ledger.Observations, Retractions: retractions}, nil
 }
 
 // retainAccountLimitObservations durably merges evidence before its session
@@ -226,10 +235,12 @@ func retractAccountLimitObservations(retractions []session.AccountLimitRetractio
 		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
 			return fmt.Errorf("account-limit retraction needs a named identity and a proof time")
 		}
-		// A proof cannot carry an instant that has not happened — a turn's
-		// start bound is always in the past. Refusing future times keeps a
-		// forward clock jump from minting a tombstone that defeats every wall
-		// sighted between now and then.
+		// A proof cannot carry an instant that has not happened — a usage
+		// record's timestamp is always in the past. Refusing future times
+		// keeps a forward clock jump from minting a tombstone that defeats
+		// every wall sighted between now and then; the read path drops a
+		// stored one rather than failing, so this refusal is what keeps the
+		// file clean.
 		if retraction.ProvenAt.After(nowFunc()) {
 			return fmt.Errorf("account-limit retraction proof time must not be in the future")
 		}
@@ -283,10 +294,18 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		prior, exists := merged[key]
 		if exists {
 			observation.ResetAt = session.RetainedAccountLimitReset(prior.ResetAt, observation.ResetAt)
-			// The wall's event time is its last sighting: keep the newest
-			// across every copy of the fact, so ordering a proof against the
-			// merged record cannot be beaten by a stale duplicate (#6776 1d).
-			if prior.ObservedAt.After(observation.ObservedAt) {
+			// The wall's event time is its last sighting — but only when
+			// EVERY copy carried one. A sighting-less copy merged with a
+			// timed one must not inherit the other's instant: the untimed
+			// copy could be a wall sighted after the proof, and stamping it
+			// would invent an event time the fact never had — one an older
+			// retraction could then order itself against (#6802 review). Any
+			// untimed copy keeps the merged fact untimed; it loses to no
+			// retraction until a fresher, timed sighting lands.
+			switch {
+			case prior.ObservedAt.IsZero() || observation.ObservedAt.IsZero():
+				observation.ObservedAt = time.Time{}
+			case prior.ObservedAt.After(observation.ObservedAt):
 				observation.ObservedAt = prior.ObservedAt
 			}
 		}

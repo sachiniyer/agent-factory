@@ -47,13 +47,9 @@ var lastStatusSweepNs atomic.Int64
 // stopped launching sessions with no error at all — the cap simply read as full.
 //
 // This is deliberately a backstop, not a return to per-tick probing: the attach
-// keeps its fast path and pays one probe per interval instead of one per tick.
-// It applies while a task run is in flight — the probe that observes the run
-// finishing is also the last one it forces — while an unverified send is
-// pending (#6590), or while a named-account session on a chrome-signatured
-// agent could still mint turn proof a stale stored wall needs (#6776 1d):
-// account evidence expires on the wall's clock, not the attach's, so pausing
-// its collection for the whole attach would leave walls it could have refuted.
+// keeps its fast path and pays one probe per interval instead of one per tick. It
+// is also self-limiting — it applies ONLY while a task run is in flight, so the
+// probe that observes the run finishing is also the last one it forces.
 //
 // A var so tests can shrink it; production never reassigns.
 var taskRunPollBackstop = 30 * time.Second
@@ -305,11 +301,8 @@ func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time)
 
 // observeTaskRunWhilePaused runs ONE bounded observation of an attached session
 // whose task run is still in flight, so the concurrency cap learns the run ended
-// even though the poll is paused (#1892). The same capture also feeds
-// account-limit turn proof for named-account sessions (noteAccountTurnEvidence)
-// and unverified-send re-verification (#6590) — every consumer of a paused
-// session's pane gets the one probe per interval. Called only from the pause
-// branch of refreshInstanceStatus, at most once per taskRunPollBackstop.
+// even though the poll is paused (#1892). Called only from the pause branch of
+// refreshInstanceStatus, at most once per taskRunPollBackstop.
 //
 // It can END a run and it can never conclude DEATH, and both halves are
 // deliberate:
@@ -404,9 +397,6 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	// Pending task-send re-verifications feed on the same paused-path captures
 	// (#6590) — an attached target's poll is still the daemon's.
 	m.noteUnverifiedSendEvidence(key, instance, obs, capturedAt)
-	// And the account-limit refutation watch: a named-account pane that proves
-	// its turn is the evidence stale wall observations retract on (#6776 1d).
-	m.noteAccountTurnEvidence(key, instance, obs, capturedAt)
 	if obs.Baseline || obs.Updated || obs.HasPrompt {
 		// Updated/prompt proves the run remains active; a baseline cannot establish
 		// that it finished. Either way, the cap has no completion to learn this tick.
@@ -481,7 +471,6 @@ func (m *Manager) RefreshStatuses() {
 	m.sweepPausedPollState()
 	m.sweepTaskRunTurnWatches()
 	m.sweepUnverifiedSendWatches()
-	m.sweepAccountTurnWatches()
 
 	// Worktree presence first, on its own bounded fan-out (#5102): it is a
 	// filesystem probe, not a tmux one, and running it inline here would let one
@@ -647,11 +636,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// attached pane's unobserved turn would otherwise expire the watch
 		// unanswered even though the queued draft was answered under it
 		// (#6592 review).
-		// So does a named-account session that could still produce turn
-		// proof: an interactive turn completed under the attach would
-		// otherwise leave no evidence a stale stored wall can retract on
-		// (#6802 review).
-		if (instance.TaskRunObservable(nowFunc()) || m.unverifiedSendWatchPending(stableSessionKey(repoID, instance)) || accountTurnProofObservable(instance)) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
+		if (instance.TaskRunObservable(nowFunc()) || m.unverifiedSendWatchPending(stableSessionKey(repoID, instance))) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}
@@ -802,9 +787,6 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 	// verdict (#6590): its watch fires only on the send-bound turn evidence,
 	// and a fire promotes the task's recorded sent-unverified to sent.
 	m.noteUnverifiedSendEvidence(key, instance, obs, capturedAt)
-	// And the account-limit refutation watch: a named-account pane that proves
-	// its turn is the evidence stale wall observations retract on (#6776 1d).
-	m.noteAccountTurnEvidence(key, instance, obs, capturedAt)
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
 	// unanswerable probes, not "looks dead" observations.

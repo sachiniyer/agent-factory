@@ -79,34 +79,35 @@ type AccountLimitObservationData struct {
 	Agent   string    `json:"agent"`
 	Account string    `json:"account"`
 	ResetAt time.Time `json:"reset_at,omitempty"`
-	// ObservedAt is the last instant af SAW this wall — the fact's own event
-	// time, which is what a retraction is ordered against. ResetAt is the
-	// provider's claimed boundary and can be far from when the banner appeared
-	// (a lagging banner may claim a reset already past), so it cannot stand in
-	// for the sighting. Zero on rows written before the field existed — or
-	// dropped by an older binary's rewrite — and a sighting-less observation
-	// orders against no retraction at all: see AccountLimitObservationRetracted.
+	// ObservedAt is the instant af first observed THIS wall fact — or last
+	// observed it as a new wall event, after the session left its parked
+	// state. Re-seeing the unchanged banner still displayed advances nothing
+	// (#6802 review). It is the fact's own event time, which is what a
+	// retraction is ordered against; ResetAt is the provider's claimed
+	// boundary and can be far from when the banner appeared (a lagging banner
+	// may claim a reset already past), so it cannot stand in for the
+	// sighting. Zero on rows written before the field existed — or dropped by
+	// an older binary's rewrite — and a sighting-less observation orders
+	// against no retraction at all: see AccountLimitObservationRetracted.
 	ObservedAt time.Time `json:"observed_at,omitempty"`
 }
 
 // AccountLimitRetractionData is durable positive proof that an account was
-// serving traffic no earlier than ProvenAt — the earliest instant a confirmed
-// turn under it could have begun, or a reading clearly below the wall after
-// the claimed reset (#4404, epic #6776). It never rewrites the observation:
-// both facts are kept, and admission decides which is newer by the time each
-// happened. That ordering is what makes a retraction safe against a fresh
-// wall — the wall's own ObservedAt outranks an older proof — and it is why a
-// retraction is written only on positive proof, never on absence of evidence,
-// a timeout, or an unknown reading.
+// serving traffic at ProvenAt — the record timestamp of a usage reading the
+// account's own store shows below the wall (#4404, epic #6776). It never
+// rewrites the observation: both facts are kept, and admission decides which
+// is newer by the time each happened. That ordering is what makes a
+// retraction safe against a fresh wall — the wall's own ObservedAt outranks
+// an older proof — and it is why a retraction is written only on positive
+// proof, never on absence of evidence, a timeout, an unknown reading, or a
+// busy pane (#6802 review: pane frames are not accepted-request evidence).
 type AccountLimitRetractionData struct {
 	Agent   string `json:"agent"`
 	Account string `json:"account"`
-	// ProvenAt is a LOWER bound on service time, not the instant af noticed:
-	// for a turn proof it is the earliest instant that turn could have begun
-	// (the frame that armed the watch, or the ticking row's own elapsed
-	// subtracted from its capture). Ordering against it proves the turn began
-	// after the wall; a turn already RUNNING when the wall was sighted keeps
-	// its pre-wall bound and can never retract it.
+	// ProvenAt is the usage record's own timestamp: ordering runs on when the
+	// provider made the claim, never on when af happened to read it. A
+	// reading recorded before the wall's last sighting is the older fact and
+	// retracts nothing.
 	ProvenAt time.Time `json:"proven_at"`
 }
 

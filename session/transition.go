@@ -794,7 +794,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
 		i.attributeLimitIdentityLocked()
-		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt)
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt, false)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).

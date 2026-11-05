@@ -155,9 +155,24 @@ func TestAccountLimitObservationUnpersistedTracksTheWrite(t *testing.T) {
 	require.False(t, i.AccountLimitObservationsUnpersisted(),
 		"a write carrying the current list clears the flag")
 
+	// Re-seeing the SAME parked wall is not a fact change: the sighting
+	// instant is the fact's own event time, and the banner still displayed
+	// adds nothing a retraction must beat — nothing mutates, nothing flags
+	// (#6802 review).
+	before := i.AccountLimitObservations()
+	i.SetLimitReached(time.Time{})
+	require.Equal(t, before, i.AccountLimitObservations(),
+		"an unchanged parked re-sight must not move the fact's event time")
+	require.False(t, i.AccountLimitObservationsUnpersisted(),
+		"an unchanged parked re-sight must never become a write")
+
+	// But a wall sighted after the session left its parked state IS a new
+	// wall event — the account recovered and hit the limit again — so the
+	// sighting advances and the change is durable.
+	i.ClearLimitReached()
 	i.SetLimitReached(time.Time{})
 	require.True(t, i.AccountLimitObservationsUnpersisted(),
-		"a re-sighting after the write is pending again")
+		"a wall sighted after recovery is a new fact, pending a write")
 }
 
 // A known-reset wall and a no-reset wall are different claims: merging them
