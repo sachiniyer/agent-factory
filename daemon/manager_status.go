@@ -355,6 +355,7 @@ func (m *Manager) observeTaskRunWhilePaused(repoID, key string, instance *sessio
 	if observedOp != session.OpNone {
 		return
 	}
+	m.noteHandoffObservation(key, err == nil && obs.Captured, obs.Content)
 	if err != nil {
 		// A transport error is the same blind window a failed capture is: the
 		// streak must break here too, not merely fail to extend, or the next
@@ -706,6 +707,7 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		instance.ClearUnreachable()
 		return
 	}
+	m.noteHandoffObservation(key, err == nil && obs.Captured, obs.Content)
 	if err != nil {
 		// The observation probe failed. The local agent-server never errors here,
 		// so this is the REMOTE runtime's path (#1592 Phase 4): the REST call to

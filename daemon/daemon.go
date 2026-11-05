@@ -530,6 +530,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// The account-limit proof reconcile owns a durable scan far too heavy for
 	// the 1 Hz poll goroutine; it runs on its own ticker (#6776 1d).
 	startAccountLimitReconcileLoop(manager, stopCh, wg)
+	// The shadow decision engine runs on its own ~45s ticker for the same
+	// reason; it only reads the status snapshot the poll already produced.
+	startAccountHandoffEngineLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an

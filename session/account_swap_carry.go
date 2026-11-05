@@ -71,6 +71,12 @@ func carrySupportedAgent(agent string) bool {
 	return agent == tmux.ProgramClaude || agent == tmux.ProgramCodex
 }
 
+// CarrySupportedAgent is the carry capability the handoff engine's
+// require_carry fact reads — the same provider check the swap path makes.
+func CarrySupportedAgent(agent string) bool {
+	return carrySupportedAgent(agent)
+}
+
 // AccountSwapCarryIntended reports whether a same-agent account swap would
 // ATTEMPT to carry its conversation, judging only the preconditions the
 // confirming user can know before the swap runs (#4367, #4504). It is a
