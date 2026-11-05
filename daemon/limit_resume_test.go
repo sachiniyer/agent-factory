@@ -43,6 +43,11 @@ type limitResumeBackend struct {
 	// real respawn failure returns before that transition) keeps the session
 	// limit-blocked, exactly as the production code does.
 	respawnErr error
+	// sendStatus, when set, replaces the PromptDelivered verdict
+	// SendPromptCommandWithStatus reports for a send that did not error —
+	// the #6767 fixture for a notice whose submission returned without proof
+	// it landed.
+	sendStatus session.PromptDeliveryStatus
 }
 
 func (b *limitResumeBackend) IsAlive(*session.Instance) (bool, error) {
@@ -109,6 +114,12 @@ func (b *limitResumeBackend) SendPromptCommandWithStatus(
 	err := b.SendPromptCommand(i, prompt)
 	if err != nil {
 		return session.PromptCouldNotConfirm, err
+	}
+	b.mu.Lock()
+	status := b.sendStatus
+	b.mu.Unlock()
+	if status != "" {
+		return status, nil
 	}
 	return session.PromptDelivered, nil
 }

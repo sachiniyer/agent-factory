@@ -559,7 +559,7 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 	canRetry := selected.CanRetryPendingManualAccountSwapDelivery() ||
 		selected.CanRetryPendingHandoffMissionDelivery()
 	canConfirm := selected.CanConfirmPendingHandoffDelivery() ||
-		selected.CanConfirmPendingManualAccountSwapDelivery()
+		selected.CanConfirmPendingAccountSwapDelivery()
 	if !selected.LimitReached() && !canRetry && !canConfirm {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is not blocked on a usage limit", selected.Title))
 	}

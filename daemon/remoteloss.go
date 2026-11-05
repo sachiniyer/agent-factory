@@ -364,6 +364,10 @@ func (m *Manager) noteRuntimeReplaced(repoID string, instance *session.Instance)
 	// can never feed its watch — the send's turn evidence, if it ever came,
 	// came on the dead pane.
 	delete(m.unverifiedSendWatches, key)
+	// The same for a pending swap-notice re-verification (#6767): its verdict
+	// stays durable, but the replacement pane cannot produce evidence for the
+	// dead pane's send.
+	delete(m.pendingSwapNoticeWatches, key)
 	m.pausedMu.Unlock()
 	// If the replacement's ConfirmLive interrupted a still-in-flight task run
 	// (#4222), stamp the owning task's status here — the post-operation
@@ -431,6 +435,7 @@ func (m *Manager) settleRemoteProbeFailure(
 	generation session.AgentObservationGeneration,
 	before session.Liveness,
 	beforeReset time.Time,
+	beforeEvidence string,
 	epoch uint64,
 	probeErr error,
 ) {
@@ -499,7 +504,7 @@ func (m *Manager) settleRemoteProbeFailure(
 		return
 	}
 	_ = instance.Transition(session.ObserveLiveness(session.LiveLost).AtEpoch(epoch))
-	m.persistPollChange(repoID, instance, before, beforeReset, false)
+	m.persistPollChange(repoID, instance, before, beforeReset, beforeEvidence, false)
 }
 
 // livenessProbe is the outcome of a liveness probe. It is a tri-state, not a

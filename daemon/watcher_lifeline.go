@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -131,11 +132,7 @@ func (s *watcherSupervisor) startWatchProcess(taskID, script string, stop <-chan
 			// including a probe hold a racing failed probe just stored
 			// (lifelineUnusable): it must not keep suppressing probes the
 			// answer just proved will succeed.
-			if s.lifelineUnsupported.Swap(false) {
-				log.InfoLog.Printf("watch task %s: %s speaks the watch lifeline protocol again; "+
-					"watch commands run under the lifeline", taskID, exe)
-			}
-			s.lifelineProbeHold.Store(0)
+			s.noteLifelineSpoke(taskID, exe)
 			return cmd, lifeline, err
 		}
 		// A stopped watcher never falls back: its run must not start at all.
@@ -248,6 +245,39 @@ func drainProbeOutput(outputs []*os.File) string {
 	return strings.Join(strings.Fields(b.String()), " ")
 }
 
+// noteLifelineSpoke records that a probe — a leader probe at a run start, or
+// a member bind — answered the protocol: the degradation state clears and
+// every binder waiting out the window wakes.
+func (s *watcherSupervisor) noteLifelineSpoke(taskID, exe string) {
+	if s.lifelineUnsupported.Swap(false) {
+		log.InfoLog.Printf("watch task %s: %s speaks the watch lifeline protocol again; "+
+			"watch commands run under the lifeline", taskID, exe)
+	}
+	s.lifelineProbeHold.Store(0)
+	s.announceLifelineRearm()
+}
+
+// lifelineRearmCh returns the channel the next successful probe closes.
+func (s *watcherSupervisor) lifelineRearmCh() <-chan struct{} {
+	s.rearmMu.Lock()
+	defer s.rearmMu.Unlock()
+	if s.lifelineRearm == nil {
+		s.lifelineRearm = make(chan struct{})
+	}
+	return s.lifelineRearm
+}
+
+// announceLifelineRearm wakes every binder waiting out a degraded window: a
+// probe just proved the binary speaks the protocol, so the window has ended.
+func (s *watcherSupervisor) announceLifelineRearm() {
+	s.rearmMu.Lock()
+	defer s.rearmMu.Unlock()
+	if s.lifelineRearm != nil {
+		close(s.lifelineRearm)
+		s.lifelineRearm = nil
+	}
+}
+
 // lifelineUnusable records that a lifeline probe failed and holds probing for
 // watchLifelineProbeRetry — never permanently, since a transient launcher
 // failure reads exactly like a missing protocol — and warns once per
@@ -263,6 +293,212 @@ func (s *watcherSupervisor) lifelineUnusable(taskID, exe, reason string) {
 		"This usually means the af binary at that path was replaced while this daemon was running, or that the "+
 		"launcher (such as systemd-run) failed transiently; if the warning repeats, "+
 		"restart the daemon (af daemon restart) so it runs the installed binary", taskID, exe, reason, watchLifelineProbeRetry)
+}
+
+// startWatchMemberLifeline spawns `af __watch-lifeline v1 member` INTO an
+// already-running watch command's process group — the late bind for a run
+// that started while the lifeline was degraded (#6771). A member supervises
+// from inside: its own membership pins the group's number for as long as it
+// lives — the same property the group anchor relies on — so the group signal
+// it sends on daemon death can only ever name this run's group. The armed
+// ack proves both the protocol and the join before the run is called bound.
+//
+// On any failure the spawned process is killed by its OWN pid, never by the
+// group's number: it is already a member of the run's group, so kill(-pid)
+// would hit the run itself.
+func (s *watcherSupervisor) startWatchMemberLifeline(pgid int, halt <-chan struct{}) (*exec.Cmd, *watchLifeline, error) {
+	lifelineR, lifelineW, err := os.Pipe()
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to create watch lifeline pipe: %w", err)
+	}
+	ackR, ackW, err := os.Pipe()
+	if err != nil {
+		_ = lifelineR.Close()
+		_ = lifelineW.Close()
+		return nil, nil, fmt.Errorf("failed to create watch lifeline ack pipe: %w", err)
+	}
+	cmd := systemdunit.NewBoundChildCommand(s.lifelineExe, watchlifeline.MemberArgv(s.stopGrace)...)
+	// Member, not leader — the run's shell already leads this group. The
+	// member gets none of the run's pipes or environment: it is a supervisor
+	// child only, and anything a failed attempt prints is not the task's
+	// output.
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	cmd.Stderr = os.Stderr
+	cmd.ExtraFiles = []*os.File{lifelineR, ackW}
+	startErr := cmd.Start()
+	_ = lifelineR.Close()
+	_ = ackW.Close()
+	if startErr != nil {
+		_ = lifelineW.Close()
+		_ = ackR.Close()
+		return nil, nil, fmt.Errorf("cannot exec it: %w", startErr)
+	}
+	acks := bufio.NewReader(ackR)
+	line, ackErr := readWatchLifelineAck(ackR, acks, watchLifelineAckTimeout, halt)
+	if !watchlifeline.ParseMemberAck(line) {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+		_ = lifelineW.Close()
+		_ = ackR.Close()
+		if errors.Is(ackErr, errWatchStopped) {
+			return nil, nil, errWatchStopped
+		}
+		return nil, nil, fmt.Errorf("no member ack: %s", describeWatchLifelineAck(line, ackErr, cmd))
+	}
+	return cmd, &watchLifeline{keep: lifelineW, ackR: ackR, acks: acks}, nil
+}
+
+// watchLifelineBinder re-binds a run that started without a lifeline (#6771):
+// while the run lives it retries joining a member lifeline to the run's
+// process group, woken each time a probe proves the binary speaks the
+// protocol again and paced at the probe cadence otherwise — so the run does
+// not stay unbound once the degraded window has ended.
+//
+// abort ends attempts: it closes when the run ends (done), when the watcher
+// stops (stop), or when the run's reaper is about to free the group's number
+// (stopAttempts) — a member must never setpgid into a number the group no
+// longer pins, since it may have been reused for an unrelated group.
+// attemptsSettled closes once no attempt can ever run again — when the
+// binder is bound, parked, or gone — which is what stopAttempts joins.
+type watchLifelineBinder struct {
+	sup             *watcherSupervisor
+	taskID          string
+	pgid            int
+	stop            <-chan struct{}
+	done            chan struct{}
+	abort           chan struct{}
+	abortOnce       sync.Once
+	attemptsSettled chan struct{}
+	settleOnce      sync.Once
+	joined          chan struct{}
+	doneOnce        sync.Once
+}
+
+// startWatchLifelineBinder launches the binder for a run that spawned
+// directly. pgid is the run's process group — its leader's pid.
+func (s *watcherSupervisor) startWatchLifelineBinder(taskID string, pgid int, stop <-chan struct{}) *watchLifelineBinder {
+	b := &watchLifelineBinder{
+		sup:             s,
+		taskID:          taskID,
+		pgid:            pgid,
+		stop:            stop,
+		done:            make(chan struct{}),
+		abort:           make(chan struct{}),
+		attemptsSettled: make(chan struct{}),
+		joined:          make(chan struct{}),
+	}
+	// done and stop both end attempts; abort unifies them with the reaper's
+	// halt so the in-flight attempt sees one shutdown channel.
+	go func() {
+		select {
+		case <-b.done:
+		case <-stop:
+		case <-b.abort:
+		}
+		b.signalAbort()
+	}()
+	go b.run()
+	return b
+}
+
+func (b *watchLifelineBinder) signalAbort() {
+	b.abortOnce.Do(func() { close(b.abort) })
+}
+
+func (b *watchLifelineBinder) settle() {
+	b.settleOnce.Do(func() { close(b.attemptsSettled) })
+}
+
+// stopAttempts ends and joins the binder's retries while the run's group
+// number is still pinned — called from the reap callback, before the group
+// kill frees it. After it returns no member can ever setpgid into the
+// (possibly reused) number; a bound member stays armed until finish.
+func (b *watchLifelineBinder) stopAttempts() {
+	b.signalAbort()
+	<-b.attemptsSettled
+}
+
+// finish ends the binder when the run is over and joins it. A bound member
+// is disarmed by closing its daemon-held pipes first — the EOF gives the
+// group the TERM-then-KILL the run's own cleanup may have skipped — then it
+// is reaped through a bounded wait, with its own pid's SIGKILL as backstop;
+// never kill(-pgid), which is the run's group, not the member's alone.
+func (b *watchLifelineBinder) finish() {
+	b.doneOnce.Do(func() { close(b.done) })
+	<-b.joined
+}
+
+func (b *watchLifelineBinder) run() {
+	defer close(b.joined)
+	var member *exec.Cmd
+	var ll *watchLifeline
+	defer func() {
+		if ll != nil {
+			ll.Close()
+		}
+		if member != nil {
+			doneWait := make(chan error, 1)
+			go func() { doneWait <- member.Wait() }()
+			select {
+			case <-doneWait:
+			case <-time.After(2*b.sup.stopGrace + 5*time.Second):
+				_ = member.Process.Kill()
+				<-doneWait
+			}
+		}
+	}()
+	// Registered after the cleanup above so it runs BEFORE it: attempts have
+	// already ended once this point is reached, and stopAttempts' join must
+	// not wait on a bound member's disarm.
+	defer b.settle()
+	s := b.sup
+	for {
+		select {
+		case <-b.abort:
+			return
+		default:
+		}
+		// Register for the next re-arm BEFORE the attempt, so a probe that
+		// succeeds during it lands in the wait below instead of being missed.
+		rearmed := s.lifelineRearmCh()
+		cmd, l, err := s.startWatchMemberLifeline(b.pgid, b.abort)
+		switch {
+		case err == nil:
+			member, ll = cmd, l
+			// Bound is final — no further attempts, so no setpgid can ever
+			// race the group's release. The member's pipes stay held until
+			// the run's own teardown finishes: it dies with the group it
+			// joined, and finish() reaps it.
+			b.settle()
+			s.noteLifelineSpoke(b.taskID, s.lifelineExe)
+			log.InfoLog.Printf("watch task %s: bound a watch lifeline to the running watch command "+
+				"(pid %d); it is covered against an unclean daemon death again", b.taskID, b.pgid)
+			select {
+			case <-b.done:
+			case <-b.stop:
+			}
+			return
+		case errors.Is(err, errWatchStopped):
+			return
+		default:
+			// Once per daemon, not once per run: N unbound runs reporting the
+			// same degradation is noise — like lifelineUnusable, but scoped to
+			// member binds so an older binary that speaks only the leader
+			// protocol does not suppress those probes too.
+			if !s.lifelineMemberWarned.Swap(true) {
+				log.WarningLog.Printf("watch task %s: cannot bind a watch lifeline to the running "+
+					"watch command's process group (%v); retrying — the run stays without daemon-death "+
+					"cover until a bind succeeds", b.taskID, err)
+			}
+			timer := time.NewTimer(watchLifelineProbeRetry)
+			select {
+			case <-b.abort:
+			case <-rearmed:
+			case <-timer.C:
+			}
+			timer.Stop()
+		}
+	}
 }
 
 // readWatchLifelineAck reads one line from the ack pipe f through its reader

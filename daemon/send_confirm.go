@@ -267,7 +267,7 @@ func (m *Manager) sweepUnverifiedSendWatches() {
 	// window re-arm once here (#6590).
 	m.sendReverifyRearmOnce.Do(m.rearmUnverifiedSendWatches)
 	m.pausedMu.Lock()
-	size := len(m.unverifiedSendWatches)
+	size := len(m.unverifiedSendWatches) + len(m.pendingSwapNoticeWatches)
 	m.pausedMu.Unlock()
 	if size == 0 {
 		return // nothing armed: skip the instance walk in the common case
@@ -294,6 +294,14 @@ func (m *Manager) sweepUnverifiedSendWatches() {
 		}
 		if len(byTask) == 0 {
 			delete(m.unverifiedSendWatches, key)
+		}
+	}
+	// The swap-notice watches share the poll feed (#6767): same liveness and
+	// expiry hygiene. Lazy re-arm in notePendingSwapNoticeEvidence covers
+	// restart, so no rearm pass is needed for these.
+	for key, entry := range m.pendingSwapNoticeWatches {
+		if _, ok := live[key]; !ok || !now.Before(entry.expiresAt) {
+			delete(m.pendingSwapNoticeWatches, key)
 		}
 	}
 }

@@ -137,7 +137,7 @@ func TestResolvingAnIdleOwedMissionEndsTheRunOnTheNextIdlePoll(t *testing.T) {
 		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 		require.True(t, inst.TaskRunActive(), "precondition: the owed notice held the idle edge")
 
-		require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("work", "personal"))
+		require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
 		require.NoError(t, inst.Transition(ObserveLiveness(LiveReady)))
 
 		require.False(t, inst.TaskRunActive(),

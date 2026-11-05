@@ -46,7 +46,7 @@ func TestPollPersistsALateReportedConversation(t *testing.T) {
 	require.True(t, inst.ConversationUnpersisted())
 
 	// No liveness change, no reset change, no checkpoint: only the report.
-	manager.persistPollChangeWithIdleEvidence(repoID, inst, inst.GetLiveness(), inst.ToInstanceData().LimitResetAt, false, false)
+	manager.persistPollChangeWithIdleEvidence(repoID, inst, inst.GetLiveness(), inst.ToInstanceData().LimitResetAt, inst.LimitResetEvidence(), false, false)
 
 	got := persistedConversation()
 	require.NotNil(t, got, "the reported identity must be durable after the next poll")

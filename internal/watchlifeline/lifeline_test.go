@@ -230,6 +230,155 @@ func TestGroupSIGTERMDoesNotOrphanTheScript(t *testing.T) {
 	waitGone(t, shell, 5*time.Second, "TERM-ignoring watch shell")
 }
 
+// TestMemberArmsAndKillsGroupOnDaemonDeath is the late-bind half of #6771: a
+// member lifeline spawned INTO an already-running group's process group acks
+// armed, then on the daemon-held pipe's EOF gives that group the same
+// TERM-then-KILL a leader would — including itself.
+func TestMemberArmsAndKillsGroupOnDaemonDeath(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	const grace = 300 * time.Millisecond
+
+	// The run already going: a TERM-ignoring shell leading its own group,
+	// with a TERM-ignoring backgrounded child — what a directly-spawned run
+	// looks like when the window ends.
+	shell := exec.Command("sh", "-c", `trap "" TERM; sh -c 'trap "" TERM; echo $$ >&3; exec sleep 300' & while :; do sleep 0.05; done`)
+	shell.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	childR, childW, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	shell.ExtraFiles = []*os.File{childW}
+	if err := shell.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = childW.Close()
+	pgid := shell.Process.Pid
+	t.Cleanup(func() {
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		_ = shell.Wait()
+		_ = childR.Close()
+	})
+	childLine, err := bufio.NewReader(childR).ReadString('\n')
+	if err != nil {
+		t.Fatalf("read the run's backgrounded child pid: %v", err)
+	}
+	child, err := strconv.Atoi(strings.TrimSpace(childLine))
+	if err != nil {
+		t.Fatalf("parse child pid %q: %v", childLine, err)
+	}
+	_ = childR.Close()
+
+	lr, lw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ar, aw, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	member := exec.Command(exe, MemberArgv(grace)...)
+	member.SysProcAttr = &syscall.SysProcAttr{Setpgid: true, Pgid: pgid}
+	member.ExtraFiles = []*os.File{lr, aw}
+	if err := member.Start(); err != nil {
+		t.Fatalf("the member could not join the run's group: %v", err)
+	}
+	_ = lr.Close()
+	_ = aw.Close()
+	memberDone := make(chan error, 1)
+	go func() { memberDone <- member.Wait() }()
+	t.Cleanup(func() {
+		_ = member.Process.Kill()
+		_ = lw.Close()
+		_ = ar.Close()
+	})
+
+	line, _ := bufio.NewReader(ar).ReadString('\n')
+	if !ParseMemberAck(line) {
+		t.Fatalf("member ack %q, want %q", line, AckMemberArmed)
+	}
+	time.Sleep(100 * time.Millisecond) // let the shell install its trap
+
+	// Daemon death: the kernel closes the daemon's write end.
+	_ = lw.Close()
+
+	waitGone(t, child, grace+5*time.Second, "the run's TERM-ignoring child")
+	waitGone(t, shell.Process.Pid, 5*time.Second, "the run's leader")
+	select {
+	case <-memberDone:
+		killedByOwnGroup(t, member.ProcessState)
+	case <-time.After(grace + 5*time.Second):
+		t.Fatal("member still running after its own group kill")
+	}
+}
+
+// TestMemberRefusesAsLeader: a member-mode lifeline spawned as a group
+// leader supervises a group that holds only itself — acking would claim a
+// coverage nothing received, so it must refuse without an ack.
+func TestMemberRefusesAsLeader(t *testing.T) {
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	lr, lw, _ := os.Pipe()
+	ar, aw, _ := os.Pipe()
+	defer lw.Close()
+	defer ar.Close()
+	cmd := exec.Command(exe, MemberArgv(time.Second)...)
+	cmd.ExtraFiles = []*os.File{lr, aw}
+	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	_ = lr.Close()
+	_ = aw.Close()
+	line, _ := io.ReadAll(ar)
+	_ = cmd.Wait()
+	if code := cmd.ProcessState.ExitCode(); code != ExitUsage || len(line) != 0 {
+		t.Fatalf("member spawned as group leader: %v, ack %q; want exit %d and no ack", cmd.ProcessState, line, ExitUsage)
+	}
+}
+
+// TestMemberArgvParses covers the member argv shape and its malformed forms.
+func TestMemberArgvParses(t *testing.T) {
+	inv, err := parse(MemberArgv(1500 * time.Millisecond))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !inv.member || inv.grace != 1500*time.Millisecond {
+		t.Fatalf("parsed %+v, want member grace 1.5s", inv)
+	}
+	for _, bad := range [][]string{
+		{Arg, Protocol, "member"},
+		{Arg, Protocol, "member", "x"},
+		{Arg, Protocol, "member", "-1"},
+		{Arg, Protocol, "member", "100", "extra"},
+		{Arg, Protocol, "member", "--"},
+	} {
+		if _, err := parse(bad); err == nil {
+			t.Fatalf("parse(%q) accepted a malformed member argv", bad)
+		}
+	}
+}
+
+func TestParseMemberAck(t *testing.T) {
+	for _, c := range []struct {
+		line  string
+		armed bool
+	}{
+		{AckMemberArmed + "\n", true},
+		{AckStarted + "\n", false},
+		{"", false},
+		{"v2 member\n", false},
+	} {
+		if got := ParseMemberAck(c.line); got != c.armed {
+			t.Errorf("ParseMemberAck(%q) = %v, want %v", c.line, got, c.armed)
+		}
+	}
+}
+
 func TestShellStartFailureIsAcked(t *testing.T) {
 	exe, err := os.Executable()
 	if err != nil {

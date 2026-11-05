@@ -8,7 +8,7 @@ import (
 
 // #6768: the pending account-swap record holds the conversation outcome only
 // until its delivery obligation retires — ClearPendingAccountSwap and
-// ConfirmPendingManualAccountSwapDelivery both delete it. The answer the
+// ConfirmPendingAccountSwapDelivery both delete it. The answer the
 // caller reads afterwards lives on the handoff ledger entry, so retiring the
 // record must stamp it there first.
 func TestPendingSwapRetirementStampsTheLedgerConversation(t *testing.T) {
@@ -78,7 +78,7 @@ func TestPendingSwapRetirementStampsOnlyItsOwnEntry(t *testing.T) {
 
 // The operator-attestation path retires the same record and owes the same
 // stamp.
-func TestConfirmPendingManualAccountSwapDeliveryStampsTheLedger(t *testing.T) {
+func TestConfirmPendingAccountSwapDeliveryStampsTheLedger(t *testing.T) {
 	inst := &Instance{Title: "t"}
 	inst.Tabs = []*Tab{{Handoffs: []AgentHandoff{{ToAccount: "work"}}}}
 	inst.pendingAccountSwap = &AccountSwapData{
@@ -87,7 +87,7 @@ func TestConfirmPendingManualAccountSwapDeliveryStampsTheLedger(t *testing.T) {
 		MissionDeliveryStatus:   PromptDelivered,
 		CarryFallback:           "its transcript is missing",
 	}
-	require.NoError(t, inst.ConfirmPendingManualAccountSwapDelivery("personal", "work"))
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("personal", "work"))
 	require.Equal(t,
 		HandoffConversation{CarryFailure: "its transcript is missing"},
 		inst.Tabs[0].Handoffs[0].Conversation)
