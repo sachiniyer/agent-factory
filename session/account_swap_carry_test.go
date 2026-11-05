@@ -765,6 +765,83 @@ func TestConversationCarryKeepsTheNewCopyWhenTheWatermarkCannotBeRecorded(t *tes
 	require.Contains(t, quarantined.UnrecordedCarries, dstPath)
 }
 
+// A re-carry that verifies a SHORTER matching prefix must not retire the
+// quarantine the longer failed carry left: its watermark covers only the
+// span it copied, and the bytes past it are still the first account's
+// unaccounted claims (Codex review on #6852). Only a watermark reaching
+// the quarantined span lifts the marker.
+func TestConversationCarryKeepsTheQuarantineWhenTheReCarryIsShorter(t *testing.T) {
+	afHome := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(afHome, "instances"), 0o700))
+	statePath := filepath.Join(afHome, "instances", handoff.StateFileName)
+	require.NoError(t, os.WriteFile(statePath, []byte("{not json"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	railsStore := func() *handoff.RailsStore {
+		return handoff.NewRailsStore(
+			filepath.Join(afHome, "instances", handoff.RailsFileName), statePath)
+	}
+	loadRails := func() handoff.Rails {
+		r, err := railsStore().Load()
+		require.NoError(t, err)
+		return r
+	}
+
+	// Carry A installs a long rollout but its watermark cannot land.
+	srcA := t.TempDir()
+	writeCarryFile(t, srcA, rel, strings.Repeat("a", 1000))
+	carryA := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcA, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcA), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carryA.copy())
+	marker := loadRails().UnrecordedCarries[filepath.Join(dstDir, rel)]
+	require.Equal(t, int64(1000), marker.Covered)
+
+	// The state file recovers; carry B holds only a shorter matching copy.
+	require.NoError(t, os.WriteFile(statePath, []byte(`{"schema_version":1}`), 0o600))
+	srcB := t.TempDir()
+	writeCarryFile(t, srcB, rel, strings.Repeat("a", 500))
+	carryB := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcB, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcB), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carryB.copy())
+
+	got, err := os.ReadFile(filepath.Join(dstDir, rel))
+	require.NoError(t, err)
+	require.Len(t, got, 1000, "the longer destination is kept — carry B verified only its own prefix")
+	marker, ok := loadRails().UnrecordedCarries[filepath.Join(dstDir, rel)]
+	require.True(t, ok, "a watermark shorter than the quarantined span must not retire the marker")
+	require.Equal(t, int64(1000), marker.Covered)
+	snap, stateErr, railsErr := handoff.LoadSnapshot(
+		handoff.NewStore(statePath), railsStore())
+	require.NoError(t, stateErr)
+	require.NoError(t, railsErr)
+	require.Equal(t, int64(1000), snap.EffectiveCarriedPrefixes()[filepath.Join(dstDir, rel)],
+		"the span 500-1000 is still carry A's unaccounted claims")
+
+	// A carry whose watermark reaches the span DOES retire the marker.
+	srcC := t.TempDir()
+	writeCarryFile(t, srcC, rel, strings.Repeat("a", 1500))
+	carryC := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcC, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcC), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carryC.copy())
+	require.NotContains(t, loadRails().UnrecordedCarries,
+		filepath.Join(dstDir, rel), "a covering watermark retires the marker")
+}
+
 // The happy path drops its backup too: a committed replace leaves only the
 // carried file, not the displaced original.
 func TestConversationCarryDiscardsTheDisplacementBackupOnCommit(t *testing.T) {

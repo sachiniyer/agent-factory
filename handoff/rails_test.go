@@ -325,7 +325,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(state.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/rollout-a", time.Now()); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", 64, time.Now()); err != nil {
 		t.Fatalf("the marker must outlive the corrupt watermark file: %v", err)
 	}
 	got := mustLoadRails(t, rails).UnrecordedCarries
@@ -336,15 +336,22 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(rails.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/rollout-b", time.Now()); err == nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-b", 64, time.Now()); err == nil {
 		t.Fatal("the marker rebuilt over a corrupt rails file")
 	}
 }
 
-func TestUnrecordedCarriesQuarantineWholeFile(t *testing.T) {
+// A quarantined rollout distrusts exactly the span its failed carry
+// copied: the marker's covered length bounds the poison and wins over a
+// stale recorded watermark — a carry that landed after it may have taken
+// fresh source bytes past the recorded boundary. Retirement needs a
+// watermark that REACHES the span: a shorter re-carry lifts distrust it
+// cannot account for (Codex review on the merge semantics and on
+// coverage-aware retirement, #6852).
+func TestUnrecordedCarriesQuarantineTheCopiedSpan(t *testing.T) {
 	rails, state := railsFixture(t)
 	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	if _, err := rails.NoteUnrecordedCarry("/rollout-a", at); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", 200, at); err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
 	if err := state.RecordCarriedPrefix("/rollout-b", 64); err != nil {
@@ -352,30 +359,34 @@ func TestUnrecordedCarriesQuarantineWholeFile(t *testing.T) {
 	}
 	snap := Snapshot{State: mustLoad(t, state), Rails: mustLoadRails(t, rails)}
 	effective := snap.EffectiveCarriedPrefixes()
-	if effective["/rollout-a"] != math.MaxInt64 {
-		t.Fatalf("unrecorded file is not fully quarantined: %v", effective["/rollout-a"])
+	if effective["/rollout-a"] != 200 {
+		t.Fatalf("unrecorded span not quarantined: %v", effective["/rollout-a"])
 	}
 	if effective["/rollout-b"] != 64 {
 		t.Fatalf("recorded watermark lost: %v", effective)
 	}
-	// A stale recorded watermark must NOT beat the marker: the carry that
-	// landed after it may have taken fresh source bytes past the recorded
-	// boundary, so the file stays fully poisoned until the watermark write
-	// retires the marker (Codex review on the merge semantics).
 	if err := state.RecordCarriedPrefix("/rollout-a", 128); err != nil {
 		t.Fatal(err)
 	}
 	snap = Snapshot{State: mustLoad(t, state), Rails: mustLoadRails(t, rails)}
-	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != math.MaxInt64 {
+	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != 200 {
 		t.Fatalf("stale watermark overrode the quarantine: %d", got)
 	}
-	// Only the explicit retire lifts the distrust — then the recorded
-	// boundary governs again.
-	if err := rails.ClearUnrecordedCarry("/rollout-c"); err != nil {
-		t.Fatal(err)
+	// A watermark SHORTER than the quarantined span retires nothing — the
+	// bytes past it are still unaccounted source claims.
+	if retired, err := rails.ClearUnrecordedCarry("/rollout-a", 128); err != nil || retired {
+		t.Fatalf("a short watermark retired the marker: retired=%v err=%v", retired, err)
 	}
-	if err := rails.ClearUnrecordedCarry("/rollout-a"); err != nil {
-		t.Fatal(err)
+	if got := mustLoadRails(t, rails).UnrecordedCarries["/rollout-a"].Covered; got != 200 {
+		t.Fatalf("marker lost to a short watermark: %d", got)
+	}
+	// An absent marker clears trivially; one the watermark REACHES retires
+	// and the recorded boundary governs again.
+	if retired, err := rails.ClearUnrecordedCarry("/rollout-c", 10); err != nil || !retired {
+		t.Fatalf("absent marker blocked the clear: retired=%v err=%v", retired, err)
+	}
+	if retired, err := rails.ClearUnrecordedCarry("/rollout-a", 256); err != nil || !retired {
+		t.Fatalf("covering watermark did not retire the marker: retired=%v err=%v", retired, err)
 	}
 	snap = Snapshot{State: mustLoad(t, state), Rails: mustLoadRails(t, rails)}
 	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != 128 {
@@ -383,6 +394,58 @@ func TestUnrecordedCarriesQuarantineWholeFile(t *testing.T) {
 	}
 	if got := mustLoadRails(t, rails).UnrecordedCarries; len(got) != 0 {
 		t.Fatalf("marker survived its clear: %+v", got)
+	}
+}
+
+// A re-quarantine only ever WIDENS the covered span — the earlier failed
+// carry's bytes are still unaccounted — while the first timestamp stands
+// as when the span first went unrecorded.
+func TestNoteUnrecordedCarryOnlyWidensTheSpan(t *testing.T) {
+	rails, _ := railsFixture(t)
+	first := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	if _, err := rails.NoteUnrecordedCarry("/r", 100, first); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := rails.NoteUnrecordedCarry("/r", 300, first.Add(time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	got := mustLoadRails(t, rails).UnrecordedCarries["/r"]
+	if got.Covered != 300 || !got.At.Equal(first) {
+		t.Fatalf("marker = %+v, want covered 300 from %v", got, first)
+	}
+	if _, err := rails.NoteUnrecordedCarry("/r", 50, first.Add(2*time.Hour)); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustLoadRails(t, rails).UnrecordedCarries["/r"]; got.Covered != 300 {
+		t.Fatalf("a shorter re-quarantine shrank the span: %+v", got)
+	}
+}
+
+// The first quarantining builds wrote the marker as a bare timestamp —
+// its covered length is unknown, so it decodes as whole-file distrust and
+// no watermark can retire it short of the file's end.
+func TestUnrecordedCarryDecodesTheLegacyTimestampForm(t *testing.T) {
+	rails, _ := railsFixture(t)
+	if err := os.MkdirAll(filepath.Dir(rails.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schema_version":1,"unrecorded_carries":{"/r.jsonl":"2026-11-05T18:00:00Z"}}`
+	if err := os.WriteFile(rails.Path(), []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	got, err := rails.Load()
+	if err != nil {
+		t.Fatalf("legacy marker did not decode: %v", err)
+	}
+	marker := got.UnrecordedCarries["/r.jsonl"]
+	if marker.Covered != math.MaxInt64 {
+		t.Fatalf("legacy marker covered = %d, want MaxInt64 (whole-file distrust)", marker.Covered)
+	}
+	if snap := (Snapshot{Rails: got}); snap.EffectiveCarriedPrefixes()["/r.jsonl"] != math.MaxInt64 {
+		t.Fatal("legacy marker did not quarantine the whole file")
+	}
+	if retired, err := rails.ClearUnrecordedCarry("/r.jsonl", 1<<40); err != nil || retired {
+		t.Fatalf("a finite watermark retired a boundless marker: retired=%v err=%v", retired, err)
 	}
 }
 
@@ -417,7 +480,9 @@ func TestNoteUnrecordedCarryEvictsGoneFilesBeforeTheOldest(t *testing.T) {
 	}
 
 	// A marker over capacity retires a GONE file, not the live record.
-	evicted, err := rails.NoteUnrecordedCarry("/new-carry", time.Now())
+	// (The seeded bare timestamps are the legacy marker form — they decode
+	// with covered = MaxInt64.)
+	evicted, err := rails.NoteUnrecordedCarry("/new-carry", 64, time.Now())
 	if err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
@@ -496,7 +561,7 @@ func TestLoadSnapshotMergesAcrossAnInterleavedCommit(t *testing.T) {
 		{CarriedPrefixes: map[string]int64{"/r.jsonl": 42}},
 	}
 	railReads := []Rails{
-		{UnrecordedCarries: map[string]time.Time{"/r.jsonl": marked}},
+		{UnrecordedCarries: map[string]UnrecordedCarry{"/r.jsonl": {At: marked, Covered: math.MaxInt64}}},
 		{},
 	}
 	si, ri := 0, 0
@@ -527,7 +592,7 @@ func TestLoadSnapshotMergesAcrossAnInterleavedCommit(t *testing.T) {
 	// Marker present in BOTH reads keeps quarantining even while the
 	// watermark advanced underneath it.
 	si, ri = 0, 0
-	railReads[0] = Rails{UnrecordedCarries: map[string]time.Time{"/r.jsonl": marked}}
+	railReads[0] = Rails{UnrecordedCarries: map[string]UnrecordedCarry{"/r.jsonl": {At: marked, Covered: math.MaxInt64}}}
 	railReads[1] = railReads[0]
 	snap, _, _ = loadSnapshot(
 		func() (State, error) { s := states[si]; si++; return s, nil },
@@ -578,7 +643,7 @@ func TestLoadSnapshotConsistentWhenNothingInterleaves(t *testing.T) {
 	if err := store.RecordCarriedPrefix("/r.jsonl", 42); err != nil {
 		t.Fatalf("RecordCarriedPrefix: %v", err)
 	}
-	if _, err := rails.NoteUnrecordedCarry("/q.jsonl", time.Now()); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/q.jsonl", 77, time.Now()); err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
 	snap, stateErr, railsErr := LoadSnapshot(store, rails)
@@ -586,7 +651,7 @@ func TestLoadSnapshotConsistentWhenNothingInterleaves(t *testing.T) {
 		t.Fatalf("errs: %v %v", stateErr, railsErr)
 	}
 	eff := snap.EffectiveCarriedPrefixes()
-	if eff["/r.jsonl"] != 42 || eff["/q.jsonl"] != math.MaxInt64 {
+	if eff["/r.jsonl"] != 42 || eff["/q.jsonl"] != 77 {
 		t.Fatalf("effective prefixes = %v", eff)
 	}
 }

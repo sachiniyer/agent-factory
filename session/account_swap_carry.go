@@ -440,7 +440,7 @@ func (c *conversationCarry) copy() error {
 		return err
 	}
 	if err := c.commitCarriedPrefix(outcome); err != nil {
-		c.quarantineUnrecorded(err)
+		c.quarantineUnrecorded(err, outcome.covered)
 	}
 	// The commit landed: the displaced original is gone for good now.
 	discardCarryDisplacement(c.dstRoot, c.transcript, outcome)
@@ -481,26 +481,39 @@ func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error 
 	if err := store.RecordCarriedPrefix(path, outcome.covered); err != nil {
 		return carryFailure("the carried-prefix watermark could not be recorded", err)
 	}
-	// A real watermark retires the unrecorded-carry quarantine for this file:
-	// the precise prefix replaces the whole-file distrust (#6776 review).
+	// A real watermark retires the unrecorded-carry quarantine for this
+	// file — but only when it COVERS the span the failed carry installed:
+	// a shorter re-carry must not lift distrust its boundary cannot
+	// account for (#6776 review). The comparison runs on the recorded
+	// watermark, which may exceed this carry's covered — the record only
+	// ever grows.
+	watermark := outcome.covered
+	if state, err := store.Load(); err == nil {
+		if recorded := state.CarriedPrefixes[path]; recorded > watermark {
+			watermark = recorded
+		}
+	}
 	rails := handoff.NewRailsStore(filepath.Join(instances, handoff.RailsFileName),
 		filepath.Join(instances, handoff.StateFileName))
-	if err := rails.ClearUnrecordedCarry(path); err != nil {
+	retired, err := rails.ClearUnrecordedCarry(path, watermark)
+	if err != nil {
 		log.WarningLog.Printf("account swap carried %s conversation %s but its quarantine record could not be retired: %v",
 			c.agent, c.id, err)
+	} else if !retired {
+		log.WarningLog.Printf("account swap carried %s conversation %s with a watermark too short to retire an earlier unrecorded carry — rollout %s stays quarantined from usage accounting",
+			c.agent, c.id, path)
 	}
 	return nil
 }
 
 // quarantineUnrecorded records in the rails file that this carry copied
-// source-account bytes but could not record its watermark (cause). Every
-// claim in the carried rollout then counts as carried end-to-end — the
-// usage reader treats the file as fully poisoned — so the target's
-// readings cannot free a wall on records that still belong to the source
-// account (#6776 review). The marker is best-effort: a home that refuses
-// the rails write too gets a louder warning and nothing more — the carry
-// itself always proceeds.
-func (c *conversationCarry) quarantineUnrecorded(cause error) {
+// covered source-account bytes but could not record its watermark
+// (cause). Claims in that span then count as carried poison — so the
+// target's readings cannot free a wall on records that still belong to
+// the source account (#6776 review). The marker is best-effort: a home
+// that refuses the rails write too gets a louder warning and nothing
+// more — the carry itself always proceeds.
+func (c *conversationCarry) quarantineUnrecorded(cause error, covered int64) {
 	path := c.carriedCodexRolloutPath()
 	if c.dstRoot.base == "" || path == "" {
 		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v), and the rollout cannot be named for quarantine — its usage claims are unquarantined",
@@ -511,13 +524,13 @@ func (c *conversationCarry) quarantineUnrecorded(cause error) {
 	store := handoff.NewRailsStore(
 		filepath.Join(instances, handoff.RailsFileName),
 		filepath.Join(instances, handoff.StateFileName))
-	evicted, err := store.NoteUnrecordedCarry(path, time.Now())
+	evicted, err := store.NoteUnrecordedCarry(path, covered, time.Now())
 	if err != nil {
 		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v) or a quarantine record — rollout %s cannot be excluded from usage accounting: %v",
 			c.agent, c.id, cause, path, err)
 		return
 	}
-	log.WarningLog.Printf("account swap carried %s conversation %s but its watermark could not be recorded (%v) — rollout %s is quarantined from usage accounting end-to-end",
+	log.WarningLog.Printf("account swap carried %s conversation %s but its watermark could not be recorded (%v) — rollout %s is quarantined from usage accounting for the copied span",
 		c.agent, c.id, cause, path)
 	if evicted != "" {
 		log.WarningLog.Printf("account swap quarantine record for %s evicted at the entry bound — that rollout's claims are no longer excluded from usage accounting",

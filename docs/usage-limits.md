@@ -456,7 +456,9 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   are the source account's numbers: a carry commits a durable byte watermark
   at copy time naming exactly which leading bytes came from the previous
   account, and the usage reader ignores claims below it — a carry that
-  cannot record its watermark is not committed. Pane chrome, busy
+  cannot record its watermark still commits (the conversation is the user's
+  context) but quarantines the copied span in the rails file instead, so no
+  claim inside it frees a wall until a covering watermark lands. Pane chrome, busy
   indicators, a delivered prompt, and idle or attached pane state prove
   nothing either — none of them shows the account accepted a request. And
   because the proof must postdate a claimed reset too, retraction mainly

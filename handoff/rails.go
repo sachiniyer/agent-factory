@@ -51,16 +51,41 @@ type Rails struct {
 	// held episode by the report worker; cleared when the backlog drains
 	// or is dropped. `af quota` surfaces it on the mover line.
 	ReportsHeld *ReportsHeld `json:"reports_held,omitempty"`
-	// UnrecordedCarries maps a rollout file's absolute path to the time a
-	// carry copied source-account bytes into it WITHOUT recording the
+	// UnrecordedCarries maps a rollout file's absolute path to the carry
+	// that copied source-account bytes into it WITHOUT recording the
 	// watermark — the record could not land (corrupt file, unwritable
 	// home) but the carry itself still committed (#6776 review: an
 	// unreadable watermark file must never force a fresh conversation).
-	// Readers treat the file's ENTIRE contents as carried poison: no claim
-	// from it may free a wall, which is exactly "the target account's
-	// readings are untrustworthy for retraction". The entry retires when a
-	// later carry records that file's watermark for real.
-	UnrecordedCarries map[string]time.Time `json:"unrecorded_carries,omitempty"`
+	// Claims in the copied span are suspect: a reading taken from them may
+	// free a wall, which is exactly "the target account's readings are
+	// untrustworthy for retraction". The entry retires when a later carry
+	// records a watermark that covers the copied span.
+	UnrecordedCarries map[string]UnrecordedCarry `json:"unrecorded_carries,omitempty"`
+}
+
+// UnrecordedCarry is one quarantine marker: At is when the failed carry's
+// bookkeeping attempt ran (first-writer-wins — the oldest standing
+// quarantine), Covered the number of leading destination bytes that carry
+// had copied. A later real watermark must reach Covered before the marker
+// can retire — a shorter re-carry must not lift distrust its boundary
+// cannot account for (Codex review on #6852).
+type UnrecordedCarry struct {
+	At      time.Time `json:"at"`
+	Covered int64     `json:"covered"`
+}
+
+// UnmarshalJSON accepts the current {at, covered} shape AND the bare
+// timestamp the first quarantining builds wrote — a marker whose covered
+// length is unknown distrusts the whole file (MaxInt64), which is the
+// exact semantic those builds recorded.
+func (u *UnrecordedCarry) UnmarshalJSON(raw []byte) error {
+	var at time.Time
+	if err := json.Unmarshal(raw, &at); err == nil {
+		u.At, u.Covered = at, math.MaxInt64
+		return nil
+	}
+	type wire UnrecordedCarry
+	return json.Unmarshal(raw, (*wire)(u))
 }
 
 // ReportsHeld is the durable record that a report_to delivery is held:
@@ -120,11 +145,11 @@ type Snapshot struct {
 
 // EffectiveCarriedPrefixes merges the recorded watermarks with the
 // unrecorded-carry quarantine: a carried file whose watermark never landed
-// is treated as carried end-to-end (MaxInt64), so no claim inside it can
-// free a wall. The marker always wins over a recorded watermark — the
-// watermark may describe an OLDER carry's boundary while the file has
-// since taken fresh source bytes past it. The marker retires only when a
-// successful watermark write explicitly clears it.
+// is distrusted for the span it copied, so no claim inside it can free a
+// wall. The marker's covered length always wins over a recorded
+// watermark — the watermark may describe an OLDER carry's boundary while
+// the file has since taken fresh source bytes past it. The marker retires
+// only when a successful watermark write covers its span for real.
 func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 	var out map[string]int64
 	for path, n := range s.State.CarriedPrefixes {
@@ -133,11 +158,19 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 		}
 		out[path] = n
 	}
-	for path := range s.Rails.UnrecordedCarries {
+	for path, marker := range s.Rails.UnrecordedCarries {
 		if out == nil {
 			out = map[string]int64{}
 		}
-		out[path] = math.MaxInt64
+		covered := marker.Covered
+		if covered <= 0 {
+			// A hand-built or legacy marker without a boundary distrusts
+			// the whole file — under-excluding is the only unsafe direction.
+			covered = math.MaxInt64
+		}
+		if covered > out[path] {
+			out[path] = covered
+		}
 	}
 	return out
 }
@@ -195,11 +228,17 @@ func loadSnapshot(loadState func() (State, error), loadRails func() (Rails, erro
 		}
 	}
 	for path, marked := range r1.UnrecordedCarries {
-		if _, ok := snap.Rails.UnrecordedCarries[path]; !ok {
+		existing, ok := snap.Rails.UnrecordedCarries[path]
+		switch {
+		case !ok:
 			if snap.Rails.UnrecordedCarries == nil {
-				snap.Rails.UnrecordedCarries = map[string]time.Time{}
+				snap.Rails.UnrecordedCarries = map[string]UnrecordedCarry{}
 			}
 			snap.Rails.UnrecordedCarries[path] = marked
+		case marked.Covered > existing.Covered:
+			// Same worst-case merge as the watermarks: the wider span wins.
+			existing.Covered = marked.Covered
+			snap.Rails.UnrecordedCarries[path] = existing
 		}
 	}
 	return snap, nil, nil
@@ -332,9 +371,9 @@ func decodeRails(path string, raw []byte) (Rails, error) {
 	if rails.ReportsHeld != nil && rails.ReportsHeld.Since.IsZero() {
 		return Rails{}, fmt.Errorf("%s reports_held carries no since timestamp", path)
 	}
-	for key, at := range rails.UnrecordedCarries {
-		if key == "" || at.IsZero() {
-			return Rails{}, fmt.Errorf("%s unrecorded_carries carries an empty path or timestamp", path)
+	for key, marker := range rails.UnrecordedCarries {
+		if key == "" || marker.At.IsZero() || marker.Covered <= 0 {
+			return Rails{}, fmt.Errorf("%s unrecorded_carries carries an empty path, timestamp, or covered length", path)
 		}
 	}
 	return rails, nil
@@ -584,32 +623,38 @@ func (s *RailsStore) mutateLiftTolerant(fn func(*Rails) error) error {
 	})
 }
 
-// NoteUnrecordedCarry records that a carry copied source-account bytes
-// into path but its watermark could not be recorded — the file is
-// quarantined end-to-end for retraction purposes until a real watermark
-// lands. First-writer-wins on the timestamp. The marker tolerates a
-// corrupt STATE file: it exists precisely for the home whose watermark
-// file cannot be written, and that file holds no readable records to lose
+// NoteUnrecordedCarry records that a carry copied covered source-account
+// bytes into path but its watermark could not be recorded — that span is
+// quarantined for retraction purposes until a real watermark covers it.
+// First-writer-wins on the timestamp; a re-quarantine only ever WIDENS
+// the covered span, never narrows it. The marker tolerates a corrupt
+// STATE file: it exists precisely for the home whose watermark file
+// cannot be written, and that file holds no readable records to lose
 // (mutateLiftTolerant). A corrupt rails file still fails closed.
 //
 // At the entry bound an eviction is required; it is reported (never
 // silent — evicting re-trusts a file) and chosen fail-safe-first: a
 // marker whose file no longer exists protects nothing, so gone files
 // retire before the oldest live one.
-func (s *RailsStore) NoteUnrecordedCarry(path string, at time.Time) (evicted string, err error) {
-	if path == "" || at.IsZero() {
-		return "", fmt.Errorf("unrecorded carry needs a path and a timestamp, got %q / %v", path, at)
+func (s *RailsStore) NoteUnrecordedCarry(path string, covered int64, at time.Time) (evicted string, err error) {
+	if path == "" || covered <= 0 || at.IsZero() {
+		return "", fmt.Errorf("unrecorded carry needs a path, a positive covered length, and a timestamp, got %q / %d / %v", path, covered, at)
 	}
 	err = s.mutateLiftTolerant(func(rails *Rails) error {
 		if rails.UnrecordedCarries == nil {
-			rails.UnrecordedCarries = map[string]time.Time{}
+			rails.UnrecordedCarries = map[string]UnrecordedCarry{}
 		}
-		if _, ok := rails.UnrecordedCarries[path]; !ok {
-			rails.UnrecordedCarries[path] = at
+		if existing, ok := rails.UnrecordedCarries[path]; !ok {
+			rails.UnrecordedCarries[path] = UnrecordedCarry{At: at, Covered: covered}
 			if len(rails.UnrecordedCarries) > unrecordedCarryCap {
 				evicted = evictUnrecordedCarry(rails.UnrecordedCarries, path)
 				delete(rails.UnrecordedCarries, evicted)
 			}
+		} else if covered > existing.Covered {
+			// A longer unrecorded copy extends the unaccounted span; the
+			// first marker's timestamp still says when quarantine began.
+			existing.Covered = covered
+			rails.UnrecordedCarries[path] = existing
 		}
 		return nil
 	})
@@ -620,41 +665,54 @@ func (s *RailsStore) NoteUnrecordedCarry(path string, at time.Time) (evicted str
 // gone (quarantining nothing), else the oldest entry — the residual
 // exposure lands on the stalest record, never the carry that just landed
 // (Codex review on the cap).
-func evictUnrecordedCarry(entries map[string]time.Time, keep string) string {
+func evictUnrecordedCarry(entries map[string]UnrecordedCarry, keep string) string {
 	var oldest string
 	var oldestAt time.Time
-	for path, at := range entries {
+	for path, marker := range entries {
 		if path == keep {
 			continue
 		}
 		if _, err := os.Stat(path); os.IsNotExist(err) {
 			return path
 		}
-		if oldest == "" || at.Before(oldestAt) {
-			oldest, oldestAt = path, at
+		if oldest == "" || marker.At.Before(oldestAt) {
+			oldest, oldestAt = path, marker.At
 		}
 	}
 	return oldest
 }
 
-// ClearUnrecordedCarry retires one quarantine marker — a recorded
-// watermark now bounds the file's poison precisely, so the blanket
-// distrust lifts. No write when there is nothing to retire.
-func (s *RailsStore) ClearUnrecordedCarry(path string) error {
+// ClearUnrecordedCarry retires one quarantine marker when a recorded
+// watermark covers every byte the failed carry installed — the precise
+// prefix replaces the distrusted span. A watermark that falls SHORT of
+// the marker's covered length retires nothing: bytes past it are still
+// source-account claims the record cannot see (Codex review on #6852).
+// Returns false when the marker stays. No write when there is nothing to
+// retire or the watermark cannot cover it.
+func (s *RailsStore) ClearUnrecordedCarry(path string, watermark int64) (bool, error) {
 	rails, err := s.Load()
 	if err != nil {
-		return err
+		return false, err
 	}
-	if _, ok := rails.UnrecordedCarries[path]; !ok {
-		return nil
+	marker, ok := rails.UnrecordedCarries[path]
+	if !ok {
+		return true, nil
 	}
-	return s.mutate(func(rails *Rails) error {
-		delete(rails.UnrecordedCarries, path)
-		if len(rails.UnrecordedCarries) == 0 {
-			rails.UnrecordedCarries = nil
+	if watermark < marker.Covered {
+		return false, nil
+	}
+	if err := s.mutate(func(rails *Rails) error {
+		if m, ok := rails.UnrecordedCarries[path]; ok && watermark >= m.Covered {
+			delete(rails.UnrecordedCarries, path)
+			if len(rails.UnrecordedCarries) == 0 {
+				rails.UnrecordedCarries = nil
+			}
 		}
 		return nil
-	})
+	}); err != nil {
+		return false, err
+	}
+	return true, nil
 }
 
 // PruneExpired drops records that can no longer matter: refusal backoffs

@@ -725,8 +725,8 @@ func TestTickSkipsPruneWhileARootIsUnresolved(t *testing.T) {
 // maximum offset, so no claim inside it can free a wall (#6776 review).
 func TestTickUnrecordedCarryQuarantinesTheWholeRollout(t *testing.T) {
 	d := &depCounts{mode: "shadow"}
-	d.railsState.UnrecordedCarries = map[string]time.Time{
-		"/poisoned/rollout.jsonl": testNow.Add(-time.Hour),
+	d.railsState.UnrecordedCarries = map[string]handoff.UnrecordedCarry{
+		"/poisoned/rollout.jsonl": {At: testNow.Add(-time.Hour), Covered: math.MaxInt64},
 	}
 	var carried map[string]int64
 	deps := d.deps()
