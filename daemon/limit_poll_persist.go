@@ -13,6 +13,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	instance *session.Instance,
 	before session.Liveness,
 	beforeReset time.Time,
+	beforeEvidence string,
 	projectionChanged bool,
 	settlementCheckpoint bool,
 ) {
@@ -28,7 +29,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	data := instance.ToInstanceData()
 	livenessChanged := data.Liveness != before
 	resetChanged := !data.LimitResetAt.Equal(beforeReset)
-	durableChanged := livenessChanged || resetChanged || settlementCheckpoint || conversationNeedsWrite(instance)
+	// Evidence is durable too (#6765 post-merge): a send-path park stores a
+	// reset with NO phrase, so the first poll that adopts the banner's phrase
+	// changes nothing else — and dropping it would leave a restart re-parsing
+	// the same banner against a later clock.
+	evidenceChanged := data.LimitResetEvidence != beforeEvidence
+	durableChanged := livenessChanged || resetChanged || evidenceChanged || settlementCheckpoint || conversationNeedsWrite(instance)
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return

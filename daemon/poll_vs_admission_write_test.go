@@ -78,7 +78,7 @@ func TestPollSnapshotCannotRegressAnAdmissionWrite(t *testing.T) {
 	pollDone := make(chan struct{})
 	go func() {
 		defer close(pollDone)
-		manager.persistPollChangeWithIdleEvidence(repoID, inst, inst.GetLiveness(), time.Time{}, true, true)
+		manager.persistPollChangeWithIdleEvidence(repoID, inst, inst.GetLiveness(), time.Time{}, "", true, true)
 	}()
 	waitSignal(t, pollAtHook, "the poll never reached its write")
 

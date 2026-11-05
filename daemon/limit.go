@@ -149,7 +149,10 @@ var testHookPollBeforeSettlementRecord = func() {}
 // persistence on the liveness alone would silently drop the reset time — the
 // [limit] resets <t> badge would never show it, and PR3's auto-resume scheduler
 // would have no time to schedule against once the daemon restarts and reloads
-// from disk. beforeReset is the reset time captured before this tick's poll.
+// from disk. beforeReset is the reset time captured before this tick's poll,
+// and beforeEvidence the reset phrase captured beside it — an evidence-only
+// change (a send-path-parked row adopting its banner's phrase) is durable
+// exactly like a reset-time one (#6765).
 //
 // projectionChanged additionally announces a live-only diagnostic change without
 // writing it to disk. This is the event-plane half of projection-only state: a
@@ -185,9 +188,10 @@ func (m *Manager) persistPollChange(
 	instance *session.Instance,
 	before session.Liveness,
 	beforeReset time.Time,
+	beforeEvidence string,
 	projectionChanged bool,
 ) {
-	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, projectionChanged, false)
+	m.persistPollChangeWithIdleEvidence(repoID, instance, before, beforeReset, beforeEvidence, projectionChanged, false)
 }
 
 // This file is the daemon side of the usage-limit manual-retry action (#1146
