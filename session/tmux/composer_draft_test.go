@@ -114,4 +114,24 @@ func TestComposerDraftPresent(t *testing.T) {
 			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
 		}
 	})
+	// #6817 review: normalizeDelivery erases box-drawing/block runes with the
+	// border — a draft drawn in those runes must never read as empty.
+	t.Run("block-rune draft is unprovable, never empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("❯ ███\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
+	t.Run("boxed block-rune draft is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("╭─────────╮\n│ ❯ ███   │\n╰─────────╯\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
+	t.Run("boxed empty composer still proves empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("╭─────────╮\n│ ❯       │\n╰─────────╯\n")
+		if present || !provable {
+			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
 }
