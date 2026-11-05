@@ -232,7 +232,9 @@ func (m *Manager) ArmConversationCaptures() {
 			continue
 		}
 		switch inst.GetLiveness() {
-		case session.LiveReady, session.LiveRunning, session.LiveLimitReached:
+		// LivenessUnset is a restored row the first status poll has not
+		// classified yet — exactly who this pass exists for.
+		case session.LivenessUnset, session.LiveReady, session.LiveRunning, session.LiveLimitReached:
 		default:
 			continue
 		}
