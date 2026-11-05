@@ -36,23 +36,32 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 		}
 		return false, false
 	}
-	// The glyph row's own text decides before the region is joined: an empty
-	// composer's ghost placeholder proves EMPTY even with a footer row the
-	// region would have folded into the payload — but only by EXACT known
-	// text (#6817 round-2 review). Ghost text is only ever drawn into an
-	// empty input, so an exact placeholder sighting is provably empty; a
-	// placeholder-SHAPED row af cannot match exactly — a rotated hint or a
-	// draft that merely opens the same way — stays unprovable, never empty.
+	// The glyph row's own text decides before the region is joined — but
+	// only a placeholder-SHAPED row af cannot match is answered here. Ghost
+	// text is drawn only into an EMPTY input, so the exact-placeholder
+	// verdict must wait for the region (#6817 final review): a placeholder
+	// row followed by a typed second line is content af cannot explain.
 	glyphText := afterComposerGlyph(normalizeDelivery(rows[anchor]))
-	switch {
-	case composerPlaceholderText(glyphText):
-		return false, true
-	case composerPlaceholderShaped(glyphText):
+	if composerPlaceholderShaped(glyphText) && !composerPlaceholderText(glyphText) {
 		return false, false
 	}
 	regionRows := composerRegion(rows, anchor)
 	region := afterComposerGlyph(normalizeDelivery(strings.Join(regionRows, "")))
-	if composerPlaceholderShaped(region) {
+	// Block elements (0x2580–0x259F) are never frame material — a composer
+	// draws borders in box-DRAWING runes (0x2500–0x257F). A contiguous row
+	// carrying them below the anchor is a draft on its own line even
+	// though normalizeDelivery erases it with the borders (#6817 final
+	// review): `❯\n████` and a boxed `│█████│` are drafts, never empty.
+	if composerBlockDraftBelow(rows, anchor) {
+		return true, true
+	}
+	// Ghost text is only ever drawn into an empty input, so the exact
+	// placeholder proves EMPTY — but only when it is ALL the composer
+	// holds: any region content beyond it is a draft or unprovable.
+	switch {
+	case composerPlaceholderText(region):
+		return false, true
+	case composerPlaceholderShaped(region):
 		return false, false
 	}
 	if region != "" {
@@ -128,6 +137,54 @@ func ultraPlaceholderRowPresent(rows []string) bool {
 		if composerPlaceholderText(rest) {
 			return true
 		}
+	}
+	return false
+}
+
+// composerHasBlockRune reports whether s carries a block element
+// (0x2580–0x259F) — the runes normalizeDelivery erases that a composer
+// never uses for its frame. A row holding one is content, not a border.
+func composerHasBlockRune(s string) bool {
+	for _, r := range s {
+		if r >= 0x2580 && r <= 0x259F {
+			return true
+		}
+	}
+	return false
+}
+
+// composerHardBorder reports whether raw is a true frame edge for the
+// draft verdict: normalizeDelivery erased it, it is not an interior blank,
+// and it carries no block elements — pure box-DRAWING (0x2500–0x257F).
+// `───` and `╰───╯` qualify; `████` does not.
+func composerHardBorder(raw string) bool {
+	if normalizeDelivery(raw) != "" || blankComposerRow(raw) {
+		return false
+	}
+	return !composerHasBlockRune(raw)
+}
+
+// composerBlockDraftBelow scans the composer-interior rows below the anchor
+// for a row normalizeDelivery erased that still carries block elements —
+// a draft typed on its own line in block runes (#6817 final review). Only
+// CONTIGUOUS rows count: the scan stops at the first real text row (the
+// region check owns those), the first box-drawing border (the composer
+// ended), and a block row past a blank gap defers to draftClosedByFrame,
+// which judges stranded content by the closing-border rule as text does.
+func composerBlockDraftBelow(rows []string, anchor int) bool {
+	sawGap := false
+	for j := anchor + 1; j < len(rows); j++ {
+		raw := rows[j]
+		if normalizeDelivery(raw) != "" {
+			return false // interior text (region already judged) or a footer
+		}
+		if composerHasBlockRune(raw) {
+			return !sawGap
+		}
+		if !blankComposerRow(raw) {
+			return false // a box-drawing border — the composer ended
+		}
+		sawGap = true
 	}
 	return false
 }
@@ -222,9 +279,22 @@ func draftClosedByFrame(rows []string, anchor int) bool {
 	sawGap := false
 	for j := anchor + 1; j < len(rows); j++ {
 		if norm := normalizeDelivery(rows[j]); norm == "" {
-			if !blankComposerRow(rows[j]) {
+			if composerHardBorder(rows[j]) {
 				return false // the frame closed before any stranded content
 			}
+			if composerHasBlockRune(rows[j]) && sawGap {
+				// A pure box/block row is stranded CONTENT, not a border
+				// (#6817 final review) — interior iff the frame closes
+				// below it, judged exactly like a text row.
+				for k := j + 1; k < len(rows); k++ {
+					if composerHardBorder(rows[k]) {
+						return true
+					}
+				}
+				return false
+			}
+			// A contiguous block row never reaches here — the block scan
+			// already answered it — and an interior blank stays a gap.
 			sawGap = true
 			continue
 		} else if !sawGap {
@@ -233,7 +303,7 @@ func draftClosedByFrame(rows []string, anchor int) bool {
 		// First post-gap content at j: interior draft iff a border row
 		// closes the frame below it before the pane ends.
 		for k := j + 1; k < len(rows); k++ {
-			if nk := normalizeDelivery(rows[k]); nk == "" && !blankComposerRow(rows[k]) {
+			if composerHardBorder(rows[k]) {
 				return true
 			}
 		}

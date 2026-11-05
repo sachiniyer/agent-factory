@@ -645,6 +645,11 @@ type Manager struct {
 	// never on a timer — a probe's noteHandoffObservation and an engine
 	// tick both do literally nothing. Read from every poll goroutine.
 	handoffActive atomic.Bool
+	// handoffDiscoverMu serialises accountHandoffDiscover (#6817 final
+	// review): compute and store run under the same hold, so a discovery
+	// that began before a newer config apply cannot win the store with a
+	// stale answer — whoever computes under the lock sees the newest config.
+	handoffDiscoverMu sync.Mutex
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
