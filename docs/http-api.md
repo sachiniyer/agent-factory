@@ -571,7 +571,7 @@ account swap whose replacement runtime still owes the session its notice and
 stored task. Unlike `in_flight_op` it is durable: it survives a daemon restart
 because the obligation does. While it is present, competing lifecycle actions
 and tab spawns on the row are refused, and the refusal names the one admitted
-retry — `af sessions handoff <title> --account <to>`, which the pending-swap
+retry — `af sessions handoff --account <to> -- <title>`, which the pending-swap
 fence recognizes as the recorded transaction's retry rather than a new one. The
 object's `to` names the committed target account and `from` the outgoing one
 (omitted for the ambient identity); the rest is recovery bookkeeping —

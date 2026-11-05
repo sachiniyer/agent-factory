@@ -859,7 +859,7 @@ func TestPendingAccountSwapRefusalsNameAccountsAndRetry(t *testing.T) {
 				"the refusal must name the committed swap's outgoing account")
 			require.Contains(t, err.Error(), `"personal"`,
 				"the refusal must name the committed swap's target account")
-			require.Contains(t, err.Error(), "af sessions handoff swap --account personal",
+			require.Contains(t, err.Error(), "af sessions handoff --account personal -- swap",
 				"the refusal must name the one request that discharges the committed swap")
 		})
 	}
@@ -879,7 +879,7 @@ func TestPendingAccountSwapRefusalNamesAmbientSource(t *testing.T) {
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "ambient",
 		"a swap out of the ambient identity must still name its source")
-	require.Contains(t, err.Error(), "af sessions handoff swap --account work")
+	require.Contains(t, err.Error(), "af sessions handoff --account work -- swap")
 }
 
 type captureAccountSwapEnvironmentPty struct {

@@ -1,6 +1,10 @@
 package session
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
+)
 
 // RuntimeAction names every operation that can start, replace, or resume a
 // session runtime after creation. Backend capability and lifecycle eligibility
@@ -215,7 +219,9 @@ func accountSwapSpan(from, to string) string {
 // accountSwapRetryCommand names the one request the pending-swap fences admit:
 // a handoff naming the committed target is the recorded transaction's retry
 // rather than a new one (#4393), so it is the remedy every committed-swap
-// refusal points at (#6773).
+// refusal points at (#6773). The title rides the positional slot through
+// PositionalCommand: quoting alone does not save a dash-leading title from
+// pflag, and a spaced one still needs its quotes (#6773 review).
 func accountSwapRetryCommand(title, to string) string {
-	return fmt.Sprintf("`af sessions handoff %s --account %s`", title, to)
+	return "`" + shellsuggest.PositionalCommand("af", []string{"sessions", "handoff", "--account", to}, title) + "`"
 }
