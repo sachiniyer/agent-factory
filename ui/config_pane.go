@@ -526,13 +526,11 @@ func (c *ConfigPane) beginEdit() {
 	// textinput.SetValue runs a sanitizer that folds newlines/tabs to spaces,
 	// so seeding with the raw multi-line value would flatten it inside the
 	// field and let commitEdit's guard read the untouched field as edited.
-	// flattenToOneLine is the shared flattener from config_pane_width.go.
 	c.input.SetValue(flattenToOneLine(entry.Value))
 	// Read the seed back AFTER the sanitizer runs: it drops not just
 	// whitespace but every unicode.IsControl rune (e.g. ESC from a TOML
-	// \u001b escape), so a flatten-only seed would diverge from the field and
-	// rewrite an untouched value that lost a control rune. The read-back is
-	// the exact, sanitizer-faithful seed.
+	// \u001b escape), so a flatten-only seed would diverge from the field
+	// and rewrite an untouched value that lost a control rune.
 	c.editSeed = c.input.Value()
 	c.dirty = false
 	c.input.CursorEnd()
@@ -557,9 +555,12 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 		return true
 	default:
 		var cmd tea.Cmd
+		before := c.input.Value()
 		c.input, cmd = c.input.Update(msg)
 		_ = cmd
-		c.dirty = true
+		if c.input.Value() != before {
+			c.dirty = true
+		}
 		return true
 	}
 }
@@ -603,9 +604,9 @@ func (c *ConfigPane) commitEdit() {
 	//     is not injective — a\nb and "a b" both flatten to "a b" — so a user
 	//     who clears the field and retypes "a b" to replace a multi-line value
 	//     with that single-line text would be silently blocked by a
-	//     value-equality guard alone. dirty is set on any rune keypress in
-	//     handleEditKey, so a genuine edit (even one that lands back on the
-	//     flattened seed) writes through.
+	//     value-equality guard alone. dirty is set in handleEditKey only
+	//     when the input value changes, so a genuine edit (even one that
+	//     lands back on the flattened seed) writes through.
 	// See beginEdit and TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
 	if !c.dirty && value == c.editSeed {
 		c.cancelEdit()

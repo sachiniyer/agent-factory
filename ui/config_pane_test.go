@@ -951,6 +951,58 @@ func TestConfigPaneControlRuneValueUntouchedSaveIsNoOp(t *testing.T) {
 	}
 }
 
+// TestConfigPaneNavigationKeysDoNotMarkDirty pins the dirty-flag fix in
+// handleEditKey. Opening a multi-line value and pressing cursor-only keys
+// (Left/Right/Home/End) that route through the default branch but do NOT
+// change the input content, then Enter, must be a no-op. Before the fix
+// every key in the default branch set dirty=true, so navigation bypassed
+// the untouched-field guard and Enter rewrote the file with the flattened
+// field text — destroying the multi-line value on disk.
+func TestConfigPaneNavigationKeysDoNotMarkDirty(t *testing.T) {
+	path, _ := seedConfigWithMultiLineValue(t)
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field on on_archive_command")
+	}
+	for _, k := range []tea.KeyType{tea.KeyLeft, tea.KeyRight, tea.KeyHome, tea.KeyEnd, tea.KeyLeft, tea.KeyRight} {
+		c.HandleKeyPress(tea.KeyMsg{Type: k})
+	}
+	if !c.IsEditing() {
+		t.Fatal("navigation must not close the field")
+	}
+	if c.input.Value() != c.editSeed {
+		t.Fatalf("navigation changed the field value: got %q, want seed %q", c.input.Value(), c.editSeed)
+	}
+
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if writes != 0 {
+		t.Errorf("saving after cursor-only navigation issued %d write(s); it must issue none — navigation keys must not mark the field dirty", writes)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("cursor-only navigation + Enter rewrote the multi-line value.\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+	if !strings.Contains(string(after), "echo start\necho mid\necho end") {
+		t.Errorf("the multi-line value was destroyed on disk:\n%s", after)
+	}
+}
+
 // TestConfigPaneWindowsWithAZeroBudget pins the degenerate size. A pane sized
 // before SetSize has run, or squeezed to nothing by a tiny terminal, must not
 // panic or slice out of range — and must still keep the selection on screen when
