@@ -72,6 +72,15 @@ type ProjectConfig struct {
 	// it can enable, disable, or reprogram a root the global default or a legacy
 	// root_agents entry set — see config.ResolveRootAgent.
 	RootAgent RootAgent `toml:"root_agent,omitempty"`
+	// AccountHandoff is the personal per-project [account_handoff] layer
+	// (#6776): the leaves the resolution's MergeTableByField reads come from the
+	// file's own shape, so a project can pin just the leaves it overrides. It is
+	// machine-local identity policy, never checked in — like
+	// limit_account_candidates. The decode is seeded with the compiled defaults
+	// before unmarshal so the per-leaf checks see a complete table rather than
+	// zero values for unwritten leaves; ordering is checked on the merged
+	// result, not here.
+	AccountHandoff AccountHandoffConfig `toml:"account_handoff,omitempty"`
 
 	// unknownLeaves lists the [root_agent] leaves the typed decode dropped
 	// because no RootAgent field matches them; see UnknownLeaves.
@@ -138,7 +147,8 @@ var projectPersonalAllowedKeys = manifestKeysForSource(SourceProjectPersonal)
 // diagnostic on the one root-agent surface (personal) that has no other
 // leaf-validation path.
 var projectPersonalAllowedTableLeaves = map[string]map[string]bool{
-	"root_agent": tableLeavesForType(reflect.TypeOf(RootAgent{})),
+	"root_agent":      tableLeavesForType(reflect.TypeOf(RootAgent{})),
+	"account_handoff": tableLeavesForType(reflect.TypeOf(AccountHandoffConfig{})),
 }
 
 // projectDir returns the per-project directory <AF home>/<registry>/<id>,
@@ -271,7 +281,7 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		}
 	}
 
-	var cfg ProjectConfig
+	cfg := ProjectConfig{AccountHandoff: defaultAccountHandoffConfig()}
 	if err := toml.Unmarshal(data, &cfg); err != nil {
 		return nil, tomlParseError("personal project config "+prettyPath, err)
 	}
@@ -324,6 +334,16 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
 	}
 	cfg.LimitAccountCandidates = normalizedCandidates
+	// Per-leaf validation only — never ordering. A personal file's unwritten
+	// leaves inherit from the global layer, not the compiled defaults, so
+	// checking prefer_below < move_idle < wall against the seeded defaults
+	// would reject an override that is valid in context and still miss two
+	// individually-valid layers merging into an invalid chain. Ordering binds
+	// the EFFECTIVE table and is checked on the merged result in
+	// materializeResolution.
+	if err := validateAccountHandoffFields(cfg.AccountHandoff); err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
+	}
 	return &cfg, nil
 }
 

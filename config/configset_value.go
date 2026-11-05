@@ -68,6 +68,31 @@ func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]str
 		return editorValue(value), encoded, nil
 	}
 
+	// account_handoff gets the same sparse-write treatment: the wrapper's
+	// pointer leaves keep an omitted member absent on disk so the field-wise
+	// merge (preserveStructuredMembers) and lower layers still own it. Each
+	// supplied leaf is validated with the loader's own rules up front, so a
+	// write that would fail the post-edit re-parse is refused here with the
+	// leaf named.
+	if key == "account_handoff" {
+		var decoded accountHandoffConfigJSON
+		if err := decodeCompactJSON(key, raw, &decoded); err != nil {
+			return "", "", err
+		}
+		if err := rejectStructuredNulls(key, raw); err != nil {
+			return "", "", err
+		}
+		if err := validateAccountHandoffSparse(decoded); err != nil {
+			return "", "", err
+		}
+		value := reflect.ValueOf(decoded)
+		encoded, err := encodeStructuredTOML(key, value)
+		if err != nil {
+			return "", "", err
+		}
+		return editorValue(value), encoded, nil
+	}
+
 	// A whole-table write may omit a leaf — the loader supplies the compiled
 	// default for an absent one, so the typed form must seed the same defaults
 	// before decoding: a zero value left by an omitted member would read as a
@@ -130,6 +155,78 @@ func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]str
 type rootAgentConfigJSON struct {
 	Enabled *bool   `json:"enabled,omitempty" toml:"enabled,omitempty"`
 	Program *string `json:"program,omitempty" toml:"program,omitempty"`
+}
+
+// accountHandoffConfigJSON is the sparse-write mirror of AccountHandoffConfig:
+// every leaf is a pointer so a whole-table JSON write only materializes the
+// members it actually names. That is the write-side twin of the manifest's
+// MergeTableByField — an omitted leaf must keep inheriting the stored value
+// (and, on the personal layer, the global leaf) rather than being reset to a
+// zero value or silently re-defaulted. An explicitly supplied zero/false/empty
+// member stays a real write (the pointer is non-nil), which is how
+// move_idle_at_percent = 0, include_pinned = false, or exclude_sessions = []
+// is told apart from an omitted leaf.
+type accountHandoffConfigJSON struct {
+	Mode               *string   `json:"mode,omitempty" toml:"mode,omitempty"`
+	IncludePinned      *bool     `json:"include_pinned,omitempty" toml:"include_pinned,omitempty"`
+	TargetOrder        *string   `json:"target_order,omitempty" toml:"target_order,omitempty"`
+	ConfirmWall        *bool     `json:"confirm_wall,omitempty" toml:"confirm_wall,omitempty"`
+	WallPercent        *int      `json:"wall_percent,omitempty" toml:"wall_percent,omitempty"`
+	MoveIdleAtPercent  *int      `json:"move_idle_at_percent,omitempty" toml:"move_idle_at_percent,omitempty"`
+	PreferBelowPercent *int      `json:"prefer_below_percent,omitempty" toml:"prefer_below_percent,omitempty"`
+	ProbeTTL           *string   `json:"probe_ttl,omitempty" toml:"probe_ttl,omitempty"`
+	DefaultLogin       *string   `json:"default_login,omitempty" toml:"default_login,omitempty"`
+	RequireCarry       *bool     `json:"require_carry,omitempty" toml:"require_carry,omitempty"`
+	ExcludeSessions    *[]string `json:"exclude_sessions,omitempty" toml:"exclude_sessions,omitempty"`
+	MaxMoves           *int      `json:"max_moves,omitempty" toml:"max_moves,omitempty"`
+	MaxMovesWindow     *string   `json:"max_moves_window,omitempty" toml:"max_moves_window,omitempty"`
+	RefusedBackoff     *string   `json:"refused_backoff,omitempty" toml:"refused_backoff,omitempty"`
+	OnFailure          *string   `json:"on_failure,omitempty" toml:"on_failure,omitempty"`
+	ReportTo           *string   `json:"report_to,omitempty" toml:"report_to,omitempty"`
+}
+
+// validateAccountHandoffSparse applies the loader's per-leaf rules to the
+// members a structured write actually supplied — the early, leaf-named refusal
+// for a value the merged-file re-parse would reject anyway.
+func validateAccountHandoffSparse(d accountHandoffConfigJSON) error {
+	checks := []struct {
+		leaf    string
+		strVal  *string
+		intVal  *int
+		listVal *[]string
+	}{
+		{"mode", d.Mode, nil, nil},
+		{"target_order", d.TargetOrder, nil, nil},
+		{"default_login", d.DefaultLogin, nil, nil},
+		{"on_failure", d.OnFailure, nil, nil},
+		{"probe_ttl", d.ProbeTTL, nil, nil},
+		{"max_moves_window", d.MaxMovesWindow, nil, nil},
+		{"refused_backoff", d.RefusedBackoff, nil, nil},
+		{"wall_percent", nil, d.WallPercent, nil},
+		{"move_idle_at_percent", nil, d.MoveIdleAtPercent, nil},
+		{"prefer_below_percent", nil, d.PreferBelowPercent, nil},
+		{"max_moves", nil, d.MaxMoves, nil},
+		{"exclude_sessions", nil, nil, d.ExcludeSessions},
+	}
+	for _, check := range checks {
+		switch {
+		case check.strVal != nil:
+			if err := validateAccountHandoffLeaf(check.leaf, *check.strVal); err != nil {
+				return err
+			}
+		case check.intVal != nil:
+			if err := validateAccountHandoffLeaf(check.leaf, strconv.Itoa(*check.intVal)); err != nil {
+				return err
+			}
+		case check.listVal != nil:
+			for i, title := range *check.listVal {
+				if strings.TrimSpace(title) == "" {
+					return fmt.Errorf("account_handoff.exclude_sessions[%d] must not be empty", i)
+				}
+			}
+		}
+	}
+	return nil
 }
 
 func decodeCompactJSON(key, raw string, target any) error {
@@ -540,13 +637,22 @@ func canonicalStructuredTOMLValue(content, key string) (string, error) {
 }
 
 // projectStructuredCurrentValue returns the typed, writer-accepted form of a
-// structured personal-project value. root_agent needs its source shape as well
-// as its decoded value: enabled=false and program="" are meaningful when
-// explicitly present, while an omitted field must keep inheriting.
+// structured personal-project value. root_agent and account_handoff need their
+// source shape as well as their decoded value: enabled=false, mode="off", and
+// move_idle_at_percent=0 are meaningful when explicitly present, while an
+// omitted field must keep inheriting from the global layer.
 func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool) {
 	field, ok := taggedFieldByKey(reflect.ValueOf(cfg), key)
 	if !ok {
 		return "", false
+	}
+	if key == "account_handoff" {
+		shapeValue, _ := cfg.source.topLevel(key)
+		shape, ok := shapeValue.(map[string]any)
+		if !ok {
+			return "", false
+		}
+		return editorValue(accountHandoffSparseCurrentValue(field, shape)), true
 	}
 	if key != "root_agent" {
 		if key == "program_overrides" {
@@ -578,6 +684,40 @@ func projectStructuredCurrentValue(cfg *ProjectConfig, key string) (string, bool
 	return editorValue(reflect.ValueOf(value)), true
 }
 
+// accountHandoffSparseCurrentValue renders only the [account_handoff] leaves a
+// source shape actually wrote: an absent table shows {}, a sparse table stays
+// sparse, and an explicit zero/false/"" leaf keeps its written value. Used by
+// both CurrentValue (global) and projectStructuredCurrentValue (personal), so
+// the two surfaces describe the same table the same way.
+//
+// It renders through the sparse-write mirror rather than a map so a FULL table
+// emits the exact bytes the structural fallback (editorValue on
+// AccountHandoffConfig) does — same field order, same [] for an empty list —
+// which is what TestCurrentValueRoundTripsThroughConfigSet's set-canonicalized-
+// to-shown assertion pins.
+func accountHandoffSparseCurrentValue(field reflect.Value, shape map[string]any) reflect.Value {
+	rt := reflect.TypeOf(AccountHandoffConfig{})
+	out := reflect.ValueOf(&accountHandoffConfigJSON{}).Elem()
+	for i := range rt.NumField() {
+		name := structTagName(rt.Field(i).Tag.Get("toml"))
+		if name == "" || name == "-" {
+			continue
+		}
+		if _, present := shape[name]; !present {
+			continue
+		}
+		// The mirror declares the same Go field names, one pointer per leaf.
+		target := out.FieldByName(rt.Field(i).Name)
+		if !target.IsValid() || !target.CanSet() {
+			continue
+		}
+		ptr := reflect.New(field.Field(i).Type())
+		ptr.Elem().Set(field.Field(i))
+		target.Set(ptr)
+	}
+	return out
+}
+
 // preserveStructuredMembers retains omitted root_agent profile fields and
 // carries fields this binary does not know
 // from the old target table into its replacement. The loader deliberately
@@ -605,11 +745,11 @@ func preserveStructuredMembers(content, key, definition string) (string, error) 
 	}
 	var merged any
 	var changed bool
-	if key == "root_agent" {
+	if key == "root_agent" || key == "account_handoff" {
 		previous, oldOK := existing.(map[string]any)
 		next, newOK := replacement.(map[string]any)
 		if !oldOK || !newOK {
-			return "", fmt.Errorf("root_agent must be a table")
+			return "", fmt.Errorf("%s must be a table", key)
 		}
 		for member, value := range previous {
 			if _, supplied := next[member]; !supplied {

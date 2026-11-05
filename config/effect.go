@@ -113,6 +113,10 @@ var keyEffectClasses = map[string]EffectClass{
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
+	// Staged for the account-handoff engine (#6776): nothing reads it yet at
+	// any layer, so no start can apply it either — NextDaemonStart is where a
+	// daemon-owned key belongs until its engine slice lands and re-decides.
+	"account_handoff": EffectNextDaemonStart,
 	// The watcher supervisor snapshots this cap when the daemon constructs it;
 	// existing supervisors are not rebuilt by ApplyConfig.
 	"watcher_events_per_minute": EffectNextDaemonStart,

@@ -287,6 +287,14 @@ func validateConfig(config *Config, prettyConfigPath string, warnShellValues boo
 	}
 	config.LimitAccountCandidates = normalizedCandidates
 
+	// The [account_handoff] table validates as a unit like the other identity
+	// keys above: a bad leaf is a hard error, never a silent fallback — the
+	// staged engine reads thresholds verbatim, and mode = "live" is rejected
+	// outright until its slice ships.
+	if err := validateAccountHandoff(config.AccountHandoff); err != nil {
+		return nil, fmt.Errorf("Config issue in %s: %w", prettyConfigPath, err)
+	}
+
 	sanitizeLimitPatterns(config)
 	sanitizeHosts(config)
 	sanitizeAllowedHosts(config, prettyConfigPath)
