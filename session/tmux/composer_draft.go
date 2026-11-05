@@ -50,12 +50,21 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 	case composerPlaceholderShaped(glyphText):
 		return false, false
 	}
-	region := afterComposerGlyph(normalizeDelivery(strings.Join(composerRegion(rows, anchor), "")))
+	regionRows := composerRegion(rows, anchor)
+	region := afterComposerGlyph(normalizeDelivery(strings.Join(regionRows, "")))
 	if composerPlaceholderShaped(region) {
 		return false, false
 	}
 	if region != "" {
 		return true, true
+	}
+	// normalizeDelivery erases box-drawing and block runes (0x2500–0x259F)
+	// to drop composer borders — but a draft DRAWN in those runes erases
+	// with them, so `❯ ███` would read as an empty input (#6817 review).
+	// Any residual left after peeling the frame is unprovable — border
+	// fragment or typed blocks, af cannot tell — never empty.
+	if composerBoxResidual(regionRows) {
+		return false, false
 	}
 	// An empty region under a bare-glyph anchor is only as good as the
 	// anchor choice: a `>`-only continuation row inside a wrapped draft is
@@ -121,6 +130,60 @@ func ultraPlaceholderRowPresent(rows []string) bool {
 		}
 	}
 	return false
+}
+
+// composerBoxResidual reports whether a composer region still holds visible
+// content once the frame is peeled away — a whole row of box runes is a
+// border and skipped, then one border column is trimmed from each surviving
+// row's edges, and the anchor row sheds its prompt glyph. Whatever remains
+// is text normalizeDelivery erased without being a frame: a border
+// fragment, or a draft typed in box-drawing/block runes — af cannot tell,
+// so its existence is unprovable, never empty (#6817 review).
+func composerBoxResidual(regionRows []string) bool {
+	for i, row := range regionRows {
+		s := strings.TrimSpace(row)
+		if s == "" || composerAllBoxRunes(s) {
+			continue
+		}
+		s = strings.TrimSpace(trimOneBoxRune(s, true))
+		s = strings.TrimSpace(trimOneBoxRune(s, false))
+		if i == 0 {
+			s = strings.TrimSpace(afterComposerGlyph(s))
+		}
+		if s != "" {
+			return true
+		}
+	}
+	return false
+}
+
+// composerAllBoxRunes reports whether every rune is box-drawing or a block
+// element — a whole frame row.
+func composerAllBoxRunes(s string) bool {
+	for _, r := range s {
+		if r < 0x2500 || r > 0x259F {
+			return false
+		}
+	}
+	return true
+}
+
+// trimOneBoxRune drops a single box-drawing rune at the front (or back) of
+// an already space-trimmed string — the one border column at that edge.
+func trimOneBoxRune(s string, front bool) string {
+	if s == "" {
+		return s
+	}
+	if front {
+		if r, size := utf8.DecodeRuneInString(s); r >= 0x2500 && r <= 0x259F {
+			return s[size:]
+		}
+		return s
+	}
+	if r, size := utf8.DecodeLastRuneInString(s); r >= 0x2500 && r <= 0x259F {
+		return s[:len(s)-size]
+	}
+	return s
 }
 
 // composerAnchorAmbiguous reports whether a GLYPH-carrying row immediately
