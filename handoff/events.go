@@ -34,6 +34,13 @@ const EventFilePrefix = "auto-handoff-events-"
 // eventRetentionDays bounds how long a day's file is kept (design R14).
 const eventRetentionDays = 7
 
+// eventDayMaxBytes caps one day's file (#6817 review): a degraded caller that
+// emits rows every tick cannot grow the log without bound. Rows past the cap
+// are dropped for that day — the file is an operator-diff surface, not a
+// transport, and an unbounded one breaks the AF-home guard the same way a
+// bare MkdirAll did.
+const eventDayMaxBytes = 4 << 20
+
 // eventLabelCap bounds the title field carried on a row — titles are data.
 const eventLabelCap = 120
 
@@ -113,9 +120,31 @@ func (l *EventLog) Append(rows []EventRow) error {
 			payload.WriteByte('\n')
 		}
 		if err := config.WithFileLockTimeout(file, config.RepoInstancesLockTimeout, func() error {
+			// A symlinked day file is never ours to write through (#6817
+			// review): Lstat refuses it outright, and the SameFile recheck
+			// after open closes the window where the path is swapped between
+			// the check and the append.
+			before, statErr := os.Lstat(file)
+			if statErr == nil && before.Mode()&os.ModeSymlink != 0 {
+				return fmt.Errorf("refusing to append through symlink %s", file)
+			}
+			if statErr == nil && before.Size() >= eventDayMaxBytes {
+				return nil // past the day cap: drop rather than grow unbounded
+			}
 			f, err := os.OpenFile(file, os.O_WRONLY|os.O_CREATE|os.O_APPEND, 0o600)
 			if err != nil {
 				return err
+			}
+			if statErr == nil {
+				after, serr := f.Stat()
+				if serr != nil {
+					f.Close()
+					return serr
+				}
+				if !os.SameFile(before, after) {
+					f.Close()
+					return fmt.Errorf("event file %s was replaced during open", file)
+				}
 			}
 			_, werr := f.WriteString(payload.String())
 			cerr := f.Close()
@@ -142,10 +171,19 @@ func (l *EventLog) prune() error {
 		cutoff := l.now().AddDate(0, 0, -eventRetentionDays)
 		for _, entry := range entries {
 			name := entry.Name()
-			if !strings.HasPrefix(name, EventFilePrefix) || !strings.HasSuffix(name, ".jsonl") {
+			if !strings.HasPrefix(name, EventFilePrefix) {
 				continue
 			}
-			stamp := strings.TrimSuffix(strings.TrimPrefix(name, EventFilePrefix), ".jsonl")
+			// The file AND its sibling lock prune on the same stamp (#6817
+			// review): a stale <day>.jsonl.lock outlives the rotation it
+			// guarded otherwise.
+			suffix := ".jsonl"
+			if strings.HasSuffix(name, ".jsonl.lock") {
+				suffix = ".jsonl.lock"
+			} else if !strings.HasSuffix(name, suffix) {
+				continue
+			}
+			stamp := strings.TrimSuffix(strings.TrimPrefix(name, EventFilePrefix), suffix)
 			day, err := time.Parse("20060102", stamp)
 			if err != nil {
 				continue // an unrelated look-alike file is never ours to remove

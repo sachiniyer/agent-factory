@@ -32,6 +32,7 @@ type depCounts struct {
 	stateErr                                                 error
 	reports                                                  []reportCall
 	warns                                                    []string
+	exclude                                                  []string
 }
 
 type reportCall struct {
@@ -49,7 +50,7 @@ func (d *depCounts) deps() Deps {
 				Mode: d.mode, IncludePinned: false, TargetOrder: "listed",
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
-				MaxMovesWindow: "30m", ExcludeSessions: []string{},
+				MaxMovesWindow: "30m", ExcludeSessions: d.exclude,
 				ReportTo: d.reportTo,
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
@@ -93,7 +94,7 @@ func (d *depCounts) deps() Deps {
 			d.rows = append(d.rows, rows...)
 			return nil
 		},
-		DeliverReport: func(recipient SessionInput, rows []handoff.EventRow) {
+		DeliverReport: func(spec string, recipient SessionInput, rows []handoff.EventRow) {
 			d.reports = append(d.reports, reportCall{key: recipient.Key, rows: rows})
 		},
 		LogWarn: func(format string, args ...any) {
@@ -120,7 +121,7 @@ func TestTickDoesNothingUnlessShadow(t *testing.T) {
 	for _, mode := range []string{"off", "", "live"} {
 		d := &depCounts{mode: mode}
 		e := New(d.deps())
-		if err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
 			t.Fatalf("mode %q: %v", mode, err)
 		}
 		if d.state+d.registered+d.limited+d.dirs+d.reads+d.writes != 0 {
@@ -136,7 +137,7 @@ func TestTickShadowDecidesAndWritesEdges(t *testing.T) {
 	d := &depCounts{mode: "shadow"}
 	e := New(d.deps())
 	in := shadowSession()
-	if err := e.Tick([]SessionInput{in}); err != nil {
+	if _, err := e.Tick([]SessionInput{in}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if d.writes != 1 || len(d.rows) == 0 {
@@ -167,7 +168,7 @@ func TestTickShadowEdgeSuppressesUnchangedVerdict(t *testing.T) {
 	e := New(d.deps())
 	in := shadowSession()
 	for i := 0; i < 3; i++ {
-		if err := e.Tick([]SessionInput{in}); err != nil {
+		if _, err := e.Tick([]SessionInput{in}); err != nil {
 			t.Fatalf("tick %d: %v", i, err)
 		}
 	}
@@ -179,7 +180,7 @@ func TestTickShadowEdgeSuppressesUnchangedVerdict(t *testing.T) {
 func TestTickCorruptStateFailsClosed(t *testing.T) {
 	d := &depCounts{mode: "shadow", stateErr: errors.New("corrupt")}
 	e := New(d.deps())
-	if err := e.Tick([]SessionInput{shadowSession()}); err == nil {
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err == nil {
 		t.Fatalf("corrupt state ticked without error")
 	}
 	if d.writes != 0 {
@@ -199,7 +200,7 @@ func TestTickReportsToResolvedRecipient(t *testing.T) {
 	d := &depCounts{mode: "shadow", reportTo: "observer"}
 	e := New(d.deps())
 	in := shadowSession()
-	if err := e.Tick([]SessionInput{in, observerSession()}); err != nil {
+	if _, err := e.Tick([]SessionInput{in, observerSession()}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
@@ -215,7 +216,7 @@ func TestTickReportQualifiedResolvesByProject(t *testing.T) {
 	e := New(d.deps())
 	obs := observerSession()
 	obs.RepoRoot = "/home/u/repo"
-	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
@@ -230,7 +231,7 @@ func TestTickReportQualifiedByFullRepoRoot(t *testing.T) {
 	e := New(d.deps())
 	obs := observerSession()
 	obs.RepoRoot = "/home/u/repo"
-	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
@@ -244,7 +245,7 @@ func TestTickReportPathQualifierDoesNotBasenameMatch(t *testing.T) {
 	e := New(d.deps())
 	obs := observerSession()
 	obs.RepoRoot = "/home/u/repo"
-	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 0 {
@@ -257,7 +258,7 @@ func TestTickReportAmbiguousSkips(t *testing.T) {
 	e := New(d.deps())
 	a, b := observerSession(), observerSession()
 	b.Key, b.RepoID, b.RepoRoot = "sess-obs2", "r2", "/other"
-	if err := e.Tick([]SessionInput{shadowSession(), a, b}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession(), a, b}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 0 {
@@ -271,7 +272,7 @@ func TestTickReportAmbiguousSkips(t *testing.T) {
 func TestTickReportNoMatchWarns(t *testing.T) {
 	d := &depCounts{mode: "shadow", reportTo: "missing"}
 	e := New(d.deps())
-	if err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	if len(d.reports) != 0 || len(d.warns) == 0 {
@@ -279,10 +280,54 @@ func TestTickReportNoMatchWarns(t *testing.T) {
 	}
 }
 
+// #6818 review: resolution runs over ALL sessions, then refuses a found
+// recipient that is not live — a lost or archived observer must not let a
+// same-titled session elsewhere claim its reports.
+func TestTickReportResolvedButNotLiveSkips(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	dead := observerSession()
+	dead.Live = false
+	if _, err := e.Tick([]SessionInput{shadowSession(), dead}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 || len(d.warns) == 0 {
+		t.Fatalf("not-live recipient: reports=%v warns=%v", d.reports, d.warns)
+	}
+}
+
+func TestTickReportDeadSiblingBlocksSameTitle(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	live := observerSession()
+	lost := observerSession()
+	lost.Key, lost.RepoID, lost.RepoRoot, lost.Live = "sess-lost", "r2", "/other", false
+	if _, err := e.Tick([]SessionInput{shadowSession(), live, lost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("dead sibling did not block same-titled delivery: %+v", d.reports)
+	}
+}
+
+// #6818 review: a governed recipient never reads its own rows back.
+func TestTickReportRecipientSkipsOwnRows(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	emitter := shadowSession()
+	emitter.Title = "observer" // resolves to itself
+	if _, err := e.Tick([]SessionInput{emitter}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("recipient received its own rows: %+v", d.reports)
+	}
+}
+
 func TestTickUnreadableLimitEvidenceSkipsNamespace(t *testing.T) {
 	d := &depCounts{mode: "shadow", limitedErr: errors.New("ledger corrupt")}
 	e := New(d.deps())
-	if err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
 		t.Fatalf("tick: %v", err)
 	}
 	// The namespace failed closed: no decision ran, nothing was written —
@@ -296,13 +341,13 @@ func TestTickWriteFailureRetriesTheEdge(t *testing.T) {
 	d := &depCounts{mode: "shadow", writeErr: errors.New("disk full")}
 	e := New(d.deps())
 	in := shadowSession()
-	if err := e.Tick([]SessionInput{in}); err == nil {
+	if _, err := e.Tick([]SessionInput{in}); err == nil {
 		t.Fatalf("failed write returned nil error")
 	}
 	// The failed append must NOT consume the edge: the next tick re-emits
 	// the same verdict instead of suppressing it as a repeat (#6817).
 	d.writeErr = nil
-	if err := e.Tick([]SessionInput{in}); err != nil {
+	if _, err := e.Tick([]SessionInput{in}); err != nil {
 		t.Fatalf("retry tick: %v", err)
 	}
 	if len(d.rows) == 0 {
@@ -310,16 +355,70 @@ func TestTickWriteFailureRetriesTheEdge(t *testing.T) {
 	}
 }
 
+// #6817 review: a session the scope gates reject must never reach the
+// account registry or a usage file — the leaf's Phase-A order runs in the
+// engine, before any evidence work.
+func TestTickScopeChecksRunBeforeEvidence(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*SessionInput)
+		setup  func(*depCounts)
+	}{
+		{"pinned and include_pinned off", func(in *SessionInput) { in.Auto = false }, nil},
+		{"excluded_sessions entry", nil, func(d *depCounts) { d.exclude = []string{"worker"} }},
+		{"dead or archived row", func(in *SessionInput) { in.Live = false }, nil},
+		{"ambient seat the config ignores", func(in *SessionInput) {
+			in.Account = ""
+			in.Auto = false
+		}, nil},
+		{"unsupported agent", func(in *SessionInput) { in.Agent = "" }, nil},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			d := &depCounts{mode: "shadow"}
+			if tc.setup != nil {
+				tc.setup(d)
+			}
+			e := New(d.deps())
+			in := shadowSession()
+			if tc.mutate != nil {
+				tc.mutate(&in)
+			}
+			if _, err := e.Tick([]SessionInput{in}); err != nil {
+				t.Fatalf("tick: %v", err)
+			}
+			if d.registered+d.limited+d.dirs+d.reads != 0 {
+				t.Fatalf("out-of-scope session read evidence: %+v", d)
+			}
+		})
+	}
+}
+
+// #6817 review: a tick refreshes an account home at most once — the walled
+// session's own home and the same-named candidate dir share one read.
+func TestTickRefreshesEachAccountDirOnce(t *testing.T) {
+	d := &depCounts{mode: "shadow"}
+	e := New(d.deps())
+	in := shadowSession()
+	if _, err := e.Tick([]SessionInput{in}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	// HomeDir "/home/codex/work" coincides with candidate "work"'s dir;
+	// "personal" is the only other read — 2 reads, not 3.
+	if d.reads != 2 {
+		t.Fatalf("usage reads = %d, want 2 (one per distinct dir)", d.reads)
+	}
+}
+
 func TestTickSessionLeavingReannouncesOnReturn(t *testing.T) {
 	d := &depCounts{mode: "shadow"}
 	e := New(d.deps())
 	in := shadowSession()
-	e.Tick([]SessionInput{in})
+	_, _ = e.Tick([]SessionInput{in})
 	// Session leaves the governed set (mode flips off), then returns —
 	// its verdict re-announces as a fresh edge, not a suppressed repeat.
-	e.Tick([]SessionInput{})
+	_, _ = e.Tick([]SessionInput{})
 	d.mode = "shadow"
-	e.Tick([]SessionInput{in})
+	_, _ = e.Tick([]SessionInput{in})
 	if d.writes != 2 {
 		t.Fatalf("returned session did not re-announce: %d writes", d.writes)
 	}

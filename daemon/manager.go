@@ -639,6 +639,16 @@ type Manager struct {
 	// handoffReportCh feeds the report_to delivery worker (R15): buffered so
 	// the decision ticker never blocks — a full queue drops with a warn.
 	handoffReportCh chan handoffReportJob
+	// handoffActive is the poll hook's cheap gate (#6817 review): while no
+	// resolved config has engaged shadow — checked once per tick — a probe's
+	// noteHandoffObservation does literally nothing: no lock, no store. Set
+	// only from the engine ticker goroutine; read from every poll goroutine.
+	handoffActive atomic.Bool
+	// handoffLastScan bounds project-config discovery while inactive: between
+	// rescans the tick is the one in-memory global-config check, and a scan
+	// at most every accountHandoffRescanInterval finds a personal-project
+	// opt-in. Touched only from the engine ticker goroutine — no lock.
+	handoffLastScan time.Time
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once

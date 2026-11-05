@@ -58,7 +58,8 @@ func EventRowSignature(r EventRow) string {
 // normalizer the event log applies — the writer sanitizes its own copies,
 // so the rows queued for reporting must be normalized here instead (#6818
 // review). The template quotes the title so spaces cannot mangle the
-// key=value scan.
+// key=value scan; the quoted value escapes quote and backslash so a raw
+// title cannot close the field early and forge a `kind=halted` tail.
 func ReportLine(r EventRow) string {
 	var b strings.Builder
 	b.WriteString("[af handoff] kind=")
@@ -67,7 +68,7 @@ func ReportLine(r EventRow) string {
 	b.WriteString(sanitizeEventLabel(r.ReasonCode))
 	if r.Title != "" {
 		b.WriteString(" session=\"")
-		b.WriteString(sanitizeEventLabel(r.Title))
+		b.WriteString(escapeReportQuoted(r.Title))
 		b.WriteByte('"')
 	}
 	if r.SessionKey != "" {
@@ -107,8 +108,28 @@ func ReportLine(r EventRow) string {
 	return b.String()
 }
 
+// escapeReportQuoted sanitizes a value for the template's quoted slot:
+// control-stripped and capped like every field, then quote/backslash
+// escaped so the rendered value cannot terminate the field early. A title
+// containing `" kind=halted` therefore stays inside its quotes instead of
+// forging report fields (#6818 review).
+func escapeReportQuoted(s string) string {
+	s = sanitizeEventLabel(s)
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, `"`, `\"`)
+}
+
+// reportDigestMaxRows and reportDigestMaxBytes bound one digest (#6818
+// review): a fleet-wide reannouncement must never become one huge prompt —
+// past the caps the digest reports the overflow count instead of the rows.
+const (
+	reportDigestMaxRows  = 24
+	reportDigestMaxBytes = 8 << 10
+)
+
 // ReportDigest renders the once-a-minute batch: a header with the count,
-// then one ReportLine per row.
+// then one ReportLine per row, truncated to the row/byte caps with an
+// overflow marker naming how many rows were not carried.
 func ReportDigest(rows []EventRow) string {
 	var b strings.Builder
 	b.WriteString("[af handoff digest] ")
@@ -118,11 +139,25 @@ func ReportDigest(rows []EventRow) string {
 	} else {
 		b.WriteString(" events\n")
 	}
+	shown := 0
 	for i, row := range rows {
+		if shown >= reportDigestMaxRows {
+			break
+		}
+		line := ReportLine(row)
+		if b.Len()+len(line)+1 > reportDigestMaxBytes {
+			break
+		}
 		if i > 0 {
 			b.WriteByte('\n')
 		}
-		b.WriteString(ReportLine(row))
+		b.WriteString(line)
+		shown++
+	}
+	if shown < len(rows) {
+		b.WriteString("\n… +")
+		b.WriteString(strconv.Itoa(len(rows) - shown))
+		b.WriteString(" more not shown")
 	}
 	return b.String()
 }

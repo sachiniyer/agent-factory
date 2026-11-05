@@ -57,10 +57,25 @@ type handoffObservation struct {
 	content  string
 }
 
+// accountHandoffRescanInterval bounds how often an INACTIVE engine re-runs
+// config resolution to discover a project-level opt-in (#6817 review). While
+// nothing anywhere engages shadow, a tick must cost no more than reading the
+// already-loaded global config; a personal project's [account_handoff] can
+// still switch shadow on, and this rescan is how it is found. The interval
+// trades a bounded discovery delay for the property that an opted-out box
+// spends nothing on machinery it never asked for.
+var accountHandoffRescanInterval = 5 * time.Minute
+
 // noteHandoffObservation records the capture verdict of one status probe for
 // the engine's fact assembly. A failed probe is recorded too — "could not
-// capture" is itself a fact (composer state unprovable → draft-blocked).
+// capture" is itself a fact (composer state unprovable → draft-blocked). The
+// handoffActive gate is the "off is off" half of the contract: with no
+// opted-in config anywhere, a status probe must not even take m.mu on the
+// engine's behalf.
 func (m *Manager) noteHandoffObservation(key string, captured bool, content string) {
+	if !m.handoffActive.Load() {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.handoffObserved == nil {
@@ -72,10 +87,28 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 // accountHandoffTick is one shadow pass: gather the session inputs from the
 // manager's own records, run the engine, warn on failure. Every leg failing
 // is a warn-and-retry — the next tick assembles fresh facts from scratch.
+//
+// The gate is the review's "off isn't off" property. A globally opted-in
+// [account_handoff] (the already-loaded config — no disk) runs every tick;
+// so does any tick while governed sessions were last seen. Otherwise the
+// full input walk + per-repo resolution happens at most once per
+// accountHandoffRescanInterval — that scan is the only way to learn a
+// personal project table switched shadow on.
 func (m *Manager) accountHandoffTick() {
-	if err := m.accountHandoffEngine().Tick(m.accountHandoffInputs()); err != nil {
+	global := false
+	if cfg := m.Config(); cfg != nil {
+		global = cfg.AccountHandoffEnabled()
+	}
+	if !global && !m.handoffActive.Load() &&
+		nowFunc().Sub(m.handoffLastScan) < accountHandoffRescanInterval {
+		return
+	}
+	m.handoffLastScan = nowFunc()
+	governed, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs())
+	if err != nil {
 		m.warn().Printf("account-handoff engine tick: %v", err)
 	}
+	m.handoffActive.Store(global || governed > 0)
 }
 
 // accountHandoffEngine lazily builds the engine and its injected deps. Kept
@@ -142,8 +175,8 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 			}
 			return log_.Append(rows)
 		},
-		DeliverReport: func(recipient handoffengine.SessionInput, rows []handoff.EventRow) {
-			m.enqueueHandoffReport(recipient.Key, rows)
+		DeliverReport: func(spec string, recipient handoffengine.SessionInput, rows []handoff.EventRow) {
+			m.enqueueHandoffReport(spec, recipient.Key, rows)
 		},
 		LogWarn: m.warn().Printf,
 		// The reconcile's own skew constants: the resume grace a resets_at
@@ -155,13 +188,26 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 	return m.handoffEngine
 }
 
+// handoffInputDraft is the under-lock half of accountHandoffInputs: the
+// input populated from in-memory instance state, plus the instance pointer
+// the second phase still needs.
+type handoffInputDraft struct {
+	in   handoffengine.SessionInput
+	inst *session.Instance
+}
+
 // accountHandoffInputs gathers one SessionInput per instance from the
 // manager's records — the same sources accountSwapOpportunity consults — plus
 // the pane observation the status poll last recorded.
+//
+// m.mu is held for the map walk ONLY (#6817 review): every getter it calls is
+// in-memory instance state. SessionCodexHomeDir — the lstat, and for a legacy
+// row the RepoFromPath→untimed-git chain — runs AFTER the lock is released,
+// and only for the sessions that can consume it: live, started codex seats.
+// An archived row's home resolve is skipped entirely.
 func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	inputs := make([]handoffengine.SessionInput, 0, len(m.instances))
+	drafts := make([]handoffInputDraft, 0, len(m.instances))
 	liveKeys := make(map[string]bool, len(m.instances))
 	for key, inst := range m.instances {
 		if inst == nil {
@@ -180,29 +226,32 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 			repoRoot = inst.Path
 		}
 		obs := m.handoffObserved[sessionKey]
-		inputs = append(inputs, handoffengine.SessionInput{
-			Key:            sessionKey,
-			Title:          inst.Title,
-			RepoID:         repoID,
-			RepoRoot:       repoRoot,
-			Agent:          accountSwapAgent(inst),
-			Account:        account,
-			Auto:           auto,
-			Started:        inst.Started(),
-			Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
-			Working:        liveness == session.LiveRunning,
-			Parked:         parked,
-			Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
-			VSCodeTab:      instanceHasVSCodeTab(inst),
-			PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
-			SwapCapable:    inst.SupportsAutomaticAccountSwap(),
-			CarryPossible:  session.CarrySupportedAgent(accountSwapAgent(inst)) && !isRemoteWorkspace(inst),
-			HomeDir:        inst.SessionCodexHomeDir(),
-			LimitAccount:   limitAccountFor(inst),
-			WallObservedAt: wallObservedAtFor(inst),
-			Captured:       obs.captured,
-			CapturedAt:     obs.at,
-			Content:        obs.content,
+		agent := accountSwapAgent(inst)
+		drafts = append(drafts, handoffInputDraft{
+			in: handoffengine.SessionInput{
+				Key:            sessionKey,
+				Title:          inst.Title,
+				RepoID:         repoID,
+				RepoRoot:       repoRoot,
+				Agent:          agent,
+				Account:        account,
+				Auto:           auto,
+				Started:        inst.Started(),
+				Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
+				Working:        liveness == session.LiveRunning,
+				Parked:         parked,
+				Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
+				VSCodeTab:      instanceHasVSCodeTab(inst),
+				PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
+				SwapCapable:    inst.SupportsAutomaticAccountSwap(),
+				CarryPossible:  session.CarrySupportedAgent(agent) && !isRemoteWorkspace(inst),
+				LimitAccount:   limitAccountFor(inst),
+				WallObservedAt: wallObservedAtFor(inst),
+				Captured:       obs.captured,
+				CapturedAt:     obs.at,
+				Content:        obs.content,
+			},
+			inst: inst,
 		})
 	}
 	// Prune observations for sessions that are gone — same rule the poll's
@@ -211,6 +260,14 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		if !liveKeys[key] {
 			delete(m.handoffObserved, key)
 		}
+	}
+	m.mu.Unlock()
+	inputs := make([]handoffengine.SessionInput, 0, len(drafts))
+	for _, d := range drafts {
+		if d.in.Agent == tmux.ProgramCodex && d.in.Started && d.in.Live {
+			d.in.HomeDir = d.inst.SessionCodexHomeDir()
+		}
+		inputs = append(inputs, d.in)
 	}
 	return inputs
 }
@@ -277,9 +334,11 @@ func readingFactsFrom(reading rateindex.AccountReading) handoff.ReadingFacts {
 	}
 }
 
-// handoffReportJob is one resolved report_to delivery: the recipient's stable
-// session key plus the rows the engine emitted for that spec this tick.
+// handoffReportJob is one resolved report_to delivery: the spec the engine
+// used, the recipient's stable session key, and the rows emitted for that
+// spec this tick.
 type handoffReportJob struct {
+	spec string
 	key  string
 	rows []handoff.EventRow
 }
@@ -287,6 +346,33 @@ type handoffReportJob struct {
 // reportFlushInterval caps the digest cadence (R15): at most one digest a
 // minute per recipient; halted and move-failed jump the window.
 var reportFlushInterval = time.Minute
+
+// reportImmediateTTL bounds how long a once-only immediate signature stays
+// spent (#6818 review): a halt/move-failure incident is a fresh one after
+// this long, and its report must fire again.
+var reportImmediateTTL = 24 * time.Hour
+
+// reportPendingCap bounds rows held for one recipient while delivery waits —
+// a recipient attached for hours cannot grow the queue without bound.
+const reportPendingCap = 512
+
+// reportSendOutcome tells the worker what one send attempt did:
+// delivered/dropped retire the rows; held keeps them for the next flush —
+// a held delivery waits rather than retrying (#6818 review).
+type reportSendOutcome int
+
+const (
+	reportSent reportSendOutcome = iota
+	reportHeld
+	reportDropped
+)
+
+// reportPending is one recipient's digest backlog plus the spec that
+// produced it — a config change to mode or report_to invalidates it.
+type reportPending struct {
+	spec string
+	rows []handoff.EventRow
+}
 
 // startHandoffReportLoop runs the report_to delivery worker. It owns the
 // prompt sends so the decision ticker never blocks on a remote transport:
@@ -297,8 +383,8 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 		defer wg.Done()
 		flush := time.NewTicker(reportFlushInterval)
 		defer flush.Stop()
-		pending := map[string][]handoff.EventRow{} // recipient key → digest rows
-		sentImmediate := map[string]bool{}         // delivered-once dedupe
+		pending := map[string]*reportPending{}  // recipient key → digest backlog
+		sentImmediate := map[string]time.Time{} // signature → when delivered
 		for {
 			select {
 			case <-stopCh:
@@ -307,74 +393,153 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 				for _, row := range job.rows {
 					if handoff.ImmediateReport(row) {
 						sig := handoff.EventRowSignature(row)
-						if !sentImmediate[sig] {
-							sentImmediate[sig] = true
-							manager.deliverHandoffReport(job.key, handoff.ReportLine(row))
+						if _, sent := sentImmediate[sig]; sent {
+							continue
+						}
+						switch manager.deliverHandoffReport(job.key, handoff.ReportLine(row)) {
+						case reportSent, reportDropped:
+							// A dropped immediate is spent like a sent one —
+							// once-only means never retried, not retried
+							// forever.
+							sentImmediate[sig] = nowFunc()
+						case reportHeld:
+							// Attached recipient: the row waits inside the
+							// digest backlog and still delivers exactly once.
+							manager.queueReportRow(pending, job, row)
 						}
 						continue
 					}
-					pending[job.key] = append(pending[job.key], row)
+					manager.queueReportRow(pending, job, row)
 				}
 			case <-flush.C:
-				for key, rows := range pending {
-					manager.deliverHandoffReport(key, handoff.ReportDigest(rows))
+				for sig, at := range sentImmediate {
+					if nowFunc().Sub(at) >= reportImmediateTTL {
+						delete(sentImmediate, sig)
+					}
 				}
-				pending = map[string][]handoff.EventRow{}
+				for key, entry := range pending {
+					rows := manager.liveReportRows(entry)
+					if len(rows) == 0 {
+						delete(pending, key)
+						continue
+					}
+					switch manager.deliverHandoffReport(key, handoff.ReportDigest(rows)) {
+					case reportHeld:
+						entry.rows = rows
+					default:
+						delete(pending, key)
+					}
+				}
 			}
 		}
 	}()
 }
 
+// queueReportRow appends one row to the recipient's backlog under its cap.
+// A job whose spec differs from the backlog's replaces it — the older rows
+// were emitted under a report_to or mode the config no longer has.
+func (m *Manager) queueReportRow(pending map[string]*reportPending, job handoffReportJob, row handoff.EventRow) {
+	entry := pending[job.key]
+	if entry == nil || entry.spec != job.spec {
+		entry = &reportPending{spec: job.spec}
+		pending[job.key] = entry
+	}
+	if len(entry.rows) >= reportPendingCap {
+		return
+	}
+	entry.rows = append(entry.rows, row)
+}
+
+// liveReportRows filters a digest backlog down to rows whose emitting
+// session still wants this spec: the emitter must resolve to a config still
+// in shadow mode whose report_to is the spec the rows were emitted under
+// (#6818 review — pending digests die when mode or report_to changes). A
+// row whose emitter is gone drops with it.
+func (m *Manager) liveReportRows(entry *reportPending) []handoff.EventRow {
+	m.mu.Lock()
+	roots := make(map[string]string, len(entry.rows))
+	for _, row := range entry.rows {
+		if _, ok := roots[row.SessionKey]; ok {
+			continue
+		}
+		for k, inst := range m.instances {
+			repoID, _ := splitDaemonInstanceKey(k)
+			if inst != nil && stableSessionKey(repoID, inst) == row.SessionKey {
+				roots[row.SessionKey] = inst.GetRepoPath()
+				if roots[row.SessionKey] == "" {
+					roots[row.SessionKey] = inst.Path
+				}
+				break
+			}
+		}
+	}
+	m.mu.Unlock()
+	var out []handoff.EventRow
+	for _, row := range entry.rows {
+		root, ok := roots[row.SessionKey]
+		if !ok || root == "" {
+			continue
+		}
+		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
+		if err != nil || cfg == nil ||
+			cfg.AccountHandoff.Mode != config.AccountHandoffModeShadow ||
+			cfg.AccountHandoff.ReportTo != entry.spec {
+			continue
+		}
+		out = append(out, row)
+	}
+	return out
+}
+
 // enqueueHandoffReport hands the worker one job. The send is non-blocking by
 // contract: a saturated queue drops the rows with a warn rather than stall
 // the engine tick behind an operator's recipient.
-func (m *Manager) enqueueHandoffReport(key string, rows []handoff.EventRow) {
+func (m *Manager) enqueueHandoffReport(spec, key string, rows []handoff.EventRow) {
 	select {
-	case m.handoffReportCh <- handoffReportJob{key: key, rows: rows}:
+	case m.handoffReportCh <- handoffReportJob{spec: spec, key: key, rows: rows}:
 	default:
 		m.warn().Printf("account-handoff report queue full — dropped %d row(s) for %s", len(rows), key)
 	}
 }
 
 // deliverHandoffReport sends one fixed-template prompt to the resolved
-// recipient session. A session that vanished between resolution and send
-// warns and drops — a report is never retried into a different session.
-// The send is automated, so it passes the same liveness guard as task
-// deliveries: a limit-parked or unrecoverable recipient is skipped rather
-// than typed into its limit picker (#6818 review).
-func (m *Manager) deliverHandoffReport(key, text string) {
+// recipient session through the SAME guarded path any automated delivery
+// takes (#6818 review): the attach lease defers while a TUI is typing in the
+// pane, and sendPromptGuarded carries the operation lock, teardown and
+// pending-swap checks, the automated liveness gate — which parks a
+// limit-reached recipient instead of answering its picker — and the
+// send-confirmation record. A vanished recipient drops; a held one reports
+// reportHeld so the worker waits for detach instead of retrying into a
+// different session.
+func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 	m.mu.Lock()
 	var target *session.Instance
+	var repoID string
 	for k, inst := range m.instances {
-		repoID, _ := splitDaemonInstanceKey(k)
-		if inst != nil && stableSessionKey(repoID, inst) == key {
-			target = inst
+		rid, _ := splitDaemonInstanceKey(k)
+		if inst != nil && stableSessionKey(rid, inst) == key {
+			target, repoID = inst, rid
 			break
 		}
 	}
 	m.mu.Unlock()
 	if target == nil {
 		m.warn().Printf("account-handoff report recipient %s is gone — dropped", key)
-		return
+		return reportDropped
 	}
-	// Mirror the task-send fencing: hold observation settlement and the limit
-	// fence while reading liveness, then release before transport I/O —
-	// accountLimitMu must never be acquired while holding m.mu.
-	releaseObservationFence := target.HoldAgentObservationSettlement()
-	m.accountLimitMu.Lock()
-	livenessErr := taskPromptTargetLivenessError(target.Title, target.GetLiveness(), true)
-	m.accountLimitMu.Unlock()
-	releaseObservationFence()
-	if livenessErr != nil {
-		m.warn().Printf("account-handoff report skipped: %v", livenessErr)
-		return
+	if m.isPollPaused(repoID, target.Title, target.ID) {
+		return reportHeld
 	}
-	status, err := target.SendPromptWithEvidence(text, nowFunc)
+	status, err := m.sendPromptGuarded(SendPromptRequest{
+		ID: target.ID, Title: target.Title, RepoID: repoID,
+		Prompt: text, TaskOrigin: true,
+	}, nil)
 	if err != nil {
 		m.warn().Printf("account-handoff report to %q: %v", target.Title, err)
-		return
+		return reportDropped
 	}
 	if status != session.PromptDelivered {
 		m.warn().Printf("account-handoff report to %q: delivery status %s", target.Title, status)
 	}
+	return reportSent
 }
