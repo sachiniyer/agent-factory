@@ -152,15 +152,23 @@ type watcherSupervisor struct {
 	lifelineExe         string
 	lifelineUnsupported atomic.Bool
 	lifelineProbeHold   atomic.Int64
-	baseBackoff         time.Duration
-	maxBackoff          time.Duration
-	crashWindow         time.Duration
-	crashMaxExits       int
-	eventsPerMinute     int
-	stopGrace           time.Duration
-	drainBaseBackoff    time.Duration
-	drainMaxBackoff     time.Duration
-	queueMaxAge         time.Duration
+	// rearmMu guards lifelineRearm, the broadcast channel every successful
+	// probe closes and replaces: a run that started unbound binds a member
+	// lifeline the moment the degraded window ends instead of waiting out its
+	// retry (#6771). lifelineMemberWarned scopes the cannot-bind warning to
+	// once per daemon, like lifelineUnsupported does for probe failures.
+	rearmMu              sync.Mutex
+	lifelineRearm        chan struct{}
+	lifelineMemberWarned atomic.Bool
+	baseBackoff          time.Duration
+	maxBackoff           time.Duration
+	crashWindow          time.Duration
+	crashMaxExits        int
+	eventsPerMinute      int
+	stopGrace            time.Duration
+	drainBaseBackoff     time.Duration
+	drainMaxBackoff      time.Duration
+	queueMaxAge          time.Duration
 }
 
 func newWatcherSupervisor() *watcherSupervisor {
@@ -597,6 +605,15 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	if anchor == nil {
 		log.WarningLog.Printf("watch task %s: cannot spawn a process-group anchor for the watch command; "+
 			"if the leader's exit cannot be awaited without reaping it, the group cleanup kill is skipped", w.taskID)
+	}
+	// A run that started while the lifeline was degraded stays uncovered
+	// against an unclean daemon death until a lifeline binds to it: the
+	// binder joins a member lifeline to the run's group once a probe re-arms
+	// — and retries at the probe cadence — so the run is not left unbound
+	// for its whole life (#6771). finish tears down whatever it bound.
+	if lifeline == nil && w.sup.lifelineExe != "" {
+		rebind := w.sup.startWatchLifelineBinder(w.taskID, cmd.Process.Pid, w.stopCh)
+		defer rebind.finish()
 	}
 	_ = pw.Close() // the child holds its own dup
 	if stderrW != nil {
