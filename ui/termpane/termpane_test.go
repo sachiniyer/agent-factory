@@ -27,9 +27,10 @@ type fakeStream struct {
 	closed   chan struct{}
 	once     sync.Once
 
-	mu      sync.Mutex
-	input   []byte
-	resizes [][2]uint16 // {rows, cols}
+	mu          sync.Mutex
+	input       []byte
+	inputFrames [][]byte    // per-SendInput payloads, for frame-bound assertions
+	resizes     [][2]uint16 // {rows, cols}
 	// resizeGate, when set, runs at the START of SendResize — after the caller has
 	// captured the size it is about to write, but before that frame is recorded. It
 	// is the seam a test needs to drive the reconnect/resize interleaving
@@ -58,6 +59,7 @@ func (s *fakeStream) Recv(ctx context.Context) (Event, error) {
 func (s *fakeStream) SendInput(_ context.Context, b []byte) error {
 	s.mu.Lock()
 	s.input = append(s.input, b...)
+	s.inputFrames = append(s.inputFrames, append([]byte(nil), b...))
 	s.mu.Unlock()
 	return nil
 }
@@ -99,6 +101,19 @@ func (s *fakeStream) sentInput() string {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return string(s.input)
+}
+
+// sentFrameSizes reports the payload size of every INPUT frame the pane wrote,
+// in wire order — for asserting the flush's per-frame bound against the
+// server's WS read limit.
+func (s *fakeStream) sentFrameSizes() []int {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	sizes := make([]int, len(s.inputFrames))
+	for i, f := range s.inputFrames {
+		sizes[i] = len(f)
+	}
+	return sizes
 }
 
 func (s *fakeStream) lastResize() ([2]uint16, bool) {
@@ -679,6 +694,41 @@ func TestInputAcrossReconnectKeepsByteOrder(t *testing.T) {
 		return s2.sentInput() == "gap-tail"
 	}, 5*time.Second, 10*time.Millisecond,
 		"input queued during the gap must land before anything typed after reconnect")
+}
+
+// TestQueuedInputFlushesInServerBoundedChunks pins the flush's per-frame bound:
+// the daemon's WS accept keeps coder/websocket's 32 KiB default read limit, so
+// a backlog larger than one allowed message must arrive in ordered chunks —
+// never as a single oversized frame the server rejects after a locally
+// successful write (silently losing the bytes the queue exists to preserve).
+func TestQueuedInputFlushesInServerBoundedChunks(t *testing.T) {
+	gate := make(chan struct{})
+	s := newFakeStream(0)
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		select {
+		case <-gate:
+			return s, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	// Three full chunks plus a tail — 49+ KB of typed input while disconnected.
+	want := strings.Repeat("x", 3*inputFlushChunkSize+7)
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(want)}))
+	close(gate)
+
+	require.Eventually(t, func() bool {
+		return s.sentInput() == want
+	}, 10*time.Second, 20*time.Millisecond,
+		"a >chunk-size backlog must arrive whole and in order across bounded frames")
+
+	for i, n := range s.sentFrameSizes() {
+		require.LessOrEqualf(t, n, inputFlushChunkSize,
+			"INPUT frame %d of %d bytes exceeds the flush bound (server read limit is 32 KiB)", i, n)
+	}
 }
 
 // TestSendKeyNeverBlocksWhileDisconnected pins the pump-drain contract: the

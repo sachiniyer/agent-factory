@@ -67,6 +67,15 @@ const (
 	// pane when its binding disappears, so this loop never needs its own give-up.
 	reconnectMinBackoff = 50 * time.Millisecond
 	reconnectMaxBackoff = 3 * time.Second
+
+	// inputFlushChunkSize bounds one INPUT frame's payload. The daemon's WS accept
+	// keeps coder/websocket's 32 KiB default read limit (the client raises only
+	// its own — apiclient/stream.go), so a flush that packed a long disconnected
+	// backlog into one message would be rejected server-side and, once written,
+	// silently lost from the queue. 16 KiB leaves the opcode byte and WS header
+	// ample margin, and a longer backlog simply rides more frames: INPUT is a
+	// byte stream, so chunk boundaries are invisible to the receiving program.
+	inputFlushChunkSize = 16384
 )
 
 // EventKind discriminates a stream Event between output bytes, a resize echo, a
@@ -463,7 +472,7 @@ func (t *TermPane) flushInput(stream Stream) {
 	defer t.flushMu.Unlock()
 	for {
 		t.inputMu.Lock()
-		data := append([]byte(nil), t.inputQueue...)
+		data := append([]byte(nil), t.inputQueue[:min(len(t.inputQueue), inputFlushChunkSize)]...)
 		t.inputMu.Unlock()
 		if len(data) == 0 {
 			return
