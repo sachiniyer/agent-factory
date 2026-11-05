@@ -235,6 +235,33 @@ func TestDirSizeBytes(t *testing.T) {
 	assert.Zero(t, missing)
 }
 
+// A measurement that hits its deadline must still report what it found —
+// never a bare zero that reads as "the tree is empty" (#6770). The hook parks
+// the walk after the first file is counted, so the deadline fires with a
+// partial total accumulated and the returned size reflects it.
+func TestDirSizeBytes_TimeoutReportsThePartialTotal(t *testing.T) {
+	root := t.TempDir()
+	payload := make([]byte, 64<<10)
+	require.NoError(t, os.WriteFile(filepath.Join(root, "first.bin"), payload, 0o644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "second.bin"), payload, 0o644))
+
+	prevT, prevH := dirSizeMeasureTimeout, dirSizeWalkHook
+	dirSizeMeasureTimeout = 50 * time.Millisecond
+	calls := 0
+	dirSizeWalkHook = func() {
+		calls++
+		if calls == 2 { // root and first.bin are counted; park before second.bin
+			time.Sleep(300 * time.Millisecond)
+		}
+	}
+	t.Cleanup(func() { dirSizeMeasureTimeout, dirSizeWalkHook = prevT, prevH })
+
+	size, err := DirSizeBytes(root)
+	require.Error(t, err)
+	assert.GreaterOrEqual(t, size, int64(64<<10),
+		"the timed-out measure must report the partial total, not read as zero")
+}
+
 // TestDirSizeBytes_AllocatedNotApparent: reclaimable_bytes is the number the
 // operator reads, so it must be the disk space deletion frees — a sparse
 // file's apparent gigabytes reclaim only its populated extents, and a

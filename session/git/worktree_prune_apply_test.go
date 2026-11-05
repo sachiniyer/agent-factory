@@ -330,6 +330,37 @@ func TestGitObjectStorageUnderTheDeletedRoots(t *testing.T) {
 	})
 }
 
+// A row whose refusal is already decided must not pay for the object-storage
+// walk — bounded at objectStorageScanTimeout (two minutes) and run row by row,
+// it turned a fleet of refused rows into minutes of pointless reading (#6770).
+// The verdict is unchanged: every check the early return skips could only add
+// more refusals, so the row refused either way.
+func TestUnrecoverableContentSkipsTheStorageWalkOnceRefused(t *testing.T) {
+	refusedWithoutWalk := func(t *testing.T, wt string) {
+		t.Helper()
+		prev := objectStorageScanHook
+		walkRan := false
+		objectStorageScanHook = func() { walkRan = true }
+		t.Cleanup(func() { objectStorageScanHook = prev })
+
+		reasons, err := WorktreeUnrecoverableContent(wt)
+		require.NoError(t, err)
+		require.NotEmpty(t, reasons, "the row still refuses — the verdict is unchanged")
+		assert.False(t, walkRan, "a decided refusal must not pay the object-storage walk")
+	}
+
+	t.Run("a dirty worktree", func(t *testing.T) {
+		_, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "only-copy.txt"), []byte("x"), 0o644))
+		refusedWithoutWalk(t, wt)
+	})
+	t.Run("a locked registration", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		gitIn(t, repo, "worktree", "lock", wt)
+		refusedWithoutWalk(t, wt)
+	})
+}
+
 // A locked registration is refused by the verdict, before any mutation (a later
 // removal would refuse it after the rename and strand a half-done prune).
 func TestLockedRegistrationIsRefusedByTheVerdict(t *testing.T) {

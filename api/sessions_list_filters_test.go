@@ -47,6 +47,31 @@ func TestSessionsList_FilterFlagsReachSnapshot(t *testing.T) {
 	require.WithinDuration(t, time.Now().Add(-2*time.Hour), bound, 5*time.Second)
 }
 
+// #6770: --max-age takes the same day/week units prune's --older-than does —
+// "7d" means seven days, not a flag-parse refusal.
+func TestSessionsList_MaxAgeAcceptsDayDurations(t *testing.T) {
+	useTempConfig(t)
+	resetScopeFlags(t)
+	t.Chdir(mkRepo(t, "day-filtered"))
+
+	setSessionsListFlag(t, "max-age", "7d")
+	reqs := stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{}, nil
+	})
+	captureSessionsList(t)
+	require.Len(t, *reqs, 1)
+
+	raw, err := json.Marshal((*reqs)[0])
+	require.NoError(t, err)
+	var got map[string]any
+	require.NoError(t, json.Unmarshal(raw, &got))
+	createdAfter, ok := got["created_after"].(string)
+	require.True(t, ok, "created_after must be resolved from --max-age 7d")
+	bound, err := time.Parse(time.RFC3339Nano, createdAfter)
+	require.NoError(t, err)
+	require.WithinDuration(t, time.Now().Add(-7*24*time.Hour), bound, 5*time.Second)
+}
+
 // TestSessionsList_NoFilterFlagsKeepTheRequestAndOutputUnchanged guards the
 // additive contract: the zero values are omitted and the daemon's full response
 // remains byte-for-byte the list command's result.

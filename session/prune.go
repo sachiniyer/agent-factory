@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -153,7 +154,14 @@ func PruneSkipReason(data InstanceData, archivedBefore time.Time) string {
 // partial total returns with a timeout error so the caller can warn — the
 // abandoned goroutine leaks one walk, the same tradeoff the bounded pointer
 // checks already make for a stuck mount.
-const dirSizeMeasureTimeout = 10 * time.Second
+// A var so a test can cut the bound instead of staging a genuinely slow walk.
+var dirSizeMeasureTimeout = 10 * time.Second
+
+// dirSizeWalkHook is a test seam fired after each counted entry, so a test can
+// park a walk mid-total and exercise the timeout arm deterministically. Nil in
+// production; DirSizeBytes hands the walk its own copy, so restoring the var
+// cannot race a walk still running behind its abandoned goroutine.
+var dirSizeWalkHook func()
 
 func DirSizeBytes(root string) (int64, error) {
 	if root == "" {
@@ -173,9 +181,14 @@ func DirSizeBytes(root string) (int64, error) {
 	}
 	dirSizeFlights[root] = true
 	dirSizeFlightsMu.Unlock()
+	// partial shadows the walk's running total so the deadline arm can report
+	// what was measured, and hook is the test seam — both captured by value
+	// for the walk goroutine, which can outlive this call.
+	var partial atomic.Int64
+	hook := dirSizeWalkHook
 	done := make(chan result, 1)
 	go func() {
-		total, err := dirSizeWalk(root)
+		total, err := dirSizeWalk(root, &partial, hook)
 		dirSizeFlightsMu.Lock()
 		delete(dirSizeFlights, root)
 		dirSizeFlightsMu.Unlock()
@@ -194,7 +207,7 @@ var (
 	dirSizeFlights   = map[string]bool{}
 )
 
-func dirSizeWalk(root string) (int64, error) {
+func dirSizeWalk(root string, partial *atomic.Int64, hook func()) (int64, error) {
 	var total int64
 	var firstErr error
 	// inoKey → {blocks, nlink, links seen in-tree}. Only populated for
@@ -242,6 +255,10 @@ func dirSizeWalk(root string) (int64, error) {
 			// No stat_t (non-unix build): apparent size is the only measure
 			// available — a coarse upper bound, still preferable to zero.
 			total += info.Size()
+			partial.Store(total)
+			if hook != nil {
+				hook()
+			}
 			return nil
 		}
 		if info.Mode().IsRegular() && stat.Nlink > 1 {
@@ -255,6 +272,10 @@ func dirSizeWalk(root string) (int64, error) {
 			return nil
 		}
 		total += stat.Blocks * 512
+		partial.Store(total)
+		if hook != nil {
+			hook()
+		}
 		return nil
 	})
 	for _, acct := range linked {
@@ -262,5 +283,6 @@ func dirSizeWalk(root string) (int64, error) {
 			total += acct.blocks * 512
 		}
 	}
+	partial.Store(total)
 	return total, firstErr
 }
