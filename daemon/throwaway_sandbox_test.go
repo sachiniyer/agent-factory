@@ -406,6 +406,44 @@ func TestKillThrowawayTmuxSocketsGuardsSharedRoots(t *testing.T) {
 	}
 }
 
+func TestThrowawayPrivateTmuxDir(t *testing.T) {
+	sandbox := t.TempDir()
+	canonSandbox, err := canonicalDir(sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
+	marker := func(root, tmuxDir string) *throwawaysandbox.Marker {
+		return &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: tmuxDir, SandboxRoot: root}
+	}
+	if dir, refuse := throwawayPrivateTmuxDir(canonSandbox, marker(sandbox, filepath.Join(sandbox, "tmux"))); dir == "" || refuse != "" {
+		t.Fatalf("private dir refused: dir=%q refuse=%q", dir, refuse)
+	}
+	for _, tc := range []struct {
+		name    string
+		root    string
+		tmuxDir string
+	}{
+		{"shared root", os.TempDir(), filepath.Join(os.TempDir(), "x")},
+		{"home outside root", t.TempDir(), filepath.Join(t.TempDir(), "y")},
+		{"tmux outside root", sandbox, filepath.Join(t.TempDir(), "z")},
+		{"tmux equals root", sandbox, sandbox},
+		{"missing tmux", sandbox, ""},
+		{"missing root", "", filepath.Join(sandbox, "tmux")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			if dir, _ := throwawayPrivateTmuxDir(canonSandbox, marker(tc.root, tc.tmuxDir)); dir != "" {
+				t.Fatalf("untrusted dir accepted: %q", dir)
+			}
+		})
+	}
+	// A recorded shared dir must not feed process selection either: the
+	// binding path consults the same proof.
+	m := marker(os.TempDir(), os.TempDir())
+	if dir, _ := throwawayPrivateTmuxDir(canonSandbox, m); dir != "" {
+		t.Fatalf("shared tmux dir %q accepted for binding", dir)
+	}
+}
+
 func TestThrowawayWatchdogDeadlineFires(t *testing.T) {
 	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: time.Now().Unix() - 10, MaxLifetimeSeconds: 5}
 	fire := make(chan struct{})

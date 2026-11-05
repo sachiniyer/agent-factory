@@ -316,37 +316,49 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 	}
 }
 
-// killThrowawayTmuxSockets runs kill-server on every unix socket under the
-// marker's recorded TMUX_TMPDIR. The dir is required to sit strictly inside
-// the recorded sandbox root, and the root must contain the marked home
-// itself: a marker cannot point teardown at directories outside the sandbox
-// it was written into. A marker claiming /tmp, the system temp dir, or a
-// root that does not enclose its own home would sweep other users' — and
-// this install's real — tmux sockets, so those shapes are refused outright;
-// the env-bound teardown still applies.
-func killThrowawayTmuxSockets(canonHome string, m *throwawaysandbox.Marker) {
+// throwawayPrivateTmuxDir returns the marker's recorded TMUX_TMPDIR when it
+// proves private to the sandbox: canonicalized, strictly inside the recorded
+// sandbox root, and with the root enclosing the marked home itself. Every
+// consumer — socket teardown AND tmux-env process selection — must pass this
+// proof before trusting the dir: a marker that recorded a shared dir such as
+// /tmp would otherwise bind or kill other users' — and this install's real —
+// tmux sockets, so those shapes are refused outright. The second return is
+// the refusal reason for logging; empty means the dir is proven private.
+func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (string, string) {
 	if m.TmuxTmpdir == "" || m.SandboxRoot == "" {
-		return
+		return "", ""
 	}
 	root, err := canonicalDir(m.SandboxRoot)
 	if err != nil {
-		return
+		return "", ""
 	}
 	tmuxDir, err := canonicalDir(m.TmuxTmpdir)
 	if err != nil {
-		return
+		return "", ""
 	}
 	sep := string(os.PathSeparator)
 	if sysTmp, err := canonicalDir(os.TempDir()); err == nil && (root == sysTmp || root == sep) {
-		log.WarningLog.Printf("refusing tmux teardown: sandbox root %s is a shared directory", root)
-		return
+		return "", fmt.Sprintf("sandbox root %s is a shared directory", root)
 	}
 	if canonHome != root && !strings.HasPrefix(canonHome, root+sep) {
-		log.WarningLog.Printf("refusing tmux teardown: marked home %s is not inside recorded sandbox root %s", canonHome, root)
-		return
+		return "", fmt.Sprintf("marked home %s is not inside recorded sandbox root %s", canonHome, root)
 	}
 	if tmuxDir == root || !strings.HasPrefix(tmuxDir, root+sep) {
-		log.WarningLog.Printf("refusing tmux teardown: recorded tmux dir %s is not inside sandbox root %s", tmuxDir, root)
+		return "", fmt.Sprintf("recorded tmux dir %s is not inside sandbox root %s", tmuxDir, root)
+	}
+	return tmuxDir, ""
+}
+
+// killThrowawayTmuxSockets runs kill-server on every unix socket under the
+// marker's private TMUX_TMPDIR. Privacy is proven by
+// throwawayPrivateTmuxDir first; a refused dir leaves the env-bound
+// teardown to do the work instead.
+func killThrowawayTmuxSockets(canonHome string, m *throwawaysandbox.Marker) {
+	tmuxDir, refuse := throwawayPrivateTmuxDir(canonHome, m)
+	if tmuxDir == "" {
+		if refuse != "" {
+			log.WarningLog.Printf("refusing tmux teardown: %s", refuse)
+		}
 		return
 	}
 	var sockets []string
@@ -389,10 +401,10 @@ func throwawayBoundProcesses(canonHome string, m *throwawaysandbox.Marker) (boun
 		return nil, 0
 	}
 	self := os.Getpid()
-	var canonTmux string
-	if m.TmuxTmpdir != "" {
-		canonTmux, _ = canonicalDir(m.TmuxTmpdir)
-	}
+	// The recorded tmux dir binds processes only when it is proven private
+	// to the sandbox — a shared dir like /tmp must never make unrelated
+	// tmux sessions part of the kill set (#6844 review).
+	canonTmux, _ := throwawayPrivateTmuxDir(canonHome, m)
 	seen := make(map[int]bool)
 	for pid := range snap {
 		if pid == self {
