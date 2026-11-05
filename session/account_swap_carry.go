@@ -661,6 +661,12 @@ func (c *conversationCarry) sameCarryHome(dir string) bool {
 // resume — the pending record follows it, so restart recovery resumes the
 // thread the replacement is actually writing, not the stale pre-fork one. The
 // tab and the record change under one lock and reach disk in the same row.
+//
+// A carried-kind conv (ConversationCaptureCarried) is the carried id itself:
+// captureCarriedCodexConversation fail-closes to it rather than adopt a
+// sibling, so it must never rewrite a different CarriedConversationID. Only a
+// conv captured as a new rollout — one whose provenance is independent of the
+// carried thread — may follow a fork.
 func (i *Instance) RecordAccountSwapConversationForRuntime(token AgentRuntimeToken, conv AgentConversationData) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -671,7 +677,8 @@ func (i *Instance) RecordAccountSwapConversationForRuntime(token AgentRuntimeTok
 	pending := i.pendingAccountSwap
 	if pending != nil && pending.To == i.Account && pending.CarriedConversationID != "" &&
 		conv.Agent == tmux.ProgramCodex && providerConversationIDRE.MatchString(conv.ID) &&
-		pending.CarriedConversationID != conv.ID {
+		pending.CarriedConversationID != conv.ID &&
+		conv.CaptureKind != ConversationCaptureCarried {
 		pending.CarriedConversationID = conv.ID
 		i.touchLocked()
 	}

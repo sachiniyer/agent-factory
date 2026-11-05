@@ -235,6 +235,132 @@ func TestCaptureAgentConversation_CodexSubagentDoesNotStealCarriedConversation(t
 		"the sub-agent's rollout must not replace the carried conversation id")
 }
 
+// TestCaptureAgentConversation_CodexSiblingRolloutDoesNotStealCarriedConversation
+// is the top-level-sibling case the #6766 sub-agent fix left uncovered: the
+// ONLY new file capture can see is an unrelated top-level rollout (source:
+// "cli") in the same working directory — which before this fix "won" and
+// replaced the carried conversation af just resumed. The carried id must
+// stand: appearance alone is not positive evidence the replacement forked.
+func TestCaptureAgentConversation_CodexSiblingRolloutDoesNotStealCarriedConversation(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	carried := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		CaptureKind: ConversationCaptureCarried,
+	}
+	carriedPath := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-33-"+carried.ID+".jsonl")
+	snap.expectCarriedCodexRollout(carried, carriedPath)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl", workDir)
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, carried.ID, conv.ID,
+		"a sibling top-level rollout must not replace the carried conversation id")
+	require.Equal(t, ConversationCaptureCarried, conv.CaptureKind,
+		"the carried id is re-stamped as a carried observation, not a rollout capture")
+}
+
+// TestCaptureAgentConversation_CodexSiblingRolloutUnscopedDoesNotStealCarriedConversation
+// is the unbound case: when the launch working directory is unprovable, every
+// new top-level rollout anywhere in the store is a candidate, so a lone
+// sibling anywhere can steal the identity. The carried id must stand.
+func TestCaptureAgentConversation_CodexSiblingRolloutUnscopedDoesNotStealCarriedConversation(t *testing.T) {
+	codexHome := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHome(codexHome)
+
+	carried := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		CaptureKind: ConversationCaptureCarried,
+	}
+	carriedPath := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-33-"+carried.ID+".jsonl")
+	snap.expectCarriedCodexRollout(carried, carriedPath)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl", t.TempDir())
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, carried.ID, conv.ID,
+		"a sibling rollout in an unscoped capture must not replace the carried conversation id")
+}
+
+// TestCaptureAgentConversation_CodexAmbiguousSiblingsDoNotStealCarriedConversation
+// confirms that two same-cwd sibling rollouts — which fresh capture refuses
+// as ambiguous — do not steal the carried id either: carried capture fail-closes
+// to the carried id rather than guess among the new rollouts.
+func TestCaptureAgentConversation_CodexAmbiguousSiblingsDoNotStealCarriedConversation(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	carried := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		CaptureKind: ConversationCaptureCarried,
+	}
+	carriedPath := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-33-"+carried.ID+".jsonl")
+	snap.expectCarriedCodexRollout(carried, carriedPath)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, carried.ID, conv.ID,
+		"ambiguous sibling rollouts must not replace the carried conversation id")
+}
+
+// TestCaptureAgentConversation_CodexSiblingRolloutSettlesIntoOtherDirDoesNotStealCarried
+// confirms that a sibling whose session_meta is initially unclassifiable — the
+// undecided state capture waits out — does not steal the carried id once it
+// settles into a different working directory or even the same one.
+func TestCaptureAgentConversation_CodexSiblingRolloutSettlesIntoOtherDirDoesNotStealCarried(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	carried := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		CaptureKind: ConversationCaptureCarried,
+	}
+	carriedPath := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-33-"+carried.ID+".jsonl")
+	snap.expectCarriedCodexRollout(carried, carriedPath)
+
+	// A sibling whose header is initially unclassifiable — the undecided
+	// state capture waits out before fail-closing.
+	const settling = "rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl"
+	writeEmptyCodexRolloutFile(t, codexHome, settling)
+
+	done := make(chan captureResult, 1)
+	go func() {
+		conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 200*time.Millisecond)
+		done <- captureResult{conv, err}
+	}()
+
+	// Let the poll observe the undecided file, then settle it into the same
+	// working directory — the lone same-cwd top-level sibling.
+	time.Sleep(300 * time.Millisecond)
+	writeCodexRolloutFileWithCwd(t, codexHome, settling, workDir)
+
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		require.Equal(t, carried.ID, r.conv.ID,
+			"a sibling that settled into the same cwd must not steal the carried id")
+	case <-time.After(5 * time.Second):
+		t.Fatal("carried capture did not resolve after the sibling settled")
+	}
+}
+
 func writeEmptyCodexRolloutFile(t *testing.T, codexHome, name string) string {
 	t.Helper()
 	// Same directory as writeCodexRolloutFile so a later write to the same name
