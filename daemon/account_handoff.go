@@ -143,11 +143,15 @@ func (m *Manager) accountHandoffTick() {
 	if !observed {
 		return
 	}
-	governed, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs())
-	if err != nil {
+	// The tick NEVER stores handoffActive (#6817 round-3 review): discovery
+	// — start, config apply, session registration — is the only writer, so
+	// the most recent config decision always wins. A tick that began while
+	// active and finishes after ApplyConfig turned the last opt-in off
+	// must not re-activate from its stale governed count; it just returns,
+	// and the next tick's gate observes the deactivation.
+	if _, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs()); err != nil {
 		m.warn().Printf("account-handoff engine tick: %v", err)
 	}
-	m.handoffActive.Store(m.handoffActive.Load() || governed > 0)
 }
 
 // accountHandoffEngine lazily builds the engine and its injected deps. Kept

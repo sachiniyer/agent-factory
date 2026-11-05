@@ -84,4 +84,20 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 			t.Fatalf("got (%q,%v), want (\"model\",false)", key, inc)
 		}
 	})
+	t.Run("workspace-write options differ is drift", func(t *testing.T) {
+		// #6817 review: sandbox_mode alone is not the sandbox — a move into
+		// a home with network_access on would widen what the agent reaches.
+		writeCodexConfig(t, src, "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = false\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
+		}
+	})
+	t.Run("workspace-write options present on one side only is drift", func(t *testing.T) {
+		writeCodexConfig(t, src, "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"workspace-write\"\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
+		}
+	})
 }
