@@ -297,6 +297,22 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			// the established evidence is the predecessor's and must not win
 			// (#4430 review round 7).
 			resolution = launchProgramResolution{command: pending.Program}
+			// Re-derive the built-in provenance of the frozen command the same
+			// way the fresh resolution and the established-evidence branch do:
+			// the committed base can carry af's own detected/overridden flags
+			// (the default claude override freezes the detected path plus
+			// --dangerously-skip-permissions), and without trustBase the proof
+			// declares only af-appended words, refusing the frozen flag as an
+			// undeclared user argument on every retry. The pane-declaration
+			// seeding gate below cannot rescue this either: pending.Program is
+			// the pre-injection base while the pane records its program
+			// post-injection, so the exact-match gate never fires here.
+			committedAgent := pending.AccountAgent
+			if committedAgent == "" {
+				committedAgent = sessionenv.AgentForCommand(pending.Program)
+			}
+			resolution.trustBase = builtInProgramOverride(
+				resolveResolvedConfigForInstance(i), committedAgent, pending.Program)
 		case pending != nil && pending.To == name && pending.AccountAgent != "" &&
 			tmux.DetectAgentFromCommand(established) != pending.AccountAgent:
 			// A pending record written before Program existed: the committed
