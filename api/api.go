@@ -831,7 +831,7 @@ func init() {
 	sessionsListCmd.Flags().StringArrayVar(&sessionsListStatusesFlag, "status", nil,
 		fmt.Sprintf("Filter by lifecycle status; repeat for more than one (%s). Matches each row's liveness_name; status_name names the legacy status integer and is not a filter value",
 			strings.Join(session.LivenessNameList(), ", ")))
-	sessionsListCmd.Flags().DurationVar(&sessionsListMaxAgeFlag, "max-age", 0, "Only list sessions created within this duration (for example 24h)")
+	sessionsListCmd.Flags().Var(ageDurationFlag{&sessionsListMaxAgeFlag}, "max-age", "Only list sessions created within this duration (for example 24h or 7d)")
 	sessionsListCmd.Flags().IntVar(&sessionsListLimitFlag, "limit", 0, "Return at most N sessions after filtering (must be greater than 0 when set; omitted is unbounded)")
 
 	SessionsCmd.AddCommand(sessionsListCmd)
@@ -860,7 +860,7 @@ func init() {
 	SessionsCmd.AddCommand(sessionsRestoreCmd)
 
 	sessionsPruneCmd.Flags().StringVar(&sessionsPruneOlderThanStr, "older-than", "",
-		"Report sessions archived longer than this duration ago (required, for example 720h for thirty days)")
+		"Report sessions archived longer than this duration ago (required, for example 30d or 720h for thirty days)")
 	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneApplyFlag, "apply", false,
 		"Delete the archived worktrees the dry run lists (the branch is kept; the row stays as a pruned tombstone)")
 	sessionsPruneCmd.Flags().BoolVar(&sessionsPruneYesFlag, "yes", false,

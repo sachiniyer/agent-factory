@@ -294,11 +294,14 @@ you assemble it would turn a save into an error about a combination it offered.
 
 **Choosing between `archive` and `kill` is the real decision, and af does not make it
 for you.** Archiving is restorable, but an archived worktree is retained whole —
-gitignored build output included — until someone prunes it by hand, so a daily task set
-to `archive` trades a session leak for a disk one. Killing reclaims that space and prunes
-the session's own branch, which is the right trade when the run's output already lives
-somewhere durable: a pushed branch, or a merged PR. A run you might need to read
-afterwards wants `archive`; a run whose result is already in git usually wants `kill`.
+gitignored build output included. `af sessions prune` reclaims archives older than a
+cutoff, but it refuses any worktree still holding uncommitted or ignored files, since
+those may be the only copy of that output — so a daily task set to `archive` trades a
+session leak for a disk one that only manual cleanup or a commit clears. Killing
+reclaims that space and prunes the session's own branch, which is the right trade when
+the run's output already lives somewhere durable: a pushed branch, or a merged PR. A run
+you might need to read afterwards wants `archive`; a run whose result is already in git
+usually wants `kill`.
 
 That is why the default is `keep` rather than either verb — af will not silently reap a
 session, and an existing task's behavior does not change when you upgrade.
