@@ -172,3 +172,30 @@ func TestDeliverHandoffReportHoldsOnUnprovableComposer(t *testing.T) {
 		t.Fatalf("unprovable-composer recipient outcome = %v, want reportHeld", got)
 	}
 }
+
+// #6817 round-3 review: the most recent config decision wins. A tick that
+// began while active must not re-activate from its stale governed count
+// after ApplyConfig's discovery has turned shadow off mid-tick.
+func TestAccountHandoffTickNeverReactivatesAfterApplyConfig(t *testing.T) {
+	m := &Manager{
+		cfg:       &config.Config{}, // no [account_handoff] table — off
+		instances: map[string]*session.Instance{"k": {Title: "t", Path: "/repo"}},
+	}
+	m.handoffEngine = handoffengine.New(handoffengine.Deps{
+		Now: nowFunc,
+		ResolveConfig: func(root string) (*config.ResolvedConfig, error) {
+			// Simulate ApplyConfig landing mid-tick: discovery recomputes
+			// from the live config — no opt-in anywhere — and stores off.
+			m.accountHandoffDiscover()
+			cfg := &config.ResolvedConfig{ProjectRoot: root}
+			cfg.AccountHandoff.Mode = config.AccountHandoffModeShadow
+			return cfg, nil
+		},
+	})
+	m.handoffActive.Store(true)
+	m.noteHandoffObservation("k", false, "") // unlock the input walk
+	m.accountHandoffTick()
+	if m.handoffActive.Load() {
+		t.Fatalf("tick re-activated shadow after ApplyConfig turned it off")
+	}
+}

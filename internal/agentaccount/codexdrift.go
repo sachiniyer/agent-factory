@@ -6,10 +6,14 @@ import (
 )
 
 // codexRuntimeCompareKeys are the effective settings a moved session must not
-// change underneath it (design R9): model, effort, approval, sandbox. The
-// comparison is profile-resolved — codexEffectiveSettings already overlays the
-// selected profile — and values only ever compare, never log or copy.
-var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "approval_policy", "sandbox_mode"}
+// change underneath it (design R9): model, effort, approval, sandbox — and the
+// sandbox's own options. Two homes that both say sandbox_mode =
+// "workspace-write" but differ on sandbox_workspace_write (network_access,
+// writable_roots, …) are not equivalent: a move to the wider one would widen
+// what the agent can reach (#6817 review). The table is shape-validated by
+// codexRuntimeSource before it reaches this compare, so an unverifiable form
+// is incomparable, never silently equal.
+var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "approval_policy", "sandbox_mode", "sandbox_workspace_write"}
 
 // CodexRuntimeDriftKey compares the effective runtime settings of a source
 // home (the session's own account dir, or the ambient home) against a
