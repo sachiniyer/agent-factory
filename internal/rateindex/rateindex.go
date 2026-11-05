@@ -227,6 +227,12 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 			best = &claim
 		}
 	}
+	// The deadline can expire while the last candidate is read or parsed —
+	// the per-file check only runs before each file, so a refresh that
+	// finished over budget is still scan-bounded.
+	if ix.now().After(deadline) {
+		indeterminate = true
+	}
 	switch {
 	case best == nil && indeterminate:
 		result.Status, result.Reason = StatusUnknown, "scan-bounded"

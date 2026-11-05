@@ -256,6 +256,27 @@ func TestRefreshDeadlineReportsUnknown(t *testing.T) {
 	}
 }
 
+// The per-file deadline check runs before each file — expiry while the last
+// candidate is being read must still report unknown, not a completed verdict.
+func TestRefreshDeadlineAfterLastScanIsUnknown(t *testing.T) {
+	home := t.TempDir()
+	writeRollout(t, home, "2026/10/31", rolloutName(1), []string{
+		claimLine("2026-10-31T10:00:00.000Z", 10.0),
+	}, base)
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		if calls <= 5 {
+			return base // start, three dir-descend checks, one scan-loop check
+		}
+		return base.Add(time.Hour)
+	}
+	got := newForTest(clock).Refresh(home, Options{Deadline: time.Minute})
+	if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
+		t.Fatalf("status = %v reason %q — a refresh that finished over budget is scan-bounded", got.Status, got.Reason)
+	}
+}
+
 func TestRefreshMaxFilesCapsCandidates(t *testing.T) {
 	home := t.TempDir()
 	for i := 0; i < 10; i++ {
