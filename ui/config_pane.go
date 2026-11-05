@@ -522,25 +522,17 @@ func (c *ConfigPane) beginEdit() {
 	c.editing = true
 	c.clearStatus()
 	c.sizeEditField()
-	// Pre-flatten the seed the same way the field's own sanitizer does
-	// (flattenToOneLine, the shared flattener from config_pane_width.go).
-	// bubbles v0.20.0's textinput.SetValue runs a sanitizer that replaces
-	// newlines and tabs with spaces, so feeding it a raw multi-line value
-	// flattens it inside the field BEFORE the user types anything — and
-	// commitEdit's untouched-field guard, which compares the field against
-	// the seed, would then read the flattened field as "edited" against the
-	// unflattened entry.Value and rewrite a multi-line value the user only
-	// looked at. Seeding with the already-flattened form makes the value
-	// stable under the field's own round trip, so open + commit is a true
-	// no-op. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
+	// Seed the field with the pre-flattened value. bubbles v0.20.0's
+	// textinput.SetValue runs a sanitizer that folds newlines/tabs to spaces,
+	// so seeding with the raw multi-line value would flatten it inside the
+	// field and let commitEdit's guard read the untouched field as edited.
+	// flattenToOneLine is the shared flattener from config_pane_width.go.
 	c.input.SetValue(flattenToOneLine(entry.Value))
-	// Capture the seed as the field actually holds it AFTER the sanitizer
-	// runs. The sanitizer does more than flattenToOneLine: it also drops
-	// every other unicode.IsControl rune (e.g. an ESC decoded from a TOML
-	// \^[ escape), and a value-equality guard seeded from a
-	// separately-computed approximation would miss that and rewrite an
-	// untouched setting that lost a control rune on the field's round trip.
-	// Reading the field back is the exact, sanitizer-faithful seed.
+	// Read the seed back AFTER the sanitizer runs: it drops not just
+	// whitespace but every unicode.IsControl rune (e.g. ESC from a TOML
+	// \u001b escape), so a flatten-only seed would diverge from the field and
+	// rewrite an untouched value that lost a control rune. The read-back is
+	// the exact, sanitizer-faithful seed.
 	c.editSeed = c.input.Value()
 	c.dirty = false
 	c.input.CursorEnd()
