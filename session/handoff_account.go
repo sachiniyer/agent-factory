@@ -363,12 +363,15 @@ func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, statu
 // obligation on POSITIVE pane evidence — a turn the replacement agent provably
 // began after this notice's send attempt (#6767) — rather than on an
 // operator's attestation the way ConfirmPendingManualAccountSwapDelivery does.
-// attemptedAt is the compare-and-set: the evidence is bound to exactly the
-// send that produced the recorded verdict, so a newer attempt (its own verdict
-// already written or in flight) refuses the stale evidence rather than being
-// settled by it. The caller feeds the daemon's re-verification watch, which
-// never arms startup-unknown rows, so unlike the operator confirm this needs
-// no pane-probe bookkeeping — the evidence IS the runtime proof.
+// A recorded PromptDelivered verdict settles identically: it IS the proof, and
+// the pending record its crash-window settle never reached would otherwise
+// outlive the evidence for it. attemptedAt is the compare-and-set: the
+// evidence is bound to exactly the send that produced the recorded verdict,
+// so a newer attempt (its own verdict already written or in flight) refuses
+// the stale evidence rather than being settled by it. The caller feeds the
+// daemon's re-verification watch, which never arms startup-unknown rows, so
+// unlike the operator confirm this needs no pane-probe bookkeeping — the
+// evidence IS the runtime proof.
 func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attemptedAt time.Time) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -379,8 +382,8 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 	if !pending.ReplacementPanesStarted {
 		return fmt.Errorf("account swap from %q to %q has no replacement panes; nothing could have been delivered", from, to)
 	}
-	if !ambiguousHandoffDelivery(pending.MissionDeliveryStatus) {
-		return fmt.Errorf("account swap from %q to %q has no ambiguous notice delivery to settle on evidence (status %q)", from, to, pending.MissionDeliveryStatus)
+	if !confirmableHandoffDelivery(pending.MissionDeliveryStatus) {
+		return fmt.Errorf("account swap from %q to %q has no evidence-settleable notice delivery (status %q)", from, to, pending.MissionDeliveryStatus)
 	}
 	if !pending.MissionDeliveryAttemptAt.Equal(attemptedAt) {
 		return fmt.Errorf("account swap from %q to %q has moved past the notice attempt this evidence belongs to", from, to)

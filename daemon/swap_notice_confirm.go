@@ -71,6 +71,19 @@ type pendingSwapNoticeWatch struct {
 func (m *Manager) notePendingSwapNoticeEvidence(repoID, key string, instance *session.Instance) {
 	from, to, status, attemptedAt, ok := instance.PendingAccountSwapNoticeDelivery()
 	skey := stableSessionKey(repoID, instance)
+	if ok && status == session.PromptDelivered && !instance.StartupStateUnknown() {
+		// A delivered verdict IS the proof — the crash window between its
+		// record and the retire it never reached. No turn evidence is needed;
+		// settle it directly rather than leaving the obligation outliving the
+		// fact that discharged it.
+		if op, _ := instance.InFlightOpAndEpoch(); op == session.OpNone {
+			m.pausedMu.Lock()
+			delete(m.pendingSwapNoticeWatches, skey)
+			m.pausedMu.Unlock()
+			m.settlePendingSwapNotice(repoID, skey, instance, from, to, attemptedAt)
+		}
+		return
+	}
 	if !ok || !ambiguousSwapNoticeVerdict(status) || attemptedAt.IsZero() || instance.StartupStateUnknown() {
 		// Nothing to re-verify: a settled swap, a verdict automation owns, a
 		// pre-field verdict with no boundary to bind, or a row whose runtime

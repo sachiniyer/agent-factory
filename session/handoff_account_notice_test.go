@@ -88,7 +88,7 @@ func TestPendingAccountSwapDeliveryUnconfirmed(t *testing.T) {
 func TestSettlePendingAccountSwapNoticeDelivery(t *testing.T) {
 	attemptAt := time.Now().Add(-time.Minute)
 	for _, manual := range []bool{false, true} {
-		for _, status := range []PromptDeliveryStatus{PromptSentUnverified, PromptCouldNotConfirm} {
+		for _, status := range []PromptDeliveryStatus{PromptSentUnverified, PromptCouldNotConfirm, PromptDelivered} {
 			inst := noticePendingSwap(manual, status, attemptAt)
 			inst.limitResetAt = time.Now().Add(time.Hour)
 			inst.limitAccount = "work"
@@ -111,7 +111,6 @@ func TestSettlePendingAccountSwapNoticeDeliveryRefusals(t *testing.T) {
 	}{
 		{"evidence bound to a different send", func(i *Instance) { i.pendingAccountSwap.MissionDeliveryAttemptAt = attemptAt.Add(time.Second) }},
 		{"not-delivered belongs to automatic recovery", func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered }},
-		{"delivered already proved itself", func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered }},
 		{"no verdict recorded", func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = "" }},
 		{"no pending swap", func(i *Instance) { i.pendingAccountSwap = nil }},
 		{"replacement panes never started", func(i *Instance) { i.pendingAccountSwap.ReplacementPanesStarted = false }},
