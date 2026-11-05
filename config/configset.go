@@ -674,6 +674,16 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 			return nil, fmt.Errorf("internal error: setting %s in %s would change %s (no changes written)", w.key, prettyPath, drift)
 		}
 	}
+	// An account_handoff write commits a MERGED table, not just this file:
+	// the leaves passed their own checks, but ordering binds the effective
+	// values the resolver produces. Validate the overlay onto the global
+	// layer now rather than persist a file every subsequent resolve fails
+	// on (Codex on #6793).
+	if isAccountHandoffKey(w.key) {
+		if err := validatePersonalAccountHandoffMerge(resulting); err != nil {
+			return nil, err
+		}
+	}
 	value := w.canonical
 	if w.structured {
 		_, err = canonicalStructuredTOMLValue(updated, w.key)

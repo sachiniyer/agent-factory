@@ -401,6 +401,50 @@ func TestAccountHandoffProjectSetMergesPerLeaf(t *testing.T) {
 	require.Error(t, err, "the per-project write path rejects live the same way")
 }
 
+// TestAccountHandoffProjectSetChecksMergedTable is the write-path half of the
+// merged-ordering rule (Codex on #6793): a personal [account_handoff] write is
+// refused when the leaf would make the EFFECTIVE table invalid — the writer
+// validates the overlay onto the global layer, the same merge the resolver
+// produces, instead of persisting a file every resolve then fails on.
+func TestAccountHandoffProjectSetChecksMergedTable(t *testing.T) {
+	t.Run("leaf write that breaks the merged chain is refused", func(t *testing.T) {
+		home, _, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "")
+
+		_, err := SetProjectConfigValue(project.ID, "account_handoff.prefer_below_percent", "96")
+		require.Error(t, err,
+			"96 is in range for the leaf but the merged table reads prefer 96 !< move_idle 95")
+		assert.Contains(t, err.Error(), "prefer_below_percent")
+		got, lerr := LoadProjectConfig(project.ID)
+		require.NoError(t, lerr)
+		assert.Nil(t, got, "a refused write must not persist the table at all")
+	})
+
+	t.Run("leaf write valid only in context is allowed", func(t *testing.T) {
+		home, _, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "[account_handoff]\nprefer_below_percent = 60\nmove_idle_at_percent = 80\nwall_percent = 90\n")
+
+		_, err := SetProjectConfigValue(project.ID, "account_handoff.move_idle_at_percent", "85")
+		require.NoError(t, err,
+			"85 !< the DEFAULT prefer 85, but the inherited one is 60 — the write checks the merged table")
+	})
+
+	t.Run("unset that reveals an invalid merge is refused", func(t *testing.T) {
+		home, _, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "[account_handoff]\nprefer_below_percent = 94\n")
+		writePersonalConfig(t, project.ID,
+			"[account_handoff]\nprefer_below_percent = 90\nmove_idle_at_percent = 93\n")
+
+		_, err := UnsetProjectConfigValue(project.ID, "account_handoff.prefer_below_percent")
+		require.Error(t, err,
+			"removing the personal leaf reveals global prefer 94 !< personal move_idle 93")
+		got, lerr := LoadProjectConfig(project.ID)
+		require.NoError(t, lerr)
+		assert.Equal(t, 90, got.AccountHandoff.PreferBelowPercent,
+			"the refused unset must leave the personal leaf in place")
+	})
+}
+
 // TestAccountHandoffNoTableNoChange pins the slice's core contract: config
 // that never names [account_handoff] is exactly today's config — same resolved
 // values, same winner — so shipping the table cannot change any install that

@@ -2,6 +2,7 @@ package config
 
 import (
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 	"time"
@@ -314,4 +315,56 @@ func accountHandoffDurationValue(leaf, value string) error {
 			leaf, value, err)
 	}
 	return nil
+}
+
+// isAccountHandoffKey reports whether a settable key targets the
+// [account_handoff] table — the whole table or one leaf.
+func isAccountHandoffKey(key string) bool {
+	return key == "account_handoff" || strings.HasPrefix(key, "account_handoff.")
+}
+
+// validatePersonalAccountHandoffMerge is the last gate before a personal
+// [account_handoff] write commits. The file's own leaves already passed
+// validateAccountHandoffFields; ordering binds the EFFECTIVE table, so the
+// writer validates the overlay onto the global layer — the same merge the
+// resolver produces — rather than persist a file every subsequent
+// ResolveConfig fails on (Codex on #6793). A personal file that declares no
+// [account_handoff] table cannot change the merge and passes untested.
+func validatePersonalAccountHandoffMerge(personal *ProjectConfig) error {
+	shape, present := personal.source.topLevel("account_handoff")
+	if !present {
+		return nil
+	}
+	global, err := LoadConfig()
+	if err != nil {
+		return fmt.Errorf("account_handoff: cannot load the global layer to check the merged table: %w", err)
+	}
+	merged := mergedAccountHandoff(global.AccountHandoff, personal.AccountHandoff, shape)
+	if err := validateAccountHandoff(merged); err != nil {
+		return fmt.Errorf("the write would leave the effective [account_handoff] invalid once the personal layer merges over the global one: %w", err)
+	}
+	return nil
+}
+
+// mergedAccountHandoff reproduces the resolver's field-wise merge for this
+// one table: leaves the personal file declares take the personal values,
+// everything else stays at the global layer's values. Shape keys preserve
+// file casing, so they are matched lowercased — the decode that produced
+// `personal` was case-insensitive too.
+func mergedAccountHandoff(global, personal AccountHandoffConfig, shape any) AccountHandoffConfig {
+	table, _ := shape.(map[string]any)
+	written := make(map[string]bool, len(table))
+	for k := range table {
+		written[strings.ToLower(k)] = true
+	}
+	merged := global
+	dst, src := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(personal)
+	rt := dst.Type()
+	for i := 0; i < rt.NumField(); i++ {
+		name := strings.SplitN(rt.Field(i).Tag.Get("toml"), ",", 2)[0]
+		if name != "" && name != "-" && written[name] {
+			dst.Field(i).Set(src.Field(i))
+		}
+	}
+	return merged
 }
