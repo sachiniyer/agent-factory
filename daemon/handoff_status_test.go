@@ -97,7 +97,7 @@ func TestHandoffStatus_LabelsLiveSessionsByKey(t *testing.T) {
 	store, err := handoff.DefaultStore()
 	require.NoError(t, err)
 	inst := &session.Instance{Title: "alpha", ID: "sess-1"}
-	s.manager.instances["repo::alpha"] = inst
+	s.manager.instances[daemonInstanceKey("repo", "alpha")] = inst
 	require.NoError(t, store.SetRefusedUntil(stableSessionKey("repo", inst), time.Now().Add(time.Hour)))
 
 	var resp HandoffStatusResponse
