@@ -184,6 +184,33 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	releaseHomeLatch := latchDaemonHomePresent()
 	defer releaseHomeLatch()
 
+	// A home the scaffold marked as a throwaway sandbox (#6844) carries its
+	// own lifetime contract: this daemon enforces the deadline and the
+	// declared-owner check itself (armThrowawayWatchdog), lists the home in
+	// the sandbox registry so the next marked start can reap it, and arms a
+	// teardown on unwind that takes the whole sandbox — driver, agents, and
+	// the private tmux server — down with it. Registered after the latch and
+	// lock defers, it runs before them on unwind, so the teardown still
+	// holds the home lock: no successor can win the home and spawn into it
+	// mid-teardown.
+	throwawayExpired := false
+	throwawayExpireCh := make(chan struct{})
+	var throwawayHome string
+	if homeDir, homeErr := config.GetConfigDir(); homeErr == nil {
+		throwawayHome = homeDir
+		if marker, marked := loadThrowawayMarker(homeDir); marked {
+			registerThrowawaySandbox(homeDir)
+			recordThrowawayDaemon(homeDir)
+			stopWatch := armThrowawayWatchdog(marker, throwawayExpireCh)
+			defer func() {
+				stopWatch()
+				if throwawayExpired {
+					teardownThrowawaySandbox(homeDir, marker)
+				}
+			}()
+		}
+	}
+
 	// Notify on SIGINT (Ctrl+C) and SIGTERM, and watch for a Shutdown RPC.
 	// The RPC path is used by `af upgrade` / autoUpdate after writing a new
 	// binary so the next RPC respawns the daemon from the fresh image (#498).
@@ -454,6 +481,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	case <-shutdownCh:
 		log.InfoLog.Printf("received shutdown request via control socket during instance restore; exiting")
 		return fatalAcceptShutdownErr()
+	case <-throwawayExpireCh:
+		throwawayExpired = true
+		return nil
 	}
 	// Upgrade candidates deliberately park before the orphan sweep. Preserve the
 	// pre-existing probation contract: restored state is readable while every
@@ -474,6 +504,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		case <-shutdownCh:
 			log.InfoLog.Printf("received shutdown request during upgrade probation; exiting")
 			return fatalAcceptShutdownErr()
+		case <-throwawayExpireCh:
+			throwawayExpired = true
+			return nil
 		}
 	}
 
@@ -497,6 +530,11 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	startupStep("unrecorded create sweep", sweepUnrecordedCreateSessions)
 	// Background and read-only until it proves an orphan; see sandbox_dir_sweep.go.
 	startupStep("sandbox orphan dir sweep", manager.sweepStartupOrphanSandboxDirs)
+	// Reaps marked sibling sandboxes that are expired or proven orphaned —
+	// the "next start of the tooling that creates them" net (#6844). The
+	// sweep itself is gated on this daemon's own marker: a real install
+	// never reaps, and teardown refuses the default home outright.
+	startupStep("throwaway sandbox reap", func() { sweepThrowawaySandboxes(throwawayHome) })
 	manager.finishInstanceRestore()
 
 	// Start task automation only after the control server is up and restore has
@@ -603,6 +641,8 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		homeGone = true
 	case <-upgradeExitCh:
 		log.InfoLog.Printf("quiescing for a daemon-owned upgrade hand-off")
+	case <-throwawayExpireCh:
+		throwawayExpired = true
 	}
 
 	joined := drainDaemon(manager, closeHTTP, closeControl, &httpClosed, &controlClosed, stopCh, wg)
@@ -612,6 +652,12 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		// us, so there is no installation left to persist into — saving would
 		// recreate a skeleton of the deleted home and resurrect the abandoned
 		// state the deletion was meant to remove.
+		return nil
+	}
+	if throwawayExpired {
+		// Same skip, for the same reason: the unwind-time teardown is about
+		// to empty this sandbox, so persisting live-session state into it
+		// would only be restored by a daemon that expires on the same marker.
 		return nil
 	}
 

@@ -75,6 +75,16 @@ if run_configure "$STANDIN_HOME"; then
     else
         no "the sandbox does not record its evidence level"
     fi
+    marker="$STANDIN_HOME/sandbox/home/throwaway-sandbox.json"
+    if [ ! -s "$marker" ]; then
+        no "the sandbox AF home carries no throwaway marker (#6844)"
+    elif grep -qF '"kind": "playtest-standin"' "$marker" &&
+        grep -qF '"max_lifetime_seconds": 21600' "$marker" &&
+        grep -qF '"created_unix":' "$marker"; then
+        ok "the scaffold marks the AF home with the throwaway-sandbox contract"
+    else
+        no "the throwaway marker lacks the declared kind or default lifetime"
+    fi
 else
     no "the default stand-in could not be configured"
 fi
@@ -121,6 +131,16 @@ if [ ! -s "$HOST_TOOL_LOG" ]; then
     ok "the host self-test does not require jq or curl"
 else
     no "the host self-test invoked container-only tools: $(tr '\n' ' ' <"$HOST_TOOL_LOG")"
+fi
+
+printf '\n=== the throwaway marker honors a declared lifetime ===\n'
+
+SHORT_HOME="$WORK/short"
+if run_configure "$SHORT_HOME" AF_SANDBOX_MAX_LIFETIME=60 &&
+    grep -qF '"max_lifetime_seconds": 60' "$SHORT_HOME/sandbox/home/throwaway-sandbox.json"; then
+    ok "AF_SANDBOX_MAX_LIFETIME reaches the marker"
+else
+    no "a declared lifetime does not reach the throwaway marker"
 fi
 
 printf '\n=== detached readiness joins the complete scaffold ===\n'
