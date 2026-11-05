@@ -217,7 +217,25 @@ their worktree. Local archives print the relocated worktree path on success.`,
 			workspace = archivedWorkspaceOf(repoID, sessionID, title)
 		}
 		if workspace != nil {
-			result["archived_workspace"] = workspace
+			// A sandbox caller's ArchiveSession response passes through the
+			// sandbox response boundary (daemon/sandbox_scrub.go), which
+			// classifies ArchivedWorkspaceData.host and .dir as withheld and
+			// omits them (daemon/sandbox_classify.go): the sandbox must not
+			// learn the daemon host's layout. A non-push preserve then arrives
+			// as a non-nil workspace with only pushed:false, which looks
+			// complete but names no location. Say so instead of echoing the
+			// hollow object (#5804). A pushed branch is the sandbox's own repo
+			// data, so a push archive still names it. An operator's response
+			// carries host and/or dir verbatim and takes the plain path.
+			if !workspace.Pushed && workspace.Host == "" && workspace.Dir == "" {
+				result["archived_workspace"] = map[string]any{
+					"pushed":   false,
+					"withheld": true,
+					"note":     "the work was preserved on the session's host; its location is withheld from sandbox callers",
+				}
+			} else {
+				result["archived_workspace"] = workspace
+			}
 		}
 		return jsonOut(result)
 	},

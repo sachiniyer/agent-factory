@@ -3,11 +3,15 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
@@ -480,4 +484,100 @@ func TestSessionsArchive_PushArchiveThreadsPushedWorkspace(t *testing.T) {
 	require.True(t, ok)
 	assert.Equal(t, true, wsMap["pushed"])
 	assert.Equal(t, "af/worker", wsMap["branch"])
+}
+
+// TestSessionsArchive_SaysWithheldWhenSandboxBoundaryStripsLocation: the bug's
+// sandbox scenario (#5804). An off-box archive issued with a sandbox credential
+// travels over HTTP, and the daemon's ArchiveSession response passes through the
+// real sandbox response boundary (daemon.ScrubbedSandboxResponses), which omits
+// ArchivedWorkspaceData.host and .dir (classified withheld in
+// daemon/sandbox_classify.go). A non-push preserve arrives as a non-nil workspace
+// holding only pushed:false — a hollow object that looks complete but names no
+// location. The CLI must say the location is withheld instead of echoing it.
+//
+// This drives the real CLI over a real HTTP server wrapped with the real
+// boundary — no stubbed archiveSessionViaDaemon — so the withheld shape is
+// genuinely produced by the scrub, not hand-built by the test.
+func TestSessionsArchive_SaysWithheldWhenSandboxBoundaryStripsLocation(t *testing.T) {
+	setupRepoForCmd(t)
+
+	const hostLayout = "box1"
+	const dirLayout = "/home/agent/.agent-factory/sessions/worker/worktree"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/ArchiveSession", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.ArchiveSessionResponse{
+			ArchivedPath:      "/home/agent/.agent-factory/archived/worker",
+			ArchivedWorkspace: &session.ArchivedWorkspaceData{Host: hostLayout, Dir: dirLayout, Pushed: false},
+		}))
+	})
+	srv := httptest.NewServer(daemon.ScrubbedSandboxResponses(mux))
+	t.Cleanup(srv.Close)
+
+	oldURL, oldTok := apiclient.FlagDaemonURL, apiclient.FlagDaemonToken
+	apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = srv.URL, "sandbox-secret"
+	t.Cleanup(func() { apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = oldURL, oldTok })
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace must appear")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok, "archived_workspace must be a JSON object")
+	assert.Equal(t, false, wsMap["pushed"])
+	assert.Equal(t, true, wsMap["withheld"], "the CLI must say the location was withheld, not emit a hollow workspace")
+	assert.Contains(t, wsMap["note"], "withheld", "the note explains why no location is shown")
+	// The boundary withheld the daemon host's layout; the CLI output must not
+	// leak it back through the archived_workspace it built.
+	assert.NotContains(t, out, hostLayout)
+	assert.NotContains(t, out, dirLayout)
+}
+
+// TestSessionsArchive_PushArchiveNamesBranchThroughSandboxBoundary: a pushed
+// branch is the sandbox's own repo data, so the boundary lets branch through
+// (callerText) while still withholding host and dir. The CLI must name the
+// pushed branch — the push case is not a "withheld location". Drives the real
+// CLI over the real boundary.
+func TestSessionsArchive_PushArchiveNamesBranchThroughSandboxBoundary(t *testing.T) {
+	setupRepoForCmd(t)
+
+	const hostLayout = "box1"
+	const dirLayout = "/home/agent/.agent-factory/sessions/worker/worktree"
+	mux := http.NewServeMux()
+	mux.HandleFunc("/v1/ArchiveSession", func(w http.ResponseWriter, _ *http.Request) {
+		w.Header().Set("Content-Type", "application/json")
+		_ = apiproto.WriteEnvelope(w, apiproto.Success(daemon.ArchiveSessionResponse{
+			ArchivedWorkspace: &session.ArchivedWorkspaceData{
+				Host: hostLayout, Dir: dirLayout, Pushed: true, Branch: "af/worker",
+			},
+		}))
+	})
+	srv := httptest.NewServer(daemon.ScrubbedSandboxResponses(mux))
+	t.Cleanup(srv.Close)
+
+	oldURL, oldTok := apiclient.FlagDaemonURL, apiclient.FlagDaemonToken
+	apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = srv.URL, "sandbox-secret"
+	t.Cleanup(func() { apiclient.FlagDaemonURL, apiclient.FlagDaemonToken = oldURL, oldTok })
+
+	sessionsArchivePush = true
+	t.Cleanup(func() { sessionsArchivePush = false })
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace must appear for a --push archive")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, wsMap["pushed"])
+	assert.Equal(t, "af/worker", wsMap["branch"], "a pushed branch is the sandbox's own repo data and may be shown")
+	// host and dir were withheld by the boundary; a push does not bring them back.
+	assert.NotContains(t, out, hostLayout)
+	assert.NotContains(t, out, dirLayout)
 }

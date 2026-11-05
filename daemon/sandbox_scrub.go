@@ -75,9 +75,11 @@ const (
 	sandboxCommittedMsg      = "the change was stored, but a follow-up step failed; see the daemon log"
 )
 
-// scrubbedSandboxResponses wraps next so its whole response is buffered and
-// sanitized before it reaches a sandbox credential.
-func scrubbedSandboxResponses(next http.Handler) http.Handler {
+// ScrubbedSandboxResponses wraps next so its whole response is buffered and
+// sanitized before it reaches a sandbox credential. Exported so the CLI's
+// handling of the withheld shape can be exercised against the real boundary
+// (api/sessions_archive_test.go) rather than a stub that bypasses it.
+func ScrubbedSandboxResponses(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		noteStaticHostLayout()
 		rec := &bufferedResponse{header: http.Header{}, status: http.StatusOK}

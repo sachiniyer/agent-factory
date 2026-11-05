@@ -176,7 +176,7 @@ func TestSandboxResponsesWithholdWhatAProjectionJustNoted(t *testing.T) {
 	require.NoError(t, err)
 	_ = inst.ToInstanceData() // the projection a create response is built from
 
-	handler := scrubbedSandboxResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	handler := ScrubbedSandboxResponses(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		_, _ = w.Write([]byte(`{"data":{"tasks":[{"id":"t1","last_run_status":"errored: ` + fresh + `","prompt":"` + fresh + `"}]},"error":null}`))
 	}))
 	rec := httptest.NewRecorder()

@@ -338,7 +338,7 @@ func servePosture(w http.ResponseWriter, r *http.Request, next http.Handler, p r
 				// One response boundary for the whole sandbox surface: no body or
 				// error envelope reaches a sandbox credential carrying the daemon
 				// host's layout (daemon/sandbox_scrub.go).
-				next = scrubbedSandboxResponses(next)
+				next = ScrubbedSandboxResponses(next)
 			}
 		} else {
 			if p.previewOrigin {
