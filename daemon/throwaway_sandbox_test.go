@@ -301,6 +301,19 @@ func TestSweepConvergesPastBound(t *testing.T) {
 	}
 }
 
+// scopedPID writes a recorded-pid entry scoped to the boot/namespace pair
+// the test's throwawayScopeIDsFn stub returns — recorded pairs are only
+// selectable inside the scope they were written in.
+func scopedPID(t *testing.T, home string, pid int, startID uint64, boot, ns string) {
+	t.Helper()
+	err := throwawaysandbox.WriteRecordedPID(home, throwawaysandbox.RecordedPID{
+		PID: pid, StartID: startID, BootID: boot, NSID: ns,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 // sandboxTreeFixture builds the shape the scaffolding creates: a fresh
 // root holding the AF home and the private tmux dir, stamped with the
 // creation sentinel bound to createdUnix. It returns the root, the
@@ -377,6 +390,24 @@ func TestThrowawayPrivateTmuxDirRequiresCreatedRoot(t *testing.T) {
 			t.Fatalf("a symlinked sentinel was accepted: %q", dir)
 		}
 	})
+	t.Run("a symlinked root is refused", func(t *testing.T) {
+		link := filepath.Join(t.TempDir(), "rootlink")
+		if err := os.Symlink(root, link); err != nil {
+			t.Skip("cannot create symlink fixture")
+		}
+		if dir, _ := throwawayPrivateTmuxDir(canonHome, marker(link, tmuxDir, created)); dir != "" {
+			t.Fatalf("a symlinked sandbox root was accepted: %q", dir)
+		}
+	})
+	t.Run("a file recorded as the root is refused", func(t *testing.T) {
+		f := filepath.Join(t.TempDir(), "file")
+		if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if dir, _ := throwawayPrivateTmuxDir(canonHome, marker(f, tmuxDir, created)); dir != "" {
+			t.Fatalf("a non-directory sandbox root was accepted: %q", dir)
+		}
+	})
 	t.Run("home outside the proven root is refused", func(t *testing.T) {
 		other := t.TempDir()
 		if err := throwawaysandbox.WriteRootSentinel(other, created); err != nil {
@@ -430,17 +461,12 @@ func TestThrowawayMembersServerTreeAndRecorded(t *testing.T) {
 		91:   {PID: 91, PPID: 1, SID: 91, StartID: 910, StartedAt: t0},  // recorded pid, recycled instance
 		self: {PID: self, PPID: 1, SID: 99, StartID: 1, StartedAt: t0},
 	}
-	if err := throwawaysandbox.WriteRecordedPID(canonHome, 90, 900); err != nil {
-		t.Fatal(err)
-	}
-	if err := throwawaysandbox.WriteRecordedPID(canonHome, 91, 910); err != nil {
-		t.Fatal(err)
-	}
-	if err := throwawaysandbox.WriteRecordedPID(canonHome, 92, 920); err != nil {
-		t.Fatal(err)
-	}
 	old := throwawaySeams()
 	defer throwawayRestoreSeams(old)
+	throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+	scopedPID(t, canonHome, 90, 900, "b", "n")
+	scopedPID(t, canonHome, 91, 910, "b", "n")
+	scopedPID(t, canonHome, 92, 920, "b", "n")
 	throwawaySnapshotFn = func() (map[int]proctree.Process, error) { return snap, nil }
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawaySameRootFn = func(int) bool { return true }
@@ -538,11 +564,10 @@ func TestThrowawayMembersNoSocketEvidence(t *testing.T) {
 		71: {PID: 71, PPID: 70, SID: 71, StartID: 710, StartedAt: t0},
 		90: {PID: 90, PPID: 1, SID: 90, StartID: 900, StartedAt: t0}, // recorded daemon
 	}
-	if err := throwawaysandbox.WriteRecordedPID(canonHome, 90, 900); err != nil {
-		t.Fatal(err)
-	}
 	old := throwawaySeams()
 	defer throwawayRestoreSeams(old)
+	throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+	scopedPID(t, canonHome, 90, 900, "b", "n")
 	throwawaySnapshotFn = func() (map[int]proctree.Process, error) { return snap, nil }
 	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
 	throwawaySameRootFn = func(int) bool { return true }
@@ -558,6 +583,115 @@ func TestThrowawayMembersNoSocketEvidence(t *testing.T) {
 	}
 	if !got[90] {
 		t.Fatal("the recorded daemon was not selected")
+	}
+}
+
+// TestThrowawayRecordedMembersRequireScope pins the lift-item rule: a
+// recorded (pid, start id) is tied to the boot and PID namespace it was
+// written in — proctree's rule for persisted kill handles. An unscoped
+// record, a record from another namespace (where a lookup hit would be a
+// coincidental collision), or a strong-boot-mismatched record is never
+// selected; only a pidns-fallback mismatch still falls through to the
+// live StartID check.
+func TestThrowawayRecordedMembersRequireScope(t *testing.T) {
+	home := t.TempDir()
+	snap := map[int]proctree.Process{
+		90: {PID: 90, PPID: 1, SID: 90, StartID: 900},
+	}
+	old := throwawaySeams()
+	defer throwawayRestoreSeams(old)
+	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
+	throwawaySameRootFn = func(int) bool { return true }
+	throwawayLookupFn = func(pid int) (proctree.Process, error) {
+		p, ok := snap[pid]
+		if !ok {
+			return proctree.Process{}, os.ErrNotExist
+		}
+		return p, nil
+	}
+	selected := func() bool {
+		for _, p := range throwawayRecordedMembers(home) {
+			if p.PID == 90 {
+				return true
+			}
+		}
+		return false
+	}
+	write := func(rec throwawaysandbox.RecordedPID) {
+		if err := throwawaysandbox.WriteRecordedPID(home, rec); err != nil {
+			t.Fatal(err)
+		}
+	}
+	matching := throwawaysandbox.RecordedPID{PID: 90, StartID: 900, BootID: "b", NSID: "n"}
+
+	write(matching)
+	throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+	if !selected() {
+		t.Fatal("a record inside its own scope was not selected")
+	}
+	if err := os.Remove(throwawaysandbox.RecordedPIDsPath(home)); err != nil {
+		t.Fatal(err)
+	}
+	for _, tc := range []struct {
+		name    string
+		rec     throwawaysandbox.RecordedPID
+		curBoot string
+		curNs   string
+	}{
+		{"other pid namespace", throwawaysandbox.RecordedPID{PID: 90, StartID: 900, BootID: "b", NSID: "other-ns"}, "b", "n"},
+		{"strong boot mismatch", throwawaysandbox.RecordedPID{PID: 90, StartID: 900, BootID: "old-boot", NSID: "n"}, "b", "n"},
+		{"unscoped record", throwawaysandbox.RecordedPID{PID: 90, StartID: 900}, "b", "n"},
+		{"unreadable current scope", matching, "", ""},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			write(tc.rec)
+			throwawayScopeIDsFn = func() (string, string) { return tc.curBoot, tc.curNs }
+			if selected() {
+				t.Fatal("an out-of-scope record was selected")
+			}
+			if err := os.Remove(throwawaysandbox.RecordedPIDsPath(home)); err != nil {
+				t.Fatal(err)
+			}
+		})
+	}
+	t.Run("pidns fallback record falls through to the live check", func(t *testing.T) {
+		write(throwawaysandbox.RecordedPID{PID: 90, StartID: 900, BootID: "pidns:1:2", NSID: "n"})
+		throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+		if !selected() {
+			t.Fatal("a fallback-booted record with a matching live instance was not selected")
+		}
+		if err := os.Remove(throwawaysandbox.RecordedPIDsPath(home)); err != nil {
+			t.Fatal(err)
+		}
+	})
+}
+
+// TestRecordThrowawayDaemonScopesRecords pins that the daemon writes its
+// own record WITH the boot/namespace scope — an unscoped record is never
+// written, because it could never be selected anyway.
+func TestRecordThrowawayDaemonScopesRecords(t *testing.T) {
+	home := t.TempDir()
+	oldLookup, oldScope := throwawayLookupFn, throwawayScopeIDsFn
+	defer func() { throwawayLookupFn, throwawayScopeIDsFn = oldLookup, oldScope }()
+	throwawayLookupFn = func(pid int) (proctree.Process, error) {
+		return proctree.Process{PID: pid, StartID: 4242}, nil
+	}
+	throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+	recordThrowawayDaemon(home)
+	recs, err := throwawaysandbox.ReadRecordedPIDs(home)
+	if err != nil {
+		t.Fatalf("the daemon record was not written: %v", err)
+	}
+	if len(recs) != 1 || recs[0].PID != os.Getpid() || recs[0].StartID != 4242 || recs[0].BootID != "b" || recs[0].NSID != "n" {
+		t.Fatalf("daemon record %+v lacks the full scoped identity", recs)
+	}
+	if err := os.Remove(throwawaysandbox.RecordedPIDsPath(home)); err != nil {
+		t.Fatal(err)
+	}
+	throwawayScopeIDsFn = func() (string, string) { return "", "n" }
+	recordThrowawayDaemon(home)
+	if _, err := os.Lstat(throwawaysandbox.RecordedPIDsPath(home)); !os.IsNotExist(err) {
+		t.Fatal("an unscoped daemon record was written")
 	}
 }
 
@@ -680,17 +814,19 @@ type throwawaySeamSet struct {
 	sameRoot  func(int) bool
 	tmuxSrv   func(int) bool
 	unixSocks func(int) ([]string, bool)
+	scope     func() (string, string)
 }
 
 func throwawaySeams() throwawaySeamSet {
 	return throwawaySeamSet{
 		snapshot: throwawaySnapshotFn, uid: throwawayUIDFn, lookup: throwawayLookupFn,
 		sameRoot: throwawaySameRootFn, tmuxSrv: throwawayIsTmuxServerFn,
-		unixSocks: throwawayUnixSocketPathsFn,
+		unixSocks: throwawayUnixSocketPathsFn, scope: throwawayScopeIDsFn,
 	}
 }
 
 func throwawayRestoreSeams(s throwawaySeamSet) {
 	throwawaySnapshotFn, throwawayUIDFn, throwawayLookupFn = s.snapshot, s.uid, s.lookup
 	throwawaySameRootFn, throwawayIsTmuxServerFn, throwawayUnixSocketPathsFn = s.sameRoot, s.tmuxSrv, s.unixSocks
+	throwawayScopeIDsFn = s.scope
 }

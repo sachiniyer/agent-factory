@@ -170,15 +170,24 @@ func registerThrowawaySandbox(home string) {
 // marked home's recorded-pid file. It is the (b) membership proof: the
 // daemon is reparented to init, so it is never "under" the private tmux
 // server — only a recorded (pid, start id) lets a teardown still reach
-// it. Best-effort: a home whose file cannot be written keeps the deadline
-// watchdog either way.
+// it. The record is scoped the way proctree scopes every persisted kill
+// handle — boot id plus PID namespace id beside the pair — so a stale
+// record can never name a process in a number space the reaper cannot
+// read. Best-effort: a home whose file cannot be written keeps the
+// deadline watchdog either way.
 func recordThrowawayDaemon(home string) {
 	cur, err := throwawayLookupFn(os.Getpid())
 	if err != nil {
 		log.WarningLog.Printf("throwaway sandbox daemon could not read its own start id; teardown will not reach it by pid: %v", err)
 		return
 	}
-	if err := throwawaysandbox.WriteRecordedPID(home, cur.PID, cur.StartID); err != nil {
+	boot, ns := throwawayScopeIDsFn()
+	if boot == "" || ns == "" {
+		log.WarningLog.Printf("throwaway sandbox daemon could not read the boot/namespace scope; teardown will not reach it by pid")
+		return
+	}
+	rec := throwawaysandbox.RecordedPID{PID: cur.PID, StartID: cur.StartID, BootID: boot, NSID: ns}
+	if err := throwawaysandbox.WriteRecordedPID(home, rec); err != nil {
 		log.WarningLog.Printf("throwaway sandbox daemon could not record its pid in %s: %v", home, err)
 	}
 }
@@ -399,6 +408,14 @@ func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (stri
 	if m.TmuxTmpdir == "" || m.SandboxRoot == "" {
 		return "", ""
 	}
+	// The recorded root is evidence, and evidence must stand on its own
+	// trust anchor: a symlinked root could redirect the sentinel check
+	// into a tree the sandbox never made, and an alien-owned root could
+	// have its contents swapped under the reaper. Checked on the recorded
+	// spelling so a symlink leaf is caught before canonicalization hides it.
+	if err := throwawaysandbox.TrustedOwnedDir(m.SandboxRoot); err != nil {
+		return "", fmt.Sprintf("recorded sandbox root is untrusted: %v", err)
+	}
 	root, err := canonicalDir(m.SandboxRoot)
 	if err != nil {
 		return "", ""
@@ -542,9 +559,11 @@ func throwawayMemberProcesses(canonHome string, m *throwawaysandbox.Marker) []pr
 // throwawayRecordedMembers returns the live processes named by the home's
 // recorded-pid file whose current instance still matches the recorded
 // (pid, start id) — proof the record names THIS process, not a recycled
-// slot. Each must also still be same-uid and in this filesystem root: a
-// record is a teardown target, so every check it could plausibly fail is
-// checked. An unreadable or untrusted file contributes nothing.
+// slot. The pair alone is not enough: it is first scoped to this boot and
+// PID namespace, proctree's rule for every persisted kill handle, so a
+// record written in another number space can never collide with a live
+// process here. Each survivor must also still be same-uid and in this
+// filesystem root. An unreadable or untrusted file contributes nothing.
 func throwawayRecordedMembers(canonHome string) []proctree.Process {
 	recs, err := throwawaysandbox.ReadRecordedPIDs(canonHome)
 	if err != nil {
@@ -553,8 +572,12 @@ func throwawayRecordedMembers(canonHome string) []proctree.Process {
 		}
 		return nil
 	}
+	curBoot, curNs := throwawayScopeIDsFn()
 	var members []proctree.Process
 	for _, rec := range recs {
+		if !recordedPIDInScope(rec, curBoot, curNs) {
+			continue
+		}
 		cur, err := throwawayLookupFn(rec.PID)
 		if err != nil || cur.StartID != rec.StartID {
 			continue // dead or recycled — the record names a process that no longer exists
@@ -568,6 +591,30 @@ func throwawayRecordedMembers(canonHome string) []proctree.Process {
 		members = append(members, cur)
 	}
 	return members
+}
+
+// recordedPIDInScope reports whether a recorded (pid, start id) MAY name a
+// process in this boot's PID namespace — the same verdict rule the orphan
+// sweep's owner stamp applies, read for selection rather than for death:
+// a record the code cannot scope is never acted on. An unscoped record
+// (empty fields, or an unreadable current scope) is out. A record stamped
+// in another PID namespace is out: its pid lives in a number space this
+// process cannot read, so a lookup hit would be a coincidental collision.
+// A strong-UUID boot mismatch is out too — the recorded instance provably
+// died with that boot. Only the pidns fallback is ambiguous (it can
+// disagree across a shared namespace), so a fallback-booted record falls
+// through to the live lookup, which decides on StartID alone.
+func recordedPIDInScope(rec throwawaysandbox.RecordedPID, curBoot, curNs string) bool {
+	if rec.BootID == "" || rec.NSID == "" || curBoot == "" || curNs == "" {
+		return false
+	}
+	if rec.NSID != curNs {
+		return false
+	}
+	if rec.BootID != curBoot && !proctree.BootIDIsFallback(rec.BootID) && !proctree.BootIDIsFallback(curBoot) {
+		return false
+	}
+	return true
 }
 
 // tmuxServerSocketPrivate proves a tmux server is the sandbox's own by

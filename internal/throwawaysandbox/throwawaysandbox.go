@@ -106,6 +106,28 @@ func WriteRootSentinel(root string, createdUnix int64) error {
 		[]byte(strconv.FormatInt(createdUnix, 10)+"\n"), 0o600)
 }
 
+// TrustedOwnedDir verifies path is a real directory — never a symlink —
+// owned by this uid. The sandbox root is an evidence anchor the same way
+// the sentinel inside it is: a symlinked root could redirect the proof
+// into a tree the sandbox never made, and an alien-owned root could have
+// its contents swapped under the reaper.
+func TrustedOwnedDir(path string) error {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return err
+	}
+	if fi.Mode()&os.ModeSymlink != 0 {
+		return fmt.Errorf("untrusted dir %s: path is a symlink", path)
+	}
+	if !fi.IsDir() {
+		return fmt.Errorf("untrusted dir %s: path is not a directory", path)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+		return fmt.Errorf("untrusted dir %s: owned by uid %d", path, st.Uid)
+	}
+	return nil
+}
+
 // TrustedOwnedFile reads path only when it is a regular, non-symlink file
 // owned by this uid — the same anchor trustedFileOwner applies to markers
 // and registry entries. Sandbox evidence a process could redirect (a
@@ -127,11 +149,21 @@ func TrustedOwnedFile(path string) ([]byte, error) {
 // where socket evidence cannot be read.
 const PidsFileName = "throwaway-pids.json"
 
-// RecordedPID names one process instance the sandbox started. StartID is
-// proctree's platform start stamp; it is compared for equality only.
+// RecordedPID names one process instance the sandbox started, scoped the
+// way proctree scopes every persisted destructive handle: the boot id and
+// the PID namespace id sit beside the (pid, start id) pair so a record can
+// never name a process in a number space the reaper cannot read — a pid
+// collision across namespaces selects nothing. StartID is proctree's
+// platform start stamp; it is compared for equality only.
 type RecordedPID struct {
 	PID     int    `json:"pid"`
 	StartID uint64 `json:"start_id"`
+	// BootID is proctree.BootID() at record time; empty means the writer
+	// could not scope the record, which makes it unselectable.
+	BootID string `json:"boot_id,omitempty"`
+	// NSID is proctree.PIDNamespaceID() at record time; empty is unscoped
+	// the same way.
+	NSID string `json:"ns_id,omitempty"`
 }
 
 type recordedPIDs struct {
@@ -159,21 +191,21 @@ func ReadRecordedPIDs(home string) ([]RecordedPID, error) {
 	return r.PIDs, nil
 }
 
-// WriteRecordedPID merges (pid, startID) into home's recorded-pid list
-// atomically. A list that exists but fails the trust/parse bar is refused
-// rather than rewritten over — the reaper would have refused it anyway,
-// and clobbering it would erase the evidence of the tampering.
-func WriteRecordedPID(home string, pid int, startID uint64) error {
+// WriteRecordedPID merges rec into home's recorded-pid list atomically.
+// A list that exists but fails the trust/parse bar is refused rather than
+// rewritten over — the reaper would have refused it anyway, and
+// clobbering it would erase the evidence of the tampering.
+func WriteRecordedPID(home string, rec RecordedPID) error {
 	existing, err := ReadRecordedPIDs(home)
 	if err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
 	for _, r := range existing {
-		if r.PID == pid && r.StartID == startID {
+		if r == rec {
 			return nil
 		}
 	}
-	data, err := json.Marshal(recordedPIDs{Version: markerVersion, PIDs: append(existing, RecordedPID{PID: pid, StartID: startID})})
+	data, err := json.Marshal(recordedPIDs{Version: markerVersion, PIDs: append(existing, rec)})
 	if err != nil {
 		return err
 	}
