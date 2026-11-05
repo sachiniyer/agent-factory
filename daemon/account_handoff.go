@@ -9,6 +9,7 @@ package daemon
 // [account_handoff] mode is "shadow".
 
 import (
+	"encoding/json"
 	"errors"
 	"strings"
 	"sync"
@@ -340,6 +341,47 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		}
 		inputs = append(inputs, d.in)
 	}
+	// Persisted rows that never materialized still carry report_to ambiguity
+	// evidence (#6818 review): refreshDaemonInstances omits a row whose
+	// restore fails, so a bare title can look unique in m.instances while a
+	// second repo's disk row claims the same title — the same blind spot
+	// collectTitleRepoPathsOnDisk exists for in findSession. Feed each
+	// non-materialized row as a Persisted input: it counts toward "is this
+	// title unique", is never governed, and resolves only as not-live.
+	claims, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()
+	if err != nil {
+		m.warn().Printf("account-handoff: load persisted sessions for title claims: %v", err)
+		return inputs
+	}
+	for _, skip := range unreadable {
+		m.warn().Printf("account-handoff: repo %s unreadable while collecting title claims — bare-title report_to may miss a claim: %v", skip.RepoID, skip.Err)
+	}
+	for rid, raw := range claims {
+		var data []session.InstanceData
+		if uerr := json.Unmarshal(raw, &data); uerr != nil {
+			continue // corrupted row — mirrors findInstanceDataByTitle's skip
+		}
+		for i := range data {
+			if data[i].Title == "" {
+				continue
+			}
+			key := data[i].ID
+			if key == "" {
+				key = daemonInstanceKey(rid, data[i].Title)
+			}
+			if liveKeys[key] {
+				continue // already materialized — counted once, live
+			}
+			liveKeys[key] = true
+			inputs = append(inputs, handoffengine.SessionInput{
+				Key:       key,
+				Title:     data[i].Title,
+				RepoID:    rid,
+				RepoRoot:  data[i].Path,
+				Persisted: true,
+			})
+		}
+	}
 	return inputs
 }
 
@@ -468,6 +510,16 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		// A restart abandons every in-memory backlog and warned latch, so a
+		// reports_held record left by the previous process is always stale
+		// (#6818 review): reconcile it at worker start. A held episode that
+		// re-forms warns and records again — the marker only ever means the
+		// CURRENT process holds a warned backlog.
+		if store, err := handoff.DefaultStore(); err == nil {
+			if cerr := store.ClearReportsHeld(); cerr != nil {
+				manager.warn().Printf("account-handoff: reconcile held-report record: %v", cerr)
+			}
+		}
 		flush := time.NewTicker(reportFlushInterval)
 		defer flush.Stop()
 		pending := map[string]*reportPending{} // recipient key → digest backlog

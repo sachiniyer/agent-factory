@@ -9,6 +9,8 @@ package daemon
 // restart, never on a timer.
 
 import (
+	"encoding/json"
+	"sync"
 	"testing"
 	"time"
 
@@ -326,4 +328,112 @@ func TestReportHeldBackoffAndWarnOnce(t *testing.T) {
 	if state.ReportsHeld != nil {
 		t.Fatalf("record survived the last held backlog draining")
 	}
+}
+
+// #6818 review: a persisted row that never materialized (failed restore)
+// still claims its title — accountHandoffInputs must feed it as a Persisted
+// claim so a bare report_to cannot read unique against it.
+func TestAccountHandoffInputsFeedsPersistedTitleClaims(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID: "ghost-obs-id", Title: "observer", Path: "/repoB",
+	}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("repoB", raw))
+
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{},
+	}
+	m.instances[daemonInstanceKey("repoA", "observer")] = &session.Instance{Title: "observer"}
+
+	var ghost *handoffengine.SessionInput
+	inputs := m.accountHandoffInputs()
+	for i := range inputs {
+		if inputs[i].Persisted {
+			ghost = &inputs[i]
+		}
+	}
+	if ghost == nil {
+		t.Fatalf("persisted unloadable row missing from inputs: %+v", inputs)
+	}
+	if ghost.Title != "observer" || ghost.RepoID != "repoB" || ghost.RepoRoot != "/repoB" {
+		t.Fatalf("persisted claim identity wrong: %+v", ghost)
+	}
+	if ghost.Live || ghost.Started {
+		t.Fatalf("persisted claim masqueraded as live: %+v", ghost)
+	}
+}
+
+// A persisted row that DID materialize counts once — the live input, not a
+// second ambiguity claim against itself.
+func TestAccountHandoffInputsDedupesMaterializedRows(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID: "live-obs-id", Title: "observer", Path: "/repoA",
+	}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("repoA", raw))
+
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{},
+	}
+	m.instances[daemonInstanceKey("repoA", "observer")] = &session.Instance{ID: "live-obs-id", Title: "observer"}
+
+	var observerInputs int
+	for _, in := range m.accountHandoffInputs() {
+		if in.Title == "observer" {
+			observerInputs++
+			if in.Persisted {
+				t.Fatalf("materialized session fed as persisted: %+v", in)
+			}
+		}
+	}
+	if observerInputs != 1 {
+		t.Fatalf("observer fed %d times, want 1 (persisted+live dedupe)", observerInputs)
+	}
+}
+
+// #6818 review: a restart abandons the in-memory backlog and warned latch —
+// the report worker reconciles the durable held record at start so it can
+// never stay asserted with no live hold behind it.
+func TestHandoffReportWorkerReconcilesHeldMarkerOnStart(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	store, err := handoff.DefaultStore()
+	require.NoError(t, err)
+	require.NoError(t, store.NoteReportsHeld(time.Now().Add(-time.Hour)))
+	state, err := store.Load()
+	require.NoError(t, err)
+	require.NotNil(t, state.ReportsHeld)
+
+	m := &Manager{
+		cfg:             &config.Config{},
+		instances:       map[string]*session.Instance{},
+		handoffReportCh: make(chan handoffReportJob, 1),
+	}
+	stop := make(chan struct{})
+	var wg sync.WaitGroup
+	startHandoffReportLoop(m, stop, &wg)
+
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		state, err := store.Load()
+		require.NoError(t, err)
+		if state.ReportsHeld == nil {
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("stale held record survived the report worker's restart reconcile")
+		}
+		time.Sleep(10 * time.Millisecond)
+	}
+	close(stop)
+	wg.Wait()
 }

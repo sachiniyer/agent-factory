@@ -589,3 +589,68 @@ func TestTickReportSilentSpecStillExcludesItsRecipient(t *testing.T) {
 		t.Fatalf("suppressed spec's recipient got %d reports, want 0", len(d.reports))
 	}
 }
+
+// #6818 review: a persisted row that never materialized still claims its
+// title. A live "observer" in one repo plus a failed-restore "observer" in
+// another must read as ambiguous — skipped, never redirected to the live
+// session.
+func TestTickReportPersistedClaimForcesAmbiguity(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	obs := observerSession() // live, repoID "r", RepoRoot "/repo"
+	ghost := SessionInput{
+		Key: "ghost-obs", Title: "observer", RepoID: "repoB",
+		RepoRoot: "/repoB", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs, ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("report delivered to %v despite a persisted same-title claim", d.reports)
+	}
+}
+
+// The persisted claim governs NOTHING: it is skipped before config
+// resolution, so its root is never even resolved and no row or report is
+// ever authored for a session that does not exist.
+func TestTickPersistedRowIsNeverGoverned(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	ghost := SessionInput{
+		Key: "ghost", Title: "ghost-worker", RepoID: "repoG",
+		RepoRoot: "/repoG", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs, ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	// ResolveConfig ran for the live roots only — "/repoG" is untouched.
+	if d.resolve != 1 {
+		t.Fatalf("resolve ran %d times, want 1 (persisted root skipped)", d.resolve)
+	}
+	for _, row := range d.rows {
+		if row.SessionKey == "ghost" {
+			t.Fatalf("persisted claim authored a row: %+v", row)
+		}
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("unique live recipient did not resolve: %+v", d.reports)
+	}
+}
+
+// A spec matching ONLY a persisted row resolves to a session that cannot
+// receive — skipped as not-live, never delivered.
+func TestTickReportPersistedSoloMatchIsNotLive(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	ghost := SessionInput{
+		Key: "ghost-obs", Title: "observer", RepoID: "repoB",
+		RepoRoot: "/repoB", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("report delivered to a persisted-only recipient: %+v", d.reports)
+	}
+}

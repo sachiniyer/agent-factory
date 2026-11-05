@@ -59,6 +59,13 @@ type SessionInput struct {
 	Captured       bool      // the poll produced a frame this pass
 	CapturedAt     time.Time
 	Content        string
+	// Persisted marks a session row that exists on disk but never
+	// materialized into m.instances (its restore failed). It is report_to
+	// ambiguity evidence ONLY (#6818 review): a failed restore can hide a
+	// second project's claim on a bare title, so the row must count when
+	// resolveRecipient asks "is this title unique" — and must never be
+	// governed, read for evidence, or receive a report itself.
+	Persisted bool
 }
 
 // Deps injects every environment read so the engine is testable without a
@@ -144,6 +151,9 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	resolved := map[string]*config.ResolvedConfig{}
 	var gov []governed
 	for _, in := range sessions {
+		if in.Persisted {
+			continue // ambiguity evidence only — never governed (#6818 review)
+		}
 		cfg, ok := resolved[in.RepoRoot]
 		if !ok {
 			var err error

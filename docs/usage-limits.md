@@ -628,7 +628,10 @@ mode = "shadow"
   banner alone.
 - **`report_to` prompts another session** with the structured events:
   `<project>/<title>` or a unique bare title resolves one live session —
-  ambiguous or absent matches are skipped and logged, never guessed. Reports
+  ambiguous or absent matches are skipped and logged, never guessed. A
+  persisted session that failed to restore still claims its title, so a
+  stalled row counts toward ambiguity rather than redirecting the report
+  to a surviving same-titled session in another project. Reports
   use a fixed template of reason codes and parameters (never pane text) and
   batch into a digest at most once a minute — every row batches; shadow
   mode has no immediate-delivery path. Delivery never delays a tick. By
