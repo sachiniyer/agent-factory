@@ -294,6 +294,12 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		note: "the same -c/--config spellings, matched as text so resumeProgram can step past " +
 			"codex's global options to the subcommand slot (#5238)",
 	}},
+	"internal/probe/codex.go:<file scope>": {{
+		class: notAShell,
+		note: "codexProbeArgv — `codex exec -c model_reasoning_effort=\"low\"`: codex's --config short flag " +
+			"with an af-fixed literal, exec'd directly into the CLI with no shell in between; the argv is " +
+			"a package constant, so no operator or repo value reaches it",
+	}},
 	"proposal/git.go:gitConfigArgs": {{
 		class: notAShell,
 		note:  "`git -c <key>=<value>` — git's config flag, paired with the fixed literals of gitFixedConfig",
