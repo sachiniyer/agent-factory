@@ -90,10 +90,15 @@ func createdTaskStatus(data session.InstanceData) string {
 // nothing is lost — see session/state_epoch.go.
 func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string, epoch uint64) {
 	agent := instance.ResolvedAgent()
-	if hit, resetAt, _ := m.limitDetector.Load().Check(content, agent, time.Now()); hit {
+	// The detector resolves the reset phrase against nowFunc (the daemon's
+	// injected clock) and also returns the phrase itself: an unchanged banner
+	// re-parses to the same phrase every tick, so the session keeps its stored
+	// reset rather than letting a time-only or relative form drift forward
+	// forever (#6765).
+	if hit, resetAt, _, evidence := m.limitDetector.Load().Check(content, agent, nowFunc()); hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
-		_ = m.setLimitReachedAtEpoch(instance, resetAt, epoch)
+		_ = m.setLimitReachedAtEpoch(instance, resetAt, evidence, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {

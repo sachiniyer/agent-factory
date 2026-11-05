@@ -68,6 +68,13 @@ func codexRollout(cwd string) string {
 	return fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q}}`+"\n"+`{"type":"event_msg","payload":{"type":"user_message"}}`+"\n", cwd)
 }
 
+// codexRolloutWithSource is codexRollout with a session_meta source: a bare
+// string like "exec" for a top-level launch, or an object like
+// {"subagent":"review"} for a data-bearing variant (#6766).
+func codexRolloutWithSource(cwd, sourceJSON string) string {
+	return fmt.Sprintf(`{"type":"session_meta","payload":{"cwd":%q,"source":%s}}`+"\n"+`{"type":"event_msg","payload":{"type":"user_message"}}`+"\n", cwd, sourceJSON)
+}
+
 func TestPlanAccountSwapCarryAppliesOnlyToSameAgentClaudeAndCodex(t *testing.T) {
 	outgoing := AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID}
 	for _, tc := range []struct {

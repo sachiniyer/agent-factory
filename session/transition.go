@@ -605,7 +605,8 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		return fmt.Errorf("session %q cannot begin an archive after the daemon shutdown checkpoint was sealed", i.Title)
 	}
 	if ev.kind == tkBeginArchive && i.pendingAccountSwap != nil {
-		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before archiving", i.Title)
+		return fmt.Errorf("session %q has %s awaiting its replacement notice and task; retry it with %s before archiving",
+			i.Title, accountSwapSpan(i.pendingAccountSwap.From, i.pendingAccountSwap.To), accountSwapRetryCommand(i.Title, i.pendingAccountSwap.To))
 	}
 	if ev.kind == tkObserveLiveness && ev.lv != LiveLost && i.rebuildTeardownPending {
 		// A committed worktree rebuild whose stale-pane teardown has not been
@@ -779,8 +780,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	switch spec.limitReset {
 	case limitResetClear:
 		i.limitResetAt = time.Time{}
+		i.limitResetEvidence = ""
 	case limitResetFromEvent:
+		// The event's reset arrives without the phrase that produced it (the
+		// handoff wait path resolved it), so the evidence slot cannot keep
+		// describing an earlier wall's reset (#6765).
 		i.limitResetAt = ev.resetAt
+		i.limitResetEvidence = ""
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

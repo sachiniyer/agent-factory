@@ -699,6 +699,194 @@ func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	}
 }
 
+// TestFailClosedPreservedArchiveRetainsHandleAcrossCheckpoint pins the fix for
+// the bug introduced by b9a3589e (#5867/#5886): a preserved unpushed archive whose
+// cleanup handle rebuild fails at reload fail-closed, but the fail-closed state
+// was not durable across a checkpoint. The raw rejected handle was never
+// retained on the in-memory instance, toInstanceDataLocked staged nothing from
+// the inert backend, and ForStorage's archived branch unconditionally cleared
+// RuntimeCleanupStateUnknown and republished the handle only from the (nil)
+// private field — so one checkpoint later the record carried neither a handle
+// nor the unknown flag, and a subsequent kill ran the no-op-success path and
+// deleted the only record naming the preserved still-un-reaped workspace.
+//
+// The fix retains the rejected handle on the instance (failedRuntimeCleanup),
+// stages it in toInstanceDataLocked for preserved archives, and ForStorage's
+// archived branch republishes it and keeps the unknown flag when no handle was
+// staged. This test would FAIL on the pre-fix tree (the checkpoint erases both
+// the handle and the flag) and PASS now.
+func TestFailClosedPreservedArchiveRetainsHandleAcrossCheckpoint(t *testing.T) {
+	// A preserved unpushed ssh archive whose handle a restart cannot rebuild:
+	// the ssh cleanup handle has an empty Host, which
+	// restoreRuntimeCleanupWithAccount rejects ("ssh cleanup handle is
+	// missing its host or remote session directory"). The ArchivedWorkspace
+	// marks the row as a preserved archive that still owes a reap.
+	rejected := InstanceData{
+		ID:          "preserved-fail-closed-id",
+		Title:       "preserved-fail-closed",
+		Path:        "/repo",
+		BackendType: "ssh",
+		Liveness:    LiveArchived,
+		ArchivedWorkspace: &ArchivedWorkspaceData{
+			Dir:    "/home/remote/.af-sessions/preserved-fail-closed",
+			Pushed: false,
+		},
+		RuntimeCleanup: &RuntimeCleanupData{SSH: &SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{User: "remote"}, // empty Host: deterministically rejected
+			SessionDir: "/home/remote/.af-sessions/preserved-fail-closed",
+		}},
+	}
+	restored, err := FromInstanceData(rejected.ForStorage())
+	if err != nil {
+		t.Fatalf("restore a preserved archive with a rejected cleanup handle: %v", err)
+	}
+	// The reload fail-closed: the teardown is the unknown-state sentinel, not
+	// a no-op, so a kill retains the record instead of laundering the missing
+	// handle into no-op success.
+	if restored.runtimeTeardown == nil {
+		t.Fatal("a rejected preserved-archive handle installed a nil teardown; the reload must fail closed so a kill retains the record")
+	}
+	if err := restored.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a rejected preserved-archive handle's teardown returned %v, not ErrWorkspaceStateUnknown; the reload must fail closed", err)
+	}
+	if !restored.runtimeCleanupStateUnknown {
+		t.Fatal("a rejected preserved-archive handle did not mark the cleanup state unknown; the next checkpoint would drop the handle and let a later restart load the row inert")
+	}
+
+	// The durable part: a checkpoint republishes the rejected handle so a
+	// SECOND restart retries the same fail-closed rebuild instead of loading
+	// the row fully inert. Pre-fix, the checkpoint erased both the handle
+	// and the unknown flag — the laundering write this test pins against.
+	stored := restored.ToInstanceData().ForStorage()
+	if stored.RuntimeCleanup == nil {
+		t.Fatal("a rejected preserved-archive handle's checkpoint dropped RuntimeCleanup; the next restart has nothing to rebuild and a kill runs the no-op-success path that orphans the preserved workspace")
+	}
+	if stored.RuntimeCleanup.SSH == nil {
+		t.Fatalf("a rejected preserved-archive handle's checkpoint published a non-ssh handle: %#v", stored.RuntimeCleanup)
+	}
+	if stored.RuntimeCleanup.SSH.Config.Host != "" {
+		t.Fatalf("the republished handle should still carry the empty Host that made the rebuild fail: got %q", stored.RuntimeCleanup.SSH.Config.Host)
+	}
+	if stored.KilledWithoutLiveRuntime {
+		t.Fatal("a rejected preserved-archive handle staged the nothing-owed marker; the row's cleanup state is unknown, not nothing-owed, and the marker would let a no-op kill delete the only record")
+	}
+
+	// The handle survives the JSON round-trip so a second restart sees it.
+	raw, err := json.Marshal(stored)
+	if err != nil {
+		t.Fatalf("marshal rejected preserved-archive checkpoint: %v", err)
+	}
+	var reloaded InstanceData
+	if err := json.Unmarshal(raw, &reloaded); err != nil {
+		t.Fatalf("unmarshal rejected preserved-archive checkpoint: %v", err)
+	}
+	if reloaded.RuntimeCleanup == nil {
+		t.Fatal("the republished handle did not survive the JSON round-trip; the second restart has nothing to rebuild")
+	}
+	// ForStorage on the reloaded row preserves the public handle (the private
+	// field is lost on unmarshal) and does not clear it for a preserved archive.
+	reProjected := reloaded.ForStorage()
+	if reProjected.RuntimeCleanup == nil {
+		t.Fatal("ForStorage on the reloaded preserved-archive row erased the public RuntimeCleanup; the second restart has nothing to rebuild")
+	}
+
+	// The second restart retries the same fail-closed rebuild from the
+	// republished handle and fails closed again — not the inert nothing-owed
+	// shape the pre-fix laundering write would have produced.
+	restoredAgain, err := FromInstanceData(reProjected)
+	if err != nil {
+		t.Fatalf("restore the second restart of a preserved archive: %v", err)
+	}
+	if restoredAgain.runtimeTeardown == nil {
+		t.Fatal("the second restart loaded a nil teardown; the republished handle should have driven the same fail-closed rebuild, not the inert nothing-owed shape")
+	}
+	if err := restoredAgain.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("the second restart's teardown returned %v, not ErrWorkspaceStateUnknown; the republished handle should have re-driven the fail-closed rebuild", err)
+	}
+	if !restoredAgain.runtimeCleanupStateUnknown {
+		t.Fatal("the second restart did not mark the cleanup state unknown; the fail-closed rebuild should have re-armed the durable retry obligation")
+	}
+	// A kill committed against the reloaded row must not stage the nothing-owed
+	// marker: the rebuilt (sentinel) teardown is non-nil, so the gate's
+	// runtimeTeardown==nil arm does not fire and the record is retained.
+	restoredAgain.MarkUserKilled()
+	tombstone := restoredAgain.ToInstanceData().ForStorage()
+	if tombstone.KilledWithoutLiveRuntime {
+		t.Fatal("a reloaded preserved-archive row with a rejected handle staged the nothing-owed marker across a second restart; the durable handle should keep the row fail-closed and the marker off")
+	}
+}
+
+// TestFailClosedPreservedArchiveWithNilHandleKeepsUnknownFlag pins the
+// belt-and-suspenders half of the fix (fix 2): when a preserved archived row
+// carries RuntimeCleanupStateUnknown but no handle was staged to republish,
+// ForStorage's archived branch must keep the durable unknown flag instead of
+// unconditionally clearing it. Pre-fix, the unconditional clear laundered the
+// fail-closed state into a plain inert archived row even when no handle was
+// available to drive the next restart's rebuild.
+func TestFailClosedPreservedArchiveWithNilHandleKeepsUnknownFlag(t *testing.T) {
+	// A preserved archive with no handle and the unknown flag set — the shape
+	// that would reach ForStorage if a fail-closed reload's handle was nil
+	// (e.g. a legacy record that never carried one). The private staging field
+	// is nil (no fresh snapshot, no failedRuntimeCleanup), so the archived
+	// branch cannot republish a handle. The flag must survive so the next
+	// restart does not load the row as a plain inert archive.
+	data := InstanceData{
+		ID:          "preserved-unknown-id",
+		Title:       "preserved-unknown",
+		Path:        "/repo",
+		BackendType: "ssh",
+		Liveness:    LiveArchived,
+		ArchivedWorkspace: &ArchivedWorkspaceData{
+			Dir:    "/home/remote/.af-sessions/preserved-unknown",
+			Pushed: false,
+		},
+		RuntimeCleanupStateUnknown: true,
+	}
+	stored := data.ForStorage()
+	if !stored.RuntimeCleanupStateUnknown {
+		t.Fatal("ForStorage cleared RuntimeCleanupStateUnknown for a preserved archive with no staged handle; the durable retry flag must survive so the next restart does not load the row inert")
+	}
+	if stored.RuntimeCleanup != nil {
+		t.Fatalf("ForStorage published a cleanup handle for a row with no staged handle: %#v", stored.RuntimeCleanup)
+	}
+	// A non-preserved archive with the unknown flag set still clears it —
+	// only the preserved carve-out keeps the flag.
+	nonPreserved := InstanceData{
+		ID:                         "non-preserved-unknown-id",
+		Title:                      "non-preserved-unknown",
+		Path:                       "/repo",
+		BackendType:                "ssh",
+		Liveness:                   LiveArchived,
+		RuntimeCleanupStateUnknown: true,
+	}
+	nonPreservedStored := nonPreserved.ForStorage()
+	if nonPreservedStored.RuntimeCleanupStateUnknown {
+		t.Fatal("ForStorage kept RuntimeCleanupStateUnknown for a non-preserved archive; only the preserved carve-out should retain the flag")
+	}
+
+	// The durable flag must drive a reload too, not just survive on disk. A
+	// preserved archive that reaches FromInstanceData with the unknown flag set
+	// and no handle to rebuild from must still fail closed: the restoration
+	// call rejects the nil handle and installs the unknown-state sentinel so a
+	// kill retains the record. Pre-fix, the archived restoration gate required
+	// a persisted handle, so this row loaded inert (nil teardown) and a kill
+	// ran the no-op-success path that deletes the only record naming the
+	// preserved still-un-reaped workspace (#5867).
+	restoredUnknown, err := FromInstanceData(stored)
+	if err != nil {
+		t.Fatalf("restore a preserved archive with the unknown flag and no handle: %v", err)
+	}
+	if restoredUnknown.runtimeTeardown == nil {
+		t.Fatal("a preserved archive with the unknown flag and no handle loaded a nil teardown; the reload must fail closed so a kill retains the record instead of running the no-op-success path")
+	}
+	if err := restoredUnknown.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
+		t.Fatalf("a preserved archive with the unknown flag and no handle returned teardown %v, not ErrWorkspaceStateUnknown; the reload must fail closed", err)
+	}
+	if !restoredUnknown.runtimeCleanupStateUnknown {
+		t.Fatal("a preserved archive with the unknown flag and no handle did not re-arm runtimeCleanupStateUnknown; the next checkpoint would drop the durable retry obligation")
+	}
+}
+
 // TestOrdinarySandboxRowFencedForPreviousRelease pins the rollback-compatibility
 // projection ForStorage writes for an ordinary sandbox row that persists its
 // RuntimeCleanup handle. A binary rolled back to the immediately preceding release

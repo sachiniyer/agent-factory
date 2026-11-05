@@ -409,6 +409,10 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
+	// The wait path resolved this reset; the phrase it parsed is not threaded
+	// here, so the evidence slot cannot keep describing an earlier wall's
+	// reset (#6765). The next poll re-derives it if the banner stands.
+	i.limitResetEvidence = ""
 	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
@@ -467,6 +471,10 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
+	// See ParkManualAccountSwapAtLimit: the reset arrives without its phrase,
+	// so the evidence slot is cleared rather than left describing an earlier
+	// wall's reset (#6765).
+	i.limitResetEvidence = ""
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)

@@ -39,7 +39,7 @@ func TestLimitTimezoneCapture(t *testing.T) {
 	h.sidebar.SetNowForTest(func() time.Time { return now })
 	h.termWidth, h.termHeight = 80, 24
 	banner := "Claude usage limit reached. Your limit will reset at 5pm (UTC)"
-	hit, reset, parsed := task.NewLimitDetector(nil).Check(banner, "claude", now)
+	hit, reset, parsed, _ := task.NewLimitDetector(nil).Check(banner, "claude", now)
 	require.True(t, hit)
 	require.True(t, parsed)
 	inst.SetLimitReached(reset)

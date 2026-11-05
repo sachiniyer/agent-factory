@@ -96,10 +96,10 @@ func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time)
 	instance.SetLimitReached(resetAt)
 }
 
-func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, epoch uint64) bool {
+func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, epoch uint64) bool {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.SetLimitReachedAtEpoch(resetAt, epoch)
+	return instance.SetLimitReachedAtEpoch(resetAt, evidence, epoch)
 }
 
 func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time) error {
@@ -380,7 +380,7 @@ func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *confi
 		return nil, errors.New("identity selection is already committed; new-swap admission cannot authorize recovery")
 	}
 	if instanceHasVSCodeTab(instance) {
-		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
+		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: %s; close the VS Code tab so the swap can proceed", instance.Title, vscodeAccountSwapRefusalReason)
 	}
 	admitted, err := preflightAccountSwapCandidates(swap, validate)
 	if err == nil {

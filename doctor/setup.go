@@ -233,6 +233,17 @@ func checkOneProgram(workspace string, repoErr error, field, agent, command stri
 		})
 		return
 	}
+	// A relative override that resolves in the main checkout but is untracked
+	// will be absent from the clean-checkout worktree a session launches in
+	// (#6499): the repo-root anchor genuinely predicts the worktree only for
+	// tracked relative paths. Downgrade the PASS to an advisory WARN so the
+	// doctor does not report a guaranteed-false PASS for an untracked file.
+	if relativeOverrideUntracked(workspace, command, check.Path) {
+		report.Warn(sectionEnvironment, field,
+			untrackedOverrideMessage(command, check.Path),
+			untrackedOverrideRemediation, false)
+		return
+	}
 	report.Pass(sectionEnvironment, field, fmt.Sprintf("%q uses %s", command, check.Path))
 }
 

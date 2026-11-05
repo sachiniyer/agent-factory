@@ -730,6 +730,7 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 
 	m.repoID = repo.ID
 	m.repoRoot = repo.Root
+	m.repoIdentityRoot = repo.IdentityRoot
 	m.sidebar.SetProjectName(filepath.Base(repo.Root))
 
 	// Re-resolve the new project's default program for future sessions.

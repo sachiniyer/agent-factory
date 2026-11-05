@@ -54,14 +54,19 @@ type agentLimitMatcher struct {
 	// its evidence admits here instead of dropping the anchor (#6246).
 	lead *regexp.Regexp
 	// parseReset extracts and parses the reset timestamp from content starting
-	// at detect's match, returning an absolute UTC reset time. It returns
-	// ok=false when no reset time is present or it cannot be parsed; detection
-	// still stands. now is the injected clock used to resolve relative and
-	// time-of-day-only forms into an absolute instant — the tested path never
-	// calls time.Now() itself, so tests are deterministic. nil for a detect-only
-	// (surface-only) agent — devin (#2411), whose exhaustion banner is
-	// recognizable but whose reset format is uncharacterized.
-	parseReset func(content string, now time.Time) (time.Time, bool)
+	// at detect's match, returning an absolute UTC reset time and the reset
+	// phrase it consumed. The phrase is the parse's durable identity: a poll
+	// that re-reads an unchanged banner re-derives the same phrase, so the
+	// session can tell "same evidence re-read" from "new reset observation"
+	// and keep the first (nearest-to-the-wall) instant (#6765). It returns
+	// ok=false — and no evidence — when no reset time is present or it cannot
+	// be parsed; detection still stands. now is the injected clock used to
+	// resolve relative and time-of-day-only forms into an absolute instant —
+	// the tested path never calls time.Now() itself, so tests are
+	// deterministic. nil for a detect-only (surface-only) agent — devin
+	// (#2411), whose exhaustion banner is recognizable but whose reset format
+	// is uncharacterized.
+	parseReset func(content string, now time.Time) (resetAt time.Time, evidence string, ok bool)
 }
 
 var (
@@ -202,9 +207,10 @@ func NewLimitDetector(overrides map[string]string) LimitDetector {
 // Check reports whether content shows a usage-limit banner for agent and, when
 // present, the absolute UTC reset time — the return contract of isLimitContent.
 // now is the injected clock used to resolve time-of-day-only and relative reset
-// phrases into an absolute instant; the daemon passes time.Now(), tests a fixed
-// clock. An agent with no matcher (gemini/aider/amp/opencode) returns hit=false.
-func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool) {
+// phrases into an absolute instant; the daemon passes its injected clock, tests
+// a fixed one. An agent with no matcher (gemini/aider/amp/opencode) returns
+// hit=false.
+func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool, evidence string) {
 	return isLimitContent(content, agent, d.matchers, now)
 }
 
@@ -216,19 +222,22 @@ func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, re
 //
 // Return contract:
 //   - hit=false: no banner for this agent (or an agent with no matcher, e.g.
-//     gemini/aider/amp/opencode). resetAt/hasResetTime are zero.
+//     gemini/aider/amp/opencode). resetAt/hasResetTime/evidence are zero.
 //   - hit=true, hasResetTime=true: banner detected and a reset time parsed;
-//     resetAt is that time in UTC.
+//     resetAt is that time in UTC and evidence is the reset phrase the parse
+//     consumed — re-reading an unchanged banner reproduces it verbatim, so the
+//     caller can recognize a re-read rather than a new observation (#6765).
 //   - hit=true, hasResetTime=false: banner detected but the reset time was
-//     absent or unparseable. Detection never depends on parsing succeeding.
+//     absent or unparseable; evidence is empty. Detection never depends on
+//     parsing succeeding.
 //
 // matchers is the resolved set (built-ins with config overrides applied);
 // now is the injected clock used to turn time-of-day-only and relative reset
 // phrases into an absolute instant.
-func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool) {
+func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool, evidence string) {
 	matcher, ok := matchers[agent]
 	if !ok || matcher.detect == nil {
-		return false, time.Time{}, false
+		return false, time.Time{}, false, ""
 	}
 	// The captured pane can legitimately contain multiple genuine usage-limit
 	// banners (e.g. the user hits the retry key and trips the limit again before
@@ -239,16 +248,16 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 		matches = anchoredMatches(content, matches, matcher.lead)
 	}
 	if len(matches) == 0 {
-		return false, time.Time{}, false
+		return false, time.Time{}, false, ""
 	}
 	last := matches[len(matches)-1]
 	if matcher.parseReset == nil {
-		return true, time.Time{}, false
+		return true, time.Time{}, false, ""
 	}
-	if reset, parsed := matcher.parseReset(content[last[0]:], now); parsed {
-		return true, reset.UTC(), true
+	if reset, phrase, parsed := matcher.parseReset(content[last[0]:], now); parsed {
+		return true, reset.UTC(), true, phrase
 	}
-	return true, time.Time{}, false
+	return true, time.Time{}, false, ""
 }
 
 // bannerLeadMarkers are the glyphs an agent draws in front of its own error or
@@ -331,15 +340,18 @@ var claudeResetAnchor = regexp.MustCompile(`(?i)reset\s+(?:at\s+)?([^\r\n]+)`)
 // tz, which we cannot know without the paren, so the injected clock's zone is
 // the deterministic stand-in), a required 12-hour clock time, and an optional
 // calendar date or weekday (the weekly variant). Without any date it mints the
-// next occurrence of that clock time strictly after now. Returns ok=false when
-// there is no reset clause or no clock time in it, so an unrecognized/reworded
-// tail degrades to hit=true, hasResetTime=false.
-func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
+// next occurrence of that clock time strictly after now. The returned evidence
+// is the matched clause itself — "reset at 2pm (…)" — identical whenever the
+// banner is re-read unchanged (#6765). Returns ok=false when there is no reset
+// clause or no clock time in it, so an unrecognized/reworded tail degrades to
+// hit=true, hasResetTime=false.
+func parseClaudeReset(content string, now time.Time) (time.Time, string, bool) {
 	anchor := claudeResetAnchor.FindStringSubmatch(content)
 	if anchor == nil {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	reset := anchor[1]
+	evidence := strings.TrimSpace(anchor[0])
 
 	loc := now.Location()
 	candidates := parenTZ.FindAllStringSubmatch(reset, -1)
@@ -353,7 +365,7 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	}
 	hour, minute, ok := parseClockTime(reset)
 	if !ok {
-		return time.Time{}, false
+		return time.Time{}, "", false
 	}
 	if len(rejected) > 0 && len(rejected) == len(candidates) {
 		warnClaudeTimezoneOnce(content, rejected, loc)
@@ -378,7 +390,7 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 		year := now.In(loc).Year()
 		if m[3] != "" {
 			year, _ = strconv.Atoi(m[3])
-			return time.Date(year, month, day, hour, minute, 0, 0, loc).UTC(), true
+			return time.Date(year, month, day, hour, minute, 0, 0, loc).UTC(), evidence, true
 		}
 		// No year in the banner: pick the year that puts the date in the
 		// future relative to now (this year, else next).
@@ -386,7 +398,7 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 		if !candidate.After(now) {
 			candidate = time.Date(year+1, month, day, hour, minute, 0, 0, loc)
 		}
-		return candidate.UTC(), true
+		return candidate.UTC(), evidence, true
 	}
 
 	// Weekday name (weekly variant that names a day): next such weekday at the
@@ -394,11 +406,11 @@ func parseClaudeReset(content string, now time.Time) (time.Time, bool) {
 	// weekday-prefixed tz name cannot satisfy this regex — see the clause note.
 	if m := weekday.FindStringSubmatch(clause); m != nil {
 		target := weekdayIndex[strings.ToLower(m[1][:3])]
-		return nextWeekday(now, loc, target, hour, minute).UTC(), true
+		return nextWeekday(now, loc, target, hour, minute).UTC(), evidence, true
 	}
 
 	// Time-only (5h window): next occurrence of the clock time after now.
-	return nextTimeOfDay(now, loc, hour, minute).UTC(), true
+	return nextTimeOfDay(now, loc, hour, minute).UTC(), evidence, true
 }
 
 var (
@@ -423,21 +435,22 @@ var (
 // prefers an absolute "try again at <ts>" timestamp (weekly
 // date+time or 5h time-only), then falls back to a relative "try again in
 // <duration>" countdown. Codex renders in local time with no timezone in the
-// banner, so absolute forms are interpreted in now's location. Returns
-// ok=false when neither form is found or parses, so a reworded banner degrades
-// to hit=true, hasResetTime=false.
-func parseCodexReset(content string, now time.Time) (time.Time, bool) {
+// banner, so absolute forms are interpreted in now's location. The returned
+// evidence is the matched reset phrase itself — identical whenever the banner
+// is re-read unchanged (#6765). Returns ok=false when neither form is found or
+// parses, so a reworded banner degrades to hit=true, hasResetTime=false.
+func parseCodexReset(content string, now time.Time) (time.Time, string, bool) {
 	if m := codexResetAt.FindStringSubmatch(content); m != nil {
 		if t, ok := parseCodexAbsolute(strings.TrimSpace(m[1]), now); ok {
-			return t, true
+			return t, strings.TrimSpace(m[0]), true
 		}
 	}
 	if m := codexResetIn.FindStringSubmatch(content); m != nil {
 		if d, ok := parseRelativeDuration(m[1]); ok {
-			return now.Add(d), true
+			return now.Add(d), strings.TrimSpace(m[0]), true
 		}
 	}
-	return time.Time{}, false
+	return time.Time{}, "", false
 }
 
 // parseCodexAbsolute parses a Codex "try again at" timestamp in now's

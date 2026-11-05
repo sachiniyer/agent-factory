@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -30,11 +31,14 @@ import (
 // exists at <repo>/bin/claude resolves to it when the doctor is run from a
 // SUBDIR of the same repo. With the bug, the doctor's cwd-relativity joined
 // "bin/claude" against <repo>/subdir and falsely failed; the fix anchors the
-// resolution to the repo's workspace, the same anchor the launch uses.
+// resolution to the repo's workspace, the same anchor the launch uses. The
+// file is committed so the tracked-file qualification (#6499) keeps the PASS:
+// a tracked relative override genuinely predicts the clean-checkout worktree.
 func TestCheckAgentPrograms_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	// Run from a SUBDIR of the repo, itself reached through a symlink: the
 	// binary lives at the repo root, not under the cwd, so cwd-relativity
 	// would resolve to <subdir>/bin/claude (missing) while
@@ -101,6 +105,7 @@ func TestCheckAgentBinaries_RelativeOverride_AnchoredToRepoRoot_NotCwd(t *testin
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	// The repo is reached through a symlink for the same reason as the
 	// setup-path test above: the anchor must hold when the repo's own path
 	// goes through one (#6729).
@@ -187,6 +192,7 @@ func TestDoctorSetup_RelativeOverrideInRepo_AnchoredToRepoRootPasses(t *testing.
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
 	writeExecutable(t, binDir, "tmux", "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then echo 'tmux 3.4'; exit 0; fi\nexit 0\n")
 
 	t.Setenv("AGENT_FACTORY_HOME", home)
@@ -277,6 +283,17 @@ func repoViaSymlink(t *testing.T, repo string) string {
 	return link
 }
 
+// commitRepoFile stages and commits path (relative to repo) so it is part of
+// the tracked tree — the tree a clean-checkout worktree materializes. The
+// tracked-file qualification (#6499) downgrades an untracked relative override
+// to a WARN, so the anchored-to-repo-root PASS tests must commit their
+// override to stay PASS.
+func commitRepoFile(t *testing.T, repo, path string) {
+	t.Helper()
+	require.NoError(t, exec.Command("git", "-C", repo, "add", "--", path).Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "commit", "-m", "track "+path).Run())
+}
+
 // reportedProgramPath returns the executable path a passing program check
 // row's Detail ends with, canonicalized. The doctor reports the resolution
 // in whatever spelling the platform's getcwd and git produced — the
@@ -299,4 +316,278 @@ func reportedProgramPath(t *testing.T, row CheckResult) string {
 	resolved, err := filepath.EvalSymlinks(path)
 	require.NoError(t, err, "check row %q reports a path that does not resolve: %q", row.Name, path)
 	return resolved
+}
+
+// ---------------------------------------------------------------------------
+// #6499: relative program_overrides that resolve in the main checkout but are
+// untracked are absent from the clean-checkout worktree a session launches in.
+// The doctor's repo-root anchor genuinely predicts the worktree only for
+// tracked relative paths, so an untracked relative override must downgrade
+// from PASS to an advisory WARN rather than reporting a guaranteed-false PASS.
+// ---------------------------------------------------------------------------
+
+// TestCheckAgentPrograms_RelativeOverrideUntracked_WarnsNotPasses is the
+// setup-path core of the #6499 fix: a relative override that exists only as an
+// untracked file in the main checkout resolves against the repo root (so the
+// old code PASSed) but will be absent from the clean-checkout worktree a
+// session launches in. The fix downgrades that PASS to an advisory WARN whose
+// detail names the cause and whose remediation names the two supported fixes
+// (commit the file, or provision it via setup_commands / the setup overlay).
+func TestCheckAgentPrograms_RelativeOverrideUntracked_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	// Deliberately NOT committed: bin/claude is untracked, so it is absent
+	// from a clean-checkout worktree.
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	// Advisory: the file does resolve in this checkout, so it must not drive
+	// the exit code or the unresolved count.
+	require.Zero(t, rep.UnresolvedCount(), "an untracked override is advisory, not actionable")
+	for _, field := range []string{"default_program", "program_overrides.claude"} {
+		row := findCheck(t, rep, field)
+		require.Equal(t, StatusWarn, row.Status,
+			"an untracked relative override must WARN, not PASS: %s", field)
+		require.False(t, row.Problem, "an untracked override is advisory: %s", field)
+		require.Contains(t, row.Detail, "untracked")
+		require.Contains(t, row.Detail, "clean checkouts")
+		require.Contains(t, row.Detail, "absent at launch")
+		require.Contains(t, row.Remediation, "commit the file")
+		require.Contains(t, row.Remediation, "setup_commands")
+	}
+}
+
+// TestCheckAgentBinaries_RelativeOverrideUntracked_WarnsNotPasses is the
+// full-sweep analogue: checkAgentBinaries must also downgrade an untracked
+// relative override from PASS to an advisory WARN, and the agents header must
+// still report the agent as present (the file does resolve in this checkout).
+func TestCheckAgentBinaries_RelativeOverrideUntracked_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, tmux.ProgramClaude)
+	require.Equal(t, StatusWarn, row.Status,
+		"an untracked relative override must WARN, not PASS")
+	require.False(t, row.Problem, "an untracked override is advisory")
+	require.Contains(t, row.Detail, "untracked")
+	require.Contains(t, row.Detail, "clean checkouts")
+	require.Contains(t, row.Detail, "absent at launch")
+	require.Contains(t, row.Remediation, "commit the file")
+	require.Contains(t, row.Remediation, "setup_commands")
+	// The file does resolve in this checkout, so the header still reports
+	// present — the WARN qualifies what the header claims, it does not
+	// contradict it.
+	require.Contains(t, agentsHeaderValue(rep), "claude=present")
+	require.Zero(t, rep.UnresolvedCount(), "an untracked override is advisory, not actionable")
+}
+
+// TestCheckAgentPrograms_TrackedRelativeOverride_StillPasses pins that the
+// #6499 qualification does not regress the tracked case: a relative override
+// pointing at a committed file still PASSes, because the repo-root anchor
+// genuinely predicts the clean-checkout worktree for tracked paths.
+func TestCheckAgentPrograms_TrackedRelativeOverride_StillPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	require.Zero(t, rep.UnresolvedCount())
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"a tracked relative override genuinely predicts the worktree and stays PASS")
+}
+
+// TestCheckAgentBinaries_AbsoluteOverrideUntracked_NotAffected pins that the
+// #6499 qualification is scoped to relative paths: an absolute path resolves
+// the same way in any worktree, so an untracked absolute override is not
+// downgraded. (A real absolute path is used so the file genuinely resolves.)
+func TestCheckAgentBinaries_AbsoluteOverrideUntracked_NotAffected(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	bin := filepath.Join(repo, "bin", "claude")
+	require.NoError(t, os.MkdirAll(filepath.Dir(bin), 0o755))
+	writeExecutable(t, filepath.Dir(bin), "claude", "#!/bin/sh\nexit 0\n")
+	// Deliberately NOT committed, but the command is absolute so the
+	// tracked-file qualification does not apply.
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: bin},
+	}
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, tmux.ProgramClaude)
+	require.Equal(t, StatusPass, row.Status,
+		"an absolute override is not cwd-dependent; the untracked qualification does not apply")
+	require.Contains(t, agentsHeaderValue(rep), "claude=present")
+}
+
+// TestCheckAgentBinaries_BareNameOnPath_NotAffectedByUntrackedCheck pins that
+// a bare name (resolved through PATH) is not cwd-dependent and so is not
+// downgraded by the tracked-file qualification.
+func TestCheckAgentBinaries_BareNameOnPath_NotAffectedByUntrackedCheck(t *testing.T) {
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	chdir(t, setupDoctorRepo(t)) // inside a repo, but the command is a bare name
+
+	cfg := &config.Config{DefaultProgram: tmux.ProgramClaude}
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, tmux.ProgramClaude)
+	require.Equal(t, StatusPass, row.Status,
+		"a bare name resolves through PATH; the untracked qualification does not apply")
+}
+
+// TestDoctorSetup_RelativeOverrideUntracked_WarnsNotActionable is the
+// end-to-end `af doctor --setup` guarantee: a relative override that exists
+// only as an untracked file produces an advisory WARN (not a PASS, not a FAIL)
+// and does not drive the exit code. Exercises the fix through Run, so the
+// workspace computation and the agent-program check are observed in their real
+// call order alongside the rest of the setup checks.
+func TestDoctorSetup_RelativeOverrideUntracked_WarnsNotActionable(t *testing.T) {
+	home := testguard.SocketTempDir(t)
+	binDir := t.TempDir()
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	// Deliberately NOT committed: the override is untracked.
+	writeExecutable(t, binDir, "tmux", "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then echo 'tmux 3.4'; exit 0; fi\nexit 0\n")
+
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
+		[]byte("default_program = \"claude\"\n\n[program_overrides]\nclaude = \"bin/claude\"\n"), 0o644))
+	chdir(t, repo)
+
+	report, err := Run(Options{
+		Setup:     true,
+		ConfigDir: home,
+		TempDir:   t.TempDir(),
+		remoteConfig: func() (*config.RemoteHooks, string, error) {
+			return nil, "", nil
+		},
+	})
+	require.NoError(t, err)
+	// Advisory: the untracked override must not drive the exit code.
+	require.Zero(t, report.UnresolvedCount(),
+		"an untracked override is advisory, not actionable: %+v", report.Findings)
+	// The WARN must be visible — not a PASS, and not silently absent.
+	row := findCheck(t, report, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status)
+	require.False(t, row.Problem)
+	require.Contains(t, row.Detail, "untracked")
+	require.Contains(t, row.Detail, "clean checkouts")
+	require.Contains(t, row.Remediation, "commit the file")
+	require.Contains(t, row.Remediation, "setup_commands")
+}
+
+// TestRelativeOverrideUntracked_HelperContract pins the helper's contract
+// directly: only a cwd-dependent command (a relative path with a separator)
+// whose resolved executable is inside the workspace and untracked returns
+// true. Absolute paths, bare names, tracked files, and paths outside the
+// workspace all return false, and a git probe failure is conservative (false).
+func TestRelativeOverrideUntracked_HelperContract(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude")
+	// Untracked sibling for the untracked case.
+	writeExecutable(t, filepath.Join(repo, "bin"), "untracked", "#!/bin/sh\nexit 0\n")
+
+	tracked := filepath.Join(repo, "bin", "claude")
+	untracked := filepath.Join(repo, "bin", "untracked")
+
+	// Tracked relative override -> false (PASS is kept).
+	require.False(t, relativeOverrideUntracked(repo, "bin/claude", tracked),
+		"a tracked relative override is not untracked")
+
+	// Untracked relative override -> true (PASS is downgraded to WARN).
+	require.True(t, relativeOverrideUntracked(repo, "bin/untracked", untracked),
+		"an untracked relative override is untracked")
+
+	// Absolute path -> false (not cwd-dependent).
+	require.False(t, relativeOverrideUntracked(repo, tracked, tracked),
+		"an absolute path is not cwd-dependent")
+
+	// Bare name -> false (not cwd-dependent).
+	require.False(t, relativeOverrideUntracked(repo, "claude", tracked),
+		"a bare name is not cwd-dependent")
+
+	// Empty workspace -> false (no repo to check against).
+	require.False(t, relativeOverrideUntracked("", "bin/claude", tracked),
+		"an empty workspace means no repo to check against")
+
+	// Path outside the workspace -> false (the worktree check does not apply).
+	parent := filepath.Dir(repo)
+	require.False(t, relativeOverrideUntracked(repo, filepath.Join("..", "bin", "claude"),
+		filepath.Join(parent, "bin", "claude")),
+		"a path resolving outside the workspace is not checked")
+
+	// Git probe failure (non-existent workspace) -> false (conservative).
+	require.False(t, relativeOverrideUntracked(filepath.Join(t.TempDir(), "no-such-repo"),
+		"bin/claude", tracked),
+		"a git probe failure is conservative, not a downgrade")
+
+	// A relative target behind a leading VAR=value assignment is still
+	// cwd-dependent: `FOO=x bin/untracked` launches bin/untracked, which is
+	// untracked, so the helper must downgrade (not read only the first token).
+	require.True(t, relativeOverrideUntracked(repo, "FOO=x bin/untracked", untracked),
+		"a relative override behind a leading assignment is still cwd-dependent and untracked")
+
+	// A relative target behind an `env` wrapper is still cwd-dependent.
+	require.True(t, relativeOverrideUntracked(repo, "env bin/untracked", untracked),
+		"a relative override behind an `env` wrapper is still cwd-dependent and untracked")
+}
+
+// TestCommandDependsOnCwd pins that leading VAR=value assignments and an `env`
+// wrapper are skipped before the cwd-dependence test, so `FOO=x bin/claude`
+// and `env bin/claude` count as cwd-dependent while bare names and absolute
+// paths do not (#6499).
+func TestCommandDependsOnCwd(t *testing.T) {
+	for _, tc := range []struct {
+		command string
+		want    bool
+	}{
+		{"bin/claude", true},
+		{"./venv/bin/claude", true},
+		{"FOO=x bin/claude", true},
+		{"FOO=x BAR=y bin/claude", true},
+		{"env bin/claude", true},
+		{"env FOO=x bin/claude", true},
+		{"claude", false},
+		{"env claude", false},
+		{"/usr/bin/codex", false},
+		{"FOO=x /usr/bin/codex", false},
+		{"", false},
+	} {
+		require.Equal(t, tc.want, commandDependsOnCwd(tc.command),
+			"commandDependsOnCwd(%q) = %v, want %v", tc.command, !tc.want, tc.want)
+	}
 }

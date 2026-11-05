@@ -1131,3 +1131,167 @@ func TestHandleStateTasks_PendingTriggerLeakOnEscCloseReopen(t *testing.T) {
 	assert.False(t, tp.HasPendingTrigger(),
 		"no pending trigger must remain after the reopen keypress")
 }
+
+// hooksOverlayRepoHome builds a home wired to a real git repo whose in-repo
+// config carries post_worktree_commands, with the hooks pane seeded from
+// that config exactly as newHome does at startup. The returned home's pane
+// holds the STARTUP snapshot; the on-disk config is left at the returned
+// path for the test to mutate before reopening the overlay.
+func hooksOverlayRepoHome(t *testing.T, hooks []string) *home {
+	t.Helper()
+	h := newTestHome(t)
+
+	repoRoot := initTestGitRepo(t)
+	t.Chdir(repoRoot)
+	repo, err := config.RepoFromPath(repoRoot)
+	require.NoError(t, err)
+	h.repoID = repo.ID
+	h.repoRoot = repo.Root
+	h.repoIdentityRoot = repo.IdentityRoot
+
+	body := "post_worktree_commands = ["
+	for i, cmd := range hooks {
+		if i > 0 {
+			body += ", "
+		}
+		body += fmt.Sprintf("%q", cmd)
+	}
+	body += "]\n"
+	writeInRepoConfig(t, repoRoot, body)
+
+	// Seed the pane from the on-disk config exactly as newHome does at
+	// startup (home_model.go: ResolveConfigForRepo -> SetCommands).
+	repoCfg, err := config.ResolveConfigForRepo(repo)
+	require.NoError(t, err)
+	h.hooksPane.SetCommands(repoCfg.PostWorktreeCommands)
+	h.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
+	return h
+}
+
+// TestShowHooksOverlayRereadsOutOfBandHooksFromDisk is the core regression
+// guard for the stale-snapshot bug: opening the hooks overlay must re-read
+// the on-disk config so the pane shows it as it is NOW, not the startup
+// snapshot. Before the fix, showHooksOverlay never re-read and the pane kept
+// the startup list, so an out-of-band hook added to config.toml while the
+// TUI was running was invisible in the editor — and any save deleted it.
+func TestShowHooksOverlayRereadsOutOfBandHooksFromDisk(t *testing.T) {
+	h := hooksOverlayRepoHome(t, []string{"echo one", "echo two"})
+	hp := h.hooksPane
+
+	// Sanity: the pane starts with the startup snapshot.
+	assert.Equal(t, []string{"echo one", "echo two"}, hp.GetCommands(),
+		"precondition: the pane is seeded from the startup config")
+
+	// Simulate an out-of-band edit: a hand edit or second TUI adds a hook
+	// to the on-disk config while this TUI is running.
+	writeInRepoConfig(t, h.repoRoot,
+		`post_worktree_commands = ["echo one", "echo two", "echo NEW HOOK from disk"]`+"\n")
+
+	// Opening the overlay must re-read the on-disk config.
+	_, _ = h.showHooksOverlay()
+	assert.Equal(t, []string{"echo one", "echo two", "echo NEW HOOK from disk"},
+		hp.GetCommands(),
+		"the overlay must re-read the on-disk config so the pane shows the out-of-band hook")
+	assert.False(t, hp.IsDirty(),
+		"a clean re-read must leave the pane non-dirty (SetCommands resets committed/dirty)")
+}
+
+// TestShowHooksOverlayOutOfBandHookSurvivesDirtyPaneSave is the full
+// end-to-end repro from the bug report: an out-of-band hook added to
+// config.toml while the TUI is running must survive a hooks-pane edit+save.
+// Before the fix, the pane kept the stale startup snapshot, so any save
+// rewrote post_worktree_commands from that snapshot, silently deleting the
+// out-of-band hook from the repo config with no error.
+func TestShowHooksOverlayOutOfBandHookSurvivesDirtyPaneSave(t *testing.T) {
+	h := hooksOverlayRepoHome(t, []string{"echo one", "echo two"})
+	hp := h.hooksPane
+
+	// Out-of-band edit: add a hook to the on-disk config.
+	writeInRepoConfig(t, h.repoRoot,
+		`post_worktree_commands = ["echo one", "echo two", "echo NEW HOOK from disk"]`+"\n")
+
+	// Open the overlay (re-reads), then add a hook in the pane.
+	_, _ = h.showHooksOverlay()
+	require.Equal(t, []string{"echo one", "echo two", "echo NEW HOOK from disk"},
+		hp.GetCommands(), "precondition: the overlay re-read the out-of-band hook")
+
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("echo user edit")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, hp.IsDirty(), "the in-pane add must mark the pane dirty")
+	require.Contains(t, hp.GetCommands(), "echo user edit")
+	require.Contains(t, hp.GetCommands(), "echo NEW HOOK from disk",
+		"the out-of-band hook must still be in the pane after the in-pane edit")
+
+	// Save: the out-of-band hook must survive on disk alongside the user's edit.
+	require.NoError(t, h.saveContentPaneState())
+	cfg, _, err := config.LoadInRepoConfig(h.repoRoot)
+	require.NoError(t, err)
+	assert.Contains(t, cfg.PostWorktreeCommands, "echo NEW HOOK from disk",
+		"the out-of-band hook must survive the save on disk (the stale-snapshot clobber is fixed)")
+	assert.Contains(t, cfg.PostWorktreeCommands, "echo user edit",
+		"the user's in-pane edit must be persisted")
+}
+
+// TestShowHooksOverlayDoesNotRereadDirtyPane pins the #1001 failed-save
+// recovery contract: a dirty pane holds an in-memory-only edit from a failed
+// save that lives nowhere on disk, so the overlay must NOT re-read it —
+// reloading would discard the very edit the user is retrying. The re-read is
+// gated on !IsDirty for exactly this reason.
+func TestShowHooksOverlayDoesNotRereadDirtyPane(t *testing.T) {
+	h := hooksOverlayRepoHome(t, []string{"echo one"})
+	hp := h.hooksPane
+
+	// Simulate a failed save: make the pane dirty with an in-memory edit.
+	// Focus is required for the pane's key loop to process the add.
+	hp.SetFocus(true)
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("echo unsaved retry")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, hp.IsDirty(), "precondition: the pane holds an unsaved edit")
+	require.Contains(t, hp.GetCommands(), "echo unsaved retry")
+
+	// An out-of-band edit lands on disk while the pane is dirty.
+	writeInRepoConfig(t, h.repoRoot,
+		`post_worktree_commands = ["echo one", "echo out-of-band"]`+"\n")
+
+	// Opening the overlay must NOT re-read: the dirty edit survives.
+	_, _ = h.showHooksOverlay()
+	assert.True(t, hp.IsDirty(),
+		"a dirty pane must not be reloaded (#1001 failed-save recovery)")
+	assert.Contains(t, hp.GetCommands(), "echo unsaved retry",
+		"the in-memory edit must survive the overlay open")
+	assert.NotContains(t, hp.GetCommands(), "echo out-of-band",
+		"the on-disk edit must not clobber the in-memory retry edit")
+}
+
+// TestShowHooksOverlayNoOpConfirmDoesNotClobberOutOfBandHook pins the
+// trivial-no-op path from the bug report: confirming an edit without
+// changing the value still set dirty=true unconditionally, so merely
+// entering edit mode and pressing enter on an existing entry could wipe
+// out-of-band hooks on the next save. With the re-read on open, the pane
+// shows the live list, so a no-op confirm on the re-read value is a no-op
+// save that preserves the out-of-band hooks.
+func TestShowHooksOverlayNoOpConfirmDoesNotClobberOutOfBandHook(t *testing.T) {
+	h := hooksOverlayRepoHome(t, []string{"echo one", "echo two"})
+	hp := h.hooksPane
+
+	// Out-of-band edit adds a third hook on disk.
+	writeInRepoConfig(t, h.repoRoot,
+		`post_worktree_commands = ["echo one", "echo two", "echo out-of-band"]`+"\n")
+
+	// Open the overlay (re-reads), then enter edit mode on the first entry
+	// and confirm without changing it — a plausible "refresh" gesture.
+	_, _ = h.showHooksOverlay()
+	require.Equal(t, []string{"echo one", "echo two", "echo out-of-band"}, hp.GetCommands())
+
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // enter edit mode
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // confirm without changes
+
+	// Save: the out-of-band hook must survive.
+	require.NoError(t, h.saveContentPaneState())
+	cfg, _, err := config.LoadInRepoConfig(h.repoRoot)
+	require.NoError(t, err)
+	assert.Contains(t, cfg.PostWorktreeCommands, "echo out-of-band",
+		"the out-of-band hook must survive a no-op confirm save")
+}

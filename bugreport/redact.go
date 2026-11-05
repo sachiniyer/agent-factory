@@ -444,6 +444,15 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	if d.LimitAccount != "" {
 		d.LimitAccount = redactedMarker
 	}
+	// LimitResetEvidence is the reset clause the banner parse consumed (#6765)
+	// — provider free text that embeds whatever timezone name the agent
+	// rendered (e.g. "reset at 2pm (America/New_York)"), which identifies the
+	// operator's locale. The marker keeps the fact triage reads — a phrase WAS
+	// or was not paired with the stored reset — and drops the clause; the
+	// instant it produced stays legible in LimitResetAt beside it.
+	if d.LimitResetEvidence != "" {
+		d.LimitResetEvidence = redactedMarker
+	}
 	if d.PendingAccountSwap != nil {
 		if d.PendingAccountSwap.From != "" {
 			d.PendingAccountSwap.From = redactedMarker

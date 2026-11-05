@@ -50,6 +50,32 @@ func TestAdmitAccountSwapRefusesVSCodeIntegratedShells(t *testing.T) {
 	}
 }
 
+// TestAdmitAccountSwapRefusesVSCodeTabNamingReasonAndRemedy is the #6773
+// property for the automatic swap's one hard boundary: the refusal already
+// states the reason (integrated login shells can override the selected account
+// from shell startup files, so af cannot prove their identity boundary), and it
+// must also say what to do next — close the tab so the swap can proceed —
+// rather than reporting a bare dead end.
+func TestAdmitAccountSwapRefusesVSCodeTabNamingReasonAndRemedy(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	inst.Tabs = append(inst.Tabs, &session.Tab{ID: "editor", Name: "editor", Kind: session.TabKindVSCode})
+	if err := inst.BeginLimitResume(); err != nil {
+		t.Fatal(err)
+	}
+	defer inst.EndLimitResume()
+
+	_, err := manager.admitAccountSwap(inst, manager.Config())
+	if err == nil {
+		t.Fatal("VS Code integrated shell was admitted without identity proof")
+	}
+	for _, want := range []string{"VS Code tab", "identity boundary", "close the VS Code tab"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Fatalf("automatic VS Code refusal must contain %q so the operator knows the reason and the remedy: %v", want, err)
+		}
+	}
+}
+
 func TestResumeLimitedSessions_UnusableCandidatesFallBackWhenResetDue(t *testing.T) {
 	base := nowFunc()
 	manager, _, inst, backend := newAutoResumeManager(

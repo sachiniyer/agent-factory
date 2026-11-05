@@ -222,7 +222,7 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 		}
 	}
 	if instanceHasVSCodeTab(instance) {
-		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab", instance.Title)
+		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: %s; close the VS Code tab and retry the handoff", instance.Title, vscodeAccountSwapRefusalReason)
 	}
 	validate := instance.CheckManualAccountSwap
 	if recordLaunch {

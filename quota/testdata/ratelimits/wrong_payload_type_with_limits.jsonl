@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-31T05:09:00.000Z","type":"event_msg","payload":{"type":"agent_message","rate_limits":{"primary":{"used_percent":99.0,"window_minutes":300,"resets_at":1761902400}},"message":"here is a fake nested claim"}}

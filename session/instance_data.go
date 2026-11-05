@@ -102,6 +102,19 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// persistKillTombstone copy that flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
+		// A fail-closed reload of a preserved archive retains the rejected
+		// handle on the instance (failedRuntimeCleanup) because the inert
+		// backend's runtimeCleanupData() is nil. Stage it here so the next
+		// ForStorage can republish it and a later restart retries the rebuild
+		// instead of laundering the handle into the orphan the marker exists
+		// to prevent (#5867). Scoped to preserved archives: a non-archived
+		// row's ForStorage default branch already preserves the unknown flag
+		// across generations, so the handle is not needed for durability
+		// there; and a non-preserved archive owes nothing to reap.
+		if data.runtimeCleanup == nil && i.failedRuntimeCleanup != nil &&
+			data.Liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() {
+			data.runtimeCleanup = i.failedRuntimeCleanup.clone()
+		}
 		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
 		// session whose off-box runtime POSITIVELY owes no teardown. The two
 		// conditions are deliberately independent and BOTH must hold:
@@ -161,6 +174,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// in-memory field lingers after ClearLimitReached but is never serialized.
 	if i.liveness == LiveLimitReached {
 		data.LimitResetAt = i.limitResetAt
+		data.LimitResetEvidence = i.limitResetEvidence
 		data.LimitAgent = i.limitAgent
 		data.LimitAccount = i.limitAccount
 	}
@@ -517,6 +531,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
 		taskRunPromptBound:       data.TaskRunActive && data.TaskRunPromptBound,
 		limitResetAt:             data.LimitResetAt,
+		limitResetEvidence:       data.LimitResetEvidence,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
 		accountLimitObservations: accountLimitObservations,
@@ -655,7 +670,14 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		hadPersistedCleanupHandle := isSandboxBackendType(data.BackendType) && data.RuntimeCleanup != nil
 		// A preserved unpushed archive keeps its handle on purpose (#5867): its
 		// workspace is still on the host, and a kill of the row must reap it.
-		preservedArchive := liveness == LiveArchived && hadPersistedCleanupHandle && data.keepsPreservedWorkspaceHandle()
+		// The unknown flag alone — e.g. a fail-closed reload whose handle was
+		// nil, or a legacy record that never carried one — is the same
+		// obligation without a handle to rebuild from, so the same gate admits
+		// it: the restoration call rejects the nil handle and installs the
+		// fail-closed sentinel instead of loading the row inert and letting a
+		// later kill run the no-op-success path that orphans the preserved
+		// workspace (#5867).
+		preservedArchive := liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() && (hadPersistedCleanupHandle || data.RuntimeCleanupStateUnknown)
 		if preservedArchive || (liveness != LiveArchived && (data.UserKilled || data.RuntimeCleanupStateUnknown || hadPersistedCleanupHandle)) {
 			backend, teardown, cleanupErr := restoreRuntimeCleanupWithAccount(data.Title, data.BackendType, data.RuntimeCleanup,
 				restoredAccount{Name: data.Account, Agent: data.AccountAgent, Program: data.Program})
@@ -690,6 +712,17 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 					// this same fail-closed rebuild instead of laundering the rejected
 					// handle into the orphan the marker exists to prevent.
 					instance.runtimeCleanupStateUnknown = true
+					// Retain the raw rejected handle on the instance so the next
+					// checkpoint can republish it for a preserved archive. The inert
+					// backend's runtimeCleanupData() is nil, so without this retention
+					// toInstanceDataLocked stages nothing and ForStorage's archived
+					// branch erases both the handle and the unknown flag — the exact
+					// laundering write #5867 exists to prevent. A non-archived row's
+					// ForStorage default branch already preserves the unknown flag
+					// across generations, so the retention only matters for the
+					// preserved-archive carve-out; staging it is gated on the
+					// preserved-archive shape in toInstanceDataLocked (#5867).
+					instance.failedRuntimeCleanup = data.RuntimeCleanup.clone()
 				}
 			} else {
 				instance.backend = backend
