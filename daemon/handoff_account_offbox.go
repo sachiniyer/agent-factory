@@ -79,7 +79,8 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	}
 	m.noteRuntimeReplaced(repoID, instance)
 	instance.ClearLimitReached()
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: outgoing, FromAccount: res.From, ToAccount: res.To}
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: outgoing, FromAccount: res.From, ToAccount: res.To,
+		Conversation: session.HandoffConversation{CarryFailure: offBoxAccountNoConversation}}
 	if override := strings.TrimSpace(req.Brief); override != "" {
 		instance.SetPrompt(override)
 	}

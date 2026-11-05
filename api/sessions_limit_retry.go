@@ -6,6 +6,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // resumeFromLimitViaDaemon is the same daemon action the TUI's `c` key and the
@@ -43,6 +44,13 @@ The command fails when neither recovery obligation exists. Use 'af sessions
 list' to find sessions carrying the [limit] badge; the TUI and web expose
 Retry handoff and Mark delivered for an unconfirmed handoff.
 
+The output's conversation object says whether the agent serving the session
+afterwards can read its previous conversation: carried=true when the retry
+resumed it (the committed account swap's carry, the recorded conversation id,
+or a worktree-scoped resume), or carried=false with carry_failure naming why
+it starts fresh — including a retry that had no recorded conversation id to
+resume and came up clean rather than guessing at the account's latest.
+
 Example:
   af sessions retry-limit fix-auth
   af sessions retry-limit fix-auth --delivered`,
@@ -57,10 +65,15 @@ Example:
 		}
 
 		title := args[0]
+		var conversation session.HandoffConversation
 		if sessionsRetryLimitDelivered {
-			err = confirmHandoffDeliveryViaDaemon(daemon.ConfirmHandoffDeliveryRequest{Title: title, RepoID: repoID})
+			var resp daemon.ConfirmHandoffDeliveryResponse
+			resp, err = confirmHandoffDeliveryViaDaemon(daemon.ConfirmHandoffDeliveryRequest{Title: title, RepoID: repoID})
+			conversation = resp.Conversation
 		} else {
-			err = resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+			var resp daemon.ResumeFromLimitResponse
+			resp, err = resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
+			conversation = resp.Conversation
 		}
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
@@ -69,7 +82,7 @@ Example:
 			return jsonError(err)
 		}
 
-		output := map[string]any{"ok": true, "title": title}
+		output := map[string]any{"ok": true, "title": title, "conversation": conversation}
 		if sessionsRetryLimitDelivered {
 			output["delivered"] = true
 		}

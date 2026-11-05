@@ -136,8 +136,13 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 			accountOnly: strings.TrimSpace(req.To) == "",
 		}
 	}
-	outcome, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap, true)
-	response := HandoffSessionResponse{OK: true, From: swap.fromAgent, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA}
+	outcome, conversation, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap, true)
+	response := HandoffSessionResponse{OK: true, From: swap.fromAgent, To: target, FromAccount: swap.from, ToAccount: swap.to, HeadSHA: swap.headSHA, Conversation: conversation}
+	if !conversation.Carried && conversation.CarryFailure == "" && swap.crossAgent {
+		// A cross-agent account handoff records no carry — there was never one
+		// to attempt — but the caller still gets the stated reason (#6768).
+		response.Conversation.CarryFailure = crossAgentConversationReason
+	}
 	if err != nil {
 		if outcome == resumePerformed || isMutationCommitted(err) {
 			return response, err

@@ -5,6 +5,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/stretchr/testify/require"
 )
 
@@ -42,7 +43,10 @@ func TestHandoffOutputOmitsAmbientAccounts(t *testing.T) {
 			out := captureStdout(t, func() { require.NoError(t, sessionsHandoffCmd.RunE(sessionsHandoffCmd, []string{"worker"})) })
 			var payload map[string]any
 			require.NoError(t, json.Unmarshal([]byte(out), &payload))
-			expected := map[string]any{"ok": true, "title": "worker", "from": "codex", "to": "claude", "head_sha": "branch-tip"}
+			expected := map[string]any{"ok": true, "title": "worker", "from": "codex", "to": "claude", "head_sha": "branch-tip",
+				// #6768: the response always answers the carry question; the
+				// stub's zero value is the uncarried answer with no reason.
+				"conversation": map[string]any{"carried": false}}
 			if tc.fromAccount != "" {
 				expected["from_account"] = tc.fromAccount
 			}
@@ -50,6 +54,54 @@ func TestHandoffOutputOmitsAmbientAccounts(t *testing.T) {
 				expected["to_account"] = tc.toAccount
 			}
 			require.Equal(t, expected, payload)
+		})
+	}
+}
+
+// #6768: the handoff output must carry the daemon's conversation verdict
+// through verbatim — a carry that landed, and a fresh start's stated reason —
+// so the caller never has to infer it from the other fields.
+func TestHandoffOutputReportsTheConversationOutcome(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		conv session.HandoffConversation
+		want map[string]any
+	}{
+		{
+			name: "carried",
+			conv: session.HandoffConversation{Carried: true},
+			want: map[string]any{"carried": true},
+		},
+		{
+			name: "carry fell back",
+			conv: session.HandoffConversation{CarryFailure: "the outgoing account's transcript could not be copied"},
+			want: map[string]any{"carried": false, "carry_failure": "the outgoing account's transcript could not be copied"},
+		},
+		{
+			name: "different program",
+			conv: session.HandoffConversation{CarryFailure: "the incoming agent is a different program and cannot read the previous agent's conversation"},
+			want: map[string]any{"carried": false, "carry_failure": "the incoming agent is a different program and cannot read the previous agent's conversation"},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			oldCall := handoffSessionViaDaemon
+			oldTo, oldBrief, oldAccount := sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount
+			oldRepo, oldEnvelope := repoFlag, envelopeOutput
+			t.Cleanup(func() {
+				handoffSessionViaDaemon = oldCall
+				sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount = oldTo, oldBrief, oldAccount
+				repoFlag, envelopeOutput = oldRepo, oldEnvelope
+			})
+			sessionsHandoffTo, sessionsHandoffBrief, sessionsHandoffAccount = "claude", "", "work"
+			repoFlag, envelopeOutput = "", false
+			handoffSessionViaDaemon = func(daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
+				return daemon.HandoffSessionResponse{OK: true, From: "claude", To: "claude", ToAccount: "work", Conversation: tc.conv}, nil
+			}
+			out := captureStdout(t, func() { require.NoError(t, sessionsHandoffCmd.RunE(sessionsHandoffCmd, []string{"worker"})) })
+			var payload map[string]any
+			require.NoError(t, json.Unmarshal([]byte(out), &payload))
+			require.Equal(t, tc.want, payload["conversation"])
 		})
 	}
 }
