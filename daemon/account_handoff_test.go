@@ -12,6 +12,7 @@ import (
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/handoffengine"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -119,6 +120,17 @@ func TestAccountHandoffTickNeverReactivatesAfterApplyConfig(t *testing.T) {
 			cfg.AccountHandoff.Mode = config.AccountHandoffModeShadow
 			return cfg, nil
 		},
+		LoadState:       func() (handoff.State, error) { return handoff.State{SchemaVersion: 1}, nil },
+		Registered:      func(string) ([]string, error) { return nil, nil },
+		LimitedAccounts: func(string) (map[string]bool, error) { return map[string]bool{}, nil },
+		AccountDir:      func(string, string) (string, error) { return "", nil },
+		ReadUsage: func(string, map[string]int64) handoff.ReadingFacts {
+			return handoff.ReadingFacts{Status: handoff.ReadingNone}
+		},
+		DriftKey:   func(string, string, string) (string, bool) { return "", false },
+		DetectWall: func(string, string) bool { return false },
+		WriteRows:  func([]handoff.EventRow) error { return nil },
+		LogWarn:    func(string, ...any) {},
 	})
 	m.handoffActive.Store(true)
 	m.noteHandoffObservation("k", false, "") // unlock the input walk
