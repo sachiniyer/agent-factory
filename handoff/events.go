@@ -84,7 +84,10 @@ func (l *EventLog) Append(rows []EventRow) error {
 	if len(rows) == 0 {
 		return nil
 	}
-	if err := os.MkdirAll(l.dir, 0o755); err != nil {
+	// MkdirAllUnderAFHome, not os.MkdirAll: this is <af-home>/instances, so a
+	// bare MkdirAll could re-create a deleted AF home as an ancestor (#3850;
+	// TestNoBareMkdirAllUnderTheAFHome).
+	if err := config.MkdirAllUnderAFHome(l.dir, 0o755); err != nil {
 		return err
 	}
 	byDay := make(map[string][]EventRow)
