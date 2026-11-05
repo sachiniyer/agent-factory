@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -50,6 +51,27 @@ func stubAccountLimitEvidence(t *testing.T, evidence accountLimitEvidence, err e
 		return evidence, err
 	}
 	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
+	bypassAccountLimitProofGate(t)
+}
+
+// bypassAccountLimitProofGate opens the reconcile's cheap pre-scan gate: a
+// test stubbing the durable evidence bypasses the very sources the gate
+// inspects, so the gate is opened explicitly to exercise the pass itself.
+// The gate's own cases are covered separately below.
+func bypassAccountLimitProofGate(t *testing.T) {
+	t.Helper()
+	previous := accountLimitProofWorthScanning
+	accountLimitProofWorthScanning = func(*Manager) bool { return true }
+	t.Cleanup(func() { accountLimitProofWorthScanning = previous })
+}
+
+// resetAccountLimitRetractionQuarantine empties the process-wide quarantine
+// of once-future-dated retractions so one test's dropped entry cannot make a
+// later test's identical entry inert.
+func resetAccountLimitRetractionQuarantine(t *testing.T) {
+	t.Helper()
+	quarantinedAccountLimitRetractions = sync.Map{}
+	quarantinedAccountLimitRetractionsCount.Store(0)
 }
 
 // requireAccountLimitRetraction asserts a retraction exists for the identity
@@ -289,6 +311,7 @@ func writeRawAccountLimitLedger(t *testing.T, body string) string {
 // correction wedges kills, handoffs, and rotation.
 func TestReadAccountLimitLedgerDropsUntrustworthyRetractions(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	resetAccountLimitRetractionQuarantine(t)
 	wallJSON := `"observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}]`
 
 	for name, retractionJSON := range map[string]string{
@@ -315,6 +338,7 @@ func TestReadAccountLimitLedgerDropsUntrustworthyRetractions(t *testing.T) {
 // while the real wall still excludes.
 func TestLimitedAccountsForSwapIgnoresAStoredFutureRetraction(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	resetAccountLimitRetractionQuarantine(t)
 	writeRawAccountLimitLedger(t,
 		`{"schema_version":1,
 		  "observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}],
@@ -911,6 +935,7 @@ func TestLimitedAccountsForSwapUntimedWallNeverDefeated(t *testing.T) {
 // joins shutdown.
 func TestAccountLimitReconcileLoopRunsOffThePoll(t *testing.T) {
 	manager, _, _ := newStatusTestManager(t)
+	bypassAccountLimitProofGate(t)
 	loads := make(chan struct{}, 16)
 	previous := loadAccountLimitEvidenceForSwap
 	loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
@@ -1047,4 +1072,163 @@ func TestUsageReadingEndToEndRestoresTheAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.NotContains(t, limited, "work",
 		"admission folds the pair: the proven account returns to the candidate pool")
+}
+
+// A once-future-dated retraction must never count: the read drops it while
+// the file still loads, the quarantine keeps it inert after the clock
+// catches up, and the load's purge removes it from the file so no later
+// process can resurrect it (#6802 review).
+func TestReadAccountLimitLedgerAFutureRetractionStaysInert(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	resetAccountLimitRetractionQuarantine(t)
+	prevNow := nowFunc
+	t.Cleanup(func() { nowFunc = prevNow })
+	now := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	nowFunc = func() time.Time { return now }
+
+	proven := now.Add(time.Hour)
+	path := writeRawAccountLimitLedger(t, fmt.Sprintf(
+		`{"schema_version":1,
+		  "observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}],
+		  "retractions":[{"agent":"claude","account":"work","proven_at":%q}]}`,
+		proven.UTC().Format(time.RFC3339Nano)))
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a proof dated in the future is dropped while the walls still load")
+
+	// The clock catches up — the entry must still not count, and the purge
+	// the load triggered has written it out of the file for good.
+	now = proven.Add(time.Hour)
+	evidence, err = loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a once-future-dated retraction never counts, even after its instant passes")
+
+	raw, err := os.ReadFile(path)
+	require.NoError(t, err)
+	require.NotContains(t, string(raw), "retractions",
+		"the purge removes the poisoned entry durably, not just for this read")
+}
+
+// The record's timestamp is when codex wrote the line, not when the request
+// started: a response completing inside the write margin of the sighting
+// could belong to a request the wall already blocked, so it proves nothing.
+// Only a record that clears the margin counts (#6802 review).
+func TestReconcileAccountLimitProofsRequiresTheWriteMargin(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	bypassAccountLimitProofGate(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+	day := base.UTC().Format("2006/01/02")
+
+	// "work"'s newest claim lands 15 minutes after the wall's sighting —
+	// inside the write margin: it may be the answer to a pre-wall request.
+	seedCodexRollout(t, home, "work", day, rolloutName("000000000001"),
+		codexUsageClaim(base.Add(-45*time.Minute), 40))
+	// "play"'s claim clears the margin — 45 minutes past the same sighting.
+	seedCodexRollout(t, home, "play", day, rolloutName("000000000002"),
+		codexUsageClaim(base.Add(-15*time.Minute), 40))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+			{Agent: tmux.ProgramCodex, Account: "play", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Len(t, evidence.Retractions, 1)
+	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "play", base.Add(-15*time.Minute))
+}
+
+// The cheap gate must let every real codex wall through while sparing users
+// without one the durable scan entirely.
+func TestAccountLimitProofWorthScanning(t *testing.T) {
+	codexAccountDir := func(t *testing.T) {
+		t.Helper()
+		home, err := config.GetConfigDir()
+		require.NoError(t, err)
+		dir, err := agentaccount.Dir(home, tmux.ProgramCodex, "work")
+		require.NoError(t, err)
+		require.NoError(t, os.MkdirAll(dir, 0o700))
+	}
+
+	t.Run("no codex accounts means nothing could be proven", func(t *testing.T) {
+		manager, _, _ := newStatusTestManager(t)
+		require.False(t, accountLimitProofWorthScanning(manager))
+	})
+
+	t.Run("codex accounts without any codex wall", func(t *testing.T) {
+		manager, _, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		require.False(t, accountLimitProofWorthScanning(manager),
+			"registered accounts alone are not a wall to free")
+	})
+
+	t.Run("a codex wall in the ledger runs the pass", func(t *testing.T) {
+		manager, _, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		writeRawAccountLimitLedger(t,
+			`{"schema_version":1,"observations":[{"agent":"codex","account":"work","observed_at":"2025-11-10T09:00:00Z"}]}`)
+		require.True(t, accountLimitProofWorthScanning(manager))
+	})
+
+	t.Run("a codex wall on a live instance runs the pass", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		codexAccountDir(t)
+		inst := registerAccountInstance(t, manager, repoID, repoPath, "parked", tmux.ProgramCodex, "work")
+		inst.SetLimitReached(time.Time{})
+		require.True(t, accountLimitProofWorthScanning(manager))
+	})
+
+	t.Run("a codex wall in a stored row runs the pass", func(t *testing.T) {
+		manager, repoID, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage(
+			`[{"title":"walled","status":"running",
+			   "account_limit_observations":[{"agent":"codex","account":"work","observed_at":"2025-11-10T09:00:00Z"}]}]`)))
+		require.True(t, accountLimitProofWorthScanning(manager))
+	})
+}
+
+// The carry-commit race the watermark exists for: the wall is sighted, THEN
+// the carry lands a rollout whose copied bytes hold a healthy claim that
+// postdates the sighting by enough to clear the write margin. Read naively
+// that claim is fresh proof for the target — only the watermark the commit
+// recorded keeps it the source account's word (#6802 review).
+func TestReconcileAccountLimitProofsACarryLandingAfterTheSightingCannotRetractTheWall(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	bypassAccountLimitProofGate(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	// The claim is dated 40 minutes after the sighting — past the write
+	// margin, so it would free the account if the copied bytes counted.
+	rollout := seedCodexRollout(t, home, "work", base.UTC().Format("2006/01/02"), rolloutName("000000000001"),
+		codexUsageClaim(base.Add(-20*time.Minute), 40))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	// What the carry commit wrote (session/carry.copy → RecordCarriedPrefix):
+	// every copied byte is the source account's and must be quarantined.
+	info, err := os.Stat(rollout)
+	require.NoError(t, err)
+	store := handoff.NewStore(filepath.Join(home, "instances", handoff.StateFileName))
+	require.NoError(t, store.RecordCarriedPrefix(rollout, info.Size()))
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a post-sighting claim inside the carried prefix stays the source account's — the wall stands")
 }

@@ -432,23 +432,42 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   exactly two ways: when its claimed reset passes (plus the short rolling-window
   grace), or when the account's own usage record — the `rate_limits` snapshot
   codex writes into its rollout store — reports every window below the
-  configured wall at a record time after the wall was last seen, which is
-  positive proof it is serving again. That proof is kept as a retraction in the
-  same ledger so one stale sighting cannot exclude a recovered account for
-  days, and it is ordered by the record's own timestamp, never by when af
-  happened to read it. Only a verified usage reading counts: today that is
-  codex alone, so a claude, devin, or other agent's wall still ends at its
-  claimed reset — or never, when none was claimed. Records an account
-  inherited from a copied transcript prefix are the source account's numbers
-  and prove nothing here. Pane chrome, busy indicators, a delivered prompt,
-  and idle or attached pane state prove nothing either — none of them shows
-  the account accepted a request. And because the proof must postdate a
-  claimed reset too, retraction mainly frees walls that named none — a wall
-  that named one cannot be retracted before that instant, and by then it
-  expires on its own. Nothing else ends a wall: not a timeout, and never the
-  mere absence of a wall. A wall sighted after the proof is the newer fact
-  and excludes again, and a session parked at its own `[limit]` stays parked —
-  retraction clears the stored record admission consults, never a live wall.
+  configured wall at a record time comfortably after the wall was last seen,
+  which is positive proof it is serving again. That proof is kept as a
+  retraction in the same ledger so one stale sighting cannot exclude a
+  recovered account for days, and it is ordered by the record's own timestamp,
+  never by when af happened to read it. The timestamp is the moment codex
+  *wrote* the line — a response completing after the wall can belong to a
+  request the wall already blocked — so af requires the record to clear a
+  thirty-minute margin past the last sighting before it counts; the record
+  format carries no request-start field to order more precisely. Only a
+  verified usage reading counts: today that is codex alone, so a claude,
+  devin, or other agent's wall still ends at its claimed reset — or never,
+  when none was claimed. A reading that reports no windows is not a healthy
+  reading, and the indexer only scans each account's newest few rollouts —
+  an account whose usage history exceeds that window reads as unknown and
+  keeps its wall until a fresh reading exists (tracked as
+  [#6809](https://github.com/sachiniyer/agent-factory/issues/6809)). A proof
+  dated in the future is quarantined permanently — dropped from the ledger
+  rather than suspended — so an ordinary clock correction can never let one
+  count later. Records an account inherited from a copied transcript prefix
+  are the source account's numbers: a carry commits a durable byte watermark
+  at copy time naming exactly which leading bytes came from the previous
+  account, and the usage reader ignores claims below it — a carry that
+  cannot record its watermark is not committed. Pane chrome, busy
+  indicators, a delivered prompt, and idle or attached pane state prove
+  nothing either — none of them shows the account accepted a request. And
+  because the proof must postdate a claimed reset too, retraction mainly
+  frees walls that named none — a wall that named one cannot be retracted
+  before that instant, and by then it expires on its own. Nothing else ends
+  a wall: not a timeout, and never the mere absence of a wall. A wall
+  sighted after the proof is the newer fact and excludes again, and a
+  session parked at its own `[limit]` stays parked — retraction clears the
+  stored record admission consults, never a live wall. A parked session that
+  re-reads the same unchanged wall records no new sighting at all — the
+  parked row keeps its original instant rather than churning a durable
+  write and an event for every poll, which is how a retraction's ordering
+  stays honest about when the wall was genuinely last seen.
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process

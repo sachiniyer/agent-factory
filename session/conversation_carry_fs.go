@@ -332,7 +332,26 @@ func probeCarryDir(home carryRoot, rel string) error {
 	return err
 }
 
-// carryConversationFile makes dstHome/rel hold the whole append-only
+// carryFileOutcome is what one file's carry decided. covered is the number of
+// leading destination bytes attributable to the SOURCE account — the prefix
+// the usage reader must quarantine as the previous account's claims rather
+// than the target's own (#6802 review). installed reports whether this call
+// put the destination file there, so a commit step that fails afterwards can
+// unwind only the bytes it actually wrote.
+type carryFileOutcome struct {
+	covered   int64
+	installed bool
+}
+
+// carryConversationFile is the error-only form: callers that copy without
+// needing the outcome (auxiliary-tree files, behavioral probes) see the
+// carry as success or failure.
+func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource bool) error {
+	_, err := carryConversationFileOutcome(srcHome, dstHome, rel, requireSource)
+	return err
+}
+
+// carryConversationFileOutcome makes dstHome/rel hold the whole append-only
 // conversation stored at srcHome/rel. It never writes to srcHome.
 //
 // requireSource is false only for a carry an identity checkpoint already
@@ -340,19 +359,19 @@ func probeCarryDir(home carryRoot, rel string) error {
 // conversation is enough even if the previous account has since lost it. A new
 // carry always requires the source, or a stale destination copy would be
 // resumed as though it were the whole conversation.
-func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource bool) error {
+func carryConversationFileOutcome(srcHome, dstHome carryRoot, rel string, requireSource bool) (carryFileOutcome, error) {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
-		return carryFailure("af refused an unsafe conversation path", err)
+		return carryFileOutcome{}, carryFailure("af refused an unsafe conversation path", err)
 	}
 	dstRoot, err := openCarryAnchor(dstHome)
 	if err != nil {
-		return carryFailureAt("the new account's home could not be opened safely", err)
+		return carryFileOutcome{}, carryFailureAt("the new account's home could not be opened safely", err)
 	}
 	defer dstRoot.Close()
 	dstDir, err := openCarryDirChain(dstRoot, dirs, true)
 	if err != nil {
-		return carryFailureAt("the new account's conversation directory is not a plain directory", err)
+		return carryFileOutcome{}, carryFailureAt("the new account's conversation directory is not a plain directory", err)
 	}
 	defer dstDir.Close()
 
@@ -367,14 +386,17 @@ func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource
 		defer srcDir.Close()
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return carryFailureAt("the conversation could not be read safely from the previous account", err)
+		return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 	}
 	return carryFileAt(srcDir, dstDir, name, requireSource)
 }
 
 // carryFileAt applies the superset rule to one file. srcDir may be nil when the
-// source directory does not exist.
-func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error {
+// source directory does not exist. The covered length it reports is the
+// carried-prefix watermark: every leading destination byte the source is
+// responsible for, whether this call copied it or only verified it was
+// already there.
+func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carryFileOutcome, error) {
 	var src *os.File
 	var srcInfo os.FileInfo
 	if srcDir != nil {
@@ -386,7 +408,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 		case errors.Is(err, fs.ErrNotExist):
 			src = nil
 		default:
-			return carryFailureAt("the conversation could not be read safely from the previous account", err)
+			return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 		}
 	}
 	dst, dstInfo, err := openCarryFileAt(dstDir, name)
@@ -396,41 +418,52 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	default:
-		return carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
+		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
 	}
 
 	if src == nil {
 		if dst != nil && !requireSource {
-			return nil
+			// A committed re-run whose source account is gone: every byte in
+			// the landed copy is unverifiable provenance — cover all of it
+			// rather than letting records af did not write count as this
+			// account's.
+			return carryFileOutcome{covered: dstInfo.Size()}, nil
 		}
-		return carryFailure("its transcript is missing from the previous account's home", fs.ErrNotExist)
+		return carryFileOutcome{}, carryFailure("its transcript is missing from the previous account's home", fs.ErrNotExist)
 	}
+	srcSize := srcInfo.Size()
 	if dst != nil {
 		if os.SameFile(srcInfo, dstInfo) {
-			return nil
+			// The destination IS the source file — every byte in it is the
+			// source account's.
+			return carryFileOutcome{covered: dstInfo.Size()}, nil
 		}
-		srcSize, dstSize := srcInfo.Size(), dstInfo.Size()
-		same, err := carryPrefixMatches(src, dst, min(srcSize, dstSize))
+		same, err := carryPrefixMatches(src, dst, min(srcSize, dstInfo.Size()))
 		if err != nil {
-			return carryFailure("comparing it with the new account's copy failed", err)
+			return carryFileOutcome{}, carryFailure("comparing it with the new account's copy failed", err)
 		}
 		if !same {
-			return carryFailure("the new account already holds a different copy of this conversation", nil)
+			return carryFileOutcome{}, carryFailure("the new account already holds a different copy of this conversation", nil)
 		}
-		if dstSize >= srcSize {
+		if dstInfo.Size() >= srcSize {
 			// A replacement that already resumed here appended to this copy.
 			// Overwriting it with the shorter source would truncate that work.
 			// It is kept, so it must stay appendable: the resumed provider
 			// writes its next turn into this file.
 			if dstInfo.Mode().Perm()&0o200 == 0 {
 				if err := dst.Chmod(carryFileMode); err != nil {
-					return carryFailure("the new account's copy of this conversation is not writable", err)
+					return carryFileOutcome{}, carryFailure("the new account's copy of this conversation is not writable", err)
 				}
 			}
-			return nil
+			// The verified prefix is the source's; anything past it is the
+			// destination's own append.
+			return carryFileOutcome{covered: srcSize}, nil
 		}
 	}
-	return replaceCarryFile(dstDir, name, src, srcInfo.Size())
+	if err := replaceCarryFile(dstDir, name, src, srcSize); err != nil {
+		return carryFileOutcome{}, err
+	}
+	return carryFileOutcome{covered: srcSize, installed: true}, nil
 }
 
 // carryPrefixMatches reports whether the first n bytes of a and b are equal.
@@ -572,7 +605,10 @@ func copyCarryTree(src, dst *os.File, depth int, budget *int) error {
 		case entry.IsDir():
 			errs = append(errs, copyCarrySubtree(src, dst, name, depth, budget))
 		case entry.Type().IsRegular():
-			errs = append(errs, carryFileAt(src, dst, name, true))
+			// Auxiliary files are not rollout evidence: the covered length a
+			// transcript would watermark is meaningless here.
+			_, err := carryFileAt(src, dst, name, true)
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

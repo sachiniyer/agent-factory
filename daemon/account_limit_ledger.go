@@ -7,6 +7,8 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -56,7 +58,14 @@ func loadAccountLimitLedger() (accountLimitEvidence, error) {
 	if err != nil {
 		return accountLimitEvidence{}, err
 	}
-	return readAccountLimitLedger(path)
+	evidence, err := readAccountLimitLedger(path)
+	if err != nil {
+		return accountLimitEvidence{}, err
+	}
+	if quarantinedAccountLimitRetractionsCount.Load() > 0 {
+		purgeQuarantinedAccountLimitRetractions(path)
+	}
+	return evidence, nil
 }
 
 type accountLimitObservationLoader func() ([]session.AccountLimitObservationData, error)
@@ -159,16 +168,93 @@ func readAccountLimitLedger(path string) (accountLimitEvidence, error) {
 		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
 			continue
 		}
+		if _, quarantined := quarantinedAccountLimitRetractions.Load(retraction); quarantined {
+			continue
+		}
 		// A future-dated proof is untrustworthy — a forward-jumped clock
 		// wrote it, or the clock corrected back after a well-formed write.
-		// Its ordering claim is unprovable, so it is ignored for freeing
-		// walls while the rest of the file still loads.
+		// Its ordering claim is unprovable — permanently: suspension by now
+		// alone would let it start counting once the clock catches up, so the
+		// quarantine makes the drop stick in-process and the next locked
+		// rewrite removes it from the file for good (#6802 review).
 		if retraction.ProvenAt.After(nowFunc()) {
+			if _, loaded := quarantinedAccountLimitRetractions.LoadOrStore(retraction, struct{}{}); !loaded {
+				quarantinedAccountLimitRetractionsCount.Add(1)
+			}
 			continue
 		}
 		retractions = append(retractions, retraction)
 	}
 	return accountLimitEvidence{Observations: ledger.Observations, Retractions: retractions}, nil
+}
+
+// quarantinedAccountLimitRetractions is process memory of retraction
+// identities a ledger read once found future-dated. A clock-corrected file
+// can hold an entry whose proof instant is now in the past, but the fact
+// that it once read as impossible is what matters: the quarantine keeps it
+// inert for the life of the process, and purgeQuarantinedAccountLimitRetractions
+// makes the drop durable so no later process can resurrect it either.
+var quarantinedAccountLimitRetractions sync.Map // map[session.AccountLimitRetractionData]struct{}
+
+// quarantinedAccountLimitRetractionsCount tracks the quarantine's size so the
+// read path can skip the purge when nothing was ever dropped.
+var quarantinedAccountLimitRetractionsCount atomic.Int64
+
+// purgeQuarantinedAccountLimitRetractions makes an in-memory quarantine
+// durable: entries the reads already ignore are removed from the file under
+// the same lock the other writers hold, so a restart — or a clock that has
+// caught up — cannot resurrect them. Best-effort: the in-memory quarantine
+// keeps this process honest, and the next locked write rewrites from the
+// filtered read and drops them regardless; the next read retries a purge
+// this one could not land.
+func purgeQuarantinedAccountLimitRetractions(path string) {
+	_ = config.WithFileLockTimeout(path, config.RepoInstancesLockTimeout, func() error {
+		raw, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var ledger accountLimitLedger
+		if err := json.Unmarshal(raw, &ledger); err != nil {
+			return err
+		}
+		if ledger.SchemaVersion != accountLimitLedgerSchemaVersion {
+			return fmt.Errorf("%s has schema_version %d, want %d",
+				path, ledger.SchemaVersion, accountLimitLedgerSchemaVersion)
+		}
+		now := nowFunc()
+		kept := ledger.Retractions[:0]
+		removed := false
+		for _, retraction := range ledger.Retractions {
+			// Quarantine keys carry the read's normalized identity fields, so
+			// the purge compares the same shape.
+			retraction.Agent = strings.TrimSpace(retraction.Agent)
+			retraction.Account = strings.TrimSpace(retraction.Account)
+			if _, quarantined := quarantinedAccountLimitRetractions.Load(retraction); quarantined {
+				removed = true
+				continue
+			}
+			if retraction.ProvenAt.After(now) {
+				if _, loaded := quarantinedAccountLimitRetractions.LoadOrStore(retraction, struct{}{}); !loaded {
+					quarantinedAccountLimitRetractionsCount.Add(1)
+				}
+				removed = true
+				continue
+			}
+			kept = append(kept, retraction)
+		}
+		if !removed {
+			return nil
+		}
+		ledger.Retractions = kept
+		raw, err = json.MarshalIndent(ledger, "", "  ")
+		if err != nil {
+			return err
+		}
+		return config.AtomicWriteFile(path, raw, 0o600)
+	})
 }
 
 // retainAccountLimitObservations durably merges evidence before its session
@@ -300,8 +386,9 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 			// copy could be a wall sighted after the proof, and stamping it
 			// would invent an event time the fact never had — one an older
 			// retraction could then order itself against (#6802 review). Any
-			// untimed copy keeps the merged fact untimed; it loses to no
-			// retraction until a fresher, timed sighting lands.
+			// untimed copy keeps the merged fact untimed, and untimed is
+			// permanent: every later merge re-applies this same rule, so the
+			// merged fact never gains an instant a retraction could beat.
 			switch {
 			case prior.ObservedAt.IsZero() || observation.ObservedAt.IsZero():
 				observation.ObservedAt = time.Time{}

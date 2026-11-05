@@ -140,7 +140,10 @@ func (s *Store) mutate(fn func(*State) error) error {
 
 // RecordCarriedPrefix durably records that the first n bytes of the rollout
 // at path were copied from the source account's file by a carry. n must be a
-// record boundary — the reader never parses a half-line.
+// record boundary — the reader never parses a half-line. The watermark only
+// ever grows: a re-carry that verifies a shorter covered prefix must not
+// shrink the quarantine onto bytes an earlier, longer copy put there —
+// records in that span are still the source account's (#6802 review).
 func (s *Store) RecordCarriedPrefix(path string, n int64) error {
 	if path == "" || n < 0 {
 		return fmt.Errorf("carried prefix needs a path and a non-negative length, got %q / %d", path, n)
@@ -149,7 +152,9 @@ func (s *Store) RecordCarriedPrefix(path string, n int64) error {
 		if state.CarriedPrefixes == nil {
 			state.CarriedPrefixes = map[string]int64{}
 		}
-		state.CarriedPrefixes[path] = n
+		if existing, ok := state.CarriedPrefixes[path]; !ok || n > existing {
+			state.CarriedPrefixes[path] = n
+		}
 		return nil
 	})
 }

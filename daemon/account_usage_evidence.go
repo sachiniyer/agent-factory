@@ -1,7 +1,9 @@
 package daemon
 
 import (
+	"bytes"
 	"fmt"
+	"os"
 	"sync"
 	"time"
 
@@ -37,6 +39,17 @@ import (
 // poll loop, so the poll never waits on it. Loose enough that a day-long wall
 // does not notice the wait. A package var so tests can compress it.
 var accountLimitProofReconcileInterval = 45 * time.Second
+
+// accountLimitProofWriteMargin is the ordering slack a usage record must
+// clear past a wall's last sighting before it may count as proof. The
+// record's timestamp is when codex WROTE the line — a token_count snapshot
+// lands as a model response completes — so a request accepted before the
+// wall can carry a later timestamp: pre-wall service wearing a post-wall
+// date. The record shape carries no request-start field, so the supported
+// bound is a margin after the sighting (#6802 review). Thirty minutes
+// generously bounds one response's write lag while staying nothing against
+// the hours these walls run.
+var accountLimitProofWriteMargin = 30 * time.Minute
 
 // startAccountLimitReconcileLoop runs the proof reconcile on its own ticker
 // goroutine, registered on the daemon's shutdown wait group like the orphan
@@ -166,17 +179,82 @@ func (m *Manager) usageIndexer() *rateindex.Indexer {
 	return m.rateIndexer
 }
 
+// accountLimitProofWorthScanning is the cheap gate that keeps the 45-second
+// durable scan off users it can never help (#6802 review). The full pass
+// parses every repo's instance rows — megabytes of JSON on a busy box — so
+// before paying it, ask the questions that can prove no codex wall exists to
+// free:
+//   - no registered codex account directories: an identity with no account
+//     home has no rollout store to read, so no proof is possible for it; and
+//   - no "codex" bytes in the raw durable rows or the ledger file, and no
+//     codex observation on a live instance: a codex wall serializes its
+//     agent name, so nothing codex-shaped exists to retract.
+//
+// Every answer short of a definite no runs the full pass — a false positive
+// costs one scan; a false negative would leave a wall excluded forever. A
+// package var so tests can drive the reconcile without standing up the
+// gate's real inputs.
+var accountLimitProofWorthScanning = func(m *Manager) bool {
+	home, err := config.GetConfigDir()
+	if err != nil {
+		return true
+	}
+	if accounts, err := agentaccount.List(home, tmux.ProgramCodex); err == nil && len(accounts) == 0 {
+		return false
+	}
+	m.mu.Lock()
+	instances := make([]*session.Instance, 0, len(m.instances))
+	for _, inst := range m.instances {
+		instances = append(instances, inst)
+	}
+	m.mu.Unlock()
+	for _, inst := range instances {
+		if inst == nil {
+			continue
+		}
+		for _, observation := range inst.AccountLimitObservations() {
+			if accountUsageReadingSource(observation.Agent) {
+				return true
+			}
+		}
+	}
+	needle := []byte(tmux.ProgramCodex)
+	if path, err := accountLimitLedgerPath(); err == nil {
+		if raw, err := os.ReadFile(path); err == nil {
+			if bytes.Contains(raw, needle) {
+				return true
+			}
+		} else if !os.IsNotExist(err) {
+			return true // an unreadable ledger is for the full read to surface
+		}
+	}
+	rows, skipped, err := config.LoadAllRepoInstancesReportingSkips()
+	if err != nil || len(skipped) > 0 {
+		return true
+	}
+	for _, raw := range rows {
+		if bytes.Contains(raw, needle) {
+			return true
+		}
+	}
+	return false
+}
+
 // reconcileAccountLimitProofs reads every account still excluded by stored
 // evidence and asks each one's own usage record whether the wall ended. The
 // durable scan plus the rollout refreshes are the expensive part, so this
-// runs on the dedicated ticker, never the poll. Stored evidence is the whole
-// domain a retraction can act on — durable rows, the process-wide ledger, and
-// live rows' own observation lists; a live session parked at its wall
-// contributes a live wall that admission keeps regardless, so retraction here
-// never un-parks it (#6776 1d property). Every failure aborts the pass —
-// nothing is half-decided on a partial picture, and the next tick retries
-// from scratch.
+// runs on the dedicated ticker, never the poll — and only after the cheap
+// gate above proves a codex wall could even exist. Stored evidence is the
+// whole domain a retraction can act on — durable rows, the process-wide
+// ledger, and live rows' own observation lists; a live session parked at its
+// wall contributes a live wall that admission keeps regardless, so
+// retraction here never un-parks it (#6776 1d property). Every failure
+// aborts the pass — nothing is half-decided on a partial picture, and the
+// next tick retries from scratch.
 func (m *Manager) reconcileAccountLimitProofs() {
+	if !accountLimitProofWorthScanning(m) {
+		return
+	}
 	evidence, err := loadAccountLimitEvidenceForSwap()
 	if err != nil {
 		m.warn().Printf("account-limit proof reconcile could not load durable evidence: %v", err)
@@ -267,15 +345,29 @@ func (m *Manager) reconcileAccountLimitProofs() {
 // something admission would not; the defeat half stops a reading that
 // predates the wall — the older fact — from littering the ledger with a
 // tombstone admission never honors (#6802 review).
+//
+// The proof must additionally clear the write margin of EVERY timed wall
+// still excluding, not merely defeat one of them: the predicate asks only
+// for strictly-after, so a record written inside the margin would beat a
+// wall whose sighting it cannot honestly order itself past — a request
+// accepted before the wall whose response landed after it. One unsafe
+// comparison refuses the whole tombstone.
 func accountLimitProofDefeatsAStoredWall(candidate session.AccountLimitRetractionData, observations []session.AccountLimitObservationData, retractions []session.AccountLimitRetractionData, now time.Time) bool {
+	defeats := false
 	for _, observation := range observations {
 		if observation.Agent != candidate.Agent || observation.Account != candidate.Account {
 			continue
 		}
-		if accountLimitObservationExcludes(observation, candidate.Agent, retractions, now) &&
-			session.AccountLimitObservationRetracted(observation, candidate) {
-			return true
+		if !accountLimitObservationExcludes(observation, candidate.Agent, retractions, now) {
+			continue
+		}
+		if !observation.ObservedAt.IsZero() &&
+			!candidate.ProvenAt.After(observation.ObservedAt.Add(accountLimitProofWriteMargin)) {
+			return false
+		}
+		if session.AccountLimitObservationRetracted(observation, candidate) {
+			defeats = true
 		}
 	}
-	return false
+	return defeats
 }

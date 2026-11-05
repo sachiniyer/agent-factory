@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
@@ -607,4 +608,111 @@ func TestRespawnForAccountSwapDemotesACarryRestartFoundImpossible(t *testing.T) 
 	require.NoError(t, restored.SynchronizeAccountSwapRuntimeMetadata(),
 		"restart metadata sync must accept the fresh id that actually launched")
 	require.Equal(t, HandoffConversation{CarryFailure: pending.CarryFallback}, restored.PendingAccountSwapConversation())
+}
+
+// The usage reader quarantines claims below a carried-prefix watermark — the
+// records a carry copied hold the SOURCE account's numbers, and without the
+// record they would count for the target. The commit half of the copy writes
+// it: a codex rollout is proof-safe only once the durable map says which
+// bytes are not the target's (#6802 review).
+func TestConversationCarryRecordsTheCarriedPrefix(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	content := "claim one\nclaim two\n"
+	writeCarryFile(t, srcHome, rel, content)
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carry.copy())
+
+	prefixes, err := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()
+	require.NoError(t, err)
+	require.Equal(t, int64(len(content)), prefixes[filepath.Join(dstDir, rel)],
+		"every copied byte is the source account's claim — the watermark covers the whole file")
+}
+
+// A destination the carry only verifies keeps its own tail past the copied
+// prefix: the watermark covers exactly the source-matched bytes, never the
+// target's appended records.
+func TestConversationCarryWatermarksOnlyTheSourcePrefix(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim one\n")
+	dstPath := writeCarryFile(t, dstDir, rel, "claim one\ntarget tail\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carry.copy())
+
+	prefixes, err := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()
+	require.NoError(t, err)
+	require.Equal(t, int64(len("claim one\n")), prefixes[dstPath],
+		"the verified prefix is the source's; the destination's tail is its own")
+}
+
+// The watermark is part of the commit: when it cannot be recorded, a rollout
+// the copy installed must not stay behind — its bytes are unverifiable
+// source claims the reconcile would read as the target's own.
+func TestConversationCarryUnwindsTheRolloutWhenTheWatermarkCannotBeRecorded(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	// instances exists as a FILE, so no state write can land beneath it.
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances"), []byte("x"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.Error(t, carry.copy(), "a carry that cannot record its watermark is not a commit")
+	require.NoFileExists(t, filepath.Join(dstDir, rel),
+		"the unrecorded rollout is unwound rather than left to mint a false retraction")
+}
+
+// Only codex leaves usage claims in its store — a claude carry commits no
+// watermark.
+func TestConversationCarrySkipsTheWatermarkForClaude(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	dstDir := filepath.Join(afHome, "accounts", "claude", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramClaude, "work", dstDir)
+	require.NoError(t, err)
+	writeCarryFile(t, srcHome, carryTestRel, "turn one\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramClaude, id: carryTestID,
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: carryTestRel,
+	}
+	require.NoError(t, carry.copy())
+	require.FileExists(t, filepath.Join(dstDir, carryTestRel))
+	require.NoFileExists(t, filepath.Join(afHome, "instances", handoff.StateFileName),
+		"no usage claims live in a claude transcript — nothing to quarantine")
 }
