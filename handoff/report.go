@@ -3,51 +3,15 @@ package handoff
 // report.go renders the report_to surface (#6776, R15): a FIXED structured
 // template over EventRow fields — the only text a report may carry. Pane,
 // transcript, and composer text can never appear in one, same rule as the
-// event log itself. halted and move-failed are the two verdicts that jump
-// the digest window; everything else batches.
+// event log itself. Every row batches through the digest — shadow mode has
+// no immediate-delivery path; that returns with the live mover in slice 6,
+// where halted and move-failed actually exist (#6818 review).
 
 import (
 	"sort"
 	"strconv"
 	"strings"
 )
-
-// ImmediateReport reports whether the row jumps the digest window and is
-// delivered as its own prompt the moment it is emitted — the halt and the
-// failed move, the two verdicts an operator cannot afford to learn about in
-// a batch. Every other kind batches.
-func ImmediateReport(r EventRow) bool {
-	return r.Kind == EventHalted || r.Kind == EventMoveFailed
-}
-
-// EventRowSignature is the dedupe key an immediate send records under: kind,
-// reason, and identity fields canonicalized — parameter ORDER cannot divide
-// one fact into two signatures.
-func EventRowSignature(r EventRow) string {
-	var b strings.Builder
-	b.WriteString(string(r.Kind))
-	b.WriteByte('|')
-	b.WriteString(r.ReasonCode)
-	b.WriteByte('|')
-	b.WriteString(r.SessionKey)
-	b.WriteByte('|')
-	b.WriteString(r.From)
-	b.WriteByte('|')
-	b.WriteString(r.To)
-	b.WriteByte('|')
-	keys := make([]string, 0, len(r.Params))
-	for k := range r.Params {
-		keys = append(keys, k)
-	}
-	sort.Strings(keys)
-	for _, k := range keys {
-		b.WriteString(k)
-		b.WriteByte('=')
-		b.WriteString(r.Params[k])
-		b.WriteByte(';')
-	}
-	return b.String()
-}
 
 // ReportLine renders one row as the fixed template:
 //

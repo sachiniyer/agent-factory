@@ -6,18 +6,20 @@ import (
 	"time"
 )
 
-func TestImmediateReport(t *testing.T) {
-	for kind, want := range map[EventKind]bool{
-		EventHalted:      true,
-		EventMoveFailed:  true,
-		EventWall:        false,
-		EventMove:        false,
-		EventNoAccount:   false,
-		EventConfigDrift: false,
-	} {
-		if got := ImmediateReport(EventRow{Kind: kind}); got != want {
-			t.Fatalf("ImmediateReport(%s) = %v, want %v", kind, got, want)
-		}
+// #6818 review: shadow mode has no immediate-delivery path — halted and
+// move-failed rows batch through the digest like every other kind.
+// Immediate delivery returns with the live mover in slice 6.
+func TestHaltedAndMoveFailedBatchInDigest(t *testing.T) {
+	rows := []EventRow{
+		{Kind: EventHalted, ReasonCode: "mover-halted", Mode: "shadow"},
+		{Kind: EventMoveFailed, ReasonCode: "carry", Mode: "shadow"},
+	}
+	digest := ReportDigest(rows)
+	if !strings.HasPrefix(digest, "[af handoff digest] 2 events\n") {
+		t.Fatalf("digest header: %q", digest)
+	}
+	if !strings.Contains(digest, "kind=halted") || !strings.Contains(digest, "kind=move-failed") {
+		t.Fatalf("halted/move-failed missing from digest: %q", digest)
 	}
 }
 
@@ -112,18 +114,5 @@ func TestReportDigestCapsRowsAndBytes(t *testing.T) {
 	}
 	if !strings.Contains(digest, "more not shown") {
 		t.Fatalf("digest dropped rows without an overflow marker: %q", digest[len(digest)-120:])
-	}
-}
-
-func TestEventRowSignatureParamOrderInvariant(t *testing.T) {
-	a := EventRow{Kind: EventWall, ReasonCode: "wall", SessionKey: "s",
-		Params: map[string]string{"x": "1", "y": "2"}}
-	b := EventRow{Kind: EventWall, ReasonCode: "wall", SessionKey: "s",
-		Params: map[string]string{"y": "2", "x": "1"}}
-	if EventRowSignature(a) != EventRowSignature(b) {
-		t.Fatalf("param order divided one fact into two signatures")
-	}
-	if EventRowSignature(a) == EventRowSignature(EventRow{Kind: EventMove, ReasonCode: "wall", SessionKey: "s"}) {
-		t.Fatalf("different kinds share a signature")
 	}
 }

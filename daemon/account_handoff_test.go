@@ -158,6 +158,24 @@ func TestReportPendingDropsOnVanishAndSpecChange(t *testing.T) {
 	}
 }
 
+// #6818 review: shadow mode has no immediate-delivery path — a halted row
+// goes through the same digest backlog as every other row. Immediate
+// delivery returns with the live mover in slice 6, where halts exist.
+func TestQueueReportJobBatchesHaltedRows(t *testing.T) {
+	m := &Manager{cfg: &config.Config{}, instances: map[string]*session.Instance{}}
+	pending := map[string]*reportPending{}
+	m.queueReportJob(pending, handoffReportJob{
+		spec: "observer", key: "k1",
+		rows: []handoff.EventRow{
+			{Kind: handoff.EventHalted, ReasonCode: "mover-halted", SessionKey: "mover"},
+			{Kind: handoff.EventWall, ReasonCode: "wall", SessionKey: "emitter"},
+		},
+	})
+	if len(pending["k1"].rows) != 2 {
+		t.Fatalf("halted row did not batch into the digest backlog: %+v", pending["k1"])
+	}
+}
+
 // #6818 round-2 review: a report never delivers over a composer af cannot
 // read — a fresh capture right before the send must prove it empty. A
 // recipient with no live runtime is the unprovable case: the send is held

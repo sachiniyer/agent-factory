@@ -403,13 +403,10 @@ type handoffReportJob struct {
 }
 
 // reportFlushInterval caps the digest cadence (R15): at most one digest a
-// minute per recipient; halted and move-failed jump the window.
+// minute per recipient. Every row batches — shadow emits no verdict an
+// operator cannot learn about a minute late (#6818 review: immediate
+// delivery returns with the live mover in slice 6, where halts exist).
 var reportFlushInterval = time.Minute
-
-// reportImmediateTTL bounds how long a once-only immediate signature stays
-// spent (#6818 review): a halt/move-failure incident is a fresh one after
-// this long, and its report must fire again.
-var reportImmediateTTL = 24 * time.Hour
 
 // reportPendingCap bounds rows held for one recipient while delivery waits —
 // a recipient attached for hours cannot grow the queue without bound.
@@ -442,40 +439,14 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 		defer wg.Done()
 		flush := time.NewTicker(reportFlushInterval)
 		defer flush.Stop()
-		pending := map[string]*reportPending{}  // recipient key → digest backlog
-		sentImmediate := map[string]time.Time{} // signature → when delivered
+		pending := map[string]*reportPending{} // recipient key → digest backlog
 		for {
 			select {
 			case <-stopCh:
 				return
 			case job := <-manager.handoffReportCh:
-				for _, row := range job.rows {
-					if handoff.ImmediateReport(row) {
-						sig := handoff.EventRowSignature(row)
-						if _, sent := sentImmediate[sig]; sent {
-							continue
-						}
-						switch manager.deliverHandoffReport(job.key, handoff.ReportLine(row)) {
-						case reportSent, reportDropped:
-							// A dropped immediate is spent like a sent one —
-							// once-only means never retried, not retried
-							// forever.
-							sentImmediate[sig] = nowFunc()
-						case reportHeld:
-							// Attached recipient: the row waits inside the
-							// digest backlog and still delivers exactly once.
-							manager.queueReportRow(pending, job, row)
-						}
-						continue
-					}
-					manager.queueReportRow(pending, job, row)
-				}
+				manager.queueReportJob(pending, job)
 			case <-flush.C:
-				for sig, at := range sentImmediate {
-					if nowFunc().Sub(at) >= reportImmediateTTL {
-						delete(sentImmediate, sig)
-					}
-				}
 				for key, entry := range pending {
 					rows := manager.liveReportRows(entry)
 					if len(rows) == 0 {
@@ -492,6 +463,15 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 			}
 		}
 	}()
+}
+
+// queueReportJob adds a tick's rows to the recipient's digest backlog.
+// Every row batches — there is no immediate-delivery path in shadow mode
+// (#6818 review).
+func (m *Manager) queueReportJob(pending map[string]*reportPending, job handoffReportJob) {
+	for _, row := range job.rows {
+		m.queueReportRow(pending, job, row)
+	}
 }
 
 // queueReportRow appends one row to the recipient's backlog under its cap.

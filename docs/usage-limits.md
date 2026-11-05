@@ -629,9 +629,9 @@ mode = "shadow"
 - **`report_to` prompts another session** with the structured events:
   `<project>/<title>` or a unique bare title resolves one live session —
   ambiguous or absent matches are skipped and logged, never guessed. Reports
-  use a fixed template of reason codes and parameters (never pane text),
-  batch into a digest at most once a minute, and `halted`/`move-failed`
-  deliver immediately but only once each. Delivery never delays a tick.
+  use a fixed template of reason codes and parameters (never pane text) and
+  batch into a digest at most once a minute — every row batches; shadow
+  mode has no immediate-delivery path. Delivery never delays a tick.
 - **Opt-in discovery is event-driven, not polled.** The daemon looks for
   `mode = "shadow"` at startup, on every `af config` write, and when a
   session is created — never on a timer. Hand-editing a personal project's
