@@ -11,6 +11,11 @@
 # so the next marked daemon start reaps sandboxes that are expired or whose
 # creator is gone. Keep this schema in sync with internal/throwawaysandbox.
 #
+# When a sandbox root is recorded, mark also plants .af-throwaway-sandbox in
+# it containing the marker's created_unix — the sentinel that proves the
+# sandbox created the tree, which the reaper requires before trusting the
+# recorded tmux directory.
+#
 # Environment:
 #   AF_SANDBOX_MAX_LIFETIME   seconds; preferred. Falls back to
 #                             AF_PLAYTEST_MAX_LIFETIME, then the shared
@@ -81,16 +86,24 @@ throwaway_sandbox_owner_identity() {
 # atomically. Returns non-zero without leaving a partial marker.
 throwaway_sandbox_mark() {
     local home="$1" root="$2" kind="$3"
-    local lifetime
+    local lifetime created
     lifetime="$(throwaway_sandbox_lifetime \
         "${AF_SANDBOX_MAX_LIFETIME:-${AF_PLAYTEST_MAX_LIFETIME:-}}")" || return
+    created="$(date +%s)"
     mkdir -p "$home" || return
+    # The sentinel binds the root's creation to THIS marker instance: the
+    # reaper trusts the recorded tmux dir only when the sentinel's content
+    # is the marker's created_unix. Best-effort — a root that cannot take
+    # the sentinel simply yields no tmux membership, never a failed mark.
+    if [[ -n "$root" ]] && mkdir -p "$root" 2>/dev/null; then
+        printf '%s\n' "$created" >"$root/.af-throwaway-sandbox" 2>/dev/null || true
+    fi
     local tmp="$home/.throwaway-sandbox.json.tmp"
     if ! {
         printf '{\n'
         printf '  "version": 1,\n'
         printf '  "kind": %s,\n' "$(throwaway_sandbox_json_quote "$kind")"
-        printf '  "created_unix": %s,\n' "$(date +%s)"
+        printf '  "created_unix": %s,\n' "$created"
         printf '  "max_lifetime_seconds": %s,\n' "$lifetime"
         if [[ -n "${AF_SANDBOX_OWNER_PID:-}" ]]; then
             throwaway_sandbox_owner_identity "$AF_SANDBOX_OWNER_PID"

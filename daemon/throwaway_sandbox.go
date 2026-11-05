@@ -23,16 +23,25 @@ package daemon
 //     safety net. The sweep is gated on this daemon's own marker: a real
 //     install never sweeps, and teardown refuses the default home outright.
 //
-// Membership is proven per process, never inherited: a pid is a member only
-// when its own environment binds it to the marked home (or to the marker's
-// proven-private tmux dir), it started no earlier than the marker it is
-// being killed under, it shares this process's filesystem root, and it is
-// not shared infrastructure — a tmux server whose socket is not the
-// sandbox's private dir, or any process holding a named socket outside the
-// sandbox's own storage. Descent from a member is not proof, and neither is
-// an environment a shared server merely inherited. Every signal still goes
+// Membership is proven per process and NEVER from environment variables:
+// environments propagate — tmux copies a creator's environment into a
+// shared server's global environment, so an inherited AGENT_FACTORY_HOME
+// can sit inside a production pane. A pid is a member only when one of
+// two positive proofs holds:
+//
+//   - it runs UNDER the sandbox's own private tmux server — a server the
+//     kernel itself shows listening on a socket inside a directory the
+//     marker records AND the root sentinel proves this sandbox created;
+//     or
+//   - its (pid, start id) pair was recorded in the home when the sandbox
+//     started it — the daemon records itself, so a reparented daemon is
+//     still reachable.
+//
+// Where socket evidence cannot be read (non-Linux), the first proof can
+// never hold and only recorded pids are members. Every signal still goes
 // through proctree's identity-checked paths, and anything the code cannot
-// prove is left running.
+// prove is left running — including shared servers, their panes, and
+// anything merely carrying sandbox environment.
 
 import (
 	"context"
@@ -52,7 +61,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 	"github.com/sachiniyer/agent-factory/log"
-	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // throwawayCheckInterval is how often a marked daemon rechecks its declared
@@ -81,23 +89,19 @@ const throwawaySweepMaxHomes = 64
 
 var throwawaySweepBudget = 30 * time.Second
 
-// Seams so the wiring — sweep selection, env binding, owner identity —
+// Seams so the wiring — sweep selection, socket proofs, owner identity —
 // can be driven by fixtures rather than real processes.
 var (
 	throwawayNowFn         = time.Now
 	throwawayRegistryDirFn = func() string { return throwawaysandbox.RegistryDir(os.TempDir(), os.Getuid()) }
 	throwawaySnapshotFn    = proctree.Snapshot
 	throwawayLookupFn      = proctree.Lookup
-	throwawayLookupEnvFn   = proctree.LookupEnv
 	throwawayUIDFn         = proctree.UID
-	throwawayWorkingDirFn  = proctree.WorkingDir
 	throwawaySameRootFn    = sameProcessRoot
-	// Server-identification seams: a process that IS a shared server is
-	// never a sandbox member no matter what its environment says, and the
-	// tmux-server shape needs its own socket-path proof because argv can be
-	// retitled (tmux: server) or flag-free (-L only, BSD rc.d).
+	// Server-identification seams: a tmux server is proven private by the
+	// unix sockets the kernel reports it holding — the only socket
+	// evidence that survives argv retitling and absent environment.
 	throwawayIsTmuxServerFn    = proctree.IsTmuxServer
-	throwawayArgvFn            = proctree.Argv
 	throwawayUnixSocketPathsFn = unixSocketPathsOf
 	throwawayScopeIDsFn        = func() (boot, ns string) {
 		b, _ := proctree.BootID()
@@ -159,6 +163,23 @@ func registerThrowawaySandbox(home string) {
 	}
 	if err := throwawaysandbox.WriteRegistryEntry(throwawayRegistryDirFn(), canon); err != nil {
 		log.WarningLog.Printf("throwaway sandbox home %s could not be registered; a later marked start cannot sweep it: %v", home, err)
+	}
+}
+
+// recordThrowawayDaemon lists this daemon's own process instance in the
+// marked home's recorded-pid file. It is the (b) membership proof: the
+// daemon is reparented to init, so it is never "under" the private tmux
+// server — only a recorded (pid, start id) lets a teardown still reach
+// it. Best-effort: a home whose file cannot be written keeps the deadline
+// watchdog either way.
+func recordThrowawayDaemon(home string) {
+	cur, err := throwawayLookupFn(os.Getpid())
+	if err != nil {
+		log.WarningLog.Printf("throwaway sandbox daemon could not read its own start id; teardown will not reach it by pid: %v", err)
+		return
+	}
+	if err := throwawaysandbox.WriteRecordedPID(home, cur.PID, cur.StartID); err != nil {
+		log.WarningLog.Printf("throwaway sandbox daemon could not record its pid in %s: %v", home, err)
 	}
 }
 
@@ -334,7 +355,7 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 		log.ErrorLog.Printf("refusing to tear down the default AF home %s", canonHome)
 		return
 	}
-	procs, unresolved := throwawayBoundProcesses(canonHome, m)
+	procs := throwawayMemberProcesses(canonHome, m)
 	killThrowawayTmuxSockets(canonHome, m)
 	if len(procs) == 0 {
 		return
@@ -353,25 +374,27 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 		}
 		log.WarningLog.Printf("throwaway teardown of %s left %d processes after SIGKILL: %s", home, len(remaining), strings.Join(pids, ","))
 	}
-	if unresolved > 0 {
-		log.InfoLog.Printf("throwaway teardown of %s left %d processes whose environment could not be read; unproven processes are left alone", home, unresolved)
-	}
 }
 
-// throwawayPrivateTmuxDir returns the marker's recorded TMUX_TMPDIR when it
-// proves private to the sandbox — an ALLOWLIST, not a denylist. The dir is
-// trusted only when the recorded shape is the one the scaffolding actually
-// creates: a sandbox root that contains the marked home itself, and the tmux
-// dir strictly inside that root. Neither the root nor the dir may be — or
-// contain — any directory other users' tmux servers (or this install's real
-// one) could be serving from: the real tmux socket directories under every
-// plausible base, the shared tmp bases themselves, and the user's home.
-// That refusal is computed from the box's fixed shapes, never from the
-// reaper's own TMPDIR — a daemon started with TMPDIR=/var/tmp must refuse
-// /tmp exactly as hard as one started under /tmp. Absent or untrusted
-// metadata means NO tmux teardown: the empty first return with an empty
-// reason is simply "nothing recorded". The second return is the refusal
-// reason for logging; empty means the dir is proven private.
+// throwawayPrivateTmuxDir returns the marker's recorded TMUX_TMPDIR when
+// the sandbox itself provably created it — POSITIVE proof, not a denylist.
+// Three conditions must all hold:
+//
+//   - the recorded sandbox root carries the creation sentinel the
+//     scaffolding plants, and the sentinel's content is THIS marker's
+//     created_unix — a root the sandbox made at mark time proves every
+//     dir inside it is sandbox-created too;
+//   - the marked home sits inside that proven root, so a marker pointing
+//     at someone else's tree gains nothing;
+//   - the tmux dir sits strictly inside the proven root and, when it
+//     exists, is a real directory owned by this uid.
+//
+// There is no shared-shape list: $HOME/.cache, /tmp, or any other path is
+// refused for exactly one reason — no sentinel proves this sandbox made
+// it. The proof also ignores the reaper's own environment entirely.
+// Absent metadata means "nothing recorded": the empty first return with
+// an empty reason is a no-op, not a refusal. The second return is the
+// refusal reason for logging; empty means the dir is proven private.
 func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (string, string) {
 	if m.TmuxTmpdir == "" || m.SandboxRoot == "" {
 		return "", ""
@@ -385,87 +408,43 @@ func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (stri
 		return "", ""
 	}
 	sep := string(os.PathSeparator)
-	// The reaper's own TMUX_TMPDIR is shared evidence — EXCEPT when it is
-	// exactly the dir this marker recorded: a marked daemon inherits the
-	// sandbox's private dir, so its own env would otherwise refuse the
-	// sandbox it serves. The exemption is narrow — only the claimed dir
-	// itself, and only after it also passes the root/home proofs below —
-	// so an env dir the marker does not record stays shared.
-	exempt := ""
-	if env := os.Getenv("TMUX_TMPDIR"); env != "" {
-		if ec, err := canonicalDir(env); err == nil && ec == tmuxDir {
-			exempt = ec
-		}
-	}
-	if refuse := sharedDirCollision(root, "sandbox root", exempt); refuse != "" {
-		return "", refuse
+	if !sandboxRootCreatedByMarker(root, m.CreatedUnix) {
+		return "", fmt.Sprintf("recorded sandbox root %s carries no creation sentinel bound to this marker", root)
 	}
 	if canonHome != root && !strings.HasPrefix(canonHome, root+sep) {
 		return "", fmt.Sprintf("marked home %s is not inside recorded sandbox root %s", canonHome, root)
 	}
-	if refuse := sharedDirCollision(tmuxDir, "recorded tmux dir", exempt); refuse != "" {
-		return "", refuse
-	}
 	if tmuxDir == root || !strings.HasPrefix(tmuxDir, root+sep) {
 		return "", fmt.Sprintf("recorded tmux dir %s is not inside sandbox root %s", tmuxDir, root)
+	}
+	if fi, err := os.Lstat(tmuxDir); err == nil {
+		if !fi.IsDir() || fi.Mode()&os.ModeSymlink != 0 {
+			return "", fmt.Sprintf("recorded tmux dir %s is not a real directory", tmuxDir)
+		}
+		if st, ok := fi.Sys().(*syscall.Stat_t); ok && int(st.Uid) != os.Getuid() {
+			return "", fmt.Sprintf("recorded tmux dir %s is owned by uid %d", tmuxDir, st.Uid)
+		}
 	}
 	return tmuxDir, ""
 }
 
-// sharedDirCollision refuses when dir IS a shared directory or an ANCESTOR
-// of one: sockets under an ancestor's subtree include the shared dir itself,
-// so walking/killing through it is the same hazard as naming it. exempt
-// names the marker's own claimed tmux dir: it and its whole subtree (the
-// tmux-<uid> socket dir derived under it) are sandbox-owned by construction
-// and must not collide with themselves.
-func sharedDirCollision(dir, what, exempt string) string {
-	sep := string(os.PathSeparator)
-	for _, shared := range throwawaySharedDirs() {
-		if exempt != "" && (shared == exempt || strings.HasPrefix(shared, exempt+sep)) {
-			continue
-		}
-		if dir == shared || strings.HasPrefix(shared, dir+sep) {
-			return fmt.Sprintf("%s %s is or contains shared directory %s", what, dir, shared)
-		}
+// sandboxRootCreatedByMarker reports whether the recorded sandbox root
+// carries the scaffolding's creation sentinel bound to THIS marker: a
+// trusted, uid-owned, regular file whose content is the marker's own
+// created_unix. The sentinel is the only way a directory proves the
+// sandbox made it — a path that merely exists proves nothing.
+func sandboxRootCreatedByMarker(root string, createdUnix int64) bool {
+	data, err := throwawaysandbox.TrustedOwnedFile(filepath.Join(root, throwawaysandbox.RootSentinelName))
+	if err != nil {
+		return false
 	}
-	return ""
-}
-
-// throwawaySharedDirs enumerates every directory a legitimate shared or
-// real tmux socket can live under, canonicalized: the fixed tmp bases (not
-// just os.TempDir — the answer must not depend on the reaper's TMPDIR), the
-// per-user tmux-<uid> socket dir under each of them plus the reaper's own
-// TMUX_TMPDIR, and the user's home with its conventional ~/.tmux dir. A
-// base that cannot be canonicalized is skipped — an unresolvable base cannot
-// host a socket the marker could reach anyway.
-func throwawaySharedDirs() []string {
-	uid := strconv.Itoa(os.Getuid())
-	bases := []string{"/", "/tmp", "/var/tmp", os.TempDir()}
-	if env := os.Getenv("TMUX_TMPDIR"); env != "" {
-		bases = append(bases, env)
-	}
-	var dirs []string
-	add := func(p string) {
-		if c, err := canonicalDir(p); err == nil {
-			dirs = append(dirs, c)
-		}
-	}
-	for _, b := range bases {
-		add(b)
-		add(filepath.Join(b, "tmux-"+uid))
-	}
-	if home, err := os.UserHomeDir(); err == nil {
-		add(home)
-		add(filepath.Join(home, ".tmux"))
-		add(filepath.Join(home, ".tmux", "tmux-"+uid))
-	}
-	return dirs
+	return strings.TrimSpace(string(data)) == strconv.FormatInt(createdUnix, 10)
 }
 
 // killThrowawayTmuxSockets runs kill-server on every unix socket under the
 // marker's private TMUX_TMPDIR. Privacy is proven by
-// throwawayPrivateTmuxDir first; a refused dir leaves the env-bound
-// teardown to do the work instead.
+// throwawayPrivateTmuxDir first; a refused dir means no socket kills at
+// all — whatever is on the other end is not the sandbox's server.
 func killThrowawayTmuxSockets(canonHome string, m *throwawaysandbox.Marker) {
 	tmuxDir, refuse := throwawayPrivateTmuxDir(canonHome, m)
 	if tmuxDir == "" {
@@ -501,297 +480,120 @@ func killThrowawayTmuxSocket(sock string) error {
 	return cmd.Run()
 }
 
-// throwawayBoundProcesses returns the processes that independently prove
-// membership in this sandbox instance — no trees, no descent. Each pid must
-// satisfy processMemberOfSandbox on its own evidence, and the instance the
-// snapshot described must still own the pid when it is selected (a pid
-// recycled between snapshot and selection is skipped, not killed). The
-// daemon calling this always excludes itself by pid: a daemon serving the
-// marked home IS bound to it and must not signal itself mid-teardown, and
-// when the sweep runs its own home never binds to the target anyway.
-// unresolved counts processes whose evidence could not be read at all —
-// "could not look" is never a kill.
-func throwawayBoundProcesses(canonHome string, m *throwawaysandbox.Marker) (bound []proctree.Process, unresolved int) {
+// throwawayMemberProcesses returns the processes proven to belong to this
+// sandbox instance. Membership never reads environment variables — they
+// propagate through shared tmux servers into production panes. A pid is a
+// member only when:
+//
+//   - (a) it is, or runs under, a tmux server the KERNEL shows listening
+//     on a socket inside the marker's proven-private tmux dir — the
+//     server's whole tree plus every process sharing a member's session
+//     id (pane strays reparented to init); or
+//   - (b) its (pid, start id) was recorded in the home's recorded-pid
+//     file, and the current instance at that pid still matches.
+//
+// Where socket evidence cannot be read at all, (a) can never hold; a pid
+// recycled after the snapshot is skipped, not killed. The reaper's own
+// pid and pid 1 are always excluded.
+func throwawayMemberProcesses(canonHome string, m *throwawaysandbox.Marker) []proctree.Process {
 	snap, err := throwawaySnapshotFn()
 	if err != nil {
 		log.WarningLog.Printf("throwaway teardown cannot snapshot the process table; leaving %s in place: %v", canonHome, err)
-		return nil, 0
+		return nil
 	}
 	self := os.Getpid()
-	// The recorded tmux dir binds processes only when it is proven private
-	// to the sandbox — a shared dir like /tmp must never make unrelated
-	// tmux sessions part of the kill set (#6844 review).
-	canonTmux, _ := throwawayPrivateTmuxDir(canonHome, m)
-	for pid, p := range snap {
-		if pid == self {
-			continue
-		}
-		member, proven := processMemberOfSandbox(pid, p, canonHome, canonTmux, m.CreatedUnix)
-		if !proven {
-			unresolved++
-			continue
-		}
-		if !member {
-			continue
-		}
-		// The environment was read AFTER the snapshot: re-lookup the pid and
-		// require the same instance. A pid that exited or recycled between
-		// the two reads names a different process than the one whose
-		// environment was just proven — it is skipped, never signalled.
-		cur, err := throwawayLookupFn(pid)
-		if err != nil || cur.StartID != p.StartID {
-			continue
-		}
-		bound = append(bound, p)
-	}
-	return bound, unresolved
-}
-
-// processMemberOfSandbox decides whether pid is a member of THIS sandbox
-// instance. Membership is per-process proof, not lineage:
-//
-//   - the process must share this process's filesystem root — an env path
-//     read under a different root/mount namespace resolves against a
-//     different filesystem, so nothing about it can be proven;
-//   - its own environment must bind it to the marked home or the proven
-//     private tmux dir — descent from a bound parent, or a binding another
-//     process happened to inherit, is not proof of anything;
-//   - it must not have started before the marker was written — the marker
-//     names an instance, not a path, and a process that predates it cannot
-//     belong to the sandbox it declares;
-//   - and it must not be shared infrastructure — a tmux server whose socket
-//     is not inside the sandbox's private dir, or any process holding a
-//     named unix socket outside the sandbox's own storage. A server the
-//     sandbox environment spawned but did not create inside its own private
-//     tmux directory is never a member: killing it would take the real
-//     install's panes — or another user's — with it.
-//
-// proven=false means the process could not be evaluated at all (foreign
-// uid, foreign root, unreadable environment) — unknown is never a member
-// and never a kill.
-func processMemberOfSandbox(pid int, p proctree.Process, canonHome, canonTmux string, createdUnix int64) (member, proven bool) {
-	if !throwawaySameRootFn(pid) {
-		return false, false
-	}
-	envBound, proven := processBoundToThrowawayHome(pid, canonHome, canonTmux)
-	if !proven || !envBound {
-		return false, proven
-	}
-	if p.StartedAt.IsZero() || p.StartedAt.Unix() < createdUnix {
-		return false, true
-	}
-	if throwawaySharedInfraProcess(pid, canonHome, canonTmux) {
-		return false, true
-	}
-	return true, true
-}
-
-// throwawaySharedInfraProcess reports whether pid is shared infrastructure
-// the sandbox must never claim, regardless of what its environment binds it
-// to. Two shapes qualify: a tmux server whose socket is not proven inside
-// the sandbox's private dir (the production server spawned from a sandbox
-// shell is the canonical hazard), and any process holding a named unix
-// socket outside the sandbox's own storage — an ssh ControlMaster, an
-// agent's control socket, anything another client can find. A process whose
-// sockets cannot be inspected shows no shared evidence; the tmux-server
-// shape keeps its own stricter proof because its argv is visible on every
-// platform.
-func throwawaySharedInfraProcess(pid int, canonHome, canonTmux string) bool {
-	if throwawayIsTmuxServerFn(pid) {
-		return !tmuxServerSocketPrivate(pid, canonTmux)
-	}
-	paths, ok := throwawayUnixSocketPathsFn(pid)
-	if !ok {
-		return false
-	}
-	for _, p := range paths {
-		if c, ok := resolveEnvPathInProcFrame(pid, p); !ok || !insideSandboxStorage(c, canonHome, canonTmux) {
-			return true
+	members := make(map[int]proctree.Process)
+	add := func(p proctree.Process) {
+		if p.PID > 1 && p.PID != self {
+			members[p.PID] = p
 		}
 	}
-	return false
-}
-
-// insideSandboxStorage reports whether a canonical path lives under the
-// sandbox's own storage — the marked home or its proven-private tmux dir.
-// Sockets there serve this sandbox; sockets anywhere else serve someone
-// else.
-func insideSandboxStorage(c, canonHome, canonTmux string) bool {
-	sep := string(os.PathSeparator)
-	if c == canonHome || strings.HasPrefix(c, canonHome+sep) {
-		return true
-	}
-	return canonTmux != "" && (c == canonTmux || strings.HasPrefix(c, canonTmux+sep))
-}
-
-// tmuxServerSocketPrivate proves a tmux server's socket lives inside the
-// sandbox's private dir. Every discovered candidate — argv -S/--socket, the
-// BSD retitle argv0, a -L socket name resolved under the server's own
-// TMUX_TMPDIR, and any socket the kernel reports — must resolve inside
-// canonTmux, and at least one must exist: an uninspectable server is not
-// proven private, so it is never a member.
-func tmuxServerSocketPrivate(pid int, canonTmux string) bool {
-	if canonTmux == "" {
-		return false
-	}
-	candidates := tmuxServerSocketCandidates(pid)
-	if len(candidates) == 0 {
-		return false
-	}
-	sep := string(os.PathSeparator)
-	for _, cand := range candidates {
-		c, ok := resolveEnvPathInProcFrame(pid, cand)
-		if !ok || (c != canonTmux && !strings.HasPrefix(c, canonTmux+sep)) {
-			return false
-		}
-	}
-	return true
-}
-
-// tmuxServerSocketCandidates collects every socket path a tmux server might
-// be serving: the -S/--socket flag value, the BSD-retitled argv0 form
-// "tmux: server (<sock>)", the -L/--socket-name form resolved under the
-// server's own TMUX_TMPDIR (or the /tmp default), and the unix sockets the
-// kernel reports it holding. Duplicates collapse; nothing here decides
-// trust — tmuxServerSocketPrivate does.
-func tmuxServerSocketCandidates(pid int) []string {
-	seen := make(map[string]bool)
-	var out []string
-	add := func(s string) {
-		if s != "" && !seen[s] {
-			seen[s] = true
-			out = append(out, s)
-		}
-	}
-	argv := throwawayArgvFn(pid)
-	if len(argv) > 0 {
-		if rest, ok := strings.CutPrefix(argv[0], "tmux: server ("); ok {
-			add(strings.TrimSuffix(rest, ")"))
-		}
-	}
-	for i, a := range argv {
-		switch {
-		case (a == "-S" || a == "--socket") && i+1 < len(argv):
-			add(argv[i+1])
-		case strings.HasPrefix(a, "-S="):
-			add(strings.TrimPrefix(a, "-S="))
-		case strings.HasPrefix(a, "--socket="):
-			add(strings.TrimPrefix(a, "--socket="))
-		case (a == "-L" || a == "--socket-name") && i+1 < len(argv):
-			base := "/tmp"
-			if v, st := throwawayLookupEnvFn(pid, "TMUX_TMPDIR"); st == proctree.EnvFound && v != "" {
-				base = v
+	// (a) The private tmux dir binds the server only when the root
+	// sentinel proves the sandbox made it — a dir the sandbox did not
+	// create can host other users' servers.
+	if canonTmux, _ := throwawayPrivateTmuxDir(canonHome, m); canonTmux != "" {
+		for pid := range snap {
+			if !tmuxServerSocketPrivate(pid, canonTmux) {
+				continue
 			}
-			add(filepath.Join(base, "tmux-"+strconv.Itoa(os.Getuid()), argv[i+1]))
+			tree := proctree.TreeOf(snap, pid)
+			for _, q := range tree {
+				add(q)
+				// A pane process reparented to init keeps its pane's
+				// session id — SessionMembers reaches the strays TreeOf
+				// cannot. A non-positive SID matches nothing by contract.
+				for _, r := range proctree.SessionMembers(snap, q.SID) {
+					add(r)
+				}
+			}
 		}
 	}
-	if paths, ok := throwawayUnixSocketPathsFn(pid); ok {
-		for _, p := range paths {
-			add(p)
-		}
+	// (b) Process instances the sandbox recorded at spawn time.
+	for _, member := range throwawayRecordedMembers(canonHome) {
+		add(member)
+	}
+	out := make([]proctree.Process, 0, len(members))
+	for _, p := range members {
+		out = append(out, p)
 	}
 	return out
 }
 
-// processBoundToThrowawayHome reports whether pid's environment proves it
-// belongs to the marked home: AGENT_FACTORY_HOME or AF_HOME resolving to it,
-// or — only when the marker recorded a private TMUX_TMPDIR — TMUX_TMPDIR
-// resolving to it or a TMUX socket under it. proven=false means every
-// environment read failed, which is "could not look", never a kill.
-// Environment binding is the membership gate, not membership: the caller
-// still owes the instance-start and shared-infrastructure checks in
-// processMemberOfSandbox.
-func processBoundToThrowawayHome(pid int, canonHome, canonTmux string) (bound bool, proven bool) {
-	if uid, ok := throwawayUIDFn(pid); !ok || uid != os.Getuid() {
-		return false, false
-	}
-	if v, st := throwawayLookupEnvFn(pid, "AGENT_FACTORY_HOME"); st != proctree.EnvUnknown {
-		proven = true
-		if st == proctree.EnvFound {
-			if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonHome {
-				return true, true
-			}
+// throwawayRecordedMembers returns the live processes named by the home's
+// recorded-pid file whose current instance still matches the recorded
+// (pid, start id) — proof the record names THIS process, not a recycled
+// slot. Each must also still be same-uid and in this filesystem root: a
+// record is a teardown target, so every check it could plausibly fail is
+// checked. An unreadable or untrusted file contributes nothing.
+func throwawayRecordedMembers(canonHome string) []proctree.Process {
+	recs, err := throwawaysandbox.ReadRecordedPIDs(canonHome)
+	if err != nil {
+		if !errors.Is(err, os.ErrNotExist) {
+			log.WarningLog.Printf("throwaway teardown could not read recorded pids in %s; skipping recorded membership: %v", canonHome, err)
 		}
+		return nil
 	}
-	if v, st := throwawayLookupEnvFn(pid, sessiontmux.EnvMarkerHome); st != proctree.EnvUnknown {
-		proven = true
-		if st == proctree.EnvFound {
-			if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonHome {
-				return true, true
-			}
+	var members []proctree.Process
+	for _, rec := range recs {
+		cur, err := throwawayLookupFn(rec.PID)
+		if err != nil || cur.StartID != rec.StartID {
+			continue // dead or recycled — the record names a process that no longer exists
 		}
+		if uid, ok := throwawayUIDFn(rec.PID); !ok || uid != os.Getuid() {
+			continue
+		}
+		if !throwawaySameRootFn(rec.PID) {
+			continue
+		}
+		members = append(members, cur)
 	}
-	if canonTmux != "" {
-		sep := string(os.PathSeparator)
-		if v, st := throwawayLookupEnvFn(pid, "TMUX_TMPDIR"); st != proctree.EnvUnknown {
-			proven = true
-			if st == proctree.EnvFound {
-				if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonTmux {
-					return true, true
-				}
-			}
-		}
-		if v, st := throwawayLookupEnvFn(pid, "TMUX"); st != proctree.EnvUnknown {
-			proven = true
-			if st == proctree.EnvFound {
-				if sock, _, _ := strings.Cut(v, ","); sock != "" {
-					if c, ok := resolveEnvPathInProcFrame(pid, sock); ok && strings.HasPrefix(c, canonTmux+sep) {
-						return true, true
-					}
-				}
-			}
-		}
-	}
-	return false, proven
+	return members
 }
 
-// resolveEnvPathInProcFrame absolutizes an environment-derived path the way
-// the process carrying it resolves it, and canonicalizes the result. A
-// relative or tilde spelling means something only in THAT process's frame —
-// the reaping daemon's own cwd is the marked home after chdirToNeutralHome,
-// so joining "." to it would bind every same-user process that happens to
-// carry a relative AGENT_FACTORY_HOME (the same hazard classifyDaemonHome
-// resolves through resolveHomeInDaemonFrame). Absolute spellings pass
-// through; "~"/"~/" expand against the target's own HOME; "~user" forms are
-// unresolvable, matching config.ConfigDirFor's rejection; and anything else
-// joins /proc/<pid>/cwd. ok=false means the frame cannot be proven — the
-// caller leaves the process alone rather than guessing in ours.
-func resolveEnvPathInProcFrame(pid int, p string) (string, bool) {
-	var joined string
-	switch {
-	case p == "":
-		return "", false
-	case filepath.IsAbs(p):
-		joined = p
-	case p == "~" || strings.HasPrefix(p, "~/"):
-		home, st := throwawayLookupEnvFn(pid, "HOME")
-		if st != proctree.EnvFound || home == "" {
-			return "", false
+// tmuxServerSocketPrivate proves a tmux server is the sandbox's own by
+// socket evidence ALONE: the kernel must report it holding at least one
+// named unix socket, and every reported socket must resolve inside the
+// proven-private tmux dir. ok=false (no socket evidence — non-Linux, or
+// an uninspectable process) means the server can never be proven, so it
+// is never a member: that fails closed exactly where the alternative
+// would aim signals at a shared server.
+func tmuxServerSocketPrivate(pid int, canonTmux string) bool {
+	if canonTmux == "" || !throwawayIsTmuxServerFn(pid) || !throwawaySameRootFn(pid) {
+		return false
+	}
+	if uid, ok := throwawayUIDFn(pid); !ok || uid != os.Getuid() {
+		return false
+	}
+	paths, ok := throwawayUnixSocketPathsFn(pid)
+	if !ok || len(paths) == 0 {
+		return false
+	}
+	sep := string(os.PathSeparator)
+	for _, p := range paths {
+		c, err := canonicalDir(p)
+		if err != nil || (c != canonTmux && !strings.HasPrefix(c, canonTmux+sep)) {
+			return false
 		}
-		joined = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
-	case strings.HasPrefix(p, "~"):
-		return "", false
-	default:
-		cwd, ok := throwawayWorkingDirFn(pid)
-		if !ok || cwd == "" {
-			return "", false
-		}
-		joined = filepath.Join(cwd, p)
 	}
-	if !filepath.IsAbs(joined) {
-		return "", false
-	}
-	// Reuse the sigterm-fallback guards rather than re-deriving them: a
-	// spelling that IS a process-relative procfs path — or whose symlink
-	// chain enters one — resolves in OUR frame, not the target's. Such a
-	// value is unresolvable as evidence, the same verdict those guards give
-	// classifyDaemonHome.
-	if isProcessRelativeProcfsHome(joined) || homeSymlinkEntersProcessRelativeProcfs(joined) {
-		return "", false
-	}
-	c, err := canonicalDir(joined)
-	if err != nil {
-		return "", false
-	}
-	return c, true
+	return true
 }

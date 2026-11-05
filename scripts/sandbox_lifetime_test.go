@@ -74,11 +74,12 @@ func markForTest(t *testing.T, script string, home string, args ...string) *thro
 
 func TestSandboxMarkWritesTheContract(t *testing.T) {
 	home := t.TempDir()
+	root := t.TempDir()
 	before := time.Now().Unix()
 	m := markForTest(t,
 		`unset TMUX_TMPDIR AF_SANDBOX_OWNER_PID AF_SANDBOX_MAX_LIFETIME AF_PLAYTEST_MAX_LIFETIME || true
 throwaway_sandbox_mark "$1" "$2" "$3"`,
-		home, home, "/tmp/sbx-root", "playtest-standin")
+		home, home, root, "playtest-standin")
 	if m.Version != 1 || m.Kind != "playtest-standin" {
 		t.Fatalf("marker identity wrong: %+v", m)
 	}
@@ -88,11 +89,20 @@ throwaway_sandbox_mark "$1" "$2" "$3"`,
 	if m.CreatedUnix < before || m.CreatedUnix > time.Now().Unix()+1 {
 		t.Fatalf("created_unix %d not stamped now (%d)", m.CreatedUnix, before)
 	}
-	if m.SandboxRoot != "/tmp/sbx-root" {
+	if m.SandboxRoot != root {
 		t.Fatalf("sandbox_root %q", m.SandboxRoot)
 	}
 	if m.OwnerPID != 0 || m.TmuxTmpdir != "" {
 		t.Fatalf("optional fields must stay empty: %+v", m)
+	}
+	// The root sentinel binds the tree's creation to THIS marker instance;
+	// it is what the reaper requires before trusting the tmux metadata.
+	sentinel, err := os.ReadFile(filepath.Join(root, ".af-throwaway-sandbox"))
+	if err != nil {
+		t.Fatalf("root sentinel not planted: %v", err)
+	}
+	if strings.TrimSpace(string(sentinel)) != strconv.FormatInt(m.CreatedUnix, 10) {
+		t.Fatalf("sentinel %q does not match created_unix %d", sentinel, m.CreatedUnix)
 	}
 }
 

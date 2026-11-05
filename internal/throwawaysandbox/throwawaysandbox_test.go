@@ -4,6 +4,7 @@ import (
 	"errors"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -267,5 +268,75 @@ func TestLoadMarkerRefusesSymlink(t *testing.T) {
 	}
 	if m, err := LoadMarker(home); err == nil || m != nil {
 		t.Fatalf("a symlinked marker loaded: %+v", m)
+	}
+}
+
+// TestRootSentinelBindsToCreatedUnix pins the creation-proof contract: the
+// sentinel's content IS the marker's created_unix, so a root can only
+// prove the sandbox made it when the two agree.
+func TestRootSentinelBindsToCreatedUnix(t *testing.T) {
+	root := t.TempDir()
+	if err := WriteRootSentinel(root, 1700000000); err != nil {
+		t.Fatal(err)
+	}
+	data, err := TrustedOwnedFile(filepath.Join(root, RootSentinelName))
+	if err != nil {
+		t.Fatalf("the sentinel must pass the trust bar: %v", err)
+	}
+	if got := strings.TrimSpace(string(data)); got != "1700000000" {
+		t.Fatalf("sentinel content %q", got)
+	}
+}
+
+// TestRecordedPIDsRoundTrip covers the write/read path the daemon and the
+// teardown share: entries merge without duplicating, and a missing file
+// reads as ErrNotExist.
+func TestRecordedPIDsRoundTrip(t *testing.T) {
+	home := t.TempDir()
+	if _, err := ReadRecordedPIDs(home); !errors.Is(err, os.ErrNotExist) {
+		t.Fatalf("empty home: %v", err)
+	}
+	for _, rec := range []RecordedPID{{PID: 10, StartID: 100}, {PID: 11, StartID: 110}, {PID: 10, StartID: 100}} {
+		if err := WriteRecordedPID(home, rec.PID, rec.StartID); err != nil {
+			t.Fatal(err)
+		}
+	}
+	recs, err := ReadRecordedPIDs(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(recs) != 2 {
+		t.Fatalf("recorded %d entries after dedupe, want 2: %v", len(recs), recs)
+	}
+}
+
+// TestRecordedPIDsRefusesUntrustedAndMalformed pins the trust bar on the
+// teardown's only portable membership evidence: a symlinked or malformed
+// file is never read, and a malformed file is never silently clobbered.
+func TestRecordedPIDsRefusesUntrustedAndMalformed(t *testing.T) {
+	home := t.TempDir()
+	real := filepath.Join(t.TempDir(), "pids.json")
+	if err := os.WriteFile(real, []byte(`{"version":1,"pids":[]}`+"\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(real, RecordedPIDsPath(home)); err != nil {
+		t.Skip("cannot create symlink fixture")
+	}
+	if _, err := ReadRecordedPIDs(home); err == nil {
+		t.Fatal("a symlinked recorded-pid file was read")
+	}
+	if err := WriteRecordedPID(home, 1, 1); err == nil {
+		t.Fatal("a symlinked recorded-pid file was written through")
+	}
+
+	home2 := t.TempDir()
+	if err := os.WriteFile(RecordedPIDsPath(home2), []byte("not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ReadRecordedPIDs(home2); err == nil {
+		t.Fatal("a malformed recorded-pid file was read")
+	}
+	if err := WriteRecordedPID(home2, 1, 1); err == nil {
+		t.Fatal("a malformed recorded-pid file was silently clobbered")
 	}
 }

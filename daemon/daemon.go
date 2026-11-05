@@ -200,6 +200,7 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 		throwawayHome = homeDir
 		if marker, marked := loadThrowawayMarker(homeDir); marked {
 			registerThrowawaySandbox(homeDir)
+			recordThrowawayDaemon(homeDir)
 			stopWatch := armThrowawayWatchdog(marker, throwawayExpireCh)
 			defer func() {
 				stopWatch()

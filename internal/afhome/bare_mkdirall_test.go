@@ -95,6 +95,11 @@ var allowedBareMkdirAll = map[string]struct {
 			"next marked daemon start reads it to find sandboxes whose own daemon is " +
 			"gone, so placing any of it under an AF home would chain the sweep to the " +
 			"thing it reaps. Callers pass RegistryDir(os.TempDir(), uid)."},
+	"internal/throwawaysandbox/throwawaysandbox.go:WriteRootSentinel": {1,
+		"Creates the sandbox ROOT the scaffolding declared (#6844) — the directory " +
+			"that contains the AF home, never anything under one. The marker records " +
+			"the root and the sentinel inside proves this sandbox made the tree; " +
+			"neither can live below the home they describe."},
 }
 
 func TestNoBareMkdirAllUnderTheAFHome(t *testing.T) {

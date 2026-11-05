@@ -315,24 +315,31 @@ bash scripts/container/sandbox-lifetime.sh mark "$AGENT_FACTORY_HOME" "$SANDBOX_
 The marker records the deadline (`AF_SANDBOX_MAX_LIFETIME` seconds,
 defaulting to `AF_PLAYTEST_MAX_LIFETIME` then six hours), optionally the
 creator's process identity (`AF_SANDBOX_OWNER_PID`), and the sandbox's
-private `TMUX_TMPDIR` when one exists. It is the ONLY identity the
-enforcement recognizes — nothing is ever reaped by path prefix or process
-name, and an unreadable marker authorizes nothing.
+private `TMUX_TMPDIR` when one exists. `mark` also plants a creation
+sentinel — `.af-throwaway-sandbox` in the sandbox root, containing the
+marker's `created_unix` — the positive proof that this sandbox made the
+tree. The marker is the ONLY identity the enforcement recognizes —
+nothing is ever reaped by path prefix or process name, and an unreadable
+marker authorizes nothing.
 
 Two safety nets share the marker:
 
 - **Self-enforcement.** A daemon serving a marked home arms a watchdog at
   startup: at the deadline — or within `AF_THROWAWAY_CHECK_INTERVAL` seconds
   (default 30) of the declared owner dying — it exits, and its unwind-time
-  teardown kills every process that independently proves membership: its own
-  environment binds it to the home (`AGENT_FACTORY_HOME` or `AF_HOME`
-  resolving to it, or `TMUX`/`TMUX_TMPDIR` state under the recorded private
-  dir) AND it started no earlier than the marker. Descent from a member is
-  not proof, and neither is an environment a shared server merely inherited
-  — a tmux server whose socket is not inside the recorded private dir, or
-  any process holding a named unix socket outside the sandbox's storage, is
-  never a member. That covers the driver and every agent even after the
-  daemon is reparented to init, while leaving shared infrastructure alone.
+  teardown kills the proven member set. Membership never reads environment
+  variables — tmux copies a creator's environment into a shared server's
+  global environment, so an inherited `AGENT_FACTORY_HOME` can sit inside a
+  production pane. A process is a member only when it runs under the
+  sandbox's own private tmux server — proven by the socket the kernel
+  reports it holding, inside a tmux dir the sentinel verifies the sandbox
+  created — or when its (pid, start id) was recorded in the home's
+  `throwaway-pids.json` (the daemon records itself at startup, which is how
+  teardown still reaches it after it reparents to init). Off Linux there is
+  no socket evidence, so recorded pids are the only members; a marker
+  without a usable private tmux dir likewise yields only recorded members.
+  Everything else — shared servers, their panes, foreign sockets — is left
+  alone.
 - **Next-start sweep.** A marked daemon also registers its home in a
   per-user registry under `/tmp`. On startup it reaps each registered home
   that is expired or whose declared owner is provably dead (pid gone,
@@ -340,9 +347,11 @@ Two safety nets share the marker:
   the real install never does — and teardown refuses the default AF home
   outright, whatever a file claims.
 
-Scaffolds that want their driver process bound to the teardown should export
-`AGENT_FACTORY_HOME` (and `TMUX_TMPDIR`, when using a private tmux server)
-before launching it; the pane/agent layer binds itself through `AF_HOME`.
+Scaffolds that run their driver under a private tmux server get the whole
+pane tree as members automatically — that is what `$TMUX_TMPDIR` inside the
+sandbox root plus the marker's `tmux_tmpdir` record is for. Processes a
+scaffold starts outside the private server can be added to
+`throwaway-pids.json` by writing `{"pid": N, "start_id": M}` entries.
 `AF_SANDBOX_OWNER_PID`, when used, must name a durable process — the driver
 pane or a dedicated keeper — not `$$` inside the marking shell, which dies
 with the call and trips the owner-death watchdog immediately.

@@ -83,6 +83,106 @@ type Marker struct {
 // MarkerPath returns where home's marker lives.
 func MarkerPath(home string) string { return filepath.Join(home, MarkerFileName) }
 
+// RootSentinelName is the file the scaffolding writes into a sandbox root
+// when it creates the sandbox (#6844): positive proof — never inferred —
+// that THIS sandbox instance made the tree. Its content is the marker's
+// created_unix in decimal, binding the root's creation to the marker
+// instance that claims it. A recorded sandbox_root without a sentinel is
+// just a path: it proves nothing and the reaper refuses the tmux metadata
+// entirely.
+const RootSentinelName = ".af-throwaway-sandbox"
+
+// WriteRootSentinel plants the creation sentinel inside a sandbox root the
+// scaffolding is making. createdUnix must be the same value the marker
+// records — that equality is the whole proof, so the scaffold writes both
+// from one timestamp.
+func WriteRootSentinel(root string, createdUnix int64) error {
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		return err
+	}
+	return os.WriteFile(filepath.Join(root, RootSentinelName),
+		[]byte(strconv.FormatInt(createdUnix, 10)+"\n"), 0o600)
+}
+
+// TrustedOwnedFile reads path only when it is a regular, non-symlink file
+// owned by this uid — the same anchor trustedFileOwner applies to markers
+// and registry entries. Sandbox evidence a process could redirect (a
+// sentinel, a recorded-pid file) is parsed only under that bar.
+func TrustedOwnedFile(path string) ([]byte, error) {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return nil, err
+	}
+	if err := trustedFileOwner(fi); err != nil {
+		return nil, fmt.Errorf("untrusted file %s: %w", path, err)
+	}
+	return os.ReadFile(path)
+}
+
+// PidsFileName is where a marked home lists the (pid, start id) instances
+// the sandbox recorded at spawn time — membership evidence for the
+// teardown's recorded-pid path, the only membership path that survives
+// where socket evidence cannot be read.
+const PidsFileName = "throwaway-pids.json"
+
+// RecordedPID names one process instance the sandbox started. StartID is
+// proctree's platform start stamp; it is compared for equality only.
+type RecordedPID struct {
+	PID     int    `json:"pid"`
+	StartID uint64 `json:"start_id"`
+}
+
+type recordedPIDs struct {
+	Version int           `json:"version"`
+	PIDs    []RecordedPID `json:"pids"`
+}
+
+// RecordedPIDsPath is where home's recorded-pid list lives.
+func RecordedPIDsPath(home string) string { return filepath.Join(home, PidsFileName) }
+
+// ReadRecordedPIDs returns the process instances home has recorded. The
+// file must pass the same trust bar as the marker — a recorded pid is a
+// teardown target, so a list anyone else could have planted is not read.
+// ErrNotExist means nothing was recorded; malformed or untrusted content
+// is an error the caller must fail closed on.
+func ReadRecordedPIDs(home string) ([]RecordedPID, error) {
+	data, err := TrustedOwnedFile(RecordedPIDsPath(home))
+	if err != nil {
+		return nil, err
+	}
+	var r recordedPIDs
+	if err := json.Unmarshal(data, &r); err != nil {
+		return nil, fmt.Errorf("parsing recorded pids: %w", err)
+	}
+	return r.PIDs, nil
+}
+
+// WriteRecordedPID merges (pid, startID) into home's recorded-pid list
+// atomically. A list that exists but fails the trust/parse bar is refused
+// rather than rewritten over — the reaper would have refused it anyway,
+// and clobbering it would erase the evidence of the tampering.
+func WriteRecordedPID(home string, pid int, startID uint64) error {
+	existing, err := ReadRecordedPIDs(home)
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return err
+	}
+	for _, r := range existing {
+		if r.PID == pid && r.StartID == startID {
+			return nil
+		}
+	}
+	data, err := json.Marshal(recordedPIDs{Version: markerVersion, PIDs: append(existing, RecordedPID{PID: pid, StartID: startID})})
+	if err != nil {
+		return err
+	}
+	path := RecordedPIDsPath(home)
+	tmp := path + ".tmp"
+	if err := os.WriteFile(tmp, append(data, '\n'), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp, path)
+}
+
 // Validate checks the mandatory contract fields. Unknown fields are ignored
 // so older readers tolerate markers written by newer scaffolds.
 func (m *Marker) Validate() error {

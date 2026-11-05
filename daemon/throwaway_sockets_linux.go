@@ -11,11 +11,9 @@ import (
 // unixSocketPathsOf lists every non-empty path the kernel reports for pid's
 // unix sockets — the authoritative answer to "which named sockets does this
 // process hold". A client socket the kernel left unnamed never appears, so
-// holding a path means the process bound or adopted that name: proof it is
-// shared infrastructure, whatever its inherited environment claims.
-// ok=false means the kernel would not show them — callers treat that as "no
-// evidence" for non-tmux processes but keep the tmux-server proof
-// requirement, which argv can still satisfy.
+// holding a path means the process bound or adopted that name. ok=false
+// means the kernel would not show them: no socket evidence, and a tmux
+// server without socket evidence is never proven private.
 func unixSocketPathsOf(pid int) ([]string, bool) {
 	fdDir := "/proc/" + strconv.Itoa(pid) + "/fd"
 	ents, err := os.ReadDir(fdDir)
