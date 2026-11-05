@@ -67,9 +67,12 @@ func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *sessi
 		m.pendingConversationCaptures = make(map[*session.Instance]int)
 	}
 	m.pendingConversationCaptures[inst]++
+	// Both clocks are snapshot under m.mu: the loop goroutine must never read
+	// the package vars back, or a test restoring them races it.
 	timeout := conversationCaptureTimeout
+	rearm := conversationCaptureRearmInterval
 	if m.launchBackgroundMutation(func(stop <-chan struct{}) {
-		m.conversationCaptureLoop(repoID, key, inst, snap, token, timeout, stop)
+		m.conversationCaptureLoop(repoID, key, inst, snap, token, timeout, rearm, stop)
 	}) {
 		return
 	}
@@ -127,7 +130,7 @@ func (m *Manager) finishConversationCapture(inst *session.Instance) {
 // never prompts is not in-flight work, so the fence drops between attempts;
 // held tracks what THIS loop currently owns so a displaced loop can never
 // decrement the newer generation's fence.
-func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration, stop <-chan struct{}) {
+func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout, rearm time.Duration, stop <-chan struct{}) {
 	// The arm-time increment is this loop's first holding, and the FIRST
 	// attempt is unconditional — the arm registered pending for exactly that
 	// poll, so a row that went Lost between arm and goroutine start still runs
@@ -148,7 +151,7 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 		}
 		m.finishConversationCapture(inst)
 		held = false
-		timer := time.NewTimer(conversationCaptureRearmInterval)
+		timer := time.NewTimer(rearm)
 		select {
 		case <-stop:
 			timer.Stop()

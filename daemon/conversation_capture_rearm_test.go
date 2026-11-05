@@ -105,7 +105,12 @@ func TestConversationCaptureLoopRecordsARolloutMintedAfterTheFirstWindow(t *test
 		return inst.AgentConversation().ID == "019f386f-7206-7fc2-803b-f7045e07a242"
 	}, 2*time.Second, 10*time.Millisecond,
 		"a rollout minted after the first capture window must still be recorded")
-	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", persistedConversationID(t, repoID))
+	// The in-memory commit lands before the locked persist it precedes, so the
+	// disk check gets its own Eventually rather than racing the write.
+	require.Eventually(t, func() bool {
+		return persistedConversationID(t, repoID) == "019f386f-7206-7fc2-803b-f7045e07a242"
+	}, 2*time.Second, 10*time.Millisecond,
+		"the recorded id must reach the repo's instance data")
 
 	// Recording is the loop's exit condition: the armed marker must release so
 	// a later runtime generation is never fenced by a spent loop.
