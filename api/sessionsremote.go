@@ -125,6 +125,18 @@ func routedConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) (dae
 	return resp, remoteMutationError("retry-limit --delivered", err)
 }
 
+func routedSetConversation(req daemon.SetConversationRequest) error {
+	if !apiclient.IsRemoteTarget() {
+		return daemon.SetConversation(req)
+	}
+	c, err := remoteSessionClient()
+	if err != nil {
+		return err
+	}
+	defer c.CloseIdleConnections()
+	return remoteMutationError("set-conversation", c.SetConversation(req))
+}
+
 func routedHandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.HandoffSession(req)

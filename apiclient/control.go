@@ -130,6 +130,25 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) (daemon.Resu
 	return resp, nil
 }
 
+// SetConversation asks the daemon to validate and record a provider
+// conversation id on a session's Agent tab (#6769) — the repair for a Codex
+// conversation af never captured or recorded stale. A pre-verb daemon refuses
+// loudly (route not served) rather than write an unvalidated id.
+func (c *Client) SetConversation(req daemon.SetConversationRequest) error {
+	var resp daemon.SetConversationResponse
+	err := c.call("SetConversation", req, &resp)
+	if IsRouteNotServed(err) {
+		return fmt.Errorf("this daemon does not support set-conversation (upgrade the daemon), so the session's recorded conversation was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("the conversation was not recorded: %s", resp.Reason)
+	}
+	return nil
+}
+
 // ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
 // on the operator's attestation that it already landed (#4429) — the "mark
 // delivered" exit for a sent-unverified or could-not-confirm verdict, and the

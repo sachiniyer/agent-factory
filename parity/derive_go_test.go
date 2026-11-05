@@ -120,6 +120,7 @@ var auditedRequests = map[string]reflect.Type{
 	"RebindProjectRequest":          reflect.TypeOf(daemon.RebindProjectRequest{}),
 	"SetProjectColorRequest":        reflect.TypeOf(daemon.SetProjectColorRequest{}),
 	"SetAttentionRequest":           reflect.TypeOf(daemon.SetAttentionRequest{}),
+	"SetConversationRequest":        reflect.TypeOf(daemon.SetConversationRequest{}),
 }
 
 // minGoLiterals guards against a vacuous pass: if the surfaces are refactored to

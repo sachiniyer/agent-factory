@@ -105,6 +105,9 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 	reflect.TypeFor[RenameTabResponse]():             {"name": callerText},
 	reflect.TypeFor[ReorderTabResponse]():            {"name": callerText},
 	reflect.TypeFor[SendPromptResponse]():            {"status": closedVocab("delivery status enum")},
+	// The refusal clause is daemon-composed text, not a closed vocabulary — it
+	// could embed a detail a sandbox must not read. Withheld like warning above.
+	reflect.TypeFor[SetConversationResponse](): {"reason": withheld},
 	// SetAttention answers with the one session the owner id resolved to: its id and
 	// its title, which the sandbox itself supplied. The reason a caller sets is never
 	// echoed, and the projected row drops attention entirely.
@@ -134,18 +137,19 @@ func sandboxRunStatusHead(status string) string {
 // scope. The boundary walks a response by it, and a test requires an entry for
 // every admitted route.
 var sandboxResponseTypes = map[string]reflect.Type{
-	"/v1/Snapshot":       reflect.TypeFor[SnapshotResponse](),
-	"/v1/SendPrompt":     reflect.TypeFor[SendPromptResponse](),
-	"/v1/SetAttention":   reflect.TypeFor[SetAttentionResponse](),
-	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionResponse](),
-	"/v1/CreateSession":  reflect.TypeFor[CreateSessionResponse](),
-	"/v1/CreateTab":      reflect.TypeFor[CreateTabResponse](),
-	"/v1/CloseTab":       reflect.TypeFor[CloseTabResponse](),
-	"/v1/RenameTab":      reflect.TypeFor[RenameTabResponse](),
-	"/v1/ReorderTab":     reflect.TypeFor[ReorderTabResponse](),
-	"/v1/ListTasks":      reflect.TypeFor[ListTasksResponse](),
-	"/v1/AddTask":        reflect.TypeFor[AddTaskResponse](),
-	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskResponse](),
+	"/v1/Snapshot":        reflect.TypeFor[SnapshotResponse](),
+	"/v1/SendPrompt":      reflect.TypeFor[SendPromptResponse](),
+	"/v1/SetAttention":    reflect.TypeFor[SetAttentionResponse](),
+	"/v1/SetConversation": reflect.TypeFor[SetConversationResponse](),
+	"/v1/ArchiveSession":  reflect.TypeFor[ArchiveSessionResponse](),
+	"/v1/CreateSession":   reflect.TypeFor[CreateSessionResponse](),
+	"/v1/CreateTab":       reflect.TypeFor[CreateTabResponse](),
+	"/v1/CloseTab":        reflect.TypeFor[CloseTabResponse](),
+	"/v1/RenameTab":       reflect.TypeFor[RenameTabResponse](),
+	"/v1/ReorderTab":      reflect.TypeFor[ReorderTabResponse](),
+	"/v1/ListTasks":       reflect.TypeFor[ListTasksResponse](),
+	"/v1/AddTask":         reflect.TypeFor[AddTaskResponse](),
+	"/v1/RemoveTask":      reflect.TypeFor[RemoveTaskResponse](),
 }
 
 // jsonField is one JSON-visible field of a struct type, with the struct type that

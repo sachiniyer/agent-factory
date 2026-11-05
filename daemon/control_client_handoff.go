@@ -49,6 +49,26 @@ func ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (ConfirmHandoffDe
 	return resp, nil
 }
 
+// SetConversation asks the daemon to validate and record a provider
+// conversation id on a session's Agent tab (#6769) — the repair for a Codex
+// conversation af never captured or recorded stale. The daemon refuses unless
+// the session's own rollout store proves the id belongs to it, so a pre-verb
+// daemon gets the same loud method-missing refusal rather than a silent write.
+func SetConversation(req SetConversationRequest) error {
+	var resp SetConversationResponse
+	err := callDaemon("SetConversation", req, &resp)
+	if isRPCMethodMissing(err) {
+		return fmt.Errorf("this daemon does not support set-conversation (upgrade the daemon), so the session's recorded conversation was left untouched")
+	}
+	if err != nil {
+		return err
+	}
+	if !resp.OK {
+		return fmt.Errorf("the conversation was not recorded: %s", resp.Reason)
+	}
+	return nil
+}
+
 // HandoffSession asks the daemon to continue a session under a different agent,
 // in place (#2013): swap the agent program, keep the worktree and branch, and
 // deliver a mission brief to the incoming agent.
