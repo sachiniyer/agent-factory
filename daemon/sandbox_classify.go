@@ -120,6 +120,11 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 var sandboxRunStatusHeads = map[string]bool{
 	"started": true, "sent": true, "sent-unverified": true, "sent-unconfirmed": true, "errored": true, "deferred": true, "parked": true,
 	"dropped": true, "stopped": true, "skipped": true, "ok": true,
+	// aborted is the head of the interrupted-run family the daemon persists on
+	// shutdown draining (taskStatusAbortedShutdown) and runtime replacement
+	// (taskStatusAbortedRuntimeReplaced). It is its own head (no ':'), so a
+	// closed-vocabulary consumer needs it listed — same rule as the sent-* heads.
+	"aborted": true,
 }
 
 // sandboxRunStatusHead projects a run status to its closed head, or "" when the head
