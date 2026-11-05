@@ -202,3 +202,66 @@ func TestValidateSettableConversation_BindsRuntimeProgram(t *testing.T) {
 // an id the operator just recorded — lives in the daemon's commit path under
 // the op-lock: TestCaptureAgentConversationSkipsARecordedRepair (CI per the
 // daemon-test rule).
+
+// The provider is what the launch command resolves to, not the configured
+// enum (#6769 review): a program_overrides mapping and a legacy Program that
+// IS the binary path are Codex sessions whose stores af can prove — the same
+// identity resolvedAgentLocked uses for capture.
+func TestValidateSettableConversation_IdentifiesCodexFromTheLaunchCommand(t *testing.T) {
+	t.Run("override maps the configured agent to codex", func(t *testing.T) {
+		setConversationConfig(t)
+		cfg := config.DefaultConfig()
+		cfg.ProgramOverrides = map[string]string{"aider": "codex"}
+		require.NoError(t, config.SaveConfig(cfg))
+		codexHome := t.TempDir()
+		t.Setenv("CODEX_HOME", codexHome)
+		workDir := t.TempDir()
+		writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+setConversationID+".jsonl", workDir)
+
+		inst := setConversationInstance(t, workDir)
+		inst.Program = "aider"
+		conv, err := ValidateSettableConversation(inst, setConversationID)
+		require.NoError(t, err)
+		assert.Equal(t, setConversationID, conv.ID)
+	})
+
+	t.Run("legacy Program is the codex binary path", func(t *testing.T) {
+		setConversationConfig(t)
+		codexHome := t.TempDir()
+		t.Setenv("CODEX_HOME", codexHome)
+		workDir := t.TempDir()
+		writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+setConversationID+".jsonl", workDir)
+
+		inst := setConversationInstance(t, workDir)
+		inst.Program = filepath.Join(t.TempDir(), "bin", "codex")
+		conv, err := ValidateSettableConversation(inst, setConversationID)
+		require.NoError(t, err)
+		assert.Equal(t, setConversationID, conv.ID)
+	})
+
+	t.Run("a genuinely non-codex launch still refuses", func(t *testing.T) {
+		setConversationConfig(t)
+		workDir := t.TempDir()
+		inst := setConversationInstance(t, workDir)
+		inst.Program = "claude"
+		_, err := ValidateSettableConversation(inst, setConversationID)
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "can only inspect a Codex")
+	})
+}
+
+// Two rollout files carrying the same id cannot be told apart (#6769 review):
+// the repair refuses rather than record an id the restore guard would reject
+// as ambiguous at the next resume.
+func TestValidateSettableConversation_RefusesAnAmbiguousID(t *testing.T) {
+	setConversationConfig(t)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := t.TempDir()
+	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+setConversationID+".jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-07T11-20-00-"+setConversationID+".jsonl", workDir)
+
+	_, err := ValidateSettableConversation(setConversationInstance(t, workDir), setConversationID)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "cannot prove which conversation")
+}
