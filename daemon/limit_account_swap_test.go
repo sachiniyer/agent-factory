@@ -1110,7 +1110,17 @@ func TestResumeLimitedSessions_CommittedSwapFinishesAfterAutoResumeOptOut(t *tes
 	backend.sendPromptErr = nil
 	backend.mu.Unlock()
 	advance(limitResumeBackoffBase)
+	// The transport failure left a durable could-not-confirm verdict, which
+	// never authorizes a scheduled resend (#6767): the notice may already be
+	// sitting in the replacement's composer. The explicit retry is what owns
+	// the resend now — opting out of the scheduler changes nothing for it.
 	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 0 {
+		t.Fatalf("an ambiguous verdict earned a scheduled resend: %q", prompts)
+	}
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("explicit retry of the committed swap: %v", err)
+	}
 
 	_, _, prompts := backend.snapshot()
 	if len(prompts) != 1 || !strings.Contains(prompts[0], `claude account "work"`) {
