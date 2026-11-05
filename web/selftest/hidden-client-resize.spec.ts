@@ -208,6 +208,31 @@ test("a parked client reclaims locally but never writes the shared grid", async 
   const ctx = await browser.newContext({ viewport: { width: 375, height: 667 } });
   try {
     const first = await ctx.newPage();
+    // The stranded tab's stream traffic, both directions. Leg B reads it: once a
+    // measurable host refits in the echo task (#6806), the parked tab's DOM never
+    // rests on the peer's grid, so the wire is the only witness that the echo
+    // arrived — and that the local reclaim it triggered wrote nothing (#6807).
+    const firstSent: Array<{ rows: number; cols: number }> = [];
+    const firstEchoes: Array<{ rows: number; cols: number }> = [];
+    first.on("websocket", socket => {
+      if (!new URL(socket.url()).pathname.endsWith("/stream")) return;
+      socket.on("framesent", ({ payload }) => {
+        if (typeof payload === "string") return;
+        const frame = decode(payload);
+        if (frame.op === Op.Resize) firstSent.push({ rows: frame.rows, cols: frame.cols });
+      });
+      socket.on("framereceived", ({ payload }) => {
+        if (typeof payload !== "string") return;
+        try {
+          const msg = JSON.parse(payload) as { type?: string; rows?: number; cols?: number };
+          if (msg.type === "resize" && typeof msg.rows === "number" && typeof msg.cols === "number") {
+            firstEchoes.push({ rows: msg.rows, cols: msg.cols });
+          }
+        } catch {
+          // Not a control message this spec reads.
+        }
+      });
+    });
     await open(first);
     await attach(first);
     const firstHost = first.locator(".af-term-host");
@@ -305,11 +330,26 @@ test("a parked client reclaims locally but never writes the shared grid", async 
 
     // Leg B — a second parked cycle, un-hidden WITH the focus event this time:
     // the signal path and the replay path must both converge. The peer's own
-    // viewport resize is what re-strands the re-parked tab. Both cursors are
+    // viewport resize sends the re-parked tab a foreign echo. Both cursors are
     // still parked on the appbar from leg A — the peer's reflow under its own
     // cursor is what fired the trusted pointerenter and bounced the grid on
     // the CI run this comment now guards (see the header).
+    //
+    // That echo no longer strands the tab, even for a moment: a measurable
+    // host re-asserts its own fit in the echo task (#6806), parked or not,
+    // so the emulator never rests on the peer's grid. The withheld write is
+    // what proves the guard: a parked page's echo-path reclaim is local-only
+    // (#6807), so the divergence between the local grid and the echoed size
+    // stays owed until the activation below flushes it. This leg used to
+    // assert the strand through the DOM. Before #6806 the DOM showed it for
+    // the 250ms before the timer twin reclaimed. With #6806 alone it showed
+    // only because the re-assert leaked an OpResize on a stale 'live'
+    // classification, the peer re-claimed, and this tab yielded to the
+    // repeat — so the old check passed on exactly the leak it should have
+    // caught (#6812). The wire is the honest witness here.
     await park(first);
+    const sentBeforeEcho = firstSent.length;
+    const echoesBeforeResize = firstEchoes.length;
     await second.setViewportSize({ width: 375, height: 2_200 });
     let peerRows2 = 0;
     await expect
@@ -318,10 +358,16 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       })
       .toBeGreaterThan(peerRows);
     await expect
-      .poll(() => rows(firstHost), {
-        message: "the second peer echo must strand the re-parked tab again",
+      .poll(() => firstEchoes.slice(echoesBeforeResize).some(e => e.rows === peerRows2), {
+        message: "the second peer echo must reach the re-parked tab",
+        timeout: 15_000,
       })
-      .toBe(peerRows2);
+      .toBe(true);
+    await expect
+      .poll(() => rows(firstHost), {
+        message: "the re-parked tab must refit to its own grid on the echo itself, never rest on the peer's",
+      })
+      .toBe(localRows);
     await first.locator(".af-nav-toggle").dispatchEvent("click");
     await expect
       .poll(() => rows(firstHost), {
@@ -330,6 +376,10 @@ test("a parked client reclaims locally but never writes the shared grid", async 
       })
       .toBeLessThan(peerRows2);
     await first.waitForTimeout(2_000);
+    expect(
+      firstSent.slice(sentBeforeEcho),
+      "the re-parked tab must write no OpResize: its echo-path and scheduled reclaims are local-only",
+    ).toEqual([]);
     expect(
       await rows(secondHost),
       "the second parked reclaim must not move the shared grid either",
