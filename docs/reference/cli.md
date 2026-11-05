@@ -759,9 +759,13 @@ in the form "af config set" accepts back; other composite values
 (program_overrides, root_agents, limit_patterns, keys) print as JSON. A comma-list
 leaf whose value the comma form cannot represent without loss (an element
 containing a comma, surrounding whitespace, brackets or quotes, or a control
-character) prints JSON instead — restore such a value through the whole-table
-form ('af config set account_handoff {"exclude_sessions":["..."]}'), not the
-leaf setter, which would reject or silently change it.
+character) prints JSON instead. The restore path depends on the key:
+account_handoff.exclude_sessions has a whole-table setter ('af config set
+account_handoff {"exclude_sessions":["..."]}'); the other comma-list leaves
+(network.cors_allowed_origins, network.allowed_hosts, limit_account_candidates)
+have no whole-table setter, so a value their leaf setter rejects must be
+corrected by editing config.toml directly — there is no 'af config set' form
+that restores it.
 
 Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
