@@ -57,6 +57,15 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 	if region != "" {
 		return true, true
 	}
+	// An empty region under a bare-glyph anchor is only as good as the
+	// anchor choice: a `>`-only continuation row inside a wrapped draft is
+	// indistinguishable from a fresh bare prompt, and the draft's earlier
+	// lines sit ABOVE the anchor the analyzer picked (#6817 review). A
+	// glyph-carrying content row in the same frame makes the reading
+	// ambiguous — unprovable, never empty.
+	if composerAnchorAmbiguous(rows, anchor) {
+		return false, false
+	}
 	return draftClosedByFrame(rows, anchor), true
 }
 
@@ -108,6 +117,29 @@ func ultraPlaceholderRowPresent(rows []string) bool {
 			continue
 		}
 		if composerPlaceholderText(rest) {
+			return true
+		}
+	}
+	return false
+}
+
+// composerAnchorAmbiguous reports whether a GLYPH-carrying row immediately
+// above the anchor holds content — the shape a wrapped draft leaves when its
+// last line is bare (a `>` quote line reads as a fresh bare prompt and wins
+// the anchor). Only contiguous glyph rows count: a submitted prompt echoes
+// with the same glyph, but output sits between the echo and the live prompt,
+// so the first non-glyph row ends the scan (#6817 review).
+func composerAnchorAmbiguous(rows []string, anchor int) bool {
+	for j := anchor - 1; j >= 0; j-- {
+		norm := normalizeDelivery(rows[j])
+		if norm == "" {
+			return false
+		}
+		r, _ := utf8.DecodeRuneInString(norm)
+		if r != '❯' && r != '›' && r != '❭' && r != '>' {
+			return false
+		}
+		if afterComposerGlyph(norm) != "" {
 			return true
 		}
 	}

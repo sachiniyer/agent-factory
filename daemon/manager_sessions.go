@@ -986,5 +986,10 @@ func (m *Manager) findSessionByStableID(stableID, title, repoID string) (*sessio
 	}
 	m.instances[key] = instance
 	m.mu.Unlock()
+	// A session materializing into an already-shadow project must engage
+	// the engine without waiting for a config write (#6817 review).
+	if !m.handoffActive.Load() {
+		m.accountHandoffDiscover()
+	}
 	return instance, rid, data, nil
 }
