@@ -334,6 +334,35 @@ func TestDecideWallConfirmation(t *testing.T) {
 			wantKind: KindMove, wantReason: reasonTriggerWall,
 		},
 		{
+			name: "named account: expired hottest window beside a live hot window confirms",
+			mutate: func(f *Facts) {
+				// The worst window's reset has passed, but a second window
+				// above wall_percent is still live — the account is walled
+				// on the live window (Codex on #6815).
+				f.Session.Reading = ReadingFacts{
+					Status: ReadingObserved, RecordedAt: testNow.Add(-time.Minute), Complete: true,
+					Windows: []WindowFact{
+						window("primary", 100, past()),
+						window("secondary", 99, future()),
+					},
+				}
+			},
+			wantKind: KindMove, wantReason: reasonTriggerWall,
+		},
+		{
+			name: "named account: every above-wall window expired cannot confirm",
+			mutate: func(f *Facts) {
+				f.Session.Reading = ReadingFacts{
+					Status: ReadingObserved, RecordedAt: testNow.Add(-time.Minute), Complete: true,
+					Windows: []WindowFact{
+						window("primary", 100, past()),
+						window("secondary", 98, past()),
+					},
+				}
+			},
+			wantKind: KindReportOnly, wantReason: reasonWallUnconfirmed,
+		},
+		{
 			name: "confirm_wall=false moves without a reading",
 			mutate: func(f *Facts) {
 				f.Config.ConfirmWall = false
@@ -603,6 +632,47 @@ func TestDecideMultipleBlockersAllReported(t *testing.T) {
 	wantDecision(t, d, KindDraftBlocked, reasonComposerDraft)
 	wantEvent(t, d, EventIgnored, reasonAttached)
 	wantEvent(t, d, EventDraftBlocked, reasonComposerDraft)
+}
+
+func TestDecideBlockedStillReportsDrift(t *testing.T) {
+	// A draft-blocked session whose candidates are also drift-shorn logs
+	// BOTH facts — the blocked verdict must not swallow the drift edges the
+	// candidate scan raises (Codex on #6815).
+	f := wallConfirmedFacts()
+	f.Session.Draft = true
+	f.Accounts[1].Drift = "model"
+	f.Accounts[2].Drift = "unverifiable"
+	d := Decide(f)
+	wantDecision(t, d, KindDraftBlocked, reasonComposerDraft)
+	wantEvent(t, d, EventDraftBlocked, reasonComposerDraft)
+	wantEvent(t, d, EventConfigDrift, "model")
+	wantEvent(t, d, EventConfigDrift, "unverifiable")
+}
+
+func TestDecideBlockedSkipsDriftReportForEarlierExclusion(t *testing.T) {
+	// A candidate already excluded for an earlier reason — the session's own
+	// current account, or an unregistered name — is not ALSO reported
+	// drifted; the blocked path applies the same precedence the filter does.
+	f := wallConfirmedFacts()
+	f.Session.Draft = true
+	f.Accounts[0].Drift = "model" // "work" is the session's current account
+	f.Accounts[1].Registered = false
+	f.Accounts[1].Drift = "model" // unregistered beats drift in precedence
+	f.Accounts[2].Drift = "model" // reachable → drift reported
+	d := Decide(f)
+	wantDecision(t, d, KindDraftBlocked, reasonComposerDraft)
+	var driftReasons int
+	for _, e := range d.Events {
+		if e.Kind == EventConfigDrift {
+			driftReasons++
+			if e.To != "spare" {
+				t.Fatalf("drift event on %q, want only spare", e.To)
+			}
+		}
+	}
+	if driftReasons != 1 {
+		t.Fatalf("got %d drift events, want exactly 1 (spare)", driftReasons)
+	}
 }
 
 func TestDecideWorkingSessionsNeverMoveEarly(t *testing.T) {
