@@ -73,6 +73,9 @@ func collectAccountEvidence(result *Result) {
 		mover.HaltReason = state.Halted.Reason
 		mover.HaltAt = state.Halted.At
 	}
+	if state.ReportsHeld != nil {
+		mover.ReportsHeldSince = state.ReportsHeld.Since
+	}
 	result.Mover = mover
 
 	home, err := config.GetConfigDir()

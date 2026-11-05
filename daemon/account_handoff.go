@@ -436,11 +436,30 @@ const (
 )
 
 // reportPending is one recipient's digest backlog plus the spec that
-// produced it — a config change to mode or report_to invalidates it.
+// produced it — a config change to mode or report_to invalidates it. The
+// held fields drive retry backoff and the warn-once latch: a recipient
+// whose composer never proves empty is retried on a doubling schedule,
+// never every minute, and reported once it has been silent too long
+// (#6818 final review).
 type reportPending struct {
-	spec string
-	rows []handoff.EventRow
+	spec        string
+	rows        []handoff.EventRow
+	heldSince   time.Time     // first held verdict this episode
+	nextAttempt time.Time     // no delivery attempt before this instant
+	backoff     time.Duration // current hold delay — doubles to the cap
+	warned      bool          // warn-once latch for this held episode
 }
+
+// reportHeldWarnAfter bounds how long a held backlog may stay silent:
+// past it the worker warns once — in the log and durably, so af quota's
+// mover line can say the reports are not arriving (#6818 final review).
+var reportHeldWarnAfter = 10 * time.Minute
+
+// reportHeldBackoffMax caps the doubling retry schedule for a held
+// recipient. An every-minute attempt runs a full resolve+restore —
+// refreshLocked rereads every repo's instances.json under m.mu — for a
+// recipient whose answer cannot have changed.
+const reportHeldBackoffMax = 10 * time.Minute
 
 // startHandoffReportLoop runs the report_to delivery worker. It owns the
 // prompt sends so the decision ticker never blocks on a remote transport:
@@ -462,13 +481,19 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 				for key, entry := range pending {
 					rows := manager.liveReportRows(entry)
 					if len(rows) == 0 {
+						manager.clearReportsHeldIf(pending, entry)
 						delete(pending, key)
 						continue
+					}
+					if nowFunc().Before(entry.nextAttempt) {
+						continue // held backoff — no resolve+restore yet
 					}
 					switch manager.deliverHandoffReport(key, handoff.ReportDigest(rows)) {
 					case reportHeld:
 						entry.rows = rows
+						manager.noteReportHeld(key, entry)
 					default:
+						manager.clearReportsHeldIf(pending, entry)
 						delete(pending, key)
 					}
 				}
@@ -483,6 +508,56 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 func (m *Manager) queueReportJob(pending map[string]*reportPending, job handoffReportJob) {
 	for _, row := range job.rows {
 		m.queueReportRow(pending, job, row)
+	}
+}
+
+// noteReportHeld records one held delivery: the episode's first held time,
+// a doubling backoff (flush interval → cap), and — past the warn threshold
+// — a once-per-episode warning in the log plus the durable record af
+// quota's mover line reads (#6818 final review).
+func (m *Manager) noteReportHeld(key string, entry *reportPending) {
+	now := nowFunc()
+	if entry.heldSince.IsZero() {
+		entry.heldSince = now
+	}
+	if entry.backoff == 0 {
+		entry.backoff = reportFlushInterval
+	} else {
+		entry.backoff *= 2
+		if entry.backoff > reportHeldBackoffMax {
+			entry.backoff = reportHeldBackoffMax
+		}
+	}
+	entry.nextAttempt = now.Add(entry.backoff)
+	if entry.warned || now.Sub(entry.heldSince) < reportHeldWarnAfter {
+		return
+	}
+	entry.warned = true
+	m.warn().Printf("account-handoff: report delivery to %s held %s — recipient composer never proves empty",
+		key, now.Sub(entry.heldSince).Round(time.Minute))
+	if store, err := handoff.DefaultStore(); err == nil {
+		if werr := store.NoteReportsHeld(entry.heldSince); werr != nil {
+			m.warn().Printf("account-handoff: record held report: %v", werr)
+		}
+	}
+}
+
+// clearReportsHeldIf retires the durable held record when this entry's
+// backlog drains or dies — but only when no OTHER recipient's held
+// episode still stands recorded (#6818 final review).
+func (m *Manager) clearReportsHeldIf(pending map[string]*reportPending, entry *reportPending) {
+	if !entry.warned {
+		return
+	}
+	for _, other := range pending {
+		if other != entry && other.warned {
+			return
+		}
+	}
+	if store, err := handoff.DefaultStore(); err == nil {
+		if cerr := store.ClearReportsHeld(); cerr != nil {
+			m.warn().Printf("account-handoff: clear held-report record: %v", cerr)
+		}
 	}
 }
 

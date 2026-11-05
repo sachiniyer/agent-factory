@@ -58,6 +58,14 @@ func TestMoverStatus_String(t *testing.T) {
 		{"unreadable beats halted", MoverStatus{
 			Mode: "shadow", Halted: true, HaltReason: "x", HaltAt: haltAt, StateUnreadable: true,
 		}, "state file unreadable"},
+		// #6818 final review: a held report backlog is never silent — it
+		// appends to the mode line, and to a halt line too.
+		{"held reports append to shadow", MoverStatus{
+			Mode: "shadow", ReportsHeldSince: haltAt,
+		}, "shadow; reports held since 2026-10-31T05:00:00Z"},
+		{"held reports append to halt", MoverStatus{
+			Mode: "shadow", Halted: true, HaltReason: "x", HaltAt: haltAt, ReportsHeldSince: haltAt,
+		}, "halted: x since 2026-10-31T05:00:00Z; reports held since 2026-10-31T05:00:00Z"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			if got := tc.mover.String(); got != tc.want {

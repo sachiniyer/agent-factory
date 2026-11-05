@@ -262,3 +262,68 @@ func TestCreateSessionWhileOffTriggersNoDiscovery(t *testing.T) {
 		t.Fatalf("session create triggered %d account-handoff discoveries", calls)
 	}
 }
+
+// #6818 final review: a held recipient must never stay silent — and must
+// not trigger a full resolve+restore every minute. noteReportHeld doubles
+// the retry backoff to a cap and warns once per held episode, durably
+// enough for af quota's mover line to carry it.
+func TestReportHeldBackoffAndWarnOnce(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	m := &Manager{cfg: &config.Config{}, instances: map[string]*session.Instance{}}
+	entry := &reportPending{spec: "observer"}
+
+	now := time.Date(2026, 11, 5, 14, 0, 0, 0, time.UTC)
+	oldNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = oldNow })
+
+	// The first hold schedules the next attempt a flush out — no warn yet.
+	m.noteReportHeld("k", entry)
+	if entry.backoff != reportFlushInterval || !entry.nextAttempt.Equal(now.Add(reportFlushInterval)) {
+		t.Fatalf("first hold backoff=%v next=%v", entry.backoff, entry.nextAttempt)
+	}
+	if entry.warned {
+		t.Fatalf("warned before the threshold")
+	}
+
+	// Past the warn threshold the latch fires once and the record lands for
+	// af quota — with the OLDEST hold time.
+	now = now.Add(reportHeldWarnAfter + time.Minute)
+	m.noteReportHeld("k", entry)
+	if !entry.warned {
+		t.Fatalf("no warn past the threshold")
+	}
+	if entry.backoff != 2*reportFlushInterval {
+		t.Fatalf("backoff did not double: %v", entry.backoff)
+	}
+	store, err := handoff.DefaultStore()
+	require.NoError(t, err)
+	state, err := store.Load()
+	require.NoError(t, err)
+	if state.ReportsHeld == nil || !state.ReportsHeld.Since.Equal(entry.heldSince) {
+		t.Fatalf("ReportsHeld = %+v, want since %v", state.ReportsHeld, entry.heldSince)
+	}
+
+	// The latch holds: further holds never re-warn and backoff caps.
+	for i := 0; i < 20; i++ {
+		m.noteReportHeld("k", entry)
+	}
+	if entry.backoff > reportHeldBackoffMax {
+		t.Fatalf("backoff exceeded cap: %v", entry.backoff)
+	}
+
+	// Draining the last warned backlog clears the durable record; a
+	// still-warned sibling keeps it standing.
+	m.clearReportsHeldIf(map[string]*reportPending{"k": entry, "other": {warned: true}}, entry)
+	state, _ = store.Load()
+	if state.ReportsHeld == nil {
+		t.Fatalf("record cleared while another backlog is held")
+	}
+	m.clearReportsHeldIf(map[string]*reportPending{"k": entry}, entry)
+	state, _ = store.Load()
+	if state.ReportsHeld != nil {
+		t.Fatalf("record survived the last held backlog draining")
+	}
+}
