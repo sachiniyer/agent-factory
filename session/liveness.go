@@ -848,6 +848,20 @@ func (i *Instance) LimitResetAt() (time.Time, bool) {
 	return i.limitResetAt, true
 }
 
+// LimitResetEvidence returns the reset phrase whose parse produced the stored
+// reset (#6765), or "" when the session is not limit-blocked or the stored
+// reset was written by a path that observed no phrase. It is gated the same
+// way ToInstanceData serializes the row, so a pre-poll capture here compares
+// cleanly against the snapshot the persist gate re-reads.
+func (i *Instance) LimitResetEvidence() string {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return ""
+	}
+	return i.limitResetEvidence
+}
+
 // LimitAccount returns the account whose runtime produced the current limit
 // observation. Empty is the ambient identity; ok is false off the limit wall.
 func (i *Instance) LimitAccount() (account string, ok bool) {

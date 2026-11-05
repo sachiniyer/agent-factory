@@ -67,6 +67,28 @@ func persistedLimitReset(t *testing.T, repoID, title string) time.Time {
 	return time.Time{}
 }
 
+// persistedLimitEvidence reads a session's persisted reset phrase from the
+// on-disk store (#6765) — the value whose survival the post-merge persist-gap
+// fix makes durable.
+func persistedLimitEvidence(t *testing.T, repoID, title string) string {
+	t.Helper()
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var data []session.InstanceData
+	if err := json.Unmarshal(raw, &data); err != nil {
+		t.Fatalf("unmarshal instances: %v", err)
+	}
+	for _, d := range data {
+		if d.Title == title {
+			return d.LimitResetEvidence
+		}
+	}
+	t.Fatalf("instance %q not found in persisted store", title)
+	return ""
+}
+
 const claudeLimitBanner = "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
 
 // TestPersistPollChange_LaterResetTime_PersistsIndependentOfLiveness is the
@@ -213,6 +235,46 @@ func TestRefreshStatuses_UnchangedBannerKeepsReset(t *testing.T) {
 			t.Fatalf("polling past 6:34 moved the reset from %v to %v: the unchanged banner is the same evidence", first, got)
 		}
 	})
+}
+
+// TestRefreshStatuses_SendPathParkedRowAdoptsPhraseDurably is the post-merge
+// Codex finding on #6765's fix (PR #6788): a send-path park stores a reset with
+// NO phrase, so the first poll that re-reads the banner adopts the phrase while
+// changing neither liveness nor reset time. A persist gate watching only those
+// two drops the adoption — and after a restart the blank evidence slot lets the
+// same banner re-parse against a later clock, moving the reset to tomorrow.
+func TestRefreshStatuses_SendPathParkedRowAdoptsPhraseDurably(t *testing.T) {
+	now := time.Date(2026, 11, 4, 6, 0, 0, 0, time.Local)
+	prevNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = prevNow })
+
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := limitBannerBackend{FakeBackend: session.NewFakeBackend(), content: codexTimeOnlyLimitBanner}
+	inst := registerStarted(t, manager, repoID, repoPath, "limited", backend, true, session.Running)
+	inst.Program = "codex"
+
+	// The send-path park shape: a resolved reset with no producing phrase,
+	// already durable on disk.
+	inst.SetLimitReached(time.Date(2026, 11, 4, 6, 34, 0, 0, time.Local).UTC())
+	manager.persistInstance(repoID, inst)
+	if got := persistedLimitEvidence(t, repoID, "limited"); got != "" {
+		t.Fatalf("seed row must carry no evidence, got %q", got)
+	}
+
+	// The poll re-reads the same banner: the reset parses to the SAME instant
+	// (6:00 is before 6:34, so the next occurrence is still today's), so
+	// liveness and LimitResetAt are both unchanged — only the phrase is new.
+	manager.RefreshStatuses()
+	if !inst.LimitReached() {
+		t.Fatal("a still-visible banner must keep the session parked")
+	}
+	if got := inst.LimitResetEvidence(); got != "try again at 6:34 AM" {
+		t.Fatalf("in-memory evidence = %q, want the banner's phrase adopted", got)
+	}
+	if got := persistedLimitEvidence(t, repoID, "limited"); got != "try again at 6:34 AM" {
+		t.Fatalf("persisted evidence = %q, want the adopted phrase durable — a restart must not re-parse the same banner against a later clock", got)
+	}
 }
 
 // TestRefreshStatuses_LimitClearsWhenBannerGone: a session that recovers on its
