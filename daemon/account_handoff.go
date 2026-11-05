@@ -540,7 +540,7 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 					if nowFunc().Before(entry.nextAttempt) {
 						continue // held backoff — no resolve+restore yet
 					}
-					switch manager.deliverHandoffReport(key, handoff.ReportDigest(rows)) {
+					switch manager.deliverHandoffReport(entry.spec, key, handoff.ReportDigest(rows)) {
 					case reportHeld:
 						entry.rows = rows
 						manager.noteReportHeld(key, entry)
@@ -615,10 +615,16 @@ func (m *Manager) clearReportsHeldIf(pending map[string]*reportPending, entry *r
 
 // queueReportRow appends one row to the recipient's backlog under its cap.
 // A job whose spec differs from the backlog's replaces it — the older rows
-// were emitted under a report_to or mode the config no longer has.
+// were emitted under a report_to or mode the config no longer has. The
+// replaced entry retires like a drained one (#6818 review): its warned
+// latch is lost with it, so its durable held record must clear here —
+// otherwise af quota reports a hold for a backlog that no longer exists.
 func (m *Manager) queueReportRow(pending map[string]*reportPending, job handoffReportJob, row handoff.EventRow) {
 	entry := pending[job.key]
 	if entry == nil || entry.spec != job.spec {
+		if entry != nil {
+			m.clearReportsHeldIf(pending, entry)
+		}
 		entry = &reportPending{spec: job.spec}
 		pending[job.key] = entry
 	}
@@ -694,14 +700,27 @@ func (m *Manager) enqueueHandoffReport(spec, key string, rows []handoff.EventRow
 
 // deliverHandoffReport sends one fixed-template prompt to the resolved
 // recipient session through the SAME guarded path any automated delivery
-// takes (#6818 review): the attach lease defers while a TUI is typing in the
-// pane, and sendPromptGuarded carries the operation lock, teardown and
-// pending-swap checks, the automated liveness gate — which parks a
-// limit-reached recipient instead of answering its picker — and the
-// send-confirmation record. A vanished recipient drops; a held one reports
-// reportHeld so the worker waits for detach instead of retrying into a
-// different session.
-func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
+// takes (#6818 review): the spec is resolved fresh on EVERY attempt so a
+// backlog can never ride a stale resolution to a different session; the
+// attach lease defers while a TUI is typing in the pane, and
+// sendPromptGuarded carries the operation lock, teardown and pending-swap
+// checks, the automated liveness gate — which parks a limit-reached
+// recipient instead of answering its picker — and the send-confirmation
+// record. A vanished or re-resolved-away recipient drops; a held one
+// reports reportHeld so the worker waits for detach instead of retrying
+// into a different session.
+func (m *Manager) deliverHandoffReport(spec, key, text string) reportSendOutcome {
+	// The spec must still resolve uniquely to THIS recipient at send time
+	// (#6818 review): a same-titled session created while the digest sat
+	// held makes the spec ambiguous — engine ticks stop queuing on the
+	// next pass, and the queued rows retire here rather than ride a stale
+	// resolution to whichever session it would now guess. The walk feeds
+	// persisted title claims too, so a failed restore also vetoes.
+	resolved, found, _ := handoffengine.ResolveRecipient(spec, m.accountHandoffInputs())
+	if !found || resolved.Key != key {
+		m.warn().Printf("account-handoff report_to %q no longer resolves uniquely to recipient %s — dropped", spec, key)
+		return reportDropped
+	}
 	m.mu.Lock()
 	var target *session.Instance
 	var repoID string

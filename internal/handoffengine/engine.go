@@ -491,6 +491,14 @@ func resolveRecipient(spec string, inputs []SessionInput) (recipient SessionInpu
 	return matches[0], true, matches[0].Live && matches[0].Started
 }
 
+// ResolveRecipient exposes the spec resolver for the daemon's send-time
+// revalidation (#6818 review): a queued digest must verify its spec still
+// resolves uniquely to the SAME session right before submission — a title
+// claim that appeared while the backlog sat would otherwise redirect it.
+func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
+	return resolveRecipient(spec, inputs)
+}
+
 // factsFor assembles one session's Facts from the snapshot fields — the only
 // pane-content reads in this file are evaluations (wall banner, working,
 // composer draft) of the capture the poll already took.

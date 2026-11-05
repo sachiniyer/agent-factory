@@ -111,6 +111,8 @@ func TestAccountHandoffActiveTickWaitsForCaptures(t *testing.T) {
 // #6818 review: a held delivery waits rather than retrying — a recipient
 // whose pane a TUI holds reports reportHeld and keeps its backlog.
 func TestDeliverHandoffReportHoldsWhileAttached(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	inst := &session.Instance{ID: "sess-1", Title: "observer", Path: "/repo"}
 	m := &Manager{
 		cfg:       &config.Config{},
@@ -119,7 +121,7 @@ func TestDeliverHandoffReportHoldsWhileAttached(t *testing.T) {
 			statusPollIDKey("sess-1"): {"tui": nowFunc().Add(time.Hour)},
 		},
 	}
-	if got := m.deliverHandoffReport("sess-1", "[af handoff] kind=x"); got != reportHeld {
+	if got := m.deliverHandoffReport("observer", "sess-1", "[af handoff] kind=x"); got != reportHeld {
 		t.Fatalf("attached recipient outcome = %v, want reportHeld", got)
 	}
 }
@@ -128,8 +130,10 @@ func TestDeliverHandoffReportHoldsWhileAttached(t *testing.T) {
 // emitting session's mode or report_to changed — and a changed spec on the
 // next job replaces the backlog.
 func TestReportPendingDropsOnVanishAndSpecChange(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	m := &Manager{cfg: &config.Config{}, instances: map[string]*session.Instance{}}
-	if got := m.deliverHandoffReport("sess-gone", "x"); got != reportDropped {
+	if got := m.deliverHandoffReport("observer", "sess-gone", "x"); got != reportDropped {
 		t.Fatalf("missing recipient outcome = %v, want reportDropped", got)
 	}
 	pending := map[string]*reportPending{}
@@ -186,12 +190,14 @@ func TestQueueReportJobBatchesHaltedRows(t *testing.T) {
 // recipient with no live runtime is the unprovable case: the send is held
 // for a later flush rather than pasted over an unseen draft.
 func TestDeliverHandoffReportHoldsOnUnprovableComposer(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 	inst := &session.Instance{ID: "sess-2", Title: "observer", Path: "/repo"}
 	m := &Manager{
 		cfg:       &config.Config{},
 		instances: map[string]*session.Instance{"r/observer": inst},
 	}
-	if got := m.deliverHandoffReport("sess-2", "[af handoff] kind=x"); got != reportHeld {
+	if got := m.deliverHandoffReport("observer", "sess-2", "[af handoff] kind=x"); got != reportHeld {
 		t.Fatalf("unprovable-composer recipient outcome = %v, want reportHeld", got)
 	}
 }
@@ -436,4 +442,78 @@ func TestHandoffReportWorkerReconcilesHeldMarkerOnStart(t *testing.T) {
 	}
 	close(stop)
 	wg.Wait()
+}
+
+// #6818 review: delivery must re-resolve its spec at send time every time —
+// a same-titled session created while the digest sat held makes the spec
+// ambiguous, and the queued rows retire rather than ride a stale resolution
+// to whichever session it would now guess.
+func TestDeliverHandoffReportRevalidatesSpecAtSendTime(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{},
+	}
+	keyA := daemonInstanceKey("repoA", "observer")
+	m.instances[keyA] = &session.Instance{Title: "observer"}
+	m.instances[daemonInstanceKey("repoB", "observer")] = &session.Instance{Title: "observer"}
+	m.instances[daemonInstanceKey("repoC", "monitor")] = &session.Instance{Title: "monitor"}
+
+	// Two live "observer" claims: the spec is now ambiguous — drop, never
+	// send on the stale resolution.
+	if got := m.deliverHandoffReport("observer", keyA, "digest"); got != reportDropped {
+		t.Fatalf("ambiguous spec sent: outcome %v", got)
+	}
+	// A spec resolving to a DIFFERENT session also drops.
+	if got := m.deliverHandoffReport("monitor", keyA, "digest"); got != reportDropped {
+		t.Fatalf("retargeted spec sent to the queued recipient: outcome %v", got)
+	}
+	// Absent spec drops too.
+	if got := m.deliverHandoffReport("nobody", keyA, "digest"); got != reportDropped {
+		t.Fatalf("absent spec sent: outcome %v", got)
+	}
+	// Restore uniqueness: the spec resolves to keyA again and delivery
+	// reaches the send gates — the unstarted target holds.
+	delete(m.instances, daemonInstanceKey("repoB", "observer"))
+	if got := m.deliverHandoffReport("observer", keyA, "digest"); got != reportHeld {
+		t.Fatalf("uniquely-resolved recipient never reached the send gates: %v", got)
+	}
+}
+
+// #6818 review: a spec-changed backlog's warned latch is lost with the entry
+// — its durable held record must retire in the same move, while another
+// recipient's warned episode keeps the marker standing.
+func TestQueueReportRowReplaceClearsHeldMarker(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	store, err := handoff.DefaultStore()
+	require.NoError(t, err)
+	require.NoError(t, store.NoteReportsHeld(time.Now()))
+
+	m := &Manager{cfg: &config.Config{}, instances: map[string]*session.Instance{}}
+	pending := map[string]*reportPending{"k": {spec: "observer", warned: true}}
+	m.queueReportRow(pending,
+		handoffReportJob{key: "k", spec: "monitoring/observer"}, handoff.EventRow{})
+	state, err := store.Load()
+	require.NoError(t, err)
+	if state.ReportsHeld != nil {
+		t.Fatal("replaced backlog's held marker survived its retirement")
+	}
+
+	// A warned sibling keeps the marker standing through the replacement.
+	require.NoError(t, store.NoteReportsHeld(time.Now()))
+	pending = map[string]*reportPending{
+		"k":     {spec: "observer", warned: true},
+		"other": {spec: "watcher", warned: true},
+	}
+	m.queueReportRow(pending,
+		handoffReportJob{key: "k", spec: "monitoring/observer"}, handoff.EventRow{})
+	state, err = store.Load()
+	require.NoError(t, err)
+	if state.ReportsHeld == nil {
+		t.Fatal("marker cleared while another recipient's warned backlog still stands")
+	}
 }
