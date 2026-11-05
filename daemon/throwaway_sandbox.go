@@ -105,17 +105,20 @@ func loadThrowawayMarker(home string) (*throwawaysandbox.Marker, bool) {
 }
 
 // isDefaultThrowawayHome reports whether home is the default install's home.
-// A resolution failure answers false — loadThrowawayMarker already holds a
-// validated marker, and "cannot compare" must not turn a real home's refusal
-// into an acceptance.
+// When the comparison cannot be made it answers true — an unresolvable
+// default must never be treated as a sandbox, the same direction every
+// other unproven case here takes.
 func isDefaultThrowawayHome(home string) bool {
 	def, err := throwawayDefaultHomeFn()
 	if err != nil {
-		return false
+		return true
 	}
 	canonHome, err1 := canonicalDir(home)
 	canonDef, err2 := canonicalDir(def)
-	return err1 == nil && err2 == nil && canonHome == canonDef
+	if err1 != nil || err2 != nil {
+		return true
+	}
+	return canonHome == canonDef
 }
 
 // registerThrowawaySandbox lists home in the per-user registry so the next
