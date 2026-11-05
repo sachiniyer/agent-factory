@@ -28,7 +28,7 @@ import (
 func TestSandboxScopeTableIsPinned(t *testing.T) {
 	want := []string{
 		"/v1/AddTask", "/v1/ArchiveSession", "/v1/CloseTab", "/v1/CreateSession", "/v1/CreateTab",
-		"/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/SetAttention", "/v1/SetConversation", "/v1/Snapshot",
+		"/v1/ListTasks", "/v1/RemoveTask", "/v1/RenameTab", "/v1/ReorderTab", "/v1/SendPrompt", "/v1/SetAttention", "/v1/Snapshot",
 	}
 	var got []string
 	for path := range sandboxAllowedPaths {
@@ -55,6 +55,12 @@ func TestSandboxScopeTableIsPinned(t *testing.T) {
 		"/v1/HandoffSession", "/v1/ResumeFromLimit", "/v1/PruneSessions",
 		// Proposals, previews, daemon lifecycle.
 		"/v1/StartProposal", "/v1/Preview", "/v1/PreviewSession", "/v1/PauseStatusPoll", "/v1/health",
+		// SetConversation's validator reads the rollout store from the daemon
+		// host's filesystem; every off-box backend the sandbox scope admits keeps
+		// its rollout store on the remote host, so no sandbox-credentialed request
+		// can complete it (#6805 dead-end). Removed from the scope rather than
+		// admitting a verb that always fails.
+		"/v1/SetConversation",
 	} {
 		assert.Falsef(t, sandboxAllowedPath(path), "%s must never be reachable with a sandbox credential", path)
 	}
@@ -497,6 +503,11 @@ func TestSandboxScope_DeniedRoutesNeverReachAHandler(t *testing.T) {
 		"/v1/UpdateTask", "/v1/TriggerTask", "/v1/RestartTask", "/v1/DeliverPrompt", "/v1/KillSession",
 		"/v1/GetConfig", "/v1/SetConfigValue", "/v1/ListAccounts", "/v1/RegisterAccount", "/v1/AccountLogin",
 		"/v1/ListProjects", "/v1/ListDirectory", "/v1/RestoreSession", "/v1/HandoffSession",
+		// SetConversation was admitted to the sandbox scope in #6805 but the
+		// validator cannot inspect an off-box rollout store from the daemon host,
+		// so every sandbox-credentialed request failed. Removed from the scope:
+		// a sandbox credential is now refused at the gate, not sanitized to a 500.
+		"/v1/SetConversation",
 	} {
 		code, _ := f.call(t, f.secret, path, `{}`)
 		assert.Equalf(t, http.StatusUnauthorized, code, "%s must be refused at the gate for a sandbox credential", path)

@@ -137,19 +137,18 @@ func sandboxRunStatusHead(status string) string {
 // scope. The boundary walks a response by it, and a test requires an entry for
 // every admitted route.
 var sandboxResponseTypes = map[string]reflect.Type{
-	"/v1/Snapshot":        reflect.TypeFor[SnapshotResponse](),
-	"/v1/SendPrompt":      reflect.TypeFor[SendPromptResponse](),
-	"/v1/SetAttention":    reflect.TypeFor[SetAttentionResponse](),
-	"/v1/SetConversation": reflect.TypeFor[SetConversationResponse](),
-	"/v1/ArchiveSession":  reflect.TypeFor[ArchiveSessionResponse](),
-	"/v1/CreateSession":   reflect.TypeFor[CreateSessionResponse](),
-	"/v1/CreateTab":       reflect.TypeFor[CreateTabResponse](),
-	"/v1/CloseTab":        reflect.TypeFor[CloseTabResponse](),
-	"/v1/RenameTab":       reflect.TypeFor[RenameTabResponse](),
-	"/v1/ReorderTab":      reflect.TypeFor[ReorderTabResponse](),
-	"/v1/ListTasks":       reflect.TypeFor[ListTasksResponse](),
-	"/v1/AddTask":         reflect.TypeFor[AddTaskResponse](),
-	"/v1/RemoveTask":      reflect.TypeFor[RemoveTaskResponse](),
+	"/v1/Snapshot":       reflect.TypeFor[SnapshotResponse](),
+	"/v1/SendPrompt":     reflect.TypeFor[SendPromptResponse](),
+	"/v1/SetAttention":   reflect.TypeFor[SetAttentionResponse](),
+	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionResponse](),
+	"/v1/CreateSession":  reflect.TypeFor[CreateSessionResponse](),
+	"/v1/CreateTab":      reflect.TypeFor[CreateTabResponse](),
+	"/v1/CloseTab":       reflect.TypeFor[CloseTabResponse](),
+	"/v1/RenameTab":      reflect.TypeFor[RenameTabResponse](),
+	"/v1/ReorderTab":     reflect.TypeFor[ReorderTabResponse](),
+	"/v1/ListTasks":      reflect.TypeFor[ListTasksResponse](),
+	"/v1/AddTask":        reflect.TypeFor[AddTaskResponse](),
+	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskResponse](),
 }
 
 // jsonField is one JSON-visible field of a struct type, with the struct type that
