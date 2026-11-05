@@ -16,9 +16,14 @@ import (
 func TestResumeConversationOutcomeCarriesAProvableResume(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	// A recorded conversation id the launch command can name carries.
+	// A recorded conversation id the launch command can name carries — when
+	// the store still holds its rollout, the evidence exact resume checks.
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
 	inst := exactResumeSession(t, tmux.ProgramCodex)
 	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramCodex, ID: "019f386f-7206-7fc2-803b-f7045e07a242", CapturedAt: time.Now()}}}
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-10T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", inst.GetWorktreePath())
 	require.Equal(t, HandoffConversation{Carried: true}, inst.ResumeConversationOutcome())
 
 	// So do the worktree-scoped resume forms that need no recorded id: the
