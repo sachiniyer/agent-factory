@@ -554,18 +554,58 @@ function stageEchoed() {
   };
 }
 
-test("a foreign authoritative echo on the active pane re-asserts the host's grid", async () => {
+// #6215 (the 2026-11 reopening): a taller mobile viewport's grown poll read
+// the emulator at a FOREIGN grid — the subscribe admission had replayed the
+// broker's stale belief (the previous attach's grown size) and the deferred
+// reclaim left the pane displaying it for a frame or more. The grown host
+// happened to fit the same grid, so `rows > beforeResizeRows` could never
+// pass even though the pane was correctly fit. A foreign grid must therefore
+// never REST on a measurable host's emulator: the echo is applied per the
+// wire contract and the host's own fit is re-asserted in the same task.
+test("a foreign authoritative echo on the active pane is reclaimed before the handler returns", async () => {
   const win = stubWindow();
   try {
-    const { echo, term, calls } = stageEchoed();
-    // A stale 24x80 write reverts the emulator — the #6215 strand's start.
+    const { echo, term, calls, terminal } = stageEchoed();
+    // A stale 104x68 belief — the grown-grid replay from the #6215 trace —
+    // moves the emulator off this host's 40x120 fit. On master the pane kept
+    // displaying 104 rows until the scheduled-fit pair delivered a frame or
+    // the 250ms twin fired; any DOM row count in that window sampled the
+    // foreign grid as this pane's own. The reclaim now lands synchronously.
+    echo(104, 68);
+    assert.deepEqual([term.rows, term.cols], [40, 120],
+      "the emulator is back on the host's fit before echo() returns");
+    assert.deepEqual(calls, ["fit", "resize"],
+      "the host's claim left the wire in the same task");
+    assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
+    // No scheduled fit was armed — nothing is left owed.
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+  } finally {
+    win.restore();
+  }
+});
+
+// The synchronous reclaim can only run when the host already measures: a
+// foreign echo that arrives while xterm's metrics are mid-invalidation falls
+// back to the scheduled-fit pair, whose retry budget carries the reclaim to
+// the first measurable frame.
+test("a foreign echo the host cannot yet measure is reclaimed through the scheduled pair", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, fit, calls, terminal } = stageEchoed();
+    const propose = fit.proposeDimensions;
+    fit.proposeDimensions = () => undefined;
     echo(24, 80);
+    // The echo still applies verbatim; the pair owns the deferred retry.
     assert.deepEqual([term.rows, term.cols], [24, 80]);
-    // The reclaim is armed through the ordinary scheduled-fit pair.
+    assert.deepEqual(calls, []);
+    assert.notEqual(terminal.visibleFitFrame, null);
+    assert.notEqual(terminal.visibleFitTimer, null);
+    fit.proposeDimensions = propose;
     win.runFrame();
     await Promise.resolve();
     assert.deepEqual(calls, ["fit", "resize"]);
-    assert.deepEqual([term.rows, term.cols], [40, 120], "the host's grid is back");
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
   } finally {
     win.restore();
   }

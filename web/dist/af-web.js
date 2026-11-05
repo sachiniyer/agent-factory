@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "923b9450ed17";
+var CLIENT_VERSION = "b465c7945d71";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -12600,7 +12600,7 @@ var AttachTerminal = class {
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
         if (!this.admittedEcho) {
           this.admittedEcho = true;
-          this.scheduleVisibleFit();
+          this.reassertHostFit();
         } else {
           const now = Date.now();
           const key = `${rows}x${cols}`;
@@ -12612,10 +12612,24 @@ var AttachTerminal = class {
               }
             }
             this.contestedEchoes.set(key, now);
-            this.scheduleVisibleFit();
+            this.reassertHostFit();
           }
         }
       }
+    }
+  }
+  /** Re-asserts this host's fit after a foreign echo moved the emulator — in
+   *  the same task, not on a scheduled frame. A measurable visible host owns
+   *  its grid, so the emulator is refit before the echo handler returns and
+   *  the foreign size is never painted: a grid that does not fit its host is
+   *  not merely ugly for a frame, it is a lie anything can read (the #6215
+   *  flake sampled one as this pane's own baseline). A host that cannot be
+   *  measured at this instant — xterm's metrics mid-invalidation, the element
+   *  mid-move — falls back to the scheduled-fit pair, which retries within
+   *  its attempt budget like any other failed measurement. */
+  reassertHostFit() {
+    if (!this.fitVisibleHost()) {
+      this.scheduleVisibleFit();
     }
   }
   /** Writes a frame if the socket can carry one right now. Returns whether it

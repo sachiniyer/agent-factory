@@ -1942,13 +1942,18 @@ export class AttachTerminal {
       }
       // A foreign write just took the grid off this host's fit: a hidden
       // sibling's reconnect force-send, the broker re-adopting the pane's
-      // tmux-measured size, an old belief replayed to a fresh subscriber. Left
-      // alone it strands this emulator on the wrong grid until an unrelated
-      // signal happens to refit it — the #6215 strand, where a taller phone
-      // viewport's fresh grid was silently reverted to the pre-growth one. The
-      // visible host re-asserts its own fit once per foreign grid; the same
-      // foreign grid echoed again inside the yield window is an insistent
-      // writer and last-resize-wins lets it prevail rather than ping-pong.
+      // tmux-measured size, an old belief replayed to a fresh subscriber. The
+      // visible host re-asserts its own fit once per foreign grid — in the
+      // same task, because the foreign grid is wire authority, never a state
+      // to paint: left even one frame the emulator renders a grid that does
+      // not fit its host, and anything sampling the grid in that window — a
+      // DOM row count, a user's eyes — reads the foreign size as this pane's
+      // own. That read is the 2026-11 #6215 reopening: the subscribe
+      // admission replayed a stale belief whose grid the taller host happened
+      // to fit, and the viewport-growth poll caught the emulator resting on
+      // it before the deferred reclaim could land. The same foreign grid
+      // echoed again inside the yield window is an insistent writer and
+      // last-resize-wins lets it prevail rather than ping-pong.
       //
       // Except the FIRST foreign-sized echo on this connection: that is the
       // subscribe admission — the broker's replay of the authority the PTY
@@ -1960,7 +1965,7 @@ export class AttachTerminal {
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
         if (!this.admittedEcho) {
           this.admittedEcho = true;
-          this.scheduleVisibleFit();
+          this.reassertHostFit();
         } else {
           const now = Date.now();
           const key = `${rows}x${cols}`;
@@ -1972,10 +1977,25 @@ export class AttachTerminal {
               }
             }
             this.contestedEchoes.set(key, now);
-            this.scheduleVisibleFit();
+            this.reassertHostFit();
           }
         }
       }
+    }
+  }
+
+  /** Re-asserts this host's fit after a foreign echo moved the emulator — in
+   *  the same task, not on a scheduled frame. A measurable visible host owns
+   *  its grid, so the emulator is refit before the echo handler returns and
+   *  the foreign size is never painted: a grid that does not fit its host is
+   *  not merely ugly for a frame, it is a lie anything can read (the #6215
+   *  flake sampled one as this pane's own baseline). A host that cannot be
+   *  measured at this instant — xterm's metrics mid-invalidation, the element
+   *  mid-move — falls back to the scheduled-fit pair, which retries within
+   *  its attempt budget like any other failed measurement. */
+  private reassertHostFit(): void {
+    if (!this.fitVisibleHost()) {
+      this.scheduleVisibleFit();
     }
   }
 
