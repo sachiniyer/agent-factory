@@ -11,10 +11,13 @@
 # so the next marked daemon start reaps sandboxes that are expired or whose
 # creator is gone. Keep this schema in sync with internal/throwawaysandbox.
 #
-# When a sandbox root is recorded, mark also plants .af-throwaway-sandbox in
-# it containing the marker's created_unix — the sentinel that proves the
-# sandbox created the tree, which the reaper requires before trusting the
-# recorded tmux directory.
+# The sandbox root's creation is proven by a sentinel the SCAFFOLD plants
+# when it creates the dedicated root — .af-throwaway-sandbox, holding the
+# creation stamp. mark never writes it: a root the scaffold merely names
+# could be a shared directory, and manufacturing the sentinel there would
+# forge the very proof the reaper trusts. mark instead ADOPTS a planted
+# sentinel's stamp as the marker's created_unix, so the two always agree.
+# The create-root subcommand below is how a scaffold plants correctly.
 #
 # Environment:
 #   AF_SANDBOX_MAX_LIFETIME   seconds; preferred. Falls back to
@@ -82,6 +85,39 @@ throwaway_sandbox_owner_identity() {
     fi
 }
 
+# throwaway_sandbox_create_root ROOT — creates a DEDICATED sandbox root and
+# plants the creation sentinel the reaper trusts. Refuses an existing path:
+# stamping a pre-existing directory would forge "the sandbox made this" on
+# whatever happens to live there — shared dirs included. Prints the stamp
+# on success; callers need not record it — mark reads the sentinel itself.
+throwaway_sandbox_create_root() {
+    local root="$1" stamp
+    if [[ -e "$root" ]]; then
+        echo "sandbox-lifetime: refusing to plant a creation sentinel in existing path $root" >&2
+        return 1
+    fi
+    mkdir -p "$root" || return
+    stamp="$(date +%s)"
+    printf '%s\n' "$stamp" >"$root/.af-throwaway-sandbox" || return
+    printf '%s\n' "$stamp"
+}
+
+# throwaway_sandbox_abspath PATH — renders PATH absolute. A recorded path
+# is resolved later in the DAEMON's frame, not the caller's, so a relative
+# spelling here would point somewhere else entirely (codex review #6846).
+throwaway_sandbox_abspath() {
+    local p="$1"
+    if [[ "$p" != /* ]]; then
+        if [[ -d "$p" ]]; then
+            (cd "$p" && pwd -P)
+            return
+        fi
+        p="$(pwd -P)/${p#./}"
+    fi
+    # Clean any dot/.. remnants without requiring the path to exist.
+    realpath -m -- "$p" 2>/dev/null || printf '%s\n' "$p"
+}
+
 # throwaway_sandbox_mark HOME ROOT KIND — writes HOME/throwaway-sandbox.json
 # atomically. Returns non-zero without leaving a partial marker.
 throwaway_sandbox_mark() {
@@ -89,15 +125,18 @@ throwaway_sandbox_mark() {
     local lifetime created
     lifetime="$(throwaway_sandbox_lifetime \
         "${AF_SANDBOX_MAX_LIFETIME:-${AF_PLAYTEST_MAX_LIFETIME:-}}")" || return
+    [[ -n "$root" ]] && root="$(throwaway_sandbox_abspath "$root")"
     created="$(date +%s)"
-    mkdir -p "$home" || return
-    # The sentinel binds the root's creation to THIS marker instance: the
-    # reaper trusts the recorded tmux dir only when the sentinel's content
-    # is the marker's created_unix. Best-effort — a root that cannot take
-    # the sentinel simply yields no tmux membership, never a failed mark.
-    if [[ -n "$root" ]] && mkdir -p "$root" 2>/dev/null; then
-        printf '%s\n' "$created" >"$root/.af-throwaway-sandbox" 2>/dev/null || true
+    # A scaffold-planted sentinel means this root was created for THIS
+    # sandbox: adopt its stamp as created_unix so the marker and the
+    # sentinel provably name the same instance. A root without one stays
+    # recorded-but-unproven — the reaper refuses its tmux metadata.
+    if [[ -n "$root" && -f "$root/.af-throwaway-sandbox" ]]; then
+        local stamp
+        stamp="$(tr -d '[:space:]' <"$root/.af-throwaway-sandbox" 2>/dev/null)"
+        [[ "$stamp" =~ ^[0-9]+$ ]] && created="$stamp"
     fi
+    mkdir -p "$home" || return
     local tmp="$home/.throwaway-sandbox.json.tmp"
     if ! {
         printf '{\n'
@@ -109,7 +148,8 @@ throwaway_sandbox_mark() {
             throwaway_sandbox_owner_identity "$AF_SANDBOX_OWNER_PID"
         fi
         if [[ -n "${TMUX_TMPDIR:-}" ]]; then
-            printf '  "tmux_tmpdir": %s,\n' "$(throwaway_sandbox_json_quote "$TMUX_TMPDIR")"
+            printf '  "tmux_tmpdir": %s,\n' \
+                "$(throwaway_sandbox_json_quote "$(throwaway_sandbox_abspath "$TMUX_TMPDIR")")"
         fi
         printf '  "sandbox_root": %s\n' "$(throwaway_sandbox_json_quote "$root")"
         printf '}\n'
@@ -131,8 +171,16 @@ if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
         fi
         throwaway_sandbox_mark "$@"
         ;;
+    create-root)
+        shift
+        if [[ $# -ne 1 ]]; then
+            echo "usage: $0 create-root <sandbox-root>" >&2
+            exit 2
+        fi
+        throwaway_sandbox_create_root "$@"
+        ;;
     *)
-        echo "usage: $0 mark <af-home> <sandbox-root> <kind>" >&2
+        echo "usage: $0 mark <af-home> <sandbox-root> <kind> | create-root <sandbox-root>" >&2
         exit 2
         ;;
     esac

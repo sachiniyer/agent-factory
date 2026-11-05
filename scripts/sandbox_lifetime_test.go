@@ -95,14 +95,54 @@ throwaway_sandbox_mark "$1" "$2" "$3"`,
 	if m.OwnerPID != 0 || m.TmuxTmpdir != "" {
 		t.Fatalf("optional fields must stay empty: %+v", m)
 	}
-	// The root sentinel binds the tree's creation to THIS marker instance;
-	// it is what the reaper requires before trusting the tmux metadata.
-	sentinel, err := os.ReadFile(filepath.Join(root, ".af-throwaway-sandbox"))
-	if err != nil {
-		t.Fatalf("root sentinel not planted: %v", err)
+	// mark must NOT plant the sentinel on an existing root — the sentinel
+	// proves the scaffold created the tree, and manufacturing it here
+	// would forge that proof on any shared dir a caller names.
+	if _, err := os.Lstat(filepath.Join(root, ".af-throwaway-sandbox")); !os.IsNotExist(err) {
+		t.Fatalf("mark planted a creation sentinel on an existing root: %v", err)
 	}
-	if strings.TrimSpace(string(sentinel)) != strconv.FormatInt(m.CreatedUnix, 10) {
-		t.Fatalf("sentinel %q does not match created_unix %d", sentinel, m.CreatedUnix)
+}
+
+// TestSandboxMarkAdoptsPlantedSentinel is the P1 regression: the only way a
+// root proves the sandbox made it is a sentinel the SCAFFOLD planted when
+// creating it. mark adopts that stamp as created_unix so marker and
+// sentinel provably name the same instance — it never writes one itself.
+func TestSandboxMarkAdoptsPlantedSentinel(t *testing.T) {
+	root := filepath.Join(t.TempDir(), "sbx")
+	stamp, err := runSandboxLifetime(t, `throwaway_sandbox_create_root "$1"`, root)
+	if err != nil {
+		t.Fatalf("create-root: %v", err)
+	}
+	stamp = strings.TrimSpace(stamp)
+	home := filepath.Join(root, "home")
+	m := markForTest(t, `throwaway_sandbox_mark "$1" "$2" "audit"`, home, home, root)
+	if strconv.FormatInt(m.CreatedUnix, 10) != stamp {
+		t.Fatalf("created_unix %d did not adopt the sentinel stamp %q", m.CreatedUnix, stamp)
+	}
+	if m.SandboxRoot != root {
+		t.Fatalf("sandbox_root %q", m.SandboxRoot)
+	}
+	// And create-root must refuse to stamp a directory that already exists.
+	if out, err := runSandboxLifetime(t, `throwaway_sandbox_create_root "$1"`, root); err == nil {
+		t.Fatalf("create-root stamped an existing root: %s", out)
+	}
+}
+
+// TestSandboxMarkAbsolutizesRelativeRoot is the P2 regression: a relative
+// sandbox_root resolves later in the DAEMON's frame, so the marker must
+// persist the absolute spelling.
+func TestSandboxMarkAbsolutizesRelativeRoot(t *testing.T) {
+	work := t.TempDir()
+	root := filepath.Join(work, "sbx")
+	if err := os.MkdirAll(root, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	home := t.TempDir()
+	m := markForTest(t,
+		`cd "$4" && throwaway_sandbox_mark "$1" "$2" "$3"`,
+		home, home, "sbx", "audit", work)
+	if m.SandboxRoot != root {
+		t.Fatalf("relative root persisted as %q, want %q", m.SandboxRoot, root)
 	}
 }
 

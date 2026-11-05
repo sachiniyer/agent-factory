@@ -118,6 +118,10 @@ them is a failed run, regardless of what else you find.
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 WORK="/tmp/af-playtest-$RUN_ID"        # keep short: unix socket paths cap at ~104 bytes
 mkdir -p "$WORK/home" "$WORK/tmux"
+# Plant the creation sentinel NOW, at root creation — the reaper trusts the
+# recorded tmux dir only when this file's stamp equals the marker's
+# created_unix, and `mark` adopts a planted stamp automatically.
+printf '%s\n' "$(date +%s)" > "$WORK/.af-throwaway-sandbox"
 touch "$WORK/pids.txt"                  # record every PID you spawn here
 
 export AGENT_FACTORY_HOME="$WORK/home"

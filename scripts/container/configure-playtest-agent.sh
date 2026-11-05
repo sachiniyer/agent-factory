@@ -12,6 +12,11 @@ EVIDENCE_FILE="$SANDBOX/playtest-agent.txt"
 KIND_FILE="$SANDBOX/playtest-agent-kind"
 AGENT="${AF_PLAYTEST_AGENT:-standin}"
 
+# Create the sandbox root through the lifetime script when it is fresh: a
+# dedicated root gets the creation sentinel the reaper requires before it
+# trusts the recorded tmux dir. An inherited or pre-existing sandbox dir
+# takes mkdir -p instead and simply stays unproven — the safe direction.
+bash "$SCRIPT_DIR/sandbox-lifetime.sh" create-root "$SANDBOX" 2>/dev/null || true
 mkdir -p "$AF_HOME" "$BIN_DIR" "$SANDBOX"
 
 json_quote() {

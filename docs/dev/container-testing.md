@@ -315,12 +315,15 @@ bash scripts/container/sandbox-lifetime.sh mark "$AGENT_FACTORY_HOME" "$SANDBOX_
 The marker records the deadline (`AF_SANDBOX_MAX_LIFETIME` seconds,
 defaulting to `AF_PLAYTEST_MAX_LIFETIME` then six hours), optionally the
 creator's process identity (`AF_SANDBOX_OWNER_PID`), and the sandbox's
-private `TMUX_TMPDIR` when one exists. `mark` also plants a creation
-sentinel — `.af-throwaway-sandbox` in the sandbox root, containing the
-marker's `created_unix` — the positive proof that this sandbox made the
-tree. The marker is the ONLY identity the enforcement recognizes —
-nothing is ever reaped by path prefix or process name, and an unreadable
-marker authorizes nothing.
+private `TMUX_TMPDIR` when one exists. A scaffold that creates a dedicated
+sandbox root plants the creation sentinel at creation —
+`.af-throwaway-sandbox` in the root, via `sandbox-lifetime.sh create-root`
+— and `mark` adopts its stamp as the marker's `created_unix`. That
+sentinel is the positive proof that this sandbox made the tree; `mark`
+never writes it, so an existing or shared directory can never be blessed
+retroactively. The marker is the ONLY identity the enforcement recognizes
+— nothing is ever reaped by path prefix or process name, and an
+unreadable marker authorizes nothing.
 
 Two safety nets share the marker:
 
