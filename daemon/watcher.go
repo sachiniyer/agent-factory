@@ -611,8 +611,9 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// binder joins a member lifeline to the run's group once a probe re-arms
 	// — and retries at the probe cadence — so the run is not left unbound
 	// for its whole life (#6771). finish tears down whatever it bound.
+	var rebind *watchLifelineBinder
 	if lifeline == nil && w.sup.lifelineExe != "" {
-		rebind := w.sup.startWatchLifelineBinder(w.taskID, cmd.Process.Pid, w.stopCh)
+		rebind = w.sup.startWatchLifelineBinder(w.taskID, cmd.Process.Pid, w.stopCh)
 		defer rebind.finish()
 	}
 	_ = pw.Close() // the child holds its own dup
@@ -671,6 +672,15 @@ func (w *taskWatcher) runOnce() (*tailBuffer, error) {
 	// (reapWatchGroupLeader).
 	groupKilled, waitErr := reapWatchGroupLeader(cmd, anchor, func() {
 		close(leaderExited)
+		// The group's number stays pinned until the kill below lands on the
+		// anchor; this is the last moment a member bind can safely target it.
+		// Stop and join the binder's attempts BEFORE the number is freed —
+		// the reader drain below can hold runOnce open indefinitely, so the
+		// deferred finish alone is too late to keep a stale setpgid out of a
+		// reused group.
+		if rebind != nil {
+			rebind.stopAttempts()
+		}
 		// The run ends when the leader is observed dead: disarm HERE, not
 		// at runOnce return — reader drain can hold runOnce open past the
 		// crash window, and a timer firing then would write "started" for

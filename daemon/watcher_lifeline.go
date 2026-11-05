@@ -353,29 +353,69 @@ func (s *watcherSupervisor) startWatchMemberLifeline(pgid int, halt <-chan struc
 // process group, woken each time a probe proves the binary speaks the
 // protocol again and paced at the probe cadence otherwise — so the run does
 // not stay unbound once the degraded window has ended.
+//
+// abort ends attempts: it closes when the run ends (done), when the watcher
+// stops (stop), or when the run's reaper is about to free the group's number
+// (stopAttempts) — a member must never setpgid into a number the group no
+// longer pins, since it may have been reused for an unrelated group.
+// attemptsSettled closes once no attempt can ever run again — when the
+// binder is bound, parked, or gone — which is what stopAttempts joins.
 type watchLifelineBinder struct {
-	sup    *watcherSupervisor
-	taskID string
-	pgid   int
-	stop   <-chan struct{}
-	done   chan struct{}
-	joined chan struct{}
-	once   sync.Once
+	sup             *watcherSupervisor
+	taskID          string
+	pgid            int
+	stop            <-chan struct{}
+	done            chan struct{}
+	abort           chan struct{}
+	abortOnce       sync.Once
+	attemptsSettled chan struct{}
+	settleOnce      sync.Once
+	joined          chan struct{}
+	doneOnce        sync.Once
 }
 
 // startWatchLifelineBinder launches the binder for a run that spawned
 // directly. pgid is the run's process group — its leader's pid.
 func (s *watcherSupervisor) startWatchLifelineBinder(taskID string, pgid int, stop <-chan struct{}) *watchLifelineBinder {
 	b := &watchLifelineBinder{
-		sup:    s,
-		taskID: taskID,
-		pgid:   pgid,
-		stop:   stop,
-		done:   make(chan struct{}),
-		joined: make(chan struct{}),
+		sup:             s,
+		taskID:          taskID,
+		pgid:            pgid,
+		stop:            stop,
+		done:            make(chan struct{}),
+		abort:           make(chan struct{}),
+		attemptsSettled: make(chan struct{}),
+		joined:          make(chan struct{}),
 	}
+	// done and stop both end attempts; abort unifies them with the reaper's
+	// halt so the in-flight attempt sees one shutdown channel.
+	go func() {
+		select {
+		case <-b.done:
+		case <-stop:
+		case <-b.abort:
+		}
+		b.signalAbort()
+	}()
 	go b.run()
 	return b
+}
+
+func (b *watchLifelineBinder) signalAbort() {
+	b.abortOnce.Do(func() { close(b.abort) })
+}
+
+func (b *watchLifelineBinder) settle() {
+	b.settleOnce.Do(func() { close(b.attemptsSettled) })
+}
+
+// stopAttempts ends and joins the binder's retries while the run's group
+// number is still pinned — called from the reap callback, before the group
+// kill frees it. After it returns no member can ever setpgid into the
+// (possibly reused) number; a bound member stays armed until finish.
+func (b *watchLifelineBinder) stopAttempts() {
+	b.signalAbort()
+	<-b.attemptsSettled
 }
 
 // finish ends the binder when the run is over and joins it. A bound member
@@ -384,12 +424,13 @@ func (s *watcherSupervisor) startWatchLifelineBinder(taskID string, pgid int, st
 // is reaped through a bounded wait, with its own pid's SIGKILL as backstop;
 // never kill(-pgid), which is the run's group, not the member's alone.
 func (b *watchLifelineBinder) finish() {
-	b.once.Do(func() { close(b.done) })
+	b.doneOnce.Do(func() { close(b.done) })
 	<-b.joined
 }
 
 func (b *watchLifelineBinder) run() {
 	defer close(b.joined)
+	defer b.settle()
 	var member *exec.Cmd
 	var ll *watchLifeline
 	defer func() {
@@ -410,19 +451,22 @@ func (b *watchLifelineBinder) run() {
 	s := b.sup
 	for {
 		select {
-		case <-b.done:
-			return
-		case <-b.stop:
+		case <-b.abort:
 			return
 		default:
 		}
 		// Register for the next re-arm BEFORE the attempt, so a probe that
 		// succeeds during it lands in the wait below instead of being missed.
 		rearmed := s.lifelineRearmCh()
-		cmd, l, err := s.startWatchMemberLifeline(b.pgid, b.done)
+		cmd, l, err := s.startWatchMemberLifeline(b.pgid, b.abort)
 		switch {
 		case err == nil:
 			member, ll = cmd, l
+			// Bound is final — no further attempts, so no setpgid can ever
+			// race the group's release. The member's pipes stay held until
+			// the run's own teardown finishes: it dies with the group it
+			// joined, and finish() reaps it.
+			b.settle()
 			s.noteLifelineSpoke(b.taskID, s.lifelineExe)
 			log.InfoLog.Printf("watch task %s: bound a watch lifeline to the running watch command "+
 				"(pid %d); it is covered against an unclean daemon death again", b.taskID, b.pgid)
@@ -445,8 +489,7 @@ func (b *watchLifelineBinder) run() {
 			}
 			timer := time.NewTimer(watchLifelineProbeRetry)
 			select {
-			case <-b.done:
-			case <-b.stop:
+			case <-b.abort:
 			case <-rearmed:
 			case <-timer.C:
 			}
