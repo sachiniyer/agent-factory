@@ -24,6 +24,7 @@ var testNow = time.Date(2026, 11, 3, 12, 0, 0, 0, time.UTC)
 type depCounts struct {
 	resolve, state, registered, limited, dirs, reads, writes int
 	writeErr                                                 error
+	limitedErr                                               error
 	rows                                                     []handoff.EventRow
 	mode                                                     string
 	stateErr                                                 error
@@ -57,15 +58,14 @@ func (d *depCounts) deps() Deps {
 		},
 		LimitedAccounts: func(agent string) (map[string]bool, error) {
 			d.limited++
+			if d.limitedErr != nil {
+				return nil, d.limitedErr
+			}
 			return map[string]bool{}, nil
 		},
 		AccountDir: func(agent, name string) (string, error) {
 			d.dirs++
 			return "/home/" + agent + "/" + name, nil
-		},
-		AmbientDir: func(program, workDir string) (string, error) {
-			d.dirs++
-			return "/ambient", nil
 		},
 		ReadUsage: func(dir string, carried map[string]int64) handoff.ReadingFacts {
 			d.reads++
@@ -92,7 +92,7 @@ func (d *depCounts) deps() Deps {
 func shadowSession() SessionInput {
 	return SessionInput{
 		Key: "sess-1", Title: "worker", RepoID: "r", RepoRoot: "/repo",
-		Program: "codex", WorkDir: "/repo", Agent: tmux.ProgramCodex,
+		Agent: tmux.ProgramCodex, HomeDir: "/home/codex/work",
 		Account: "work", Auto: true, Started: true, Live: true,
 		Parked: true, SwapCapable: true, CarryPossible: true,
 		LimitAccount: "work", WallObservedAt: testNow.Add(-time.Hour),
@@ -169,6 +169,37 @@ func TestTickCorruptStateFailsClosed(t *testing.T) {
 	}
 	if d.writes != 0 {
 		t.Fatalf("corrupt state still wrote rows")
+	}
+}
+
+func TestTickUnreadableLimitEvidenceSkipsNamespace(t *testing.T) {
+	d := &depCounts{mode: "shadow", limitedErr: errors.New("ledger corrupt")}
+	e := New(d.deps())
+	if err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	// The namespace failed closed: no decision ran, nothing was written —
+	// an unreadable exclusion set is not an unlimited-account claim.
+	if d.writes != 0 || len(d.rows) != 0 {
+		t.Fatalf("unreadable limit evidence still produced rows: %+v", d.rows)
+	}
+}
+
+func TestTickWriteFailureRetriesTheEdge(t *testing.T) {
+	d := &depCounts{mode: "shadow", writeErr: errors.New("disk full")}
+	e := New(d.deps())
+	in := shadowSession()
+	if err := e.Tick([]SessionInput{in}); err == nil {
+		t.Fatalf("failed write returned nil error")
+	}
+	// The failed append must NOT consume the edge: the next tick re-emits
+	// the same verdict instead of suppressing it as a repeat (#6817).
+	d.writeErr = nil
+	if err := e.Tick([]SessionInput{in}); err != nil {
+		t.Fatalf("retry tick: %v", err)
+	}
+	if len(d.rows) == 0 {
+		t.Fatalf("retry did not re-emit the verdict: writes=%d rows=%d", d.writes, len(d.rows))
 	}
 }
 

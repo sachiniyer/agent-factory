@@ -33,5 +33,41 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 	if r, size := utf8.DecodeRuneInString(region); r == '❯' || r == '›' || r == '❭' || r == '>' {
 		region = region[size:]
 	}
-	return region != "", true
+	if region != "" {
+		return true, true
+	}
+	return draftClosedByFrame(rows, anchor), true
+}
+
+// draftClosedByFrame disambiguates the shape composerRegion cut short: a
+// content row that follows a blank gap below the glyph is EITHER an agent's
+// footer/status line (bare idle composer) OR a draft that opened with blank
+// lines — textually indistinguishable. The composer's own frame separates
+// them: draft text sits INSIDE the border a boxed composer draws (or above
+// the rule an unboxed one draws), while a footer lives past the frame's end.
+// A border row after the stranded content therefore proves the content was
+// interior — a real draft (#6817 review). No border before pane end is a
+// footer reading: provably empty stands.
+func draftClosedByFrame(rows []string, anchor int) bool {
+	sawGap := false
+	for j := anchor + 1; j < len(rows); j++ {
+		if norm := normalizeDelivery(rows[j]); norm == "" {
+			if !blankComposerRow(rows[j]) {
+				return false // the frame closed before any stranded content
+			}
+			sawGap = true
+			continue
+		} else if !sawGap {
+			continue // adjacent interior row — region would have carried it
+		}
+		// First post-gap content at j: interior draft iff a border row
+		// closes the frame below it before the pane ends.
+		for k := j + 1; k < len(rows); k++ {
+			if nk := normalizeDelivery(rows[k]); nk == "" && !blankComposerRow(rows[k]) {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }

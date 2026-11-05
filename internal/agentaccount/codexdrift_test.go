@@ -33,10 +33,12 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 			t.Fatalf("got (%q,%v), want (\"model\",false)", key, inc)
 		}
 	})
-	t.Run("target missing a seedable key is equal", func(t *testing.T) {
+	t.Run("source key the target omits is drift", func(t *testing.T) {
+		// No presence gap is presumed seedable: prep fills from ambient
+		// prompts, not from source settings (#6817 review).
 		writeCodexConfig(t, tgt, "approval_policy = \"on-request\"\nsandbox_mode = \"read-only\"\n")
-		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "" || inc {
-			t.Fatalf("got (%q,%v), want (\"\",false) — model seeds at prep", key, inc)
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "model" || inc {
+			t.Fatalf("got (%q,%v), want (\"model\",false)", key, inc)
 		}
 	})
 	t.Run("unparseable target is incomparable", func(t *testing.T) {
@@ -45,12 +47,18 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 			t.Fatalf("unparseable target was comparable")
 		}
 	})
-	t.Run("missing target config is comparable", func(t *testing.T) {
-		// An absent file is provably empty, not unverifiable: prep seeds the
-		// seedable keys, so a source setting only seedable values matches.
+	t.Run("missing target config is drift when source sets keys", func(t *testing.T) {
+		// An absent file is provably empty, not unverifiable — and a source
+		// that sets runtime keys cannot be presumed equal to an empty target.
 		if err := os.Remove(filepath.Join(tgt, "config.toml")); err != nil {
 			t.Fatal(err)
 		}
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "model" || inc {
+			t.Fatalf("got (%q,%v), want (\"model\",false)", key, inc)
+		}
+	})
+	t.Run("empty source and empty target compare equal", func(t *testing.T) {
+		writeCodexConfig(t, src, "")
 		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "" || inc {
 			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
 		}
@@ -67,6 +75,13 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 		writeCodexConfig(t, tgt, "model = \"o3\"\n")
 		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "" || inc {
 			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
+		}
+	})
+	t.Run("source key the target omits blocks even when effort also differs", func(t *testing.T) {
+		writeCodexConfig(t, src, "model = \"gpt-5\"\nmodel_reasoning_effort = \"high\"\n")
+		writeCodexConfig(t, tgt, "model_reasoning_effort = \"high\"\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "model" || inc {
+			t.Fatalf("got (%q,%v), want (\"model\",false)", key, inc)
 		}
 	})
 }
