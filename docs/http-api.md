@@ -342,7 +342,7 @@ apply not finish and belongs in a re-run's plan. An archived
 worktree still holding uncommitted or ignored files is **refused**, not
 counted: the kept branch does not contain them and they are the only copy —
 restore the session or clean the tree first. `older_than` is required and
-must be a positive Go duration measured from each session's archive time;
+must be a positive duration measured from each session's archive time;
 the request needs a scope — `repo_id` or `all: true`, which are mutually
 exclusive. `reclaimable_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a
