@@ -109,6 +109,11 @@ type governed struct {
 	cfg *config.ResolvedConfig
 }
 
+// moverRowKey is the edge-tracker/row key for mover-level events — the
+// halted announcement is the mover's own, not any one session's (#6818
+// round-2 review).
+const moverRowKey = "mover"
+
 // namespace is the evidence shared by every session in one agent's account
 // registry: who is registered, who still-excluding evidence marks limited.
 type namespace struct {
@@ -154,6 +159,10 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	for _, g := range gov {
 		liveKeys[g.in.Key] = true
 	}
+	// The mover-level row keeps its edge alive alongside the sessions'
+	// (a pruned "mover" edge would re-announce a persistent halt every
+	// tick — the N-immediate-prompts bug of #6818 round-2 review).
+	liveKeys[moverRowKey] = true
 	// Pruning commits immediately — a dropped edge is the safe direction
 	// (the returning session re-announces rather than staying suppressed).
 	e.edges.Prune(liveKeys)
@@ -225,6 +234,26 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	pending := e.edges.Clone()
 
 	var rows []handoff.EventRow
+	// A halt is a MOVER-level event (#6818 round-2 review): one row while
+	// the rails say stopped — edge-triggered on the mover key, so a
+	// persistent halt announces once per episode, not once per walled
+	// session per tick.
+	if state.Halted != nil {
+		ev := handoff.Event{
+			Kind:   handoff.EventHalted,
+			Reason: handoff.ReasonMoverHalted,
+			Params: map[string]string{
+				"halt_reason": state.Halted.Reason,
+				"halted_at":   state.Halted.At.UTC().Format(time.RFC3339),
+			},
+		}
+		for _, ev := range pending.Filter(moverRowKey, []handoff.Event{ev}, now, Reannounce) {
+			rows = append(rows, handoff.EventRow{
+				TS: now, Kind: ev.Kind, SessionKey: moverRowKey,
+				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
+			})
+		}
+	}
 	for _, g := range gov {
 		// The leaf's Phase-A scope gates run here BEFORE any evidence read:
 		// a pinned session excluded by include_pinned=false, an

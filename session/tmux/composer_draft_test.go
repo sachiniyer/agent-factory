@@ -75,9 +75,23 @@ func TestComposerDraftPresent(t *testing.T) {
 		}
 	})
 	t.Run("claude placeholder is provably empty", func(t *testing.T) {
-		present, provable := ComposerDraftPresent(`❯ Try "how do I list files?"` + "\n")
+		present, provable := ComposerDraftPresent(`❯ Try "how do I…"` + "\n")
 		if present || !provable {
 			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
+	// #6817 round-2: placeholder-SHAPED text af cannot match exactly is
+	// unprovable, never empty — the safe direction for a draft guard.
+	t.Run("rotated claude hint is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent(`❯ Try "npm test" then fix what fails` + "\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
+	t.Run("two-line draft starting with Try is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("› Try \"npm test\"\nthen fix what fails\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
 		}
 	})
 	t.Run("bare unrecognized glyph is unprovable", func(t *testing.T) {

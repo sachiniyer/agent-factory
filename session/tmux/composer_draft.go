@@ -38,15 +38,22 @@ func ComposerDraftPresent(content string) (present, provable bool) {
 	}
 	// The glyph row's own text decides before the region is joined: an empty
 	// composer's ghost placeholder proves EMPTY even with a footer row the
-	// region would have folded into the payload (#6817 review). Ghost text
-	// is only ever drawn into an empty input.
-	if composerPlaceholderText(afterComposerGlyph(normalizeDelivery(rows[anchor]))) {
+	// region would have folded into the payload — but only by EXACT known
+	// text (#6817 round-2 review). Ghost text is only ever drawn into an
+	// empty input, so an exact placeholder sighting is provably empty; a
+	// placeholder-SHAPED row af cannot match exactly — a rotated hint or a
+	// draft that merely opens the same way — stays unprovable, never empty.
+	glyphText := afterComposerGlyph(normalizeDelivery(rows[anchor]))
+	switch {
+	case composerPlaceholderText(glyphText):
 		return false, true
+	case composerPlaceholderShaped(glyphText):
+		return false, false
 	}
-	region := normalizeDelivery(strings.Join(composerRegion(rows, anchor), ""))
-	// Strip exactly one leading prompt glyph — the payload itself may open
-	// with '>' (the same discipline stillChipComposer holds).
-	region = afterComposerGlyph(region)
+	region := afterComposerGlyph(normalizeDelivery(strings.Join(composerRegion(rows, anchor), "")))
+	if composerPlaceholderShaped(region) {
+		return false, false
+	}
 	if region != "" {
 		return true, true
 	}
@@ -63,22 +70,36 @@ func afterComposerGlyph(s string) string {
 	return s
 }
 
+// composerPlaceholders is the set of NORMALIZED placeholder texts af has seen
+// an agent draw as ghost hint in an empty composer — exact matches only
+// (#6817 round-2 review). Codex's hint is a fixed string. Claude rotates its
+// `Try "…"` suggestions, so only observed texts are listed; a hint af cannot
+// prove is placeholder-shaped, and shaped is unprovable.
+var composerPlaceholders = map[string]bool{
+	"AskCodextodoanything": true, // codex — both the old › and Ultra » glyphs
+	`Try"howdoI…"`:         true, // claude hint
+}
+
 // composerPlaceholderText reports whether NORMALIZED composer interior text
-// is a known placeholder hint — ghost text the agent draws in an EMPTY
-// composer, which survives the ANSI strip as ordinary letters. The input
-// arrives normalizeDelivery'd, so the patterns carry no whitespace: Codex's
-// hint is a fixed string; Claude's rotates suggestions after a fixed `Try "`
-// prefix, so that one matches on the prefix alone.
+// is an EXACT known placeholder — nothing more, nothing after it.
 func composerPlaceholderText(region string) bool {
-	return region == "AskCodextodoanything" || strings.HasPrefix(region, `Try"`)
+	return composerPlaceholders[region]
+}
+
+// composerPlaceholderShaped reports whether NORMALIZED composer interior text
+// OPENS like a placeholder hint without being an exact match — a rotated
+// `Try "…"` suggestion or a leading "Ask Codex" — so the frame cannot be
+// called empty and cannot be called a draft either: unprovable.
+func composerPlaceholderShaped(region string) bool {
+	return strings.HasPrefix(region, `Try"`) || strings.HasPrefix(region, "AskCodex")
 }
 
 // ultraPlaceholderRowPresent handles the composer whose glyph is not a prompt
 // anchor — Ultra's » (Codex draws it only under the Ultra tier, #5383). Its
 // ghost-placeholder row is still a definitive empty-composer sighting: the
-// hint text is never submitted, so it cannot be a transcript echo. A BARE »,
-// by contrast, is a composer shape af cannot prove — the caller's unprovable
-// default stands.
+// hint text is never submitted, so an exact match cannot be a transcript
+// echo. A bare » or a » carrying anything else stays unprovable — submitted
+// prompts echo with the same glyph, so non-placeholder text proves nothing.
 func ultraPlaceholderRowPresent(rows []string) bool {
 	for _, row := range rows {
 		norm := normalizeDelivery(row)

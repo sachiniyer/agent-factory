@@ -145,7 +145,7 @@ func TestEventLogPrunesStaleLockFiles(t *testing.T) {
 
 // #6817 review: a day file past the byte cap takes no more rows — bounded
 // growth over a silently unbounded log.
-func TestEventLogDayCapDropsRows(t *testing.T) {
+func TestEventLogDayCapHoldsRows(t *testing.T) {
 	dir := t.TempDir()
 	log := NewEventLog(dir)
 	now := time.Date(2026, 11, 3, 4, 30, 0, 0, time.UTC)
@@ -154,8 +154,11 @@ func TestEventLogDayCapDropsRows(t *testing.T) {
 	if err := os.WriteFile(dayFile, make([]byte, eventDayMaxBytes), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}}); err != nil {
-		t.Fatalf("Append: %v", err)
+	// Past the day cap, Append ERRORS rather than silently dropping — the
+	// caller's edge stays uncommitted so the row retries next tick (#6817
+	// round-2 review).
+	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}}); err == nil {
+		t.Fatalf("Append past the day cap returned nil error")
 	}
 	if info, err := os.Stat(dayFile); err != nil || info.Size() != eventDayMaxBytes {
 		t.Fatalf("capped day file changed: size=%d err=%v", info.Size(), err)

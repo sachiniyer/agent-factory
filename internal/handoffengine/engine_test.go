@@ -28,6 +28,7 @@ type depCounts struct {
 	rows                                                     []handoff.EventRow
 	mode                                                     string
 	stateErr                                                 error
+	haltState                                                handoff.State
 	exclude                                                  []string
 }
 
@@ -51,7 +52,9 @@ func (d *depCounts) deps() Deps {
 			if d.stateErr != nil {
 				return handoff.State{}, d.stateErr
 			}
-			return handoff.State{SchemaVersion: 1}, nil
+			s := d.haltState
+			s.SchemaVersion = 1
+			return s, nil
 		},
 		Registered: func(agent string) ([]string, error) {
 			d.registered++
@@ -270,5 +273,45 @@ func TestTickSessionLeavingReannouncesOnReturn(t *testing.T) {
 	_, _ = e.Tick([]SessionInput{in})
 	if d.writes != 2 {
 		t.Fatalf("returned session did not re-announce: %d writes", d.writes)
+	}
+}
+
+// #6818 round-2 review: a halt is a MOVER-level event — one "halted" row per
+// episode, not one per walled session it defers. Two walled sessions under a
+// halt must produce exactly one halted row, and a second tick while the halt
+// persists must produce zero more (edge-triggered on the mover key).
+func TestTickHaltEmitsOncePerMover(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		haltState: handoff.State{Halted: &handoff.Halt{
+			At: testNow.Add(-time.Hour), Reason: "move-failed"}},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	b := shadowSession()
+	b.Key, b.Title = "sess-2", "other"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	halted := 0
+	for _, row := range d.rows {
+		if row.Kind == handoff.EventHalted {
+			halted++
+			if row.SessionKey != "mover" {
+				t.Fatalf("halted row keyed %q, want mover-level", row.SessionKey)
+			}
+		}
+	}
+	if halted != 1 {
+		t.Fatalf("halted rows = %d, want exactly 1 mover-level", halted)
+	}
+	d.rows = nil
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("second tick: %v", err)
+	}
+	for _, row := range d.rows {
+		if row.Kind == handoff.EventHalted {
+			t.Fatalf("persistent halt re-announced on tick 2")
+		}
 	}
 }
