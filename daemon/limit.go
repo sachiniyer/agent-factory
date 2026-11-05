@@ -585,8 +585,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
 			if accountSwap.alreadySet {
-				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
-					return resumeNotPerformed, conversation, err
+				revalidateErr := revalidateGoneAccountSwap(instance, accountSwap.to)
+				// A carried replacement that never proved itself is demoted
+				// to a stated fresh start inside the revalidation; answer
+				// with the record as it now stands (#6768).
+				conversation = instance.PendingAccountSwapConversation()
+				if revalidateErr != nil {
+					return resumeNotPerformed, conversation, revalidateErr
 				}
 			}
 			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
@@ -627,6 +632,10 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if rerr == nil {
 				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
 			}
+			// The launch can demote a committed carry to a fresh start;
+			// the answer is the pending record's state as it now stands
+			// (#6768).
+			conversation = instance.PendingAccountSwapConversation()
 		} else {
 			// Answer the conversation question BEFORE the respawn rewrites the
 			// recorded state it is asked about (#6768).
@@ -761,6 +770,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		conversation = session.HandoffConversation{Carried: true}
 	}
 	if accountSwap != nil {
+		// The launch and readiness work above can demote a committed carry —
+		// a copy that failed, or a carried replacement that never proved
+		// itself — so answer with the pending record's final state, the same
+		// read the notice below renders (#6768).
+		conversation = instance.PendingAccountSwapConversation()
 		// A committed-swap recovery that re-established the runtime after a
 		// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered
 		// with StartupStateUnknown set and started cleared. The probe or the
