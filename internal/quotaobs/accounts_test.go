@@ -1,6 +1,8 @@
 package quotaobs
 
 import (
+	"crypto/sha256"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strconv"
@@ -188,6 +190,14 @@ func TestCollect_CorruptStateFileReportsUnreadable(t *testing.T) {
 	if !result.HandoffUnreadable {
 		t.Fatal("HandoffUnreadable = false, want true")
 	}
+	// Unknown watermarks mean unknown readings: the claim may live inside a
+	// carried prefix holding the SOURCE account's numbers, so the row must
+	// not present it as this account's observed evidence.
+	if len(result.Accounts) != 1 ||
+		result.Accounts[0].Observation != quota.AccountObservationUnknown ||
+		result.Accounts[0].Reason != "watermarks unreadable" {
+		t.Fatalf("Accounts = %+v, want one unknown row with the watermark reason", result.Accounts)
+	}
 	var found bool
 	for _, warning := range result.Warnings() {
 		found = found || strings.Contains(warning, "auto-handoff state file")
@@ -222,4 +232,137 @@ func TestCollect_CarriedPrefixWatermarkIsHonored(t *testing.T) {
 	if len(result.Accounts) != 1 || result.Accounts[0].Observation != quota.AccountObservationNone {
 		t.Fatalf("Accounts = %+v, want one account with no evidence (whole claim watermarked)", result.Accounts)
 	}
+}
+
+// An unreadable config must still warn when nothing else engages the section:
+// a failed load does not establish that handoff is off, so an operator who
+// enabled shadow mode and then broke the TOML elsewhere needs the caveat even
+// though no section renders.
+func TestCollect_UnreadableConfigStillWarns(t *testing.T) {
+	home := fakeHome(t)
+	writeGlobalConfig(t, home, "not valid toml [[[\n")
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if !result.ConfigUnreadable {
+		t.Fatal("ConfigUnreadable = false, want true")
+	}
+	if result.Accounts != nil || result.Mover != nil {
+		t.Fatalf("section rendered off an unreadable config: accounts=%+v mover=%+v", result.Accounts, result.Mover)
+	}
+	var found bool
+	for _, warning := range result.Warnings() {
+		found = found || strings.Contains(warning, "could not read its config")
+	}
+	if !found {
+		t.Fatalf("warnings missing the config caveat: %v", result.Warnings())
+	}
+}
+
+// The same unreadable config with a state file present: the section still
+// renders (a recorded halt is never silent), and the mover line must not
+// claim a configured mode af never saw.
+func TestCollect_UnreadableConfigWithStateFile(t *testing.T) {
+	home := fakeHome(t)
+	writeGlobalConfig(t, home, "not valid toml [[[\n")
+	writeStateFile(t, home, `{"schema_version":1,"halted":{"at":"2026-10-31T05:00:00Z","reason":"x"}}`)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if !result.ConfigUnreadable {
+		t.Fatal("ConfigUnreadable = false, want true")
+	}
+	if result.Mover == nil || !result.Mover.ModeUnknown || !result.Mover.Halted {
+		t.Fatalf("Mover = %+v, want mode-unknown + halted", result.Mover)
+	}
+	if result.Mover.Mode != "" {
+		t.Fatalf("Mover.Mode = %q, want empty — af never saw the configured mode", result.Mover.Mode)
+	}
+}
+
+// `af quota` is a read-only command: Collect must not create or rewrite any
+// file under the af home — not a materialized config.toml on a home without
+// one, and not a config.json → config.toml conversion on a legacy home.
+func TestCollect_ReadOnlyLeavesHomeUntouched(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		setup func(t *testing.T, home string)
+	}{
+		{"no config files", func(t *testing.T, home string) {}},
+		{"enabled handoff config", func(t *testing.T, home string) {
+			writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
+		}},
+		{"legacy config.json only", func(t *testing.T, home string) {
+			if err := os.WriteFile(filepath.Join(home, "config.json"),
+				[]byte(`{"default_program":"claude"}`), 0o600); err != nil {
+				t.Fatalf("write config.json: %v", err)
+			}
+		}},
+		{"account and state file present", func(t *testing.T, home string) {
+			writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
+			writeAccountRollout(t, home, "work", "31", claimLine)
+			writeStateFile(t, home, `{"schema_version":1}`)
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := fakeHome(t)
+			tc.setup(t, home)
+			before := snapshotTree(t, home)
+			if _, err := Collect(); err != nil {
+				t.Fatalf("Collect: %v", err)
+			}
+			after := snapshotTree(t, home)
+			if len(before) != len(after) {
+				t.Fatalf("entry count changed: %d -> %d (new: %v)", len(before), len(after), missingKeys(before, after))
+			}
+			for path, sum := range before {
+				if after[path] != sum {
+					t.Fatalf("%s changed across Collect", path)
+				}
+			}
+		})
+	}
+}
+
+// snapshotTree maps every entry under root to a content fingerprint —
+// directories to a marker, files to their byte sum. Byte-for-byte comparison
+// of before/after proves Collect wrote nothing anywhere under the home.
+func snapshotTree(t *testing.T, root string) map[string]string {
+	t.Helper()
+	tree := map[string]string{}
+	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, err := filepath.Rel(root, path)
+		if err != nil || rel == "." {
+			return err
+		}
+		if d.IsDir() {
+			tree[rel] = "dir"
+			return nil
+		}
+		raw, err := os.ReadFile(path)
+		if err != nil {
+			return err
+		}
+		tree[rel] = fmt.Sprintf("%x", sha256.Sum256(raw))
+		return nil
+	})
+	if err != nil {
+		t.Fatalf("walk home: %v", err)
+	}
+	return tree
+}
+
+func missingKeys(before, after map[string]string) []string {
+	var extra []string
+	for k := range after {
+		if _, ok := before[k]; !ok {
+			extra = append(extra, k)
+		}
+	}
+	return extra
 }

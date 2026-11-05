@@ -29,11 +29,16 @@ import (
 func collectAccountEvidence(result *Result) {
 	mode := config.AccountHandoffModeOff
 	enabled := false
-	if cfg, err := config.LoadConfig(); err != nil {
+	// LoadConfigReadOnly, not LoadConfig: `af quota` and the QuotaReport RPC
+	// are read-only, while LoadConfig materializes a default config.toml —
+	// and converts a legacy config.json — on a home that has neither. A
+	// missing config resolves to in-memory defaults whose [account_handoff]
+	// mode is "off": the same answer, without a read-only command writing.
+	if load, err := config.LoadConfigReadOnly(); err != nil {
 		result.ConfigUnreadable = true
-	} else if cfg != nil {
-		mode = cfg.AccountHandoff.Mode
-		enabled = cfg.AccountHandoffEnabled()
+	} else if load.Config != nil {
+		mode = load.Config.AccountHandoff.Mode
+		enabled = load.Config.AccountHandoffEnabled()
 	}
 
 	var state handoff.State
@@ -48,13 +53,18 @@ func collectAccountEvidence(result *Result) {
 
 	if !enabled && !stateExists {
 		// Nothing opted this af home in and the machinery never ran here.
-		// ConfigUnreadable (if set) is meaningless in that world: a config af
-		// could not read cannot have gated anything off.
-		result.ConfigUnreadable = false
+		// ConfigUnreadable (if set) still warns: an unreadable config does
+		// not establish that handoff is disabled, and hiding that failure
+		// would silently omit a section the operator may have enabled.
 		return
 	}
 
 	mover := &quota.MoverStatus{Mode: mode}
+	if result.ConfigUnreadable {
+		// The configured mode is unknowable — "mover: off" would be a guess.
+		mover.Mode = ""
+		mover.ModeUnknown = true
+	}
 	if stateErr != nil {
 		mover.StateUnreadable = true
 		result.HandoffUnreadable = true
@@ -89,19 +99,32 @@ func collectAccountEvidence(result *Result) {
 		result.Accounts = append(result.Accounts,
 			accountFromReading(name, indexer.Refresh(dir, rateindex.Options{
 				CarriedPrefixes: state.CarriedPrefixes,
-			})))
+			}), stateErr == nil))
 	}
 }
 
 // accountFromReading projects an indexer verdict onto the report's account
 // row. The indexer's own vocabulary (observed/unknown/none) maps one-for-one;
 // the render-side wording lives in quota.AccountObservation.String.
-func accountFromReading(name string, reading rateindex.AccountReading) quota.ObservedAccount {
+//
+// watermarksKnown is false when the state file would not decode, leaving the
+// carried-prefix map unknown. An "observed" reading may then be a claim inside
+// a carried prefix — the source account's numbers wearing the target's name —
+// so it degrades to unknown rather than presenting a poisoned percentage.
+// StatusNone is still honest: a watermark can only SHRINK the eligible region,
+// so "no claim anywhere" cannot become "claim" by knowing the watermark.
+// StatusUnknown keeps its own reason.
+func accountFromReading(name string, reading rateindex.AccountReading, watermarksKnown bool) quota.ObservedAccount {
 	out := quota.ObservedAccount{Agent: "codex", Name: name}
 	switch reading.Status {
 	case rateindex.StatusObserved:
 		out.Observation = quota.AccountObservationObserved
 		out.Reading = reading.Reading
+		if !watermarksKnown {
+			out.Observation = quota.AccountObservationUnknown
+			out.Reading = quota.UsageReading{}
+			out.Reason = "watermarks unreadable"
+		}
 	case rateindex.StatusUnknown:
 		out.Observation = quota.AccountObservationUnknown
 		out.Reason = reading.Reason

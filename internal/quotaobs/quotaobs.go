@@ -70,7 +70,7 @@ func (r Result) Warnings() []string {
 	}
 	if r.ConfigUnreadable {
 		warnings = append(warnings,
-			"af could not read its config, so [account_handoff] presence could not be determined; the handoff state file alone triggered the ACCOUNTS section")
+			"af could not read its config, so the [account_handoff] mode is unknown")
 	}
 	if r.HandoffUnreadable {
 		warnings = append(warnings,
