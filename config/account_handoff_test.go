@@ -224,6 +224,39 @@ func TestAccountHandoffPersonalAbsentLeavesStayDefault(t *testing.T) {
 		"unwritten personal leaves inherit the compiled default, not a zero value")
 }
 
+// TestAccountHandoffOrderingBindsTheMergedTable pins the cross-layer rule:
+// each source validates its own leaves, and prefer_below < move_idle < wall
+// binds the EFFECTIVE table — both halves, the merge that must pass and the
+// merge that must fail.
+func TestAccountHandoffOrderingBindsTheMergedTable(t *testing.T) {
+	t.Run("personal leaf valid only in context resolves", func(t *testing.T) {
+		home, repoRoot, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "[account_handoff]\nprefer_below_percent = 60\nmove_idle_at_percent = 80\nwall_percent = 90\n")
+		writePersonalConfig(t, project.ID, "[account_handoff]\nmove_idle_at_percent = 85\n")
+
+		_, err := LoadProjectConfig(project.ID)
+		require.NoError(t, err,
+			"the personal file is valid alone: 85 is in range, and ordering is a property of the merged table — not defaults")
+		resolved, err := ResolveConfig(repoRoot)
+		require.NoError(t, err)
+		assert.Equal(t, 85, resolved.AccountHandoff.MoveIdleAtPercent,
+			"rejected against the default prefer_below (85) before; valid against the inherited one (60 < 85 < 90)")
+	})
+
+	t.Run("individually-valid layers merging invalid fails at resolve", func(t *testing.T) {
+		home, repoRoot, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "[account_handoff]\nmove_idle_at_percent = 94\n")
+		writePersonalConfig(t, project.ID, "[account_handoff]\nprefer_below_percent = 94\n")
+
+		_, err := LoadProjectConfig(project.ID)
+		require.NoError(t, err, "each file is valid alone")
+		_, err = ResolveConfig(repoRoot)
+		require.Error(t, err,
+			"global 85 < 94 < 97 and personal 94 < 95 < 97 each validate — the merged prefer 94 !< move_idle 94 does not")
+		assert.Contains(t, err.Error(), "account_handoff")
+	})
+}
+
 func TestAccountHandoffPersonalRejectsInvalid(t *testing.T) {
 	_, _, project := registeredTestProject(t)
 	writePersonalConfig(t, project.ID, "[account_handoff]\nmode = \"live\"\n")

@@ -77,8 +77,9 @@ type ProjectConfig struct {
 	// file's own shape, so a project can pin just the leaves it overrides. It is
 	// machine-local identity policy, never checked in — like
 	// limit_account_candidates. The decode is seeded with the compiled defaults
-	// before unmarshal so validateAccountHandoff sees a complete table rather
-	// than zero values for unwritten leaves.
+	// before unmarshal so the per-leaf checks see a complete table rather than
+	// zero values for unwritten leaves; ordering is checked on the merged
+	// result, not here.
 	AccountHandoff AccountHandoffConfig `toml:"account_handoff,omitempty"`
 
 	// unknownLeaves lists the [root_agent] leaves the typed decode dropped
@@ -333,10 +334,14 @@ func parseProjectConfig(data []byte, path string) (*ProjectConfig, error) {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
 	}
 	cfg.LimitAccountCandidates = normalizedCandidates
-	// Same validation contract as the global layer: the personal decode seeded
-	// the compiled defaults before unmarshal, so this sees a complete table —
-	// unwritten leaves are defaults, written ones are the project's values.
-	if err := validateAccountHandoff(cfg.AccountHandoff); err != nil {
+	// Per-leaf validation only — never ordering. A personal file's unwritten
+	// leaves inherit from the global layer, not the compiled defaults, so
+	// checking prefer_below < move_idle < wall against the seeded defaults
+	// would reject an override that is valid in context and still miss two
+	// individually-valid layers merging into an invalid chain. Ordering binds
+	// the EFFECTIVE table and is checked on the merged result in
+	// materializeResolution.
+	if err := validateAccountHandoffFields(cfg.AccountHandoff); err != nil {
 		return nil, fmt.Errorf("Config issue in %s: %w", prettyPath, err)
 	}
 	return &cfg, nil

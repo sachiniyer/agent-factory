@@ -664,6 +664,15 @@ func materializeResolution(global *Config, projectRoot string, entries []Manifes
 		value.resolved.Value = clonedInterface(value.value)
 		res.Resolution = append(res.Resolution, value.resolved)
 	}
+	// Cross-field ordering binds the EFFECTIVE account_handoff table, not each
+	// source: two individually-valid layers can merge into an invalid chain
+	// (a global move_idle_at_percent below a personal prefer_below_percent),
+	// and this is the first place every source is known. Same loud posture as
+	// the leaf checks — a resolved table that violates the documented
+	// ordering must not pass silently.
+	if err := validateAccountHandoff(res.AccountHandoff); err != nil {
+		return nil, fmt.Errorf("resolved [account_handoff] is invalid across the merged layers: %w", err)
+	}
 	// A stored personal branch_prefix resolves as precedence-disallowed; relabel
 	// it as the accepted-but-unapplied state it actually is (#4539) so explain
 	// output and the get/list marker describe it honestly. No-op on the

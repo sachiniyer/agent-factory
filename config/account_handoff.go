@@ -145,7 +145,34 @@ func defaultAccountHandoffConfig() AccountHandoffConfig {
 // first invalid value. The checks are hard errors — like default_accounts and
 // limit_account_candidates — because the table selects identity policy and a
 // silent fallback could weaken an explicit safety opt-in.
+//
+// The ordering half binds the EFFECTIVE table: a personal per-project file
+// calls validateAccountHandoffFields only, because its unwritten leaves
+// inherit from the global layer rather than from defaults — checking its
+// ordering against defaults would reject a personal override that is valid
+// in context, and would still miss two individually-valid layers merging
+// into an invalid chain. materializeResolution runs this full check on the
+// merged result, the first place every source is known.
 func validateAccountHandoff(table AccountHandoffConfig) error {
+	if err := validateAccountHandoffFields(table); err != nil {
+		return err
+	}
+	// The ordering rule is conditioned on proactive moves being enabled:
+	// prefer_below < move_idle < wall only binds when move_idle_at_percent is
+	// nonzero — with moves disabled the hint has no referent.
+	if table.MoveIdleAtPercent != 0 &&
+		!(table.PreferBelowPercent < table.MoveIdleAtPercent && table.MoveIdleAtPercent < table.WallPercent) {
+		return fmt.Errorf("account_handoff: prefer_below_percent (%d) must be < move_idle_at_percent (%d) must be < wall_percent (%d)",
+			table.PreferBelowPercent, table.MoveIdleAtPercent, table.WallPercent)
+	}
+	return nil
+}
+
+// validateAccountHandoffFields checks every leaf INDEPENDENTLY — enum
+// spellings, per-leaf ranges, duration shapes, list contents — and nothing
+// across fields. It is the check one source file can honestly run; see
+// validateAccountHandoff for where ordering is enforced.
+func validateAccountHandoffFields(table AccountHandoffConfig) error {
 	if err := validateAccountHandoffEnum("mode", table.Mode,
 		AccountHandoffModeOff, AccountHandoffModeShadow); err != nil {
 		return err
@@ -170,14 +197,6 @@ func validateAccountHandoff(table AccountHandoffConfig) error {
 	}
 	if err := accountHandoffPercentValue("prefer_below_percent", table.PreferBelowPercent, false); err != nil {
 		return err
-	}
-	// The ordering rule is conditioned on proactive moves being enabled:
-	// prefer_below < move_idle < wall only binds when move_idle_at_percent is
-	// nonzero — with moves disabled the hint has no referent.
-	if table.MoveIdleAtPercent != 0 &&
-		!(table.PreferBelowPercent < table.MoveIdleAtPercent && table.MoveIdleAtPercent < table.WallPercent) {
-		return fmt.Errorf("account_handoff: prefer_below_percent (%d) must be < move_idle_at_percent (%d) must be < wall_percent (%d)",
-			table.PreferBelowPercent, table.MoveIdleAtPercent, table.WallPercent)
 	}
 	if table.MaxMoves < 1 {
 		return fmt.Errorf("account_handoff.max_moves must be at least 1, got %d — set mode = \"off\" to disable automatic handoffs", table.MaxMoves)
