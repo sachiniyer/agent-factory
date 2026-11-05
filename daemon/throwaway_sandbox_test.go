@@ -379,8 +379,11 @@ func TestThrowawayPrivateTmuxDirRequiresCreatedRoot(t *testing.T) {
 	})
 	t.Run("home outside the proven root is refused", func(t *testing.T) {
 		other := t.TempDir()
+		if err := throwawaysandbox.WriteRootSentinel(other, created); err != nil {
+			t.Fatal(err)
+		}
 		if dir, _ := throwawayPrivateTmuxDir(canonHome, marker(other, filepath.Join(other, "tmux"), created)); dir != "" {
-			t.Fatalf("a root that does not contain the home was accepted: %q", dir)
+			t.Fatalf("a proven root that does not contain the home was accepted: %q", dir)
 		}
 	})
 	t.Run("tmux dir outside the proven root is refused", func(t *testing.T) {
