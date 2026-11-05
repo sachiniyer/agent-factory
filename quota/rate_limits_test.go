@@ -84,6 +84,9 @@ func TestParseCodexRateLimitsLine(t *testing.T) {
 		{fixture: "malformed_window_no_percent.jsonl", verdict: RateLimitsMalformed},
 		{fixture: "malformed_no_timestamp.jsonl", verdict: RateLimitsMalformed},
 		{fixture: "malformed_bad_timestamp.jsonl", verdict: RateLimitsMalformed},
+		// A non-string timestamp on a claim is the same violation class as a
+		// bad string one — it must not silently skip the claim.
+		{fixture: "malformed_numeric_timestamp.jsonl", verdict: RateLimitsMalformed},
 		{
 			fixture: "null_window_fields.jsonl",
 			verdict: RateLimitsParsed,

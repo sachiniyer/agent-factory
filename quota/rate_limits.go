@@ -104,7 +104,7 @@ type codexRateLimitWindow struct {
 func ParseCodexRateLimitsLine(line []byte) (RateLimitsVerdict, UsageReading) {
 	var envelope struct {
 		Type      string          `json:"type"`
-		Timestamp string          `json:"timestamp"`
+		Timestamp json.RawMessage `json:"timestamp"`
 		Payload   json.RawMessage `json:"payload"`
 	}
 	if err := json.Unmarshal(line, &envelope); err != nil {
@@ -129,8 +129,14 @@ func ParseCodexRateLimitsLine(line []byte) (RateLimitsVerdict, UsageReading) {
 	}
 
 	// From here the line CLAIMS a rate_limits snapshot: failures are
-	// malformed claims, never silent skips.
-	recordedAt, err := time.Parse(time.RFC3339Nano, envelope.Timestamp)
+	// malformed claims, never silent skips. The timestamp is decoded only now
+	// that the claim is established — a wrong-typed timestamp on a claim is
+	// malformed, not absent.
+	var timestampText string
+	if err := json.Unmarshal(envelope.Timestamp, &timestampText); err != nil {
+		return RateLimitsMalformed, UsageReading{}
+	}
+	recordedAt, err := time.Parse(time.RFC3339Nano, timestampText)
 	if err != nil {
 		return RateLimitsMalformed, UsageReading{}
 	}
