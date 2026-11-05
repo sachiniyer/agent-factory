@@ -55,7 +55,7 @@ func (m *home) handleQuotaLoaded(msg quotaLoadedMsg) {
 func (m *home) applyQuotaToPane(resp daemon.QuotaReportResponse, err error) {
 	if err != nil {
 		log.WarningLog.Printf("quota: could not read the usage report for the config pane: %v", err)
-		m.configPane.SetQuota(nil, nil, err)
+		m.configPane.SetQuota(nil, nil, "", err)
 		return
 	}
 	rows := make([]ui.QuotaRow, 0, len(resp.Agents))
@@ -70,5 +70,5 @@ func (m *home) applyQuotaToPane(resp daemon.QuotaReportResponse, err error) {
 			Detail:          agent.Detail,
 		})
 	}
-	m.configPane.SetQuota(rows, resp.Warnings, nil)
+	m.configPane.SetQuota(rows, resp.Warnings, resp.Mover, nil)
 }

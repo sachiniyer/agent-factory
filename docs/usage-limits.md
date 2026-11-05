@@ -456,7 +456,19 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   are the source account's numbers: a carry commits a durable byte watermark
   at copy time naming exactly which leading bytes came from the previous
   account, and the usage reader ignores claims below it — a carry that
-  cannot record its watermark is not committed. Pane chrome, busy
+  cannot record its watermark commits only when the copied span is
+  quarantined in the rails file instead, so no claim inside it frees a
+  wall until a covering watermark lands. When neither durable record can
+  be written the carry does not commit at all: the install is unwound
+  and the replacement starts a fresh conversation whose brief says why —
+  committing bytes no record can mark untrustworthy would silently let
+  the source account's claims count as the target's. The
+  quarantine ledger is bounded, and its cap never evicts a marker — a
+  dropped marker would re-trust a file whose poison span is still on
+  disk. A failed carry that cannot get a marker flags its account
+  instead: that account's usage claims are then untrusted for retraction
+  wholesale until a watermark covering the named rollout lands, or the
+  rails file is repaired. Pane chrome, busy
   indicators, a delivered prompt, and idle or attached pane state prove
   nothing either — none of them shows the account accepted a request. And
   because the proof must postdate a claimed reset too, retraction mainly
@@ -655,6 +667,60 @@ mode = "shadow"
 - **`mode = "live"` is rejected at load.** Live moves, verification, and
   recovery land in later slices; until then `shadow` and `off` are the only
   accepted spellings.
+
+### Inspecting and resetting the rails
+
+The engine keeps its durable record across two files under
+`~/.agent-factory/instances/`, both keyed by stable session identity, never
+by title:
+
+- `auto-handoff-state.json` — the file older af versions already read and
+  write: carried-prefix watermarks and the mover halt.
+- `auto-handoff-rails.json` — the records the mover keeps for itself:
+  refusal backoffs, the recent-move ledger the switch-loop rail
+  (`max_moves` inside `max_moves_window`) and the anti-pile-on move credits
+  count, held-report markers, the unrecorded-carry quarantine, and the
+  account-level flags a full quarantine records. Keeping
+  these out of the shared file means a downgrade's carry rewrite cannot
+  erase them.
+
+Both files preserve fields a later version adds, refuse symlinked paths,
+and fail closed on corruption: a corrupt file is an error on every surface,
+never an empty report. Two operator verbs read and repair the records:
+
+```
+af accounts handoff status
+af accounts handoff reset <halt|backoff|moves> [--session <key>]
+```
+
+- **status** prints the resolved `account_handoff.mode` (the absent table is
+  `off`, exactly the pre-feature behavior; a personal-project opt-in reports
+  the mode the engine actually resolved), whether the daemon's engine is
+  observing, the recorded halt with its reason and timestamp, live refusal
+  backoffs — expired ones stay in the file for the next prune but never
+  print — and the recent-move entries alongside the `max_moves`/`window`
+  they are counted against. Either file corrupt is an error, not an empty
+  report — the rails fail closed.
+- **reset clears only the record you name.** `halt` clears the mover halt;
+  `backoff` and `moves` clear refusal backoffs and recent-move entries,
+  all of them or one session's with `--session`. Clearing a halt never
+  silently takes the loop history or a held report with it — each rail
+  protects the others from an impatient reset, and a reset that matched
+  nothing says so rather than claiming a clearance it did not perform.
+- **A halt stops only automatic moves.** `on_failure = "halt"` (the default)
+  is for the live-mover slice; nothing moves today. The recorded halt is
+  still honored on the surfaces: it appears on `af accounts handoff status`,
+  on `af quota`'s `mover:` line, and on the TUI and web Usage sections, so a
+  stopped mover is never silent. Ordinary wait-for-reset resume —
+  including a `limit_account_candidates` auto-swap — is *not* gated by the
+  halt record: it is a different mechanism with its own rails.
+- **The verbs are daemon calls on every transport.** Local runs use the
+  control socket; `--daemon-url`/`AF_DAEMON_URL` targets route over the
+  authenticated HTTP API (`POST /v1/HandoffStatus`, `POST /v1/HandoffReset`)
+  to the daemon the flag names — never to the local daemon's home by
+  accident. Neither route is reachable with a sandbox credential: the rails
+  name the operator's sessions and accounts with no per-session owner to
+  narrow to, and reset is operator authority over the mover itself.
 
 ## Hand off to another agent
 

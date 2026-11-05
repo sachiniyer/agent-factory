@@ -317,8 +317,17 @@ var controlMethodPolicies = map[string]probationPolicy{
 	// section that cannot read reports "af could not look", which is a worse
 	// answer than the true one.
 	"QuotaReport": allowedDuringProbation,
-	"TriggerTask": blockedDuringProbation,
-	"UpdateTask":  blockedDuringProbation,
+	// HandoffStatus is a read of the rails file plus resolved config (#6776
+	// slice 5): no manager mutation, nothing an upgrade window is protecting —
+	// same class as QuotaReport, whose vocabulary its halt state feeds. A
+	// status that refuses during probation would read as "af could not look",
+	// which is the worse answer.
+	"HandoffStatus": allowedDuringProbation,
+	// HandoffReset clears durable rail records — a mutation of the candidate
+	// under validation like every other write. A refusal costs a retry.
+	"HandoffReset": blockedDuringProbation,
+	"TriggerTask":  blockedDuringProbation,
+	"UpdateTask":   blockedDuringProbation,
 	// ApplyConfig was allowed during probation on the reasoning that a blocked
 	// SetConfigValue kept the file from changing, so an apply could only re-read
 	// unchanged bytes. #3231 disproved the premise: pre-#3231 CLIs and hand-edits

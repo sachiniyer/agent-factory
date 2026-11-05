@@ -836,6 +836,10 @@ export interface QuotaReportResponse {
    *  Shown when present — an incomplete report that hides them reads as
    *  authoritative. */
   warnings?: string[];
+  /** The rendered mover line — the configured auto-handoff mode plus any
+   *  recorded halt (R16: a halted mover is never silent). Absent under the
+   *  absent-table condition, when no handoff machinery ever ran here. */
+  mover?: string;
 }
 
 /** AccountLoginResponse (daemon/control_types_accounts.go). */

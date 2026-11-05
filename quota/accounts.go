@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/printsafety"
 )
 
 // AccountObservation is the verdict on one registered account's recorded usage
@@ -97,10 +99,10 @@ func (m MoverStatus) String() string {
 	case m.StateUnreadable:
 		base = "state file unreadable"
 	case m.Halted:
-		if m.HaltReason == "" {
+		if reason := printsafety.Field(m.HaltReason); reason == "" {
 			base = fmt.Sprintf("halted since %s", m.HaltAt.UTC().Format(time.RFC3339))
 		} else {
-			base = fmt.Sprintf("halted: %s since %s", m.HaltReason, m.HaltAt.UTC().Format(time.RFC3339))
+			base = fmt.Sprintf("halted: %s since %s", reason, m.HaltAt.UTC().Format(time.RFC3339))
 		}
 	case m.ModeUnknown:
 		base = "configured mode unknown"

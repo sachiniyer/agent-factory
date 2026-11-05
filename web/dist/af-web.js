@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f29ebbd1ee8e";
+var CLIENT_VERSION = "7b7f7c957f6e";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7534,7 +7534,7 @@ async function listAccounts(token2, repoPath = "") {
 }
 async function quotaReport(token2) {
   const resp = await af("QuotaReport", {}, token2);
-  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [], mover: resp?.mover ?? "" };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -8453,7 +8453,7 @@ function appendStatus(row, status, agent, name) {
 
 // src/quota.ts
 function emptyQuotaState() {
-  return { agents: [], warnings: [], loaded: false, error: "" };
+  return { agents: [], warnings: [], mover: "", loaded: false, error: "" };
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
 function renderQuotaSection(state) {
@@ -8475,6 +8475,9 @@ function renderQuotaSection(state) {
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
     );
     return section;
+  }
+  if (state.mover !== "") {
+    section.append(h("p", { class: "af-quota-note" }, `mover: ${state.mover}`));
   }
   for (const warning of state.warnings) {
     section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
@@ -22978,7 +22981,7 @@ var quotaRefetcher = createFencedRefetcher({
   fetch: quotaReport,
   commit: (resp) => {
     store.set({
-      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], mover: resp.mover ?? "", error: "", loaded: true }
     });
   },
   onError: (err) => {

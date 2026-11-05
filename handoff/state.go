@@ -1,34 +1,47 @@
-// Package handoff owns the durable record shared by the native
-// account-handoff slices (#6776): <af-home>/instances/auto-handoff-state.json.
+// Package handoff owns the durable records shared by the native
+// account-handoff slices (#6776). Two files live under
+// <af-home>/instances/:
 //
-// The file carries state that must survive a daemon restart — today the
-// per-file carried-prefix watermarks the usage reader honors, and the halt
-// record af quota surfaces; the rails slices extend it additively
-// (recent-move credits, refusal backoff, ambient wall bookkeeping). It is
-// written under a sibling file lock with an atomic rename and FAILS CLOSED on
-// decode: a corrupt rails file must stop the mover, never be silently rebuilt
-// — the same posture readAccountLimitLedger takes.
+//   - auto-handoff-state.json — the file v1.0.345 already reads and writes:
+//     the per-file carried-prefix watermarks the usage reader honors, and
+//     the halt record af quota surfaces. Its schema stays exactly the field
+//     set v1.0.345 models, so a downgrade's read-modify-write cannot erase
+//     anything here.
+//   - auto-handoff-rails.json — everything v1.0.345 does NOT model (move
+//     credits, refusal backoffs, held-report records, unrecorded-carry
+//     quarantine). v1.0.345 rewrites the state file on every carry and
+//     drops fields it does not know, so these records MUST live in a file
+//     it never opens. See rails.go.
+//
+// Both files are written under a sibling file lock with an atomic rename
+// and FAIL CLOSED on decode: a corrupt file must stop the mover, never be
+// silently rebuilt — the same posture readAccountLimitLedger takes. Reads
+// open O_NOFOLLOW (#3672): a symlinked rails or watermark file is a
+// tampering signal, not something to follow. And every read-modify-write
+// preserves top-level fields the writing binary does not model, so a later
+// slice's fields survive an older writer that knows this rule.
 package handoff
 
 import (
 	"encoding/json"
 	"fmt"
-	"os"
 	"path/filepath"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 )
 
-// StateFileName is the file's name under <af-home>/instances/.
+// StateFileName is the watermark/halt file's name under <af-home>/instances/.
 const StateFileName = "auto-handoff-state.json"
 
 const stateSchemaVersion = 1
 
-// State is the durable auto-handoff record. Fields are additive: readers
-// tolerate fields a newer slice writes, and every field must be meaningful
-// when absent (omitempty everywhere) so a file written by an older af still
-// decodes.
+// State is the durable record v1.0.345 already models — carried-prefix
+// watermarks plus the mover halt — and NOTHING else: fields a newer slice
+// adds live in the rails file (rails.go), because v1.0.345's rewrite drops
+// any field it does not know. Reads tolerate unknown fields; every modeled
+// field is meaningful when absent (omitempty everywhere) so a file written
+// by an older af still decodes.
 type State struct {
 	SchemaVersion int `json:"schema_version"`
 	// CarriedPrefixes maps a rollout file's absolute path to the number of
@@ -43,44 +56,25 @@ type State struct {
 	// Halted records a mover halt (on_failure = "halt"). Presence means
 	// engine-originated moves are stopped; ordinary wait-for-reset resume is
 	// unaffected. Written by the rails slice; read by `af quota` and the
-	// status surface so a halted mover is never silent (design R16).
+	// status surface so a halted mover is never silent (design R16). It
+	// lives in the SHARED file because v1.0.345 models it — a halt recorded
+	// here still blocks a downgraded binary's swaps.
 	Halted *Halt `json:"halted,omitempty"`
-	// RecentMoves are the committed automatic moves the switch-loop rail
-	// (max_moves inside max_moves_window, counted per session_key) and the
-	// anti-pile-on credits (counted per target account) read. Written by the
-	// live-mover slice; shadow reads them as zero when absent.
-	RecentMoves []RecentMove `json:"recent_moves,omitempty"`
-	// RefusedUntil maps stableSessionKey → the instant until which the
-	// engine leaves the session alone after it refused every candidate.
-	RefusedUntil map[string]time.Time `json:"refused_until,omitempty"`
-	// ReportsHeld records a report_to backlog whose delivery has been held
-	// past the warn threshold — a recipient whose composer never proves
-	// empty must not stay silent (#6818 final review). Written once per
-	// held episode by the report worker; cleared when the backlog drains
-	// or is dropped. `af quota` surfaces it on the mover line.
-	ReportsHeld *ReportsHeld `json:"reports_held,omitempty"`
-}
-
-// ReportsHeld is the durable record that a report_to delivery is held:
-// Since is when the hold began — the first writer wins, so it is the
-// oldest standing hold.
-type ReportsHeld struct {
-	Since time.Time `json:"since"`
-}
-
-// RecentMove is one committed automatic account move: when, and to which
-// account. Decay is the reader's job — entries outside max_moves_window
-// simply count for nothing.
-type RecentMove struct {
-	SessionKey string    `json:"session_key"`
-	Account    string    `json:"account"`
-	At         time.Time `json:"at"`
 }
 
 // Halt is the durable halt record: when the mover stopped and why.
 type Halt struct {
 	At     time.Time `json:"at"`
 	Reason string    `json:"reason"`
+}
+
+// stateKeys are the top-level fields this binary models in the state file;
+// a read-modify-write preserves every other key verbatim (marshalPreserving
+// in store_io.go).
+var stateKeys = map[string]bool{
+	"schema_version":     true,
+	"carried_prefix_len": true,
+	"halted":             true,
 }
 
 // Store reads and mutates one auto-handoff state file.
@@ -120,14 +114,29 @@ func (s *Store) Path() string {
 // real answer ("nothing recorded"), unlike a CORRUPT file, which errors:
 // callers deciding on corrupt rails state must fail closed.
 func (s *Store) Load() (State, error) {
-	raw, err := os.ReadFile(s.path)
+	state, _, err := s.loadDoc()
+	return state, err
+}
+
+// loadDoc returns the decoded state plus the file's raw top-level fields —
+// the pair a preserving rewrite needs.
+func (s *Store) loadDoc() (State, map[string]json.RawMessage, error) {
+	raw, exists, err := readFileNoFollow(s.path)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return State{SchemaVersion: stateSchemaVersion}, nil
-		}
-		return State{}, fmt.Errorf("read %s: %w", s.path, err)
+		return State{}, nil, err
 	}
-	return decodeState(s.path, raw)
+	if !exists {
+		return State{SchemaVersion: stateSchemaVersion}, nil, nil
+	}
+	state, err := decodeState(s.path, raw)
+	if err != nil {
+		return State{}, nil, err
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &fields); err != nil {
+		return State{}, nil, fmt.Errorf("decode %s: %w", s.path, err)
+	}
+	return state, fields, nil
 }
 
 func decodeState(path string, raw []byte) (State, error) {
@@ -144,18 +153,8 @@ func decodeState(path string, raw []byte) (State, error) {
 			return State{}, fmt.Errorf("%s carries a negative prefix length for %s", path, file)
 		}
 	}
-	for i, move := range state.RecentMoves {
-		if move.SessionKey == "" || move.Account == "" || move.At.IsZero() {
-			return State{}, fmt.Errorf("%s recent_moves[%d] is missing session_key, account, or at", path, i)
-		}
-	}
-	for key := range state.RefusedUntil {
-		if key == "" {
-			return State{}, fmt.Errorf("%s refused_until carries an empty session key", path)
-		}
-	}
-	if state.ReportsHeld != nil && state.ReportsHeld.Since.IsZero() {
-		return State{}, fmt.Errorf("%s reports_held carries no since timestamp", path)
+	if state.Halted != nil && (state.Halted.At.IsZero() || state.Halted.Reason == "") {
+		return State{}, fmt.Errorf("%s halted is missing at or reason", path)
 	}
 	return state, nil
 }
@@ -163,19 +162,20 @@ func decodeState(path string, raw []byte) (State, error) {
 // mutate applies fn under the sibling file lock and writes the result
 // atomically. The read happens INSIDE the lock so a racing mutator cannot be
 // clobbered; a corrupt file fails fn's caller rather than being rebuilt on
-// top of.
+// top of. Fields this binary does not model survive the rewrite
+// (marshalPreserving in store_io.go).
 func (s *Store) mutate(fn func(*State) error) error {
 	return config.WithFileLockTimeout(s.path, config.RepoInstancesLockTimeout, func() error {
-		state, err := s.Load()
+		state, extras, err := s.loadDoc()
 		if err != nil {
 			return err
 		}
 		if err := fn(&state); err != nil {
 			return err
 		}
-		raw, err := json.MarshalIndent(state, "", "  ")
+		raw, err := marshalPreserving(state, extras, stateKeys, s.path)
 		if err != nil {
-			return fmt.Errorf("encode %s: %w", s.path, err)
+			return err
 		}
 		return config.AtomicWriteFile(s.path, raw, 0o600)
 	})
@@ -220,26 +220,40 @@ func (s *Store) HaltedAt() (*Halt, error) {
 	return state.Halted, nil
 }
 
-// NoteReportsHeld durably records that report_to delivery has been held
-// since the given instant. First-writer-wins: a second held backlog does
-// not move the recorded since forward and erase the older hold.
-func (s *Store) NoteReportsHeld(since time.Time) error {
-	if since.IsZero() {
-		return fmt.Errorf("reports_held needs a since timestamp")
+// RecordHalt writes the durable mover halt (on_failure = "halt"): from this
+// instant engine-originated moves are stopped until an operator clears the
+// record. The live-mover slice is the writer; the reset surface and af quota
+// are the readers. A halt carries a reason — a reasonless halt would stop
+// the mover silently, which is the failure R16 exists to prevent.
+func (s *Store) RecordHalt(reason string, at time.Time) error {
+	if reason == "" || at.IsZero() {
+		return fmt.Errorf("halt needs a reason and a timestamp, got %q / %v", reason, at)
 	}
 	return s.mutate(func(state *State) error {
-		if state.ReportsHeld == nil {
-			state.ReportsHeld = &ReportsHeld{Since: since}
-		}
+		state.Halted = &Halt{At: at, Reason: reason}
 		return nil
 	})
 }
 
-// ClearReportsHeld drops the held record when the last held backlog
-// drains or dies — a cleared hold must not keep warning.
-func (s *Store) ClearReportsHeld() error {
-	return s.mutate(func(state *State) error {
-		state.ReportsHeld = nil
+// ClearHalt drops the halt record, returning the cleared record — nil when
+// no halt stood — so a reset can say what it removed rather than claiming a
+// clearance it did not perform. It never materializes the file: absent IS
+// the "no halt" answer, so a reset on an untouched home writes nothing.
+func (s *Store) ClearHalt() (*Halt, error) {
+	state, err := s.Load()
+	if err != nil {
+		return nil, err
+	}
+	if state.Halted == nil {
+		return nil, nil
+	}
+	var cleared *Halt
+	if err := s.mutate(func(state *State) error {
+		cleared = state.Halted
+		state.Halted = nil
 		return nil
-	})
+	}); err != nil {
+		return nil, err
+	}
+	return cleared, nil
 }

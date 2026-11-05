@@ -138,6 +138,55 @@ func (m *Manager) accountHandoffDiscover() {
 	m.handoffActive.Store(active)
 }
 
+// resolvedHandoffPolicy returns the [account_handoff] table the engine
+// actually runs under (#6776 review): the global table when IT opts in,
+// else the first session root whose resolved config says shadow — the
+// same session-root walk accountHandoffDiscover performs, but carrying
+// the whole table so status reports the rail limits the records are
+// really counted against (Codex review: a personal opt-in's max_moves is
+// not the global one). Several governed roots with differing tables
+// resolve to the FIRST shadow root's policy — the records are per-session
+// anyway; the printed limits are the legend, not the ledger. An
+// unreadable personal layer cannot silently widen the policy — a
+// resolution failure simply contributes nothing, and the global answer
+// stands.
+func (m *Manager) resolvedHandoffPolicy() config.AccountHandoffConfig {
+	global := m.Config()
+	if global != nil && global.AccountHandoffEnabled() {
+		return global.AccountHandoff
+	}
+	m.mu.Lock()
+	roots := make([]string, 0, len(m.instances))
+	for _, inst := range m.instances {
+		if inst == nil {
+			continue
+		}
+		root := inst.GetRepoPath()
+		if root == "" {
+			root = inst.Path
+		}
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	m.mu.Unlock()
+	seen := map[string]bool{}
+	for _, root := range roots {
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, global)
+		if err == nil && cfg != nil && cfg.AccountHandoff.Mode == config.AccountHandoffModeShadow {
+			return cfg.AccountHandoff
+		}
+	}
+	if global != nil {
+		return global.AccountHandoff
+	}
+	return config.AccountHandoffConfig{}
+}
+
 // accountHandoffTick is one shadow pass: gather the session inputs from the
 // manager's own records, run the engine, warn on failure. Every leg failing
 // is a warn-and-retry — the next tick assembles fresh facts from scratch.
@@ -157,6 +206,15 @@ func (m *Manager) accountHandoffTick() {
 	if !observed {
 		return
 	}
+	// The one-move-at-a-time rail (R14): when a move is in flight the tick
+	// skips rather than waits — a Lock here would let a minutes-long swap
+	// stack ticks behind it. Shadow mode moves nothing, so the lock is
+	// always free today; the live-mover slice acquires it for the duration
+	// of a swap, which is what makes this TryLock meaningful.
+	if !m.handoffMoveMu.TryLock() {
+		return
+	}
+	defer m.handoffMoveMu.Unlock()
 	// The tick NEVER stores handoffActive (#6817 round-3 review): discovery
 	// — start, config apply, session registration — is the only writer, so
 	// the most recent config decision always wins. A tick that began while
@@ -180,12 +238,30 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 		ResolveConfig: func(repoRoot string) (*config.ResolvedConfig, error) {
 			return config.ResolveConfigForIdentityDecisionFromGlobal(repoRoot, m.Config())
 		},
-		LoadState: func() (handoff.State, error) {
+		LoadState: func() (handoff.Snapshot, error) {
 			store, err := handoff.DefaultStore()
 			if err != nil {
-				return handoff.State{}, err
+				return handoff.Snapshot{}, err
 			}
-			return store.Load()
+			railsStore, err := handoff.DefaultRailsStore()
+			if err != nil {
+				return handoff.Snapshot{}, err
+			}
+			snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
+			if stateErr != nil {
+				return handoff.Snapshot{}, stateErr
+			}
+			if railsErr != nil {
+				return handoff.Snapshot{}, railsErr
+			}
+			return snap, nil
+		},
+		PruneRails: func(maxWindow time.Duration, now time.Time) error {
+			railsStore, err := handoff.DefaultRailsStore()
+			if err != nil {
+				return err
+			}
+			return railsStore.PruneExpired(maxWindow, now)
 		},
 		Registered: func(agent string) ([]string, error) {
 			home, err := config.GetConfigDir()
@@ -525,7 +601,7 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 		// (#6818 review): reconcile it at worker start. A held episode that
 		// re-forms warns and records again — the marker only ever means the
 		// CURRENT process holds a warned backlog.
-		if store, err := handoff.DefaultStore(); err == nil {
+		if store, err := handoff.DefaultRailsStore(); err == nil {
 			if cerr := store.ClearReportsHeld(); cerr != nil {
 				manager.warn().Printf("account-handoff: reconcile held-report record: %v", cerr)
 			}
@@ -597,7 +673,7 @@ func (m *Manager) noteReportHeld(key string, entry *reportPending) {
 	entry.warned = true
 	m.warn().Printf("account-handoff: report delivery to %s held %s — recipient composer never proves empty",
 		key, now.Sub(entry.heldSince).Round(time.Minute))
-	if store, err := handoff.DefaultStore(); err == nil {
+	if store, err := handoff.DefaultRailsStore(); err == nil {
 		if werr := store.NoteReportsHeld(entry.heldSince); werr != nil {
 			m.warn().Printf("account-handoff: record held report: %v", werr)
 		}
@@ -616,7 +692,7 @@ func (m *Manager) clearReportsHeldIf(pending map[string]*reportPending, entry *r
 			return
 		}
 	}
-	if store, err := handoff.DefaultStore(); err == nil {
+	if store, err := handoff.DefaultRailsStore(); err == nil {
 		if cerr := store.ClearReportsHeld(); cerr != nil {
 			m.warn().Printf("account-handoff: clear held-report record: %v", cerr)
 		}

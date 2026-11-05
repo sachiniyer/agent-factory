@@ -716,6 +716,25 @@
       "notes": "Closed by serving the report from the daemon (POST /v1/QuotaReport, daemon/quota_report.go): all three surfaces render the SAME records->quota.Build read \u2014 internal/quotaobs Collect is the one projection, and the rows ship pre-rendered (quota.RenderedAgent) so no client re-derives the vocabulary. The panel sits in the config view/pane next to Accounts, per #3385's precedent for daemon-reported non-config sections. The report keeps provider ENTITLEMENT (always \"not reported\" \u2014 no supported agent exposes a quota surface af can read) apart from af's own OBSERVATION of sessions parked at a usage wall; a surface that renders it must preserve that separation: a blank or zero quota cell reads as exhausted, which is the failure the command exists to avoid. Not sandboxAllowed \u2014 it reports fleet-wide session health with no per-session owner to narrow to. Multiple accounts per agent (#2983 Part 2) is a separate capability, session.accounts."
     },
     {
+      "id": "handoff.mover-rails",
+      "title": "Inspect and reset the automatic account handoff's durable rails",
+      "tui": {
+        "status": "partial",
+        "pointer": "ui/config_pane_quota.go (the served mover line in the Usage section); app/quota_load.go (resp.Mover passthrough)"
+      },
+      "web": {
+        "status": "partial",
+        "pointer": "web/src/quota.ts renderQuotaSection (the served mover line in the Usage section); web/src/index.ts quotaRefetcher"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "commands/accountshandoffcmd.go (af accounts handoff status|reset) → daemon/handoff_status.go over the gob socket locally or POST /v1/HandoffStatus|HandoffReset on a remote target"
+      },
+      "verdict": "deliberate",
+      "issue": "#6776",
+      "notes": "The durable rails (#6776 slice 5): the mover halt record (on_failure), refusal backoffs, and the recent-move ledger the switch-loop rail and anti-pile-on credits count — keyed by stable session identity, never titles. `af accounts handoff status` serves the same HandoffStatus RPC answer on every transport; `af accounts handoff reset` clears exactly the one record the operator names (halt | backoff | moves, --session scoping the latter two), never silently clearing sibling rails. A halt is never silent (R16): it rides the served mover line on QuotaReport, so the TUI and web render it in their Usage sections alongside `af quota` — partial here because a dedicated sidebar badge lands with the live-mover slice, when the badge has a mover to report on; HandoffStatus already serves the field it will read. reset stays CLI-only by design: it is the operator's repair verb over fleet rails, and POST /v1/HandoffReset|HandoffStatus are deliberately not sandboxAllowed — like QuotaReport the records name the operator's session identities and account names with no session owner to narrow to."
+    },
+    {
       "id": "session.account-login",
       "title": "Log in to an agent account by running the agent's own login flow",
       "tui": {
@@ -1841,6 +1860,9 @@
     "cli_verbs": {
       "af": "meta.discovery",
       "af accounts add": "session.accounts",
+      "af accounts handoff": "handoff.mover-rails",
+      "af accounts handoff reset": "handoff.mover-rails",
+      "af accounts handoff status": "handoff.mover-rails",
       "af accounts list": "session.accounts",
       "af accounts login": "session.account-login",
       "af agent-server": "meta.internal",
@@ -1961,7 +1983,9 @@
       "POST /v1/DeliverPrompt": "-",
       "POST /v1/GetConfig": "config.read",
       "POST /v1/ExplainConfig": "config.explain",
+      "POST /v1/HandoffReset": "handoff.mover-rails",
       "POST /v1/HandoffSession": "session.handoff",
+      "POST /v1/HandoffStatus": "handoff.mover-rails",
       "POST /v1/KillSession": "session.kill",
       "POST /v1/ListAccounts": "session.accounts",
       "POST /v1/CheckHost": "host.check",
@@ -2115,6 +2139,12 @@
       "af accounts --help": "meta.discovery",
       "af accounts add --help": "meta.discovery",
       "af accounts add --json": "cli.json-envelope",
+      "af accounts handoff --help": "meta.discovery",
+      "af accounts handoff reset --help": "meta.discovery",
+      "af accounts handoff reset --json": "cli.json-envelope",
+      "af accounts handoff reset --session": "handoff.mover-rails",
+      "af accounts handoff status --help": "meta.discovery",
+      "af accounts handoff status --json": "cli.json-envelope",
       "af accounts list --help": "meta.discovery",
       "af accounts list --json": "cli.json-envelope",
       "af accounts login --help": "meta.discovery",

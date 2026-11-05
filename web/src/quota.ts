@@ -22,6 +22,10 @@ import type { QuotaAgentRow } from "./types.js";
 export interface QuotaState {
   agents: QuotaAgentRow[];
   warnings: string[];
+  /** The served mover line — the auto-handoff mode plus any recorded halt
+   *  (#6776: a halted mover is never silent). Empty under the absent-table
+   *  condition, so the line never materializes unconfigured. */
+  mover: string;
   /** false until the first read answers: a section that has not read yet must
    *  say it is connecting, not that there is nothing to report. */
   loaded: boolean;
@@ -31,7 +35,7 @@ export interface QuotaState {
 }
 
 export function emptyQuotaState(): QuotaState {
-  return { agents: [], warnings: [], loaded: false, error: "" };
+  return { agents: [], warnings: [], mover: "", loaded: false, error: "" };
 }
 
 /** The heading's note — the same two-axis answer `af quota` gives, said before
@@ -62,6 +66,12 @@ export function renderQuotaSection(state: QuotaState): HTMLElement {
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`),
     );
     return section;
+  }
+
+  // The mover line rides under the note: a recorded handoff halt is fleet
+  // state the operator must see wherever the report renders (#6776 R16).
+  if (state.mover !== "") {
+    section.append(h("p", { class: "af-quota-note" }, `mover: ${state.mover}`));
   }
 
   // Completeness caveats under the note, before the rows: a skipped record may
