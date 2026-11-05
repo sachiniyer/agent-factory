@@ -45,11 +45,15 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 	if strings.TrimSpace(program) == "" {
 		program = resolveLaunchProgramForInstance(i).command
 	}
-	agent := i.AgentProgram()
-	if agent != tmux.ProgramCodex || tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex {
-		shown := agent
+	// The provider is what the launch command resolves to, not the configured
+	// enum: a program_overrides entry pointing another agent's name at codex,
+	// or a legacy row whose Program IS the binary path, is a Codex session
+	// whose rollout store af can prove. resolvedAgentLocked identifies the
+	// same evidence for capture (#6769 review).
+	if detected := tmux.DetectAgentFromCommand(program); detected != tmux.ProgramCodex {
+		shown := detected
 		if shown == "" {
-			shown = tmux.DetectAgentFromCommand(program)
+			shown = i.AgentProgram()
 		}
 		if shown == "" {
 			shown = "its agent"
@@ -83,13 +87,22 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 			"the session's Codex store at %s cannot be read: %w", home, err)
 	}
 	var rolloutPath string
+	matches := 0
 	for p := range files {
 		if codexConversationIDFromPath(p) == strings.ToLower(id) {
 			rolloutPath = p
-			break
+			matches++
 		}
 	}
-	if rolloutPath == "" {
+	switch {
+	case matches > 1:
+		// Two rollouts claim the id: the repair cannot prove which conversation
+		// it names, and the restore guard refuses the same ambiguity — an
+		// accepted record would be refused again at the next resume (#6769
+		// review).
+		return AgentConversationData{}, fmt.Errorf(
+			"%s matches %d rollout files in the session's Codex store at %s — af cannot prove which conversation it names; remove the duplicate rollout, then retry", id, matches, home)
+	case matches == 0:
 		return AgentConversationData{}, fmt.Errorf(
 			"no rollout named %s exists in the session's Codex store at %s — check the id with 'codex resume' there", id, home)
 	}
