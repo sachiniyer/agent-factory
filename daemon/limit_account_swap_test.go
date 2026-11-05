@@ -1096,7 +1096,7 @@ func TestResumeFromLimit_LiveCommittedSwapDoesNotClearWithMissingSibling(t *test
 func TestResumeLimitedSessions_CommittedSwapFinishesAfterAutoResumeOptOut(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
-	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
 	backend.sendPromptErr = errors.New("prompt transport failed")
 
