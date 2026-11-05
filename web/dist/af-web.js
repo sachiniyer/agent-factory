@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "864abb58471b";
+var CLIENT_VERSION = "b465c7945d71";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -12626,26 +12626,9 @@ var AttachTerminal = class {
    *  flake sampled one as this pane's own baseline). A host that cannot be
    *  measured at this instant — xterm's metrics mid-invalidation, the element
    *  mid-move — falls back to the scheduled-fit pair, which retries within
-   *  its attempt budget like any other failed measurement.
-   *
-   *  The wire reclaim is a different matter: a stale `parked === false`
-   *  cannot clear it. Every flag-clearing signal is trusted input or a
-   *  rendering-step delivery — neither can arrive on an occluded page — but
-   *  a resize echo is a NETWORK event and can land exactly there, where
-   *  visibilityState still reads 'visible' and frames have already starved.
-   *  Writing on that stale 'live' would resize the shared PTY out from under
-   *  the active peer — the violation the parked latch exists to prevent. So
-   *  a `false` reading is downgraded to unclassified before the fit: the
-   *  local refit still runs at once, while the write defers to the delivery
-   *  pair, whose first delivery classifies the page and flushes whatever is
-   *  owed (a starved twin marks the page parked and the wake probe alone
-   *  owns the flush — never a timer poll). */
+   *  its attempt budget like any other failed measurement. */
   reassertHostFit() {
-    if (this.parked === false) {
-      this.parked = null;
-    }
-    const settled = this.fitVisibleHost();
-    if (!settled || this.parked === null) {
+    if (!this.fitVisibleHost()) {
       this.scheduleVisibleFit();
     }
   }
