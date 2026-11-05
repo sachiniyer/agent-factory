@@ -626,6 +626,22 @@ mode = "shadow"
   agent's ambient login (no `--account`). A working ambient session needs a
   qualifying usage reading to move; a provably idle one may leave on the
   banner alone.
+- **`report_to` prompts another session** with the structured events:
+  `<project>/<title>` or a unique bare title resolves one live session —
+  ambiguous or absent matches are skipped and logged, never guessed. A
+  persisted session that failed to restore still claims its title, so a
+  stalled row counts toward ambiguity rather than redirecting the report
+  to a surviving same-titled session in another project. Reports
+  use a fixed template of reason codes and parameters (never pane text) and
+  batch into a digest at most once a minute — every row batches; shadow
+  mode has no immediate-delivery path. Delivery never delays a tick. By
+  design the digest drops rows that name a resolved recipient — a session
+  never reads reports about itself (that loop is how report ping-pong
+  starts), so its own wall events reach it only through the event log. A
+  recipient af cannot safely prompt — attached, or its composer won't
+  prove empty — holds its backlog instead of being pasted over; retries
+  back off exponentially, and a hold longer than ten minutes warns once
+  in the log and on `af quota`'s `mover:` line.
 - **Opt-in discovery is event-driven, not polled.** The daemon looks for
   `mode = "shadow"` at startup and on every `af config` write — never on a
   timer, and never on session create: `[account_handoff]` is rejected in

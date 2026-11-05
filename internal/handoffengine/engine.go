@@ -59,6 +59,13 @@ type SessionInput struct {
 	Captured       bool      // the poll produced a frame this pass
 	CapturedAt     time.Time
 	Content        string
+	// Persisted marks a session row that exists on disk but never
+	// materialized into m.instances (its restore failed). It is report_to
+	// ambiguity evidence ONLY (#6818 review): a failed restore can hide a
+	// second project's claim on a bare title, so the row must count when
+	// resolveRecipient asks "is this title unique" — and must never be
+	// governed, read for evidence, or receive a report itself.
+	Persisted bool
 }
 
 // Deps injects every environment read so the engine is testable without a
@@ -78,7 +85,12 @@ type Deps struct {
 	DriftKey   func(agent, sourceDir, targetDir string) (key string, incomparable bool)
 	DetectWall func(content, agent string) bool
 	WriteRows  func(rows []handoff.EventRow) error
-	LogWarn    func(format string, args ...any)
+	// DeliverReport hands one report_to recipient's emitted rows to the
+	// delivery path — spec included so the worker can drop digests whose
+	// mode or target changed since emission (#6818 review). It must never
+	// block the tick — the wiring enqueues and a separate worker sends.
+	DeliverReport func(spec string, recipient SessionInput, rows []handoff.EventRow)
+	LogWarn       func(format string, args ...any)
 	// ResetGrace and ProofMargin are the daemon's skew constants: the
 	// limit-resume grace a resets_at gets before it counts as past, and the
 	// reconcile's write margin a calm record must clear of a wall sighting.
@@ -139,6 +151,9 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	resolved := map[string]*config.ResolvedConfig{}
 	var gov []governed
 	for _, in := range sessions {
+		if in.Persisted {
+			continue // ambiguity evidence only — never governed (#6818 review)
+		}
 		cfg, ok := resolved[in.RepoRoot]
 		if !ok {
 			var err error
@@ -238,10 +253,20 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	pending := e.edges.Clone()
 
 	var rows []handoff.EventRow
+	reportRows := map[string][]handoff.EventRow{} // report_to spec → emitted rows
+	specByKey := map[string]string{}
+	specs := map[string]bool{}
+	for _, g := range gov {
+		specByKey[g.in.Key] = g.cfg.AccountHandoff.ReportTo
+		if g.cfg.AccountHandoff.ReportTo != "" {
+			specs[g.cfg.AccountHandoff.ReportTo] = true
+		}
+	}
 	// A halt is a MOVER-level event (#6818 round-2 review): one row while
 	// the rails say stopped — edge-triggered on the mover key, so a
 	// persistent halt announces once per episode, not once per walled
-	// session per tick.
+	// session per tick. It rides every report_to spec too — the mover's
+	// alert is exactly what the recipient channel exists for.
 	if state.Halted != nil {
 		ev := handoff.Event{
 			Kind:   handoff.EventHalted,
@@ -252,10 +277,14 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 			},
 		}
 		for _, ev := range pending.Filter(moverRowKey, []handoff.Event{ev}, now, Reannounce) {
-			rows = append(rows, handoff.EventRow{
+			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: moverRowKey,
 				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
-			})
+			}
+			rows = append(rows, row)
+			for spec := range specs {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
 		}
 	}
 	for _, g := range gov {
@@ -278,11 +307,15 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		decision := handoff.Decide(facts)
 		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
-			rows = append(rows, handoff.EventRow{
+			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: g.in.Key, Agent: g.in.Agent,
 				Title: g.in.Title, From: ev.From, To: ev.To,
 				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
-			})
+			}
+			rows = append(rows, row)
+			if spec := specByKey[g.in.Key]; spec != "" {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
 		}
 	}
 	if len(rows) > 0 {
@@ -291,6 +324,55 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		}
 	}
 	e.edges = pending
+	// report_to delivery happens after the log write — the durable record is
+	// the primary artifact — and on the wiring's own async path (R15).
+	if e.deps.DeliverReport == nil {
+		return len(gov), nil
+	}
+	// Every resolved recipient is excluded from EVERY payload, not only its
+	// own spec's (#6818 round-2 review): with two projects pointed at each
+	// other's sessions, A's report prompts a turn in B-sess whose events B's
+	// spec would report back into A-sess — a ping-pong of report prompts.
+	// Resolution covers ALL configured specs, not only specs whose authors
+	// emitted rows this tick: a spec edge-suppressed into silence still
+	// names a recipient whose rows must be excluded, or alternating ticks
+	// restart the ping-pong (#6818 round-3 review).
+	recipientKeys := map[string]bool{}
+	specResolved := map[string]struct {
+		recipient SessionInput
+		found     bool
+		live      bool
+	}{}
+	for spec := range specs {
+		recipient, found, live := resolveRecipient(spec, sessions)
+		specResolved[spec] = struct {
+			recipient SessionInput
+			found     bool
+			live      bool
+		}{recipient, found, live}
+		if found && live {
+			recipientKeys[recipient.Key] = true
+		}
+	}
+	for spec, specRows := range reportRows {
+		r := specResolved[spec]
+		switch {
+		case !r.found:
+			e.warnf("report_to %q matched no session or was ambiguous — skipped", spec)
+		case !r.live:
+			e.warnf("report_to %q resolved to a session that is not live — skipped", spec)
+		default:
+			var own []handoff.EventRow
+			for _, row := range specRows {
+				if !recipientKeys[row.SessionKey] {
+					own = append(own, row)
+				}
+			}
+			if len(own) > 0 {
+				e.deps.DeliverReport(spec, r.recipient, own)
+			}
+		}
+	}
 	return len(gov), nil
 }
 
@@ -350,6 +432,71 @@ func (e *Engine) bareFacts(g governed, state handoff.State, now time.Time) hando
 		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
 		Session: s, Rails: rails, Config: g.cfg.AccountHandoff,
 	}
+}
+
+// resolveRecipient applies the report_to grammar (R15): "<project>/<title>"
+// resolves the session whose project and title both name it — the project
+// part matching the repo's id, full root, or basename — while a bare title
+// must name exactly one session. The spec splits at its LAST slash so a
+// full repository root qualifies too ("/home/u/repo/observer"). A qualifier
+// that itself contains slashes must equal the full root (or repo id)
+// exactly — basename matching is reserved for single-segment qualifiers so
+// "other/repo" cannot collide with "/home/u/repo" (#6818 review).
+//
+// Matching runs over ALL sessions, not only live ones (#6818 review): a
+// lost or archived intended recipient must not let a same-titled session in
+// another project claim its reports. The caller then refuses a found-but-
+// not-live target — ambiguity is a skip, never a guess.
+func resolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
+	project, title, qualified := spec, "", false
+	if i := strings.LastIndex(spec, "/"); i >= 0 {
+		project, title, qualified = spec[:i], spec[i+1:], true
+	}
+	projectIsPath := strings.Contains(project, "/")
+	var matches []SessionInput
+	for _, in := range inputs {
+		if qualified {
+			if in.Title != title {
+				continue
+			}
+			base := in.RepoRoot
+			if i := strings.LastIndexByte(base, '/'); i >= 0 {
+				base = base[i+1:]
+			}
+			projectOK := project == in.RepoID || project == in.RepoRoot ||
+				(!projectIsPath && project == base)
+			if !projectOK {
+				continue
+			}
+		} else if in.Title != spec {
+			continue
+		}
+		matches = append(matches, in)
+	}
+	if len(matches) == 0 && qualified {
+		// A session title may itself carry slashes ("feature/login") —
+		// title shape validation forbids control chars, not slashes
+		// (#6818 round-3 review). A spec that matched nothing under the
+		// project/title grammar retries as a bare title; ambiguity with
+		// a same-titled sibling is still a skip, never a guess.
+		for _, in := range inputs {
+			if in.Title == spec {
+				matches = append(matches, in)
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return SessionInput{}, false, false // absent or ambiguous alike
+	}
+	return matches[0], true, matches[0].Live && matches[0].Started
+}
+
+// ResolveRecipient exposes the spec resolver for the daemon's send-time
+// revalidation (#6818 review): a queued digest must verify its spec still
+// resolves uniquely to the SAME session right before submission — a title
+// claim that appeared while the backlog sat would otherwise redirect it.
+func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
+	return resolveRecipient(spec, inputs)
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only

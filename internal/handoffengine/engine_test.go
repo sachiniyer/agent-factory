@@ -8,6 +8,7 @@ package handoffengine
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -27,9 +28,18 @@ type depCounts struct {
 	limitedErr                                               error
 	rows                                                     []handoff.EventRow
 	mode                                                     string
+	reportTo                                                 string
+	reportToByRoot                                           map[string]string
 	stateErr                                                 error
 	haltState                                                handoff.State
+	reports                                                  []reportCall
+	warns                                                    []string
 	exclude                                                  []string
+}
+
+type reportCall struct {
+	key  string
+	rows []handoff.EventRow
 }
 
 func (d *depCounts) deps() Deps {
@@ -43,6 +53,7 @@ func (d *depCounts) deps() Deps {
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
 				MaxMovesWindow: "30m", ExcludeSessions: d.exclude,
+				ReportTo: d.reportToFor(root),
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
 			return cfg, nil
@@ -87,10 +98,24 @@ func (d *depCounts) deps() Deps {
 			d.rows = append(d.rows, rows...)
 			return nil
 		},
-		LogWarn:     func(string, ...any) {},
+		DeliverReport: func(spec string, recipient SessionInput, rows []handoff.EventRow) {
+			d.reports = append(d.reports, reportCall{key: recipient.Key, rows: rows})
+		},
+		LogWarn: func(format string, args ...any) {
+			d.warns = append(d.warns, fmt.Sprintf(format, args...))
+		},
 		ResetGrace:  time.Minute,
 		ProofMargin: 30 * time.Minute,
 	}
+}
+
+// reportToFor resolves the spec a root's config carries — the map overrides
+// the single-spec field for multi-project tests (#6818 round-2 ping-pong).
+func (d *depCounts) reportToFor(root string) string {
+	if d.reportToByRoot != nil {
+		return d.reportToByRoot[root]
+	}
+	return d.reportTo
 }
 
 func shadowSession() SessionInput {
@@ -173,6 +198,142 @@ func TestTickCorruptStateFailsClosed(t *testing.T) {
 	}
 	if d.writes != 0 {
 		t.Fatalf("corrupt state still wrote rows")
+	}
+}
+
+func observerSession() SessionInput {
+	in := shadowSession()
+	in.Key, in.Title = "sess-obs", "observer"
+	in.Account, in.Auto, in.Parked, in.LimitAccount = "", true, false, ""
+	in.WallObservedAt = time.Time{}
+	return in
+}
+
+func TestTickReportsToResolvedRecipient(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	in := shadowSession()
+	if _, err := e.Tick([]SessionInput{in, observerSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("reports = %+v", d.reports)
+	}
+	if len(d.reports[0].rows) == 0 {
+		t.Fatalf("report carried no rows")
+	}
+}
+
+func TestTickReportQualifiedResolvesByProject(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("qualified report did not resolve: %+v", d.reports)
+	}
+}
+
+func TestTickReportQualifiedByFullRepoRoot(t *testing.T) {
+	// A multi-segment qualifier names the full root — "#6818 review: splitting
+	// at the first slash made absolute-path specs unresolvable.
+	d := &depCounts{mode: "shadow", reportTo: "/home/u/repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("full-root qualified report did not resolve: %+v", d.reports)
+	}
+}
+
+func TestTickReportPathQualifierDoesNotBasenameMatch(t *testing.T) {
+	// "other/repo" must not basename-match the "/home/u/repo" root.
+	d := &depCounts{mode: "shadow", reportTo: "other/repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("path qualifier basename-matched the wrong root: %+v", d.reports)
+	}
+}
+
+func TestTickReportAmbiguousSkips(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	a, b := observerSession(), observerSession()
+	b.Key, b.RepoID, b.RepoRoot = "sess-obs2", "r2", "/other"
+	if _, err := e.Tick([]SessionInput{shadowSession(), a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("ambiguous recipient still delivered: %+v", d.reports)
+	}
+	if len(d.warns) == 0 {
+		t.Fatalf("ambiguous recipient was not logged")
+	}
+}
+
+func TestTickReportNoMatchWarns(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "missing"}
+	e := New(d.deps())
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 || len(d.warns) == 0 {
+		t.Fatalf("unresolvable recipient: reports=%v warns=%v", d.reports, d.warns)
+	}
+}
+
+// #6818 review: resolution runs over ALL sessions, then refuses a found
+// recipient that is not live — a lost or archived observer must not let a
+// same-titled session elsewhere claim its reports.
+func TestTickReportResolvedButNotLiveSkips(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	dead := observerSession()
+	dead.Live = false
+	if _, err := e.Tick([]SessionInput{shadowSession(), dead}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 || len(d.warns) == 0 {
+		t.Fatalf("not-live recipient: reports=%v warns=%v", d.reports, d.warns)
+	}
+}
+
+func TestTickReportDeadSiblingBlocksSameTitle(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	live := observerSession()
+	lost := observerSession()
+	lost.Key, lost.RepoID, lost.RepoRoot, lost.Live = "sess-lost", "r2", "/other", false
+	if _, err := e.Tick([]SessionInput{shadowSession(), live, lost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("dead sibling did not block same-titled delivery: %+v", d.reports)
+	}
+}
+
+// #6818 review: a governed recipient never reads its own rows back.
+func TestTickReportRecipientSkipsOwnRows(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	emitter := shadowSession()
+	emitter.Title = "observer" // resolves to itself
+	if _, err := e.Tick([]SessionInput{emitter}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("recipient received its own rows: %+v", d.reports)
 	}
 }
 
@@ -313,5 +474,183 @@ func TestTickHaltEmitsOncePerMover(t *testing.T) {
 		if row.Kind == handoff.EventHalted {
 			t.Fatalf("persistent halt re-announced on tick 2")
 		}
+	}
+}
+
+// #6818 round-2 review: two projects pointing report_to at each other's
+// sessions must not ping-pong — a report prompt's turn would emit events the
+// other spec reports back, forever. Rows authored by ANY resolved recipient
+// are dropped from EVERY payload, starving both directions.
+func TestTickReportRecipientRowsAreStarvedEverywhere(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		reportToByRoot: map[string]string{
+			"/repoA": "repoB/beta",
+			"/repoB": "repoA/alpha",
+		},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	a.Key, a.Title, a.RepoID, a.RepoRoot = "sess-A", "alpha", "repoA", "/repoA"
+	b := shadowSession()
+	b.Key, b.Title, b.RepoID, b.RepoRoot = "sess-B", "beta", "repoB", "/repoB"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("ping-pong delivered %d reports, want 0 (recipient rows starved)", len(d.reports))
+	}
+}
+
+// The mover-level halt row rides every report_to spec — the alert is exactly
+// what the recipient channel exists for (#6818 round-2 review).
+func TestTickHaltRowRidesReportSpec(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow", reportTo: "observer",
+		haltState: handoff.State{Halted: &handoff.Halt{
+			At: testNow.Add(-time.Hour), Reason: "move-failed"}},
+	}
+	e := New(d.deps())
+	walled := shadowSession()
+	observer := SessionInput{
+		Key: "obs", Title: "observer", RepoID: "r", RepoRoot: "/repo",
+		Started: true, Live: true,
+	}
+	if _, err := e.Tick([]SessionInput{walled, observer}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 {
+		t.Fatalf("reports = %d, want 1", len(d.reports))
+	}
+	found := false
+	for _, row := range d.reports[0].rows {
+		if row.Kind == handoff.EventHalted {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("halted row missing from the report payload")
+	}
+}
+
+// A session title may itself carry slashes ("feature/login"): a spec that
+// matches nothing under the project/title grammar falls back to a bare-title
+// match (#6818 round-3 review).
+func TestTickReportSlashTitleResolvesByBareFallback(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "feature/login"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.Title = "feature/login"
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("slash-titled recipient did not resolve: %+v", d.reports)
+	}
+}
+
+// A spec whose author emitted no rows this tick still names a recipient:
+// resolving recipients over reportRows alone lets an edge-suppressed spec
+// drop out of the exclusion set and alternating ticks restart the ping-pong
+// (#6818 round-3 review).
+func TestTickReportSilentSpecStillExcludesItsRecipient(t *testing.T) {
+	d := &depCounts{
+		mode: "shadow",
+		reportToByRoot: map[string]string{
+			"/repoA": "repoB/beta",
+			"/repoB": "repoA/alpha",
+		},
+	}
+	e := New(d.deps())
+	a := shadowSession()
+	a.Key, a.Title, a.RepoID, a.RepoRoot = "sess-A", "alpha", "repoA", "/repoA"
+	b := shadowSession()
+	b.Key, b.Title, b.RepoID, b.RepoRoot = "sess-B", "beta", "repoB", "/repoB"
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	d.reports = nil
+	rowsBefore := 0
+	for _, batch := range [][]handoff.EventRow{d.rows} {
+		rowsBefore += len(batch)
+	}
+	// Tick 2: A's verdict gains a new edge — a pinned session outside
+	// include_pinned emits EventPinnedIneligible — while B's verdict
+	// stays edge-suppressed.
+	a.Auto = false
+	if _, err := e.Tick([]SessionInput{a, b}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	newRows := len(d.rows) - rowsBefore
+	if newRows == 0 {
+		t.Fatalf("tick 2 emitted no rows — the exclusion path was never exercised")
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("suppressed spec's recipient got %d reports, want 0", len(d.reports))
+	}
+}
+
+// #6818 review: a persisted row that never materialized still claims its
+// title. A live "observer" in one repo plus a failed-restore "observer" in
+// another must read as ambiguous — skipped, never redirected to the live
+// session.
+func TestTickReportPersistedClaimForcesAmbiguity(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	obs := observerSession() // live, repoID "r", RepoRoot "/repo"
+	ghost := SessionInput{
+		Key: "ghost-obs", Title: "observer", RepoID: "repoB",
+		RepoRoot: "/repoB", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs, ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("report delivered to %v despite a persisted same-title claim", d.reports)
+	}
+}
+
+// The persisted claim governs NOTHING: it is skipped before config
+// resolution, so its root is never even resolved and no row or report is
+// ever authored for a session that does not exist.
+func TestTickPersistedRowIsNeverGoverned(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	ghost := SessionInput{
+		Key: "ghost", Title: "ghost-worker", RepoID: "repoG",
+		RepoRoot: "/repoG", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), obs, ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	// ResolveConfig ran for the live roots only — "/repoG" is untouched.
+	if d.resolve != 1 {
+		t.Fatalf("resolve ran %d times, want 1 (persisted root skipped)", d.resolve)
+	}
+	for _, row := range d.rows {
+		if row.SessionKey == "ghost" {
+			t.Fatalf("persisted claim authored a row: %+v", row)
+		}
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("unique live recipient did not resolve: %+v", d.reports)
+	}
+}
+
+// A spec matching ONLY a persisted row resolves to a session that cannot
+// receive — skipped as not-live, never delivered.
+func TestTickReportPersistedSoloMatchIsNotLive(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	ghost := SessionInput{
+		Key: "ghost-obs", Title: "observer", RepoID: "repoB",
+		RepoRoot: "/repoB", Persisted: true,
+	}
+	if _, err := e.Tick([]SessionInput{shadowSession(), ghost}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("report delivered to a persisted-only recipient: %+v", d.reports)
 	}
 }

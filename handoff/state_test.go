@@ -148,3 +148,52 @@ func TestRecordCarriedPrefixNeverShrinks(t *testing.T) {
 		t.Fatalf("prefix = %d, want 140 — a larger copy always extends the mark", prefixes[path])
 	}
 }
+
+// #6818 final review: a held report backlog is recorded durably so af
+// quota's mover line can say it — first-writer-wins, cleared on drain.
+func TestNoteAndClearReportsHeld(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	since := time.Date(2026, 11, 5, 13, 0, 0, 0, time.UTC)
+	later := since.Add(5 * time.Minute)
+
+	if err := store.NoteReportsHeld(since); err != nil {
+		t.Fatalf("NoteReportsHeld: %v", err)
+	}
+	if err := store.NoteReportsHeld(later); err != nil {
+		t.Fatalf("NoteReportsHeld second: %v", err)
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if state.ReportsHeld == nil || !state.ReportsHeld.Since.Equal(since) {
+		t.Fatalf("ReportsHeld = %+v — the older hold must win", state.ReportsHeld)
+	}
+	if err := store.ClearReportsHeld(); err != nil {
+		t.Fatalf("ClearReportsHeld: %v", err)
+	}
+	state, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load after clear: %v", err)
+	}
+	if state.ReportsHeld != nil {
+		t.Fatalf("cleared hold still recorded: %+v", state.ReportsHeld)
+	}
+	if err := store.NoteReportsHeld(time.Time{}); err == nil {
+		t.Fatalf("zero since was accepted")
+	}
+}
+
+func TestReportsHeldWithoutSinceFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schema_version": 1, "reports_held": {}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(path).Load(); err == nil {
+		t.Fatalf("reports_held without since was accepted")
+	}
+}

@@ -533,6 +533,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	// The shadow decision engine runs on its own ~45s ticker for the same
 	// reason; it only reads the status snapshot the poll already produced.
 	startAccountHandoffEngineLoop(manager, stopCh, wg)
+	// The report_to worker owns prompt delivery so sends never block the
+	// decision ticker (R15).
+	startHandoffReportLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an

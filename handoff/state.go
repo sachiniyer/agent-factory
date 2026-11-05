@@ -53,6 +53,19 @@ type State struct {
 	// RefusedUntil maps stableSessionKey → the instant until which the
 	// engine leaves the session alone after it refused every candidate.
 	RefusedUntil map[string]time.Time `json:"refused_until,omitempty"`
+	// ReportsHeld records a report_to backlog whose delivery has been held
+	// past the warn threshold — a recipient whose composer never proves
+	// empty must not stay silent (#6818 final review). Written once per
+	// held episode by the report worker; cleared when the backlog drains
+	// or is dropped. `af quota` surfaces it on the mover line.
+	ReportsHeld *ReportsHeld `json:"reports_held,omitempty"`
+}
+
+// ReportsHeld is the durable record that a report_to delivery is held:
+// Since is when the hold began — the first writer wins, so it is the
+// oldest standing hold.
+type ReportsHeld struct {
+	Since time.Time `json:"since"`
 }
 
 // RecentMove is one committed automatic account move: when, and to which
@@ -141,6 +154,9 @@ func decodeState(path string, raw []byte) (State, error) {
 			return State{}, fmt.Errorf("%s refused_until carries an empty session key", path)
 		}
 	}
+	if state.ReportsHeld != nil && state.ReportsHeld.Since.IsZero() {
+		return State{}, fmt.Errorf("%s reports_held carries no since timestamp", path)
+	}
 	return state, nil
 }
 
@@ -202,4 +218,28 @@ func (s *Store) HaltedAt() (*Halt, error) {
 		return nil, err
 	}
 	return state.Halted, nil
+}
+
+// NoteReportsHeld durably records that report_to delivery has been held
+// since the given instant. First-writer-wins: a second held backlog does
+// not move the recorded since forward and erase the older hold.
+func (s *Store) NoteReportsHeld(since time.Time) error {
+	if since.IsZero() {
+		return fmt.Errorf("reports_held needs a since timestamp")
+	}
+	return s.mutate(func(state *State) error {
+		if state.ReportsHeld == nil {
+			state.ReportsHeld = &ReportsHeld{Since: since}
+		}
+		return nil
+	})
+}
+
+// ClearReportsHeld drops the held record when the last held backlog
+// drains or dies — a cleared hold must not keep warning.
+func (s *Store) ClearReportsHeld() error {
+	return s.mutate(func(state *State) error {
+		state.ReportsHeld = nil
+		return nil
+	})
 }

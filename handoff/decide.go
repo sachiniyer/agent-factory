@@ -400,6 +400,10 @@ func Decide(f Facts) Decision {
 			Event{Kind: EventIgnored, Reason: reasonVSCodeTab})
 	}
 	if f.Rails.Halted {
+		// Per-session rows stay EventIgnored — the MOVER-level EventHalted
+		// is emitted once per episode by the engine (#6818 round-2 review);
+		// an immediate-kind row per walled session is N un-rate-limited
+		// prompts for one halt.
 		block(KindDefer, reasonMoverHalted,
 			Event{Kind: EventIgnored, Reason: reasonMoverHalted,
 				Params: map[string]string{"halt_reason": f.Rails.HaltReason}})
