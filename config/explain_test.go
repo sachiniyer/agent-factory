@@ -178,3 +178,27 @@ func TestFormatExplainValueForKeyCommaJoinsAnyList(t *testing.T) {
 		t.Fatalf("non-string []any must fall back to JSON, got %q", got)
 	}
 }
+
+// TestCommaListFallsBackToJSONForCommaBearingElement pins the silent-corruption
+// guard from the round-trip review: when an element contains a comma (only
+// storable via the whole-table JSON escape hatch, since the leaf setter splits
+// on commas), the get path falls back to JSON rather than printing a
+// comma-joined string that the leaf setter would parse back into a different
+// list. The JSON form is unambiguous and signals "use the whole-table form to
+// set this back," instead of a value that looks round-trippable but is not.
+func TestCommaListFallsBackToJSONForCommaBearingElement(t *testing.T) {
+	const want = `["work, feature X"]`
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"work, feature X"}); got != want {
+		t.Fatalf("comma-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []string{"work, feature X"}); got != want {
+		t.Fatalf("explain path must fall back to JSON for comma-bearing element, got %q want %q", got, want)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"work, feature X"}); got != want {
+		t.Fatalf("[]any comma-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	// A comma-free list still renders comma-joined (the round-trip path).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("comma-free list must still render comma-joined, got %q", got)
+	}
+}

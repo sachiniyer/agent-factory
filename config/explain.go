@@ -199,15 +199,31 @@ func FormatExplainValueForKey(key string, value any) string {
 // string. The explain trace's candidate values come from map[string]any (TOML
 // decode) which produces []any rather than []string, so both spellings are
 // accepted. ok is false for any other type, leaving the caller to its fallback.
+//
+// ok is also false when any element itself contains a comma: the leaf setter
+// splits the input on commas, so joining such a value would print something the
+// setter parses back into a different list (silent corruption). A comma-bearing
+// title is only storable via the whole-table JSON escape hatch, so the get path
+// falls back to JSON for it — the unambiguous form that signals "use the
+// whole-table form to set this back" rather than a comma-joined string that
+// looks round-trippable but is not.
 func commaJoinStringList(v any) (string, bool) {
 	switch list := v.(type) {
 	case []string:
+		for _, s := range list {
+			if strings.ContainsRune(s, ',') {
+				return "", false
+			}
+		}
 		return strings.Join(list, ","), true
 	case []any:
 		parts := make([]string, len(list))
 		for i, elem := range list {
 			s, ok := elem.(string)
 			if !ok {
+				return "", false
+			}
+			if strings.ContainsRune(s, ',') {
 				return "", false
 			}
 			parts[i] = s
