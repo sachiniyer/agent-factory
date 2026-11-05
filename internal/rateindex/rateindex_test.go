@@ -296,6 +296,47 @@ func TestRefreshMaxFilesCapsCandidates(t *testing.T) {
 	}
 }
 
+// A store holding more rollouts than MaxFiles is not blanket-unknown (#6809):
+// the candidates the cap dropped are bounded by the documented bound — a
+// record can postdate its file's mtime, but not by more than the
+// still-appending horizon — so drops whose ceilings cannot beat the newest
+// found claim are proven irrelevant and the reading is observed.
+func TestRefreshOverflowStoreStillObserved(t *testing.T) {
+	home := t.TempDir()
+	// 199 old rollouts: the cap keeps the 32 newest by mtime and drops the
+	// rest; every dropped ceiling (2026-09-01 mtime + 30d) precedes the
+	// newest file's claim.
+	for i := 0; i < 199; i++ {
+		writeRollout(t, home, "2026/09/01", rolloutName(i+1), []string{
+			claimLine("2026-09-01T10:00:00.000Z", 5.0),
+		}, mustTime(t, "2026-09-01T12:00:00.000Z"))
+	}
+	writeRollout(t, home, "2026/11/05", rolloutName(300), []string{
+		claimLine("2026-11-05T11:00:00.000Z", 42.0),
+	}, mustTime(t, "2026-11-05T12:00:00.000Z"))
+	got := New().Refresh(home, Options{})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 42.0 {
+		t.Fatalf("got = %+v — dropped files that cannot hold a newer record must not sink the reading", got)
+	}
+}
+
+// The other half of the bound: a dropped file whose mtime postdates the
+// newest found claim could still hold a newer record — the refresh stays
+// unknown rather than reporting a stale observation.
+func TestRefreshDropNewerThanFoundClaimIsUnknown(t *testing.T) {
+	home := t.TempDir()
+	writeRollout(t, home, "2026/11/05", rolloutName(1), []string{
+		claimLine("2026-10-01T10:00:00.000Z", 30.0), // stale claim, newest mtime
+	}, mustTime(t, "2026-11-05T12:00:00.000Z"))
+	writeRollout(t, home, "2026/11/04", rolloutName(2), []string{
+		claimLine("2026-11-04T10:00:00.000Z", 99.0), // never read: loses the mtime race
+	}, mustTime(t, "2026-11-04T12:00:00.000Z"))
+	got := New().Refresh(home, Options{MaxFiles: 1})
+	if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
+		t.Fatalf("status = %v reason %q — a dropped file whose mtime beats the found claim could hold the newest record", got.Status, got.Reason)
+	}
+}
+
 // A file the MaxFiles cap drops is unexamined content — its records are not
 // bounded by the mtime that lost the race — so the refresh reports unknown
 // rather than a stale observation.
