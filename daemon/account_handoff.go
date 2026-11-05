@@ -122,9 +122,6 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 			}
 			return agentaccount.Dir(home, agent, name)
 		},
-		AmbientDir: func(program, workDir string) (string, error) {
-			return tmux.CodexHomeFromCommand(program, workDir)
-		},
 		ReadUsage: func(dir string, carried map[string]int64) handoff.ReadingFacts {
 			return readingFactsFrom(m.refreshAccountUsage(dir, carried))
 		},
@@ -188,19 +185,19 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 			Title:          inst.Title,
 			RepoID:         repoID,
 			RepoRoot:       repoRoot,
-			Program:        inst.AgentProgram(),
-			WorkDir:        inst.GetWorktreePath(),
 			Agent:          accountSwapAgent(inst),
 			Account:        account,
 			Auto:           auto,
 			Started:        inst.Started(),
 			Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
+			Working:        liveness == session.LiveRunning,
 			Parked:         parked,
 			Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
 			VSCodeTab:      instanceHasVSCodeTab(inst),
 			PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
 			SwapCapable:    inst.SupportsAutomaticAccountSwap(),
 			CarryPossible:  session.CarrySupportedAgent(accountSwapAgent(inst)) && !isRemoteWorkspace(inst),
+			HomeDir:        inst.SessionCodexHomeDir(),
 			LimitAccount:   limitAccountFor(inst),
 			WallObservedAt: wallObservedAtFor(inst),
 			Captured:       obs.captured,

@@ -17,7 +17,6 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/session/tmux"
-	"github.com/sachiniyer/agent-factory/task"
 )
 
 // Reannounce bounds the unchanged-verdict heartbeat (design R14).
@@ -36,23 +35,25 @@ const driftUnverifiable = "unverifiable"
 // SessionInput is one live session row the daemon feeds the engine. Content
 // is the poll's own pane capture — it is evaluated here and never logged.
 type SessionInput struct {
-	Key            string // stableSessionKey(repoID, inst) — never the title
-	Title          string
-	RepoID         string // report_to resolution (slice PR3)
-	RepoRoot       string // resolved-config root
-	Program        string // agent binary (ambient-home detection)
-	WorkDir        string // working directory (ambient-home detection)
-	Agent          string // accountSwapAgent's answer: configured, pinned, or ambient
-	Account        string // "" = ambient default login
-	Auto           bool   // af chose the account; false = explicit pin
-	Started        bool
-	Live           bool
+	Key      string // stableSessionKey(repoID, inst) — never the title
+	Title    string
+	RepoID   string // report_to resolution (slice PR3)
+	RepoRoot string // resolved-config root
+	Agent    string // accountSwapAgent's answer: configured, pinned, or ambient
+	Account  string // "" = ambient default login
+	Auto     bool   // af chose the account; false = explicit pin
+	Started  bool
+	Live     bool
+	Working  bool // the poll's own verdict — LiveRunning, which folds in
+	// churn + the agent's in-turn indicator; never IsWorkingContent, whose
+	// unsupported agents (codex) always read idle (#6817 review)
 	Parked         bool // limit-parked liveness = wall liveness
 	Attached       bool
 	VSCodeTab      bool
 	PendingOp      bool // in-flight op or pending account swap
 	SwapCapable    bool
 	CarryPossible  bool      // local worktree + carry-capable agent
+	HomeDir        string    // the runtime-bound account home (codex), "" elsewhere
 	LimitAccount   string    // parked-on account, from instance limit facts
 	WallObservedAt time.Time // durable wall sighting; zero for banner-only
 	Captured       bool      // the poll produced a frame this pass
@@ -69,9 +70,6 @@ type Deps struct {
 	Registered      func(agent string) ([]string, error)
 	LimitedAccounts func(agent string) (map[string]bool, error)
 	AccountDir      func(agent, name string) (string, error)
-	// AmbientDir locates the account home an ambient session runs against
-	// (codex: CODEX_HOME-aware, worktree-aware).
-	AmbientDir func(program, workDir string) (string, error)
 	// ReadUsage refreshes the bounded index for an account home; carried is
 	// the carried-prefix map from durable handoff state (R3's rule).
 	ReadUsage func(dir string, carried map[string]int64) handoff.ReadingFacts
@@ -120,6 +118,10 @@ type governed struct {
 type namespace struct {
 	registered map[string]bool
 	limited    map[string]bool
+	// failed marks a namespace whose limit evidence could not be loaded —
+	// its sessions are skipped entirely rather than judged on a half-known
+	// exclusion set.
+	failed bool
 }
 
 // Tick runs one shadow pass over the sessions the daemon fed. It exits before
@@ -154,6 +156,8 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 	for _, g := range gov {
 		liveKeys[g.in.Key] = true
 	}
+	// Pruning commits immediately — a dropped edge is the safe direction
+	// (the returning session re-announces rather than staying suppressed).
 	e.edges.Prune(liveKeys)
 	if len(gov) == 0 {
 		return nil
@@ -166,15 +170,21 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 		return fmt.Errorf("load handoff state: %w", err)
 	}
 
-	// Occupancy is the governed set's own count, per agent-namespace account.
+	// Occupancy is the governed set's own count, per agent-namespace account
+	// — live sessions only: retained selections on dead/archived rows must
+	// not skew the emptiest-order tiebreak (#6817 review).
 	occupancy := map[string]int{}
 	for _, g := range gov {
-		if g.in.Account != "" {
+		if g.in.Account != "" && g.in.Started && g.in.Live {
 			occupancy[g.in.Agent+"\x00"+g.in.Account]++
 		}
 	}
 
 	// Evidence shared per agent namespace: registered names + limited set.
+	// A namespace whose limit evidence cannot be read fails CLOSED — an
+	// unavailable exclusion set is not an unlimited-account claim, and a
+	// candidate with no usage reading is otherwise eligible for a confirmed
+	// wall move (#6817 review).
 	namespaces := map[string]*namespace{}
 	nsFor := func(agent string) *namespace {
 		ns, ok := namespaces[agent]
@@ -190,12 +200,18 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 			if limited, err := e.deps.LimitedAccounts(agent); err == nil {
 				ns.limited = limited
 			} else {
-				e.warnf("limited %s accounts: %v (treated unlimited)", agent, err)
+				e.warnf("limited %s accounts: %v (namespace skipped — evidence unreadable)", agent, err)
+				ns.failed = true
 			}
 			namespaces[agent] = ns
 		}
 		return ns
 	}
+
+	// Edges filter on a pending clone and commit only after the log write
+	// succeeds — a failed append must not suppress the verdict's retry on
+	// the next tick (#6817 review).
+	pending := e.edges.Clone()
 
 	var rows []handoff.EventRow
 	reportRows := map[string][]handoff.EventRow{} // report_to spec → emitted rows
@@ -204,9 +220,13 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 		specByKey[g.in.Key] = g.cfg.AccountHandoff.ReportTo
 	}
 	for _, g := range gov {
-		facts := e.factsFor(g, nsFor(g.in.Agent), occupancy, state, now)
+		ns := nsFor(g.in.Agent)
+		if ns.failed {
+			continue
+		}
+		facts := e.factsFor(g, ns, occupancy, state, now)
 		decision := handoff.Decide(facts)
-		events := e.edges.Filter(g.in.Key, decision.Events, now, Reannounce)
+		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
 			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: g.in.Key, Agent: g.in.Agent,
@@ -224,6 +244,7 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 			return fmt.Errorf("write shadow rows: %w", err)
 		}
 	}
+	e.edges = pending
 	// report_to delivery happens after the log write — the durable record is
 	// the primary artifact — and on the wiring's own async path (R15).
 	if e.deps.DeliverReport == nil {
@@ -298,6 +319,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 		LimitAccount:   in.LimitAccount,
 		WallObservedAt: in.WallObservedAt,
 		Captured:       fresh,
+		Working:        in.Working,
 		Attached:       in.Attached,
 		VSCodeTab:      in.VSCodeTab,
 		PendingOp:      in.PendingOp,
@@ -305,16 +327,15 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 		CarryPossible:  in.CarryPossible,
 	}
 	if fresh {
-		s.Working = task.IsWorkingContent(in.Content, in.Agent)
 		s.WallBanner = e.deps.DetectWall(in.Content, in.Agent)
 		s.Draft, s.DraftCertain = tmux.ComposerDraftPresent(in.Content)
 	}
-	// The session's own reading: codex identity homes only — a named
-	// account's home, or the ambient home under default_login = "move"
+	// The session's own reading: codex identity homes only — the home the
+	// runtime command bound, never the configured enum (#6817 review).
 	// (#6794: codex alone writes the rate_limits record).
 	srcDir := ""
 	if in.Agent == tmux.ProgramCodex {
-		srcDir = e.sessionHomeDir(in)
+		srcDir = in.HomeDir
 		if srcDir != "" {
 			s.Reading = e.deps.ReadUsage(srcDir, state.CarriedPrefixes)
 		} else {
@@ -386,21 +407,4 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
 		Session: s, Accounts: accounts, Rails: rails, Config: cfg.AccountHandoff,
 	}
-}
-
-// sessionHomeDir resolves the account home the session currently runs
-// against: its named account dir, or the ambient codex home for a
-// default-login session. "" means the home could not be located.
-func (e *Engine) sessionHomeDir(in SessionInput) string {
-	if in.Account != "" {
-		if dir, err := e.deps.AccountDir(in.Agent, in.Account); err == nil {
-			return dir
-		}
-		return ""
-	}
-	dir, err := e.deps.AmbientDir(in.Program, in.WorkDir)
-	if err != nil || dir == "" {
-		return ""
-	}
-	return dir
 }

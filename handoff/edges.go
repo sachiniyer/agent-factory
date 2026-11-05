@@ -28,6 +28,18 @@ func NewEdgeTracker() *EdgeTracker {
 	return &EdgeTracker{last: map[string]edgeState{}}
 }
 
+// Clone returns a tracker copy for two-phase emission: a pass may filter on
+// the clone and commit it only after the events it released are durably
+// written, so a failed write never suppresses the verdict's retry (#6817
+// review).
+func (t *EdgeTracker) Clone() *EdgeTracker {
+	c := &EdgeTracker{last: make(map[string]edgeState, len(t.last))}
+	for k, v := range t.last {
+		c.last[k] = v
+	}
+	return c
+}
+
 // Filter returns the events worth logging for sessionKey: all of them when
 // the session's verdict signature changed (or the re-announce interval
 // elapsed), none when it is unchanged. An empty event set is itself a
