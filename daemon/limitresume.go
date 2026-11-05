@@ -318,7 +318,7 @@ func (m *Manager) resumeLimitedSession(
 	attempts, wait := m.limitResumeAttempted(
 		st, now, hadReset || accountSwap != nil, retryInterval, ordinaryDue, ordinaryAttempt)
 
-	outcome, resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
+	outcome, _, resumeErr := m.resumeFromLimitLockedWithAccount(repoID, key, inst, inst.Title, accountSwap)
 	if accountSwap != nil && accountSwap.fellBack && !hadReset && retryInterval > 0 {
 		wait = m.limitResumeFixedFallbackScheduled(st, now, retryInterval)
 	}

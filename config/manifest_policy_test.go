@@ -239,7 +239,7 @@ func expectedPrecedence(entry ManifestEntry) []ConfigSource {
 		// Global-only precedence while Sources still admits the personal layer
 		// for storage — see manifestDeferredSources (#4539).
 		return precedenceGlobal
-	case "on_archive_command", "root_agent", "default_accounts", "limit_account_candidates":
+	case "on_archive_command", "root_agent", "default_accounts", "limit_account_candidates", "account_handoff":
 		return precedenceGlobalPersonal
 	default:
 		if entry.Sources == sourceGlobalOnly {
@@ -253,7 +253,7 @@ func expectedMerge(entry ManifestEntry) MergePolicy {
 	switch entry.Key {
 	case "program_overrides", "limit_patterns", "root_agents", "keys", "default_accounts":
 		return MergeMapByKey
-	case "docker", "ssh", "root_agent":
+	case "docker", "ssh", "root_agent", "account_handoff":
 		return MergeTableByField
 	case "network.cors_allowed_origins", "network.allowed_hosts", "post_worktree_commands", "limit_account_candidates", "setup_commands":
 		return MergeListReplace

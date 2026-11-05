@@ -948,6 +948,10 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
+  account_handoff            compact JSON object of automatic account-handoff settings (staged; not active yet — mode = "live" is rejected)
+  account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
+                             prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
+                             max_moves_window, refused_backoff, on_failure, report_to
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
@@ -973,7 +977,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates, account_handoff, account_handoff.<leaf>); a global-only key
 is rejected with the location it actually belongs to. One caveat: a
 per-project branch_prefix is accepted and stored but ignored for now — the
 global prefix applies to every project until #4539 lands the real feature.
@@ -2536,6 +2540,13 @@ made, the new account starts a fresh conversation, and its brief says why. An
 off-box (listed-host sandbox) account swap cannot reach the previous account's
 transcript and always starts a fresh conversation with a notice saying why.
 
+The output's conversation object reports the same outcome to the caller:
+carried=true when the transcript was copied and resumed, or carried=false
+with carry_failure naming why the replacement starts fresh — a copy that
+could not be made, a sandbox store af cannot reach, or a different program
+that cannot read its predecessor's transcript. A completed handoff's ledger
+entry keeps the same answer under 'af sessions get'.
+
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
@@ -2834,6 +2845,13 @@ mission a second time.
 The command fails when neither recovery obligation exists. Use 'af sessions
 list' to find sessions carrying the [limit] badge; the TUI and web expose
 Retry handoff and Mark delivered for an unconfirmed handoff.
+
+The output's conversation object says whether the agent serving the session
+afterwards can read its previous conversation: carried=true when the retry
+resumed it (the committed account swap's carry, the recorded conversation id,
+or a worktree-scoped resume), or carried=false with carry_failure naming why
+it starts fresh — including a retry that had no recorded conversation id to
+resume and came up clean rather than guessing at the account's latest.
 
 Example:
   af sessions retry-limit fix-auth

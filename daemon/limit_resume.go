@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 type resumeFromLimitOutcome uint8
@@ -22,8 +24,9 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	outcome, err := s.manager.resumeFromLimitOutcome(req)
+	outcome, conversation, err := s.manager.resumeFromLimitOutcomeConversation(req)
 	resp.OK = outcome == resumePerformed
+	resp.Conversation = conversation
 	if !resp.MutationOutcome.record(err) {
 		return err
 	}
@@ -40,7 +43,16 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 // inverted order deadlocked on.
 var testHookResumeAfterFirstLock = func() {}
 
+// resumeFromLimitOutcome is the outcome-only view every existing caller and
+// test holds: callers that need the retry's conversation outcome (#6768) — the
+// control handler and the handoff wrapper — call
+// resumeFromLimitOutcomeConversation instead.
 func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFromLimitOutcome, error) {
+	outcome, _, err := m.resumeFromLimitOutcomeConversation(req)
+	return outcome, err
+}
+
+func (m *Manager) resumeFromLimitOutcomeConversation(req ResumeFromLimitRequest) (resumeFromLimitOutcome, session.HandoffConversation, error) {
 	// resolveActionSession, not findSession: id-first with a {title, repoID}
 	// fallback, the same resolver kill/archive/restore and the tab verbs use. This
 	// verb re-delivers a prompt INTO a pane, so resolving it by title alone would
@@ -51,10 +63,10 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	// id-keyed request may leave empty.
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return resumeNotPerformed, err
+		return resumeNotPerformed, session.HandoffConversation{}, err
 	}
 	if instance == nil {
-		return resumeNotPerformed, fmt.Errorf("session %q not found", title)
+		return resumeNotPerformed, session.HandoffConversation{}, fmt.Errorf("session %q not found", title)
 	}
 	// ResumeFromLimit is also the explicit recovery door for an ambiguous
 	// agent-only handoff. The TUI c action, web Retry handoff button, and CLI
@@ -66,9 +78,12 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 			repoID: repoID, key: key, instance: instance,
 		}, mission, true)
 		if performed {
-			return resumePerformed, retryErr
+			// A pending agent-handoff mission only exists where the handoff
+			// replaced the program — the incoming agent's conversation is a
+			// fresh one, resent mission or not (#6768).
+			return resumePerformed, session.HandoffConversation{CarryFailure: crossAgentConversationReason}, retryErr
 		}
-		return resumeNotPerformed, retryErr
+		return resumeNotPerformed, session.HandoffConversation{}, retryErr
 	}
 	// A committed account swap whose post-commit respawn went blind
 	// (ErrAccountSwapAgentTeardownBlind) is recoverable through the alreadySet
@@ -82,14 +97,14 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	// committed-swap bypass lives here at the explicit RPC rather than inside
 	// the shared predicate.
 	if committedAccountSwap(instance) == nil && !accountSwapResumeEligible(instance) {
-		return resumeNotPerformed, fmt.Errorf("session %q is not blocked on a usage limit", title)
+		return resumeNotPerformed, session.HandoffConversation{}, fmt.Errorf("session %q is not blocked on a usage limit", title)
 	}
 
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
-		return resumeNotPerformed, nil
+		return resumeNotPerformed, session.HandoffConversation{}, nil
 	}
 	m.mu.Unlock()
 
@@ -106,12 +121,12 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
-		return resumeNotPerformed, nil
+		return resumeNotPerformed, session.HandoffConversation{}, nil
 	}
 	defer opLock.Unlock()
 	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "resume", instance)
 	if err != nil {
-		return resumeNotPerformed, err
+		return resumeNotPerformed, session.HandoffConversation{}, err
 	}
 	defer unlockWorktreeAdmission(worktreeAdmission)
 
@@ -120,7 +135,7 @@ func (m *Manager) resumeFromLimitOutcome(req ResumeFromLimitRequest) (resumeFrom
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != instance || instance.IsTearingDown() {
-		return resumeNotPerformed, nil
+		return resumeNotPerformed, session.HandoffConversation{}, nil
 	}
 
 	return m.resumeFromLimitLockedOutcome(repoID, key, instance, title, committedAccountSwap(instance), true)

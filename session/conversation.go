@@ -286,3 +286,26 @@ func (i *Instance) ExactResume() (bool, string) {
 	}
 	return false, "af cannot resume this " + agent + " session's recorded conversation with the command it would launch"
 }
+
+// ResumeConversationOutcome reports what a re-spawn of this session's runtime
+// does to its conversation — the answer a retry-limit response owes (#6768):
+// Carried when the launch resumes this session's own conversation, whether by
+// the recorded id or the worktree-scoped resume form the exact-only rewrite
+// keeps; otherwise the reason it starts a fresh conversation, the fact the
+// respawn could previously only log.
+func (i *Instance) ResumeConversationOutcome() HandoffConversation {
+	if i.Capabilities().Workspace == WorkspaceRemote {
+		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
+	}
+	program := resolveLaunchProgramForInstance(i).command
+	if _, ok := prepareExactResumeConversation(i, program); ok {
+		return HandoffConversation{Carried: true}
+	}
+	if tmux.ProgramResumesConversation(program) {
+		return HandoffConversation{Carried: true}
+	}
+	if _, why := i.ExactResume(); why != "" {
+		return HandoffConversation{CarryFailure: why}
+	}
+	return HandoffConversation{CarryFailure: "af cannot prove the launched program resumes this session's conversation"}
+}

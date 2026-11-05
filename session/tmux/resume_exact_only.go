@@ -32,6 +32,45 @@ func (t *TmuxSession) SetExactResumeOnly(on bool) {
 	t.exactResumeOnly = on
 }
 
+// ProgramResumesConversation reports whether program — launched through the
+// exact-resume rewrite a re-spawn applies — comes up on an existing
+// conversation. af suppresses the shared-home "latest" rewrite for codex and
+// amp, so one of those launches resumes only a conversation the program itself
+// names; a codex selector af cannot fully model (--all drops the
+// working-directory scope, an unclassified option leaves the target
+// unprovable) does not count. Every other supported agent's resume form is
+// scoped to the working directory, so its launch lands on the newest
+// conversation in this session's own worktree — or the program already names
+// one. An unrecognized command answers false: af cannot prove the process it
+// launches resumes anything.
+func ProgramResumesConversation(program string) bool {
+	tokens, _ := SplitShellTokens(program)
+	agentIdx, agent := findAgentToken(tokens)
+	if agentIdx < 0 || agent == "" {
+		return false
+	}
+	switch agent {
+	case ProgramCodex:
+		selector, resume := CodexResumeSelection(program)
+		if !resume {
+			return false
+		}
+		_, _, all, ok := CodexResumeTarget(selector)
+		return ok && !all
+	case ProgramAmp:
+		_, alreadyResume := ampResumeInsertIndex(tokens, agentIdx)
+		return alreadyResume
+	case ProgramAider:
+		for _, tok := range tokens[agentIdx+1:] {
+			if tok == "--no-restore-chat-history" {
+				return false
+			}
+		}
+		return true
+	}
+	return true
+}
+
 // resumeRewrite is the rewrite Restore's re-spawn applies to the program.
 func (t *TmuxSession) resumeRewrite() func(string) string {
 	t.programMu.RLock()

@@ -507,6 +507,16 @@ Other agents always start fresh with a brief. Use `--brief` to replace the promp
 agent always starts a fresh conversation. The recorded handoff includes the
 outgoing and incoming accounts and branch tip.
 
+The `af sessions handoff` response answers the same question its output
+carries under `conversation`: `carried` when the transcript was copied and
+resumed, or `carry_failure` naming why the replacement starts fresh — a copy
+that could not be made, a sandbox store af cannot reach, or a different
+program. Retiring the swap's delivery obligation writes the same answer onto
+the recorded handoff entry, so `af sessions get` reports it afterwards.
+`af sessions retry-limit` reports the same object for its own resume — the
+swap's carry, a re-spawn that resumed the recorded conversation, or a fresh
+start it names.
+
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
 submission may already have landed. Inspect the replacement pane, then choose

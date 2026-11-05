@@ -330,19 +330,28 @@ func TestProjectUnknownLeafDottedInlineTableShape(t *testing.T) {
 }
 
 // TestProjectPersonalAllowedTableLeavesMatchStruct is the drift guard for the
-// personal [root_agent] leaf allowlist, mirroring
+// personal table leaf allowlist, mirroring
 // TestInRepoAllowedTableLeavesMatchStructs: projectPersonalAllowedTableLeaves
-// must be exactly the leaf keys derived from RootAgent's struct tags. A
-// future field added to RootAgent without acknowledging the new leaf here
-// fails this test demanding an explicit update; a hand-maintained literal that
-// drops a field (the #1817 class) fails because the literal is missing the
-// struct's field.
+// must be exactly the leaf keys derived from the struct tags of each personal
+// table type (RootAgent, AccountHandoffConfig). A future field added without
+// acknowledging the new leaf here fails this test demanding an explicit
+// update; a hand-maintained literal that drops a field (the #1817 class)
+// fails because the literal is missing the struct's field.
 func TestProjectPersonalAllowedTableLeavesMatchStruct(t *testing.T) {
 	want := map[string]map[string]bool{
 		"root_agent": {"enabled": true, "program": true},
+		"account_handoff": {
+			"mode": true, "include_pinned": true, "target_order": true,
+			"confirm_wall": true, "wall_percent": true,
+			"move_idle_at_percent": true, "prefer_below_percent": true,
+			"probe_ttl": true, "default_login": true, "require_carry": true,
+			"exclude_sessions": true, "max_moves": true,
+			"max_moves_window": true, "refused_backoff": true,
+			"on_failure": true, "report_to": true,
+		},
 	}
 	assert.Equal(t, want, projectPersonalAllowedTableLeaves,
-		"projectPersonalAllowedTableLeaves must match RootAgent struct tags")
+		"projectPersonalAllowedTableLeaves must match the personal table types' struct tags")
 }
 
 // TestProjectUnknownLeafWarningsMemoIsPerSource confirms the warning is

@@ -107,6 +107,15 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 	if drift := projectRewriteDrift(before, resulting, key); drift != "" {
 		return nil, fmt.Errorf("internal error: unsetting %s in %s would change %s (no changes written)", key, prettyPath, drift)
 	}
+	// Same gate as the set path: removing a personal account_handoff leaf can
+	// also flip the merged ordering (the revealed global value may conflict
+	// with a sibling personal leaf), so the effective table is re-checked
+	// before the write commits.
+	if isAccountHandoffKey(key) {
+		if err := validatePersonalAccountHandoffMerge(resulting); err != nil {
+			return nil, err
+		}
+	}
 	if err := AtomicWriteFile(path, []byte(updated), 0o644); err != nil {
 		return nil, err
 	}

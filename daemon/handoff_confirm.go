@@ -1,6 +1,10 @@
 package daemon
 
-import "fmt"
+import (
+	"fmt"
+
+	"github.com/sachiniyer/agent-factory/session"
+)
 
 // ConfirmHandoffDeliveryRequest asks the daemon to retire a pending handoff
 // mission WITHOUT resending it (#4429). It is the operator's attestation half
@@ -25,6 +29,10 @@ type ConfirmHandoffDeliveryRequest struct {
 type ConfirmHandoffDeliveryResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+	// Conversation is what the confirmed replacement can read of the previous
+	// conversation (#6768): the carry its committed swap recorded, or the
+	// fresh start an agent handoff always means.
+	Conversation session.HandoffConversation `json:"conversation"`
 	// The confirmation mutates durable state before its settlement write; a
 	// persist failure after that point is a committed outcome, not a refusal.
 	MutationOutcome
@@ -37,8 +45,9 @@ func (s *controlServer) ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest
 	if err := validateRPCRepoID(req.RepoID); err != nil {
 		return err
 	}
-	performed, err := s.manager.confirmHandoffDelivery(req)
+	performed, conversation, err := s.manager.confirmHandoffDeliveryConversation(req)
 	resp.OK = performed
+	resp.Conversation = conversation
 	if !resp.MutationOutcome.record(err) {
 		return err
 	}
@@ -59,12 +68,17 @@ func (s *controlServer) ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest
 // must answer at this binding for "it landed" to be confirmable — a dead pane
 // means restore/kill owns the row instead.
 func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (bool, error) {
+	performed, _, err := m.confirmHandoffDeliveryConversation(req)
+	return performed, err
+}
+
+func (m *Manager) confirmHandoffDeliveryConversation(req ConfirmHandoffDeliveryRequest) (bool, session.HandoffConversation, error) {
 	instance, repoID, title, _, _, err := m.resolveActionSession(req.ID, req.Title, req.RepoID)
 	if err != nil {
-		return false, err
+		return false, session.HandoffConversation{}, err
 	}
 	if instance == nil {
-		return false, fmt.Errorf("session %q not found", title)
+		return false, session.HandoffConversation{}, fmt.Errorf("session %q not found", title)
 	}
 
 	// Admission before the locks: this verb covers both pending obligations —
@@ -72,14 +86,14 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	// since #6767). Neither is eligible without a recorded ambiguous-or-
 	// positive verdict.
 	if !instance.CanConfirmPendingHandoffDelivery() && !instance.CanConfirmPendingAccountSwapDelivery() {
-		return false, fmt.Errorf("session %q has no unconfirmed handoff delivery to settle — inspect `af sessions get %s` for its delivery state", title, title)
+		return false, session.HandoffConversation{}, fmt.Errorf("session %q has no unconfirmed handoff delivery to settle — inspect `af sessions get %s` for its delivery state", title, title)
 	}
 
 	key := daemonInstanceKey(repoID, instance.Title)
 	m.mu.Lock()
 	if _, killing := m.killsInFlight[key]; killing {
 		m.mu.Unlock()
-		return false, nil
+		return false, session.HandoffConversation{}, nil
 	}
 	m.mu.Unlock()
 
@@ -88,7 +102,7 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
-		return false, nil
+		return false, session.HandoffConversation{}, nil
 	}
 	defer opLock.Unlock()
 
@@ -99,14 +113,23 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != instance || instance.IsTearingDown() {
-		return false, nil
+		return false, session.HandoffConversation{}, nil
 	}
 	mission := instance.PendingHandoffMission()
 	confirmAgent := mission != "" && instance.CanConfirmPendingHandoffDelivery()
 	from, to, swapPending := instance.PendingAccountSwap()
 	confirmSwap := swapPending && instance.CanConfirmPendingAccountSwapDelivery()
 	if !confirmAgent && !confirmSwap {
-		return false, nil
+		return false, session.HandoffConversation{}, nil
+	}
+	// Capture the conversation outcome while the pending record still holds it:
+	// the confirm below retires it (#6768).
+	var conversation session.HandoffConversation
+	switch {
+	case confirmSwap:
+		conversation = instance.PendingAccountSwapConversation()
+	case confirmAgent:
+		conversation = session.HandoffConversation{CarryFailure: crossAgentConversationReason}
 	}
 
 	// af's half of the proof: a runtime must answer at this binding. The
@@ -119,7 +142,7 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 	switch probe := probeLivenessForOperator(instance, instance.AgentServer()); probe {
 	case probeAlive:
 	default:
-		return false, fmt.Errorf(
+		return false, session.HandoffConversation{}, fmt.Errorf(
 			"session %q's runtime could not be confirmed live (%s); "+
 				"if the pane is gone, restore or kill owns this row — confirmation retires the mission, it does not resurrect the runtime",
 			title, probe.notAliveReason())
@@ -132,13 +155,13 @@ func (m *Manager) confirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (boo
 		err = instance.ConfirmPendingAccountSwapDelivery(from, to)
 	}
 	if err != nil {
-		return false, err
+		return false, session.HandoffConversation{}, err
 	}
 	if perr := m.persistSettlement(repoID, key, instance); perr != nil {
-		return true, &mutationCommittedError{err: fmt.Errorf(
+		return true, conversation, &mutationCommittedError{err: fmt.Errorf(
 			"confirmed the pending handoff delivery, but could not persist its settlement: %w", perr)}
 	}
 	m.clearPendingHandoffRetry(repoID, instance)
 	m.info().Printf("handoff %q: pending delivery confirmed by operator; mission retired without resend", title)
-	return true, nil
+	return true, conversation, nil
 }

@@ -34,6 +34,12 @@ type HandoffSessionRequest struct {
 // this method, so it refuses before any legacy agent-only mutation can run.
 const AccountAwareHandoffMethod = "HandoffSessionV2"
 
+// crossAgentConversationReason is the stated conversation outcome for a
+// handoff that replaced the agent program: providers cannot read each other's
+// transcripts, so the incoming agent always starts a fresh conversation
+// (#6768).
+const crossAgentConversationReason = "the incoming agent is a different program and cannot read the previous agent's conversation"
+
 type HandoffSessionResponse struct {
 	OK          bool   `json:"ok"`
 	FromAccount string `json:"from_account,omitempty"`
@@ -44,6 +50,14 @@ type HandoffSessionResponse struct {
 	To   string `json:"to"`
 	// HeadSHA is the branch tip at swap time — the attribution boundary.
 	HeadSHA string `json:"head_sha,omitempty"`
+	// Conversation is what the incoming agent can read of the previous
+	// conversation (#6768): the carry a same-agent account handoff committed,
+	// or the reason it starts fresh — a different program, a carry that could
+	// not complete, or an account boundary the transcript cannot cross. The
+	// zero value answers "carried: false"; the delivery obligation's
+	// retirement writes the same answer onto the handoff ledger entry, so it
+	// is still there to be read afterwards.
+	Conversation session.HandoffConversation `json:"conversation"`
 	MutationOutcome
 }
 
@@ -371,7 +385,11 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		m.warn().Printf("handoff %q: failed to persist the post-swap checkpoint before mission delivery: %v", req.Title, err)
 	}
 
-	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA, FromAccount: fromAccount}
+	// A --to handoff always replaces the program: the incoming agent starts a
+	// fresh conversation, and the response says why rather than leaving the
+	// caller to infer it from From != To (#6768).
+	response := HandoffSessionResponse{OK: true, From: outgoing, To: target, HeadSHA: headSHA, FromAccount: fromAccount,
+		Conversation: session.HandoffConversation{CarryFailure: crossAgentConversationReason}}
 	if err := m.deliverHandoffMission(delivery); err != nil {
 		// SwapAgent already installed the incoming runtime. Preserve the resolved
 		// identity and classify every later delivery/settlement failure as

@@ -497,6 +497,18 @@ var configManifest = []ManifestEntry{
 		Formats:    formatTOMLJSON,
 	},
 	{
+		Key:        "account_handoff",
+		Type:       "table",
+		Default:    "no table · handoff stays off",
+		Purpose:    "Staged settings for automatic account handoff (#6776): mode, thresholds, and safety rails · NOT ACTIVE YET — an absent table ≡ off ≡ today, and mode = \"live\" is rejected · set the whole table with compact JSON, or set one leaf (mode, wall_percent, …) directly · global or personal per-project, never checked in: whose accounts a machine may spend is identity policy, the #3174 boundary.",
+		Tier:       TierAdvanced,
+		Settable:   true,
+		Sources:    sourceGlobalPersonal,
+		Precedence: precedenceGlobalPersonal,
+		Merge:      MergeTableByField,
+		Formats:    formatTOMLOnly,
+	},
+	{
 		Key:        "global_agent_skills",
 		Type:       "bool",
 		Default:    "false",
