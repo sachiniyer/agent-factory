@@ -265,22 +265,26 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		agent := accountSwapAgent(inst)
 		drafts = append(drafts, handoffInputDraft{
 			in: handoffengine.SessionInput{
-				Key:            sessionKey,
-				Title:          inst.Title,
-				RepoID:         repoID,
-				RepoRoot:       repoRoot,
-				Agent:          agent,
-				Account:        account,
-				Auto:           auto,
-				Started:        inst.Started(),
-				Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
-				Working:        liveness == session.LiveRunning,
-				Parked:         parked,
-				Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
-				VSCodeTab:      instanceHasVSCodeTab(inst),
-				PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
-				SwapCapable:    inst.SupportsAutomaticAccountSwap(),
-				CarryPossible:  session.CarrySupportedAgent(agent) && !isRemoteWorkspace(inst),
+				Key:         sessionKey,
+				Title:       inst.Title,
+				RepoID:      repoID,
+				RepoRoot:    repoRoot,
+				Agent:       agent,
+				Account:     account,
+				Auto:        auto,
+				Started:     inst.Started(),
+				Live:        liveness == session.LiveRunning || liveness == session.LiveReady || parked,
+				Working:     liveness == session.LiveRunning,
+				Parked:      parked,
+				Attached:    m.isPollPaused(repoID, inst.Title, inst.ID),
+				VSCodeTab:   instanceHasVSCodeTab(inst),
+				PendingOp:   inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
+				SwapCapable: inst.SupportsAutomaticAccountSwap(),
+				// CarryPossible is admission's own feasibility predicate
+				// (#6817 review): a carry-supporting provider BY LAUNCH
+				// COMMAND plus a recorded conversation that belongs to it —
+				// a session with no conversation id can never carry.
+				CarryPossible:  inst.AccountSwapCarryPossible() && !isRemoteWorkspace(inst),
 				LimitAccount:   limitAccountFor(inst),
 				WallObservedAt: wallObservedAtFor(inst),
 				Captured:       obs.captured,
@@ -306,7 +310,11 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		// is resolveLaunchProgramForInstance → RepoFromPath → UNTIMED GIT —
 		// which must never run on this ticker. A legacy row resolves "" and
 		// its drift fact reports unverifiable — the safe direction.
-		if d.in.Agent == tmux.ProgramCodex && d.in.Started && d.in.Live &&
+		// The codex-home judgment follows the provider the LAUNCH COMMAND
+		// resolves to (#6817 review, the #6811 resolver), not the settled
+		// swap enum: a program_overrides session running codex under
+		// another agent name still writes a codex home worth reading.
+		if d.inst.ResolvedAgent() == tmux.ProgramCodex && d.in.Started && d.in.Live &&
 			strings.TrimSpace(d.inst.RuntimeProgram()) != "" {
 			d.in.HomeDir = d.inst.SessionCodexHomeDir()
 		}

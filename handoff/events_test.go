@@ -216,3 +216,58 @@ func TestEdgeTrackerPruneDropsGoneSessions(t *testing.T) {
 // ReannounceTest mirrors the wiring's heartbeat constant for this leaf's
 // internal tests (the exported one lives in the engine package).
 const ReannounceTest = 30 * time.Minute
+
+// #6817 review: a crash-torn tail must not corrupt the next row — an
+// unterminated final line is dropped before the append, never concatenated.
+func TestEventLogAppendRepairsUnterminatedTail(t *testing.T) {
+	dir := t.TempDir()
+	log := NewEventLog(dir)
+	now := time.Date(2026, 11, 12, 8, 0, 0, 0, time.UTC)
+	log.now = func() time.Time { return now }
+	dayFile := filepath.Join(dir, "auto-handoff-events-20261112.jsonl")
+	good := `{"ts":"2026-11-12T07:59:00Z","kind":"wall","reason":"hit"}`
+	if err := os.WriteFile(dayFile, []byte(good+"\n"+`{"ts":"2026-11-12T07:59`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall", Title: "next"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	raw, err := os.ReadFile(dayFile)
+	if err != nil {
+		t.Fatal(err)
+	}
+	lines := strings.Split(strings.TrimRight(string(raw), "\n"), "\n")
+	if len(lines) != 2 {
+		t.Fatalf("day file has %d lines, want 2: %q", len(lines), raw)
+	}
+	if lines[0] != good {
+		t.Fatalf("good row mutated: %q", lines[0])
+	}
+	var decoded EventRow
+	if err := json.Unmarshal([]byte(lines[1]), &decoded); err != nil {
+		t.Fatalf("appended row is not valid JSON (tail corrupted it): %v", err)
+	}
+	if decoded.Title != "next" {
+		t.Fatalf("appended row lost its fields: %+v", decoded)
+	}
+}
+
+// A file that is nothing but a partial line truncates to empty rather than
+// refusing every subsequent append.
+func TestEventLogAppendTruncatesWholePartialFile(t *testing.T) {
+	dir := t.TempDir()
+	log := NewEventLog(dir)
+	now := time.Date(2026, 11, 12, 8, 0, 0, 0, time.UTC)
+	log.now = func() time.Time { return now }
+	dayFile := filepath.Join(dir, "auto-handoff-events-20261112.jsonl")
+	if err := os.WriteFile(dayFile, []byte(`{"ts":"partial, no newline`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	raw, _ := os.ReadFile(dayFile)
+	if !strings.HasPrefix(string(raw), "{") || !strings.HasSuffix(string(raw), "}\n") {
+		t.Fatalf("file does not hold exactly one clean row: %q", raw)
+	}
+}
