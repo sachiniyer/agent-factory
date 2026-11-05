@@ -39,6 +39,7 @@ type depCounts struct {
 	warns                                                    []string
 	exclude                                                  []string
 	targetOrder                                              string
+	movesWindow                                              string
 }
 
 type reportCall struct {
@@ -63,7 +64,7 @@ func (d *depCounts) deps() Deps {
 				Mode: d.mode, IncludePinned: false, TargetOrder: order,
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
-				MaxMovesWindow: "30m", ExcludeSessions: d.exclude,
+				MaxMovesWindow: d.movesWindowOrDefault(), ExcludeSessions: d.exclude,
 				ReportTo: d.reportToFor(root),
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
@@ -129,6 +130,15 @@ func (d *depCounts) reportToFor(root string) string {
 		return d.reportToByRoot[root]
 	}
 	return d.reportTo
+}
+
+// movesWindowOrDefault returns the fake's max_moves_window — "0" parses to a
+// non-positive duration, the documented unbounded-window value.
+func (d *depCounts) movesWindowOrDefault() string {
+	if d.movesWindow == "" {
+		return "30m"
+	}
+	return d.movesWindow
 }
 
 func shadowSession() SessionInput {
@@ -891,5 +901,46 @@ func TestTickMovesInWindowIsSessionAndWindowScoped(t *testing.T) {
 	}
 	if hasLoopEdge(t, d) {
 		t.Fatalf("other sessions' or out-of-window moves counted: %+v", d.rows)
+	}
+}
+
+// max_moves_window has ONE meaning — "" or a non-positive duration is an
+// UNBOUNDED window, so every recorded move counts toward max_moves (the
+// docs' meaning, and the same one PruneExpired keeps by pruning nothing).
+// An engine that counted nothing under it would let a session move forever
+// once the window were emptied (#6852 round-2 review).
+func TestTickMovesInWindowCountsEverythingWhenTheWindowIsUnbounded(t *testing.T) {
+	in := shadowSession()
+	in.Content = "You've hit your usage limit\n› Ask Codex to do anything\n"
+	d := &depCounts{mode: "shadow", movesWindow: "0"}
+	// Three moves — two of them older than any bounded window — meet the
+	// fake's max_moves of 3 when the window is unbounded.
+	d.railsState.RecentMoves = []handoff.RecentMove{
+		{SessionKey: "sess-1", Agent: "codex", Account: "work", At: testNow.Add(-365 * 24 * time.Hour)},
+		{SessionKey: "sess-1", Agent: "codex", Account: "work", At: testNow.Add(-30 * 24 * time.Hour)},
+		{SessionKey: "sess-1", Agent: "codex", Account: "work", At: testNow.Add(-time.Minute)},
+	}
+	deps := d.deps()
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		if dir == in.HomeDir {
+			return handoff.ReadingFacts{
+				Status:     handoff.ReadingObserved,
+				Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: 98}},
+				RecordedAt: testNow.Add(-time.Minute), Complete: true,
+			}
+		}
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	if _, err := New(deps).Tick([]SessionInput{in}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	found := false
+	for _, row := range d.rows {
+		if row.Kind == handoff.EventSwitchLoop {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("an unbounded window counted nothing — the rail never engaged: %+v", d.rows)
 	}
 }

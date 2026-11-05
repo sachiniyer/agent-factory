@@ -893,6 +893,115 @@ func TestReconcileAccountLimitProofsFailsClosedOnUnreadableWatermarks(t *testing
 		"an unknown watermark means an observed claim cannot be trusted — the pass writes nothing")
 }
 
+// A corrupt RAILS file fails the pass closed the same way the watermark
+// file does: the unrecorded-carry quarantine is the record that some
+// rollout's copied bytes cannot be trusted, and a file that will not
+// decode hides that record — a reading inside an unrecorded prefix could
+// be the other account's evidence (#6852 round-2 review).
+func TestReconcileAccountLimitProofsFailsClosedOnUnreadableRails(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	seedCodexRollout(t, home, "work", base.UTC().Format("2006/01/02"), rolloutName("000000000001"),
+		codexUsageClaim(base.Add(-time.Minute), 40))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	railsPath := filepath.Join(home, "instances", handoff.RailsFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(railsPath), 0o700))
+	require.NoError(t, os.WriteFile(railsPath, []byte("not json"), 0o600))
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a rails file that will not decode hides the quarantine record — the pass writes nothing")
+}
+
+// An account whose carry quarantine overflowed the marker cap is flagged
+// untrusted in the rails file wholesale: the reconcile skips its store
+// entirely — no claim in it may free a wall, however healthy it reads
+// (#6852 review). The flag stands until a covering watermark lands or the
+// rails are repaired.
+func TestReconcileAccountLimitProofsSkipsAQuarantinedAccount(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	seedCodexRollout(t, home, "work", base.UTC().Format("2006/01/02"), rolloutName("000000000001"),
+		codexUsageClaim(base.Add(-time.Minute), 40))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	dir, err := agentaccount.Dir(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	railsPath := filepath.Join(home, "instances", handoff.RailsFileName)
+	require.NoError(t, os.MkdirAll(filepath.Dir(railsPath), 0o700))
+	require.NoError(t, os.WriteFile(railsPath, []byte(
+		fmt.Sprintf(`{"schema_version":1,"quarantined_accounts":{%q:{"at":%q}}}`,
+			dir, base.Add(-time.Hour).UTC().Format(time.RFC3339Nano))), 0o600))
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a quarantined account's claims are never retraction evidence — the pass skips it")
+}
+
+// A quarantine marker always wins over an older recorded watermark: the
+// marker may describe a carry whose bytes landed past the recorded
+// boundary, so honoring the stale watermark would free a wall on the
+// source account's claims (#6852 round-2 review).
+func TestReconcileAccountLimitProofsAMarkerBeatsARecordedWatermark(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	rollout := seedCodexRollout(t, home, "work", base.UTC().Format("2006/01/02"), rolloutName("000000000001"),
+		codexUsageClaim(base.Add(-time.Minute), 40))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	// The recorded watermark covers only the first bytes — taken alone the
+	// healthy claim sits past it and would read as the target's own.
+	store := handoff.NewStore(filepath.Join(home, "instances", handoff.StateFileName))
+	require.NoError(t, store.RecordCarriedPrefix(rollout, 10))
+	// …but a later carry quarantined the file end to end and its marker
+	// stands: the whole file's claims are carried poison until a watermark
+	// covering the marked span lands.
+	dir, err := agentaccount.Dir(home, tmux.ProgramCodex, "work")
+	require.NoError(t, err)
+	rails := handoff.NewRailsStore(
+		filepath.Join(home, "instances", handoff.RailsFileName),
+		filepath.Join(home, "instances", handoff.StateFileName))
+	info, err := os.Stat(rollout)
+	require.NoError(t, err)
+	_, err = rails.NoteUnrecordedCarry(rollout, dir, info.Size(), base.Add(-2*time.Hour))
+	require.NoError(t, err)
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"the marker's covered span beats the stale watermark — no claim inside it is the target's")
+}
+
 // The wall line is the RESOLVED config leaf, not a hardcoded 97: an operator
 // who raised it keeps walls that a default threshold would retract.
 func TestReconcileAccountLimitProofsRespectsConfiguredWallPercent(t *testing.T) {

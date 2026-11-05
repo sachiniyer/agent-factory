@@ -760,13 +760,18 @@ func TestConversationCarryQuarantinesTheRolloutWhenTheWatermarkCannotBeRecorded(
 		"the unrecorded rollout is quarantined end-to-end — no claim in it can free a wall")
 }
 
-// Even when NO record can land — the instances directory itself is gone —
-// the carry still commits: the copy is the user's context, and the louder
-// warning tells the operator the rollout's claims are unquarantined.
-func TestConversationCarryCarriesOnWhenNoRecordCanBeWritten(t *testing.T) {
+// When NO durable record can land — the watermark fails AND the
+// quarantine write fails — the carry must not commit the copied bytes:
+// without a record they would count as the target's own usage claims,
+// the silent-poison failure the quarantine exists to prevent (#6852
+// round-2 review). The install unwinds and the carry fails, so the swap
+// starts a fresh conversation whose brief names why — the same
+// fresh-conversation fallback the pre-quarantine behavior had.
+func TestConversationCarryUnwindsWhenNoRecordCanBeWritten(t *testing.T) {
 	afHome := t.TempDir()
 	srcHome := t.TempDir()
-	// instances exists as a FILE, so no state write can land beneath it.
+	// instances exists as a FILE, so neither durable write can land
+	// beneath it.
 	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances"), []byte("x"), 0o600))
 	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
 	require.NoError(t, os.MkdirAll(dstDir, 0o700))
@@ -781,8 +786,40 @@ func TestConversationCarryCarriesOnWhenNoRecordCanBeWritten(t *testing.T) {
 		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
 		transcript: rel,
 	}
-	require.NoError(t, carry.copy(), "record-keeping must never strand the conversation")
-	require.FileExists(t, filepath.Join(dstDir, rel))
+	err = carry.copy()
+	require.Error(t, err,
+		"with no durable record the copy's claims would count as the target's own — the carry must not commit")
+	require.Contains(t, carryFailureReason(err), "watermark")
+	require.NoFileExists(t, filepath.Join(dstDir, rel),
+		"the unwound install leaves no unrecorded carry bytes behind")
+}
+
+// A committed carry that displaces a pre-existing destination restores it
+// when the durable record cannot land: the destination goes back to
+// exactly what it held before the carry ran.
+func TestConversationCarryRestoresTheDisplacedOriginalWhenNoRecordLands(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances"), []byte("x"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim one\nclaim two\n")
+	dstPath := writeCarryFile(t, dstDir, rel, "claim one\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.Error(t, carry.copy())
+	got, err := os.ReadFile(dstPath)
+	require.NoError(t, err)
+	require.Equal(t, "claim one\n", string(got),
+		"the displaced original is restored — the destination is exactly as it was")
 }
 
 // When the watermark write fails and a shorter matching destination was

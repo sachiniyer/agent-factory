@@ -456,9 +456,13 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   are the source account's numbers: a carry commits a durable byte watermark
   at copy time naming exactly which leading bytes came from the previous
   account, and the usage reader ignores claims below it — a carry that
-  cannot record its watermark still commits (the conversation is the user's
-  context) but quarantines the copied span in the rails file instead, so no
-  claim inside it frees a wall until a covering watermark lands. The
+  cannot record its watermark commits only when the copied span is
+  quarantined in the rails file instead, so no claim inside it frees a
+  wall until a covering watermark lands. When neither durable record can
+  be written the carry does not commit at all: the install is unwound
+  and the replacement starts a fresh conversation whose brief says why —
+  committing bytes no record can mark untrustworthy would silently let
+  the source account's claims count as the target's. The
   quarantine ledger is bounded, and its cap never evicts a marker — a
   dropped marker would re-trust a file whose poison span is still on
   disk. A failed carry that cannot get a marker flags its account

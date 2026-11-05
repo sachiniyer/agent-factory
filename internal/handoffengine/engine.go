@@ -599,20 +599,29 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 		s.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
 	}
 
-	// Rails. MaxMovesWindow is validated by config resolution, so a parse
-	// failure here means the table was hand-built — fall back to no window
-	// (counting nothing) rather than a fabricated bound.
+	// Rails. max_moves_window has ONE meaning everywhere it is read — and
+	// the docs name it: "" or a non-positive duration is an UNBOUNDED
+	// window, so every recorded move counts (the same meaning
+	// PruneExpired keeps when it prunes nothing). Counting nothing here
+	// would make the same value mean "the rail never engages" — a second,
+	// opposite meaning for one leaf (#6852 round-2 review). A parse
+	// failure means a hand-built table; the unbounded answer is also the
+	// fail-closed one, so it serves as the fallback.
 	window, _ := time.ParseDuration(cfg.AccountHandoff.MaxMovesWindow)
+	var cutoff time.Time
+	if window > 0 {
+		cutoff = now.Add(-window)
+	}
+	inWindow := func(at time.Time) bool {
+		return window <= 0 || !at.Before(cutoff)
+	}
 	rails := handoff.RailsFacts{Halted: snap.State.Halted != nil}
 	if snap.State.Halted != nil {
 		rails.HaltReason = snap.State.Halted.Reason
 	}
-	if window > 0 {
-		cutoff := now.Add(-window)
-		for _, mv := range snap.Rails.RecentMoves {
-			if mv.SessionKey == in.Key && !mv.At.Before(cutoff) {
-				rails.MovesInWindow++
-			}
+	for _, mv := range snap.Rails.RecentMoves {
+		if mv.SessionKey == in.Key && inWindow(mv.At) {
+			rails.MovesInWindow++
 		}
 	}
 	if until, ok := snap.Rails.RefusedUntil[in.Key]; ok && until.After(now) {
@@ -647,15 +656,12 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 			af.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
 		}
 		af.Occupancy = occupancy[in.Agent+"\x00"+name]
-		if window > 0 {
-			cutoff := now.Add(-window)
-			for _, mv := range snap.Rails.RecentMoves {
-				// Credits key on agent + account — "work" on codex is a
-				// different seat than "work" on claude, the same namespacing
-				// occupancy uses (#6776 review).
-				if mv.Agent == in.Agent && mv.Account == name && !mv.At.Before(cutoff) {
-					af.RecentMoveCredits++
-				}
+		for _, mv := range snap.Rails.RecentMoves {
+			// Credits key on agent + account — "work" on codex is a
+			// different seat than "work" on claude, the same namespacing
+			// occupancy uses (#6776 review).
+			if mv.Agent == in.Agent && mv.Account == name && inWindow(mv.At) {
+				af.RecentMoveCredits++
 			}
 		}
 		accounts = append(accounts, af)
