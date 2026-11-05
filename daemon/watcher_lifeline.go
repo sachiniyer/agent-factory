@@ -430,7 +430,6 @@ func (b *watchLifelineBinder) finish() {
 
 func (b *watchLifelineBinder) run() {
 	defer close(b.joined)
-	defer b.settle()
 	var member *exec.Cmd
 	var ll *watchLifeline
 	defer func() {
@@ -448,6 +447,10 @@ func (b *watchLifelineBinder) run() {
 			}
 		}
 	}()
+	// Registered after the cleanup above so it runs BEFORE it: attempts have
+	// already ended once this point is reached, and stopAttempts' join must
+	// not wait on a bound member's disarm.
+	defer b.settle()
 	s := b.sup
 	for {
 		select {
