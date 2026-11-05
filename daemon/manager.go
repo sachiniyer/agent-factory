@@ -558,6 +558,14 @@ type Manager struct {
 	// Guarded by m.mu and keyed by pointer so a same-title successor never
 	// inherits its predecessor's pending work.
 	pendingConversationCaptures map[*session.Instance]int
+	// armedConversationCaptures marks the one capture loop admitted for an
+	// instance's CURRENT runtime generation (#6769). An arm for the same token
+	// already exists, so admission is refused; an arm for a different token —
+	// a handoff or swap that replaced the runtime — displaces the marker, and
+	// the displaced goroutine exits on its next qualifier check instead of
+	// holding the slot while the new conversation goes unrecorded. Only the
+	// goroutine owning the recorded token clears the entry. Guarded by m.mu.
+	armedConversationCaptures map[*session.Instance]session.AgentRuntimeToken
 
 	// pausedPolls records sessions whose daemon capture-pane liveness poll is
 	// paused while a TUI is attached full-screen to them (#1160), keyed by stable

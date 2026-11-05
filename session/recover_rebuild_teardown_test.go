@@ -888,6 +888,11 @@ func TestRecover_RespawnsSurvivingPaneAfterWorktreeRebuild(t *testing.T) {
 	const agentName = "af_recover_survivor"
 	shellName := agentName + tmuxTabSeparator + shellTabName
 	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	// The restore guard proves the recorded rollout exists in the session's
+	// own store before it resumes it (#6769).
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+conversationID+".jsonl")
 	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-survivor")
 	branchCreatedByUs := true
 	data := InstanceData{
@@ -997,6 +1002,11 @@ func TestRecover_RebuiltTeardownSurvivesAPartialFailureRetry(t *testing.T) {
 
 	const agentName = "af_recover_retry"
 	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	// The restore guard proves the recorded rollout exists in the session's
+	// own store before it resumes it (#6769).
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+conversationID+".jsonl")
 	worktreePath := filepath.Join(t.TempDir(), "repo-lost-recover-retry")
 	branchCreatedByUs := true
 	data := InstanceData{

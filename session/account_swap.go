@@ -60,21 +60,31 @@ func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchP
 
 func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	trustBase, resume bool, prepared *accountSwapLaunchPlan,
-) (string, sessionenv.AccountLaunchProof) {
+) (string, sessionenv.AccountLaunchProof, string) {
 	if prepared != nil {
 		if prepared.conversation.HasID() {
 			i.SetAgentConversation(prepared.conversation)
 		}
-		return prepared.program, prepared.proof
+		return prepared.program, prepared.proof, ""
 	}
 	program := resolvedProgram
+	refusedID := ""
 	if resume {
-		program = prepareResumeConversation(i, program)
+		rewritten, ok, reason := prepareExactResumeConversation(i, program)
+		if ok {
+			program = rewritten
+		} else if reason != "" {
+			// The recorded conversation was refused as stale or unprovable, so
+			// this launch starts fresh. The caller retires the dead id when the
+			// spawn commits (#6769 review): leaving it recorded would suppress
+			// every later capture arm and make each restore start fresh again.
+			refusedID = i.resumableConversation().ID
+		}
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
 	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
-	return program, accountLaunchProof(declarationBase, program, trustBase, nil, "")
+	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusedID
 }
 
 // AccountSelection reports the current account and whether af selected it. A
