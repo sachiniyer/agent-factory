@@ -99,6 +99,69 @@ func TestEventLogPrunesPastRetention(t *testing.T) {
 	}
 }
 
+// #6817 review: a symlinked day file is never written through — the log
+// follows the AF-home rule, not whatever the link points at.
+func TestEventLogAppendRefusesSymlinkedDayFile(t *testing.T) {
+	dir := t.TempDir()
+	log := NewEventLog(dir)
+	now := time.Date(2026, 11, 3, 4, 30, 0, 0, time.UTC)
+	log.now = func() time.Time { return now }
+	target := filepath.Join(t.TempDir(), "elsewhere.jsonl")
+	if err := os.WriteFile(target, []byte("{}\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	dayFile := filepath.Join(dir, "auto-handoff-events-20261103.jsonl")
+	if err := os.Symlink(target, dayFile); err != nil {
+		t.Fatal(err)
+	}
+	err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}})
+	if err == nil {
+		t.Fatal("Append wrote through a symlinked day file")
+	}
+	raw, _ := os.ReadFile(target)
+	if len(raw) != len("{}\n") {
+		t.Fatalf("append reached the symlink target: %q", raw)
+	}
+}
+
+// #6817 review: the sibling lock file prunes on the same stamp as the data
+// file — otherwise stale locks accumulate past retention.
+func TestEventLogPrunesStaleLockFiles(t *testing.T) {
+	dir := t.TempDir()
+	log := NewEventLog(dir)
+	now := time.Date(2026, 11, 10, 0, 0, 0, 0, time.UTC)
+	log.now = func() time.Time { return now }
+	staleLock := filepath.Join(dir, "auto-handoff-events-20261101.jsonl.lock")
+	if err := os.WriteFile(staleLock, []byte{}, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if _, err := os.Stat(staleLock); !os.IsNotExist(err) {
+		t.Fatalf("stale lock file survived pruning")
+	}
+}
+
+// #6817 review: a day file past the byte cap takes no more rows — bounded
+// growth over a silently unbounded log.
+func TestEventLogDayCapDropsRows(t *testing.T) {
+	dir := t.TempDir()
+	log := NewEventLog(dir)
+	now := time.Date(2026, 11, 3, 4, 30, 0, 0, time.UTC)
+	log.now = func() time.Time { return now }
+	dayFile := filepath.Join(dir, "auto-handoff-events-20261103.jsonl")
+	if err := os.WriteFile(dayFile, make([]byte, eventDayMaxBytes), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := log.Append([]EventRow{{TS: now, Kind: EventWall, ReasonCode: "wall"}}); err != nil {
+		t.Fatalf("Append: %v", err)
+	}
+	if info, err := os.Stat(dayFile); err != nil || info.Size() != eventDayMaxBytes {
+		t.Fatalf("capped day file changed: size=%d err=%v", info.Size(), err)
+	}
+}
+
 func TestEdgeTrackerEmitsOnChangeThenSuppresses(t *testing.T) {
 	tr := NewEdgeTracker()
 	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)

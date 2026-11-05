@@ -57,10 +57,25 @@ type handoffObservation struct {
 	content  string
 }
 
+// accountHandoffRescanInterval bounds how often an INACTIVE engine re-runs
+// config resolution to discover a project-level opt-in (#6817 review). While
+// nothing anywhere engages shadow, a tick must cost no more than reading the
+// already-loaded global config; a personal project's [account_handoff] can
+// still switch shadow on, and this rescan is how it is found. The interval
+// trades a bounded discovery delay for the property that an opted-out box
+// spends nothing on machinery it never asked for.
+var accountHandoffRescanInterval = 5 * time.Minute
+
 // noteHandoffObservation records the capture verdict of one status probe for
 // the engine's fact assembly. A failed probe is recorded too — "could not
-// capture" is itself a fact (composer state unprovable → draft-blocked).
+// capture" is itself a fact (composer state unprovable → draft-blocked). The
+// handoffActive gate is the "off is off" half of the contract: with no
+// opted-in config anywhere, a status probe must not even take m.mu on the
+// engine's behalf.
 func (m *Manager) noteHandoffObservation(key string, captured bool, content string) {
+	if !m.handoffActive.Load() {
+		return
+	}
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.handoffObserved == nil {
@@ -72,10 +87,28 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 // accountHandoffTick is one shadow pass: gather the session inputs from the
 // manager's own records, run the engine, warn on failure. Every leg failing
 // is a warn-and-retry — the next tick assembles fresh facts from scratch.
+//
+// The gate is the review's "off isn't off" property. A globally opted-in
+// [account_handoff] (the already-loaded config — no disk) runs every tick;
+// so does any tick while governed sessions were last seen. Otherwise the
+// full input walk + per-repo resolution happens at most once per
+// accountHandoffRescanInterval — that scan is the only way to learn a
+// personal project table switched shadow on.
 func (m *Manager) accountHandoffTick() {
-	if err := m.accountHandoffEngine().Tick(m.accountHandoffInputs()); err != nil {
+	global := false
+	if cfg := m.Config(); cfg != nil {
+		global = cfg.AccountHandoffEnabled()
+	}
+	if !global && !m.handoffActive.Load() &&
+		nowFunc().Sub(m.handoffLastScan) < accountHandoffRescanInterval {
+		return
+	}
+	m.handoffLastScan = nowFunc()
+	governed, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs())
+	if err != nil {
 		m.warn().Printf("account-handoff engine tick: %v", err)
 	}
+	m.handoffActive.Store(global || governed > 0)
 }
 
 // accountHandoffEngine lazily builds the engine and its injected deps. Kept
@@ -152,13 +185,26 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 	return m.handoffEngine
 }
 
+// handoffInputDraft is the under-lock half of accountHandoffInputs: the
+// input populated from in-memory instance state, plus the instance pointer
+// the second phase still needs.
+type handoffInputDraft struct {
+	in   handoffengine.SessionInput
+	inst *session.Instance
+}
+
 // accountHandoffInputs gathers one SessionInput per instance from the
 // manager's records — the same sources accountSwapOpportunity consults — plus
 // the pane observation the status poll last recorded.
+//
+// m.mu is held for the map walk ONLY (#6817 review): every getter it calls is
+// in-memory instance state. SessionCodexHomeDir — the lstat, and for a legacy
+// row the RepoFromPath→untimed-git chain — runs AFTER the lock is released,
+// and only for the sessions that can consume it: live, started codex seats.
+// An archived row's home resolve is skipped entirely.
 func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 	m.mu.Lock()
-	defer m.mu.Unlock()
-	inputs := make([]handoffengine.SessionInput, 0, len(m.instances))
+	drafts := make([]handoffInputDraft, 0, len(m.instances))
 	liveKeys := make(map[string]bool, len(m.instances))
 	for key, inst := range m.instances {
 		if inst == nil {
@@ -177,29 +223,32 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 			repoRoot = inst.Path
 		}
 		obs := m.handoffObserved[sessionKey]
-		inputs = append(inputs, handoffengine.SessionInput{
-			Key:            sessionKey,
-			Title:          inst.Title,
-			RepoID:         repoID,
-			RepoRoot:       repoRoot,
-			Agent:          accountSwapAgent(inst),
-			Account:        account,
-			Auto:           auto,
-			Started:        inst.Started(),
-			Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
-			Working:        liveness == session.LiveRunning,
-			Parked:         parked,
-			Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
-			VSCodeTab:      instanceHasVSCodeTab(inst),
-			PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
-			SwapCapable:    inst.SupportsAutomaticAccountSwap(),
-			CarryPossible:  session.CarrySupportedAgent(accountSwapAgent(inst)) && !isRemoteWorkspace(inst),
-			HomeDir:        inst.SessionCodexHomeDir(),
-			LimitAccount:   limitAccountFor(inst),
-			WallObservedAt: wallObservedAtFor(inst),
-			Captured:       obs.captured,
-			CapturedAt:     obs.at,
-			Content:        obs.content,
+		agent := accountSwapAgent(inst)
+		drafts = append(drafts, handoffInputDraft{
+			in: handoffengine.SessionInput{
+				Key:            sessionKey,
+				Title:          inst.Title,
+				RepoID:         repoID,
+				RepoRoot:       repoRoot,
+				Agent:          agent,
+				Account:        account,
+				Auto:           auto,
+				Started:        inst.Started(),
+				Live:           liveness == session.LiveRunning || liveness == session.LiveReady || parked,
+				Working:        liveness == session.LiveRunning,
+				Parked:         parked,
+				Attached:       m.isPollPaused(repoID, inst.Title, inst.ID),
+				VSCodeTab:      instanceHasVSCodeTab(inst),
+				PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
+				SwapCapable:    inst.SupportsAutomaticAccountSwap(),
+				CarryPossible:  session.CarrySupportedAgent(agent) && !isRemoteWorkspace(inst),
+				LimitAccount:   limitAccountFor(inst),
+				WallObservedAt: wallObservedAtFor(inst),
+				Captured:       obs.captured,
+				CapturedAt:     obs.at,
+				Content:        obs.content,
+			},
+			inst: inst,
 		})
 	}
 	// Prune observations for sessions that are gone — same rule the poll's
@@ -208,6 +257,14 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		if !liveKeys[key] {
 			delete(m.handoffObserved, key)
 		}
+	}
+	m.mu.Unlock()
+	inputs := make([]handoffengine.SessionInput, 0, len(drafts))
+	for _, d := range drafts {
+		if d.in.Agent == tmux.ProgramCodex && d.in.Started && d.in.Live {
+			d.in.HomeDir = d.inst.SessionCodexHomeDir()
+		}
+		inputs = append(inputs, d.in)
 	}
 	return inputs
 }

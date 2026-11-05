@@ -60,4 +60,36 @@ func TestComposerDraftPresent(t *testing.T) {
 			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
 		}
 	})
+	// #6817 review: placeholder ghost text is empty input, never a draft; a
+	// composer glyph af does not recognize stays unprovable.
+	t.Run("old codex placeholder is provably empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("› Ask Codex to do anything\n")
+		if present || !provable {
+			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
+	t.Run("Ultra placeholder is provably empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent(codexUltraComposer)
+		if present || !provable {
+			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
+	t.Run("claude placeholder is provably empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent(`❯ Try "how do I list files?"` + "\n")
+		if present || !provable {
+			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
+	t.Run("bare unrecognized glyph is unprovable", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("»\n")
+		if present || provable {
+			t.Fatalf("got (%v,%v), want (false,false)", present, provable)
+		}
+	})
+	t.Run("placeholder with a footer below is still provably empty", func(t *testing.T) {
+		present, provable := ComposerDraftPresent("» Ask Codex to do anything\n  ← for agents · ? for shortcuts\n")
+		if present || !provable {
+			t.Fatalf("got (%v,%v), want (false,true)", present, provable)
+		}
+	})
 }

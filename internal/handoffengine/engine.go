@@ -11,6 +11,7 @@ package handoffengine
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -119,11 +120,13 @@ type namespace struct {
 	failed bool
 }
 
-// Tick runs one shadow pass over the sessions the daemon fed. It exits before
-// touching state, registry, evidence, or disk unless at least one session's
-// resolved config opts into mode="shadow" — the "does nothing unless"
-// contract the lane's tests pin.
-func (e *Engine) Tick(sessions []SessionInput) error {
+// Tick runs one shadow pass over the sessions the daemon fed. It returns the
+// count of sessions whose resolved config opted into shadow — the daemon's
+// poll-observation gate keys off it (#6817 review). It exits before touching
+// state, registry, evidence, or disk unless at least one session's resolved
+// config opts into mode="shadow" — the "does nothing unless" contract the
+// lane's tests pin.
+func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	now := e.deps.Now()
 
 	// Resolve config once per repo root; keep only sessions opting into
@@ -155,14 +158,14 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 	// (the returning session re-announces rather than staying suppressed).
 	e.edges.Prune(liveKeys)
 	if len(gov) == 0 {
-		return nil
+		return 0, nil
 	}
 
 	// Rails + carried-prefix evidence: one locked read. A corrupt file fails
 	// the pass closed — the same rule the ledger holds for the live mover.
 	state, err := e.deps.LoadState()
 	if err != nil {
-		return fmt.Errorf("load handoff state: %w", err)
+		return len(gov), fmt.Errorf("load handoff state: %w", err)
 	}
 
 	// Occupancy is the governed set's own count, per agent-namespace account
@@ -203,6 +206,19 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 		return ns
 	}
 
+	// Usage evidence reads once per account home per tick: a walled session
+	// and its own drift candidates may name the same directories, and an
+	// unchanged rollout file is the only cheap second read (#6817 review).
+	readings := map[string]handoff.ReadingFacts{}
+	readUsage := func(dir string, carried map[string]int64) handoff.ReadingFacts {
+		if r, ok := readings[dir]; ok {
+			return r
+		}
+		r := e.deps.ReadUsage(dir, carried)
+		readings[dir] = r
+		return r
+	}
+
 	// Edges filter on a pending clone and commit only after the log write
 	// succeeds — a failed append must not suppress the verdict's retry on
 	// the next tick (#6817 review).
@@ -210,11 +226,22 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 
 	var rows []handoff.EventRow
 	for _, g := range gov {
-		ns := nsFor(g.in.Agent)
-		if ns.failed {
-			continue
+		// The leaf's Phase-A scope gates run here BEFORE any evidence read:
+		// a pinned session excluded by include_pinned=false, an
+		// exclude_sessions entry, a dead/archived row, an unsupported agent,
+		// or an ambient seat the config ignores never touches the account
+		// registry or a usage file (#6817 review). It still reaches Decide —
+		// on empty accounts — so its pinned-ineligible edge can fire.
+		var facts handoff.Facts
+		if outOfScope(g) {
+			facts = e.bareFacts(g, state, now)
+		} else {
+			ns := nsFor(g.in.Agent)
+			if ns.failed {
+				continue
+			}
+			facts = e.factsFor(g, ns, occupancy, state, now, readUsage)
 		}
-		facts := e.factsFor(g, ns, occupancy, state, now)
 		decision := handoff.Decide(facts)
 		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
@@ -227,17 +254,75 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 	}
 	if len(rows) > 0 {
 		if err := e.deps.WriteRows(rows); err != nil {
-			return fmt.Errorf("write shadow rows: %w", err)
+			return len(gov), fmt.Errorf("write shadow rows: %w", err)
 		}
 	}
 	e.edges = pending
-	return nil
+	return len(gov), nil
+}
+
+// outOfScope reproduces the leaf's Phase-A scope gates — the cheap checks
+// Decide runs before it would ever consult account evidence — so the engine
+// can skip the registry, usage, and drift reads those gates make moot. Keep
+// it in lockstep with handoff.Decide's scope phase: the cases and their order
+// are the same, and a divergence shows up as a session silently un-governed.
+func outOfScope(g governed) bool {
+	in, cfg := g.in, g.cfg.AccountHandoff
+	switch {
+	case !in.Started || !in.Live:
+		return true
+	case in.Agent == "":
+		return true
+	case !in.SwapCapable:
+		return true
+	case excludedTitle(cfg.ExcludeSessions, in.Title):
+		return true
+	case in.Account != "" && !in.Auto && !cfg.IncludePinned:
+		return true
+	case in.Account == "" && cfg.DefaultLogin != config.AccountHandoffDefaultLoginMove:
+		return true
+	}
+	return false
+}
+
+// excludedTitle mirrors decide.go's exclude_sessions match: exact title after
+// trimming the configured entry.
+func excludedTitle(excludes []string, title string) bool {
+	for _, entry := range excludes {
+		if strings.TrimSpace(entry) == title {
+			return true
+		}
+	}
+	return false
+}
+
+// bareFacts builds the evidence-free Facts an out-of-scope session reaches
+// Decide with — Phase A returns before it would read Accounts or a reading,
+// so skipping those fields cannot change the verdict, only the cost.
+func (e *Engine) bareFacts(g governed, state handoff.State, now time.Time) handoff.Facts {
+	in := g.in
+	s := handoff.SessionFacts{
+		Key:          in.Key,
+		Title:        in.Title,
+		Agent:        in.Agent,
+		Account:      in.Account,
+		AutoSelected: in.Auto,
+		Started:      in.Started,
+		Live:         in.Live,
+		Parked:       in.Parked,
+		SwapCapable:  in.SwapCapable,
+	}
+	rails := handoff.RailsFacts{Halted: state.Halted != nil}
+	return handoff.Facts{
+		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
+		Session: s, Rails: rails, Config: g.cfg.AccountHandoff,
+	}
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only
 // pane-content reads in this file are evaluations (wall banner, working,
 // composer draft) of the capture the poll already took.
-func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, state handoff.State, now time.Time) handoff.Facts {
+func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, state handoff.State, now time.Time, readUsage func(string, map[string]int64) handoff.ReadingFacts) handoff.Facts {
 	in, cfg := g.in, g.cfg
 	fresh := in.Captured && !in.CapturedAt.IsZero() && now.Sub(in.CapturedAt) <= Freshness
 	s := handoff.SessionFacts{
@@ -270,7 +355,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 	if in.Agent == tmux.ProgramCodex {
 		srcDir = in.HomeDir
 		if srcDir != "" {
-			s.Reading = e.deps.ReadUsage(srcDir, state.CarriedPrefixes)
+			s.Reading = readUsage(srcDir, state.CarriedPrefixes)
 		} else {
 			s.Reading = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
 		}
@@ -314,7 +399,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 				af.Drift = driftUnverifiable
 			}
 		} else if in.Agent == tmux.ProgramCodex {
-			af.Reading = e.deps.ReadUsage(dir, state.CarriedPrefixes)
+			af.Reading = readUsage(dir, state.CarriedPrefixes)
 			if srcDir == "" {
 				af.Drift = driftUnverifiable
 			} else if key, incomparable := e.deps.DriftKey(in.Agent, srcDir, dir); incomparable {

@@ -20,23 +20,77 @@ import (
 // honest either way: the glyph row plus interior content is a draft; the bare
 // glyph alone is an empty input.
 //
+// Placeholder ghost text is empty input, never a draft (#6817 review): a
+// composer's "Ask Codex to do anything" or `Try "…"` hint survives the ANSI
+// strip as plain text but is still nobody's typing. A glyph af does not
+// recognize — Ultra's bare "»" — stays unprovable rather than claiming a
+// verdict.
+//
 // The function reads the capture it is given — it never reaches for the pane.
 func ComposerDraftPresent(content string) (present, provable bool) {
 	rows := paneGridRows(xansi.Strip(content))
 	anchor := lastComposerGlyphRow(rows)
 	if anchor < 0 {
+		if ultraPlaceholderRowPresent(rows) {
+			return false, true
+		}
 		return false, false
+	}
+	// The glyph row's own text decides before the region is joined: an empty
+	// composer's ghost placeholder proves EMPTY even with a footer row the
+	// region would have folded into the payload (#6817 review). Ghost text
+	// is only ever drawn into an empty input.
+	if composerPlaceholderText(afterComposerGlyph(normalizeDelivery(rows[anchor]))) {
+		return false, true
 	}
 	region := normalizeDelivery(strings.Join(composerRegion(rows, anchor), ""))
 	// Strip exactly one leading prompt glyph — the payload itself may open
 	// with '>' (the same discipline stillChipComposer holds).
-	if r, size := utf8.DecodeRuneInString(region); r == '❯' || r == '›' || r == '❭' || r == '>' {
-		region = region[size:]
-	}
+	region = afterComposerGlyph(region)
 	if region != "" {
 		return true, true
 	}
 	return draftClosedByFrame(rows, anchor), true
+}
+
+// afterComposerGlyph strips exactly one leading prompt glyph from normalized
+// composer text — the payload itself may open with '>' (the same discipline
+// stillChipComposer holds).
+func afterComposerGlyph(s string) string {
+	if r, size := utf8.DecodeRuneInString(s); r == '❯' || r == '›' || r == '❭' || r == '>' {
+		return s[size:]
+	}
+	return s
+}
+
+// composerPlaceholderText reports whether NORMALIZED composer interior text
+// is a known placeholder hint — ghost text the agent draws in an EMPTY
+// composer, which survives the ANSI strip as ordinary letters. The input
+// arrives normalizeDelivery'd, so the patterns carry no whitespace: Codex's
+// hint is a fixed string; Claude's rotates suggestions after a fixed `Try "`
+// prefix, so that one matches on the prefix alone.
+func composerPlaceholderText(region string) bool {
+	return region == "AskCodextodoanything" || strings.HasPrefix(region, `Try"`)
+}
+
+// ultraPlaceholderRowPresent handles the composer whose glyph is not a prompt
+// anchor — Ultra's » (Codex draws it only under the Ultra tier, #5383). Its
+// ghost-placeholder row is still a definitive empty-composer sighting: the
+// hint text is never submitted, so it cannot be a transcript echo. A BARE »,
+// by contrast, is a composer shape af cannot prove — the caller's unprovable
+// default stands.
+func ultraPlaceholderRowPresent(rows []string) bool {
+	for _, row := range rows {
+		norm := normalizeDelivery(row)
+		rest, ok := strings.CutPrefix(norm, "»")
+		if !ok {
+			continue
+		}
+		if composerPlaceholderText(rest) {
+			return true
+		}
+	}
+	return false
 }
 
 // draftClosedByFrame disambiguates the shape composerRegion cut short: a
