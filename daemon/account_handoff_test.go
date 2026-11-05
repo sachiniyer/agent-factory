@@ -45,17 +45,18 @@ func TestAccountHandoffDisabledDoesNoWork(t *testing.T) {
 		t.Fatalf("disabled tick resolved configs %d times", resolved)
 	}
 
-	// Discovery — the only way a project opt-in is found — resolves the live
-	// sessions' roots; finding nothing keeps the engine inactive.
+	// Discovery — the only way a project opt-in is found — walks the live
+	// sessions' roots through the real resolver (the engine's dep is never
+	// invoked); finding no shadow config keeps the engine inactive.
 	m.accountHandoffDiscover()
-	if resolved != 1 {
-		t.Fatalf("discovery resolved %d times, want 1", resolved)
+	if resolved != 0 {
+		t.Fatalf("discovery invoked the engine's ResolveConfig %d times", resolved)
 	}
 	if m.handoffActive.Load() {
 		t.Fatalf("engine reported active with nothing governed")
 	}
 	m.accountHandoffTick()
-	if resolved != 1 {
+	if resolved != 0 {
 		t.Fatalf("post-discovery inactive tick resolved configs %d times", resolved)
 	}
 
