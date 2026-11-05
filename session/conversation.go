@@ -515,7 +515,7 @@ func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
 	}
 	program := resolveLaunchProgramForInstance(i).command
-	if _, ok := prepareExactResumeConversation(i, program); ok {
+	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return HandoffConversation{Carried: true}
 	}
 	if tmux.ProgramResumesConversation(program) {
