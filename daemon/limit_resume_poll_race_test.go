@@ -344,7 +344,7 @@ func TestPersistPollChange_ResumeDuringWriteWindowIsNotOverwritten(t *testing.T)
 		}
 	}
 
-	manager.persistPollChange(repoID, inst, before, beforeReset, false)
+	manager.persistPollChange(repoID, inst, before, beforeReset, "", false)
 
 	if got := persistedLiveness(t, repoID, "limited"); got != session.LiveRunning {
 		t.Errorf("persisted liveness = %v, want LiveRunning: the poll must not overwrite a resume that landed while it waited for the write lock (#2135)", got)
@@ -440,7 +440,7 @@ func TestPersistPollChange_HandoffSwapFailureDuringWriteWindowIsNotPersistedAsSe
 		<-backend.entered
 	}
 
-	manager.persistPollChange(repoID, inst, before, beforeReset, false)
+	manager.persistPollChange(repoID, inst, before, beforeReset, "", false)
 
 	// The handoff is still parked inside SwapAgent: the poll has just re-read the
 	// mid-OpReplacing snapshot. Prove the race window was actually reached, so the
