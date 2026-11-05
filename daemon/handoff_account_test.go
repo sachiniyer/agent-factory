@@ -77,10 +77,9 @@ func TestHandoffAccountRefusesVSCodeTabNamingReasonAndRemedy(t *testing.T) {
 	configureLimitAccountCandidate(t, m, "personal")
 	inst.Account = "work"
 	inst.ClearLimitReached()
-	_, err := inst.AddVSCodeTab("editor")
-	require.NoError(t, err)
+	inst.Tabs = append(inst.Tabs, &session.Tab{ID: "editor", Name: "editor", Kind: session.TabKindVSCode})
 
-	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	_, err := m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
 	require.ErrorContains(t, err, "VS Code tab")
 	require.ErrorContains(t, err, "identity boundary",
 		"the manual refusal must carry the same reason the automatic one states")
