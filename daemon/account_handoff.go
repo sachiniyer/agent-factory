@@ -588,6 +588,9 @@ func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 	if m.isPollPaused(repoID, target.Title, target.ID) {
 		return reportHeld
 	}
+	if !target.Started() {
+		return reportHeld // no runtime ⇒ no provable-empty composer
+	}
 	// The composer check runs on a FRESH capture immediately before the
 	// send (#6818 round-2 review): a report's C-u clears whatever the
 	// composer holds, so a non-empty OR unprovable composer holds the
