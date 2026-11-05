@@ -373,11 +373,21 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 				continue // already materialized — counted once, live
 			}
 			liveKeys[key] = true
+			// The claim's root is the worktree's resolved repo path — the
+			// identity a materialized session reports through GetRepoPath —
+			// not the possibly-symlinked launch Path (#6818 review): qualified
+			// specs must match the same root for persisted and live claims,
+			// or a symlinked create loses its ambiguity veto on restore
+			// failure. Legacy rows predate the worktree record → Path.
+			repoRoot := data[i].Worktree.RepoPath
+			if repoRoot == "" {
+				repoRoot = data[i].Path
+			}
 			inputs = append(inputs, handoffengine.SessionInput{
 				Key:       key,
 				Title:     data[i].Title,
 				RepoID:    rid,
-				RepoRoot:  data[i].Path,
+				RepoRoot:  repoRoot,
 				Persisted: true,
 			})
 		}

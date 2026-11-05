@@ -517,3 +517,49 @@ func TestQueueReportRowReplaceClearsHeldMarker(t *testing.T) {
 		t.Fatal("marker cleared while another recipient's warned backlog still stands")
 	}
 }
+
+// #6818 review: a persisted claim's root is the worktree's resolved repo
+// path — the identity a materialized session reports through GetRepoPath —
+// not the possibly-symlinked launch Path. A symlinked create must keep its
+// ambiguity veto when its restore fails; TestDaemonSaveUsesResolvedRepoPath
+// ForSymlinkedRepo pins that this shape is real on disk.
+func TestAccountHandoffInputsPersistedClaimUsesWorktreeRepoPath(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+	raw, err := json.Marshal([]session.InstanceData{{
+		ID:    "ghost-obs-id",
+		Title: "observer",
+		Path:  "/links/alias", // symlinked launch path
+		Worktree: session.GitWorktreeData{
+			RepoPath: "/a/repo", // canonical root the row was created under
+		},
+	}})
+	require.NoError(t, err)
+	require.NoError(t, config.SaveRepoInstances("repoA", raw))
+
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{},
+	}
+	m.instances[daemonInstanceKey("repoB", "observer")] = &session.Instance{Title: "observer", Path: "/b/repo"}
+
+	var ghost *handoffengine.SessionInput
+	inputs := m.accountHandoffInputs()
+	for i := range inputs {
+		if inputs[i].Persisted {
+			ghost = &inputs[i]
+		}
+	}
+	if ghost == nil {
+		t.Fatalf("persisted unloadable row missing from inputs: %+v", inputs)
+	}
+	if ghost.RepoRoot != "/a/repo" {
+		t.Fatalf("persisted claim rooted at %q — qualified specs see a different identity than materialized sessions", ghost.RepoRoot)
+	}
+	// repo/observer must now read ambiguous: the ghost claims the same
+	// basename root as the live /b/repo session — skip, never redirect.
+	if _, found, _ := handoffengine.ResolveRecipient("repo/observer", inputs); found {
+		t.Fatalf("qualified spec resolved despite the persisted same-root claim")
+	}
+}
