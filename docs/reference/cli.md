@@ -757,9 +757,11 @@ bare; comma-list leaves (network.cors_allowed_origins, network.allowed_hosts,
 limit_account_candidates, account_handoff.exclude_sessions) print comma-joined
 in the form "af config set" accepts back; other composite values
 (program_overrides, root_agents, limit_patterns, keys) print as JSON. A comma-list
-leaf whose value the comma form cannot represent without loss (an element
-containing a comma, surrounding whitespace, brackets or quotes, or a control
-character) prints JSON instead. The restore path depends on the key:
+leaf whose value the comma form cannot represent without loss — an element
+containing a comma, surrounding whitespace, or a control character, or an element
+the per-key leaf validator rejects (e.g. account_handoff.exclude_sessions titles
+containing brackets or quotes) — prints JSON instead. The restore path depends
+on the key:
 account_handoff.exclude_sessions has a whole-table setter ('af config set
 account_handoff {"exclude_sessions":["..."]}'); the other comma-list leaves
 (network.cors_allowed_origins, network.allowed_hosts, limit_account_candidates)
