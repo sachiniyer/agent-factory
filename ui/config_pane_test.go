@@ -890,6 +890,67 @@ func TestConfigPaneMultiLineValueEscCancelsWithoutWriting(t *testing.T) {
 	}
 }
 
+// TestConfigPaneControlRuneValueUntouchedSaveIsNoOp pins the sanitizer-faithful
+// seed: a value containing a control rune that flattenToOneLine does NOT fold
+// (ESC, which bubbles v0.20.0's textinput sanitizer drops via
+// unicode.IsControl, but flattenToOneLine only folds whitespace controls) must
+// still be a no-op on open + commit. A guard seeded from a flatten-only
+// approximation would leave the ESC in the seed while the field's own
+// round trip drops it, read the untouched field as edited, and rewrite the
+// value without the rune. beginEdit reads the seed back from the field, so the
+// seed is exactly what the sanitizer produced and the untouched field matches.
+func TestConfigPaneControlRuneValueUntouchedSaveIsNoOp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	path := filepath.Join(home, "config.toml")
+	// A TOML basic string holding an ESC rune via the \u001b escape. ESC is a
+	// control character that flattenToOneLine does NOT fold (it only folds
+	// whitespace controls) but the textinput sanitizer drops (unicode.IsControl),
+	// which is the asymmetry the seed must account for.
+	body := "on_archive_command = \"echo \\u001bstart\"\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	orig := []byte(body)
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("config does not load with a control-rune on_archive_command: %v", err)
+	}
+	if !strings.Contains(cfg.OnArchiveCommand, "\x1b") {
+		t.Fatalf("precondition: the loaded value lost the ESC rune: %q", cfg.OnArchiveCommand)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field on on_archive_command")
+	}
+	// The field is single-line and the sanitizer must have dropped the ESC.
+	if strings.Contains(c.input.Value(), "\x1b") {
+		t.Errorf("the field holds an ESC rune — the sanitizer should have dropped it: %q", c.input.Value())
+	}
+
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if writes != 0 {
+		t.Errorf("saving an untouched control-rune field issued %d write(s); it must issue none — the seed was not sanitizer-faithful and the untouched field read as edited", writes)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("an untouched control-rune on_archive_command was rewritten — the sanitizer-faithful seed is missing.\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+}
+
 // TestConfigPaneWindowsWithAZeroBudget pins the degenerate size. A pane sized
 // before SetSize has run, or squeezed to nothing by a tiny terminal, must not
 // panic or slice out of range — and must still keep the selection on screen when

@@ -55,6 +55,19 @@ type ConfigPane struct {
 	editing bool
 	input   textinput.Model
 
+	// editSeed is the field's value immediately after beginEdit seeds it —
+	// read back from the input so it reflects whatever the textinput sanitizer
+	// did to the seed (whitespace flattened AND other control runes dropped),
+	// not a separately-computed approximation. commitEdit's untouched-field
+	// guard compares the live field against this. dirty tracks whether the
+	// user typed anything since beginEdit: because flattening is not injective,
+	// a value-equality check alone cannot tell an untouched field from one the
+	// user cleared and retyped into the same flattened form (which is a real
+	// edit — replacing a multi-line value with that single-line text), so the
+	// guard only fires when nothing was typed.
+	editSeed string
+	dirty    bool
+
 	// scrollTop is the first row-line rendered, so a list taller than the pane
 	// keeps the selection on screen. It persists between renders: recomputing it
 	// from scratch each frame would snap the view around while the user reads.
@@ -521,6 +534,15 @@ func (c *ConfigPane) beginEdit() {
 	// stable under the field's own round trip, so open + commit is a true
 	// no-op. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
 	c.input.SetValue(flattenToOneLine(entry.Value))
+	// Capture the seed as the field actually holds it AFTER the sanitizer
+	// runs. The sanitizer does more than flattenToOneLine: it also drops
+	// every other unicode.IsControl rune (e.g. an ESC decoded from a TOML
+	// \^[ escape), and a value-equality guard seeded from a
+	// separately-computed approximation would miss that and rewrite an
+	// untouched setting that lost a control rune on the field's round trip.
+	// Reading the field back is the exact, sanitizer-faithful seed.
+	c.editSeed = c.input.Value()
+	c.dirty = false
 	c.input.CursorEnd()
 	c.input.Focus()
 }
@@ -545,6 +567,7 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 		var cmd tea.Cmd
 		c.input, cmd = c.input.Update(msg)
 		_ = cmd
+		c.dirty = true
 		return true
 	}
 }
@@ -573,16 +596,26 @@ func (c *ConfigPane) commitEdit() {
 	// notice, telling the user they changed something when they did not.
 	//
 	// The GUARANTEE against truncation is the absent CharLimit above, not this:
-	// a truncating field would make value != entry.Value, which reads as an edit
+	// a truncating field would make value != editSeed, which reads as an edit
 	// and would write straight through this check.
 	//
-	// The comparison is against the FLATTENED entry.Value, not the raw one,
-	// because beginEdit seeds the field with flattenToOneLine(entry.Value) and
-	// the field's sanitizer flattens newlines/tabs to spaces — so the field
-	// holds the flattened form. Comparing against the raw multi-line
-	// entry.Value would always read as an edit for a multi-line value and
-	// rewrite it destructively on an untouched enter+enter. See beginEdit.
-	if value == flattenToOneLine(entry.Value) {
+	// Two signals, both required:
+	//   - value == c.editSeed: the field holds exactly what beginEdit seeded
+	//     it with, read back AFTER the textinput sanitizer ran (so control
+	//     runes the sanitizer drops — not just the whitespace flattenToOneLine
+	//     folds — are already gone from both sides). Comparing against the raw
+	//     entry.Value, or against a flatten-only approximation, would always
+	//     read an untouched value containing such a rune as an edit and
+	//     rewrite it without the rune.
+	//   - !c.dirty: the user typed nothing since beginEdit. flattenToOneLine
+	//     is not injective — a\nb and "a b" both flatten to "a b" — so a user
+	//     who clears the field and retypes "a b" to replace a multi-line value
+	//     with that single-line text would be silently blocked by a
+	//     value-equality guard alone. dirty is set on any rune keypress in
+	//     handleEditKey, so a genuine edit (even one that lands back on the
+	//     flattened seed) writes through.
+	// See beginEdit and TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
+	if !c.dirty && value == c.editSeed {
 		c.cancelEdit()
 		return
 	}
