@@ -58,6 +58,50 @@ func TestRedactInstanceDataRedactsHandoffConversationIDs(t *testing.T) {
 	}
 }
 
+// The ledger's Conversation.CarryFailure (#6768) inherits the pending record's
+// CarryFallback prose, which can name a private account label — for example
+// "the previous account \"acme-legacy\" is no longer registered for claude".
+// The label lives inside af-authored text, and once that account is gone from
+// the registry the account scrub cannot find it, so the field must take the
+// same trade the pending record already does: presence survives, text does
+// not (#6785 review).
+func TestRedactInstanceDataRedactsHandoffConversationCarryFailure(t *testing.T) {
+	d := session.InstanceData{
+		Tabs: []session.TabData{{
+			ID: "tab-1",
+			Handoffs: []session.AgentHandoff{
+				{To: "claude", ToAccount: "acme-legacy",
+					Conversation: session.HandoffConversation{Carried: false,
+						CarryFailure: `the previous account "acme-legacy" is no longer registered for claude`}},
+				{To: "claude", Conversation: session.HandoffConversation{Carried: true}},
+			},
+		}},
+		PendingTabs: []session.TabData{{
+			ID: "pending-1",
+			Handoffs: []session.AgentHandoff{
+				{To: "codex", Conversation: session.HandoffConversation{Carried: false,
+					CarryFailure: "the carried conversation could not be copied"}},
+			},
+		}},
+	}
+
+	redactOneInstanceData(&d)
+
+	for i, h := range d.Tabs[0].Handoffs {
+		if h.Conversation.CarryFailure != redactedMarker && h.Conversation.CarryFailure != "" {
+			t.Fatalf("tabs[0].handoffs[%d].conversation.carry_failure leaked: %q", i, h.Conversation.CarryFailure)
+		}
+	}
+	if got := d.PendingTabs[0].Handoffs[0].Conversation.CarryFailure; got != redactedMarker {
+		t.Fatalf("pending_tabs[0].handoffs[0].conversation.carry_failure was not redacted: %q", got)
+	}
+	// The carried verdict survives — that is the triage fact the field exists
+	// to keep.
+	if !d.Tabs[0].Handoffs[1].Conversation.Carried {
+		t.Fatalf("the carried verdict was destroyed rather than kept: %+v", d.Tabs[0].Handoffs[1].Conversation)
+	}
+}
+
 // The generic fallback runs when instances.json does NOT decode as
 // []InstanceData, and it is key-driven: a handoff id lives under "from", which
 // matched nothing, so the path that is supposed to redact MORE redacted less.
