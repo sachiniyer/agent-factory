@@ -134,6 +134,15 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // kernel pipe without reopening production. The queue is limit-protected, so
 // these already-emitted events may cross its ordinary cap without eviction.
 //
+// The drain emits via enqueueEvent directly rather than deliverLine, so it
+// updates the reader-liveness signals (readerBusy/readerProgress) itself:
+// awaitWatchReaders consults readerWorking to decide whether to keep waiting
+// or close the stdout read end. Without these bumps a slow drain is
+// misclassified as idle and the read end is closed mid-drain, silently
+// discarding events still staged in the kernel pipe — violating the bound's
+// own invariant that it never discards events the reader has yet to deliver
+// (#4321 review).
+//
 // The destination is chosen at drain time behind one unthrottled load attempt.
 // A queue that healed during teardown takes the enqueue path and keeps the
 // events durable. One whose state is still unreadable must refuse every
@@ -143,10 +152,10 @@ func (w *taskWatcher) targetLimitRequiresRetention() bool {
 // without the failure summary that would otherwise print that tail (#4226
 // review).
 func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBuffer) {
-	emit := func(line string) { w.enqueueEvent(line, tail, true) }
+	deliver := func(line string) { w.enqueueEvent(line, tail, true) }
 	if w.queue != nil && w.queue.loadFailedFresh() {
 		lost := 0
-		emit = func(line string) {
+		deliver = func(line string) {
 			tail.add(line)
 			lost++
 			w.recordEventDrop()
@@ -156,6 +165,14 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 				log.ErrorLog.Printf("watch task %s: event queue still unreadable at stop; %d complete event(s) from the stopped command could not be retained and were counted as dropped%s", w.taskID, lost, tail.logSuffix())
 			}
 		}()
+	}
+	emit := func(line string) {
+		w.readerBusy.Add(1)
+		defer func() {
+			w.readerBusy.Add(-1)
+			w.readerProgress.Add(1)
+		}()
+		deliver(line)
 	}
 	for {
 		chunk, err := br.ReadSlice('\n')
@@ -192,6 +209,16 @@ func (w *taskWatcher) persistRemainingLimitEvents(br *bufio.Reader, tail *tailBu
 			}
 			return
 		default:
+			// A non-EOF read error here means the read end was closed under the
+			// drain (awaitWatchReaders) or the pipe failed. The reader-liveness
+			// wrapping above keeps awaitWatchReaders from closing it mid-drain,
+			// but defense in depth: never lose the remainder silently. Log it
+			// and keep any partial chunk in the run tail so the loss is visible
+			// rather than unaudited (#4321 review).
+			if len(chunk) > 0 {
+				tail.add(string(chunk))
+			}
+			log.WarningLog.Printf("watch task %s: stop drain interrupted by read error; events still staged in the pipe may have been lost: %v", w.taskID, err)
 			return
 		}
 	}
