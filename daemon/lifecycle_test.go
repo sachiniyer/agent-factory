@@ -275,6 +275,7 @@ var controlMethodPolicies = map[string]probationPolicy{
 	"SendPrompt":           blockedDuringProbation,
 	"SetAttention":         blockedDuringProbation,
 	"SetConfigValue":       blockedDuringProbation,
+	"SetConversation":      blockedDuringProbation,
 	"UnsetConfigValue":     blockedDuringProbation,
 	"SpawnConfigAgent":     blockedDuringProbation,
 	"RebindProject":        blockedDuringProbation,

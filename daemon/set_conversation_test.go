@@ -124,6 +124,7 @@ func TestSetConversationRefusesNonCodex(t *testing.T) {
 	manager.mu.Lock()
 	manager.instances[daemonInstanceKey(repoID, claude.Title)] = claude
 	manager.mu.Unlock()
+	require.NoError(t, appendInstanceData(repoID, claude.ToInstanceData()))
 
 	err = manager.setConversation(setConversationReq(claude, repoID, setConversationDaemonID), nil)
 	require.Error(t, err)
