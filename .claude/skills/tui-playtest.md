@@ -207,6 +207,15 @@ cat > "$AGENT_FACTORY_HOME/config.json" <<EOF
 EOF
 ```
 
+**Mark the sandbox as throwaway** (#6844) before first launch: the daemon
+serving this home then enforces the deadline itself and reaps ownerless
+siblings on the next marked start. `AF_SANDBOX_OWNER_PID=$$` optionally adds
+owner liveness; `AF_SANDBOX_MAX_LIFETIME=<seconds>` overrides six hours:
+
+```bash
+bash "$WORK/src/scripts/container/sandbox-lifetime.sh" mark "$AGENT_FACTORY_HOME" "$WORK" playtest-host
+```
+
 **Verify isolation before launching anything**: `"$AF" debug` must print
 paths under `$WORK` only. If it prints anything under the real home, STOP
 and fix the environment first.

@@ -1,0 +1,440 @@
+package daemon
+
+import (
+	"errors"
+	"net"
+	"os"
+	"path/filepath"
+	"strconv"
+	"syscall"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
+)
+
+// markedHome writes a valid marker into a fresh temp home.
+func markedHome(t *testing.T, mutate func(*throwawaysandbox.Marker)) string {
+	t.Helper()
+	home := t.TempDir()
+	m := &throwawaysandbox.Marker{
+		Version:            1,
+		Kind:               "playtest",
+		CreatedUnix:        time.Now().Unix(),
+		MaxLifetimeSeconds: 21600,
+	}
+	if mutate != nil {
+		mutate(m)
+	}
+	if err := throwawaysandbox.WriteMarker(home, m); err != nil {
+		t.Fatal(err)
+	}
+	return home
+}
+
+func TestLoadThrowawayMarker(t *testing.T) {
+	t.Run("unmarked home", func(t *testing.T) {
+		if m, marked := loadThrowawayMarker(t.TempDir()); marked || m != nil {
+			t.Fatal("unmarked home loaded as a sandbox")
+		}
+	})
+	t.Run("marked home", func(t *testing.T) {
+		home := markedHome(t, nil)
+		m, marked := loadThrowawayMarker(home)
+		if !marked || m == nil || m.Kind != "playtest" {
+			t.Fatalf("marked=%v marker=%+v", marked, m)
+		}
+	})
+	t.Run("corrupt marker is unmarked", func(t *testing.T) {
+		home := t.TempDir()
+		if err := os.WriteFile(throwawaysandbox.MarkerPath(home), []byte("{"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if m, marked := loadThrowawayMarker(home); marked || m != nil {
+			t.Fatal("corrupt marker must never authorize enforcement")
+		}
+	})
+	t.Run("default home marker refused", func(t *testing.T) {
+		home := markedHome(t, nil)
+		old := throwawayDefaultHomeFn
+		throwawayDefaultHomeFn = func() (string, error) { return home, nil }
+		defer func() { throwawayDefaultHomeFn = old }()
+		if _, marked := loadThrowawayMarker(home); marked {
+			t.Fatal("the real install's home accepted a throwaway marker")
+		}
+	})
+}
+
+// ownerDeadCase drives throwawayOwnerDead with injected scope and lookup.
+func ownerDeadCase(t *testing.T, m *throwawaysandbox.Marker, lookup func(int) (proctree.Process, error), boot, ns string) bool {
+	t.Helper()
+	oldLookup, oldScope := throwawayLookupFn, throwawayScopeIDsFn
+	throwawayLookupFn = lookup
+	throwawayScopeIDsFn = func() (string, string) { return boot, ns }
+	defer func() { throwawayLookupFn, throwawayScopeIDsFn = oldLookup, oldScope }()
+	return throwawayOwnerDead(m)
+}
+
+func TestThrowawayOwnerDead(t *testing.T) {
+	owner := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60,
+		OwnerPID: 42, OwnerStartID: 7, OwnerBootID: "boot-a", OwnerNsID: "ns-a",
+	}
+	alive := func(int) (proctree.Process, error) { return proctree.Process{PID: 42, StartID: 7}, nil }
+	cases := []struct {
+		name   string
+		marker *throwawaysandbox.Marker
+		lookup func(int) (proctree.Process, error)
+		boot   string
+		ns     string
+		dead   bool
+	}{
+		{"no owner declared", &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60}, alive, "boot-a", "ns-a", false},
+		{"owner exited", owner, func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }, "boot-a", "ns-a", true},
+		{"owner missing", owner, func(int) (proctree.Process, error) { return proctree.Process{}, syscall.ESRCH }, "boot-a", "ns-a", true},
+		{"lookup failure is not death", owner, func(int) (proctree.Process, error) { return proctree.Process{}, errors.New("denied") }, "boot-a", "ns-a", false},
+		{"pid recycled", owner, func(int) (proctree.Process, error) { return proctree.Process{PID: 42, StartID: 99}, nil }, "boot-a", "ns-a", true},
+		{"same instance alive", owner, alive, "boot-a", "ns-a", false},
+		{"different boot is death", owner, alive, "boot-b", "ns-a", true},
+		{"pidns fallback is not a boot proof", func() *throwawaysandbox.Marker {
+			m := *owner
+			m.OwnerBootID = "pidns:1:2"
+			return &m
+		}(), alive, "pidns:9:9", "ns-a", false},
+		{"different namespace is unverifiable", owner, func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }, "boot-a", "ns-b", false},
+		{"pid-only owner, alive", func() *throwawaysandbox.Marker {
+			m := *owner
+			m.OwnerStartID, m.OwnerBootID, m.OwnerNsID = 0, "", ""
+			return &m
+		}(), alive, "", "", false},
+		{"pid-only owner, exited", func() *throwawaysandbox.Marker {
+			m := *owner
+			m.OwnerStartID, m.OwnerBootID, m.OwnerNsID = 0, "", ""
+			return &m
+		}(), func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }, "", "", true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := ownerDeadCase(t, tc.marker, tc.lookup, tc.boot, tc.ns); got != tc.dead {
+				t.Fatalf("ownerDead=%v, want %v", got, tc.dead)
+			}
+		})
+	}
+}
+
+// sweepFixture builds a registry and a set of marked homes, then returns the
+// teardown invocations the sweep produced.
+func sweepFixture(t *testing.T, selfHome string, homes map[string]*throwawaysandbox.Marker) (reaped []string) {
+	t.Helper()
+	regDir := t.TempDir()
+	oldReg, oldNow, oldTeardown := throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn
+	oldLookup, oldScope := throwawayLookupFn, throwawayScopeIDsFn
+	throwawayRegistryDirFn = func() string { return regDir }
+	throwawayNowFn = func() time.Time { return time.Unix(100000, 0) }
+	throwawayTeardownFn = func(home string, m *throwawaysandbox.Marker) {
+		reaped = append(reaped, home)
+	}
+	// Any declared owner reads as gone — deterministic orphaning without
+	// guessing at a pid that cannot exist on the runner.
+	throwawayLookupFn = func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	defer func() {
+		throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn = oldReg, oldNow, oldTeardown
+		throwawayLookupFn, throwawayScopeIDsFn = oldLookup, oldScope
+	}()
+	for home, m := range homes {
+		if m != nil {
+			if err := throwawaysandbox.WriteMarker(home, m); err != nil {
+				t.Fatal(err)
+			}
+		}
+		canon, err := canonicalDir(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := throwawaysandbox.WriteRegistryEntry(regDir, canon); err != nil {
+			t.Fatal(err)
+		}
+	}
+	sweepThrowawaySandboxes(selfHome)
+	return reaped
+}
+
+func TestSweepRequiresOwnMarker(t *testing.T) {
+	expired := t.TempDir()
+	reaped := sweepFixture(t, t.TempDir(), map[string]*throwawaysandbox.Marker{
+		expired: {Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60},
+	})
+	if len(reaped) != 0 {
+		t.Fatalf("an unmarked daemon reaped sandboxes: %v", reaped)
+	}
+}
+
+func TestSweepReapsExpiredAndOrphaned(t *testing.T) {
+	self := markedHome(t, func(m *throwawaysandbox.Marker) { m.CreatedUnix = 99999 })
+	expired := t.TempDir()
+	young := t.TempDir()
+	orphaned := t.TempDir()
+	reaped := sweepFixture(t, self, map[string]*throwawaysandbox.Marker{
+		self:     {Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60}, // own home: never self-reaped by the sweep
+		expired:  {Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60},
+		young:    {Version: 1, CreatedUnix: 99900, MaxLifetimeSeconds: 21600},
+		orphaned: {Version: 1, CreatedUnix: 99900, MaxLifetimeSeconds: 21600, OwnerPID: 4242, OwnerStartID: 1},
+	})
+	if len(reaped) != 2 {
+		t.Fatalf("reaped %v, want the expired and orphaned homes only", reaped)
+	}
+	for _, h := range reaped {
+		if h == self || h == young {
+			t.Fatalf("sweep reaped %s, which it must never touch", h)
+		}
+	}
+}
+
+func TestSweepDropsMissingMarkerEntries(t *testing.T) {
+	self := markedHome(t, nil)
+	regDir := t.TempDir()
+	oldReg := throwawayRegistryDirFn
+	throwawayRegistryDirFn = func() string { return regDir }
+	defer func() { throwawayRegistryDirFn = oldReg }()
+	// A registered home with no marker: the contract is void, and the stale
+	// registration must not keep resurfacing.
+	stale := t.TempDir()
+	canon, err := canonicalDir(stale)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := throwawaysandbox.WriteRegistryEntry(regDir, canon); err != nil {
+		t.Fatal(err)
+	}
+	sweepThrowawaySandboxes(self)
+	homes, _, err := throwawaysandbox.ReadRegistryHomes(regDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, h := range homes {
+		if h == canon {
+			t.Fatal("a marker-free home stayed registered")
+		}
+	}
+}
+
+func TestProcessBoundToThrowawayHome(t *testing.T) {
+	home := t.TempDir()
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxDir := filepath.Join(home, "tmux")
+	canonTmux, err := canonicalDir(tmuxDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	selfUID := os.Getuid()
+	envCases := []struct {
+		name   string
+		env    map[string]string
+		bound  bool
+		proven bool
+	}{
+		{"AGENT_FACTORY_HOME match", map[string]string{"AGENT_FACTORY_HOME": home}, true, true},
+		{"AF_HOME match", map[string]string{"AF_HOME": home}, true, true},
+		{"AF_HOME with symlink spelling", map[string]string{"AF_HOME": home + "/."}, true, true},
+		{"different home", map[string]string{"AGENT_FACTORY_HOME": t.TempDir(), "AF_HOME": t.TempDir()}, false, true},
+		{"no relevant env", map[string]string{"PATH": "/bin"}, false, true},
+		{"tmux_tmpdir match", map[string]string{"TMUX_TMPDIR": tmuxDir}, true, true},
+		{"TMUX socket under tmpdir", map[string]string{"TMUX": filepath.Join(tmuxDir, "tmux-x", "default") + ",1,0"}, true, true},
+		{"TMUX socket elsewhere", map[string]string{"TMUX": "/elsewhere/default,1,0"}, false, true},
+	}
+	for _, tc := range envCases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldUID, oldEnv := throwawayUIDFn, throwawayLookupEnvFn
+			throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+			throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+				v, ok := tc.env[key]
+				if !ok {
+					return "", proctree.EnvAbsent
+				}
+				return v, proctree.EnvFound
+			}
+			defer func() { throwawayUIDFn, throwawayLookupEnvFn = oldUID, oldEnv }()
+			bound, proven := processBoundToThrowawayHome(1234, canonHome, canonTmux)
+			if bound != tc.bound || proven != tc.proven {
+				t.Fatalf("bound=%v proven=%v, want %v/%v", bound, proven, tc.bound, tc.proven)
+			}
+		})
+	}
+	t.Run("unreadable env is unproven", func(t *testing.T) {
+		oldUID, oldEnv := throwawayUIDFn, throwawayLookupEnvFn
+		throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+		throwawayLookupEnvFn = func(int, string) (string, proctree.EnvStatus) { return "", proctree.EnvUnknown }
+		defer func() { throwawayUIDFn, throwawayLookupEnvFn = oldUID, oldEnv }()
+		if bound, proven := processBoundToThrowawayHome(1234, canonHome, canonTmux); bound || proven {
+			t.Fatal("an unreadable environment must not be killable")
+		}
+	})
+	t.Run("foreign uid is unproven", func(t *testing.T) {
+		oldUID := throwawayUIDFn
+		throwawayUIDFn = func(int) (int, bool) { return selfUID + 1, true }
+		defer func() { throwawayUIDFn = oldUID }()
+		if bound, proven := processBoundToThrowawayHome(1234, canonHome, canonTmux); bound || proven {
+			t.Fatal("another user's process must never be bound")
+		}
+	})
+	t.Run("missing tmux marker ignores tmux env", func(t *testing.T) {
+		oldUID, oldEnv := throwawayUIDFn, throwawayLookupEnvFn
+		throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+		throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+			if key == "TMUX_TMPDIR" {
+				return tmuxDir, proctree.EnvFound
+			}
+			return "", proctree.EnvAbsent
+		}
+		defer func() { throwawayUIDFn, throwawayLookupEnvFn = oldUID, oldEnv }()
+		if bound, _ := processBoundToThrowawayHome(1234, canonHome, ""); bound {
+			t.Fatal("tmux binding applied without a recorded tmux dir")
+		}
+	})
+}
+
+func TestThrowawayBoundProcessesSelectsTrees(t *testing.T) {
+	home := t.TempDir()
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: ""}
+	// Snapshot: bound driver (10) with children 11,12; unbound other (20)
+	// with child 21; self pid must be excluded even if bound.
+	self := os.Getpid()
+	snap := map[int]proctree.Process{
+		10:   {PID: 10, PPID: 1},
+		11:   {PID: 11, PPID: 10},
+		12:   {PID: 12, PPID: 11},
+		20:   {PID: 20, PPID: 1},
+		21:   {PID: 21, PPID: 20},
+		self: {PID: self, PPID: 10},
+	}
+	oldSnap, oldUID, oldEnv := throwawaySnapshotFn, throwawayUIDFn, throwawayLookupEnvFn
+	throwawaySnapshotFn = func() (map[int]proctree.Process, error) { return snap, nil }
+	throwawayUIDFn = func(int) (int, bool) { return os.Getuid(), true }
+	throwawayLookupEnvFn = func(pid int, key string) (string, proctree.EnvStatus) {
+		if key != "AGENT_FACTORY_HOME" {
+			return "", proctree.EnvAbsent
+		}
+		if pid == 10 || pid == self {
+			return home, proctree.EnvFound
+		}
+		return "", proctree.EnvAbsent
+	}
+	defer func() { throwawaySnapshotFn, throwawayUIDFn, throwawayLookupEnvFn = oldSnap, oldUID, oldEnv }()
+	bound, _ := throwawayBoundProcesses(canonHome, m)
+	got := map[int]bool{}
+	for _, p := range bound {
+		got[p.PID] = true
+	}
+	for pid, want := range map[int]bool{10: true, 11: true, 12: true, 20: false, 21: false, self: false} {
+		if got[pid] != want {
+			t.Fatalf("pid %d bound=%v, want %v (all: %v)", pid, got[pid], want, got)
+		}
+	}
+}
+
+// unixSock creates a real socket file under dir so WalkDir's ModeSocket
+// check sees it.
+func unixSock(t *testing.T, dir string) string {
+	t.Helper()
+	if err := os.MkdirAll(dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	path := filepath.Join(dir, "default")
+	l, err := net.Listen("unix", path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { l.Close() })
+	return path
+}
+
+func TestKillThrowawayTmuxSocketsGuardsSharedRoots(t *testing.T) {
+	var killed []string
+	oldKill := throwawayKillSocketFn
+	throwawayKillSocketFn = func(sock string) error {
+		killed = append(killed, sock)
+		return nil
+	}
+	defer func() { throwawayKillSocketFn = oldKill }()
+	marker := func(root, tmuxDir string) *throwawaysandbox.Marker {
+		return &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: tmuxDir, SandboxRoot: root}
+	}
+	// A private dir under the sandbox root: the socket is killed.
+	sandbox := t.TempDir()
+	good := unixSock(t, filepath.Join(sandbox, "tmux", "tmux-"+strconv.Itoa(os.Getuid())))
+	killThrowawayTmuxSockets(marker(sandbox, filepath.Join(sandbox, "tmux")))
+	if len(killed) != 1 || killed[0] != good {
+		t.Fatalf("killed %v, want only %s", killed, good)
+	}
+	killed = nil
+	// Every out-of-root or shared-root shape is refused.
+	shared := unixSock(t, filepath.Join(os.TempDir(), "af-sbxtest-"+strconv.Itoa(os.Getpid())))
+	killThrowawayTmuxSockets(marker(os.TempDir(), filepath.Dir(shared)))
+	if len(killed) != 0 {
+		t.Fatalf("a shared-root marker killed sockets: %v", killed)
+	}
+	outside := unixSock(t, t.TempDir())
+	killThrowawayTmuxSockets(marker(sandbox, filepath.Dir(outside)))
+	if len(killed) != 0 {
+		t.Fatalf("an out-of-root marker killed sockets: %v", killed)
+	}
+	killThrowawayTmuxSockets(marker(sandbox, sandbox))
+	if len(killed) != 0 {
+		t.Fatal("tmux dir equal to the sandbox root was not refused")
+	}
+}
+
+func TestThrowawayWatchdogDeadlineFires(t *testing.T) {
+	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: time.Now().Unix() - 10, MaxLifetimeSeconds: 5}
+	fire := make(chan struct{})
+	stop := armThrowawayWatchdog(m, fire)
+	defer stop()
+	select {
+	case <-fire:
+	case <-time.After(5 * time.Second):
+		t.Fatal("an expired marker did not fire the watchdog")
+	}
+}
+
+func TestThrowawayWatchdogOwnerDeathFires(t *testing.T) {
+	oldLookup, oldScope, oldInterval := throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval
+	throwawayLookupFn = func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }
+	throwawayScopeIDsFn = func() (string, string) { return "b", "n" }
+	throwawayCheckInterval = 10 * time.Millisecond
+	defer func() {
+		throwawayLookupFn, throwawayScopeIDsFn, throwawayCheckInterval = oldLookup, oldScope, oldInterval
+	}()
+	m := &throwawaysandbox.Marker{
+		Version: 1, CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 3600,
+		OwnerPID: 42, OwnerStartID: 7,
+	}
+	fire := make(chan struct{})
+	stop := armThrowawayWatchdog(m, fire)
+	defer stop()
+	select {
+	case <-fire:
+	case <-time.After(5 * time.Second):
+		t.Fatal("a dead declared owner did not fire the watchdog")
+	}
+}
+
+func TestThrowawayWatchdogStopsCleanly(t *testing.T) {
+	m := &throwawaysandbox.Marker{Version: 1, CreatedUnix: time.Now().Unix(), MaxLifetimeSeconds: 3600}
+	fire := make(chan struct{})
+	stop := armThrowawayWatchdog(m, fire)
+	stop()
+	select {
+	case <-fire:
+		t.Fatal("a stopped watchdog fired")
+	case <-time.After(50 * time.Millisecond):
+	}
+}

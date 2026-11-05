@@ -1,0 +1,121 @@
+#!/usr/bin/env bash
+# Lifetime contract for throwaway sandboxes (#6844). Source this file for its
+# functions, or run it directly:
+#
+#   bash scripts/container/sandbox-lifetime.sh mark <af-home> <sandbox-root> <kind>
+#
+# The marker file — throwaway-sandbox.json at the top of the AF home — is the
+# ONLY identity a throwaway sandbox has: a home without a valid marker is
+# never touched. A daemon serving a marked home enforces the recorded
+# deadline (and the declared owner's liveness) itself, and registers the home
+# so the next marked daemon start reaps sandboxes that are expired or whose
+# creator is gone. Keep this schema in sync with internal/throwawaysandbox.
+#
+# Environment:
+#   AF_SANDBOX_MAX_LIFETIME   seconds; preferred. Falls back to
+#                             AF_PLAYTEST_MAX_LIFETIME, then the shared
+#                             six-hour default.
+#   AF_SANDBOX_OWNER_PID      optional: the creating process's pid. When set,
+#                             the marker records as much of its process
+#                             identity as the platform offers (start stamp,
+#                             boot id, pid namespace) so a later start can
+#                             prove the owner is gone. An unreadable identity
+#                             degrades to a pid-only record — never a
+#                             fabricated one.
+
+throwaway_sandbox_lifetime() {
+    local value="${1:-21600}"
+    if [[ ! "$value" =~ ^[1-9][0-9]{0,9}$ ]] || ((value > 2147483647)); then
+        echo "sandbox-lifetime: sandbox lifetime must be 1..2147483647 seconds" >&2
+        return 2
+    fi
+    printf '%s\n' "$value"
+}
+
+throwaway_sandbox_json_quote() {
+    local value="$1"
+    value="${value//\\/\\\\}"
+    value="${value//\"/\\\"}"
+    value="${value//$'\b'/\\b}"
+    value="${value//$'\f'/\\f}"
+    value="${value//$'\n'/\\n}"
+    value="${value//$'\r'/\\r}"
+    value="${value//$'\t'/\\t}"
+    printf '"%s"' "$value"
+}
+
+# Emit the marker's owner_* JSON fragments for $1 (a pid), best-effort. Each
+# fragment ends with a comma because it is only emitted between fields.
+throwaway_sandbox_owner_identity() {
+    local pid="$1"
+    [[ "$pid" =~ ^[1-9][0-9]*$ ]] || return 0
+    printf '  "owner_pid": %s,\n' "$pid"
+    if [[ -r "/proc/$pid/stat" ]]; then
+        # comm sits in parens and may itself contain ')'; everything after
+        # the LAST ') ' is numeric, and starttime is field 20 of that tail.
+        local stat_tail start_id
+        stat_tail="$(sed 's/.*) //' "/proc/$pid/stat" 2>/dev/null)"
+        start_id="$(awk '{print $20}' <<<"$stat_tail" 2>/dev/null)"
+        [[ "$start_id" =~ ^[0-9]+$ ]] && printf '  "owner_start_id": %s,\n' "$start_id"
+    fi
+    if [[ -r /proc/sys/kernel/random/boot_id ]]; then
+        local boot_id
+        boot_id="$(tr -d '[:space:]' </proc/sys/kernel/random/boot_id)"
+        [[ -n "$boot_id" ]] &&
+            printf '  "owner_boot_id": %s,\n' "$(throwaway_sandbox_json_quote "$boot_id")"
+    fi
+    if [[ -e "/proc/$pid/ns/pid" ]]; then
+        local dev ino
+        read -r dev ino < <(stat -Lc '%D %i' "/proc/$pid/ns/pid" 2>/dev/null)
+        [[ "$dev" =~ ^[0-9a-fA-F]+$ && "$ino" =~ ^[0-9]+$ ]] &&
+            printf '  "owner_ns_id": "pidns:%s:%x",\n' "$dev" "$ino"
+    fi
+}
+
+# throwaway_sandbox_mark HOME ROOT KIND — writes HOME/throwaway-sandbox.json
+# atomically. Returns non-zero without leaving a partial marker.
+throwaway_sandbox_mark() {
+    local home="$1" root="$2" kind="$3"
+    local lifetime
+    lifetime="$(throwaway_sandbox_lifetime \
+        "${AF_SANDBOX_MAX_LIFETIME:-${AF_PLAYTEST_MAX_LIFETIME:-}}")" || return
+    mkdir -p "$home" || return
+    local tmp="$home/.throwaway-sandbox.json.tmp"
+    if ! {
+        printf '{\n'
+        printf '  "version": 1,\n'
+        printf '  "kind": %s,\n' "$(throwaway_sandbox_json_quote "$kind")"
+        printf '  "created_unix": %s,\n' "$(date +%s)"
+        printf '  "max_lifetime_seconds": %s,\n' "$lifetime"
+        if [[ -n "${AF_SANDBOX_OWNER_PID:-}" ]]; then
+            throwaway_sandbox_owner_identity "$AF_SANDBOX_OWNER_PID"
+        fi
+        if [[ -n "${TMUX_TMPDIR:-}" ]]; then
+            printf '  "tmux_tmpdir": %s,\n' "$(throwaway_sandbox_json_quote "$TMUX_TMPDIR")"
+        fi
+        printf '  "sandbox_root": %s\n' "$(throwaway_sandbox_json_quote "$root")"
+        printf '}\n'
+    } >"$tmp"; then
+        rm -f "$tmp"
+        return 1
+    fi
+    mv -f "$tmp" "$home/throwaway-sandbox.json"
+}
+
+if [[ "${BASH_SOURCE[0]}" == "$0" ]]; then
+    set -euo pipefail
+    case "${1:-}" in
+    mark)
+        shift
+        if [[ $# -ne 3 ]]; then
+            echo "usage: $0 mark <af-home> <sandbox-root> <kind>" >&2
+            exit 2
+        fi
+        throwaway_sandbox_mark "$@"
+        ;;
+    *)
+        echo "usage: $0 mark <af-home> <sandbox-root> <kind>" >&2
+        exit 2
+        ;;
+    esac
+fi

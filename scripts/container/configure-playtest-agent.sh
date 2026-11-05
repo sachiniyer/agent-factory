@@ -81,3 +81,12 @@ codex)
     exit 2
     ;;
 esac
+
+# Declare the sandbox's lifetime contract (#6844) at the same point the AF
+# home is configured: the daemon serving this home enforces the deadline and
+# lists it in the sweep registry so a later marked start can reap the sandbox
+# once its owner is gone. Best-effort: a home that cannot be marked is simply
+# unenforced, which is the safe direction.
+if ! bash "$SCRIPT_DIR/sandbox-lifetime.sh" mark "$AF_HOME" "$SANDBOX" "playtest-$AGENT"; then
+    echo "play-test: could not mark the throwaway sandbox AF home; lifetime enforcement is off" >&2
+fi
