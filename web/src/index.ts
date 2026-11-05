@@ -1178,7 +1178,11 @@ function newSession(): void {
             }
             m.setBusy(false);
             m.setError(errorText(e));
-            if (!modal && token === tok) {
+            // If another overlay has taken the slot or the credential moved on, the
+            // outcome notice is the path — openModal would reap a live assistant/login
+            // overlay (the create modal closes itself before awaiting the RPC, so the
+            // slot may be reoccupied by the time a definitive refusal arrives).
+            if (!modal && !configAssistant && !accountLogin && token === tok) {
               openModal(m, true, invoker);
               m.el.querySelector<HTMLElement>(".af-modal-card input, .af-modal-card select, .af-modal-card textarea")
                 ?.focus({ preventScroll: true });
@@ -1298,7 +1302,12 @@ function openConfirm(
         }
         m.setBusy(false);
         m.setError(errorText(e));
-        if (!modal) mountConfirmation(m);
+        // If another overlay has taken the slot, the outcome notice is the path —
+        // mountConfirmation → openModal → mountOverlay would reap a live
+        // assistant/login overlay (the confirm modal closes itself before awaiting
+        // the RPC, so the slot may be reoccupied by the time a definitive refusal
+        // arrives).
+        if (!modal && !configAssistant && !accountLogin) mountConfirmation(m);
         else surfaceMutationError(e);
         return;
       }
