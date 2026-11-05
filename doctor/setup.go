@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -194,11 +195,72 @@ func checkTmux(report *Report) {
 }
 
 func checkAgentPrograms(cfg *config.Config, report *Report) {
-	if cfg.DefaultProgram == "" {
+	// Resolve the effective config the way session launch does: when the doctor
+	// is inside a git repo, merge the in-repo layer over the global config so
+	// the setup profile verifies the first session's actual prerequisites, not
+	// the global layer alone. Outside a repo the global config is the only
+	// layer sessions could launch under, so it is kept unchanged.
+	repo, repoErr := currentRepoContext()
+	workspace := ""
+	if repoErr == nil {
+		workspace = repo.Root
+	}
+	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
+	if resolveErr != nil {
+		// A repo whose in-repo config exists but cannot be resolved refuses
+		// session creation with this same error (#5801). Report it as an
+		// actionable finding instead of checking a command the session would
+		// never launch. The resolver error names the offending layer, so the
+		// remediation stays layer-neutral rather than unconditionally pointing
+		// at the checked-in in-repo file.
+		report.addActionableFinding(Finding{
+			Check: "agent-program",
+			Detail: fmt.Sprintf("could not resolve the in-repo config at %s — fix the config layer named in this error and rerun `af doctor --setup`: %v",
+				repo.Root, resolveErr),
+		})
+		return
+	}
+	if effective == nil || effective.DefaultProgram == "" {
 		report.addActionableFinding(Finding{
 			Check:  "agent-program",
 			Detail: fmt.Sprintf("default_program is empty — set it to one of %s in ~/.agent-factory/config.toml", tmux.SupportedProgramsString()),
 		})
+		return
+	}
+	if !isLocalBackend(backend) {
+		// Validate the selector and the backend's config the way session
+		// creation does. An unknown backend value (e.g. `backend = "dokcer"`)
+		// is a misconfiguration af refuses at create time, not a remote backend
+		// to skip host checks for; and a supported but misconfigured one
+		// (docker without docker.image, ssh without ssh.host, hook without
+		// remote_hooks) is rejected by BackendConfigError. Either way report an
+		// actionable finding instead of a silent skip that exits cleanly for a
+		// repo whose every default create would fail.
+		kind, kerr := session.ParseBackendKind(backend)
+		if kerr != nil {
+			report.addActionableFinding(Finding{
+				Check: "agent-program",
+				Detail: fmt.Sprintf("unknown backend %q in the in-repo config: %v — set `backend` to one of %s in the in-repo config (.agent-factory/config.toml) and rerun `af doctor --setup`",
+					backend, kerr, config.SupportedBackendsString()),
+			})
+			return
+		}
+		if resolved != nil {
+			if reason := session.BackendConfigError(kind, resolved); reason != nil {
+				report.addActionableFinding(Finding{
+					Check: "agent-program",
+					Detail: fmt.Sprintf("backend %q is not usable for sessions in this repo: %v — address the missing config key named above and rerun `af doctor --setup`",
+						backend, reason),
+				})
+				return
+			}
+		}
+		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
+		// host's agent binaries are not prerequisites for them — mirroring
+		// daemon.createNeedsDaemonHostPrereqs. Report a non-actionable row so
+		// the setup profile records why no binary check ran.
+		report.Pass(sectionEnvironment, "agent-program",
+			fmt.Sprintf("host agent binaries not checked — this repo's sessions run on the %q backend", backend))
 		return
 	}
 	// Anchor relative program_overrides to the session's launch directory (the
@@ -209,10 +271,9 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	// repo the launch directory cannot be determined, so today's CheckCommand
 	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	workspace, repoErr := currentRepoRoot()
-	checkOneProgram(workspace, repoErr, "default_program", cfg.DefaultProgram, config.ResolveProgram(cfg, cfg.DefaultProgram), report)
-	for _, agent := range sortedKeys(cfg.ProgramOverrides) {
-		command := strings.TrimSpace(cfg.ProgramOverrides[agent])
+	checkOneProgram(workspace, repoErr, "default_program", effective.DefaultProgram, config.ResolveProgram(effective, effective.DefaultProgram), report)
+	for _, agent := range sortedKeys(effective.ProgramOverrides) {
+		command := strings.TrimSpace(effective.ProgramOverrides[agent])
 		if command == "" {
 			continue
 		}

@@ -226,6 +226,63 @@ func TestResolveConfigDegradesOnUnreadableRegistry(t *testing.T) {
 	t.Fatal("expected a personal-project candidate in the trace")
 }
 
+// TestResolveConfigForRepoInspectionWithGlobalNonStrictDegradesOnUnreadableRegistry
+// pins that the read-only, already-loaded-global inspection path used by `af
+// doctor` matches the runtime resolve's non-strict project-registry
+// semantics: an unreadable personal/project-registry record degrades to "no
+// personal layer" instead of failing, so one bad record does not make `af
+// doctor` FAIL every repo session creation can still launch in. The strict
+// ResolveConfigForRepoInspectionWithGlobal (used by credential selection, which
+// needs the COMPLETE candidate policy) refuses the same registry — that is the
+// false FAIL this twin exists to avoid.
+func TestResolveConfigForRepoInspectionWithGlobalNonStrictDegradesOnUnreadableRegistry(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	id := "prj_cccccccccccccccccccccccccccccccc"
+	dir := filepath.Join(home, ProjectRegistryDirName, id)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	metadata := `{
+  "schema_version": 999,
+  "id": "prj_cccccccccccccccccccccccccccccccc",
+  "checkout_id": "chk_aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+  "root": "/repo",
+  "checkout_root": "/repo",
+  "relative_root": "."
+}`
+	require.NoError(t, os.WriteFile(filepath.Join(dir, projectMetadataFileName), []byte(metadata), 0o644))
+	_, listErr := ListProjects()
+	require.Error(t, listErr, "the record must genuinely make the registry unreadable")
+
+	repoRoot := initProjectRegistryRepo(t, filepath.Join(base, "some-repo"))
+	repo, err := RepoFromPath(repoRoot)
+	require.NoError(t, err)
+
+	global := DefaultConfig()
+
+	// The strict path refuses the unreadable registry: an incomplete read is a
+	// refusal for callers that need the complete candidate policy.
+	if _, err := ResolveConfigForRepoInspectionWithGlobal(repo, global); err == nil {
+		t.Fatal("strict ResolveConfigForRepoInspectionWithGlobal must fail on an unreadable registry")
+	}
+
+	// The non-strict twin degrades to "no personal layer", matching
+	// ResolveConfigForRepo / session creation.
+	resolved, err := ResolveConfigForRepoInspectionWithGlobalNonStrict(repo, global)
+	require.NoError(t, err, "a corrupt registry must not break read-only repo inspection for every repo")
+
+	value, ok := resolved.ResolvedValue("default_program")
+	require.True(t, ok)
+	for _, c := range value.Candidates {
+		if c.Layer == SourceProjectPersonal.String() {
+			assert.False(t, c.Present, "the personal layer degrades to absent, not a hard failure")
+			return
+		}
+	}
+	t.Fatal("expected a personal-project candidate in the trace")
+}
+
 // TestResolveGlobalConfigUnaffectedByPersonalLayer confirms the bare global read
 // path is unchanged: it never appends a personal document, so default_program
 // resolves over built-in and global only.

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/preflight"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -122,16 +123,60 @@ func checkStorageDir(report *Report, path, name string) {
 	}
 }
 
-func currentRepoRoot() (string, error) {
+func currentRepoContext() (*config.RepoContext, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
-	repo, err := config.RepoFromPath(cwd)
+	return config.RepoFromPath(cwd)
+}
+
+func currentRepoRoot() (string, error) {
+	repo, err := currentRepoContext()
 	if err != nil {
 		return "", err
 	}
 	return repo.Root, nil
+}
+
+// resolveEffectiveConfig merges the in-repo config layer over the global cfg
+// the way session launch does (config.ResolveConfigForRepoInspectionWithGlobalNonStrict),
+// so the doctor verifies the same command a session's tmux pane will actually
+// execute, not the global layer alone. It returns the effective config, the
+// effective `backend` runtime selector (empty meaning local), the full
+// resolved config (non-nil only when a repo layer was actually resolved, so
+// callers can run session-creation's backend precondition checks), and any
+// error from resolving the in-repo layer. Outside a repo (repo == nil) the
+// global cfg is returned with a local backend and no error — that is the only
+// layer sessions could launch under there. A nil global config returns
+// (nil, local, nil, nil); callers must nil-check the config before using it.
+//
+// The non-strict project-registry path matches the runtime resolve
+// (ResolveConfigForRepo): an unreadable personal/project-registry record
+// degrades to "no personal layer" with a warning instead of failing, so one
+// bad record does not make `af doctor` FAIL every repo session creation can
+// still launch in.
+func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*config.Config, string, *config.ResolvedConfig, error) {
+	if global == nil {
+		return nil, config.BackendLocal, nil, nil
+	}
+	if repo == nil {
+		return global, config.BackendLocal, nil, nil
+	}
+	resolved, err := config.ResolveConfigForRepoInspectionWithGlobalNonStrict(repo, global)
+	if err != nil {
+		return nil, "", nil, err
+	}
+	return &resolved.Config, resolved.Backend, resolved, nil
+}
+
+// isLocalBackend reports whether a repo's resolved backend runs the agent on
+// the daemon's own host — the only case where the daemon host's tmux and agent
+// binary decide whether a create succeeds. docker/ssh/hook/sandbox run the
+// agent elsewhere, so the daemon host's binaries are not prerequisites for
+// them. Mirrors daemon.createNeedsDaemonHostPrereqs.
+func isLocalBackend(backend string) bool {
+	return backend == "" || backend == config.BackendLocal
 }
 
 func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
@@ -202,22 +247,90 @@ func checkTmuxEnvironment(report *Report) {
 }
 
 func checkAgentBinaries(cfg *config.Config, report *Report) {
+	// Resolve the effective config the way session launch does: when the doctor
+	// is inside a git repo, merge the in-repo layer over the global config
+	// (config.ResolveConfigForRepoInspectionWithGlobalNonStrict) so the command and
+	// severity reflect what a session's tmux pane will actually execute, not
+	// the global layer alone. Outside a repo the global config is the only
+	// layer sessions could launch under, so it is kept unchanged.
+	//
 	// Anchor relative program_overrides to the session's launch directory (the
 	// repo the doctor is inside), mirroring the daemon-side #5779 fix that
 	// passes repo.WorkspacePath() to preflight.LocalSessionPrereqsAt. The doctor
 	// used the cwd-fallback CheckCommand instead, so a relative override flipped
 	// between PASS and FAIL purely on where `af doctor` was invoked. Outside any
-	// repo the launch directory cannot be determined, so today's CheckCommand is
-	// kept and any failure is reported with an honest message instead of
+	// repo the launch directory cannot be determined, so today's CheckCommand
+	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	workspace, repoErr := currentRepoRoot()
+	repo, repoErr := currentRepoContext()
+	workspace := ""
+	if repoErr == nil {
+		workspace = repo.Root
+	}
+	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
+	if resolveErr != nil {
+		// A repo whose in-repo config exists but cannot be resolved refuses
+		// session creation with this same error (#5801): the backend is
+		// undeterminable, and guessing local could run the agent somewhere
+		// other than the isolation the repo chose. Report it as an actionable
+		// config failure instead of checking a command the session would
+		// never launch. The resolver error itself names the offending layer
+		// (checked-in, legacy, or personal-project), so the remediation stays
+		// layer-neutral rather than unconditionally pointing at the checked-in
+		// in-repo file — a malformed personal-project config reaches this
+		// branch too, and "fix .agent-factory/config.toml" would not clear it.
+		report.AddHeader("agents", "n/a (repo config unresolved)")
+		report.Fail(sectionConfig, "agent-config",
+			fmt.Sprintf("could not resolve the in-repo config at %s: %v", repo.Root, resolveErr),
+			"fix the config layer named in the error above and rerun `af doctor`")
+		return
+	}
+	if !isLocalBackend(backend) {
+		// Validate the selector the way session creation does (ParseBackendKind):
+		// an unknown value such as `backend = "dokcer"` is a misconfiguration
+		// session creation refuses, not a remote backend to skip host checks for.
+		// Without this, both doctor profiles would skip the agent checks and exit
+		// cleanly while claiming sessions run on a backend af itself rejects.
+		kind, kerr := session.ParseBackendKind(backend)
+		if kerr != nil {
+			report.AddHeader("agents", fmt.Sprintf("n/a (unknown backend %q)", backend))
+			report.Fail(sectionConfig, "agent-config",
+				fmt.Sprintf("unknown backend %q in the in-repo config: %v", backend, kerr),
+				"set `backend` to one of "+config.SupportedBackendsString()+" in the in-repo config (.agent-factory/config.toml) and rerun `af doctor`")
+			return
+		}
+		// A supported non-local backend still has to be USABLE for a session in
+		// this repo: config resolution accepts `backend = "docker"` without
+		// docker.image, `backend = "ssh"` without ssh.host, or
+		// `backend = "hook"` without remote_hooks, while session creation
+		// rejects them through BackendConfigError. Run that same side-effect-free
+		// config-key validation before reporting a skip, so the doctor does not
+		// exit cleanly for a repo whose every default create would fail.
+		if resolved != nil {
+			if reason := session.BackendConfigError(kind, resolved); reason != nil {
+				report.AddHeader("agents", fmt.Sprintf("n/a (backend %q misconfigured)", backend))
+				report.Fail(sectionConfig, "agent-config",
+					fmt.Sprintf("backend %q is not usable for sessions in this repo: %v", backend, reason),
+					"address the missing config key named above and rerun `af doctor`")
+				return
+			}
+		}
+		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
+		// host's agent binaries are not prerequisites for them — mirroring
+		// daemon.createNeedsDaemonHostPrereqs, which skips LocalSessionPrereqs
+		// for non-local backends.
+		report.AddHeader("agents", fmt.Sprintf("skipped (repo backend: %s)", backend))
+		report.Info(sectionEnvironment, "agents",
+			fmt.Sprintf("host agent binaries not checked — this repo's sessions run on the %q backend", backend))
+		return
+	}
 	header := make([]string, 0, len(tmux.SupportedPrograms))
 	for _, agent := range tmux.SupportedPrograms {
 		command := agent
 		configured := false
-		if cfg != nil {
-			command = config.ResolveProgram(cfg, agent)
-			configured = cfg.DefaultProgram == agent || strings.TrimSpace(cfg.ProgramOverrides[agent]) != ""
+		if effective != nil {
+			command = config.ResolveProgram(effective, agent)
+			configured = effective.DefaultProgram == agent || strings.TrimSpace(effective.ProgramOverrides[agent]) != ""
 		}
 		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
 		if err == nil {
