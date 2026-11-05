@@ -592,33 +592,22 @@ func (c *ConfigPane) commitEdit() {
 	// a truncating field would make value != editSeed, which reads as an edit
 	// and would write straight through this check.
 	//
-	// Two signals, both required:
-	//   - value == entry.Value: the field holds exactly the raw stored value.
-	//     This is the honest no-op for a sanitizer-stable value the user edited
-	//     and then restored — dirty stays true from the edit, but the field
-	//     landed back on the raw value, so there is no semantic change to
-	//     write. Without this arm, restoring an ordinary single-line value
-	//     would bypass the guard below and run the config writer / daemon
-	//     apply path (and risk an admission refusal) for nothing.
-	//   - value == c.editSeed: the field holds exactly what beginEdit seeded
-	//     it with, read back AFTER the textinput sanitizer ran (so control
-	//     runes the sanitizer drops — not just the whitespace flattenToOneLine
-	//     folds — are already gone from both sides). Comparing against the raw
-	//     entry.Value, or against a flatten-only approximation, would always
-	//     read an untouched value containing such a rune as an edit and
-	//     rewrite it without the rune.
-	//   - !c.dirty: the user typed nothing since beginEdit. flattenToOneLine
-	//     is not injective — a\nb and "a b" both flatten to "a b" — so a user
-	//     who clears the field and retypes "a b" to replace a multi-line value
-	//     with that single-line text would be silently blocked by a
-	//     value-equality guard alone. dirty is set in handleEditKey only
-	//     when the input value changes, so a genuine edit (even one that
-	//     lands back on the flattened seed) writes through. The raw-value
-	//     arm above does not weaken this: a multi-line entry.Value can never
-	//     equal the single-line field, so the replace-with-flattened-text
-	//     case never hits the raw-value arm and still needs the dirty flag.
-	// See beginEdit and TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and
-	// TestConfigPaneEditRestoreIsNoOp.
+	// Two no-op signals, either sufficient:
+	//   - value == entry.Value: the field holds the raw stored value again,
+	//     a true no-op even when dirty is true (e.g. the user edited a
+	//     sanitizer-stable single-line value and restored it — without this
+	//     arm that would run the config writer / daemon apply path for no
+	//     semantic change).
+	//   - !c.dirty && value == c.editSeed: the field is untouched since
+	//     beginEdit. editSeed is read back AFTER the textinput sanitizer ran,
+	//     so control runes the sanitizer drops (not just the whitespace
+	//     flattenToOneLine folds) are gone from both sides. flattenToOneLine
+	//     is not injective (a\nb and "a b" both flatten to "a b"), so a
+	//     value-equality guard alone would block a genuine edit that lands
+	//     back on the flattened seed; dirty, set only when the input value
+	//     changes, lets that write through. A multi-line entry.Value can
+	//     never equal the single-line field, so the first arm does not weaken
+	//     this. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and TestConfigPaneEditRestoreIsNoOp.
 	if value == entry.Value || (!c.dirty && value == c.editSeed) {
 		c.cancelEdit()
 		return
