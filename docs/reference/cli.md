@@ -79,6 +79,7 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
+- [`af sessions set-conversation`](#af-sessions-set-conversation) — Record a session's provider conversation id
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
@@ -2256,6 +2257,7 @@ af sessions
 - [`af sessions restore`](#af-sessions-restore) — Restore an archived, lost, or dead session
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
+- [`af sessions set-conversation`](#af-sessions-set-conversation) — Record a session's provider conversation id
 - [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
@@ -2933,6 +2935,40 @@ af sessions send-prompt <title> <prompt> [flags]
 | `--include-root` |  | With --all, also deliver to the reserved root session (excluded by default) |
 | `--program` | `string` | Program to run when creating a new session (one of: claude, codex, aider, gemini, amp, opencode, devin; defaults to config default) |
 | `--prompt` | `string` | The prompt to send (alias for the positional <prompt>, matching 'sessions create --prompt') |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--json` |  | Wrap output in the {data,error} JSON envelope (default: bare payload) |
+| `--repo` | `string` | Path to the project's git repository (default: the current directory's project) |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af sessions set-conversation
+
+Record a session's provider conversation id
+
+Record a provider conversation id on a session's Agent tab — the repair for
+a conversation af never captured, or captured stale before the store had a
+capture arm on it (#6769).
+
+The daemon refuses unless the session's own conversation store proves the id
+belongs to it: today that means a Codex rollout-…-<uuid>.jsonl whose
+session_meta launches in the session's working directory and is not a
+sub-agent thread. A remote session, a non-Codex agent, a malformed or absent
+rollout, and a session mid-operation all refuse with the reason.
+
+The running pane is NOT touched: the recorded id only matters the next time af
+builds a resume command (respawn, restore, handoff). Re-running with the same
+id is a no-op success.
+
+Example:
+  af sessions set-conversation fix-auth 0195f8e2-7c3a-7b1d-9e4f-2a6c8d0b1e2f
+
+```
+af sessions set-conversation <title> <id>
+```
 
 **Global flags**
 

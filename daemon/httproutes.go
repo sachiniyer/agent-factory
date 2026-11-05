@@ -279,6 +279,19 @@ var httpRoutes = []HTTPRoute{
 		requestType: reflect.TypeOf(ConfirmHandoffDeliveryRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ConfirmHandoffDelivery) },
 	},
+	// The operator repair for a conversation af never recorded or recorded
+	// stale (#6769): validates the id against the session's own rollout store
+	// before writing it to the Agent tab — strict correlation only, never a
+	// guess. The running pane is untouched; the recorded id matters the next
+	// time af builds a resume command.
+	{
+		Method:         http.MethodPost,
+		Path:           "/v1/SetConversation",
+		sandboxAllowed: true,
+		Description:    "Record a provider conversation id on a session's Agent tab after proving it against the session's own conversation store — the repair for an unrecorded or stale recorded conversation.",
+		requestType:    reflect.TypeOf(SetConversationRequest{}),
+		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.setConversationScoped) },
+	},
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/HandoffSession",

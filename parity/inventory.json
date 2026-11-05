@@ -1030,6 +1030,25 @@
       "notes": "A handoff whose mission delivery reports sent-unverified or could-not-confirm may already have landed: resending can double-deliver, doing nothing leaves a durable obligation no verb used to retire. ConfirmHandoffDelivery is the attestation half of the exit \u2014 a separate verb rather than a ResumeFromLimit flag so a pre-verb daemon refuses loudly instead of silently resending. The daemon probes that a runtime answers at the binding, then settles the leftover replacement/startup-unknown state and clears the mission in one commit. Automatic recovery still owns only positive mission-scoped non-delivery (PromptNotDelivered); ambiguous verdicts stay operator-resolved. The TUI surfaces it inside the `c` resolve picker (no new binding \u2014 the same key now chooses between resend and mark-delivered when a confirmable verdict exists); the web grows a second head action with a confirmation modal; the CLI spells it as a flag on the same recovery command."
     },
     {
+      "id": "session.set-conversation",
+      "title": "Record a provider conversation id on a session's Agent tab",
+      "tui": {
+        "status": "no",
+        "pointer": "deliberately CLI-only: a rare operator repair, not a pane action (#6769)"
+      },
+      "web": {
+        "status": "no",
+        "pointer": "deliberately CLI-only: a rare operator repair, not a row action (#6769)"
+      },
+      "cli": {
+        "status": "yes",
+        "pointer": "api/sessions_set_conversation.go (af sessions set-conversation <title> <id>) -> daemon controlServer.SetConversation -> Manager.setConversation + session.ValidateSettableConversation"
+      },
+      "verdict": "deliberate",
+      "issue": "#6769",
+      "notes": "The repair for a conversation af never recorded or recorded stale. It is deliberately a CLI verb only: correcting durable state the capture loop missed is an occasional operator action, and the strict store-correlation refusals (wrong worktree, sub-agent thread, unclassifiable first record, mid-operation row) read better as a command error than as a greyed-out button. The daemon owns validation and the write; the TUI and web would only ever render the result the next Snapshot delivers. Served on the sandbox-scoped route so a sandbox credential can repair a sibling in its own project but nothing outside it."
+    },
+    {
       "id": "session.list",
       "title": "List sessions",
       "tui": {
@@ -1882,6 +1901,7 @@
       "af sessions restore": "session.restore",
       "af sessions retry-limit": "session.limit-retry",
       "af sessions send-prompt": "session.send-prompt",
+      "af sessions set-conversation": "session.set-conversation",
       "af sessions tab-create": "session.tab.create",
       "af sessions tab-delete": "session.tab.close",
       "af sessions tab-rename": "session.tab.rename",
@@ -1969,6 +1989,7 @@
       "POST /v1/SendPrompt": "session.send-prompt",
       "POST /v1/ResumeFromLimit": "session.limit-retry",
       "POST /v1/SetConfigValue": "config.write",
+      "POST /v1/SetConversation": "session.set-conversation",
       "POST /v1/Snapshot": "session.list",
       "POST /v1/SuggestSessionName": "-",
       "POST /v1/TriggerTask": "task.trigger",
@@ -2261,6 +2282,7 @@
       "af sessions send-prompt --include-root": "session.send-prompt.broadcast",
       "af sessions send-prompt --program": "session.send-prompt",
       "af sessions send-prompt --prompt": "session.send-prompt",
+      "af sessions set-conversation --help": "meta.discovery",
       "af sessions tab-create --command": "session.tab.create.options",
       "af sessions tab-create --help": "meta.discovery",
       "af sessions tab-create --kind": "session.tab.create.options",
@@ -2849,6 +2871,13 @@
         "cli": {
           "id": {
             "ok": "The CLI resolves sessions by title under --repo scoping, exactly as kill/archive/send-prompt do; the stable id is the all-project web client's collision-proof key."
+          }
+        }
+      },
+      "SetConversationRequest": {
+        "cli": {
+          "id": {
+            "ok": "The CLI resolves sessions by title under --repo scoping, exactly as retry-limit/kill/archive/send-prompt do; the stable id is for clients that already hold one."
           }
         }
       },
