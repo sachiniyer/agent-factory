@@ -7,13 +7,20 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 func exactResumeSession(t *testing.T, program string) *Instance {
 	t.Helper()
-	inst, err := NewInstance(InstanceOptions{Title: "B-7 item", Path: t.TempDir(), Program: program, BacklogItem: 7})
+	workDir := t.TempDir()
+	inst, err := NewInstance(InstanceOptions{Title: "B-7 item", Path: workDir, Program: program, BacklogItem: 7})
 	require.NoError(t, err)
+	// The restore guard resolves the session's launch environment against its
+	// worktree path (#6769); a bare Path without a worktree resolves nothing.
+	gw, err := git.NewGitWorktreeFromStorage(workDir, workDir, "B-7 item", "main", "", false, true)
+	require.NoError(t, err)
+	inst.gitWorktree = gw
 	return inst
 }
 
@@ -23,11 +30,19 @@ func exactResumeSession(t *testing.T, program string) *Instance {
 // claude, codex and amp; every other agent would come back as a fresh agent.
 func TestExactResumeFollowsResumeProgramWithConversationID(t *testing.T) {
 	resumable := map[string]bool{tmux.ProgramClaude: true, tmux.ProgramCodex: true, tmux.ProgramAmp: true}
+	const convID = "11111111-1111-4111-8111-111111111111"
 	for _, program := range tmux.SupportedPrograms {
 		t.Run(program, func(t *testing.T) {
 			inst := exactResumeSession(t, program)
-			inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: program, ID: "conv-1", CapturedAt: time.Now()}}}
-			_, want := tmux.ResumeProgramWithConversationID(program, program, "conv-1")
+			inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: program, ID: convID, CapturedAt: time.Now()}}}
+			if program == tmux.ProgramCodex {
+				// The restore guard also proves the recorded rollout exists in
+				// the session's own store (#6769): give the fixture one.
+				codexHome := t.TempDir()
+				t.Setenv("CODEX_HOME", codexHome)
+				writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+convID+".jsonl")
+			}
+			_, want := tmux.ResumeProgramWithConversationID(program, program, convID)
 			got, why := inst.ExactResume()
 			require.Equal(t, want, got, "ExactResume must follow ResumeProgramWithConversationID for %s", program)
 			require.Equal(t, resumable[program], got, "which agents af resumes by id changed; check the archive after asking and docs/cli.md")

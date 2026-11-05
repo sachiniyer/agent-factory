@@ -277,7 +277,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %w)", err, rebuildErr),
 				}
 			}
-			exactProgram, ok := prepareExactResumeConversation(i, resolvedProgram)
+			exactProgram, ok, _ := prepareExactResumeConversation(i, resolvedProgram)
 			if !ok {
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
@@ -639,7 +639,7 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 	if !resume {
 		return fmt.Errorf("branch %s is gone, and a fresh rebuild is only allowed when resuming the recorded conversation", branch)
 	}
-	if _, ok := prepareExactResumeConversation(i, program); !ok {
+	if _, ok, _ := prepareExactResumeConversation(i, program); !ok {
 		return fmt.Errorf("branch %s is gone and no recorded conversation id can resume into a fresh rebuild", branch)
 	}
 	return nil

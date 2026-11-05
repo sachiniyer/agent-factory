@@ -60,6 +60,11 @@ func TestRecover_UnrebuildableWorktreeKeepsTheSurvivingPanes(t *testing.T) {
 					ID:          "019f386f-7206-7fc2-803b-f7045e07a243",
 					CaptureKind: ConversationCaptureCodexRollout,
 				}
+				// The restore guard proves the recorded rollout exists in the
+				// session's own store before it resumes it (#6769).
+				codexHome := t.TempDir()
+				t.Setenv("CODEX_HOME", codexHome)
+				writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+agentTab.Conversation.ID+".jsonl")
 			}
 			data := InstanceData{
 				Title:    "unrebuildable",
