@@ -140,7 +140,7 @@ func currentRepoRoot() (string, error) {
 }
 
 // resolveEffectiveConfig merges the in-repo config layer over the global cfg
-// the way session launch does (config.ResolveConfigForRepoInspectionWithGlobal),
+// the way session launch does (config.ResolveConfigForRepoInspectionWithGlobalNonStrict),
 // so the doctor verifies the same command a session's tmux pane will actually
 // execute, not the global layer alone. It returns the effective config, the
 // effective `backend` runtime selector (empty meaning local), the full
@@ -150,6 +150,12 @@ func currentRepoRoot() (string, error) {
 // global cfg is returned with a local backend and no error — that is the only
 // layer sessions could launch under there. A nil global config returns
 // (nil, local, nil, nil); callers must nil-check the config before using it.
+//
+// The non-strict project-registry path matches the runtime resolve
+// (ResolveConfigForRepo): an unreadable personal/project-registry record
+// degrades to "no personal layer" with a warning instead of failing, so one
+// bad record does not make `af doctor` FAIL every repo session creation can
+// still launch in.
 func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*config.Config, string, *config.ResolvedConfig, error) {
 	if global == nil {
 		return nil, config.BackendLocal, nil, nil
@@ -157,7 +163,7 @@ func resolveEffectiveConfig(global *config.Config, repo *config.RepoContext) (*c
 	if repo == nil {
 		return global, config.BackendLocal, nil, nil
 	}
-	resolved, err := config.ResolveConfigForRepoInspectionWithGlobal(repo, global)
+	resolved, err := config.ResolveConfigForRepoInspectionWithGlobalNonStrict(repo, global)
 	if err != nil {
 		return nil, "", nil, err
 	}
@@ -243,7 +249,7 @@ func checkTmuxEnvironment(report *Report) {
 func checkAgentBinaries(cfg *config.Config, report *Report) {
 	// Resolve the effective config the way session launch does: when the doctor
 	// is inside a git repo, merge the in-repo layer over the global config
-	// (config.ResolveConfigForRepoInspectionWithGlobal) so the command and
+	// (config.ResolveConfigForRepoInspectionWithGlobalNonStrict) so the command and
 	// severity reflect what a session's tmux pane will actually execute, not
 	// the global layer alone. Outside a repo the global config is the only
 	// layer sessions could launch under, so it is kept unchanged.

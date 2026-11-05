@@ -253,10 +253,24 @@ func ResolveConfigForRepoInspection(repo *RepoContext) (*ResolvedConfig, error) 
 // resolve from re-entering LoadConfig while preserving the same repo/personal
 // precedence. An unreadable personal lookup is unknown, never an empty layer.
 func ResolveConfigForRepoInspectionWithGlobal(repo *RepoContext, global *Config) (*ResolvedConfig, error) {
-	return resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, nil)
+	return resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, nil, true)
 }
 
-func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, global *Config, personal *sourceDocument) (*ResolvedConfig, error) {
+// ResolveConfigForRepoInspectionWithGlobalNonStrict is the read-only,
+// already-loaded-global inspection path that matches the runtime resolve's
+// non-strict project-registry semantics (ResolveConfigForRepo): an unreadable
+// personal/project-registry record degrades to "no personal layer" with a
+// warning instead of failing the resolve, so one bad record does not break
+// resolution for every repo. Callers that diagnose the same command a session
+// will actually launch — `af doctor` — use this so the doctor does not report
+// an actionable config failure for a repo session creation can still launch
+// in. Callers that need the COMPLETE candidate policy (credential selection)
+// must stay on the strict ResolveConfigForRepoInspectionWithGlobal.
+func ResolveConfigForRepoInspectionWithGlobalNonStrict(repo *RepoContext, global *Config) (*ResolvedConfig, error) {
+	return resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, nil, false)
+}
+
+func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, global *Config, personal *sourceDocument, strict bool) (*ResolvedConfig, error) {
 	if repo == nil {
 		return nil, fmt.Errorf("repo context is required")
 	}
@@ -269,7 +283,7 @@ func resolveConfigForRepoInspectionWithGlobalAndPersonal(repo *RepoContext, glob
 	}
 	resolved, err := resolveConfigRootsWithOptions(
 		repo.IdentityPath(), repo.WorkspacePath(), suppressInRepoLoadObservation,
-		resolveOptions{global: prepared, requirePersonalPolicy: true, personalDocument: personal},
+		resolveOptions{global: prepared, requirePersonalPolicy: strict, personalDocument: personal},
 	)
 	if err != nil {
 		return nil, err
@@ -303,7 +317,7 @@ func resolveConfigForRepoInspectionWithGlobalAndPersonalContext(ctx context.Cont
 	}
 	done := make(chan result, 1)
 	go func() {
-		resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, personal)
+		resolved, err := resolveConfigForRepoInspectionWithGlobalAndPersonal(repo, global, personal, true)
 		done <- result{resolved: resolved, err: err}
 	}()
 	select {
