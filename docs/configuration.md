@@ -467,20 +467,21 @@ target_order         = "listed"   # listed | emptiest
 confirm_wall         = true
 wall_percent         = 97
 move_idle_at_percent = 95         # 0 disables proactive moves
-prefer_below_percent = 85
-probe_ttl            = "10m"      # "" disables probes
+prefer_below_percent = 85         # ordering preference, not a threshold
+probe_ttl            = "10m"      # "" or "0" disables probes
 default_login        = "ignore"   # ignore | move
 require_carry        = false
 exclude_sessions     = []
-max_moves            = 3
-max_moves_window     = "30m"      # "" or 0 means unlimited
+max_moves            = 3          # must be >= 1 (0 is rejected — use mode = "off")
+max_moves_window     = "30m"      # "" or "0" means unlimited
 refused_backoff      = "2h"
-on_failure           = "halt"     # halt | skip-session
+on_failure           = "halt"     # halt | skip
 report_to            = ""
 ```
 
 - **`mode`**: `off` (compiled default) or `shadow`. `live` is a recognized spelling but rejected at load with an error until live moves ship — a config that asks for behavior that does not exist must fail loudly, not silently degrade.
-- **Percent leaves** (`wall_percent`, `move_idle_at_percent`, `prefer_below_percent`) accept 50–100. While `move_idle_at_percent` is nonzero they must satisfy `prefer_below_percent < move_idle_at_percent < wall_percent`. `move_idle_at_percent = 0` disables proactive moves and relaxes the ordering check.
+- **Percent leaves** (`wall_percent`, `move_idle_at_percent`, `prefer_below_percent`) accept 50–100. While `move_idle_at_percent` is nonzero they must satisfy `prefer_below_percent < move_idle_at_percent < wall_percent`. `move_idle_at_percent = 0` disables proactive moves and relaxes the ordering check. `prefer_below_percent` is an ordering preference, not a threshold.
+- **`max_moves` must be at least 1.** `0` is rejected at load — "no automatic moves" is `mode = "off"`, and a bare `0` reads too easily as "unlimited". `max_moves_window` is the window it counts within; `""` or `"0"` means unlimited.
 - **Duration leaves** (`probe_ttl`, `max_moves_window`, `refused_backoff`) are Go durations like `10m` or `2h`; an empty or non-positive value is the documented disabled/unlimited state for each.
 - **`exclude_sessions`** is a list of session titles the engine must never move; `report_to` names a session (`<project>/<title>` or a unique bare title) to prompt with handoff events — empty logs only.
 - **`include_pinned = true` opts pinned sessions IN.** A session pinned to an account (`--account` or a manual handoff) is normally left in place. With `include_pinned` the pin no longer protects it — `exclude_sessions` is then the way to keep a named session out of automatic movement.

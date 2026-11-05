@@ -53,8 +53,9 @@ type AccountHandoffConfig struct {
 	// session may move proactively. Range 50–100, default 95; 0 disables
 	// proactive moves.
 	MoveIdleAtPercent int `json:"move_idle_at_percent" toml:"move_idle_at_percent"`
-	// PreferBelowPercent is an ordering hint: prefer accounts whose worst
-	// window sits below this percent. Range 50–100, default 85.
+	// PreferBelowPercent is an ordering preference, not a threshold: prefer
+	// accounts whose worst window sits below this percent. Range 50–100,
+	// default 85.
 	PreferBelowPercent int `json:"prefer_below_percent" toml:"prefer_below_percent"`
 	// ProbeTTL caches a cheap usage probe per account for this long. Default
 	// "10m"; "" or a non-positive duration disables probes.
@@ -71,7 +72,8 @@ type AccountHandoffConfig struct {
 	// explicit opt-out that keeps working when include_pinned is true.
 	ExcludeSessions []string `json:"exclude_sessions" toml:"exclude_sessions"`
 	// MaxMoves caps automatic moves per session within MaxMovesWindow. Default
-	// 3; 0 permits no automatic moves.
+	// 3; must be at least 1 — 0 is rejected because "no moves" is mode = "off"
+	// and many readers take 0 for unlimited.
 	MaxMoves int `json:"max_moves" toml:"max_moves"`
 	// MaxMovesWindow is the window MaxMoves counts within. Default "30m"; ""
 	// or a non-positive duration means unlimited.
@@ -81,8 +83,8 @@ type AccountHandoffConfig struct {
 	// the backoff.
 	RefusedBackoff string `json:"refused_backoff" toml:"refused_backoff"`
 	// OnFailure decides engine behavior after a failed move: "halt" (default —
-	// stop all automatic moves until cleared) or "skip-session" (leave that
-	// session out, keep going).
+	// stop all automatic moves until cleared) or "skip" (skip that session,
+	// keep governing the others).
 	OnFailure string `json:"on_failure" toml:"on_failure"`
 	// ReportTo names a session to prompt with handoff events, as
 	// "<project>/<title>" or a unique bare title. Default "" logs only.
@@ -102,8 +104,8 @@ const (
 	AccountHandoffDefaultLoginIgnore = "ignore"
 	AccountHandoffDefaultLoginMove   = "move"
 
-	AccountHandoffOnFailureHalt        = "halt"
-	AccountHandoffOnFailureSkipSession = "skip-session"
+	AccountHandoffOnFailureHalt = "halt"
+	AccountHandoffOnFailureSkip = "skip"
 )
 
 const (
@@ -157,7 +159,7 @@ func validateAccountHandoff(table AccountHandoffConfig) error {
 		return err
 	}
 	if err := validateAccountHandoffEnum("on_failure", table.OnFailure,
-		AccountHandoffOnFailureHalt, AccountHandoffOnFailureSkipSession); err != nil {
+		AccountHandoffOnFailureHalt, AccountHandoffOnFailureSkip); err != nil {
 		return err
 	}
 	if err := accountHandoffPercentValue("wall_percent", table.WallPercent, false); err != nil {
@@ -177,8 +179,8 @@ func validateAccountHandoff(table AccountHandoffConfig) error {
 		return fmt.Errorf("account_handoff: prefer_below_percent (%d) must be < move_idle_at_percent (%d) must be < wall_percent (%d)",
 			table.PreferBelowPercent, table.MoveIdleAtPercent, table.WallPercent)
 	}
-	if table.MaxMoves < 0 {
-		return fmt.Errorf("account_handoff.max_moves must be non-negative, got %d", table.MaxMoves)
+	if table.MaxMoves < 1 {
+		return fmt.Errorf("account_handoff.max_moves must be at least 1, got %d — set mode = \"off\" to disable automatic handoffs", table.MaxMoves)
 	}
 	for _, leaf := range []struct {
 		name  string
@@ -228,7 +230,7 @@ func validateAccountHandoffLeaf(leaf, value string) error {
 	case "default_login":
 		return validateAccountHandoffEnum("default_login", value, AccountHandoffDefaultLoginIgnore, AccountHandoffDefaultLoginMove)
 	case "on_failure":
-		return validateAccountHandoffEnum("on_failure", value, AccountHandoffOnFailureHalt, AccountHandoffOnFailureSkipSession)
+		return validateAccountHandoffEnum("on_failure", value, AccountHandoffOnFailureHalt, AccountHandoffOnFailureSkip)
 	case "wall_percent", "prefer_below_percent":
 		n, err := strconv.Atoi(strings.TrimSpace(value))
 		if err != nil {
@@ -242,7 +244,14 @@ func validateAccountHandoffLeaf(leaf, value string) error {
 		}
 		return accountHandoffPercentValue(leaf, n, true)
 	case "max_moves":
-		return requireNonNegativeInt("account_handoff.max_moves", value)
+		n, err := strconv.Atoi(strings.TrimSpace(value))
+		if err != nil {
+			return fmt.Errorf("account_handoff.max_moves must be an integer, got %q", value)
+		}
+		if n < 1 {
+			return fmt.Errorf("account_handoff.max_moves must be at least 1, got %d — set mode = \"off\" to disable automatic handoffs", n)
+		}
+		return nil
 	case "probe_ttl", "max_moves_window", "refused_backoff":
 		return accountHandoffDurationValue(leaf, value)
 	case "exclude_sessions":

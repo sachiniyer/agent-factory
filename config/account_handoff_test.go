@@ -59,7 +59,7 @@ exclude_sessions     = ["alpha-session", "beta-session"]
 max_moves            = 5
 max_moves_window     = "1h"
 refused_backoff      = "45m"
-on_failure           = "skip-session"
+on_failure           = "skip"
 report_to            = "project-a/status-session"
 `)
 
@@ -80,7 +80,7 @@ report_to            = "project-a/status-session"
 	assert.Equal(t, 5, got.MaxMoves)
 	assert.Equal(t, "1h", got.MaxMovesWindow)
 	assert.Equal(t, "45m", got.RefusedBackoff)
-	assert.Equal(t, "skip-session", got.OnFailure)
+	assert.Equal(t, "skip", got.OnFailure)
 	assert.Equal(t, "project-a/status-session", got.ReportTo)
 }
 
@@ -108,6 +108,7 @@ func TestAccountHandoffRejectsInvalidValues(t *testing.T) {
 		"ordering":         "move_idle_at_percent = 98\nwall_percent = 97\n",
 		"prefer ordering":  "prefer_below_percent = 96\nmove_idle_at_percent = 95\n",
 		"max_moves":        "max_moves = -1\n",
+		"max_moves zero":   "max_moves = 0\n",
 		"probe_ttl":        "probe_ttl = \"soon\"\n",
 		"max_moves_window": "max_moves_window = \"an hourish\"\n",
 		"refused_backoff":  "refused_backoff = \"2hours-ish\"\n",
@@ -124,6 +125,24 @@ func TestAccountHandoffRejectsInvalidValues(t *testing.T) {
 			assert.Contains(t, err.Error(), "account_handoff")
 		})
 	}
+}
+
+// TestAccountHandoffRejectsMaxMovesZero pins the resolved name decision:
+// 0 is rejected outright — "no moves" is mode = "off", and many readers
+// take 0 for unlimited — so the error points at the right disable.
+func TestAccountHandoffRejectsMaxMovesZero(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "[account_handoff]\nmax_moves = 0\n")
+
+	_, err := LoadConfig()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "at least 1")
+	assert.Contains(t, err.Error(), `mode = "off"`,
+		"the rejection names the real disable path")
+
+	_, err = SetGlobalConfigValue("account_handoff.max_moves", "0")
+	require.Error(t, err, "the leaf writer applies the same rejection")
 }
 
 func TestAccountHandoffZeroDisablesIdleAndWindow(t *testing.T) {
