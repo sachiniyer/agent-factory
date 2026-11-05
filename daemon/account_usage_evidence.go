@@ -2,8 +2,8 @@ package daemon
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
-	"os"
 	"sync"
 	"time"
 
@@ -11,6 +11,7 @@ import (
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/rateindex"
+	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -142,12 +143,14 @@ func accountUsageReadingSource(agent string) bool {
 // was serving at a specific instant. The newest claim must be OBSERVED —
 // "none" is no evidence, "unknown" is a claim that cannot be trusted, and
 // neither frees a wall — timestamped no later than now (a future-dated record
-// is as untrustworthy as a future-dated retraction), and must carry at least
-// one window with EVERY reported window below the wall threshold: "no
-// windows" is not a zero reading, and one hot window means the account is
-// still at its wall by its own newest word. The proof instant is the record's
-// own timestamp — ordering runs on when the provider made the claim, never
-// on when af happened to read it.
+// is as untrustworthy as a future-dated retraction), and must report EVERY
+// window the account is subject to, each below the wall threshold. "No
+// windows" is not a zero reading, one hot window means the account is still
+// at its wall by its own newest word, and a snapshot missing a slot is
+// silent about that window — "secondary": null beside a calm primary is not
+// evidence the weekly limit is below the wall (#6802 review). The proof
+// instant is the record's own timestamp — ordering runs on when the
+// provider made the claim, never on when af happened to read it.
 func usageReadingProof(reading rateindex.AccountReading, wallPercent int, now time.Time) (time.Time, bool) {
 	if reading.Status != rateindex.StatusObserved {
 		return time.Time{}, false
@@ -159,8 +162,15 @@ func usageReadingProof(reading rateindex.AccountReading, wallPercent int, now ti
 	if len(reading.Reading.Windows) == 0 {
 		return time.Time{}, false
 	}
+	reported := make(map[string]struct{}, len(reading.Reading.Windows))
 	for _, window := range reading.Reading.Windows {
 		if window.UsedPercent >= float64(wallPercent) {
+			return time.Time{}, false
+		}
+		reported[window.Name] = struct{}{}
+	}
+	for _, name := range quota.CodexWindowSlotNames() {
+		if _, ok := reported[name]; !ok {
 			return time.Time{}, false
 		}
 	}
@@ -182,13 +192,18 @@ func (m *Manager) usageIndexer() *rateindex.Indexer {
 // accountLimitProofWorthScanning is the cheap gate that keeps the 45-second
 // durable scan off users it can never help (#6802 review). The full pass
 // parses every repo's instance rows — megabytes of JSON on a busy box — so
-// before paying it, ask the questions that can prove no codex wall exists to
-// free:
-//   - no registered codex account directories: an identity with no account
-//     home has no rollout store to read, so no proof is possible for it; and
-//   - no "codex" bytes in the raw durable rows or the ledger file, and no
-//     codex observation on a live instance: a codex wall serializes its
-//     agent name, so nothing codex-shaped exists to retract.
+// before paying it, the gate asks the question the pass itself would: does
+// an UNEXPIRED codex wall observation exist anywhere a wall can live? The
+// sources are checked cheapest first:
+//   - no registered codex account directories means no rollout store exists
+//     for any identity, so no reading could ever count as proof;
+//   - the process-wide ledger is one small structured file — its own
+//     observations and retractions are decoded, never byte-matched;
+//   - live instances carry their observation lists in memory; and
+//   - durable rows pay a field-name PREFILTER, never a verdict: a row that
+//     serializes no limit field cannot hold a wall, so only a row carrying
+//     one is decoded and checked for a real codex observation that still
+//     excludes. A codex session's program text or prompt prose is not a wall.
 //
 // Every answer short of a definite no runs the full pass — a false positive
 // costs one scan; a false negative would leave a wall excluded forever. A
@@ -202,6 +217,22 @@ var accountLimitProofWorthScanning = func(m *Manager) bool {
 	if accounts, err := agentaccount.List(home, tmux.ProgramCodex); err == nil && len(accounts) == 0 {
 		return false
 	}
+	now := nowFunc()
+	// The ledger read is cheap (one file) and feeds every "still excluding"
+	// check below, so a wall already retracted frees no scan either.
+	evidence, err := loadAccountLimitLedger()
+	if err != nil {
+		return true // an unreadable ledger is for the full pass to surface
+	}
+	stillWalls := func(observation session.AccountLimitObservationData) bool {
+		return accountUsageReadingSource(observation.Agent) &&
+			accountLimitObservationExcludes(observation, observation.Agent, evidence.Retractions, now)
+	}
+	for _, observation := range evidence.Observations {
+		if stillWalls(observation) {
+			return true
+		}
+	}
 	m.mu.Lock()
 	instances := make([]*session.Instance, 0, len(m.instances))
 	for _, inst := range m.instances {
@@ -213,19 +244,9 @@ var accountLimitProofWorthScanning = func(m *Manager) bool {
 			continue
 		}
 		for _, observation := range inst.AccountLimitObservations() {
-			if accountUsageReadingSource(observation.Agent) {
+			if stillWalls(observation) {
 				return true
 			}
-		}
-	}
-	needle := []byte(tmux.ProgramCodex)
-	if path, err := accountLimitLedgerPath(); err == nil {
-		if raw, err := os.ReadFile(path); err == nil {
-			if bytes.Contains(raw, needle) {
-				return true
-			}
-		} else if !os.IsNotExist(err) {
-			return true // an unreadable ledger is for the full read to surface
 		}
 	}
 	rows, skipped, err := config.LoadAllRepoInstancesReportingSkips()
@@ -233,6 +254,44 @@ var accountLimitProofWorthScanning = func(m *Manager) bool {
 		return true
 	}
 	for _, raw := range rows {
+		// Wall evidence serializes only under limit_* field names or a
+		// parked liveness — "limit-reached" covers the derived
+		// liveness_name every SaveInstances row carries, and the
+		// liveness-integer spellings cover rows written before the derived
+		// names existed (the enum is append-only, so 6 is stable). A row
+		// matching none carries no observation to parse.
+		if !accountLimitRowMightWall(raw) {
+			continue
+		}
+		var data []session.InstanceData
+		if err := json.Unmarshal(raw, &data); err != nil {
+			return true // an unreadable row may hold the wall — the pass surfaces it
+		}
+		for _, row := range data {
+			_, observations := session.AccountLimitEvidenceFromData(row)
+			for _, observation := range observations {
+				if stillWalls(observation) {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+// accountLimitWallFieldNeedles is the prefilter for durable rows: every
+// serialized shape of wall evidence contains at least one. It is RECALL,
+// never verdict — a matching row is decoded for real, so a false match costs
+// one row's parse while a missed row would hide a wall.
+var accountLimitWallFieldNeedles = [][]byte{
+	[]byte("limit_"),        // account_limit_observations and every limit_* field
+	[]byte("limit-reached"), // liveness_name on every row modern af writes parked
+	[]byte(`"liveness":6`),  // the parked int itself — compact- and
+	[]byte(`"liveness": 6`), // indent-encoded rows written before the names existed
+}
+
+func accountLimitRowMightWall(raw json.RawMessage) bool {
+	for _, needle := range accountLimitWallFieldNeedles {
 		if bytes.Contains(raw, needle) {
 			return true
 		}

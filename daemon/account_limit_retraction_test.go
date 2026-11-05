@@ -561,11 +561,20 @@ func registerAccountInstance(t *testing.T, m *Manager, repoID, repoPath, title, 
 }
 
 // codexUsageClaim renders one rate_limits rollout line — the only record the
-// usage indexer reads — timestamped ts with a primary window at pct percent.
-// The shape is handwritten from the pinned Codex record; the day directory is
+// usage indexer reads — timestamped ts with BOTH windows at pct percent: a
+// proof needs a value for every window the account is subject to, so the
+// default claim reports the primary and the weekly secondary alike. The
+// shape is handwritten from the pinned Codex record; the day directory is
 // derived from the record date so the fixture lands inside the enumeration
 // window it models.
 func codexUsageClaim(ts time.Time, pct float64) string {
+	return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":%v,"window_minutes":300,"resets_at":1761902400},"secondary":{"used_percent":%v,"window_minutes":10080,"resets_at":1762502400}}}}`,
+		ts.UTC().Format(time.RFC3339Nano), pct, pct)
+}
+
+// codexUsageClaimMissingSecondary renders a claim with "secondary": null —
+// the shape that says nothing about the weekly window's wall.
+func codexUsageClaimMissingSecondary(ts time.Time, pct float64) string {
 	return fmt.Sprintf(`{"timestamp":%q,"type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"primary":{"used_percent":%v,"window_minutes":300,"resets_at":1761902400},"secondary":null}}}`,
 		ts.UTC().Format(time.RFC3339Nano), pct)
 }
@@ -590,9 +599,9 @@ func rolloutName(suffix string) string {
 	return fmt.Sprintf("rollout-2025-11-10T09-00-00-00000000-0000-4000-8000-%012s.jsonl", suffix)
 }
 
-// usageReadingProof is the proof gate: only an OBSERVED, past-dated claim with
-// every reported window below the configured wall proves the account served at
-// the record's own instant.
+// usageReadingProof is the proof gate: only an OBSERVED, past-dated claim
+// that reports every window the account is subject to, each below the
+// configured wall, proves the account served at the record's own instant.
 func TestUsageReadingProof(t *testing.T) {
 	now := nowFunc()
 	at := now.Add(-time.Minute)
@@ -600,12 +609,17 @@ func TestUsageReadingProof(t *testing.T) {
 		return rateindex.AccountReading{Status: rateindex.StatusObserved,
 			Reading: quota.UsageReading{RecordedAt: recorded, Windows: windows}}
 	}
-	window := func(pct float64) quota.UsageWindow {
-		return quota.UsageWindow{Name: "primary", UsedPercent: pct}
+	window := func(name string, pct float64) quota.UsageWindow {
+		return quota.UsageWindow{Name: name, UsedPercent: pct}
+	}
+	// A healthy snapshot reports every window the account is subject to:
+	// primary and secondary alike below the configured wall.
+	healthy := func() []quota.UsageWindow {
+		return []quota.UsageWindow{window("primary", 40), window("secondary", 40)}
 	}
 
 	t.Run("a below-wall reading proves at its record timestamp", func(t *testing.T) {
-		proven, ok := usageReadingProof(observed(at, window(40)), 97, now)
+		proven, ok := usageReadingProof(observed(at, healthy()...), 97, now)
 		require.True(t, ok)
 		require.True(t, proven.Equal(at),
 			"the proof instant is the provider's timestamp, never when af happened to read it")
@@ -624,12 +638,12 @@ func TestUsageReadingProof(t *testing.T) {
 	})
 
 	t.Run("a future-dated record is untrustworthy", func(t *testing.T) {
-		_, ok := usageReadingProof(observed(now.Add(time.Minute), window(40)), 97, now)
+		_, ok := usageReadingProof(observed(now.Add(time.Minute), healthy()...), 97, now)
 		require.False(t, ok)
 	})
 
 	t.Run("an untimed record proves nothing", func(t *testing.T) {
-		_, ok := usageReadingProof(observed(time.Time{}, window(40)), 97, now)
+		_, ok := usageReadingProof(observed(time.Time{}, healthy()...), 97, now)
 		require.False(t, ok)
 	})
 
@@ -638,13 +652,19 @@ func TestUsageReadingProof(t *testing.T) {
 		require.False(t, ok, "no windows is no data, not headroom")
 	})
 
+	t.Run("a record missing a window is not proof", func(t *testing.T) {
+		_, ok := usageReadingProof(observed(at, window("primary", 10)), 97, now)
+		require.False(t, ok,
+			"a calm primary beside \"secondary\": null is silent on the weekly wall, not below it")
+	})
+
 	t.Run("a window at the wall is still the wall", func(t *testing.T) {
-		_, ok := usageReadingProof(observed(at, window(97)), 97, now)
+		_, ok := usageReadingProof(observed(at, window("primary", 97), window("secondary", 40)), 97, now)
 		require.False(t, ok, "below means below — at the wall keeps excluding")
 	})
 
 	t.Run("one hot window keeps the wall", func(t *testing.T) {
-		_, ok := usageReadingProof(observed(at, window(10), window(99)), 97, now)
+		_, ok := usageReadingProof(observed(at, window("primary", 10), window("secondary", 99)), 97, now)
 		require.False(t, ok,
 			"the account's own newest word still shows a window at the wall")
 	})
@@ -1190,9 +1210,54 @@ func TestAccountLimitProofWorthScanning(t *testing.T) {
 		manager, repoID, _ := newStatusTestManager(t)
 		codexAccountDir(t)
 		require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage(
-			`[{"title":"walled","status":"running",
+			`[{"title":"walled","status":0,
 			   "account_limit_observations":[{"agent":"codex","account":"work","observed_at":"2025-11-10T09:00:00Z"}]}]`)))
 		require.True(t, accountLimitProofWorthScanning(manager))
+	})
+
+	t.Run("a codex session without a codex wall stays skipped", func(t *testing.T) {
+		manager, repoID, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		// The row IS a codex session and even carries a wall — a claude
+		// one. The bytes "codex" everywhere must not run the pass: only an
+		// actual codex wall observation can (#6802 review).
+		require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage(
+			`[{"title":"walled","status":0,"program":"codex",
+			   "account_limit_observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}]}]`)))
+		require.False(t, accountLimitProofWorthScanning(manager),
+			"a claude wall on a codex session row is not a codex wall observation")
+	})
+
+	t.Run("an expired codex wall does not run the pass", func(t *testing.T) {
+		manager, repoID, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage(
+			`[{"title":"walled","status":0,
+			   "account_limit_observations":[{"agent":"codex","account":"work","observed_at":"2025-11-10T09:00:00Z","reset_at":"2025-11-10T10:00:00Z"}]}]`)))
+		require.False(t, accountLimitProofWorthScanning(manager),
+			"a wall whose reset already passed is not a wall — nothing left to free")
+	})
+
+	t.Run("a retracted codex wall does not run the pass", func(t *testing.T) {
+		manager, _, _ := newStatusTestManager(t)
+		resetAccountLimitRetractionQuarantine(t)
+		codexAccountDir(t)
+		writeRawAccountLimitLedger(t,
+			`{"schema_version":1,
+			  "observations":[{"agent":"codex","account":"work","observed_at":"2025-11-10T09:00:00Z"}],
+			  "retractions":[{"agent":"codex","account":"work","proven_at":"2025-11-10T12:00:00Z"}]}`)
+		require.False(t, accountLimitProofWorthScanning(manager),
+			"a wall already retracted is already free — nothing left to free")
+	})
+
+	t.Run("a legacy parked row's synthesized codex wall runs the pass", func(t *testing.T) {
+		manager, repoID, _ := newStatusTestManager(t)
+		codexAccountDir(t)
+		require.NoError(t, config.LoadState().SaveInstances(repoID, json.RawMessage(
+			`[{"title":"walled","status":0,"program":"codex","account":"work",
+			   "liveness":6,"limit_account":"work"}]`)))
+		require.True(t, accountLimitProofWorthScanning(manager),
+			"a parked row with a named codex account synthesizes a real wall observation")
 	})
 }
 
@@ -1231,4 +1296,31 @@ func TestReconcileAccountLimitProofsACarryLandingAfterTheSightingCannotRetractTh
 	require.NoError(t, err)
 	require.Empty(t, evidence.Retractions,
 		"a post-sighting claim inside the carried prefix stays the source account's — the wall stands")
+}
+
+// A record that reports only some of the windows the account is subject to
+// is silent about the rest: "secondary": null beside a calm primary says
+// nothing about the weekly wall, so it frees nothing even when it postdates
+// the sighting and clears the write margin (#6802 review).
+func TestReconcileAccountLimitProofsAMissingWindowIsNotProof(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	bypassAccountLimitProofGate(t)
+	base := nowFunc()
+	home, err := config.GetConfigDir()
+	require.NoError(t, err)
+
+	seedCodexRollout(t, home, "work", base.UTC().Format("2006/01/02"), rolloutName("000000000001"),
+		codexUsageClaimMissingSecondary(base.Add(-time.Minute), 10))
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: tmux.ProgramCodex, Account: "work", ObservedAt: base.Add(-time.Hour)},
+		},
+	}, nil)
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a snapshot silent on the weekly window is not proof of a healthy account")
 }

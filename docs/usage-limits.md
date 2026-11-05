@@ -443,8 +443,10 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   format carries no request-start field to order more precisely. Only a
   verified usage reading counts: today that is codex alone, so a claude,
   devin, or other agent's wall still ends at its claimed reset — or never,
-  when none was claimed. A reading that reports no windows is not a healthy
-  reading, and the indexer only scans each account's newest few rollouts —
+  when none was claimed. A reading that reports no windows — or omits any
+  window the account is subject to, like `"secondary": null` — is silent
+  about that window's wall, not proof it is below; and the indexer only
+  scans each account's newest few rollouts —
   an account whose usage history exceeds that window reads as unknown and
   keeps its wall until a fresh reading exists (tracked as
   [#6809](https://github.com/sachiniyer/agent-factory/issues/6809)). A proof
