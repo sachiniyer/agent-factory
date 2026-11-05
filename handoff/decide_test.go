@@ -569,7 +569,7 @@ func TestDecideBlockers(t *testing.T) {
 				f.Rails.HaltReason = "move-failed"
 			},
 			wantKind: KindDefer, wantReason: reasonMoverHalted,
-			eventKind: EventIgnored, eventReason: reasonMoverHalted,
+			eventKind: EventHalted, eventReason: reasonMoverHalted,
 		},
 		{
 			name: "move cap reached is a switch-loop",

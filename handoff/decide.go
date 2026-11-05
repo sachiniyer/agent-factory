@@ -396,7 +396,7 @@ func Decide(f Facts) Decision {
 	}
 	if f.Rails.Halted {
 		block(KindDefer, reasonMoverHalted,
-			Event{Kind: EventIgnored, Reason: reasonMoverHalted,
+			Event{Kind: EventHalted, Reason: reasonMoverHalted,
 				Params: map[string]string{"halt_reason": f.Rails.HaltReason}})
 	}
 	if f.Rails.MovesInWindow >= cfg.MaxMoves {

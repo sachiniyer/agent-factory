@@ -266,10 +266,19 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 
 // resolveRecipient applies the report_to grammar (R15): "<project>/<title>"
 // resolves the session whose project and title both name it — the project
-// part matching the repo's path, basename, or repoID — while a bare title
-// must name exactly one live session. Ambiguity is a skip, never a guess.
+// part matching the repo's id, full root, or basename — while a bare title
+// must name exactly one live session. The spec splits at its LAST slash so a
+// full repository root qualifies too ("/home/u/repo/observer"). A qualifier
+// that itself contains slashes must equal the full root (or repo id)
+// exactly — basename matching is reserved for single-segment qualifiers so
+// "other/repo" cannot collide with "/home/u/repo" (#6818 review). Ambiguity
+// is a skip, never a guess.
 func resolveRecipient(spec string, inputs []SessionInput) (SessionInput, bool, bool) {
-	project, title, qualified := strings.Cut(spec, "/")
+	project, title, qualified := spec, "", false
+	if i := strings.LastIndex(spec, "/"); i >= 0 {
+		project, title, qualified = spec[:i], spec[i+1:], true
+	}
+	projectIsPath := strings.Contains(project, "/")
 	var matches []SessionInput
 	for _, in := range inputs {
 		if !in.Live || !in.Started {
@@ -283,7 +292,9 @@ func resolveRecipient(spec string, inputs []SessionInput) (SessionInput, bool, b
 			if i := strings.LastIndexByte(base, '/'); i >= 0 {
 				base = base[i+1:]
 			}
-			if project != in.RepoID && project != in.RepoRoot && project != base {
+			projectOK := project == in.RepoID || project == in.RepoRoot ||
+				(!projectIsPath && project == base)
+			if !projectOK {
 				continue
 			}
 		} else if in.Title != spec {

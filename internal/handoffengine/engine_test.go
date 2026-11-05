@@ -223,6 +223,35 @@ func TestTickReportQualifiedResolvesByProject(t *testing.T) {
 	}
 }
 
+func TestTickReportQualifiedByFullRepoRoot(t *testing.T) {
+	// A multi-segment qualifier names the full root — "#6818 review: splitting
+	// at the first slash made absolute-path specs unresolvable.
+	d := &depCounts{mode: "shadow", reportTo: "/home/u/repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("full-root qualified report did not resolve: %+v", d.reports)
+	}
+}
+
+func TestTickReportPathQualifierDoesNotBasenameMatch(t *testing.T) {
+	// "other/repo" must not basename-match the "/home/u/repo" root.
+	d := &depCounts{mode: "shadow", reportTo: "other/repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("path qualifier basename-matched the wrong root: %+v", d.reports)
+	}
+}
+
 func TestTickReportAmbiguousSkips(t *testing.T) {
 	d := &depCounts{mode: "shadow", reportTo: "observer"}
 	e := New(d.deps())

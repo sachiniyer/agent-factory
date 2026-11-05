@@ -339,6 +339,9 @@ func (m *Manager) enqueueHandoffReport(key string, rows []handoff.EventRow) {
 // deliverHandoffReport sends one fixed-template prompt to the resolved
 // recipient session. A session that vanished between resolution and send
 // warns and drops — a report is never retried into a different session.
+// The send is automated, so it passes the same liveness guard as task
+// deliveries: a limit-parked or unrecoverable recipient is skipped rather
+// than typed into its limit picker (#6818 review).
 func (m *Manager) deliverHandoffReport(key, text string) {
 	m.mu.Lock()
 	var target *session.Instance
@@ -352,6 +355,18 @@ func (m *Manager) deliverHandoffReport(key, text string) {
 	m.mu.Unlock()
 	if target == nil {
 		m.warn().Printf("account-handoff report recipient %s is gone — dropped", key)
+		return
+	}
+	// Mirror the task-send fencing: hold observation settlement and the limit
+	// fence while reading liveness, then release before transport I/O —
+	// accountLimitMu must never be acquired while holding m.mu.
+	releaseObservationFence := target.HoldAgentObservationSettlement()
+	m.accountLimitMu.Lock()
+	livenessErr := taskPromptTargetLivenessError(target.Title, target.GetLiveness(), true)
+	m.accountLimitMu.Unlock()
+	releaseObservationFence()
+	if livenessErr != nil {
+		m.warn().Printf("account-handoff report skipped: %v", livenessErr)
 		return
 	}
 	status, err := target.SendPromptWithEvidence(text, nowFunc)
