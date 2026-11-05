@@ -509,7 +509,18 @@ func (c *ConfigPane) beginEdit() {
 	c.editing = true
 	c.clearStatus()
 	c.sizeEditField()
-	c.input.SetValue(entry.Value)
+	// Pre-flatten the seed the same way the field's own sanitizer does
+	// (flattenToOneLine, the shared flattener from config_pane_width.go).
+	// bubbles v0.20.0's textinput.SetValue runs a sanitizer that replaces
+	// newlines and tabs with spaces, so feeding it a raw multi-line value
+	// flattens it inside the field BEFORE the user types anything — and
+	// commitEdit's untouched-field guard, which compares the field against
+	// the seed, would then read the flattened field as "edited" against the
+	// unflattened entry.Value and rewrite a multi-line value the user only
+	// looked at. Seeding with the already-flattened form makes the value
+	// stable under the field's own round trip, so open + commit is a true
+	// no-op. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
+	c.input.SetValue(flattenToOneLine(entry.Value))
 	c.input.CursorEnd()
 	c.input.Focus()
 }
@@ -564,7 +575,14 @@ func (c *ConfigPane) commitEdit() {
 	// The GUARANTEE against truncation is the absent CharLimit above, not this:
 	// a truncating field would make value != entry.Value, which reads as an edit
 	// and would write straight through this check.
-	if value == entry.Value {
+	//
+	// The comparison is against the FLATTENED entry.Value, not the raw one,
+	// because beginEdit seeds the field with flattenToOneLine(entry.Value) and
+	// the field's sanitizer flattens newlines/tabs to spaces — so the field
+	// holds the flattened form. Comparing against the raw multi-line
+	// entry.Value would always read as an edit for a multi-line value and
+	// rewrite it destructively on an untouched enter+enter. See beginEdit.
+	if value == flattenToOneLine(entry.Value) {
 		c.cancelEdit()
 		return
 	}
