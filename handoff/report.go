@@ -54,38 +54,40 @@ func EventRowSignature(r EventRow) string {
 //	[af handoff] kind=<kind> reason=<code> session="<title>" key=<key>
 //	agent=<agent> from=<from> to=<to> mode=<mode> params=<k=v;k=v>
 //
-// Fields arrive already sanitized by the event-log writer (title capped and
-// control-stripped); the template quotes the title so spaces cannot mangle
-// the key=value scan.
+// Every interpolated field passes through the same cap/control-strip
+// normalizer the event log applies — the writer sanitizes its own copies,
+// so the rows queued for reporting must be normalized here instead (#6818
+// review). The template quotes the title so spaces cannot mangle the
+// key=value scan.
 func ReportLine(r EventRow) string {
 	var b strings.Builder
 	b.WriteString("[af handoff] kind=")
-	b.WriteString(string(r.Kind))
+	b.WriteString(sanitizeEventLabel(string(r.Kind)))
 	b.WriteString(" reason=")
-	b.WriteString(r.ReasonCode)
+	b.WriteString(sanitizeEventLabel(r.ReasonCode))
 	if r.Title != "" {
 		b.WriteString(" session=\"")
-		b.WriteString(r.Title)
+		b.WriteString(sanitizeEventLabel(r.Title))
 		b.WriteByte('"')
 	}
 	if r.SessionKey != "" {
 		b.WriteString(" key=")
-		b.WriteString(r.SessionKey)
+		b.WriteString(sanitizeEventLabel(r.SessionKey))
 	}
 	if r.Agent != "" {
 		b.WriteString(" agent=")
-		b.WriteString(r.Agent)
+		b.WriteString(sanitizeEventLabel(r.Agent))
 	}
 	if r.From != "" {
 		b.WriteString(" from=")
-		b.WriteString(r.From)
+		b.WriteString(sanitizeEventLabel(r.From))
 	}
 	if r.To != "" {
 		b.WriteString(" to=")
-		b.WriteString(r.To)
+		b.WriteString(sanitizeEventLabel(r.To))
 	}
 	b.WriteString(" mode=")
-	b.WriteString(r.Mode)
+	b.WriteString(sanitizeEventLabel(r.Mode))
 	if len(r.Params) > 0 {
 		keys := make([]string, 0, len(r.Params))
 		for k := range r.Params {
@@ -97,9 +99,9 @@ func ReportLine(r EventRow) string {
 			if i > 0 {
 				b.WriteByte(';')
 			}
-			b.WriteString(k)
+			b.WriteString(sanitizeEventLabel(k))
 			b.WriteByte('=')
-			b.WriteString(r.Params[k])
+			b.WriteString(sanitizeEventLabel(r.Params[k]))
 		}
 	}
 	return b.String()

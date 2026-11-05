@@ -45,6 +45,24 @@ func TestReportLineCarriesOnlyStructuredFields(t *testing.T) {
 	}
 }
 
+func TestReportLineSanitizesLabels(t *testing.T) {
+	// The event-log writer sanitizes its own copies; the report path must
+	// normalize the same fields itself (#6818 review).
+	long := strings.Repeat("x", 200)
+	row := EventRow{
+		Kind: EventWall, ReasonCode: "wall", Mode: "shadow",
+		Title:      long + "\n injected",
+		SessionKey: "sess\n-1",
+	}
+	line := ReportLine(row)
+	if strings.Contains(line, "\n") || strings.Contains(line, "injected") {
+		t.Fatalf("control characters leaked into the report: %q", line)
+	}
+	if strings.Contains(line, strings.Repeat("x", 121)) {
+		t.Fatalf("title was not capped at %d chars", eventLabelCap)
+	}
+}
+
 func TestReportDigestHeaderAndLines(t *testing.T) {
 	rows := []EventRow{
 		{Kind: EventWall, ReasonCode: "wall", Mode: "shadow"},
