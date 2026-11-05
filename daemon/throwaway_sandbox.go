@@ -289,13 +289,17 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 		log.ErrorLog.Printf("refusing to tear down the default AF home %s", canonHome)
 		return
 	}
-	killThrowawayTmuxSockets(m)
+	killThrowawayTmuxSockets(canonHome, m)
 	procs, unresolved := throwawayBoundProcesses(canonHome, m)
 	if len(procs) == 0 {
 		return
 	}
 	remaining := throwawayKillFn(procs, throwawayReapGrace, throwawayReapTermWait, func(outcome proctree.ReapOutcome, format string, args ...any) {
-		log.WarningLog.Printf("throwaway teardown: "+format, args...)
+		if outcome == proctree.ReapSignalled {
+			log.InfoLog.Printf("throwaway teardown: "+format, args...)
+		} else {
+			log.WarningLog.Printf("throwaway teardown: "+format, args...)
+		}
 	})
 	if len(remaining) > 0 {
 		pids := make([]string, 0, len(remaining))
@@ -311,10 +315,13 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 
 // killThrowawayTmuxSockets runs kill-server on every unix socket under the
 // marker's recorded TMUX_TMPDIR. The dir is required to sit strictly inside
-// the recorded sandbox root: a marker claiming /tmp or the system temp dir
-// would sweep other users' — and this install's real — tmux sockets, so the
-// guard refuses it and the env-bound teardown still applies.
-func killThrowawayTmuxSockets(m *throwawaysandbox.Marker) {
+// the recorded sandbox root, and the root must contain the marked home
+// itself: a marker cannot point teardown at directories outside the sandbox
+// it was written into. A marker claiming /tmp, the system temp dir, or a
+// root that does not enclose its own home would sweep other users' — and
+// this install's real — tmux sockets, so those shapes are refused outright;
+// the env-bound teardown still applies.
+func killThrowawayTmuxSockets(canonHome string, m *throwawaysandbox.Marker) {
 	if m.TmuxTmpdir == "" || m.SandboxRoot == "" {
 		return
 	}
@@ -329,6 +336,10 @@ func killThrowawayTmuxSockets(m *throwawaysandbox.Marker) {
 	sep := string(os.PathSeparator)
 	if sysTmp, err := canonicalDir(os.TempDir()); err == nil && (root == sysTmp || root == sep) {
 		log.WarningLog.Printf("refusing tmux teardown: sandbox root %s is a shared directory", root)
+		return
+	}
+	if canonHome != root && !strings.HasPrefix(canonHome, root+sep) {
+		log.WarningLog.Printf("refusing tmux teardown: marked home %s is not inside recorded sandbox root %s", canonHome, root)
 		return
 	}
 	if tmuxDir == root || !strings.HasPrefix(tmuxDir, root+sep) {

@@ -368,28 +368,41 @@ func TestKillThrowawayTmuxSocketsGuardsSharedRoots(t *testing.T) {
 	marker := func(root, tmuxDir string) *throwawaysandbox.Marker {
 		return &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: tmuxDir, SandboxRoot: root}
 	}
-	// A private dir under the sandbox root: the socket is killed.
+	// A private dir under the sandbox root: the socket is killed. The marked
+	// home sits inside the root, the shape our own scaffolding produces.
 	sandbox := t.TempDir()
+	canonSandbox, err := canonicalDir(sandbox)
+	if err != nil {
+		t.Fatal(err)
+	}
 	good := unixSock(t, filepath.Join(sandbox, "tmux", "tmux-"+strconv.Itoa(os.Getuid())))
-	killThrowawayTmuxSockets(marker(sandbox, filepath.Join(sandbox, "tmux")))
+	killThrowawayTmuxSockets(canonSandbox, marker(sandbox, filepath.Join(sandbox, "tmux")))
 	if len(killed) != 1 || killed[0] != good {
 		t.Fatalf("killed %v, want only %s", killed, good)
 	}
 	killed = nil
 	// Every out-of-root or shared-root shape is refused.
 	shared := unixSock(t, filepath.Join(os.TempDir(), "af-sbxtest-"+strconv.Itoa(os.Getpid())))
-	killThrowawayTmuxSockets(marker(os.TempDir(), filepath.Dir(shared)))
+	killThrowawayTmuxSockets(canonSandbox, marker(os.TempDir(), filepath.Dir(shared)))
 	if len(killed) != 0 {
 		t.Fatalf("a shared-root marker killed sockets: %v", killed)
 	}
 	outside := unixSock(t, t.TempDir())
-	killThrowawayTmuxSockets(marker(sandbox, filepath.Dir(outside)))
+	killThrowawayTmuxSockets(canonSandbox, marker(sandbox, filepath.Dir(outside)))
 	if len(killed) != 0 {
 		t.Fatalf("an out-of-root marker killed sockets: %v", killed)
 	}
-	killThrowawayTmuxSockets(marker(sandbox, sandbox))
+	killThrowawayTmuxSockets(canonSandbox, marker(sandbox, sandbox))
 	if len(killed) != 0 {
 		t.Fatal("tmux dir equal to the sandbox root was not refused")
+	}
+	// A forged marker naming a root that does not contain its own home must
+	// not reach anyone else's tmux dir.
+	forgedRoot := t.TempDir()
+	forgedSock := unixSock(t, filepath.Join(forgedRoot, "tmux"))
+	killThrowawayTmuxSockets(canonSandbox, marker(forgedRoot, filepath.Dir(forgedSock)))
+	if len(killed) != 0 {
+		t.Fatalf("a marker claiming an unrelated root killed sockets: %v", killed)
 	}
 }
 
