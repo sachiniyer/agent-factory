@@ -15,8 +15,16 @@ func AccountLimitEvidenceFromData(data InstanceData) (string, []AccountLimitObse
 	}
 	if account == "" && data.Account != "" && !data.AccountAutoSelected {
 		// A pre-limit_account row with a named account can only be an explicit pin,
-		// so that account produced the persisted current wall.
+		// so that account produced the persisted current wall — unless the row also
+		// carries a committed swap naming that account its target. After
+		// commitNewAccountSwapIdentity the persisted account IS the replacement
+		// runtime, and the wall belongs to the outgoing identity the swap recorded
+		// ("" for the ambient default login) — the account change itself created
+		// no evidence (#6764).
 		account = data.Account
+		if swap := data.PendingAccountSwap; swap != nil && swap.To == account {
+			account = swap.From
+		}
 	}
 	if account == "" || len(observations) > 0 {
 		return account, observations

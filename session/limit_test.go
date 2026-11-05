@@ -106,6 +106,45 @@ func TestAccountLimitObservationPreservesSafestReset(t *testing.T) {
 	})
 }
 
+// TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset is the session-level
+// half of #6765: the poll re-parses an unchanged banner against a later clock
+// every tick, and the time-only and relative forms resolve to a LATER instant
+// each time. The same reset phrase is the same observation — the stored
+// instant is the first parse's, the one nearest the wall the provider printed.
+func TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset(t *testing.T) {
+	i := &Instance{Program: tmux.ProgramCodex}
+	first := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	phrase := "try again in 4 days 2 hours 46 minutes."
+
+	require.True(t, i.SetLimitReachedAtEpoch(first, phrase, i.stateEpoch))
+	require.True(t, i.LimitReached())
+	reset, ok := i.LimitResetAt()
+	require.True(t, ok)
+	require.True(t, reset.Equal(first))
+
+	// A re-read of the same banner re-parses to a later instant but must not
+	// move the stored reset — the phrase already produced this row's reset.
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Minute), phrase, i.stateEpoch))
+	reset, _ = i.LimitResetAt()
+	require.True(t, reset.Equal(first), "an unchanged banner's re-read must not move the stored reset")
+
+	// The phrase rides the durable row beside the reset it produced, so a
+	// daemon restart keeps the pairing (#6765).
+	require.Equal(t, phrase, i.ToInstanceData().LimitResetEvidence)
+
+	// A different phrase is NEW evidence and applies normally.
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(time.Hour), "try again at 9:00 AM", i.stateEpoch))
+	reset, _ = i.LimitResetAt()
+	require.True(t, reset.Equal(first.Add(time.Hour)))
+
+	// A reset that arrives without a phrase always applies — and clears the
+	// slot so it cannot keep describing this reset.
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Hour), "", i.stateEpoch))
+	reset, _ = i.LimitResetAt()
+	require.True(t, reset.Equal(first.Add(2*time.Hour)))
+	require.Empty(t, i.ToInstanceData().LimitResetEvidence)
+}
+
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still
 // blocks the session, but LimitResetAt reports no known time.
 func TestSetLimitReached_NoResetTime(t *testing.T) {

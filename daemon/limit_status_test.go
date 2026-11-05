@@ -136,6 +136,85 @@ func TestRefreshStatuses_LimitBannerBecomesLimitReached(t *testing.T) {
 	}
 }
 
+// codexRelativeLimitBanner is the relative-countdown form Codex renders
+// (openai/codex#3031). It is the sharpest repeated-read case: every re-parse
+// resolves "in N" against a later now, so an unchanged banner moves its reset
+// on every poll when the poll rewrites the stored value (#6765).
+const codexRelativeLimitBanner = "■ You've hit your usage limit, try again in 4 days 2 hours 46 minutes."
+
+// codexTimeOnlyLimitBanner is Codex's 5h-window form: a clock time with no
+// date. Re-reading it after the stated time mints the NEXT day's occurrence —
+// a stale banner on screen postpones auto-resume by a day, not by a tick.
+const codexTimeOnlyLimitBanner = "■ You've hit your usage limit. Please try again at 6:34 AM."
+
+// TestRefreshStatuses_UnchangedBannerKeepsReset is the #6765 regression:
+// several polls over an unchanged banner must not move its stored reset. The
+// relative form drifts every poll; the time-only form jumps a full day once
+// the stated clock time passes. Re-reading evidence already recorded is not a
+// new observation — the first parse of a phrase is the one nearest the wall
+// the provider printed.
+func TestRefreshStatuses_UnchangedBannerKeepsReset(t *testing.T) {
+	base := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+	now := base
+	prevNow := nowFunc
+	nowFunc = func() time.Time { return now }
+	t.Cleanup(func() { nowFunc = prevNow })
+
+	t.Run("relative countdown does not drift across polls", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		backend := limitBannerBackend{FakeBackend: session.NewFakeBackend(), content: codexRelativeLimitBanner}
+		inst := registerStarted(t, manager, repoID, repoPath, "limited", backend, true, session.Running)
+		inst.Program = "codex"
+
+		manager.RefreshStatuses()
+		first, ok := inst.LimitResetAt()
+		if !ok {
+			t.Fatal("a relative countdown banner must park with a parsed reset")
+		}
+		for step := 1; step <= 3; step++ {
+			now = base.Add(time.Duration(step) * time.Minute)
+			// Defends the red run too: without the fix the poll reads the
+			// real clock, and a slept gap still moves the reset.
+			time.Sleep(5 * time.Millisecond)
+			manager.RefreshStatuses()
+			got, ok := inst.LimitResetAt()
+			if !ok {
+				t.Fatalf("poll %d dropped the stored reset", step+1)
+			}
+			if !got.Equal(first) {
+				t.Fatalf("poll %d moved the reset from %v to %v: re-reading an unchanged banner is not a new observation", step+1, first, got)
+			}
+		}
+	})
+
+	t.Run("time-only reset does not jump to tomorrow past the stated time", func(t *testing.T) {
+		manager, repoID, repoPath := newStatusTestManager(t)
+		backend := limitBannerBackend{FakeBackend: session.NewFakeBackend(), content: codexTimeOnlyLimitBanner}
+		inst := registerStarted(t, manager, repoID, repoPath, "limited", backend, true, session.Running)
+		inst.Program = "codex"
+
+		now = time.Date(2026, 11, 4, 6, 0, 0, 0, time.Local)
+		manager.RefreshStatuses()
+		first, ok := inst.LimitResetAt()
+		want := time.Date(2026, 11, 4, 6, 34, 0, 0, time.Local).UTC()
+		if !ok || !first.Equal(want) {
+			t.Fatalf("the 6:34 AM banner at 6:00 must park for today 6:34 (%v), got %v ok=%v", want, first, ok)
+		}
+
+		// The stated time passes while the banner is still on screen: the pane
+		// is unchanged, so the stored reset must not become tomorrow's.
+		now = time.Date(2026, 11, 4, 6, 40, 0, 0, time.Local)
+		manager.RefreshStatuses()
+		got, ok := inst.LimitResetAt()
+		if !ok {
+			t.Fatal("a still-visible banner must not drop its stored reset")
+		}
+		if !got.Equal(first) {
+			t.Fatalf("polling past 6:34 moved the reset from %v to %v: the unchanged banner is the same evidence", first, got)
+		}
+	})
+}
+
 // TestRefreshStatuses_LimitClearsWhenBannerGone: a session that recovers on its
 // own — the banner scrolls away and the pane goes idle-clean — leaves the limit
 // state and resolves back to Ready.

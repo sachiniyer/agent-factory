@@ -1,9 +1,12 @@
 package app
 
 import (
+	"context"
 	"fmt"
 	"strings"
+	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -418,15 +421,94 @@ func (m *home) handleStateTasks(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// hooksReseedTimeout bounds the hooks pane's on-open re-read. The read is
+// ordinary file I/O (global/legacy/checked-in/personal TOML) that an
+// unavailable mount can stall indefinitely; bounding it keeps a stuck read
+// from freezing the Bubble Tea update loop when the user opens Hooks. Mirrors
+// refreshDefaultProgram's localDefaultProgramTimeout — the same bounded
+// synchronous read the event loop already uses for live config probes — and a
+// var so tests can shorten it.
+var hooksReseedTimeout = 10 * time.Second
+
 // showHooksOverlay opens the post-worktree hooks editor as a modal overlay
 // (#1024 PR 4: hooks lost their persistent sidebar slot). The editor opens
 // with input focus so its key loop (n add, enter edit, D delete, esc close)
 // is live immediately.
+//
+// The pane is re-read from disk on every open unless it is dirty — the same
+// no-stale-copy contract showConfigEditor applies to the global config editor
+// (a stale editor would "silently overwrite the newer file"). config.toml is
+// hand-editable by design, and the daemon resolves hook commands fresh from
+// disk at every hook-run, so an out-of-band edit (a second TUI, a hand edit)
+// is live immediately — the pane must show it as it is NOW rather than the
+// startup snapshot, or any save clobbers the out-of-band hooks from the
+// repo config with no error. A dirty pane is left untouched: it holds an
+// in-memory-only edit from a failed save (#1001) that lives nowhere on disk,
+// and reloading would discard the very edit the user is trying to save.
+//
+// A re-read that fails is surfaced and the overlay is NOT opened: the save
+// path writes only the in-repo key, so a stale pane opened for editing could
+// save successfully and overwrite newer on-disk hooks without ever surfacing
+// the read failure. Refusing to open until a fresh snapshot is obtained is the
+// same "do not edit onto a broken read" contract showConfigEditor applies.
 func (m *home) showHooksOverlay() (tea.Model, tea.Cmd) {
+	if err := m.reseedHooksFromDisk(); err != nil {
+		return m, m.handleError(err)
+	}
 	m.hooksPane.SetFocus(true)
 	m.layoutPaneOverlays()
 	m.state = stateHooks
 	return m, nil
+}
+
+// reseedHooksFromDisk re-reads the repo's post-worktree hooks from the on-disk
+// config into the hooks pane, so the editor shows the config as it is now
+// rather than the startup snapshot. It is the hooks-pane half of the
+// no-stale-copy contract showConfigEditor applies to the global config
+// editor: an editor showing a stale copy would silently overwrite a newer
+// file on save, deleting hooks added out-of-band (a hand edit, a second TUI
+// session, an `af config set`) since the TUI started.
+//
+// The re-read is gated on !IsDirty: a dirty pane holds an in-memory-only edit
+// from a failed save (#1001) that lives nowhere on disk, so reloading would
+// discard the very edit the user is retrying. SetCommands resets the pane's
+// committed baseline and dirty flag, so a clean re-read leaves the pane
+// non-dirty and ready to edit the live list.
+//
+// The read runs under hooksReseedTimeout via ResolveConfigForRepoContext, the
+// bounded variant of ResolveConfigForRepo: the unbounded call could block
+// indefinitely on a slow or unavailable mount and freeze the Bubble Tea update
+// loop on every Hooks open. This matches refreshDefaultProgram's bounded
+// synchronous read on the event loop.
+//
+// Skipped (returns nil) in remote mode: the project's in-repo config is on the
+// daemon's host, so resolving it from this machine would read an unrelated
+// (or absent) file. The pane is already read-only in remote mode
+// (switchProject/home_model set the reason at startup), so there is nothing
+// to clobber and nothing to re-read. A read failure is returned so the caller
+// can surface it rather than open an editable stale pane (see showHooksOverlay).
+func (m *home) reseedHooksFromDisk() error {
+	hp := m.hooksPane
+	if hp.IsDirty() {
+		return nil
+	}
+	if isRemoteTarget() || m.repoRoot == "" {
+		return nil
+	}
+	repo := &config.RepoContext{
+		Root:         m.repoRoot,
+		IdentityRoot: m.repoIdentityRoot,
+		ID:           m.repoID,
+	}
+	ctx, cancel := context.WithTimeout(m.ctx, hooksReseedTimeout)
+	defer cancel()
+	repoCfg, err := config.ResolveConfigForRepoContext(ctx, repo)
+	if err != nil {
+		return fmt.Errorf("hooks overlay: failed to re-resolve repo config for %s: %w", m.repoRoot, err)
+	}
+	hp.SetCommands(repoCfg.PostWorktreeCommands)
+	m.store.SetHookCount(len(repoCfg.PostWorktreeCommands))
+	return nil
 }
 
 // showConfigEditor opens the global config editor overlay, reading config fresh

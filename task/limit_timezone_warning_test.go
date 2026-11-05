@@ -21,7 +21,7 @@ func TestClaudeResetTimezoneWarningDeduplicated(t *testing.T) {
 	now := time.Date(2026, 9, 7, 11, 0, 0, 0, time.FixedZone("daemon", -4*60*60))
 	banner := "Claude usage limit reached. Your limit will reset at 5pm (XYZ)"
 	for i := 0; i < 3; i++ {
-		reset, ok := parseClaudeReset(banner, now)
+		reset, _, ok := parseClaudeReset(banner, now)
 		if !ok || reset.Format(time.RFC3339) != "2026-09-07T21:00:00Z" {
 			t.Fatalf("parse %d: reset=%s parsed=%v", i, reset, ok)
 		}
@@ -102,7 +102,7 @@ func TestClaudeResetTimezoneWarningKey(t *testing.T) {
 		{"Claude usage limit reached. Changed banner\nYour limit will reset at 5pm (ABC)", 3},
 	}
 	for _, tc := range cases {
-		if _, ok := parseClaudeReset(tc.content, now); !ok {
+		if _, _, ok := parseClaudeReset(tc.content, now); !ok {
 			t.Fatal("reset not parsed")
 		}
 		if got := strings.Count(warnings.String(), "\n"); got != tc.lines {
@@ -120,7 +120,7 @@ func TestClaudeResetLimitTimezoneWarningRequiresClock(t *testing.T) {
 	now := time.Date(2026, 9, 7, 11, 0, 0, 0, time.FixedZone("daemon", -4*60*60))
 	const firstLine = "Claude usage limit reached.\n"
 	detector := NewLimitDetector(nil)
-	hit, reset, parsed := detector.Check(firstLine+"Your limit will reset when available (XYZ)", "claude", now)
+	hit, reset, parsed, _ := detector.Check(firstLine+"Your limit will reset when available (XYZ)", "claude", now)
 	if !hit || parsed || !reset.IsZero() {
 		t.Fatalf("incomplete banner: hit=%v parsed=%v reset=%s", hit, parsed, reset)
 	}
@@ -138,7 +138,7 @@ func TestClaudeResetLimitTimezoneWarningRequiresClock(t *testing.T) {
 	// clock. The incomplete capture must not suppress this actual fallback.
 	warnings.Reset()
 	for i := 0; i < 2; i++ {
-		hit, reset, parsed = detector.Check(firstLine+"Your limit will reset at 5pm (XYZ)", "claude", now)
+		hit, reset, parsed, _ = detector.Check(firstLine+"Your limit will reset at 5pm (XYZ)", "claude", now)
 		if !hit || !parsed || reset.Format(time.RFC3339) != "2026-09-07T21:00:00Z" {
 			t.Fatalf("complete banner: hit=%v parsed=%v reset=%s", hit, parsed, reset)
 		}

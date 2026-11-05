@@ -221,6 +221,19 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
 		if err == nil {
+			// A relative override that resolves in the main checkout but is
+			// untracked will be absent from the clean-checkout worktree a
+			// session launches in (#6499): the repo-root anchor genuinely
+			// predicts the worktree only for tracked relative paths.
+			// Downgrade the PASS to an advisory WARN so the doctor does not
+			// report a guaranteed-false PASS for an untracked file.
+			if relativeOverrideUntracked(workspace, command, check.Path) {
+				header = append(header, agent+"=present")
+				report.Warn(sectionEnvironment, agent,
+					untrackedOverrideMessage(command, check.Path),
+					untrackedOverrideRemediation, false)
+				continue
+			}
 			header = append(header, agent+"=present")
 			report.Pass(sectionEnvironment, agent, fmt.Sprintf("%q resolves to %s", command, check.Path))
 			continue

@@ -286,6 +286,15 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// limitResetEvidence is the reset phrase the poll's parse consumed to
+	// produce limitResetAt (#6765). An unchanged banner re-parses to the same
+	// phrase, so SetLimitReachedAtEpoch keeps the stored instant — the first
+	// parse is nearest the wall the provider printed — instead of letting a
+	// time-only or relative form drift forward on every tick. Empty when the
+	// stored reset came from a path that observed no phrase (a send-path park,
+	// a TUI mirror, or an unparseable banner). Persisted beside limitResetAt so
+	// a restart does not lose the pairing.
+	limitResetEvidence string
 	// limitAgent and limitAccount attribute the current limit after Program or
 	// Account changes. Account labels are scoped to an agent, so neither field
 	// alone identifies the provider identity that produced the wall.
@@ -671,6 +680,17 @@ type Instance struct {
 	// replacement is provisioned. It is independent of userKilled: restore
 	// failures retain wanted sessions, not kill tombstones.
 	runtimeCleanupStateUnknown bool
+	// failedRuntimeCleanup retains the raw rejected cleanup handle when
+	// FromInstanceData's rebuild fail-closed for a preserved archive, so the
+	// next checkpoint can republish it and a later restart retries the rebuild
+	// instead of laundering the handle into the orphan the marker exists to
+	// prevent (#5867). The inert backend the fail-closed reload leaves behind
+	// carries no cleanup identity, so without this field the handle is gone
+	// from the instance the moment the rebuild fails; one ForStorage later the
+	// on-disk row carries neither a handle nor the unknown flag, and a
+	// subsequent kill runs the no-op-success path and deletes the only record
+	// naming the preserved still-un-reaped workspace.
+	failedRuntimeCleanup *RuntimeCleanupData
 	// pendingTabCleanup holds the tmux cleanup handles of tabs already durably
 	// removed from Tabs whose teardown was never confirmed (#2669). Guarded by
 	// i.mu like Tabs, because a close stages both under one acquisition and a

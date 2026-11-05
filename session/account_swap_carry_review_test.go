@@ -70,6 +70,37 @@ func TestCarryRefusesARecordedConversationThatIsNoLongerTheNewest(t *testing.T) 
 		require.Nil(t, inst.accountSwapLaunch.carry)
 		require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback)
 	})
+	t.Run("codex with a newer sub-agent rollout", func(t *testing.T) {
+		home := carryAmbientProviderHomes(t)
+		inst, _ := carrySwapInstance(t, tmux.ProgramCodex)
+		recordOutgoingConversation(t, inst, tmux.ProgramCodex, carryTestID)
+		source := filepath.Join(home, ".codex")
+		recorded := writeCarryFile(t, source, codexRolloutRel(carryTestID), codexRollout(inst.GetWorktreePath()))
+		subagent := writeCarryFile(t, source, codexRolloutRel(newerConversationID),
+			codexRolloutWithSource(inst.GetWorktreePath(), `{"subagent":"review"}`))
+		setModTime(t, recorded, past)
+		setModTime(t, subagent, past.Add(time.Minute))
+
+		require.NoError(t, inst.ValidateAccountSwap("work"))
+		require.NotNil(t, inst.accountSwapLaunch.carry,
+			"a sub-agent's rollout shares the parent's directory but can never be the conversation the pane is in (#6766)")
+	})
+	t.Run("codex with a newer exec rollout stays stale", func(t *testing.T) {
+		home := carryAmbientProviderHomes(t)
+		inst, _ := carrySwapInstance(t, tmux.ProgramCodex)
+		recordOutgoingConversation(t, inst, tmux.ProgramCodex, carryTestID)
+		source := filepath.Join(home, ".codex")
+		recorded := writeCarryFile(t, source, codexRolloutRel(carryTestID), codexRollout(inst.GetWorktreePath()))
+		newer := writeCarryFile(t, source, codexRolloutRel(newerConversationID),
+			codexRolloutWithSource(inst.GetWorktreePath(), `"exec"`))
+		setModTime(t, recorded, past)
+		setModTime(t, newer, past.Add(time.Minute))
+
+		require.NoError(t, inst.ValidateAccountSwap("work"))
+		require.Nil(t, inst.accountSwapLaunch.carry)
+		require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback,
+			"af launches `codex exec` sessions itself, so an exec rollout CAN be the pane's own thread (#6766)")
+	})
 	t.Run("codex with a newer rollout for another worktree", func(t *testing.T) {
 		home := carryAmbientProviderHomes(t)
 		inst, _ := carrySwapInstance(t, tmux.ProgramCodex)

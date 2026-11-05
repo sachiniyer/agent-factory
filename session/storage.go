@@ -253,6 +253,13 @@ type InstanceData struct {
 	// LimitAccount is the identity that produced this limit observation. It may
 	// differ from Account while a durably selected replacement is still starting.
 	LimitAccount string `json:"limit_account,omitempty"`
+	// LimitResetEvidence is the reset phrase whose parse produced LimitResetAt
+	// (#6765). It rides the same LiveLimitReached gate as the fields above: a
+	// poll that re-reads an unchanged banner re-derives this phrase verbatim,
+	// so the row's stored reset stays put instead of drifting on every tick —
+	// including the first poll after a daemon restart. Empty when the stored
+	// reset came from a path that observed no phrase.
+	LimitResetEvidence string `json:"limit_reset_evidence,omitempty"`
 	// AccountLimitObservations retain quota walls after a successful identity
 	// replacement clears the session's current limit liveness. Candidate
 	// selection uses these per agent/account observations until a known reset

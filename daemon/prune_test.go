@@ -642,6 +642,19 @@ func TestPruneSessions_ReportsUnmaterializedNonArchivedGhost(t *testing.T) {
 	assert.Contains(t, resp.Skipped[0].Reason, "not archived")
 }
 
+// #6770: --older-than takes the day/week units a retention window is written
+// in — "7d" must mean what "168h" means, not a parse refusal.
+func TestPruneSessions_OlderThanAcceptsDayDurations(t *testing.T) {
+	manager, repoID, _, _, _ := seedPrunableArchive(t, "day-row")
+
+	resp, err := manager.PruneSessions(PruneSessionsRequest{RepoID: repoID, OlderThan: "7d"})
+	require.NoError(t, err)
+	require.Empty(t, resp.Candidates, "a moments-old archive is far too recent for a 7d cutoff")
+	require.Len(t, resp.Skipped, 1)
+	assert.Contains(t, resp.Skipped[0].Reason, "archived too recently")
+	assert.WithinDuration(t, time.Now().Add(-7*24*time.Hour), resp.ArchivedBefore, 5*time.Second)
+}
+
 // TestPruneSessions_RequiresScopeAndDuration: the validation that keeps the
 // command honest — no retention guess, no unscoped run.
 func TestPruneSessions_RequiresScopeAndDuration(t *testing.T) {
@@ -651,10 +664,10 @@ func TestPruneSessions_RequiresScopeAndDuration(t *testing.T) {
 	require.ErrorContains(t, err, "older_than is required")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", OlderThan: "not-a-duration"})
-	require.ErrorContains(t, err, "not a positive Go duration")
+	require.ErrorContains(t, err, "not a positive duration")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", OlderThan: "-1h"})
-	require.ErrorContains(t, err, "not a positive Go duration")
+	require.ErrorContains(t, err, "not a positive duration")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{OlderThan: "1ms"})
 	require.ErrorContains(t, err, "a scope is required")

@@ -808,7 +808,7 @@ func capturePreview(ctx context.Context, instance *session.Instance) (string, er
 // banner for agent, else nil. Factored out so both the ticker and timeout
 // branches of WaitForReady detect the banner identically (#1146 PR4).
 func limitParkError(detector LimitDetector, content, agent string) error {
-	if hit, resetAt, _ := detector.Check(content, agent, waitLimitNow()); hit {
+	if hit, resetAt, _, _ := detector.Check(content, agent, waitLimitNow()); hit {
 		return &LimitReachedError{ResetAt: resetAt}
 	}
 	return nil

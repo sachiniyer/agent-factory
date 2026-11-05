@@ -170,6 +170,71 @@ func TestCaptureAgentConversation_CodexRetriesIncompleteConcurrentMetadata(t *te
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }
 
+// A sub-agent's rollout shares its parent's working directory but can never be
+// the session's own top-level conversation (#6766). When the only new rollout
+// is a sub-agent's, capture must keep waiting for the pane's own file rather
+// than record the sub-agent's id — an id respawn would then resume.
+func TestCaptureAgentConversation_CodexSubagentRolloutIsNeverTheConversation(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
+		map[string]any{"subagent": "review"})
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 200*time.Millisecond)
+	require.NoError(t, err)
+	require.False(t, conv.HasID(), "a sub-agent's rollout can never be this session's conversation")
+}
+
+// The session's own rollout and a sub-agent's arriving together used to refuse
+// capture as ambiguous — two "new" files in the launch directory. A sub-agent
+// is positively identified by its session_meta source, so capture follows the
+// one file that can be the top-level conversation (#6766).
+func TestCaptureAgentConversation_CodexSubagentDoesNotForceAmbiguity(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
+		map[string]any{"subagent": "review"})
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+}
+
+// The carried half of #6766: the rollout a swap copied in sits in codexBefore,
+// so the ONLY new file capture can see is the sub-agent's — which before the
+// source check "won" and replaced the carried conversation af just resumed.
+// The carried id must stand.
+func TestCaptureAgentConversation_CodexSubagentDoesNotStealCarriedConversation(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	carried := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "5b1d2c3e-4f50-4a6b-8c7d-9e0f1a2b3c4d",
+		CaptureKind: ConversationCaptureCarried,
+	}
+	carriedPath := filepath.Join(codexHome, "sessions", "2026", "07", "06",
+		"rollout-2026-07-06T10-17-33-"+carried.ID+".jsonl")
+	snap.expectCarriedCodexRollout(carried, carriedPath)
+
+	writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
+		map[string]any{"subagent": "review"})
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, carried.ID, conv.ID,
+		"the sub-agent's rollout must not replace the carried conversation id")
+}
+
 func writeEmptyCodexRolloutFile(t *testing.T, codexHome, name string) string {
 	t.Helper()
 	// Same directory as writeCodexRolloutFile so a later write to the same name
@@ -1004,6 +1069,27 @@ func TestWaitForPromptReceipt_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 				"nonblocking FIFO cleanup (%v)", unblockErr)
 		}
 	}
+}
+
+// A sub-agent's rollout that quotes the prompt back is not the launched
+// process's receipt: it can never be this session's top-level conversation, so
+// its contents are not receipt evidence either (#6766).
+func TestWaitForPromptReceipt_SubagentRolloutIsNotReceiptEvidence(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	subagent := writeCodexRolloutFileWithSource(t, codexHome,
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
+		map[string]any{"subagent": "review"})
+	appendCodexRolloutEvent(t, subagent, map[string]any{
+		"type":    "event_msg",
+		"payload": map[string]any{"type": "user_message", "message": "config briefing"},
+	})
+
+	err := WaitForPromptReceipt(context.Background(), tmux.ProgramCodex, snap, "config briefing", 0)
+	require.ErrorIs(t, err, ErrPromptReceiptNotObserved,
+		"a sub-agent's rollout is not evidence the pane's conversation recorded the prompt")
 }
 
 func TestWaitForPromptReceipt_UnsupportedAgentDoesNotInventReceipt(t *testing.T) {
