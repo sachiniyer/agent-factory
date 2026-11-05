@@ -612,7 +612,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -667,7 +667,7 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
 	// wall's reset (#6765).
 	i.limitResetEvidence = ""
 	i.attributeLimitIdentityLocked()
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
+	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }

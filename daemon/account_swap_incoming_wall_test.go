@@ -93,9 +93,7 @@ func TestResumeLimitedSessions_AutoSwapIncomingWallAttributesAndRecordsIncomingI
 	// appended), so a sibling session scanning the same limitedSet could
 	// admit the still-exhausted incoming account as a candidate.
 	observations := inst.AccountLimitObservations()
-	require.Contains(t, observations, session.AccountLimitObservationData{
-		Agent: tmux.ProgramClaude, Account: "work", ResetAt: incomingWallReset,
-	}, "the live observations ledger gains the incoming (claude, work) entry")
+	requireAccountLimitObservation(t, observations, tmux.ProgramClaude, "work", incomingWallReset)
 
 	got, ok := inst.LimitResetAt()
 	require.True(t, ok)
@@ -113,9 +111,7 @@ func TestResumeLimitedSessions_AutoSwapIncomingWallAttributesAndRecordsIncomingI
 	require.Equal(t, tmux.ProgramClaude, record.LimitAgent, "durable LimitAgent is the incoming agent namespace")
 	require.Equal(t, "work", record.LimitAccount, "durable LimitAccount is the incoming account")
 	require.True(t, record.LimitResetAt.Equal(incomingWallReset), "durable LimitResetAt is the incoming window")
-	require.Contains(t, record.AccountLimitObservations, session.AccountLimitObservationData{
-		Agent: tmux.ProgramClaude, Account: "work", ResetAt: incomingWallReset,
-	}, "the durable row carries the incoming observation")
+	requireAccountLimitObservation(t, record.AccountLimitObservations, tmux.ProgramClaude, "work", incomingWallReset)
 }
 
 // TestResumeLimitedSessions_AutoSwapIncomingWall_ExcludesIncomingFromFutureCandidates
@@ -186,9 +182,7 @@ func TestResumeLimitedSessions_AutoSwapIncomingWall_ReloadCarriesIncomingAttribu
 	// After the fix it returns the incoming account and the incoming pair.
 	limitAccount, observations := session.AccountLimitEvidenceFromData(*record)
 	require.Equal(t, "work", limitAccount, "the reloaded limit account is the incoming identity")
-	require.Contains(t, observations, session.AccountLimitObservationData{
-		Agent: tmux.ProgramClaude, Account: "work", ResetAt: incomingWallReset,
-	}, "the reloaded observations ledger carries the incoming entry")
+	requireAccountLimitObservation(t, observations, tmux.ProgramClaude, "work", incomingWallReset)
 
 	// limitAgentFromData returns data.LimitAgent directly when it is a
 	// supported program (session/account_limit_evidence.go:42-43). The durable

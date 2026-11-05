@@ -7,6 +7,9 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
+	"sync/atomic"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
@@ -21,9 +24,25 @@ const (
 // to the session that observed it. It lives at the root of instances/ so a full
 // factory reset removes it with session state, while per-repo record deletion
 // cannot erase it.
+//
+// Retractions is additive under the same schema version: a reader that does
+// not know the field sees every wall and no proof, which is the fail-closed
+// direction — a downgraded af cannot mistake retracted evidence for a clean
+// bill, it can only exclude an account this binary proved free.
 type accountLimitLedger struct {
 	SchemaVersion int                                   `json:"schema_version"`
 	Observations  []session.AccountLimitObservationData `json:"observations,omitempty"`
+	Retractions   []session.AccountLimitRetractionData  `json:"retractions,omitempty"`
+}
+
+// accountLimitEvidence is the whole durable fact set admission folds: walls
+// still believed, and the proofs that may defeat some of them. Both halves
+// travel together because the verdict is always the pair — a caller that saw
+// only the observations could not distinguish "no proof exists" from "the
+// proof source could not be read".
+type accountLimitEvidence struct {
+	Observations []session.AccountLimitObservationData
+	Retractions  []session.AccountLimitRetractionData
 }
 
 func accountLimitLedgerPath() (string, error) {
@@ -34,31 +53,43 @@ func accountLimitLedgerPath() (string, error) {
 	return filepath.Join(home, "instances", accountLimitLedgerFileName), nil
 }
 
-func loadAccountLimitLedger() ([]session.AccountLimitObservationData, error) {
+func loadAccountLimitLedger() (accountLimitEvidence, error) {
 	path, err := accountLimitLedgerPath()
 	if err != nil {
-		return nil, err
+		return accountLimitEvidence{}, err
 	}
-	return readAccountLimitLedger(path)
+	evidence, err := readAccountLimitLedger(path)
+	if err != nil {
+		return accountLimitEvidence{}, err
+	}
+	if quarantinedAccountLimitRetractionsCount.Load() > 0 {
+		purgeQuarantinedAccountLimitRetractions(path)
+	}
+	return evidence, nil
 }
 
-type accountLimitEvidenceLoader func() ([]session.AccountLimitObservationData, error)
+type accountLimitObservationLoader func() ([]session.AccountLimitObservationData, error)
+type accountLimitEvidenceLoader func() (accountLimitEvidence, error)
 
 // loadAccountLimitEvidenceSnapshot combines the two durable evidence sources.
 // The ordering is part of the snapshot protocol with session deletion, which
 // transfers a row's observations into the ledger before removing that row.
+// Retractions live only in the ledger — rows hold the walls they observed,
+// never proofs about other sessions' accounts.
 func loadAccountLimitEvidenceSnapshot(
-	loadPersisted, loadRetained accountLimitEvidenceLoader,
-) ([]session.AccountLimitObservationData, error) {
+	loadPersisted accountLimitObservationLoader,
+	loadRetained accountLimitEvidenceLoader,
+) (accountLimitEvidence, error) {
 	persisted, err := loadPersisted()
 	if err != nil {
-		return nil, fmt.Errorf("load persisted account-limit evidence: %w", err)
+		return accountLimitEvidence{}, fmt.Errorf("load persisted account-limit evidence: %w", err)
 	}
 	retained, err := loadRetained()
 	if err != nil {
-		return nil, fmt.Errorf("load retained account-limit evidence: %w", err)
+		return accountLimitEvidence{}, fmt.Errorf("load retained account-limit evidence: %w", err)
 	}
-	return append(persisted, retained...), nil
+	retained.Observations = append(persisted, retained.Observations...)
+	return retained, nil
 }
 
 // loadPersistedAccountLimitObservations reads quota evidence straight from
@@ -93,20 +124,20 @@ func loadPersistedAccountLimitObservations() ([]session.AccountLimitObservationD
 	return observations, nil
 }
 
-func readAccountLimitLedger(path string) ([]session.AccountLimitObservationData, error) {
+func readAccountLimitLedger(path string) (accountLimitEvidence, error) {
 	raw, err := os.ReadFile(path)
 	if os.IsNotExist(err) {
-		return nil, nil
+		return accountLimitEvidence{}, nil
 	}
 	if err != nil {
-		return nil, err
+		return accountLimitEvidence{}, err
 	}
 	var ledger accountLimitLedger
 	if err := json.Unmarshal(raw, &ledger); err != nil {
-		return nil, fmt.Errorf("decode %s: %w", path, err)
+		return accountLimitEvidence{}, fmt.Errorf("decode %s: %w", path, err)
 	}
 	if ledger.SchemaVersion != accountLimitLedgerSchemaVersion {
-		return nil, fmt.Errorf("%s has schema_version %d, want %d", path,
+		return accountLimitEvidence{}, fmt.Errorf("%s has schema_version %d, want %d", path,
 			ledger.SchemaVersion, accountLimitLedgerSchemaVersion)
 	}
 	for idx := range ledger.Observations {
@@ -114,10 +145,116 @@ func readAccountLimitLedger(path string) ([]session.AccountLimitObservationData,
 		observation.Agent = strings.TrimSpace(observation.Agent)
 		observation.Account = strings.TrimSpace(observation.Account)
 		if observation.Agent == "" || observation.Account == "" {
-			return nil, fmt.Errorf("%s contains an account-limit observation with an empty agent or account", path)
+			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit observation with an empty agent or account", path)
 		}
 	}
-	return ledger.Observations, nil
+	// Observations and retractions get OPPOSITE failure postures, because
+	// they move admission in opposite directions: a damaged wall means the
+	// file's exclusions cannot be trusted — fail closed. A damaged or
+	// untrustworthy retraction can only ever FREE an account wrongly, so it
+	// loses its power instead — dropped from the read, never allowed to
+	// break it (#6802 review: failing the whole ledger on one questionable
+	// proof would block kills, handoffs and rotation on, e.g., an ordinary
+	// clock correction). Whatever survives the filter below is a well-formed
+	// claim; whatever does not can defeat nothing.
+	retractions := make([]session.AccountLimitRetractionData, 0, len(ledger.Retractions))
+	for idx := range ledger.Retractions {
+		retraction := ledger.Retractions[idx]
+		retraction.Agent = strings.TrimSpace(retraction.Agent)
+		retraction.Account = strings.TrimSpace(retraction.Account)
+		// An unscoped or untimed retraction cannot order against anything —
+		// the predicate already gives it no power, so keeping or dropping it
+		// is equivalent; dropping keeps the fold's input clean.
+		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
+			continue
+		}
+		if _, quarantined := quarantinedAccountLimitRetractions.Load(retraction); quarantined {
+			continue
+		}
+		// A future-dated proof is untrustworthy — a forward-jumped clock
+		// wrote it, or the clock corrected back after a well-formed write.
+		// Its ordering claim is unprovable — permanently: suspension by now
+		// alone would let it start counting once the clock catches up, so the
+		// quarantine makes the drop stick in-process and the next locked
+		// rewrite removes it from the file for good (#6802 review).
+		if retraction.ProvenAt.After(nowFunc()) {
+			if _, loaded := quarantinedAccountLimitRetractions.LoadOrStore(retraction, struct{}{}); !loaded {
+				quarantinedAccountLimitRetractionsCount.Add(1)
+			}
+			continue
+		}
+		retractions = append(retractions, retraction)
+	}
+	return accountLimitEvidence{Observations: ledger.Observations, Retractions: retractions}, nil
+}
+
+// quarantinedAccountLimitRetractions is process memory of retraction
+// identities a ledger read once found future-dated. A clock-corrected file
+// can hold an entry whose proof instant is now in the past, but the fact
+// that it once read as impossible is what matters: the quarantine keeps it
+// inert for the life of the process, and purgeQuarantinedAccountLimitRetractions
+// makes the drop durable so no later process can resurrect it either.
+var quarantinedAccountLimitRetractions sync.Map // map[session.AccountLimitRetractionData]struct{}
+
+// quarantinedAccountLimitRetractionsCount tracks the quarantine's size so the
+// read path can skip the purge when nothing was ever dropped.
+var quarantinedAccountLimitRetractionsCount atomic.Int64
+
+// purgeQuarantinedAccountLimitRetractions makes an in-memory quarantine
+// durable: entries the reads already ignore are removed from the file under
+// the same lock the other writers hold, so a restart — or a clock that has
+// caught up — cannot resurrect them. Best-effort: the in-memory quarantine
+// keeps this process honest, and the next locked write rewrites from the
+// filtered read and drops them regardless; the next read retries a purge
+// this one could not land.
+func purgeQuarantinedAccountLimitRetractions(path string) {
+	_ = config.WithFileLockTimeout(path, config.RepoInstancesLockTimeout, func() error {
+		raw, err := os.ReadFile(path)
+		if os.IsNotExist(err) {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+		var ledger accountLimitLedger
+		if err := json.Unmarshal(raw, &ledger); err != nil {
+			return err
+		}
+		if ledger.SchemaVersion != accountLimitLedgerSchemaVersion {
+			return fmt.Errorf("%s has schema_version %d, want %d",
+				path, ledger.SchemaVersion, accountLimitLedgerSchemaVersion)
+		}
+		now := nowFunc()
+		kept := ledger.Retractions[:0]
+		removed := false
+		for _, retraction := range ledger.Retractions {
+			// Quarantine keys carry the read's normalized identity fields, so
+			// the purge compares the same shape.
+			retraction.Agent = strings.TrimSpace(retraction.Agent)
+			retraction.Account = strings.TrimSpace(retraction.Account)
+			if _, quarantined := quarantinedAccountLimitRetractions.Load(retraction); quarantined {
+				removed = true
+				continue
+			}
+			if retraction.ProvenAt.After(now) {
+				if _, loaded := quarantinedAccountLimitRetractions.LoadOrStore(retraction, struct{}{}); !loaded {
+					quarantinedAccountLimitRetractionsCount.Add(1)
+				}
+				removed = true
+				continue
+			}
+			kept = append(kept, retraction)
+		}
+		if !removed {
+			return nil
+		}
+		ledger.Retractions = kept
+		raw, err = json.MarshalIndent(ledger, "", "  ")
+		if err != nil {
+			return err
+		}
+		return config.AtomicWriteFile(path, raw, 0o600)
+	})
 }
 
 // retainAccountLimitObservations durably merges evidence before its session
@@ -149,13 +286,72 @@ func retainAccountLimitObservations(observations []session.AccountLimitObservati
 		if err != nil {
 			return err
 		}
-		merged, err := mergeAccountLimitObservations(current, keyed)
+		merged, err := mergeAccountLimitObservations(current.Observations, keyed)
 		if err != nil {
 			return err
 		}
 		raw, err := json.MarshalIndent(accountLimitLedger{
 			SchemaVersion: accountLimitLedgerSchemaVersion,
 			Observations:  merged,
+			// The file is rewritten whole: proofs recorded by other writers
+			// carry through untouched, and the merge that lands here orders
+			// the new walls against them by event time at read, never by
+			// which writer happened to lock the file last.
+			Retractions: current.Retractions,
+		}, "", "  ")
+		if err != nil {
+			return err
+		}
+		return config.AtomicWriteFile(path, raw, 0o600)
+	})
+}
+
+// retractAccountLimitObservations records positive proof that accounts were
+// serving at ProvenAt. It writes tombstones, never deletes walls: the defeat
+// is applied at read time by event-time ordering (see
+// session.AccountLimitObservationRetracted), so a fresh wall sighted after the
+// proof always outranks it no matter which lands on disk last. A retraction
+// with no proof time or no identity is refused outright — an untimed proof
+// cannot be ordered and an unnamed one cannot be scoped.
+func retractAccountLimitObservations(retractions []session.AccountLimitRetractionData) error {
+	keyed := make([]session.AccountLimitRetractionData, 0, len(retractions))
+	for _, retraction := range retractions {
+		retraction.Agent = strings.TrimSpace(retraction.Agent)
+		retraction.Account = strings.TrimSpace(retraction.Account)
+		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
+			return fmt.Errorf("account-limit retraction needs a named identity and a proof time")
+		}
+		// A proof cannot carry an instant that has not happened — a usage
+		// record's timestamp is always in the past. Refusing future times
+		// keeps a forward clock jump from minting a tombstone that defeats
+		// every wall sighted between now and then; the read path drops a
+		// stored one rather than failing, so this refusal is what keeps the
+		// file clean.
+		if retraction.ProvenAt.After(nowFunc()) {
+			return fmt.Errorf("account-limit retraction proof time must not be in the future")
+		}
+		keyed = append(keyed, retraction)
+	}
+	if len(keyed) == 0 {
+		return nil
+	}
+	path, err := accountLimitLedgerPath()
+	if err != nil {
+		return err
+	}
+	return config.WithFileLockTimeout(path, config.RepoInstancesLockTimeout, func() error {
+		current, err := readAccountLimitLedger(path)
+		if err != nil {
+			return err
+		}
+		merged, err := mergeAccountLimitRetractions(current.Retractions, keyed)
+		if err != nil {
+			return err
+		}
+		raw, err := json.MarshalIndent(accountLimitLedger{
+			SchemaVersion: accountLimitLedgerSchemaVersion,
+			Observations:  current.Observations,
+			Retractions:   merged,
 		}, "", "  ")
 		if err != nil {
 			return err
@@ -172,10 +368,33 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		if observation.Agent == "" || observation.Account == "" {
 			return fmt.Errorf("account-limit observation has an empty agent or account")
 		}
+		// Merge only same-kind claims: folding a known reset into an
+		// unknown-reset wall — or the reverse — would either drop the
+		// never-expires property or lower the instant a retraction must
+		// postdate, freeing an account the separate facts still exclude
+		// (#6802 review). Identity plus reset-kind keeps both facts.
 		key := observation.Agent + "\x00" + observation.Account
+		if observation.ResetAt.IsZero() {
+			key += "\x00unknown-reset"
+		}
 		prior, exists := merged[key]
 		if exists {
 			observation.ResetAt = session.RetainedAccountLimitReset(prior.ResetAt, observation.ResetAt)
+			// The wall's event time is its last sighting — but only when
+			// EVERY copy carried one. A sighting-less copy merged with a
+			// timed one must not inherit the other's instant: the untimed
+			// copy could be a wall sighted after the proof, and stamping it
+			// would invent an event time the fact never had — one an older
+			// retraction could then order itself against (#6802 review). Any
+			// untimed copy keeps the merged fact untimed, and untimed is
+			// permanent: every later merge re-applies this same rule, so the
+			// merged fact never gains an instant a retraction could beat.
+			switch {
+			case prior.ObservedAt.IsZero() || observation.ObservedAt.IsZero():
+				observation.ObservedAt = time.Time{}
+			case prior.ObservedAt.After(observation.ObservedAt):
+				observation.ObservedAt = prior.ObservedAt
+			}
 		}
 		merged[key] = observation
 		return nil
@@ -193,6 +412,52 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 	result := make([]session.AccountLimitObservationData, 0, len(merged))
 	for _, observation := range merged {
 		result = append(result, observation)
+	}
+	sort.Slice(result, func(i, j int) bool {
+		if result[i].Agent != result[j].Agent {
+			return result[i].Agent < result[j].Agent
+		}
+		if result[i].Account != result[j].Account {
+			return result[i].Account < result[j].Account
+		}
+		return result[i].ResetAt.Before(result[j].ResetAt)
+	})
+	return result, nil
+}
+
+// mergeAccountLimitRetractions folds retraction facts per identity, keeping
+// only the newest proof each account earned: an older proof is a strict subset
+// of the ordering power of a newer one and adds nothing.
+func mergeAccountLimitRetractions(current, added []session.AccountLimitRetractionData) ([]session.AccountLimitRetractionData, error) {
+	merged := make(map[string]session.AccountLimitRetractionData)
+	merge := func(retraction session.AccountLimitRetractionData) error {
+		retraction.Agent = strings.TrimSpace(retraction.Agent)
+		retraction.Account = strings.TrimSpace(retraction.Account)
+		if retraction.Agent == "" || retraction.Account == "" {
+			return fmt.Errorf("account-limit retraction has an empty agent or account")
+		}
+		if retraction.ProvenAt.IsZero() {
+			return fmt.Errorf("account-limit retraction has no proof time")
+		}
+		key := retraction.Agent + "\x00" + retraction.Account
+		if prior, exists := merged[key]; !exists || prior.ProvenAt.Before(retraction.ProvenAt) {
+			merged[key] = retraction
+		}
+		return nil
+	}
+	for _, retraction := range current {
+		if err := merge(retraction); err != nil {
+			return nil, err
+		}
+	}
+	for _, retraction := range added {
+		if err := merge(retraction); err != nil {
+			return nil, err
+		}
+	}
+	result := make([]session.AccountLimitRetractionData, 0, len(merged))
+	for _, retraction := range merged {
+		result = append(result, retraction)
 	}
 	sort.Slice(result, func(i, j int) bool {
 		if result[i].Agent != result[j].Agent {

@@ -393,11 +393,11 @@ func TestResumeLimitedSessions_LoadsDurableAccountLimitEvidenceOncePerPass(t *te
 
 	previous := loadAccountLimitEvidenceForSwap
 	loads := 0
-	loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+	loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
 		loads++
-		return []session.AccountLimitObservationData{{
+		return accountLimitEvidence{Observations: []session.AccountLimitObservationData{{
 			Agent: tmux.ProgramClaude, Account: "work", ResetAt: base.Add(time.Hour),
-		}}, nil
+		}}}, nil
 	}
 	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
 

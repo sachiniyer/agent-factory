@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/rateindex"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/accountlogin"
@@ -618,6 +619,12 @@ type Manager struct {
 	// re-verifying ambiguous account-swap notice verdicts — one per committed
 	// swap, keyed by stableSessionKey like unverifiedSendWatches (#6767).
 	pendingSwapNoticeWatches map[string]*pendingSwapNoticeWatch
+	// rateIndexer is the bounded rollout-store reader the account-limit proof
+	// reconcile refreshes per walled account (#6776 1d). Its per-file memo is
+	// the reason an every-45s cadence is cheap: an unchanged file costs zero
+	// bytes on the next pass. Built lazily by usageIndexer and touched only
+	// from that goroutine — no lock.
+	rateIndexer *rateindex.Indexer
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once

@@ -84,7 +84,7 @@ func TestHandoffAccountBranchBoundaryAfterStop(t *testing.T) {
 	var tip string
 	old := loadAccountLimitEvidenceForSwap
 	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = old })
-	loadAccountLimitEvidenceForSwap = func() ([]session.AccountLimitObservationData, error) {
+	loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
 		evidence, err := old()
 		if tip == "" {
 			tip = handoffBoundaryCommit(t, inst, "outgoing final commit")

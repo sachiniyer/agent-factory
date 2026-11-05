@@ -303,6 +303,13 @@ type Instance struct {
 	limitAccount string
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
+	// accountLimitObsUnpersisted marks an observation change — a fresh wall or
+	// a re-sighting that moved ObservedAt — that no durable row-write has
+	// carried yet. The poll's durableChanged gate does not diff observations,
+	// so without this flag a re-sight could stay memory-only until an
+	// unrelated axis happened to change, and a retraction decided against the
+	// stale stored copy (#6802 review).
+	accountLimitObsUnpersisted bool
 	// agentModelChange is a live, projection-only diagnostic supplied by the
 	// running agent-server. It is mutex-protected and deliberately omitted from
 	// durable restore state; see AgentModelChange and InstanceData.ForStorage.

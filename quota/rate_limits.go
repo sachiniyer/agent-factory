@@ -98,6 +98,21 @@ type codexRateLimitWindow struct {
 	ResetsAt      *int64   `json:"resets_at"`
 }
 
+// codexWindowSlotNames is every rate-limit window slot a Codex account is
+// subject to — the same slots the pinned snapshot shape below decodes, in
+// the same order. A snapshot that leaves a slot null still HAS that window;
+// it simply reports nothing about it.
+var codexWindowSlotNames = []string{"primary", "secondary"}
+
+// CodexWindowSlotNames returns the window slots a Codex usage snapshot must
+// report for its reading to speak for every window the account is subject
+// to. A reader proving health needs a value for each: a null slot is
+// silence about that window — "secondary": null beside a calm primary is
+// not evidence the weekly limit is below the wall (#6802 review).
+func CodexWindowSlotNames() []string {
+	return codexWindowSlotNames
+}
+
 // ParseCodexRateLimitsLine classifies one Codex rollout JSONL line and, when
 // it is a well-formed rate_limits record, returns the reading. The zero
 // reading is returned for every non-Parsed verdict.
@@ -147,27 +162,26 @@ func ParseCodexRateLimitsLine(line []byte) (RateLimitsVerdict, UsageReading) {
 	if err := json.Unmarshal(payload.RateLimits, &snapshot); err != nil {
 		return RateLimitsMalformed, UsageReading{}
 	}
+	windows := map[string]*codexRateLimitWindow{
+		"primary":   snapshot.Primary,
+		"secondary": snapshot.Secondary,
+	}
 	reading := UsageReading{RecordedAt: recordedAt}
-	for _, slot := range []struct {
-		name   string
-		window *codexRateLimitWindow
-	}{
-		{"primary", snapshot.Primary},
-		{"secondary", snapshot.Secondary},
-	} {
-		if slot.window == nil {
+	for _, name := range codexWindowSlotNames {
+		slot := windows[name]
+		if slot == nil {
 			continue
 		}
-		if slot.window.UsedPercent == nil {
+		if slot.UsedPercent == nil {
 			return RateLimitsMalformed, UsageReading{}
 		}
 		window := UsageWindow{
-			Name:          slot.name,
-			UsedPercent:   *slot.window.UsedPercent,
-			WindowMinutes: slot.window.WindowMinutes,
+			Name:          name,
+			UsedPercent:   *slot.UsedPercent,
+			WindowMinutes: slot.WindowMinutes,
 		}
-		if slot.window.ResetsAt != nil {
-			resetsAt := time.Unix(*slot.window.ResetsAt, 0).UTC()
+		if slot.ResetsAt != nil {
+			resetsAt := time.Unix(*slot.ResetsAt, 0).UTC()
 			window.ResetsAt = &resetsAt
 		}
 		reading.Windows = append(reading.Windows, window)

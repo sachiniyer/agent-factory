@@ -116,3 +116,35 @@ func TestHaltedAtReadsTheRecord(t *testing.T) {
 		t.Fatalf("halt = %+v", halt)
 	}
 }
+
+// A watermark only ever grows: a re-carry that verifies a shorter covered
+// prefix must not shrink the quarantine onto bytes an earlier, longer copy
+// put there — records in that span are still the source account's (#6802
+// review).
+func TestRecordCarriedPrefixNeverShrinks(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	path := "/home/fake/.codex/sessions/2026/11/10/rollout-x.jsonl"
+	if err := store.RecordCarriedPrefix(path, 100); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
+	}
+	if err := store.RecordCarriedPrefix(path, 40); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
+	}
+	prefixes, err := store.CarriedPrefixes()
+	if err != nil {
+		t.Fatalf("CarriedPrefixes: %v", err)
+	}
+	if prefixes[path] != 100 {
+		t.Fatalf("prefix = %d, want 100 — a smaller re-carry must not shrink the quarantine", prefixes[path])
+	}
+	if err := store.RecordCarriedPrefix(path, 140); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
+	}
+	prefixes, err = store.CarriedPrefixes()
+	if err != nil {
+		t.Fatalf("CarriedPrefixes: %v", err)
+	}
+	if prefixes[path] != 140 {
+		t.Fatalf("prefix = %d, want 140 — a larger copy always extends the mark", prefixes[path])
+	}
+}

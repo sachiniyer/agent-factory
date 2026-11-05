@@ -451,10 +451,11 @@ func TestKillSession_GhostDeletionRetainsLegacyAccountLimitEvidence(t *testing.T
 	if _, err := manager.KillSession(KillSessionRequest{Title: "legacy-limit", RepoID: repoID}); err != nil {
 		t.Fatalf("KillSession: %v", err)
 	}
-	observations, err := loadAccountLimitLedger()
+	evidence, err := loadAccountLimitLedger()
 	if err != nil {
 		t.Fatalf("load retained account-limit evidence: %v", err)
 	}
+	observations := evidence.Observations
 	if len(observations) != 1 || observations[0].Agent != tmux.ProgramClaude ||
 		observations[0].Account != "work" || !observations[0].ResetAt.Equal(resetAt) {
 		t.Fatalf("retained observations = %+v, want legacy claude/work limit through %v", observations, resetAt)

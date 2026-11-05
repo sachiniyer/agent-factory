@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
@@ -393,17 +394,64 @@ func (c *conversationCarry) launch(resolvedProgram string) (string, AgentConvers
 	}, true
 }
 
-// copy performs the carry. Only the transcript decides success.
+// copy performs the carry. Only the transcript decides success — and for a
+// codex carry the commit has a second half: the durable carried-prefix
+// watermark telling the usage reader that the copied bytes hold the SOURCE
+// account's claims. Without it the carried rollout's records count for the
+// target, and a healthy prefix could free a wall on the previous account's
+// numbers (#6802 review). A carry that cannot record its watermark is not a
+// commit; the caller replans the swap as a fresh conversation.
 func (c *conversationCarry) copy() error {
-	if err := carryConversationFile(c.srcRoot, c.dstRoot, c.transcript, !c.committed); err != nil {
+	outcome, err := carryConversationFileOutcome(c.srcRoot, c.dstRoot, c.transcript, !c.committed)
+	if err != nil {
 		return err
 	}
+	if err := c.commitCarriedPrefix(outcome); err != nil {
+		// The commit failed: put back whatever the install displaced, or
+		// remove a fresh install — a failed carry leaves the destination
+		// exactly as it was (#6802 Codex review).
+		restoreCarryDisplacement(c.dstRoot, c.transcript, outcome)
+		return err
+	}
+	// The commit landed: the displaced original is gone for good now.
+	discardCarryDisplacement(c.dstRoot, c.transcript, outcome)
 	if c.aux == "" {
 		return nil
 	}
 	if err := carryConversationTree(c.srcRoot, c.dstRoot, c.aux); err != nil {
 		log.WarningLog.Printf("account swap carried %s conversation %s without all of its per-session files: %v",
 			c.agent, c.id, err)
+	}
+	return nil
+}
+
+// commitCarriedPrefix records the carry's watermark durably: the first
+// covered bytes of the carried rollout are the source account's records, and
+// the usage indexer must skip claims whose line begins below that mark
+// (internal/rateindex reads handoff.State.CarriedPrefixes). Only codex
+// writes usage claims into its rollout files, so other carries copy nothing
+// the reader would quarantine.
+//
+// The watermark is part of the commit because the copied bytes are the
+// poison: a rollout whose source-account records could count for the target
+// must not outlive a failed record. On failure the caller unwinds the
+// install — the displaced destination is restored byte-for-byte, or a fresh
+// install is removed — while a destination the carry only verified is left
+// untouched (it predates this carry and is not af's to delete).
+func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error {
+	if c.agent != tmux.ProgramCodex || outcome.covered == 0 {
+		return nil
+	}
+	path := c.carriedCodexRolloutPath()
+	if c.dstRoot.base == "" || path == "" {
+		return carryFailure("the carried-prefix watermark has no AF home to land in", nil)
+	}
+	// The store lives under the AF home the carry itself resolved, not a
+	// fresh GetConfigDir lookup — the watermark must land beside the
+	// accounts/ tree the copy targeted.
+	store := handoff.NewStore(filepath.Join(c.dstRoot.base, "instances", handoff.StateFileName))
+	if err := store.RecordCarriedPrefix(path, outcome.covered); err != nil {
+		return carryFailure("the carried-prefix watermark could not be recorded", err)
 	}
 	return nil
 }

@@ -67,17 +67,20 @@ func TestAccountLimitObservationSurvivesClearAndStorage(t *testing.T) {
 	i.SetLimitReached(reset)
 	i.ClearLimitReached()
 
-	want := []AccountLimitObservationData{{
-		Agent: tmux.ProgramClaude, Account: "work", ResetAt: reset,
-	}}
-	require.Equal(t, want, i.AccountLimitObservations(),
+	observations := i.AccountLimitObservations()
+	require.Len(t, observations, 1,
 		"clearing current liveness must not make an exhausted identity eligible")
+	require.Equal(t, tmux.ProgramClaude, observations[0].Agent)
+	require.Equal(t, "work", observations[0].Account)
+	require.True(t, observations[0].ResetAt.Equal(reset))
+	require.False(t, observations[0].ObservedAt.IsZero(),
+		"the wall's sighting instant is part of the evidence (#6776 1d)")
 
 	raw, err := json.Marshal(i.ToInstanceData().ForStorage())
 	require.NoError(t, err)
 	var stored InstanceData
 	require.NoError(t, json.Unmarshal(raw, &stored))
-	require.Equal(t, want, stored.AccountLimitObservations,
+	require.Equal(t, observations, stored.AccountLimitObservations,
 		"account limit evidence must survive the daemon restart boundary")
 }
 
@@ -95,14 +98,19 @@ func TestAccountLimitObservationPreservesSafestReset(t *testing.T) {
 			"a short-window wall must not erase a still-active longer quota wall")
 	})
 
-	t.Run("unknown reset dominates", func(t *testing.T) {
+	t.Run("distinct reset claims keep distinct rows", func(t *testing.T) {
 		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
 		i.SetLimitReached(time.Time{})
 		i.ClearLimitReached()
 		i.SetLimitReached(later)
 
-		require.True(t, i.AccountLimitObservations()[0].ResetAt.IsZero(),
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 2,
+			"a known reset cannot merge into an unknown-reset wall without lowering what a proof must beat (#6802 review)")
+		require.True(t, observations[0].ResetAt.IsZero(),
 			"a later timestamp cannot make an indefinite limit observation safe to reuse")
+		require.True(t, observations[1].ResetAt.Equal(later),
+			"the known reset claim survives beside the unknown one — the strictest still excludes")
 	})
 }
 

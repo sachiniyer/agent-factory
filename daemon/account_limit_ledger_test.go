@@ -107,9 +107,9 @@ func TestLoadAccountLimitEvidenceSnapshotReadsRowsBeforeLedger(t *testing.T) {
 		reads = append(reads, "rows")
 		return nil, nil
 	}
-	loadRetained := func() ([]session.AccountLimitObservationData, error) {
+	loadRetained := func() (accountLimitEvidence, error) {
 		reads = append(reads, "ledger")
-		return nil, nil
+		return accountLimitEvidence{}, nil
 	}
 
 	if _, err := loadAccountLimitEvidenceSnapshot(loadPersisted, loadRetained); err != nil {

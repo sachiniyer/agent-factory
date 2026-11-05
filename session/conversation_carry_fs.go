@@ -13,6 +13,7 @@ import (
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
 
@@ -332,7 +333,34 @@ func probeCarryDir(home carryRoot, rel string) error {
 	return err
 }
 
-// carryConversationFile makes dstHome/rel hold the whole append-only
+// carryFileOutcome is what one file's carry decided. covered is the number of
+// leading destination bytes attributable to the SOURCE account — the prefix
+// the usage reader must quarantine as the previous account's claims rather
+// than the target's own (#6802 review). installed reports whether this call
+// put the destination file there, so a commit step that fails afterwards can
+// unwind only the bytes it actually wrote. displaced is the backup name the
+// install left beside the file when it replaced existing content — the
+// caller restores it on a failed commit and discards it on success, so a
+// failed carry leaves the destination exactly as it was.
+type carryFileOutcome struct {
+	covered   int64
+	installed bool
+	displaced string
+}
+
+// carryConversationFile is the error-only form: callers that copy without
+// needing the outcome (auxiliary-tree files, behavioral probes) see the
+// carry as success or failure.
+func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource bool) error {
+	outcome, err := carryConversationFileOutcome(srcHome, dstHome, rel, requireSource)
+	if err != nil {
+		return err
+	}
+	discardCarryDisplacement(dstHome, rel, outcome)
+	return nil
+}
+
+// carryConversationFileOutcome makes dstHome/rel hold the whole append-only
 // conversation stored at srcHome/rel. It never writes to srcHome.
 //
 // requireSource is false only for a carry an identity checkpoint already
@@ -340,19 +368,19 @@ func probeCarryDir(home carryRoot, rel string) error {
 // conversation is enough even if the previous account has since lost it. A new
 // carry always requires the source, or a stale destination copy would be
 // resumed as though it were the whole conversation.
-func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource bool) error {
+func carryConversationFileOutcome(srcHome, dstHome carryRoot, rel string, requireSource bool) (carryFileOutcome, error) {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {
-		return carryFailure("af refused an unsafe conversation path", err)
+		return carryFileOutcome{}, carryFailure("af refused an unsafe conversation path", err)
 	}
 	dstRoot, err := openCarryAnchor(dstHome)
 	if err != nil {
-		return carryFailureAt("the new account's home could not be opened safely", err)
+		return carryFileOutcome{}, carryFailureAt("the new account's home could not be opened safely", err)
 	}
 	defer dstRoot.Close()
 	dstDir, err := openCarryDirChain(dstRoot, dirs, true)
 	if err != nil {
-		return carryFailureAt("the new account's conversation directory is not a plain directory", err)
+		return carryFileOutcome{}, carryFailureAt("the new account's conversation directory is not a plain directory", err)
 	}
 	defer dstDir.Close()
 
@@ -367,14 +395,17 @@ func carryConversationFile(srcHome, dstHome carryRoot, rel string, requireSource
 		defer srcDir.Close()
 	case errors.Is(err, fs.ErrNotExist):
 	default:
-		return carryFailureAt("the conversation could not be read safely from the previous account", err)
+		return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 	}
 	return carryFileAt(srcDir, dstDir, name, requireSource)
 }
 
 // carryFileAt applies the superset rule to one file. srcDir may be nil when the
-// source directory does not exist.
-func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error {
+// source directory does not exist. The covered length it reports is the
+// carried-prefix watermark: every leading destination byte the source is
+// responsible for, whether this call copied it or only verified it was
+// already there.
+func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carryFileOutcome, error) {
 	var src *os.File
 	var srcInfo os.FileInfo
 	if srcDir != nil {
@@ -386,7 +417,7 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 		case errors.Is(err, fs.ErrNotExist):
 			src = nil
 		default:
-			return carryFailureAt("the conversation could not be read safely from the previous account", err)
+			return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 		}
 	}
 	dst, dstInfo, err := openCarryFileAt(dstDir, name)
@@ -396,41 +427,121 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) error
 	case errors.Is(err, fs.ErrNotExist):
 		dst = nil
 	default:
-		return carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
+		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
 	}
 
 	if src == nil {
 		if dst != nil && !requireSource {
-			return nil
+			// A committed re-run whose source account is gone: every byte in
+			// the landed copy is unverifiable provenance — cover all of it
+			// rather than letting records af did not write count as this
+			// account's.
+			return carryFileOutcome{covered: dstInfo.Size()}, nil
 		}
-		return carryFailure("its transcript is missing from the previous account's home", fs.ErrNotExist)
+		return carryFileOutcome{}, carryFailure("its transcript is missing from the previous account's home", fs.ErrNotExist)
 	}
+	srcSize := srcInfo.Size()
 	if dst != nil {
 		if os.SameFile(srcInfo, dstInfo) {
-			return nil
+			// The destination IS the source file — every byte in it is the
+			// source account's.
+			return carryFileOutcome{covered: dstInfo.Size()}, nil
 		}
-		srcSize, dstSize := srcInfo.Size(), dstInfo.Size()
-		same, err := carryPrefixMatches(src, dst, min(srcSize, dstSize))
+		same, err := carryPrefixMatches(src, dst, min(srcSize, dstInfo.Size()))
 		if err != nil {
-			return carryFailure("comparing it with the new account's copy failed", err)
+			return carryFileOutcome{}, carryFailure("comparing it with the new account's copy failed", err)
 		}
 		if !same {
-			return carryFailure("the new account already holds a different copy of this conversation", nil)
+			return carryFileOutcome{}, carryFailure("the new account already holds a different copy of this conversation", nil)
 		}
-		if dstSize >= srcSize {
+		if dstInfo.Size() >= srcSize {
 			// A replacement that already resumed here appended to this copy.
 			// Overwriting it with the shorter source would truncate that work.
 			// It is kept, so it must stay appendable: the resumed provider
 			// writes its next turn into this file.
 			if dstInfo.Mode().Perm()&0o200 == 0 {
 				if err := dst.Chmod(carryFileMode); err != nil {
-					return carryFailure("the new account's copy of this conversation is not writable", err)
+					return carryFileOutcome{}, carryFailure("the new account's copy of this conversation is not writable", err)
 				}
 			}
-			return nil
+			// The verified prefix is the source's; anything past it is the
+			// destination's own append.
+			return carryFileOutcome{covered: srcSize}, nil
 		}
 	}
-	return replaceCarryFile(dstDir, name, src, srcInfo.Size())
+	displaced, err := replaceCarryFile(dstDir, name, src, srcSize, dst != nil)
+	if err != nil {
+		return carryFileOutcome{}, err
+	}
+	return carryFileOutcome{covered: srcSize, installed: true, displaced: displaced}, nil
+}
+
+// openCarryOutcomeDir reopens the directory a carry file landed in so a
+// caller can finish the displaced-backup lifecycle carryFileOutcome began.
+func openCarryOutcomeDir(dstHome carryRoot, rel string) (*os.File, string, error) {
+	dirs, name, err := splitCarryPath(rel, true)
+	if err != nil {
+		return nil, "", err
+	}
+	dstRoot, err := openCarryAnchor(dstHome)
+	if err != nil {
+		return nil, "", err
+	}
+	defer dstRoot.Close()
+	dstDir, err := openCarryDirChain(dstRoot, dirs, false)
+	if err != nil {
+		return nil, "", err
+	}
+	return dstDir, name, nil
+}
+
+// discardCarryDisplacement removes the backup an install left once the
+// carry's commit has landed — the displaced content is gone for good by
+// then, which is the committed carry's intent.
+func discardCarryDisplacement(dstHome carryRoot, rel string, outcome carryFileOutcome) {
+	if outcome.displaced == "" {
+		return
+	}
+	dstDir, _, err := openCarryOutcomeDir(dstHome, rel)
+	if err != nil {
+		log.WarningLog.Printf("account swap carry could not drop its pre-carry backup for %s: %v", rel, err)
+		return
+	}
+	defer dstDir.Close()
+	if err := unix.Unlinkat(int(dstDir.Fd()), outcome.displaced, 0); err != nil {
+		log.WarningLog.Printf("account swap carry could not drop its pre-carry backup %s for %s: %v",
+			outcome.displaced, rel, err)
+	}
+}
+
+// restoreCarryDisplacement unwinds an install whose commit failed: the
+// displaced original is renamed back over the file the carry wrote, one
+// atomic replace that puts the destination exactly as it was. A fresh
+// install that displaced nothing is removed instead — unverifiable carried
+// content must not outlive the commit that failed to record it. When the
+// restore itself fails the backup still holds the original, so it is left
+// in place and named in the warning for manual recovery.
+func restoreCarryDisplacement(dstHome carryRoot, rel string, outcome carryFileOutcome) {
+	if outcome.displaced == "" && !outcome.installed {
+		return
+	}
+	dstDir, name, err := openCarryOutcomeDir(dstHome, rel)
+	if err != nil {
+		log.WarningLog.Printf("account swap carry could not reach %s to unwind a failed carry: %v", rel, err)
+		return
+	}
+	defer dstDir.Close()
+	if outcome.displaced != "" {
+		if err := unix.Renameat(int(dstDir.Fd()), outcome.displaced, int(dstDir.Fd()), name); err != nil {
+			_ = unix.Unlinkat(int(dstDir.Fd()), name, 0)
+			log.WarningLog.Printf("account swap carry could not restore %s after a failed carry (backup kept at %s): %v",
+				rel, outcome.displaced, err)
+		}
+		return
+	}
+	if outcome.installed {
+		_ = unix.Unlinkat(int(dstDir.Fd()), name, 0)
+	}
 }
 
 // carryPrefixMatches reports whether the first n bytes of a and b are equal.
@@ -468,16 +579,24 @@ func readFullAt(file *os.File, buf []byte, offset int64) error {
 // replaceCarryFile atomically installs the first size bytes of src as
 // dir/name: an owner-only temporary file beside the target, synced, then
 // renamed over it. rename replaces a planted symlink rather than writing
-// through it.
-func replaceCarryFile(dir *os.File, name string, src *os.File, size int64) error {
+// through it. When preserve is set and name holds a file, the displaced
+// content is first hardlinked to a sibling backup name, which the call
+// returns: the caller restores it if the carry's commit fails and discards
+// it once the commit lands, so a failed carry leaves the destination
+// exactly as it was (#6802 Codex review — replacing then unwinding would
+// otherwise delete a transcript the account already held). A file that
+// vanished between the caller's open and the link has nothing to preserve,
+// and a backup that cannot be created refuses the replace rather than
+// letting the install destroy content it could not put back.
+func replaceCarryFile(dir *os.File, name string, src *os.File, size int64, preserve bool) (string, error) {
 	var nonce [8]byte
 	if _, err := rand.Read(nonce[:]); err != nil {
-		return carryFailure("copying it into the new account failed", err)
+		return "", carryFailure("copying it into the new account failed", err)
 	}
 	tmpName := ".af-carry-" + hex.EncodeToString(nonce[:]) + ".tmp"
 	tmp, err := openCarryAt(dir, tmpName, unix.O_WRONLY|unix.O_CREAT|unix.O_EXCL, carryFileMode)
 	if err != nil {
-		return carryFailure("copying it into the new account failed", err)
+		return "", carryFailure("copying it into the new account failed", err)
 	}
 	installed := false
 	defer func() {
@@ -501,17 +620,46 @@ func replaceCarryFile(dir *os.File, name string, src *os.File, size int64) error
 	if err == nil {
 		err = tmp.Close()
 	}
+	var displaced string
+	if err == nil && preserve {
+		// The backup is a hardlink, not a rename: name keeps pointing at the
+		// original inode, so no instant exists where the destination lacks
+		// its file. The rename below then swaps name's entry atomically while
+		// the backup still holds the displaced inode.
+		var bakNonce [8]byte
+		if _, err := rand.Read(bakNonce[:]); err != nil {
+			return "", carryFailure("preserving the new account's existing copy failed", err)
+		}
+		bakName := ".af-carry-" + hex.EncodeToString(bakNonce[:]) + ".bak"
+		err = retryEINTR(func() error {
+			return unix.Linkat(int(dir.Fd()), name, int(dir.Fd()), bakName, 0)
+		})
+		switch {
+		case err == nil:
+			displaced = bakName
+		case errors.Is(err, fs.ErrNotExist):
+			// name vanished between the caller's open and this link: nothing
+			// is there to displace, so there is nothing to preserve.
+		default:
+			return "", carryFailure("preserving the new account's existing copy failed", err)
+		}
+	}
 	if err == nil {
 		err = retryEINTR(func() error {
 			return unix.Renameat(int(dir.Fd()), tmpName, int(dir.Fd()), name)
 		})
 	}
 	if err != nil {
-		return carryFailure("copying it into the new account failed", err)
+		if displaced != "" {
+			// The rename never landed, so name still points at the original
+			// inode — the backup is only a redundant link to it.
+			_ = unix.Unlinkat(int(dir.Fd()), displaced, 0)
+		}
+		return "", carryFailure("copying it into the new account failed", err)
 	}
 	installed = true
 	_ = dir.Sync()
-	return nil
+	return displaced, nil
 }
 
 // carryConversationTree copies a per-session directory (Claude's tool-result
@@ -572,7 +720,15 @@ func copyCarryTree(src, dst *os.File, depth int, budget *int) error {
 		case entry.IsDir():
 			errs = append(errs, copyCarrySubtree(src, dst, name, depth, budget))
 		case entry.Type().IsRegular():
-			errs = append(errs, carryFileAt(src, dst, name, true))
+			// Auxiliary files are not rollout evidence: the covered length a
+			// transcript would watermark is meaningless here. An aux copy has
+			// no commit step after install, so the displaced backup's only
+			// remaining job is done — remove it.
+			outcome, err := carryFileAt(src, dst, name, true)
+			if err == nil && outcome.displaced != "" {
+				_ = unix.Unlinkat(int(dst.Fd()), outcome.displaced, 0)
+			}
+			errs = append(errs, err)
 		}
 	}
 	return errors.Join(errs...)

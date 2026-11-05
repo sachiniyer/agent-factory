@@ -56,9 +56,7 @@ func TestParkAutomaticAccountSwapAtLimit_AttributesAndRecordsIncomingIdentity(t 
 
 	// The durable observations ledger gains the incoming entry.
 	observations := inst.AccountLimitObservations()
-	require.Contains(t, observations, AccountLimitObservationData{
-		Agent: tmux.ProgramClaude, Account: "personal", ResetAt: reset,
-	}, "accountLimitObservations must record the incoming (claude, personal) wall")
+	requireAccountLimitObservation(t, observations, tmux.ProgramClaude, "personal", reset)
 
 	// The durable InstanceData row persists both the live attribution and the
 	// observation, so a restart reloads the incoming wall rather than the
@@ -68,9 +66,7 @@ func TestParkAutomaticAccountSwapAtLimit_AttributesAndRecordsIncomingIdentity(t 
 	require.Equal(t, tmux.ProgramClaude, data.LimitAgent)
 	require.Equal(t, "personal", data.LimitAccount)
 	require.True(t, data.LimitResetAt.Equal(reset))
-	require.Contains(t, data.AccountLimitObservations, AccountLimitObservationData{
-		Agent: tmux.ProgramClaude, Account: "personal", ResetAt: reset,
-	}, "the durable row carries the incoming observation")
+	requireAccountLimitObservation(t, data.AccountLimitObservations, tmux.ProgramClaude, "personal", reset)
 }
 
 // TestParkAutomaticAccountSwapAtLimit_RefusesWithoutAutomaticPendingSwap guards
