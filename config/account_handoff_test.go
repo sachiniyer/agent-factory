@@ -443,6 +443,21 @@ func TestAccountHandoffProjectSetChecksMergedTable(t *testing.T) {
 		assert.Equal(t, 90, got.AccountHandoff.PreferBelowPercent,
 			"the refused unset must leave the personal leaf in place")
 	})
+
+	// The TOML decode is case-insensitive but the resolver's leaf presence
+	// check is not: a mixed-case leaf lands in the decoded struct yet the
+	// resolver ignores it. The write gate must see the merge the RESOLVER
+	// produces — not the decoded value — or a write could pass against an
+	// idle the resolver never applies (Codex on #6793).
+	t.Run("mixed-case leaf cannot hide a merged-invalid write", func(t *testing.T) {
+		home, _, project := registeredTestProject(t)
+		writeGlobalTOML(t, home, "")
+		writePersonalConfig(t, project.ID, "[account_handoff]\nMove_Idle_At_Percent = 0\n")
+
+		_, err := SetProjectConfigValue(project.ID, "account_handoff.prefer_below_percent", "96")
+		require.Error(t, err,
+			"the resolver ignores the mixed-case leaf, so the effective chain is 96 !< 95 — not 0-disabled")
+	})
 }
 
 // TestAccountHandoffNoTableNoChange pins the slice's core contract: config

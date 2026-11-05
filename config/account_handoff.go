@@ -348,22 +348,31 @@ func validatePersonalAccountHandoffMerge(personal *ProjectConfig) error {
 
 // mergedAccountHandoff reproduces the resolver's field-wise merge for this
 // one table: leaves the personal file declares take the personal values,
-// everything else stays at the global layer's values. Shape keys preserve
-// file casing, so they are matched lowercased — the decode that produced
-// `personal` was case-insensitive too.
+// everything else stays at the global layer's values. Presence matching is
+// deliberately identical to compositeLeaves/taggedFieldByKey — shape keys
+// are compared to the field's toml/json/config tag byte-for-byte, with NO
+// case folding: the TOML decode is case-insensitive but the resolver is not,
+// so a hand-written `Move_Idle_At_Percent` decodes into the struct yet the
+// resolver ignores it. Matching leniently here would let a write pass the
+// gate against an idle the resolver never applies, then fail at resolve —
+// the exact hole this gate exists to close (Codex on #6793).
 func mergedAccountHandoff(global, personal AccountHandoffConfig, shape any) AccountHandoffConfig {
 	table, _ := shape.(map[string]any)
-	written := make(map[string]bool, len(table))
-	for k := range table {
-		written[strings.ToLower(k)] = true
-	}
 	merged := global
 	dst, src := reflect.ValueOf(&merged).Elem(), reflect.ValueOf(personal)
 	rt := dst.Type()
-	for i := 0; i < rt.NumField(); i++ {
-		name := strings.SplitN(rt.Field(i).Tag.Get("toml"), ",", 2)[0]
-		if name != "" && name != "-" && written[name] {
-			dst.Field(i).Set(src.Field(i))
+	for name := range table {
+		for i := 0; i < rt.NumField(); i++ {
+			field := rt.Field(i)
+			if !field.IsExported() {
+				continue
+			}
+			if structTagName(field.Tag.Get("toml")) == name ||
+				structTagName(field.Tag.Get("json")) == name ||
+				field.Tag.Get("config") == name {
+				dst.Field(i).Set(src.Field(i))
+				break
+			}
 		}
 	}
 	return merged
