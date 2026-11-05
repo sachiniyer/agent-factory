@@ -384,6 +384,11 @@ func TestObjectStorageScanIsBounded(t *testing.T) {
 		t.Cleanup(func() { objectStorageScanMaxEntries = prev })
 		_, err := gitObjectStorageUnder(wt)
 		require.Error(t, err)
+		// Only a row the cheap probes did not already refuse reaches the walk
+		// (#6770), so the fixture files must be committed before the verdict
+		// propagates the scan's error.
+		gitIn(t, wt, "add", "-A")
+		gitIn(t, wt, "commit", "-qm", "track the fixture files")
 		_, err = WorktreeUnrecoverableContent(wt)
 		require.Error(t, err, "an unbounded tree is unknown and refuses")
 	})

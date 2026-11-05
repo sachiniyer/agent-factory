@@ -198,7 +198,10 @@ func DirSizeBytes(root string) (int64, error) {
 	case r := <-done:
 		return r.total, r.err
 	case <-time.After(dirSizeMeasureTimeout):
-		return 0, fmt.Errorf("measuring %s timed out after %s — the filesystem is likely stalled", root, dirSizeMeasureTimeout)
+		// Report what the walk measured before the deadline, not a bare zero
+		// that would list the row as reclaiming nothing (#6770); the error
+		// still tells the caller the total is partial.
+		return partial.Load(), fmt.Errorf("measuring %s timed out after %s — the filesystem is likely stalled", root, dirSizeMeasureTimeout)
 	}
 }
 

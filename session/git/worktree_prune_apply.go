@@ -92,9 +92,13 @@ func VerifyArchiveOccupant(worktreePath, recordedNonce string, archivedAt time.T
 	return nil
 }
 
-// WorktreeUnrecoverableContent returns one reason per way the worktree holds
-// content the kept branch cannot restore, or an error when that could not be
-// established (callers fail closed on an error). It is the dirty probe plus what
+// WorktreeUnrecoverableContent returns reasons the worktree holds content the
+// kept branch cannot restore, or an error when that could not be established
+// (callers fail closed on an error). Once a refusal stands it stops looking:
+// every remaining check can only add more refusals or fail closed, so skipping
+// them cannot change the verdict — and the object-storage walk below is the
+// bounded-but-costly one (up to objectStorageScanTimeout) a fleet of refused
+// rows would otherwise each pay (#6770). It is the dirty probe plus what
 // `git status` cannot see:
 //
 //   - index entries flagged assume-unchanged (`h`) or skip-worktree (`S`/`s`):
@@ -141,6 +145,19 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 		reasons = append(reasons, fmt.Sprintf("%d index entr(ies) flagged assume-unchanged or skip-worktree (%s) — git status cannot see their content, so it may not be on the kept branch; clear the flag (git update-index --no-assume-unchanged / --no-skip-worktree) and commit or discard the change",
 			flagged, sampleList(flaggedSample, flagged)))
 	}
+	// ANY submodule is refused outright, and it is named HERE — another cheap
+	// index read — rather than after the costly walk: without this a submodule
+	// row would report only the object storage its .git happens to place under
+	// a deleted root, which does not tell the user what actually must be
+	// preserved or removed.
+	subs, err := gitlinkPaths(worktreePath)
+	if err != nil {
+		return nil, err
+	}
+	if len(subs) > 0 {
+		reasons = append(reasons, fmt.Sprintf("the worktree contains %d submodule(s) (%s) — pruning does not support submodules, because their objects and local files are not covered by the kept branch; remove the archive by hand after preserving them",
+			len(subs), sampleList(firstN(subs, pruneSamplePaths), len(subs))))
+	}
 	// Anything a later step would refuse is refused HERE, before any mutation: a
 	// locked registration (`git worktree lock`) is one that removal refuses after
 	// the rename, which would strand a half-done prune.
@@ -155,6 +172,12 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	if locked {
 		reasons = append(reasons, "the worktree is locked (git worktree lock) — unlock it (git worktree unlock) and re-run")
 	}
+	// The verdict is already decided: everything below can only add refusals or
+	// fail closed, never admit the row. Skip the costly evidence — the
+	// object-storage walk and the store/gitlink probes — once a refusal stands.
+	if len(reasons) > 0 {
+		return reasons, nil
+	}
 	// The principle, not a list of shapes: prune deletes the worktree tree and its
 	// registration leaf, so neither may hold ANY git object storage — however it got
 	// there (absorbed, non-absorbed, retained after the gitlink was removed, a nested
@@ -166,6 +189,7 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	if len(storage) > 0 {
 		reasons = append(reasons, fmt.Sprintf("git object storage lives inside what pruning deletes (%s) — its commits may exist nowhere else; pruning does not touch such worktrees, so preserve or relocate that repository first",
 			sampleList(firstN(storage, pruneSamplePaths), len(storage))))
+		return reasons, nil
 	}
 	// The same principle stated as a DEPENDENCY: every object store the kept
 	// branch's repository depends on — its objects directory and the transitive
@@ -178,14 +202,6 @@ func WorktreeUnrecoverableContent(worktreePath string) ([]string, error) {
 	if len(deps) > 0 {
 		reasons = append(reasons, fmt.Sprintf("the kept branch's repository depends on an object store inside what pruning deletes (%s) — its objects would be destroyed; move that store out (or run `git repack -a -d` in the origin to make it self-contained) first",
 			sampleList(firstN(deps, pruneSamplePaths), len(deps))))
-	}
-	subs, err := gitlinkPaths(worktreePath)
-	if err != nil {
-		return nil, err
-	}
-	if len(subs) > 0 {
-		reasons = append(reasons, fmt.Sprintf("the worktree contains %d submodule(s) (%s) — pruning does not support submodules, because their objects and local files are not covered by the kept branch; remove the archive by hand after preserving them",
-			len(subs), sampleList(firstN(subs, pruneSamplePaths), len(subs))))
 	}
 	return reasons, nil
 }

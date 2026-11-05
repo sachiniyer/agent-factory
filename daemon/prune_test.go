@@ -664,10 +664,10 @@ func TestPruneSessions_RequiresScopeAndDuration(t *testing.T) {
 	require.ErrorContains(t, err, "older_than is required")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", OlderThan: "not-a-duration"})
-	require.ErrorContains(t, err, "not a positive Go duration")
+	require.ErrorContains(t, err, "not a positive duration")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{RepoID: "x", OlderThan: "-1h"})
-	require.ErrorContains(t, err, "not a positive Go duration")
+	require.ErrorContains(t, err, "not a positive duration")
 
 	_, err = manager.PruneSessions(PruneSessionsRequest{OlderThan: "1ms"})
 	require.ErrorContains(t, err, "a scope is required")
