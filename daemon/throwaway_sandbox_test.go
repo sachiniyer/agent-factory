@@ -127,7 +127,12 @@ func TestThrowawayOwnerDead(t *testing.T) {
 // teardown invocations the sweep produced.
 func sweepFixture(t *testing.T, selfHome string, homes map[string]*throwawaysandbox.Marker) (reaped []string) {
 	t.Helper()
-	regDir := t.TempDir()
+	// The registry fixture must match the shape WriteRegistryEntry produces:
+	// owner-only, never looser — the trust check refuses anything else.
+	regDir := filepath.Join(t.TempDir(), "registry")
+	if err := os.Mkdir(regDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	oldReg, oldNow, oldTeardown := throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn
 	oldLookup, oldScope := throwawayLookupFn, throwawayScopeIDsFn
 	throwawayRegistryDirFn = func() string { return regDir }
@@ -194,7 +199,10 @@ func TestSweepReapsExpiredAndOrphaned(t *testing.T) {
 
 func TestSweepDropsMissingMarkerEntries(t *testing.T) {
 	self := markedHome(t, nil)
-	regDir := t.TempDir()
+	regDir := filepath.Join(t.TempDir(), "registry")
+	if err := os.Mkdir(regDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
 	oldReg := throwawayRegistryDirFn
 	throwawayRegistryDirFn = func() string { return regDir }
 	defer func() { throwawayRegistryDirFn = oldReg }()
