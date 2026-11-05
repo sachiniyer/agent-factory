@@ -596,6 +596,9 @@ func (m *Manager) deliverHandoffReport(key, text string) reportSendOutcome {
 	if m.isPollPaused(repoID, target.Title, target.ID) {
 		return reportHeld
 	}
+	if !target.Started() {
+		return reportHeld // no runtime ⇒ no provable-empty composer
+	}
 	guard := func(inst *session.Instance, rid string) error {
 		if m.isPollPaused(rid, inst.Title, inst.ID) {
 			return errReportHeld
