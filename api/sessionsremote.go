@@ -60,17 +60,17 @@ func routedKillSession(req daemon.KillSessionRequest) (session.KeptBranch, error
 	return kept, remoteMutationError("kill", err)
 }
 
-func routedArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
+func routedArchiveSession(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.ArchiveSession(req)
 	}
 	c, err := remoteSessionClient()
 	if err != nil {
-		return "", err
+		return "", nil, err
 	}
 	defer c.CloseIdleConnections()
-	p, err := c.ArchiveSession(req)
-	return p, remoteMutationError("archive", err)
+	p, w, err := c.ArchiveSession(req)
+	return p, w, remoteMutationError("archive", err)
 }
 
 func routedRestoreSession(req daemon.RestoreSessionRequest) (string, error) {

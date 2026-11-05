@@ -35,8 +35,8 @@ func TestSessionsArchive_SurfacesDaemonError(t *testing.T) {
 	setupRepoForCmd(t)
 
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
-		return "", errors.New("cannot archive remote session")
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "", nil, errors.New("cannot archive remote session")
 	}
 	defer func() { archiveSessionViaDaemon = prev }()
 
@@ -53,8 +53,8 @@ func TestSessionsArchiveReportsCommittedHookWarningAsSuccess(t *testing.T) {
 	setupRepoForCmd(t)
 
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
-		return "/archive/worker", committedArchiveWarningTestError{}
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archive/worker", nil, committedArchiveWarningTestError{}
 	}
 	defer func() { archiveSessionViaDaemon = prev }()
 
@@ -114,9 +114,9 @@ func TestSessionsArchiveSelf_ResolvesAndArchivesCurrentSession(t *testing.T) {
 
 	var gotReq daemon.ArchiveSessionRequest
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotReq = req
-		return "/home/u/.agent-factory/archived/" + req.RepoID + "/me", nil
+		return "/home/u/.agent-factory/archived/" + req.RepoID + "/me", nil, nil
 	}
 	defer func() { archiveSessionViaDaemon = prev }()
 
@@ -185,9 +185,9 @@ func TestSessionsArchiveSelf_ScopesByResolvedRepoNotCwd(t *testing.T) {
 
 	var gotReq daemon.ArchiveSessionRequest
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotReq = req
-		return "/archived/me", nil
+		return "/archived/me", nil, nil
 	}
 	defer func() { archiveSessionViaDaemon = prev }()
 
@@ -223,9 +223,9 @@ func TestSessionsArchiveSelf_PreservesRecordedRepoIdentityInsideAncestor(t *test
 
 	var gotReq daemon.ArchiveSessionRequest
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotReq = req
-		return "/archived/me", nil
+		return "/archived/me", nil, nil
 	}
 	t.Cleanup(func() { archiveSessionViaDaemon = prev })
 	sessionsArchiveSelf = true
@@ -290,9 +290,9 @@ func TestSessionsArchiveSelf_SendsStableIDForWorktreelessRow(t *testing.T) {
 
 	var gotReq daemon.ArchiveSessionRequest
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotReq = req
-		return "/archived/me", nil
+		return "/archived/me", nil, nil
 	}
 	t.Cleanup(func() { archiveSessionViaDaemon = prev })
 	sessionsArchiveSelf = true
@@ -306,4 +306,178 @@ func TestSessionsArchiveSelf_SendsStableIDForWorktreelessRow(t *testing.T) {
 	// alone would have aimed the archive at the wrong project.
 	assert.Equal(t, config.RepoIDForPath(foreign), gotReq.RepoID,
 		"test premise: the recorded path resolves to the unrelated occupying repository")
+}
+
+// TestSessionsArchive_ThreadsArchivedWorkspaceFromResponse: the daemon computes
+// and returns ArchivedWorkspace in the ArchiveSessionResponse; the CLI must
+// thread it straight to its JSON output instead of discarding it and
+// re-deriving it through a snapshot read-back (#5804). This is the mainline fix:
+// the response field is the authoritative source.
+func TestSessionsArchive_ThreadsArchivedWorkspaceFromResponse(t *testing.T) {
+	setupRepoForCmd(t)
+
+	want := &session.ArchivedWorkspaceData{Host: "box1", Dir: "/home/agent/.agent-factory/sessions/worker/worktree", Pushed: false}
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archived/worker", want, nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	assert.Equal(t, "/archived/worker", parsed["archived_path"])
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace key must appear when the daemon response carries it")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok, "archived_workspace must be a JSON object")
+	assert.Equal(t, "box1", wsMap["host"])
+	assert.Equal(t, "/home/agent/.agent-factory/sessions/worker/worktree", wsMap["dir"])
+	assert.Equal(t, false, wsMap["pushed"])
+}
+
+// TestSessionsArchiveSelf_SurfacesArchivedWorkspaceFromResponseNotReadBack:
+// the bug's mainline repro: an off-box --self archive runs inside the sandbox,
+// so the snapshot read-back reaches the daemon's sandbox projection
+// (sandboxSafeInstanceData), which strips ArchivedWorkspace from every row. The
+// response field the daemon already returned is the only source that can carry
+// the value, and the CLI must thread it through instead of discarding it.
+func TestSessionsArchiveSelf_SurfacesArchivedWorkspaceFromResponseNotReadBack(t *testing.T) {
+	setupRepoForCmd(t)
+
+	const sessionRoot = "/home/agent/src/myrepo"
+	stubCurrentTmuxName(t, func() (string, error) { return "af_me_agent", nil })
+	// The snapshot simulates the sandbox projection: the row is found but its
+	// ArchivedWorkspace is nil — exactly what sandboxSafeInstanceData serves a
+	// sandbox caller. The read-back cannot recover the field from this shape.
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			ID:       "sess_1",
+			Title:    "me",
+			TmuxName: "af_me_agent",
+			Worktree: session.GitWorktreeData{RepoPath: sessionRoot},
+		}}, nil
+	})
+
+	want := &session.ArchivedWorkspaceData{Host: "box1", Dir: "/home/agent/.agent-factory/sessions/me/worktree", Pushed: false}
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archived/me", want, nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	sessionsArchiveSelf = true
+	defer func() { sessionsArchiveSelf = false }()
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, nil)
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	assert.Equal(t, "me", parsed["title"])
+	assert.Equal(t, "/archived/me", parsed["archived_path"])
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace must appear from the response field even when the snapshot read-back is scrubbed")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok, "archived_workspace must be a JSON object")
+	assert.Equal(t, "box1", wsMap["host"])
+	assert.Equal(t, "/home/agent/.agent-factory/sessions/me/worktree", wsMap["dir"])
+	assert.Equal(t, false, wsMap["pushed"])
+}
+
+// TestSessionsArchive_FallsBackToReadBackForOlderDaemon: an older daemon that
+// predates the ArchivedWorkspace response field returns nil for it; the CLI
+// must then fall back to the best-effort snapshot read-back so the key still
+// appears for a daemon that populates the row but not the response.
+func TestSessionsArchive_FallsBackToReadBackForOlderDaemon(t *testing.T) {
+	setupRepoForCmd(t)
+
+	// Older daemon: response carries no ArchivedWorkspace.
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archived/worker", nil, nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	// The read-back finds the row with ArchivedWorkspace populated (what an
+	// unsandboxed snapshot or a daemon that populates the row serves).
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{
+			Title:             "worker",
+			ArchivedWorkspace: &session.ArchivedWorkspaceData{Host: "box1", Dir: "/home/agent/.agent-factory/sessions/worker/worktree"},
+		}}, nil
+	})
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace must appear via the read-back fallback when the response omits it")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok, "archived_workspace must be a JSON object")
+	assert.Equal(t, "box1", wsMap["host"])
+	assert.Equal(t, "/home/agent/.agent-factory/sessions/worker/worktree", wsMap["dir"])
+}
+
+// TestSessionsArchive_OmitsArchivedWorkspaceWhenNeitherSourceHasIt: when both
+// the response field and the read-back are nil (a local archive, or a sandbox
+// caller against an older daemon), the key must be absent — no regression to a
+// spurious nil/empty value.
+func TestSessionsArchive_OmitsArchivedWorkspaceWhenNeitherSourceHasIt(t *testing.T) {
+	setupRepoForCmd(t)
+
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archived/worker", nil, nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
+		return []session.InstanceData{{Title: "worker"}}, nil
+	})
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	assert.Equal(t, true, parsed["ok"])
+	_, ok := parsed["archived_workspace"]
+	assert.False(t, ok, "archived_workspace must be absent when neither the response nor the read-back carries it")
+}
+
+// TestSessionsArchive_PushArchiveThreadsPushedWorkspace: a --push archive
+// carries {pushed:true, branch:...} in the response field; the CLI must thread
+// it through so the output names the pushed branch.
+func TestSessionsArchive_PushArchiveThreadsPushedWorkspace(t *testing.T) {
+	setupRepoForCmd(t)
+
+	want := &session.ArchivedWorkspaceData{Pushed: true, Branch: "af/worker"}
+	prev := archiveSessionViaDaemon
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archived/worker", want, nil
+	}
+	defer func() { archiveSessionViaDaemon = prev }()
+
+	sessionsArchivePush = true
+	defer func() { sessionsArchivePush = false }()
+
+	out, err := runCmdCaptureStdout(t, sessionsArchiveCmd, []string{"worker"})
+	require.NoError(t, err)
+
+	var parsed map[string]any
+	require.NoError(t, json.Unmarshal(out, &parsed))
+	ws, ok := parsed["archived_workspace"]
+	require.True(t, ok, "archived_workspace must appear for a --push archive")
+	wsMap, ok := ws.(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, true, wsMap["pushed"])
+	assert.Equal(t, "af/worker", wsMap["branch"])
 }

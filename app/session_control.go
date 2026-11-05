@@ -268,14 +268,15 @@ var killSessionThroughDaemon = func(request daemon.KillSessionRequest) error {
 // archiveSessionThroughDaemon / restoreSessionThroughDaemon route archive and
 // restore verbs through the daemon (the single writer). Package vars so the app
 // test suite can stub them without dialing a real daemon.
-var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
+var archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 	var path string
+	var workspace *session.ArchivedWorkspaceData
 	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
 		var e error
-		path, e = c.ArchiveSession(request)
+		path, workspace, e = c.ArchiveSession(request)
 		return e
 	})
-	return path, err
+	return path, workspace, err
 }
 
 var restoreSessionThroughDaemon = func(request daemon.RestoreSessionRequest) (string, error) {

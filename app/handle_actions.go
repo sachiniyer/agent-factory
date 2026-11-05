@@ -473,7 +473,7 @@ func (m *home) handleRestore() (tea.Model, tea.Cmd) {
 func (m *home) archiveInstanceCmd(target sessionActionTarget) tea.Cmd {
 	archive := archiveSessionThroughDaemon
 	return func() tea.Msg {
-		if _, err := archive(target.archiveRequest()); err != nil {
+		if _, _, err := archive(target.archiveRequest()); err != nil {
 			log.ErrorLog.Printf("could not archive instance %q: %v", target.title, err)
 			return instanceArchivedMsg{target: target, err: err}
 		}
