@@ -479,6 +479,110 @@ func TestLifelineProbeRetriesAfterCooldown(t *testing.T) {
 	}
 }
 
+// lifelineMemberPID returns the pid of a `af __watch-lifeline v1 member`
+// process in process group pgid, or -1 when none is visible. The run's own
+// shell leads the group; the member that joins it answers for a bound run
+// (#6771). ps's pid/pgid/args fields read the same on Linux and macOS.
+func lifelineMemberPID(t *testing.T, pgid int) int {
+	t.Helper()
+	out, err := exec.Command("ps", "-eo", "pid=,pgid=,args=").Output()
+	if err != nil {
+		t.Fatalf("ps pid,pgid,args: %v", err)
+	}
+	needle := watchlifeline.Arg + " " + watchlifeline.Protocol + " member"
+	for _, line := range strings.Split(string(out), "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 3 {
+			continue
+		}
+		pid, err1 := strconv.Atoi(fields[0])
+		pg, err2 := strconv.Atoi(fields[1])
+		if err1 == nil && err2 == nil && pg == pgid && strings.Contains(strings.Join(fields[2:], " "), needle) {
+			return pid
+		}
+	}
+	return -1
+}
+
+// TestUnboundRunBindsALifelineAfterTheDegradedWindow is #6771: a watch run
+// that started while the lifeline was degraded spawns its shell directly —
+// and before the fix stayed unbound for its whole life, so an unclean daemon
+// death could orphan it. Once the window has ended and the binary answers
+// the protocol again, a lifeline must join the run's process group and
+// supervise it from inside, and the run must not be left unbound.
+func TestUnboundRunBindsALifelineAfterTheDegradedWindow(t *testing.T) {
+	dir := t.TempDir()
+	pidFile := filepath.Join(dir, "shell.pid")
+	stub := filepath.Join(dir, "af-stub")
+	// A lifeline binary that runs but does not speak the protocol: the probe
+	// fails and the shell spawns directly — the run starts unbound.
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\nexit 1\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	s, _ := newTestSupervisor(t, staticTasks())
+	realExe := s.lifelineExe
+	if realExe == "" {
+		t.Fatal("no lifeline executable resolved for this test binary")
+	}
+	s.lifelineExe = stub
+
+	w := s.newTaskWatcher(watchTask("rebind", "echo $$ > "+pidFile+"; sleep 300", dir))
+	done := make(chan error, 1)
+	go func() {
+		_, err := w.runOnce()
+		done <- err
+	}()
+	stopped := false
+	stopAndJoin := func() {
+		if !stopped {
+			stopped = true
+			close(w.stopCh)
+			<-done
+		}
+	}
+	defer stopAndJoin()
+
+	var shell int
+	waitUntil(t, 5*time.Second, "watch command to start without a lifeline", func() bool {
+		var ok bool
+		shell, ok = readPIDFile(pidFile)
+		return ok
+	})
+
+	// The degraded window ends: the binary the daemon would exec speaks the
+	// protocol again — a transient launcher failure clearing, modelled as a
+	// shim onto the real binary (an atomic replace, so a spawn mid-swap can
+	// never read a half-written script).
+	shim := filepath.Join(dir, "af-shim")
+	if err := os.WriteFile(shim, []byte("#!/bin/sh\nexec "+realExe+" \"$@\"\n"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Rename(shim, stub); err != nil {
+		t.Fatal(err)
+	}
+	// Another run's probe is what re-arms the lifeline; it is also what tells
+	// an unbound run the window has ended.
+	s.lifelineProbeHold.Store(0)
+	if _, err := s.newTaskWatcher(watchTask("rearm", "true", dir)).runOnce(); err != nil {
+		t.Fatal(err)
+	}
+	var member int
+	waitUntil(t, 5*time.Second, "a lifeline member to join the unbound run's group", func() bool {
+		member = lifelineMemberPID(t, shell)
+		return member > 0
+	})
+	if s.lifelineUnsupported.Load() {
+		t.Fatal("a bound run did not re-arm the lifeline state")
+	}
+
+	// And the bound run must end with the watcher's stop: the member dies
+	// with the group it joined, not lingering as an orphan itself.
+	stopAndJoin()
+	waitUntil(t, 5*time.Second, "the bound member to leave with the run", func() bool {
+		return processGone(member)
+	})
+}
+
 // TestLifelineProbeWarnsOncePerDegradation pins the warning contract the
 // cooldown relies on: two consecutive failed probes produce exactly one
 // warning — a skewed binary must not spam the log every retry — a probe

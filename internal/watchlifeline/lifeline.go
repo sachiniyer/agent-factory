@@ -34,6 +34,19 @@
 // version it does not know writes no ack, explains on stderr, and exits
 // ExitUsage, which the daemon's fallback turns into a warning instead of a
 // crash loop.
+//
+// Member mode — `af __watch-lifeline v1 member <grace-ms>` — is the late
+// bind for a run that started while the lifeline was degraded (#6771): the
+// shell is already running and already leads the group, so the daemon spawns
+// the lifeline INTO that group (Setpgid with the run's pgid). A member has
+// no shell to start and no status to report: it acks once it is armed, then
+// watches only the lifeline pipe, and on EOF gives its group the same
+// SIGTERM, grace, SIGKILL. Killing its own group from inside is as safe as
+// the leader's: while a member lives the group is never empty, so its
+// number cannot be freed and reused to name someone else's group — the same
+// property the daemon's group anchor relies on. The daemon ends a member by
+// its own pid when the run is over; the pipe's EOF is only ever daemon
+// death.
 package watchlifeline
 
 import (
@@ -62,10 +75,18 @@ const (
 	LifelineFD = 3
 	AckFD      = 4
 
+	// MemberArg selects member mode in a v1 argv: `af __watch-lifeline v1
+	// member <grace-ms>` — supervise the process group it was spawned into
+	// instead of leading a fresh one and starting the shell.
+	MemberArg = "member"
+
 	// AckStarted prefixes the ack line when the shell started; AckStartFailed
 	// prefixes it, followed by the error, when it could not be started.
 	AckStarted     = Protocol + " started"
 	AckStartFailed = Protocol + " start-failed: "
+	// AckMemberArmed is the member mode's ack line: the lifeline has joined
+	// the run's group and is supervising it.
+	AckMemberArmed = Protocol + " member"
 	// AckExited and AckSignaled prefix the second line, the shell's status:
 	// its exit code, or the number of the signal that killed it.
 	AckExited   = Protocol + " exited "
@@ -111,6 +132,14 @@ func Argv(grace time.Duration, shell string, shellArgs ...string) []string {
 	return append(argv, shellArgs...)
 }
 
+// MemberArgv is the member-mode invocation: no shell follows — the run's
+// shell is already running; the lifeline joins ITS process group and only
+// supervises. The daemon kills the member by its own pid when the run is
+// over, so the lifeline pipe's EOF is only ever daemon death.
+func MemberArgv(grace time.Duration) []string {
+	return []string{Arg, Protocol, MemberArg, strconv.FormatInt(grace.Milliseconds(), 10)}
+}
+
 // HandleExec runs the lifeline and exits when os.Args is a lifeline
 // invocation; any other invocation returns immediately.
 func HandleExec() {
@@ -124,9 +153,10 @@ func HandleExec() {
 
 // invocation is a parsed v1 argv.
 type invocation struct {
-	grace time.Duration
-	shell string
-	args  []string
+	grace  time.Duration
+	shell  string
+	args   []string
+	member bool
 }
 
 func parse(args []string) (invocation, error) {
@@ -136,6 +166,16 @@ func parse(args []string) (invocation, error) {
 	if args[1] != Protocol {
 		return invocation{}, fmt.Errorf("unsupported protocol %q (this af binary speaks %s); "+
 			"restart the af daemon so it runs the installed binary", args[1], Protocol)
+	}
+	if len(args) >= 3 && args[2] == MemberArg {
+		if len(args) != 4 {
+			return invocation{}, errors.New("malformed member invocation: want " + Arg + " " + Protocol + " member <grace-ms>")
+		}
+		ms, err := strconv.ParseInt(args[3], 10, 64)
+		if err != nil || ms < 0 {
+			return invocation{}, fmt.Errorf("malformed grace %q", args[3])
+		}
+		return invocation{grace: time.Duration(ms) * time.Millisecond, member: true}, nil
 	}
 	if len(args) < 5 || args[3] != "--" {
 		return invocation{}, errors.New("malformed invocation: want " + Arg + " " + Protocol + " <grace-ms> -- <shell> [args…]")
@@ -162,6 +202,9 @@ func Run(args []string, lifeline, ack *os.File) int {
 		fmt.Fprintf(os.Stderr, "af %s: started without its lifeline descriptors (fd %d and %d); "+
 			"this is an internal invocation only the af daemon makes\n", Arg, LifelineFD, AckFD)
 		return ExitUsage
+	}
+	if inv.member {
+		return runMember(inv, lifeline, ack)
 	}
 	// Every signal below names this process's own group, which is only this
 	// run's when this process leads it — the daemon starts it with Setpgid.
@@ -228,6 +271,40 @@ func Run(args []string, lifeline, ack *os.File) int {
 	return 1 // unreachable: both paths end with a SIGKILL that includes this process
 }
 
+// runMember is the member half of the protocol: a lifeline the daemon
+// spawned INTO an already-running watch command's process group, so it
+// supervises that group from inside. Its own membership pins the group's
+// number for as long as it lives, so the kill below can only ever name this
+// run's group — the same property the leader's Setpgid gives it, and the
+// daemon's anchor relies on. The run's shell is not its child, so there is
+// no status to report: armed is the only ack line, and the lifeline pipe's
+// EOF — the daemon gone — is the only event it acts on.
+func runMember(inv invocation, lifeline, ack *os.File) int {
+	// Spawned as a group leader, a member supervises a group that holds only
+	// itself — acking would claim a coverage nothing received. It must have
+	// been Setpgid'd into the run's group instead.
+	if pgid := syscall.Getpgrp(); pgid == os.Getpid() {
+		fmt.Fprintf(os.Stderr, "af %s: member spawned as the leader of a new process group (pgid %d, pid %d); "+
+			"it must join the run's group instead\n", Arg, pgid, os.Getpid())
+		return ExitUsage
+	}
+	syscall.CloseOnExec(int(lifeline.Fd()))
+	syscall.CloseOnExec(int(ack.Fd()))
+	// The TERM catch goes in BEFORE the armed ack: the daemon's stop path
+	// SIGTERMs the whole group, and a member that died of it would stop
+	// supervising through the escalation. The group's SIGKILL still ends it.
+	terms := make(chan os.Signal, 1)
+	signal.Notify(terms, syscall.SIGTERM)
+	go func() {
+		for range terms {
+		}
+	}()
+	writeAck(ack, AckMemberArmed)
+	_, _ = io.Copy(io.Discard, lifeline)
+	stopOwnGroup(inv.grace, nil)
+	return 1 // unreachable: the group kill includes this process
+}
+
 // stopOwnGroup is the daemon-died path: SIGTERM the group so the script can
 // clean up, wait up to grace for the shell, then SIGKILL the group — this
 // process included, as its last act. Both signals name this process's own
@@ -287,6 +364,13 @@ func ParseAck(line string) (supported, ok bool, startErr error) {
 		return true, false, errors.New(strings.TrimPrefix(line, AckStartFailed))
 	}
 	return false, false, nil
+}
+
+// ParseMemberAck reads a member-mode ack line: armed reports the lifeline
+// joined the run's group and is supervising it. Anything else — including
+// no line — is a binary that does not speak member mode.
+func ParseMemberAck(line string) (armed bool) {
+	return strings.TrimSuffix(line, "\n") == AckMemberArmed
 }
 
 // ParseExit reads the ack pipe's second line, the shell's status. ok is false
