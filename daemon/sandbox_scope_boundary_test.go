@@ -98,18 +98,6 @@ func TestSandboxScope_NoResponseCarriesTheDaemonHostLayout(t *testing.T) {
 			`{"reason":"` + otherPath + `"}`,
 		},
 		"/v1/ArchiveSession": {`{"title":"peer"}`, `{"title":"foreign"}`, `{"title":"does-not-exist"}`, `{"id":"` + f.other.ID + `"}`},
-		// Same selector shapes as SendPrompt: an in-project off-box peer, another
-		// project's session, an unknown title, an on-box row, a foreign id, and a
-		// repo_id the scope must ignore. The id is a valid Codex UUID so the
-		// refusal comes from scoping/validation, not the id shape.
-		"/v1/SetConversation": {
-			`{"title":"peer","conversation_id":"` + setConversationDaemonID + `"}`,
-			`{"title":"foreign","conversation_id":"` + setConversationDaemonID + `"}`,
-			`{"title":"does-not-exist","conversation_id":"` + setConversationDaemonID + `"}`,
-			`{"title":"local-one","conversation_id":"` + setConversationDaemonID + `"}`,
-			`{"id":"` + f.other.ID + `","conversation_id":"` + setConversationDaemonID + `"}`,
-			`{"repo_id":"` + f.repoB + `","title":"peer","conversation_id":"` + setConversationDaemonID + `"}`,
-		},
 		"/v1/CreateSession": {
 			`{"title":"x","prompt":"p","host":"h1"}`, `{"title":"x","prompt":"p"}`, `{"title":"x","host":"h1","backend":"local"}`,
 			`{"title":"x","host":"h1","repo_path":"` + otherPath + `"}`, `{"title":"x","host":"h1","in_place":true}`,
@@ -256,19 +244,18 @@ func scrubWatch(t *testing.T) func() []string {
 
 // requestTypes is the request type of every route admitted to the sandbox scope.
 var requestTypes = map[string]reflect.Type{
-	"/v1/Snapshot":        reflect.TypeFor[SnapshotRequest](),
-	"/v1/SendPrompt":      reflect.TypeFor[SendPromptRequest](),
-	"/v1/SetAttention":    reflect.TypeFor[SetAttentionRequest](),
-	"/v1/SetConversation": reflect.TypeFor[SetConversationRequest](),
-	"/v1/ArchiveSession":  reflect.TypeFor[ArchiveSessionRequest](),
-	"/v1/CreateSession":   reflect.TypeFor[CreateSessionRequest](),
-	"/v1/CreateTab":       reflect.TypeFor[CreateTabRequest](),
-	"/v1/CloseTab":        reflect.TypeFor[CloseTabRequest](),
-	"/v1/RenameTab":       reflect.TypeFor[RenameTabRequest](),
-	"/v1/ReorderTab":      reflect.TypeFor[ReorderTabRequest](),
-	"/v1/ListTasks":       reflect.TypeFor[ListTasksRequest](),
-	"/v1/AddTask":         reflect.TypeFor[AddTaskRequest](),
-	"/v1/RemoveTask":      reflect.TypeFor[RemoveTaskRequest](),
+	"/v1/Snapshot":       reflect.TypeFor[SnapshotRequest](),
+	"/v1/SendPrompt":     reflect.TypeFor[SendPromptRequest](),
+	"/v1/SetAttention":   reflect.TypeFor[SetAttentionRequest](),
+	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionRequest](),
+	"/v1/CreateSession":  reflect.TypeFor[CreateSessionRequest](),
+	"/v1/CreateTab":      reflect.TypeFor[CreateTabRequest](),
+	"/v1/CloseTab":       reflect.TypeFor[CloseTabRequest](),
+	"/v1/RenameTab":      reflect.TypeFor[RenameTabRequest](),
+	"/v1/ReorderTab":     reflect.TypeFor[ReorderTabRequest](),
+	"/v1/ListTasks":      reflect.TypeFor[ListTasksRequest](),
+	"/v1/AddTask":        reflect.TypeFor[AddTaskRequest](),
+	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskRequest](),
 }
 
 // stringFieldPaths lists the JSON path of every settable string field of t,
@@ -340,16 +327,15 @@ func TestSandboxScope_ResponsesDoNotDependOnCallerInputMembership(t *testing.T) 
 		body map[string]any
 	}
 	bases := map[string][]baseShape{
-		"/v1/Snapshot":        {{"empty", map[string]any{}}},
-		"/v1/SendPrompt":      {{"to a peer", map[string]any{"prompt": "hi", "title": "peer"}}},
-		"/v1/SetAttention":    {{"own session", map[string]any{"id": f.me.ID, "reason": "r"}}},
-		"/v1/SetConversation": {{"to a peer", map[string]any{"title": "peer", "conversation_id": setConversationDaemonID}}},
-		"/v1/ArchiveSession":  {{"unknown", map[string]any{"title": "nope"}}},
-		"/v1/CreateTab":       {{"own session", map[string]any{"id": f.me.ID, "command": "x"}}},
-		"/v1/CloseTab":        {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
-		"/v1/RenameTab":       {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope", "new_name": "n"}}},
-		"/v1/ReorderTab":      {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
-		"/v1/ListTasks":       {{"empty", map[string]any{}}},
+		"/v1/Snapshot":       {{"empty", map[string]any{}}},
+		"/v1/SendPrompt":     {{"to a peer", map[string]any{"prompt": "hi", "title": "peer"}}},
+		"/v1/SetAttention":   {{"own session", map[string]any{"id": f.me.ID, "reason": "r"}}},
+		"/v1/ArchiveSession": {{"unknown", map[string]any{"title": "nope"}}},
+		"/v1/CreateTab":      {{"own session", map[string]any{"id": f.me.ID, "command": "x"}}},
+		"/v1/CloseTab":       {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
+		"/v1/RenameTab":      {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope", "new_name": "n"}}},
+		"/v1/ReorderTab":     {{"own session", map[string]any{"id": f.me.ID, "tab_name": "nope"}}},
+		"/v1/ListTasks":      {{"empty", map[string]any{}}},
 		"/v1/AddTask": {{"cron to a peer", map[string]any{"task": map[string]any{
 			"prompt": "p", "cron_expr": "0 * * * *", "target_session": "peer"}}}},
 		"/v1/RemoveTask": {{"own task", map[string]any{"id": "t-mine"}}},
@@ -744,7 +730,6 @@ func TestSandboxSessionVerbsAreAtomicWithTheirAuthorization(t *testing.T) {
 	for _, route := range []struct{ path, body string }{
 		{"/v1/SendPrompt", `{"prompt":"hi","title":"peer"}`},
 		{"/v1/ArchiveSession", `{"title":"peer"}`},
-		{"/v1/SetConversation", `{"title":"peer","conversation_id":"` + setConversationDaemonID + `"}`},
 	} {
 		t.Run(route.path, func(t *testing.T) {
 			f := newScopeFixture(t)

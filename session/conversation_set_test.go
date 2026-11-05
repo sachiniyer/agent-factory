@@ -32,6 +32,29 @@ func setConversationConfig(t *testing.T) {
 	require.NoError(t, config.SaveConfig(cfg))
 }
 
+// A session whose workspace runs off-box (ssh, sandbox, docker, remote) keeps
+// its Codex rollout store on the remote host, where the daemon cannot read it.
+// The validator refuses before any store access — this is the constraint that
+// makes set-conversation unservable for the sandbox scope's off-box targets
+// (#6805): every backend authorizeSandboxSession admits reconstructs with
+// WorkspaceRemote, so the authorized set and the validatable set have an empty
+// intersection. The route was removed from the sandbox scope rather than
+// admitting a verb no sandbox-credentialed request can complete.
+func TestValidateSettableConversation_RefusesRemoteWorkspace(t *testing.T) {
+	setConversationConfig(t)
+	workDir := t.TempDir()
+	for _, backend := range []string{"ssh", "sandbox", "docker", "remote"} {
+		inst := sandboxInstanceOn(t, backend, nil)
+		inst.Path = workDir
+		assert.Equal(t, WorkspaceRemote, inst.Capabilities().Workspace,
+			"backend %q reconstructs with WorkspaceRemote", backend)
+		_, err := ValidateSettableConversation(inst, setConversationID)
+		require.Error(t, err, "backend %q: a remote workspace is not inspectable from here", backend)
+		assert.Contains(t, err.Error(), "runs off this host",
+			"backend %q: the refusal names the store-owning host", backend)
+	}
+}
+
 func TestValidateSettableConversation_HappyPath(t *testing.T) {
 	setConversationConfig(t)
 	codexHome := t.TempDir()

@@ -283,14 +283,20 @@ var httpRoutes = []HTTPRoute{
 	// stale (#6769): validates the id against the session's own rollout store
 	// before writing it to the Agent tab — strict correlation only, never a
 	// guess. The running pane is untouched; the recorded id matters the next
-	// time af builds a resume command.
+	// time af builds a resume command. Not sandboxAllowed: the validator reads
+	// the rollout store from the daemon host's filesystem, and every off-box
+	// backend the sandbox scope admits (ssh/sandbox/docker/remote) keeps its
+	// rollout store on the remote host, where the daemon cannot inspect it —
+	// so the authorized target set and the validatable target set have an empty
+	// intersection. Admitting the route to the scope would publish a verb no
+	// sandbox-credentialed request can complete (#6805 dead-end). The operator
+	// path (unix socket, operator token) remains fully functional.
 	{
-		Method:         http.MethodPost,
-		Path:           "/v1/SetConversation",
-		sandboxAllowed: true,
-		Description:    "Record a provider conversation id on a session's Agent tab after proving it against the session's own conversation store — the repair for an unrecorded or stale recorded conversation.",
-		requestType:    reflect.TypeOf(SetConversationRequest{}),
-		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.setConversationScoped) },
+		Method:      http.MethodPost,
+		Path:        "/v1/SetConversation",
+		Description: "Record a provider conversation id on a session's Agent tab after proving it against the session's own conversation store — the repair for an unrecorded or stale recorded conversation.",
+		requestType: reflect.TypeOf(SetConversationRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.SetConversation) },
 	},
 	{
 		Method:      http.MethodPost,

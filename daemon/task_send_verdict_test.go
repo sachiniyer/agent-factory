@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -71,5 +72,44 @@ func TestUnprovenSendStatusesAreNotFailuresAndSurviveTheSandboxProjection(t *tes
 		if len(status) >= 8 && status[:8] == "errored:" {
 			t.Errorf("%q must not carry the errored: prefix", status)
 		}
+	}
+}
+
+// The interrupted-run family the daemon persists (taskStatusAbortedShutdown on
+// drain, taskStatusAbortedRuntimeReplaced on runtime replacement) is its own
+// head ("aborted", no ':' inside the head), so a closed-vocabulary consumer
+// needs the head listed (sandboxRunStatusHeads). Without it the projection
+// collapses both to "" — indistinguishable from "never ran" — while the
+// operator TUI/CLI still reads "aborted: ...". The head is daemon-chosen and
+// closed-form (the family is keyed by the "aborted:" prefix elsewhere), so
+// admitting it adds nothing a sandbox must not read.
+func TestAbortedRunStatusesSurviveTheSandboxProjection(t *testing.T) {
+	for _, status := range []string{taskStatusAbortedShutdown, taskStatusAbortedRuntimeReplaced} {
+		if got := sandboxRunStatusHead(status); got != "aborted" {
+			t.Errorf("sandboxRunStatusHead(%q) = %q, want %q; the aborted head must survive the sandbox projection, not collapse to \"\"", status, got, "aborted")
+		}
+		// The tail after the head is free-form (it carries a reason), so the
+		// projection must keep only the head and never the whole status.
+		if got := sandboxRunStatusHead(status); got == status {
+			t.Errorf("sandboxRunStatusHead(%q) returned the whole status; only the head may cross the boundary", status)
+		}
+	}
+	// sandboxSafeTask keeps LastRunAt and projects LastRunStatus to the head,
+	// so a sandbox sees a last-run timestamp with "aborted" — not "" — for an
+	// interrupted occurrence.
+	at := time.Now()
+	got := sandboxSafeTask(task.Task{
+		ID: "t", LastRunAt: &at, LastRunStatus: taskStatusAbortedShutdown,
+	})
+	if got.LastRunStatus != "aborted" {
+		t.Errorf("sandboxSafeTask LastRunStatus = %q, want %q", got.LastRunStatus, "aborted")
+	}
+	if got.LastRunAt == nil || !got.LastRunAt.Equal(at) {
+		t.Errorf("sandboxSafeTask LastRunAt was not preserved: got %v, want %v", got.LastRunAt, at)
+	}
+	// A genuinely empty status (never ran) still projects to "", so the
+	// distinction the interrupted-run marker exists to communicate is preserved.
+	if got := sandboxRunStatusHead(""); got != "" {
+		t.Errorf("sandboxRunStatusHead(\"\") = %q, want \"\"", got)
 	}
 }

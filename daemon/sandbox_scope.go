@@ -213,27 +213,6 @@ func (s *controlServer) archiveSessionScoped(ctx context.Context, req *ArchiveSe
 	return s.archiveSessionGuarded(ctx, req, resp, guard)
 }
 
-// setConversationScoped admits a sandbox credential to set-conversation on a
-// sibling session in its own project, on the same rule as send-prompt: the
-// write only changes what af records, but a misrecorded conversation changes
-// what the NEXT resume opens, so cross-project reach stays refused. The row
-// is addressed by its authorized stable ID and re-checked inside the op lock.
-func (s *controlServer) setConversationScoped(ctx context.Context, req SetConversationRequest, resp *SetConversationResponse) error {
-	owner, ok := sandboxOwner(ctx)
-	if !ok {
-		return s.SetConversation(req, resp)
-	}
-	proj, inst, err := s.manager.authorizeSandboxSession(owner, req.ID, req.Title, false)
-	if err != nil {
-		return err
-	}
-	req.ID, req.Title, req.RepoID = inst.ID, inst.Title, proj.repoID
-	if testHookSandboxAfterAuthorize != nil {
-		testHookSandboxAfterAuthorize()
-	}
-	return s.setConversationGuarded(req, resp, s.manager.sandboxSessionGuard(inst.ID, proj.repoID))
-}
-
 // --- tab verbs: the credential's own session only ---------------------------
 
 func (s *controlServer) createTabScoped(ctx context.Context, req CreateTabRequest, resp *CreateTabResponse) error {

@@ -120,6 +120,11 @@ var sandboxStringClasses = map[reflect.Type]map[string]fieldSpec{
 var sandboxRunStatusHeads = map[string]bool{
 	"started": true, "sent": true, "sent-unverified": true, "sent-unconfirmed": true, "errored": true, "deferred": true, "parked": true,
 	"dropped": true, "stopped": true, "skipped": true, "ok": true,
+	// aborted is the head of the interrupted-run family the daemon persists on
+	// shutdown draining (taskStatusAbortedShutdown) and runtime replacement
+	// (taskStatusAbortedRuntimeReplaced). It is its own head (no ':'), so a
+	// closed-vocabulary consumer needs it listed — same rule as the sent-* heads.
+	"aborted": true,
 }
 
 // sandboxRunStatusHead projects a run status to its closed head, or "" when the head
@@ -137,19 +142,18 @@ func sandboxRunStatusHead(status string) string {
 // scope. The boundary walks a response by it, and a test requires an entry for
 // every admitted route.
 var sandboxResponseTypes = map[string]reflect.Type{
-	"/v1/Snapshot":        reflect.TypeFor[SnapshotResponse](),
-	"/v1/SendPrompt":      reflect.TypeFor[SendPromptResponse](),
-	"/v1/SetAttention":    reflect.TypeFor[SetAttentionResponse](),
-	"/v1/SetConversation": reflect.TypeFor[SetConversationResponse](),
-	"/v1/ArchiveSession":  reflect.TypeFor[ArchiveSessionResponse](),
-	"/v1/CreateSession":   reflect.TypeFor[CreateSessionResponse](),
-	"/v1/CreateTab":       reflect.TypeFor[CreateTabResponse](),
-	"/v1/CloseTab":        reflect.TypeFor[CloseTabResponse](),
-	"/v1/RenameTab":       reflect.TypeFor[RenameTabResponse](),
-	"/v1/ReorderTab":      reflect.TypeFor[ReorderTabResponse](),
-	"/v1/ListTasks":       reflect.TypeFor[ListTasksResponse](),
-	"/v1/AddTask":         reflect.TypeFor[AddTaskResponse](),
-	"/v1/RemoveTask":      reflect.TypeFor[RemoveTaskResponse](),
+	"/v1/Snapshot":       reflect.TypeFor[SnapshotResponse](),
+	"/v1/SendPrompt":     reflect.TypeFor[SendPromptResponse](),
+	"/v1/SetAttention":   reflect.TypeFor[SetAttentionResponse](),
+	"/v1/ArchiveSession": reflect.TypeFor[ArchiveSessionResponse](),
+	"/v1/CreateSession":  reflect.TypeFor[CreateSessionResponse](),
+	"/v1/CreateTab":      reflect.TypeFor[CreateTabResponse](),
+	"/v1/CloseTab":       reflect.TypeFor[CloseTabResponse](),
+	"/v1/RenameTab":      reflect.TypeFor[RenameTabResponse](),
+	"/v1/ReorderTab":     reflect.TypeFor[ReorderTabResponse](),
+	"/v1/ListTasks":      reflect.TypeFor[ListTasksResponse](),
+	"/v1/AddTask":        reflect.TypeFor[AddTaskResponse](),
+	"/v1/RemoveTask":     reflect.TypeFor[RemoveTaskResponse](),
 }
 
 // jsonField is one JSON-visible field of a struct type, with the struct type that
