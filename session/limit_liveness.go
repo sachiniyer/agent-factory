@@ -78,6 +78,20 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ep
 		// per second for as long as it stayed parked (#6802 review).
 		return true
 	}
+	if i.liveness == LiveLimitReached && evidence == "" && resetAt.IsZero() {
+		// A re-read of the same wall whose reset clause is no longer parseable
+		// observed nothing new: detection still stands, but no reset arrived
+		// (the poll's empty evidence is always paired with a zero reset), so
+		// keep the first parse's reset and phrase (#6765 symmetry). Without
+		// this guard the degraded re-read — the exact shape the poll sends
+		// when viewport truncation strips the reset clause out of the captured
+		// pane — falls through to setLimitReachedLocked, which wipes the
+		// stored reset and evidence and appends a second, never-expiring
+		// zero-reset observation row, downgrading auto-resume from
+		// reset+grace to the fixed retry interval and durably excluding the
+		// account from automatic replacement (#6802 review).
+		return true
+	}
 	if !i.setLimitReachedLocked(resetAt, evidence) {
 		return false
 	}

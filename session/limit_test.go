@@ -153,6 +153,115 @@ func TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset(t *testing.T) {
 	require.Empty(t, i.ToInstanceData().LimitResetEvidence)
 }
 
+// TestSetLimitReachedAtEpoch_DegradedRereadKeepsStoredReset is the session-level
+// half of the parse-failure re-read fix: the poll captures only the pane's
+// visible viewport (no scrollback), so a parked session whose banner is still
+// detected but whose reset clause has scrolled or wrapped below the viewport
+// fold re-reads as hit=true with resetAt=zero and evidence="". That degraded
+// re-read must be a no-op for stored facts — the wall is exactly as parseable
+// as at park time, so downgrading it from known-reset to unknown wipes the
+// stored reset, wipes the stored evidence phrase, and appends a second
+// never-expiring zero-reset observation row that durably excludes the account
+// from automatic replacement (#6802 review).
+func TestSetLimitReachedAtEpoch_DegradedRereadKeepsStoredReset(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		program string
+		phrase  string
+	}{
+		{"codex", tmux.ProgramCodex, "try again at Sep 20th, 2026 9:16 AM"},
+		{"claude", tmux.ProgramClaude, "reset at 2pm (America/New_York)"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			i := &Instance{Program: tc.program, Account: "work", accountAutoSelected: true}
+			reset0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+
+			// Park exactly as the poll does: a parsed reset time and its phrase.
+			require.True(t, i.SetLimitReachedAtEpoch(reset0, tc.phrase, i.stateEpoch))
+			require.True(t, i.LimitReached())
+			storedReset, ok := i.LimitResetAt()
+			require.True(t, ok)
+			require.True(t, storedReset.Equal(reset0))
+			require.Equal(t, tc.phrase, i.LimitResetEvidence())
+			require.Len(t, i.AccountLimitObservations(), 1)
+			// The first park flagged the observation dirty; simulate the
+			// persist that landed it on disk so the re-read's dirty flag is
+			// observable in isolation (matching the poll's persist sequence).
+			i.MarkAccountLimitObservationsPersisted(i.AccountLimitObservations())
+			require.False(t, i.AccountLimitObservationsUnpersisted())
+
+			// Degraded re-read: hit=true but the reset clause is no longer
+			// parseable from the visible pane — the exact shape the poll
+			// sends (zero reset, empty evidence).
+			applied := i.SetLimitReachedAtEpoch(time.Time{}, "", i.stateEpoch)
+			require.True(t, applied, "the degraded re-read still parks (detection stands)")
+
+			// The stored reset and evidence phrase are preserved — the first
+			// parse is nearest the real window (#6765).
+			gotReset, ok := i.LimitResetAt()
+			require.True(t, ok, "the stored known reset must not be wiped by a parse-failure re-read")
+			require.True(t, gotReset.Equal(reset0), "the stored reset must not move")
+			require.Equal(t, tc.phrase, i.LimitResetEvidence(),
+				"the stored evidence phrase must not be wiped by a parse-failure re-read")
+
+			// No second observation row is appended — the degraded re-read
+			// observed no new fact, so the durable ledger is unchanged.
+			observations := i.AccountLimitObservations()
+			require.Len(t, observations, 1,
+				"a parse-failure re-read must not append a second zero-reset observation row")
+			require.True(t, observations[0].ResetAt.Equal(reset0),
+				"the stored observation's reset must not be downgraded to zero")
+			require.False(t, i.AccountLimitObservationsUnpersisted(),
+				"the degraded re-read must not flag the observation dirty")
+		})
+	}
+}
+
+// TestSetLimitReachedAtEpoch_DegradedRereadDoesNotMaskNewWall verifies the fix
+// does not suppress a genuinely new wall event: after the parked state is
+// cleared (the account recovered), a fresh limit hit — even one with no
+// parseable reset — must still apply normally.
+func TestSetLimitReachedAtEpoch_DegradedRereadDoesNotMaskNewWall(t *testing.T) {
+	i := &Instance{Program: tmux.ProgramCodex, Account: "work", accountAutoSelected: true}
+	reset0 := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+
+	require.True(t, i.SetLimitReachedAtEpoch(reset0, "try again at 9:00 AM", i.stateEpoch))
+	require.Len(t, i.AccountLimitObservations(), 1)
+
+	// The account recovers and hits the wall again with no parseable reset.
+	i.ClearLimitReached()
+	require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", i.stateEpoch),
+		"a fresh wall hit with no parseable reset must still apply when not parked")
+	require.True(t, i.LimitReached())
+	_, ok := i.LimitResetAt()
+	require.False(t, ok, "a zero reset must report as unknown")
+	require.Empty(t, i.LimitResetEvidence())
+	require.Len(t, i.AccountLimitObservations(), 2,
+		"a wall sighted after recovery is a new fact — a second row lands")
+}
+
+// TestSetLimitReachedAtEpoch_NonZeroResetWithEmptyEvidenceStillApplies pins the
+// #6788 shape: a reset that arrives without a phrase always applies. The fix
+// only short-circuits the zero-reset+empty-evidence parse-failure shape, so a
+// non-zero reset paired with empty evidence — which no production caller of
+// SetLimitReachedAtEpoch can produce, but the #6788 design pinned — must still
+// fall through and apply.
+func TestSetLimitReachedAtEpoch_NonZeroResetWithEmptyEvidenceStillApplies(t *testing.T) {
+	i := &Instance{Program: tmux.ProgramCodex, Account: "work", accountAutoSelected: true}
+	first := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
+
+	require.True(t, i.SetLimitReachedAtEpoch(first, "try again at 9:00 AM", i.stateEpoch))
+
+	// A non-zero reset with empty evidence is NOT the parse-failure shape and
+	// must still apply, clearing the evidence slot.
+	later := first.Add(2 * time.Hour)
+	require.True(t, i.SetLimitReachedAtEpoch(later, "", i.stateEpoch))
+	gotReset, ok := i.LimitResetAt()
+	require.True(t, ok)
+	require.True(t, gotReset.Equal(later))
+	require.Empty(t, i.LimitResetEvidence())
+}
+
 // TestSetLimitReached_NoResetTime: a banner with no parseable reset time still
 // blocks the session, but LimitResetAt reports no known time.
 func TestSetLimitReached_NoResetTime(t *testing.T) {
