@@ -43,7 +43,8 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		return fmt.Errorf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
 	}
 	if v.PendingAccountSwap && action != RuntimeActionResumeLimit {
-		return fmt.Errorf("session %q has a committed account swap awaiting its replacement notice and task; retry that account swap before another lifecycle action", v.Title)
+		return fmt.Errorf("session %q has %s awaiting its replacement notice and task; retry it with %s before another lifecycle action",
+			v.Title, accountSwapSpan(v.PendingAccountSwapFrom, v.PendingAccountSwapTo), accountSwapRetryCommand(v.Title, v.PendingAccountSwapTo))
 	}
 
 	switch action {
@@ -198,4 +199,23 @@ func (i *Instance) ValidateRuntimeAction(action RuntimeAction) error {
 
 func runtimeActionBusyError(v LifecycleView) error {
 	return fmt.Errorf("session %q is busy (%v); try again in a moment", v.Title, v.Status)
+}
+
+// accountSwapSpan describes a committed swap's endpoints for refusal copy. The
+// ambient identity has no account name, so a swap out of it names its source as
+// such rather than quoting an empty string (#6773).
+func accountSwapSpan(from, to string) string {
+	source := "the ambient identity"
+	if from != "" {
+		source = fmt.Sprintf("account %q", from)
+	}
+	return fmt.Sprintf("a committed account swap from %s to account %q", source, to)
+}
+
+// accountSwapRetryCommand names the one request the pending-swap fences admit:
+// a handoff naming the committed target is the recorded transaction's retry
+// rather than a new one (#4393), so it is the remedy every committed-swap
+// refusal points at (#6773).
+func accountSwapRetryCommand(title, to string) string {
+	return fmt.Sprintf("`af sessions handoff %s --account %s`", title, to)
 }

@@ -197,6 +197,13 @@ type LifecycleView struct {
 	// and task still have to land. Only the limit-resume action may consume it;
 	// competing archive/handoff/restore actions must leave that obligation intact.
 	PendingAccountSwap bool
+	// PendingAccountSwapFrom and PendingAccountSwapTo are the committed swap's
+	// endpoints, so a refusal can name the retry that discharges it —
+	// `af sessions handoff <title> --account <to>` — rather than pointing at an
+	// unnamed transaction (#6773). Both are empty when no swap is pending; From
+	// is also empty for the ambient identity.
+	PendingAccountSwapFrom string
+	PendingAccountSwapTo   string
 	// PendingHandoffMission is an agent handoff whose takeover brief has not been
 	// confirmed delivered. The swap itself is complete — its fence settles on the
 	// incoming runtime's liveness (#4429) — so this obligation, not the op axis,
@@ -257,7 +264,7 @@ func (i *Instance) LifecycleView() LifecycleView {
 // state mutation under the same critical section, so validation and mutation
 // cannot observe different lifecycle states.
 func (i *Instance) lifecycleViewLocked() LifecycleView {
-	return LifecycleView{
+	view := LifecycleView{
 		Title:                  i.Title,
 		TaskID:                 i.TaskID,
 		Liveness:               i.liveness,
@@ -283,6 +290,11 @@ func (i *Instance) lifecycleViewLocked() LifecycleView {
 		TaskRunActive:               i.taskRunActive,
 		BacklogItem:                 i.BacklogItem,
 	}
+	if i.pendingAccountSwap != nil {
+		view.PendingAccountSwapFrom = i.pendingAccountSwap.From
+		view.PendingAccountSwapTo = i.pendingAccountSwap.To
+	}
+	return view
 }
 
 // Activity classifies a snapshot through the same state machine ClassifyActivity

@@ -572,6 +572,10 @@ func (i *Instance) tabSpawnBlockedLocked() error {
 		return fmt.Errorf("cannot add a tab to a session that is being archived or removed; try again in a moment")
 	}
 	if i.accountSwapLaunch != nil || i.pendingAccountSwap != nil {
+		if pending := i.pendingAccountSwap; pending != nil {
+			return fmt.Errorf("cannot add a tab while session %q has %s in progress; retry it with %s or wait for it to settle",
+				i.Title, accountSwapSpan(pending.From, pending.To), accountSwapRetryCommand(i.Title, pending.To))
+		}
 		return fmt.Errorf("cannot add a tab while session %q has an account swap in progress", i.Title)
 	}
 	if i.rebuildTeardownPending {

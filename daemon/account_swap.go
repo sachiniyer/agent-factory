@@ -380,7 +380,7 @@ func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *confi
 		return nil, errors.New("identity selection is already committed; new-swap admission cannot authorize recovery")
 	}
 	if instanceHasVSCodeTab(instance) {
-		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary", instance.Title)
+		return nil, fmt.Errorf("cannot switch accounts for %q while it has a VS Code tab: %s; close the VS Code tab so the swap can proceed", instance.Title, vscodeAccountSwapRefusalReason)
 	}
 	admitted, err := preflightAccountSwapCandidates(swap, validate)
 	if err == nil {

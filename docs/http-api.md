@@ -549,6 +549,35 @@ The vocabulary can grow. Treat an unknown value as no reason — the TUI and web
 rows render no idle-reason label for values they don't know, so an older client
 never mislabels a newer daemon's observation.
 
+### Session operation state
+
+Two more `<session>` fields describe an operation in flight rather than an idle
+verdict. Both are **diagnostic**: they report what the daemon is doing to the
+row, not a state to filter or branch lifecycle decisions on.
+
+**`in_flight_op`** (integer, omitted when `0`) — the client/executor operation
+overlaid on the row's liveness right now: `1` creating, `2` killing,
+`3` archiving, `4` restoring, `5` a handoff between its outgoing and incoming
+runtime, `6` a limit resume re-spawning the runtime. It is process-local by
+design — disk writers scrub it before persistence, so a record read off disk or
+a row after a daemon restart reports none even when a recovery is genuinely
+mid-flight — and it can legitimately disagree with a request the client just
+sent, since the op may have been raised after the snapshot was taken. Read it
+to explain why a row is ignoring a gesture; never read its absence as proof
+that nothing is in flight.
+
+**`pending_account_swap`** (object, omitted when absent) — the committed
+account swap whose replacement runtime still owes the session its notice and
+stored task. Unlike `in_flight_op` it is durable: it survives a daemon restart
+because the obligation does. While it is present, competing lifecycle actions
+and tab spawns on the row are refused, and the refusal names the one admitted
+retry — `af sessions handoff <title> --account <to>`, which the pending-swap
+fence recognizes as the recorded transaction's retry rather than a new one. The
+object's `to` names the committed target account and `from` the outgoing one
+(omitted for the ambient identity); the rest is recovery bookkeeping —
+conversation carry and delivery evidence — that consumers should treat as
+opaque rather than a vocabulary.
+
 ### Session warnings
 
 Session objects also carry daemon-projected warnings as additive,

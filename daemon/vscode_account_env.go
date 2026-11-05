@@ -43,6 +43,12 @@ import (
 // needs no startup file at all: an extension, task, or terminal that simply
 // shells out and authenticates as whoever the daemon is.
 
+// vscodeAccountSwapRefusalReason is the reason clause every account-swap
+// refusal on a VS Code tab states — the refusal-length form of the file
+// comment above, shared by the manual and automatic admission paths so the two
+// cannot drift apart (#6773).
+const vscodeAccountSwapRefusalReason = "integrated login shells can override the selected account from shell startup files, so af cannot prove their identity boundary"
+
 // vscodeAccountScope is the credential boundary one editor runs under.
 type vscodeAccountScope struct {
 	// account is the selected account NAME, empty for the ambient identity. It is
