@@ -86,7 +86,13 @@ func (m *Manager) noteAccountTurnEvidence(key string, instance *session.Instance
 	}
 	turning := entry.watch.Observe(obs.Content, capturedAt)
 	m.pausedMu.Unlock()
-	if !turning {
+	// The scoped agents' watch reports "turn in flight" on every
+	// indicator-present frame after it has armed — not only on the edge —
+	// so an unchanged pane left showing busy chrome would otherwise mint a
+	// newer proof on every capture and let a frozen frame out-rank a wall
+	// sighted after it. Only fresh pane bytes carry fresh turn evidence:
+	// a capture identical to the last proves nothing new (#6802 review).
+	if !turning || !obs.Updated {
 		return
 	}
 	m.pausedMu.Lock()
@@ -95,6 +101,22 @@ func (m *Manager) noteAccountTurnEvidence(key string, instance *session.Instance
 		m.accountLimitProofs[proofKey] = capturedAt
 	}
 	m.pausedMu.Unlock()
+}
+
+// accountTurnProofObservable reports whether a paused instance is worth the
+// bounded backstop purely for proof collection: it runs a named account on an
+// agent whose chrome can confirm a turn — the same account/agent checks
+// noteAccountTurnEvidence applies to every fed frame. Without it an attached
+// interactive session's successful turns produce no proof and a stale stored
+// wall on its account can never be refuted while the attach lasts, because
+// detaching after the turn finishes cannot reconstruct the missed chrome
+// evidence (#6802 review).
+func accountTurnProofObservable(instance *session.Instance) bool {
+	account, _ := instance.AccountSelection()
+	if strings.TrimSpace(account) == "" {
+		return false
+	}
+	return task.TurnSignaturedAgent(instance.AccountAgent())
 }
 
 // sweepAccountTurnWatches drops chrome watchers for sessions that are gone or
@@ -167,12 +189,13 @@ func (m *Manager) reconcileAccountLimitProofs() {
 	}
 	var retractions []session.AccountLimitRetractionData
 	for key, provenAt := range proofs {
-		if accountLimitStoredEvidenceExcludes(key.agent, key.account, observations, evidence.Retractions, now) {
-			retractions = append(retractions, session.AccountLimitRetractionData{
-				Agent:    key.agent,
-				Account:  key.account,
-				ProvenAt: provenAt,
-			})
+		candidate := session.AccountLimitRetractionData{
+			Agent:    key.agent,
+			Account:  key.account,
+			ProvenAt: provenAt,
+		}
+		if accountLimitProofDefeatsAStoredWall(candidate, observations, evidence.Retractions, now) {
+			retractions = append(retractions, candidate)
 		}
 	}
 	if len(retractions) == 0 {
@@ -202,18 +225,22 @@ func (m *Manager) requeueAccountLimitProofs(proofs map[accountLimitProofKey]time
 	}
 }
 
-// accountLimitStoredEvidenceExcludes reports whether any stored observation —
-// durable or row-carried — still excludes (agent, account) after expiry and
-// retraction folding. It is the reconcile-side sibling of
+// accountLimitProofDefeatsAStoredWall reports whether persisting candidate
+// flips at least one still-excluding observation: the wall must currently
+// exclude under the retractions already recorded AND be defeated by this
+// proof's own instant. The exclusion half is the reconcile-side sibling of
 // limitedAccountsForSwap's stored-evidence loops, sharing
 // accountLimitObservationExcludes so the write path can never believe
-// something admission would not.
-func accountLimitStoredEvidenceExcludes(agent, account string, observations []session.AccountLimitObservationData, retractions []session.AccountLimitRetractionData, now time.Time) bool {
+// something admission would not; the defeat half stops a proof that predates
+// the wall — the older fact — from littering the ledger with a tombstone
+// admission never honors (#6802 review).
+func accountLimitProofDefeatsAStoredWall(candidate session.AccountLimitRetractionData, observations []session.AccountLimitObservationData, retractions []session.AccountLimitRetractionData, now time.Time) bool {
 	for _, observation := range observations {
-		if observation.Agent != agent || observation.Account != account {
+		if observation.Agent != candidate.Agent || observation.Account != candidate.Account {
 			continue
 		}
-		if accountLimitObservationExcludes(observation, agent, retractions, now) {
+		if accountLimitObservationExcludes(observation, candidate.Agent, retractions, now) &&
+			session.AccountLimitObservationRetracted(observation, candidate) {
 			return true
 		}
 	}

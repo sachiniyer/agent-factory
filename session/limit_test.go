@@ -98,14 +98,19 @@ func TestAccountLimitObservationPreservesSafestReset(t *testing.T) {
 			"a short-window wall must not erase a still-active longer quota wall")
 	})
 
-	t.Run("unknown reset dominates", func(t *testing.T) {
+	t.Run("distinct reset claims keep distinct rows", func(t *testing.T) {
 		i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
 		i.SetLimitReached(time.Time{})
 		i.ClearLimitReached()
 		i.SetLimitReached(later)
 
-		require.True(t, i.AccountLimitObservations()[0].ResetAt.IsZero(),
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 2,
+			"a known reset cannot merge into an unknown-reset wall without lowering what a proof must beat (#6802 review)")
+		require.True(t, observations[0].ResetAt.IsZero(),
 			"a later timestamp cannot make an indefinite limit observation safe to reuse")
+		require.True(t, observations[1].ResetAt.Equal(later),
+			"the known reset claim survives beside the unknown one — the strictest still excludes")
 	})
 }
 

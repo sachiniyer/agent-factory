@@ -97,7 +97,7 @@ func TestAccountLimitObservationExcludes(t *testing.T) {
 	t.Run("a wall sighted after the proof is the newer fact", func(t *testing.T) {
 		fresh := wall
 		fresh.ObservedAt = now.Add(-time.Minute)
-		fresh.ResetAt = now.Add(-time.Hour)
+		fresh.ResetAt = time.Time{}
 		require.True(t, accountLimitObservationExcludes(fresh, tmux.ProgramClaude,
 			[]session.AccountLimitRetractionData{retract(now.Add(-2 * time.Minute))}, now),
 			"event time decides — never the order the facts were written")
@@ -140,6 +140,68 @@ func TestMergeAccountLimitObservationsKeepsFreshestSighting(t *testing.T) {
 		require.True(t, merged[0].ObservedAt.Equal(later),
 			"the merged wall's event time is its last sighting")
 	}
+}
+
+// A known-reset wall and an unknown-reset wall for the same identity are
+// different claims about the account: the first expires and bounds what a
+// proof must beat, the second ends only on proof. Folding them into one row
+// loses whichever half the merge drops — an unknown-dominated merge would let
+// a proof between the sightings and the known reset free an account the
+// separate facts still exclude (#6802 review).
+func TestMergeAccountLimitObservationsKeepsResetKindsSeparate(t *testing.T) {
+	earlier := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	reset := earlier.Add(48 * time.Hour)
+	unknown := session.AccountLimitObservationData{Agent: "claude", Account: "work", ObservedAt: earlier}
+	known := session.AccountLimitObservationData{Agent: "claude", Account: "work", ObservedAt: earlier.Add(time.Hour), ResetAt: reset}
+
+	for _, order := range [][2]session.AccountLimitObservationData{{unknown, known}, {known, unknown}} {
+		merged, err := mergeAccountLimitObservations(
+			[]session.AccountLimitObservationData{order[0]},
+			[]session.AccountLimitObservationData{order[1]})
+		require.NoError(t, err)
+		require.Len(t, merged, 2,
+			"distinct reset claims keep distinct rows — the strictest still excludes")
+		require.True(t, merged[0].ResetAt.IsZero(), "the unknown-reset claim keeps its row")
+		require.True(t, merged[1].ResetAt.Equal(reset), "the known reset claim keeps its row")
+	}
+}
+
+// The scenario the merge must not open: two sessions' walls for one account —
+// one with no reset claim, one with a future reset — transfer into the
+// ledger. A proof after both sightings but before the known reset must not
+// free the account the unmerged evidence kept excluded.
+func TestLimitedAccountsForSwapKeepsTheKnownResetThroughAMixedMerge(t *testing.T) {
+	now := nowFunc()
+	reset := now.Add(48 * time.Hour)
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: "claude", Account: "work", ObservedAt: now.Add(-time.Hour)},
+			{Agent: "claude", Account: "work", ObservedAt: now.Add(-30 * time.Minute), ResetAt: reset},
+		},
+		Retractions: []session.AccountLimitRetractionData{
+			{Agent: "claude", Account: "work", ProvenAt: now.Add(-time.Minute)},
+		},
+	}, nil)
+
+	limited, err := (&Manager{}).limitedAccountsForSwap("claude", loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work",
+		"a proof before the known reset defeats the unknown claim but not the reset-bounded one")
+
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: "claude", Account: "work", ObservedAt: now.Add(-time.Hour)},
+			{Agent: "claude", Account: "work", ObservedAt: now.Add(-30 * time.Minute), ResetAt: reset},
+		},
+		Retractions: []session.AccountLimitRetractionData{
+			{Agent: "claude", Account: "work", ProvenAt: reset.Add(time.Second)},
+		},
+	}, nil)
+
+	limited, err = (&Manager{}).limitedAccountsForSwap("claude", loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.NotContains(t, limited, "work",
+		"a proof past the known reset defeats both claims")
 }
 
 func TestMergeAccountLimitRetractionsKeepsNewestProof(t *testing.T) {
@@ -425,13 +487,30 @@ func TestNoteAccountTurnEvidenceRecordsProofAtCaptureTime(t *testing.T) {
 
 	// The scoped indicator needs its absent→present edge: an armed watch, then
 	// the chrome frame, proves a turn began.
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexArmFrame}, capturedAt)
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt)
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
 
 	proofs := manager.pendingAccountLimitProofs()
 	require.Equal(t, map[accountLimitProofKey]time.Time{
 		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(time.Second),
 	}, proofs, "a confirmed turn is positive proof for the (agent, account) it ran under")
+
+	// A scoped watch reports "turn in flight" on every indicator-present frame
+	// after the edge, so a pane frozen on busy chrome must not keep minting
+	// newer proof: identical bytes carry no new evidence (#6802 review).
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: false, Content: codexTurnFrame}, capturedAt.Add(time.Hour))
+	require.Equal(t, map[accountLimitProofKey]time.Time{
+		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(time.Second),
+	}, manager.pendingAccountLimitProofs(),
+		"an unchanged re-capture is a stale frame — it cannot out-rank a wall sighted after the real turn")
+
+	// But a live pane keeps proving: the next frame whose bytes differ is a
+	// fresh confirmation at its own capture instant.
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame + "still working\n"}, capturedAt.Add(2*time.Hour))
+	require.Equal(t, map[accountLimitProofKey]time.Time{
+		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(2 * time.Hour),
+	}, manager.pendingAccountLimitProofs(),
+		"a frame with fresh bytes is fresh turn evidence at its own instant")
 }
 
 func TestNoteAccountTurnEvidenceIgnoresNonPositiveObservations(t *testing.T) {
@@ -470,14 +549,14 @@ func TestNoteAccountTurnEvidenceWallFrameCannotArm(t *testing.T) {
 	key := stableSessionKey(repoID, inst)
 	capturedAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexWallFrame}, capturedAt)
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexWallFrame}, capturedAt)
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
 	require.Empty(t, manager.pendingAccountLimitProofs(),
 		"a chrome frame after a wall frame has no armed edge to fire on — the wall frame was skipped")
 
 	// And once the pane is unambiguous, the normal edge still works.
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexArmFrame}, capturedAt.Add(2*time.Second))
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, capturedAt.Add(3*time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt.Add(2*time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(3*time.Second))
 	require.Contains(t, manager.pendingAccountLimitProofs(),
 		accountLimitProofKey{agent: tmux.ProgramCodex, account: "work"})
 }
@@ -491,19 +570,39 @@ func TestNoteAccountTurnEvidenceRebuildsOnIdentityChange(t *testing.T) {
 	key := stableSessionKey(repoID, inst)
 	capturedAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
 
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexArmFrame}, capturedAt)
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt)
 
 	inst.Account = "play"
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
 	require.Empty(t, manager.pendingAccountLimitProofs(),
 		"the first chrome frame under the new identity has no armed edge — the watch was rebuilt")
 
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexArmFrame}, capturedAt.Add(2*time.Second))
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, capturedAt.Add(3*time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt.Add(2*time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(3*time.Second))
 	require.Equal(t, map[accountLimitProofKey]time.Time{
 		{agent: tmux.ProgramCodex, account: "play"}: capturedAt.Add(3 * time.Second),
 	}, manager.pendingAccountLimitProofs(),
 		"the turn is credited to the account the pane ran under when chrome proved it")
+}
+
+// The paused-poll backstop admits exactly the sessions the proof feed can
+// spend: a named account on a chrome-signatured agent. Ambient sessions and
+// agents whose pane carries no turn signature never earn a probe (#6802
+// review).
+func TestAccountTurnProofObservableMatchesTheFeedChecks(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+
+	named := registerAccountInstance(t, manager, repoID, repoPath, "named", tmux.ProgramCodex, "work")
+	require.True(t, accountTurnProofObservable(named),
+		"a named account on a signatured agent can produce proof while attached")
+
+	ambient := registerAccountInstance(t, manager, repoID, repoPath, "ambient", tmux.ProgramCodex, "")
+	require.False(t, accountTurnProofObservable(ambient),
+		"the ambient identity is never named-account evidence")
+
+	unsigned := registerAccountInstance(t, manager, repoID, repoPath, "unsigned", tmux.ProgramAider, "work")
+	require.False(t, accountTurnProofObservable(unsigned),
+		"an agent with no in-turn chrome can never confirm a turn — probing it only burns the backstop")
 }
 
 func TestSweepAccountTurnWatchesDropsGoneSessions(t *testing.T) {
@@ -651,8 +750,8 @@ func TestAccountTurnProofEndToEndRestoresTheAccount(t *testing.T) {
 	require.NoError(t, err)
 	require.Contains(t, limited, "work", "precondition: the stored wall excludes the account")
 
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexArmFrame}, base.Add(-time.Minute))
-	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Content: codexTurnFrame}, base)
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, base.Add(-time.Minute))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, base)
 	advance(accountLimitProofReconcileInterval)
 	manager.reconcileAccountLimitProofs()
 

@@ -640,7 +640,11 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// attached pane's unobserved turn would otherwise expire the watch
 		// unanswered even though the queued draft was answered under it
 		// (#6592 review).
-		if (instance.TaskRunObservable(nowFunc()) || m.unverifiedSendWatchPending(stableSessionKey(repoID, instance))) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
+		// So does a named-account session that could still produce turn
+		// proof: an interactive turn completed under the attach would
+		// otherwise leave no evidence a stale stored wall can retract on
+		// (#6802 review).
+		if (instance.TaskRunObservable(nowFunc()) || m.unverifiedSendWatchPending(stableSessionKey(repoID, instance)) || accountTurnProofObservable(instance)) && m.taskRunBackstopDue(stableSessionKey(repoID, instance)) {
 			m.observeTaskRunWhilePaused(repoID, key, instance)
 			return
 		}

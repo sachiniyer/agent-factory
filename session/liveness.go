@@ -689,7 +689,14 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	sighted := instanceNow().UTC()
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
-		if observation.Agent == agent && observation.Account == account {
+		// One row per reset claim KIND, not per identity: merging a
+		// known-reset wall into an unknown one — or the reverse — would
+		// either drop the never-expires property or lower the instant a
+		// retraction must postdate. Distinct claims are distinct facts and
+		// keep their own rows; the strictest one still excludes (#6802
+		// review).
+		if observation.Agent == agent && observation.Account == account &&
+			observation.ResetAt.IsZero() == resetAt.IsZero() {
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
 			if !observation.ResetAt.Equal(retained) {
 				observation.ResetAt = retained

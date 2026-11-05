@@ -257,7 +257,15 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		if observation.Agent == "" || observation.Account == "" {
 			return fmt.Errorf("account-limit observation has an empty agent or account")
 		}
+		// Merge only same-kind claims: folding a known reset into an
+		// unknown-reset wall — or the reverse — would either drop the
+		// never-expires property or lower the instant a retraction must
+		// postdate, freeing an account the separate facts still exclude
+		// (#6802 review). Identity plus reset-kind keeps both facts.
 		key := observation.Agent + "\x00" + observation.Account
+		if observation.ResetAt.IsZero() {
+			key += "\x00unknown-reset"
+		}
 		prior, exists := merged[key]
 		if exists {
 			observation.ResetAt = session.RetainedAccountLimitReset(prior.ResetAt, observation.ResetAt)
@@ -289,7 +297,10 @@ func mergeAccountLimitObservations(current, added []session.AccountLimitObservat
 		if result[i].Agent != result[j].Agent {
 			return result[i].Agent < result[j].Agent
 		}
-		return result[i].Account < result[j].Account
+		if result[i].Account != result[j].Account {
+			return result[i].Account < result[j].Account
+		}
+		return result[i].ResetAt.Before(result[j].ResetAt)
 	})
 	return result, nil
 }

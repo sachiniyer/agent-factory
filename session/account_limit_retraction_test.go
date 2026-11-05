@@ -133,3 +133,29 @@ func TestAccountLimitObservationStampsEachSighting(t *testing.T) {
 	require.True(t, observations[0].ObservedAt.Equal(second),
 		"re-sighting the same wall advances its event time so an older proof cannot defeat it")
 }
+
+// A known-reset wall and a no-reset wall are different claims: merging them
+// into one row would either let the indefinite claim expire on the other's
+// clock or lower the instant a retraction must postdate. The recorder keeps
+// one row per reset-claim kind and folds only same-kind re-sightings (#6802
+// review).
+func TestAccountLimitObservationKeepsResetClaimsSeparate(t *testing.T) {
+	later := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	i.SetLimitReached(later)
+	i.ClearLimitReached()
+	i.SetLimitReached(time.Time{})
+	observations := i.AccountLimitObservations()
+	require.Len(t, observations, 2,
+		"an unknown-reset wall cannot merge into the known one — the strictest claim still excludes")
+	require.True(t, observations[0].ResetAt.Equal(later))
+	require.True(t, observations[1].ResetAt.IsZero())
+
+	// And a same-kind re-sighting still folds: the list stays bounded at one
+	// row per claim kind.
+	i.ClearLimitReached()
+	i.SetLimitReached(time.Time{})
+	require.Len(t, i.AccountLimitObservations(), 2,
+		"re-sighting the no-reset wall advances its row rather than growing the list")
+}
