@@ -225,7 +225,6 @@ func (d InstanceData) ForStorage() InstanceData {
 		// Archived rows have already reaped their runtime, so retaining a teardown
 		// identity here would only preserve unused credentials until row deletion,
 		// except a preserved unpushed workspace (below).
-		d.RuntimeCleanupStateUnknown = false
 		d.KilledWithoutLiveRuntime = false
 		if d.keepsPreservedWorkspaceHandle() {
 			// The exception: an archive that left its workspace on the host still owes
@@ -233,10 +232,31 @@ func (d InstanceData) ForStorage() InstanceData {
 			// af made (#5867). A fresh snapshot staged the private field; a reloaded
 			// row carries only the public one.
 			if d.runtimeCleanup != nil {
+				// Republish the staged handle — either from a fresh snapshot's
+				// backend or from the failedRuntimeCleanup a fail-closed reload
+				// retained on the instance (toInstanceDataLocked stages it here).
+				// The handle drives the next restart's rebuild retry, so the
+				// unknown flag is not needed alongside it.
 				d.RuntimeCleanup = d.runtimeCleanup.clone()
+				d.RuntimeCleanupStateUnknown = false
+			} else if d.RuntimeCleanupStateUnknown {
+				// The reload could not rebuild the teardown and no handle was
+				// staged to republish. Keep the durable unknown flag so the next
+				// restart retries the fail-closed rebuild instead of laundering
+				// the rejected handle into the orphan the marker exists to
+				// prevent (#5867). Without this, the unconditional clear below
+				// would erase the flag and a subsequent kill would run the
+				// no-op-success path and delete the only record naming the
+				// preserved still-un-reaped workspace.
+			} else {
+				// A reloaded row carries only the public RuntimeCleanup (the
+				// private field is lost on JSON unmarshal). Preserve it
+				// untouched and clear the flag.
+				d.RuntimeCleanupStateUnknown = false
 			}
 		} else {
 			d.RuntimeCleanup = nil
+			d.RuntimeCleanupStateUnknown = false
 		}
 	case !d.UserKilled && !d.RuntimeCleanupStateUnknown:
 		// Cleanup credentials/identities have no reason to live in ordinary LOCAL
