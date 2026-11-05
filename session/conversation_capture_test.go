@@ -255,7 +255,7 @@ func TestCaptureAgentConversation_CodexSiblingRolloutDoesNotStealCarriedConversa
 	snap.expectCarriedCodexRollout(carried, carriedPath)
 
 	writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl", workDir)
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7c20-803b-f7045e07a245.jsonl", workDir)
 
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
 	require.NoError(t, err)
@@ -282,7 +282,7 @@ func TestCaptureAgentConversation_CodexSiblingRolloutUnscopedDoesNotStealCarried
 	snap.expectCarriedCodexRollout(carried, carriedPath)
 
 	writeCodexRolloutFileWithCwd(t, codexHome,
-		"rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl", t.TempDir())
+		"rollout-2026-07-06T10-17-40-049f386f-7206-7c20-803b-f7045e07a245.jsonl", t.TempDir())
 
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
 	require.NoError(t, err)
@@ -337,7 +337,7 @@ func TestCaptureAgentConversation_CodexSiblingRolloutSettlesIntoOtherDirDoesNotS
 
 	// A sibling whose header is initially unclassifiable — the undecided
 	// state capture waits out before fail-closing.
-	const settling = "rollout-2026-07-06T10-17-40-049f386f-7206-7c2-803b-f7045e07a245.jsonl"
+	const settling = "rollout-2026-07-06T10-17-40-049f386f-7206-7c20-803b-f7045e07a245.jsonl"
 	writeEmptyCodexRolloutFile(t, codexHome, settling)
 
 	done := make(chan captureResult, 1)
