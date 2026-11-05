@@ -527,6 +527,9 @@ func runDaemon(cfg *config.Config, upgradeTransactionID string) error {
 	stopCh := make(chan struct{})
 	startInstancePollLoop(manager, time.Duration(cfg.DaemonPollInterval)*time.Millisecond, stopCh, wg)
 	startHostReadinessRefresh(manager, stopCh)
+	// The account-limit proof reconcile owns a durable scan far too heavy for
+	// the 1 Hz poll goroutine; it runs on its own ticker (#6776 1d).
+	startAccountLimitReconcileLoop(manager, stopCh, wg)
 
 	// Watch our own AF home directory (the dir holding tasks.json, the
 	// control socket, and state). If it is deleted out from under us — an

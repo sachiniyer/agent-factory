@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -272,8 +275,8 @@ func TestReadAccountLimitLedgerReadsRetractionsWithWalls(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	path := writeRawAccountLimitLedger(t,
 		`{"schema_version":1,
-		  "observations":[{"agent":"claude","account":"work","observed_at":"2026-11-10T09:00:00Z"}],
-		  "retractions":[{"agent":"claude","account":"work","proven_at":"2026-11-10T12:00:00Z"}]}`)
+		  "observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}],
+		  "retractions":[{"agent":"claude","account":"work","proven_at":"2025-11-10T12:00:00Z"}]}`)
 
 	evidence, err := readAccountLimitLedger(path)
 	require.NoError(t, err)
@@ -281,13 +284,13 @@ func TestReadAccountLimitLedgerReadsRetractionsWithWalls(t *testing.T) {
 	require.Equal(t, "work", evidence.Observations[0].Account)
 	require.Equal(t, []session.AccountLimitRetractionData{{
 		Agent: "claude", Account: "work",
-		ProvenAt: time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC),
+		ProvenAt: time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC),
 	}}, evidence.Retractions)
 }
 
 func TestRetractAccountLimitObservationsWritesTombstones(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	proven := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	proven := time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC)
 	reset := proven.Add(-time.Hour)
 	require.NoError(t, retainAccountLimitObservations([]session.AccountLimitObservationData{{
 		Agent: "claude", Account: "work", ObservedAt: proven.Add(-2 * time.Hour), ResetAt: reset,
@@ -307,7 +310,7 @@ func TestRetractAccountLimitObservationsWritesTombstones(t *testing.T) {
 
 func TestRetractAccountLimitObservationsRefusesUnscopedOrUntimed(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	proven := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	proven := time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC)
 
 	require.Error(t, retractAccountLimitObservations([]session.AccountLimitRetractionData{
 		{Agent: "claude", Account: "work"},
@@ -325,7 +328,7 @@ func TestRetractAccountLimitObservationsRefusesUnscopedOrUntimed(t *testing.T) {
 // account can land in either order. Event time — not file-write order — picks
 // the winner, in BOTH directions.
 func TestAccountLimitLedgerEventTimeBeatsWriteOrder(t *testing.T) {
-	observed := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	observed := time.Date(2025, 11, 10, 9, 0, 0, 0, time.UTC)
 	proven := observed.Add(30 * time.Minute)
 
 	t.Run("retraction written first, wall retained second, wall is newer", func(t *testing.T) {
@@ -360,7 +363,7 @@ func TestAccountLimitLedgerEventTimeBeatsWriteOrder(t *testing.T) {
 }
 
 func TestLoadAccountLimitEvidenceSnapshotCarriesRowsAndRetractions(t *testing.T) {
-	observed := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	observed := time.Date(2025, 11, 10, 9, 0, 0, 0, time.UTC)
 	rowObs := session.AccountLimitObservationData{Agent: "claude", Account: "work", ObservedAt: observed}
 	ledgerObs := session.AccountLimitObservationData{Agent: "codex", Account: "play", ObservedAt: observed}
 	retraction := session.AccountLimitRetractionData{Agent: "claude", Account: "work", ProvenAt: observed.Add(time.Hour)}
@@ -493,38 +496,90 @@ func accountTurnWatchKeys(m *Manager) map[string]struct{} {
 	return watched
 }
 
-func TestNoteAccountTurnEvidenceRecordsProofAtCaptureTime(t *testing.T) {
+// The minted proof is the turn's provable START bound — the earliest instant
+// the turn could have begun — never the frame that happened to fire. A turn
+// still running when a wall lands keeps its pre-wall bound, so it can never
+// retract that wall no matter how long the busy frames keep coming (#6802
+// review).
+func TestNoteAccountTurnEvidenceRecordsTheTurnsStartBound(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerAccountInstance(t, manager, repoID, repoPath, "codex-session", tmux.ProgramCodex, "work")
 	key := stableSessionKey(repoID, inst)
-	capturedAt := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	capturedAt := time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC)
 
 	// The scoped indicator needs its absent→present edge: an armed watch, then
-	// the chrome frame, proves a turn began.
+	// the chrome frame. The proof is the ARM instant — the earliest the turn
+	// could have begun — not the frame that confirmed it.
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt)
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(time.Second))
 
 	proofs := manager.pendingAccountLimitProofs()
 	require.Equal(t, map[accountLimitProofKey]time.Time{
-		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(time.Second),
-	}, proofs, "a confirmed turn is positive proof for the (agent, account) it ran under")
+		{agent: tmux.ProgramCodex, account: "work"}: capturedAt,
+	}, proofs, "a confirmed turn proves the account served from its earliest possible start on")
 
 	// A scoped watch reports "turn in flight" on every indicator-present frame
 	// after the edge, so a pane frozen on busy chrome must not keep minting
 	// newer proof: identical bytes carry no new evidence (#6802 review).
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: false, Content: codexTurnFrame}, capturedAt.Add(time.Hour))
 	require.Equal(t, map[accountLimitProofKey]time.Time{
-		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(time.Second),
+		{agent: tmux.ProgramCodex, account: "work"}: capturedAt,
 	}, manager.pendingAccountLimitProofs(),
 		"an unchanged re-capture is a stale frame — it cannot out-rank a wall sighted after the real turn")
 
-	// But a live pane keeps proving: the next frame whose bytes differ is a
-	// fresh confirmation at its own capture instant.
+	// A live pane keeps FIRING — but the turn's bound never advances past its
+	// own start: a wall sighted between the turn's beginning and this frame
+	// can never be out-ranked by the still-running turn that predates it.
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame + "still working\n"}, capturedAt.Add(2*time.Hour))
 	require.Equal(t, map[accountLimitProofKey]time.Time{
-		{agent: tmux.ProgramCodex, account: "work"}: capturedAt.Add(2 * time.Hour),
+		{agent: tmux.ProgramCodex, account: "work"}: capturedAt,
 	}, manager.pendingAccountLimitProofs(),
-		"a frame with fresh bytes is fresh turn evidence at its own instant")
+		"a still-running turn keeps its pre-wall bound — only a turn that began after the wall can retract it")
+}
+
+// The reviewer's scenario end to end: two sessions share an account; one is
+// mid-turn when the other hits the wall. The busy session's continued frames
+// prove nothing about post-wall service — the wall must stand — while a turn
+// that BEGAN after the wall is exactly the positive proof that retracts it.
+func TestNoteAccountTurnEvidenceATurnInFlightCannotRetractTheWallItPredates(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst := registerAccountInstance(t, manager, repoID, repoPath, "codex-session", tmux.ProgramCodex, "work")
+	key := stableSessionKey(repoID, inst)
+	base := time.Date(2025, 11, 10, 12, 0, 0, 0, time.UTC)
+	wallAt := base.Add(10 * time.Second)
+
+	storedWall := session.AccountLimitObservationData{
+		Agent: tmux.ProgramCodex, Account: "work", ObservedAt: wallAt,
+	}
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{storedWall},
+	}, nil)
+
+	// The session's turn began BEFORE the wall: armed at base, chrome visible
+	// from base+1s. Every subsequent busy frame keeps that turn's bound at
+	// base — before the wall.
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, base)
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, base.Add(time.Second))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame + "still working\n"}, wallAt.Add(time.Hour))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame + "still working more\n"}, wallAt.Add(2*time.Hour))
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions,
+		"a turn already in flight when the wall was sighted proves nothing about service after it")
+
+	// Then the turn ends and the account accepts a NEW request: the absent
+	// frame after the wall arms a fresh edge whose bound is after the wall.
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, wallAt.Add(3*time.Hour))
+	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, wallAt.Add(3*time.Hour+time.Second))
+
+	manager.reconcileAccountLimitProofs()
+
+	evidence, err = loadAccountLimitLedger()
+	require.NoError(t, err)
+	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", wallAt.Add(3*time.Hour))
 }
 
 func TestNoteAccountTurnEvidenceIgnoresNonPositiveObservations(t *testing.T) {
@@ -594,9 +649,9 @@ func TestNoteAccountTurnEvidenceRebuildsOnIdentityChange(t *testing.T) {
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, capturedAt.Add(2*time.Second))
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, capturedAt.Add(3*time.Second))
 	require.Equal(t, map[accountLimitProofKey]time.Time{
-		{agent: tmux.ProgramCodex, account: "play"}: capturedAt.Add(3 * time.Second),
+		{agent: tmux.ProgramCodex, account: "play"}: capturedAt.Add(2 * time.Second),
 	}, manager.pendingAccountLimitProofs(),
-		"the turn is credited to the account the pane ran under when chrome proved it")
+		"the turn is credited to the account the pane ran under, at the instant its indicator last left")
 }
 
 // The paused-poll backstop admits exactly the sessions the proof feed can
@@ -644,9 +699,9 @@ func TestSweepAccountTurnWatchesDropsGoneSessions(t *testing.T) {
 
 // The reconcile folds collected proofs against durable evidence and writes a
 // retraction for each account the stored record still excludes. It owns the
-// expensive durable scan, so it is interval-bounded and proof-gated.
+// expensive durable scan, runs on its own ticker goroutine (never the poll's),
+// and is proof-gated.
 func TestReconcileAccountLimitProofsRetractsOnlyExcludedEvidence(t *testing.T) {
-	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerAccountInstance(t, manager, repoID, repoPath, "idle-session", tmux.ProgramCodex, "other")
@@ -675,25 +730,6 @@ func TestReconcileAccountLimitProofsRetractsOnlyExcludedEvidence(t *testing.T) {
 			"a fresh wall outranks the older proof, and a proof with no wall writes nothing")
 	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", base.Add(-time.Minute))
 	require.Empty(t, manager.pendingAccountLimitProofs(), "consumed proofs do not linger")
-
-	// The bounded cadence: a second pass inside the interval does not rescan.
-	advance(time.Second)
-	manager.pausedMu.Lock()
-	manager.accountLimitProofs[accountLimitProofKey{agent: tmux.ProgramCodex, account: "play"}] = base
-	manager.pausedMu.Unlock()
-	loads := 0
-	previous := loadAccountLimitEvidenceForSwap
-	loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
-		loads++
-		return previous()
-	}
-	manager.reconcileAccountLimitProofs()
-	require.Zero(t, loads, "the durable scan is bounded — never once per poll")
-	require.NotEmpty(t, manager.pendingAccountLimitProofs(), "the pending proof waits for the interval")
-
-	advance(accountLimitProofReconcileInterval)
-	manager.reconcileAccountLimitProofs()
-	require.Equal(t, 1, loads, "the scan resumes once the interval elapses")
 }
 
 // The stored record a proof answers for is not only the ledger: a live
@@ -742,11 +778,145 @@ func TestReconcileAccountLimitProofsRequeuesOnUnreadableEvidence(t *testing.T) {
 		"proofs survive a failed read — they are facts, retried against a whole evidence record")
 }
 
+// A wall that lost its sighting time — a session row rewritten by an older
+// binary that dropped observed_at — can never be ordered against a retraction,
+// so it must never lose to one: its true sighting could postdate the proof
+// (#6802 review). The untimed wall stands until expiry or a fresher sighting.
+func TestLimitedAccountsForSwapUntimedWallNeverDefeated(t *testing.T) {
+	now := nowFunc()
+	stubAccountLimitEvidence(t, accountLimitEvidence{
+		Observations: []session.AccountLimitObservationData{
+			{Agent: "claude", Account: "work", ObservedAt: time.Time{}},
+		},
+		Retractions: []session.AccountLimitRetractionData{
+			{Agent: "claude", Account: "work", ProvenAt: now.Add(-time.Minute)},
+		},
+	}, nil)
+
+	limited, err := (&Manager{}).limitedAccountsForSwap("claude", loadAccountLimitEvidenceForSwap)
+	require.NoError(t, err)
+	require.Contains(t, limited, "work",
+		"a wall with no sighting time cannot be ordered — it keeps excluding however new the proof")
+}
+
+// The reconcile owns a durable scan far too heavy for the 1 Hz poll goroutine;
+// it runs on its own ticker so the poll never waits on the disk read (#6802
+// review). The loop drains pending proofs on its interval and joins shutdown.
+func TestAccountLimitReconcileLoopRunsOffThePoll(t *testing.T) {
+	manager, _, _ := newStatusTestManager(t)
+	loads := make(chan struct{}, 16)
+	previous := loadAccountLimitEvidenceForSwap
+	loadAccountLimitEvidenceForSwap = func() (accountLimitEvidence, error) {
+		loads <- struct{}{}
+		return accountLimitEvidence{}, nil
+	}
+	t.Cleanup(func() { loadAccountLimitEvidenceForSwap = previous })
+
+	prevInterval := accountLimitProofReconcileInterval
+	accountLimitProofReconcileInterval = 10 * time.Millisecond
+	t.Cleanup(func() { accountLimitProofReconcileInterval = prevInterval })
+
+	manager.pausedMu.Lock()
+	manager.accountLimitProofs[accountLimitProofKey{agent: "codex", account: "work"}] = nowFunc().Add(-time.Minute)
+	manager.pausedMu.Unlock()
+
+	stopCh := make(chan struct{})
+	var wg sync.WaitGroup
+	startAccountLimitReconcileLoop(manager, stopCh, &wg)
+
+	select {
+	case <-loads:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the reconcile loop never drained the pending proof")
+	}
+	close(stopCh)
+	wg.Wait()
+	require.Empty(t, manager.pendingAccountLimitProofs(),
+		"the loop's own cadence, not a poll tick, consumes the proofs")
+}
+
+// A proof cannot carry an instant that has not happened: the write refuses
+// future times (#6802 review) — otherwise a forward clock jump mints a
+// tombstone that defeats every wall sighted between now and then. And a
+// stored future-dated retraction is integrity damage like any other: the read
+// fails closed rather than let it defeat real walls.
+func TestRetractAccountLimitObservationsRefusesAFutureProof(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	require.Error(t, retractAccountLimitObservations([]session.AccountLimitRetractionData{
+		{Agent: "claude", Account: "work", ProvenAt: nowFunc().Add(time.Hour)},
+	}), "a proof dated in the future cannot be ordered against real walls")
+
+	evidence, err := loadAccountLimitLedger()
+	require.NoError(t, err)
+	require.Empty(t, evidence.Retractions, "a refused retraction must not reach the ledger")
+}
+
+func TestReadAccountLimitLedgerFailsClosedOnAFutureRetraction(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	path := writeRawAccountLimitLedger(t,
+		`{"schema_version":1,
+		  "observations":[{"agent":"claude","account":"work","observed_at":"2025-11-10T09:00:00Z"}],
+		  "retractions":[{"agent":"claude","account":"work","proven_at":"2999-11-10T12:00:00Z"}]}`)
+
+	_, err := readAccountLimitLedger(path)
+	require.Error(t, err, "a future-dated retraction means the file cannot be trusted to order anything")
+}
+
+// A re-sighted wall moves only ObservedAt — nothing on the liveness, reset or
+// evidence axes the persist gate compares. The instance flags the change like
+// an unpersisted conversation, so the stored record carries the same fact the
+// reconcile decides against (#6802 review): a stale stored sighting must never
+// be what a retraction is ordered against.
+func TestPollPersistsAResightedWallObservation(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	inst, err := session.NewInstance(session.InstanceOptions{Title: "walled", Path: repoPath, Program: "claude"})
+	require.NoError(t, err)
+	inst.SetStartedForTest(true)
+	inst.SetStatusForTest(session.Running)
+	inst.Account = "work"
+	seedDiskInstance(t, repoID, "walled", repoPath)
+	manager.mu.Lock()
+	manager.instances[daemonInstanceKey(repoID, "walled")] = inst
+	manager.mu.Unlock()
+
+	persistedSighting := func() time.Time {
+		raw, err := config.LoadRepoInstances(repoID)
+		require.NoError(t, err)
+		var rows []session.InstanceData
+		require.NoError(t, json.Unmarshal(raw, &rows))
+		for _, d := range rows {
+			if d.Title == "walled" && len(d.AccountLimitObservations) > 0 {
+				return d.AccountLimitObservations[0].ObservedAt
+			}
+		}
+		return time.Time{}
+	}
+	persistUnchangedAxes := func() {
+		manager.persistPollChangeWithIdleEvidence(repoID, inst,
+			inst.GetLiveness(), inst.ToInstanceData().LimitResetAt, inst.LimitResetEvidence(), false, false)
+	}
+
+	inst.SetLimitReached(time.Time{})
+	require.True(t, inst.AccountLimitObservationsUnpersisted())
+	persistUnchangedAxes()
+	firstSeen := persistedSighting()
+	require.False(t, firstSeen.IsZero(), "the first sighting must be durable with no other axis changed")
+	require.False(t, inst.AccountLimitObservationsUnpersisted(), "a successful write clears the flag")
+
+	// The same wall sighted again: every axis but ObservedAt is identical, so
+	// only the observation flag makes the fresher sighting durable.
+	time.Sleep(20 * time.Millisecond)
+	inst.SetLimitReached(time.Time{})
+	persistUnchangedAxes()
+	require.True(t, persistedSighting().After(firstSeen),
+		"the stored record must carry the re-sight — the fact the reconcile decides against")
+}
+
 // The end-to-end shape: a pane proves a turn under a named account whose
-// stored wall is older than the proof; the reconcile retracts it; admission
-// folds the pair and the account is a candidate again.
+// stored wall is older than the turn's provable start; the reconcile retracts
+// it; admission folds the pair and the account is a candidate again.
 func TestAccountTurnProofEndToEndRestoresTheAccount(t *testing.T) {
-	advance := withFrozenClock(t)
 	base := nowFunc()
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerAccountInstance(t, manager, repoID, repoPath, "codex-session", tmux.ProgramCodex, "work")
@@ -765,14 +935,14 @@ func TestAccountTurnProofEndToEndRestoresTheAccount(t *testing.T) {
 
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexArmFrame}, base.Add(-time.Minute))
 	manager.noteAccountTurnEvidence(key, inst, session.Observation{Captured: true, Updated: true, Content: codexTurnFrame}, base)
-	advance(accountLimitProofReconcileInterval)
 	manager.reconcileAccountLimitProofs()
 
 	evidence, err := loadAccountLimitLedger()
 	require.NoError(t, err)
 	require.Len(t, evidence.Retractions, 1)
-	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", base)
-	// The tombstone carries the turn's capture instant as the durable proof.
+	// The tombstone carries the turn's provable START — the last instant its
+	// indicator was seen absent — not the frame that confirmed it.
+	requireAccountLimitRetraction(t, evidence.Retractions, tmux.ProgramCodex, "work", base.Add(-time.Minute))
 
 	// The loader used by admission sees the ledger's retraction fold the wall.
 	limited, err = manager.limitedAccountsForSwap(tmux.ProgramCodex, ledgerBackedEvidence(storedWall))

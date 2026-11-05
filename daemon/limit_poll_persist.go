@@ -34,7 +34,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// changes nothing else — and dropping it would leave a restart re-parsing
 	// the same banner against a later clock.
 	evidenceChanged := data.LimitResetEvidence != beforeEvidence
-	durableChanged := livenessChanged || resetChanged || evidenceChanged || settlementCheckpoint || conversationNeedsWrite(instance)
+	// A re-sighted wall moves only ObservedAt — nothing on the axes above. The
+	// instance flags it like an unpersisted conversation, or the stored record
+	// would keep a stale sighting that a retraction then decides against
+	// (#6802 review): the decision and the stored record must use the same fact.
+	obsChanged := instance.AccountLimitObservationsUnpersisted()
+	durableChanged := livenessChanged || resetChanged || evidenceChanged || settlementCheckpoint || conversationNeedsWrite(instance) || obsChanged
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -81,6 +86,9 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 		err = persistInstanceData(repoID, data)
 		rowLock.Unlock()
 		noteConversationWritten(instance, data, err)
+		if err == nil {
+			instance.MarkAccountLimitObservationsPersisted(data.AccountLimitObservations)
+		}
 	} else {
 		rowLock.Unlock()
 	}

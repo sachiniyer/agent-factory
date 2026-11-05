@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -27,11 +28,34 @@ import (
 // The reconcile is deliberately rare: it owns the expensive durable scan, and
 // the accounts it acts on were walled for far longer than the interval costs.
 
-// accountLimitProofReconcileInterval bounds how often pending turn proofs are
-// folded against durable evidence — never inside the 1 Hz per-session work,
-// and loose enough that a day-long wall does not notice the wait. A package
+// accountLimitProofReconcileInterval is the cadence of the dedicated
+// reconcile goroutine — the durable scan it owns is far too heavy for the 1 Hz
+// poll loop (~12 MB of instance rows on a busy box), so the poll never waits
+// on it. Loose enough that a day-long wall does not notice the wait. A package
 // var so tests can compress it.
 var accountLimitProofReconcileInterval = 45 * time.Second
+
+// startAccountLimitReconcileLoop runs the turn-proof reconcile on its own
+// ticker goroutine, registered on the daemon's shutdown wait group like the
+// orphan sweep's deferred worker — a disk scan this size must never suspend
+// RefreshStatuses, lost-session recovery, or limit resumes for the duration
+// of the read (#6802 review).
+func startAccountLimitReconcileLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		ticker := time.NewTicker(accountLimitProofReconcileInterval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-stopCh:
+				return
+			case <-ticker.C:
+				manager.reconcileAccountLimitProofs()
+			}
+		}
+	}()
+}
 
 // accountLimitProofKey names one provider-scoped identity a turn proved.
 type accountLimitProofKey struct {
@@ -49,12 +73,16 @@ type accountTurnWatchEntry struct {
 
 // noteAccountTurnEvidence feeds this tick's confirmed pane capture through the
 // session's turn watch and, when the agent's own in-turn chrome is
-// demonstrated, records the frame instant as positive proof for the account
-// the pane runs under. The proof is a fact about the account, kept even if
-// the session later dies; reconcileAccountLimitProofs decides what it
-// retracts. Called beside noteTaskRunTurnEvidence on both poll paths — it
-// needs every confirmed frame, including chrome-absent ones, because the
-// scoped agents' watch arms on absence.
+// demonstrated, records the turn's provable START bound as positive proof for
+// the account the pane runs under — never the frame instant itself. A turn
+// that was already in flight when the wall was sighted keeps a bound from
+// before it, so a still-running turn can never out-rank the wall's sighting;
+// only a turn that demonstrably began after it can (#6802 review). The proof
+// is a fact about the account, kept even if the session later dies;
+// reconcileAccountLimitProofs decides what it retracts. Called beside
+// noteTaskRunTurnEvidence on both poll paths — it needs every confirmed
+// frame, including chrome-absent ones, because the scoped agents' watch arms
+// on absence and that arming instant IS the bound.
 func (m *Manager) noteAccountTurnEvidence(key string, instance *session.Instance, obs session.Observation, capturedAt time.Time) {
 	if !obs.Captured {
 		return
@@ -81,10 +109,16 @@ func (m *Manager) noteAccountTurnEvidence(key string, instance *session.Instance
 	m.pausedMu.Lock()
 	entry := m.accountTurnWatches[key]
 	if entry == nil || entry.sig != sig {
-		entry = &accountTurnWatchEntry{sig: sig, watch: task.NewTurnWatch(agent, capturedAt)}
+		// A zero boundary: the watch's own age check is for prompt-attribution
+		// ("did this turn begin after MY prompt"), which is not this file's
+		// question. The question here is whether the turn began after the
+		// WALL — answered by ordering the proof's start bound against the
+		// wall's own sighting at reconcile, so the bound is what we mint.
+		entry = &accountTurnWatchEntry{sig: sig, watch: task.NewTurnWatch(agent, time.Time{})}
 		m.accountTurnWatches[key] = entry
 	}
 	turning := entry.watch.Observe(obs.Content, capturedAt)
+	bound, bounded := entry.watch.StartBound()
 	m.pausedMu.Unlock()
 	// The scoped agents' watch reports "turn in flight" on every
 	// indicator-present frame after it has armed — not only on the edge —
@@ -92,13 +126,13 @@ func (m *Manager) noteAccountTurnEvidence(key string, instance *session.Instance
 	// newer proof on every capture and let a frozen frame out-rank a wall
 	// sighted after it. Only fresh pane bytes carry fresh turn evidence:
 	// a capture identical to the last proves nothing new (#6802 review).
-	if !turning || !obs.Updated {
+	if !turning || !bounded || !obs.Updated {
 		return
 	}
 	m.pausedMu.Lock()
 	proofKey := accountLimitProofKey{agent: agent, account: account}
-	if prior := m.accountLimitProofs[proofKey]; capturedAt.After(prior) {
-		m.accountLimitProofs[proofKey] = capturedAt
+	if prior := m.accountLimitProofs[proofKey]; bound.After(prior) {
+		m.accountLimitProofs[proofKey] = bound
 	}
 	m.pausedMu.Unlock()
 }
@@ -156,16 +190,15 @@ func (m *Manager) sweepAccountTurnWatches() {
 // A live session parked at its wall contributes a live wall that admission
 // keeps regardless; retraction here never un-parks it (#6776 1d property).
 func (m *Manager) reconcileAccountLimitProofs() {
-	now := nowFunc()
 	m.pausedMu.Lock()
-	if len(m.accountLimitProofs) == 0 || now.Before(m.accountLimitProofReconcileAt) {
+	if len(m.accountLimitProofs) == 0 {
 		m.pausedMu.Unlock()
 		return
 	}
-	m.accountLimitProofReconcileAt = now.Add(accountLimitProofReconcileInterval)
 	proofs := m.accountLimitProofs
 	m.accountLimitProofs = make(map[accountLimitProofKey]time.Time)
 	m.pausedMu.Unlock()
+	now := nowFunc()
 
 	evidence, err := loadAccountLimitEvidenceForSwap()
 	if err != nil {

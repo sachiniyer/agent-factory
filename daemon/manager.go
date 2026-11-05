@@ -620,9 +620,6 @@ type Manager struct {
 	// account) until reconcileAccountLimitProofs folds them into durable
 	// retractions. Guarded by pausedMu.
 	accountLimitProofs map[accountLimitProofKey]time.Time
-	// accountLimitProofReconcileAt gates the expensive durable scan to at
-	// most once per accountLimitProofReconcileInterval while proofs pend.
-	accountLimitProofReconcileAt time.Time
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once

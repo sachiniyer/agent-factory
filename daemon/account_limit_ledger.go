@@ -151,6 +151,13 @@ func readAccountLimitLedger(path string) (accountLimitEvidence, error) {
 		if retraction.ProvenAt.IsZero() {
 			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit retraction with no proof time", path)
 		}
+		// A future-dated proof is impossible by construction — turn bounds are
+		// always in the past — so one on disk means a forward-jumped clock or a
+		// tampered file; either way its ordering claim is untrustworthy, and it
+		// must never get to defeat walls sighted before its fantasy instant.
+		if retraction.ProvenAt.After(nowFunc()) {
+			return accountLimitEvidence{}, fmt.Errorf("%s contains an account-limit retraction dated in the future", path)
+		}
 	}
 	return accountLimitEvidence{Observations: ledger.Observations, Retractions: ledger.Retractions}, nil
 }
@@ -218,6 +225,13 @@ func retractAccountLimitObservations(retractions []session.AccountLimitRetractio
 		retraction.Account = strings.TrimSpace(retraction.Account)
 		if retraction.Agent == "" || retraction.Account == "" || retraction.ProvenAt.IsZero() {
 			return fmt.Errorf("account-limit retraction needs a named identity and a proof time")
+		}
+		// A proof cannot carry an instant that has not happened — a turn's
+		// start bound is always in the past. Refusing future times keeps a
+		// forward clock jump from minting a tombstone that defeats every wall
+		// sighted between now and then.
+		if retraction.ProvenAt.After(nowFunc()) {
+			return fmt.Errorf("account-limit retraction proof time must not be in the future")
 		}
 		keyed = append(keyed, retraction)
 	}

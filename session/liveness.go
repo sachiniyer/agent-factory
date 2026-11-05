@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"slices"
 	"time"
 )
 
@@ -703,8 +704,11 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 			}
 			// Re-sighting a wall is itself a fact: keep the last-seen instant
 			// so a retraction must postdate the freshest wall evidence, not
-			// merely the first (#6776 1d).
+			// merely the first (#6776 1d). It is also a durable change — the
+			// flag makes the poll write it out, since nothing else on the
+			// change-detection axes may have moved (#6802 review).
 			observation.ObservedAt = sighted
+			i.accountLimitObsUnpersisted = true
 			i.touchLocked()
 			return
 		}
@@ -712,6 +716,7 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
 		Agent: agent, Account: account, ResetAt: resetAt, ObservedAt: sighted,
 	})
+	i.accountLimitObsUnpersisted = true
 	i.touchLocked()
 }
 
@@ -905,6 +910,26 @@ func (i *Instance) AccountLimitObservations() []AccountLimitObservationData {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	return append([]AccountLimitObservationData(nil), i.accountLimitObservations...)
+}
+
+// AccountLimitObservationsUnpersisted reports whether the durable observation
+// list changed in memory without a row-write carrying it yet (#6802 review).
+func (i *Instance) AccountLimitObservationsUnpersisted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.accountLimitObsUnpersisted
+}
+
+// MarkAccountLimitObservationsPersisted records that a whole-row write
+// carrying written has landed. It clears the pending flag only when the
+// observation list written is the one now held: a re-sighting that landed
+// after the written snapshot stays pending and is written on the next tick.
+func (i *Instance) MarkAccountLimitObservationsPersisted(written []AccountLimitObservationData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if slices.Equal(written, i.accountLimitObservations) {
+		i.accountLimitObsUnpersisted = false
+	}
 }
 
 // livenessFromData resolves the liveness a persisted or snapshot record should

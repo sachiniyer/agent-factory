@@ -430,14 +430,18 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   when af currently observes one of its sessions at a limit; absence of that
   observation is not presented as a provider guarantee. A recorded wall ends
   exactly two ways: when its claimed reset passes (plus the short rolling-window
-  grace), or when the daemon watches a session under that exact account
-  complete a confirmed turn later than the wall — positive proof it is serving
+  grace), or when the daemon watches a session under that exact account begin
+  a confirmed turn after the wall was last seen — positive proof it is serving
   again, kept as a retraction in the same ledger so one stale sighting cannot
-  exclude a recovered account for days. Nothing else ends a wall: not an idle
-  or uncaptured pane, not a timeout, and never the mere absence of a wall. A
-  wall sighted after the proof is the newer fact and excludes again, and a
-  session parked at its own `[limit]` stays parked — retraction clears the
-  stored record admission consults, never a live wall.
+  exclude a recovered account for days. A turn already in flight when the wall
+  was sighted never counts: the proof must be a request the account accepted
+  after it. And because the proof must postdate a claimed reset too, retraction
+  mainly frees walls that named none — a wall that named one cannot be
+  retracted before that instant, and by then it expires on its own. Nothing
+  else ends a wall: not an idle or uncaptured pane, not a timeout, and never
+  the mere absence of a wall. A wall sighted after the proof is the newer fact
+  and excludes again, and a session parked at its own `[limit]` stays parked —
+  retraction clears the stored record admission consults, never a live wall.
 - **Visible in the session.** The first prompt after replacement names the old
   and new identities before repeating the stored task prompt.
 - **One credential boundary.** A local swap stops every agent, shell, and process

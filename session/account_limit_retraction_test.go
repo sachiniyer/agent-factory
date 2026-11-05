@@ -76,11 +76,12 @@ func TestAccountLimitObservationRetracted(t *testing.T) {
 			retract(tmux.ProgramClaude, "work", resetAt.Add(-time.Minute))))
 	})
 
-	t.Run("a missing sighting instant orders only through the reset", func(t *testing.T) {
+	t.Run("a missing sighting instant orders against nothing", func(t *testing.T) {
 		legacy := observation
 		legacy.ObservedAt = time.Time{}
-		require.True(t, AccountLimitObservationRetracted(legacy,
-			retract(tmux.ProgramClaude, "work", resetAt.Add(time.Second))))
+		require.False(t, AccountLimitObservationRetracted(legacy,
+			retract(tmux.ProgramClaude, "work", resetAt.Add(time.Second))),
+			"a row that lost its timestamp could have been sighted after the proof — it cannot be ordered (#6802 review)")
 		require.False(t, AccountLimitObservationRetracted(legacy,
 			retract(tmux.ProgramClaude, "work", resetAt.Add(-time.Second))))
 	})
@@ -94,16 +95,15 @@ func TestAccountLimitObservationRetracted(t *testing.T) {
 			retract(tmux.ProgramClaude, "work", observedAt.Add(-time.Second))))
 	})
 
-	t.Run("a wall with neither instant ends only on positive proof", func(t *testing.T) {
+	t.Run("a wall with neither instant is never defeated", func(t *testing.T) {
 		untimed := observation
 		untimed.ObservedAt = time.Time{}
 		untimed.ResetAt = time.Time{}
-		require.True(t, AccountLimitObservationRetracted(untimed,
-			retract(tmux.ProgramClaude, "work", observedAt.Add(-time.Hour))),
-			"a no-reset, no-sighting wall has no ordering claim — positive proof is its only exit")
 		require.False(t, AccountLimitObservationRetracted(untimed,
-			retract(tmux.ProgramClaude, "work", time.Time{})),
-			"but never on an untimed one — absence of evidence is not proof")
+			retract(tmux.ProgramClaude, "work", observedAt.Add(time.Hour))),
+			"an untimed wall's true sighting is unknowable — it cannot lose to any retraction (#6802 review)")
+		require.False(t, AccountLimitObservationRetracted(untimed,
+			retract(tmux.ProgramClaude, "work", time.Time{})))
 	})
 }
 
@@ -132,6 +132,32 @@ func TestAccountLimitObservationStampsEachSighting(t *testing.T) {
 	require.Len(t, observations, 1)
 	require.True(t, observations[0].ObservedAt.Equal(second),
 		"re-sighting the same wall advances its event time so an older proof cannot defeat it")
+}
+
+// The durable-observation dirty flag is what carries a re-sighting to disk
+// when nothing else on the poll's change axes moved: the stored record must
+// carry the same fact the reconcile decides against, and a mark only clears
+// when the write carried the list the instance still holds (#6802 review).
+func TestAccountLimitObservationUnpersistedTracksTheWrite(t *testing.T) {
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	require.False(t, i.AccountLimitObservationsUnpersisted(),
+		"observations loaded from a row are already durable")
+
+	i.SetLimitReached(time.Time{})
+	require.True(t, i.AccountLimitObservationsUnpersisted(),
+		"a fresh sighting is memory-only until a write carries it")
+
+	i.MarkAccountLimitObservationsPersisted(nil)
+	require.True(t, i.AccountLimitObservationsUnpersisted(),
+		"a write that did not carry the observation list clears nothing")
+
+	i.MarkAccountLimitObservationsPersisted(i.AccountLimitObservations())
+	require.False(t, i.AccountLimitObservationsUnpersisted(),
+		"a write carrying the current list clears the flag")
+
+	i.SetLimitReached(time.Time{})
+	require.True(t, i.AccountLimitObservationsUnpersisted(),
+		"a re-sighting after the write is pending again")
 }
 
 // A known-reset wall and a no-reset wall are different claims: merging them

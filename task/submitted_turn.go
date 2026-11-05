@@ -32,6 +32,10 @@ var (
 	// "1.2k") when deriving the row's identity, since those repaint with the
 	// timer and would otherwise make one row read as two.
 	statusRowNumber = regexp.MustCompile(`\d+(?:\.\d+)?`)
+	// codexInterruptHint matches the hint row itself — the trimmed line holds
+	// the hint and nothing else. Codex draws it as a bare row of pane chrome;
+	// a draft can quote the same words inside other text.
+	codexInterruptHint = regexp.MustCompile(`^esc +to +interrupt$`)
 	// postSubmitDeliveredBudget bounds the post-Enter observation that may
 	// upgrade a sent-unverified verdict to delivered (#4429), and
 	// postSubmitDeliveredPoll is its re-check interval. The send path proved the
@@ -119,21 +123,21 @@ func submittedTurnContent(content, agent string) bool {
 		// Anchoring on the composer keeps a transcript that quotes the hint
 		// from qualifying.
 		lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
-		composer := -1
+		composer, lastContent := -1, -1
 		for i, line := range lines {
 			if tmux.IsCodexComposerLine(line) {
 				composer = i
 			}
-		}
-		if composer < 0 {
-			return false
-		}
-		for _, line := range lines[composer+1:] {
-			if escToInterruptHint.MatchString(line) {
-				return true
+			if strings.TrimSpace(line) != "" {
+				lastContent = i
 			}
 		}
-		return false
+		// The hint is codex's bottom chrome and a bare row of its own — the
+		// capture's last non-empty line, below the composer. A draft that
+		// QUOTES the hint inside the composer's wrapped text has the draft's
+		// own lines after it, so only this shape counts.
+		return composer >= 0 && lastContent > composer &&
+			codexInterruptHint.MatchString(strings.TrimSpace(lines[lastContent]))
 	case tmux.ProgramClaude:
 		// Claude draws its timed status row in the slot above the live
 		// composer and its interrupt hint on a separate footer below it —
@@ -314,6 +318,18 @@ type TurnWatch struct {
 	boundary time.Time
 	prev     map[string]timedRow
 	armed    bool
+	// armedAt is the last frame instant the scoped indicator was absent — the
+	// earliest instant a turn that fires on the next present frame could have
+	// begun. The absent frame bounds the start from below the same way a timed
+	// row's own elapsed does.
+	armedAt time.Time
+	// startBound is the earliest instant the turn demonstrated by the most
+	// recent firing Observe could have begun. A still-RUNNING turn cannot
+	// prove the agent accepted work after any later instant than this —
+	// callers ordering proof against a wall must use the bound, never the
+	// capture time of the frame that happened to fire.
+	startBound time.Time
+	fired      bool
 }
 
 // NewTurnWatch returns the chrome watcher for the agent the pane actually runs
@@ -352,14 +368,41 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 		// display's own resolution — real elapsed is strictly less than
 		// displayed+1s, so demanding that fit inside the boundary's age makes a
 		// strictly-pre-boundary turn unrepresentable (#5221 review).
-		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
+		if !ticked || row.elapsed+time.Second > at.Sub(w.boundary) {
+			w.fired = false
+			return false
+		}
+		// The row displays elapsed whole seconds, so the real turn began
+		// inside (at-elapsed-1s, at-elapsed]: its earliest possible start is
+		// the bound a caller can safely order against a wall's sighting.
+		w.startBound = at.Add(-row.elapsed - time.Second)
+		w.fired = true
+		return true
 	default:
 		if !submittedTurnContent(content, w.agent) {
 			w.armed = true
+			w.armedAt = at
+			w.fired = false
 			return false
+		}
+		w.fired = w.armed
+		if w.fired {
+			w.startBound = w.armedAt
 		}
 		return w.armed
 	}
+}
+
+// StartBound reports the earliest instant the turn demonstrated by the most
+// recent Observe call could have begun — for a timed row, the capture instant
+// minus its displayed elapsed and the one-second display margin; for a scoped
+// indicator, the instant it was last seen absent. ok is false when the last
+// Observe did not demonstrate a turn. A frame only proves the account was
+// serving at moments after this bound: ordering the proof against a wall
+// sighted between the bound and the capture instant would let a turn that
+// predates the wall retract it.
+func (w *TurnWatch) StartBound() (bound time.Time, ok bool) {
+	return w.startBound, w.fired
 }
 
 // tickingTimedRow is timedRowTicked lifted to name the row that moved, so the

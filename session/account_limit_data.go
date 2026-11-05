@@ -83,23 +83,30 @@ type AccountLimitObservationData struct {
 	// time, which is what a retraction is ordered against. ResetAt is the
 	// provider's claimed boundary and can be far from when the banner appeared
 	// (a lagging banner may claim a reset already past), so it cannot stand in
-	// for the sighting. Zero on rows written before the field existed; a
-	// time-claim-less observation orders against a retraction only through
-	// ResetAt — see AccountLimitObservationRetracted.
+	// for the sighting. Zero on rows written before the field existed — or
+	// dropped by an older binary's rewrite — and a sighting-less observation
+	// orders against no retraction at all: see AccountLimitObservationRetracted.
 	ObservedAt time.Time `json:"observed_at,omitempty"`
 }
 
 // AccountLimitRetractionData is durable positive proof that an account was
-// serving traffic at ProvenAt — a confirmed turn under it, or a reading
-// clearly below the wall after the claimed reset (#4404, epic #6776). It never
-// rewrites the observation: both facts are kept, and admission decides which
-// is newer by the time each happened. That ordering is what makes a retraction
-// safe against a fresh wall — the wall's own ObservedAt outranks an older
-// proof — and it is why a retraction is written only on positive proof, never
-// on absence of evidence, a timeout, or an unknown reading.
+// serving traffic no earlier than ProvenAt — the earliest instant a confirmed
+// turn under it could have begun, or a reading clearly below the wall after
+// the claimed reset (#4404, epic #6776). It never rewrites the observation:
+// both facts are kept, and admission decides which is newer by the time each
+// happened. That ordering is what makes a retraction safe against a fresh
+// wall — the wall's own ObservedAt outranks an older proof — and it is why a
+// retraction is written only on positive proof, never on absence of evidence,
+// a timeout, or an unknown reading.
 type AccountLimitRetractionData struct {
-	Agent    string    `json:"agent"`
-	Account  string    `json:"account"`
+	Agent   string `json:"agent"`
+	Account string `json:"account"`
+	// ProvenAt is a LOWER bound on service time, not the instant af noticed:
+	// for a turn proof it is the earliest instant that turn could have begun
+	// (the frame that armed the watch, or the ticking row's own elapsed
+	// subtracted from its capture). Ordering against it proves the turn began
+	// after the wall; a turn already RUNNING when the wall was sighted keeps
+	// its pre-wall bound and can never retract it.
 	ProvenAt time.Time `json:"proven_at"`
 }
 
@@ -114,12 +121,12 @@ type AccountLimitRetractionData struct {
 //     time is still ordered, since a wall observed after the proof may be
 //     reporting a window that lags.
 //
-// An observation missing one or both times has no ordering claim through the
-// missing field: a wall with no recorded sighting time is ordered only by its
-// claimed reset, and one with neither is ended by any positive proof — the
-// only exit the spec gives a no-reset observation, and safe because every
-// observation written by this binary carries both times. A zero ProvenAt
-// defeats nothing: a retraction with no event time orders against nothing.
+// An observation with no recorded sighting time orders against NOTHING and
+// can never lose to a retraction: a row that lost ObservedAt to an older
+// binary's rewrite could have been sighted after the proof, and there is no
+// way to order them — the untimed wall stands until it expires or a fresher
+// sighting stamps it. A zero ProvenAt defeats nothing either: a retraction
+// with no event time orders against nothing.
 func AccountLimitObservationRetracted(observation AccountLimitObservationData, retraction AccountLimitRetractionData) bool {
 	if retraction.ProvenAt.IsZero() {
 		return false
@@ -127,7 +134,10 @@ func AccountLimitObservationRetracted(observation AccountLimitObservationData, r
 	if observation.Agent != retraction.Agent || observation.Account != retraction.Account {
 		return false
 	}
-	if !observation.ObservedAt.IsZero() && !retraction.ProvenAt.After(observation.ObservedAt) {
+	if observation.ObservedAt.IsZero() {
+		return false
+	}
+	if !retraction.ProvenAt.After(observation.ObservedAt) {
 		return false
 	}
 	if !observation.ResetAt.IsZero() && !retraction.ProvenAt.After(observation.ResetAt) {

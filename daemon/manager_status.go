@@ -47,9 +47,13 @@ var lastStatusSweepNs atomic.Int64
 // stopped launching sessions with no error at all — the cap simply read as full.
 //
 // This is deliberately a backstop, not a return to per-tick probing: the attach
-// keeps its fast path and pays one probe per interval instead of one per tick. It
-// is also self-limiting — it applies ONLY while a task run is in flight, so the
-// probe that observes the run finishing is also the last one it forces.
+// keeps its fast path and pays one probe per interval instead of one per tick.
+// It applies while a task run is in flight — the probe that observes the run
+// finishing is also the last one it forces — while an unverified send is
+// pending (#6590), or while a named-account session on a chrome-signatured
+// agent could still mint turn proof a stale stored wall needs (#6776 1d):
+// account evidence expires on the wall's clock, not the attach's, so pausing
+// its collection for the whole attach would leave walls it could have refuted.
 //
 // A var so tests can shrink it; production never reassigns.
 var taskRunPollBackstop = 30 * time.Second
@@ -301,8 +305,11 @@ func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time)
 
 // observeTaskRunWhilePaused runs ONE bounded observation of an attached session
 // whose task run is still in flight, so the concurrency cap learns the run ended
-// even though the poll is paused (#1892). Called only from the pause branch of
-// refreshInstanceStatus, at most once per taskRunPollBackstop.
+// even though the poll is paused (#1892). The same capture also feeds
+// account-limit turn proof for named-account sessions (noteAccountTurnEvidence)
+// and unverified-send re-verification (#6590) — every consumer of a paused
+// session's pane gets the one probe per interval. Called only from the pause
+// branch of refreshInstanceStatus, at most once per taskRunPollBackstop.
 //
 // It can END a run and it can never conclude DEATH, and both halves are
 // deliberate:

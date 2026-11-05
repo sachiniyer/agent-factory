@@ -108,12 +108,11 @@ func startInstancePollLoop(manager *Manager, pollInterval time.Duration, stopCh 
 
 			manager.ResumeLimitedSessions()
 
-			// Fold the turn proofs this sweep's pane watches collected into
-			// durable retractions (#6776 1d): a session that demonstrably ran a
-			// turn under a named account is positive proof that account was
-			// serving, so wall evidence older than the proof may retire. Bounded
-			// to one durable scan per interval; a no-op when nothing proved.
-			manager.reconcileAccountLimitProofs()
+			// The turn proofs this sweep's pane watches collect are folded into
+			// durable retractions by a DEDICATED goroutine
+			// (startAccountLimitReconcileLoop), never here: the durable scan it
+			// owns is megabytes of instance rows and must never suspend this
+			// 1 Hz loop (#6776 1d, #6802 review).
 
 			// Report proposal docs that changed on disk to open Docs tabs. A stat
 			// of each watched doc; it commits nothing.
