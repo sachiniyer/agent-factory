@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/handoffengine"
 	"github.com/sachiniyer/agent-factory/internal/rateindex"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -622,9 +623,30 @@ type Manager struct {
 	// rateIndexer is the bounded rollout-store reader the account-limit proof
 	// reconcile refreshes per walled account (#6776 1d). Its per-file memo is
 	// the reason an every-45s cadence is cheap: an unchanged file costs zero
-	// bytes on the next pass. Built lazily by usageIndexer and touched only
-	// from that goroutine — no lock.
-	rateIndexer *rateindex.Indexer
+	// bytes on the next pass. Built lazily by usageIndexer; guarded by
+	// rateIndexerMu now that the shadow-engine ticker is a second caller
+	// (both still serialize — the memoization is what they share).
+	rateIndexerMu sync.Mutex
+	rateIndexer   *rateindex.Indexer
+	// handoffEngine is the shadow decision engine (#6776 slice 4): built
+	// lazily by accountHandoffEngine and touched only from its own ticker
+	// goroutine — no lock.
+	handoffEngine *handoffengine.Engine
+	// handoffObserved carries the status poll's last capture verdict per
+	// session — the ONLY pane knowledge the engine sees, so fact assembly
+	// adds zero pane reads. Keyed by stableSessionKey; guarded by m.mu.
+	handoffObserved map[string]handoffObservation
+	// handoffActive is the poll hook's and tick's cheap gate (#6817 round-2
+	// review): while no resolved config has engaged shadow — recomputed by
+	// accountHandoffDiscover at daemon start and on every config apply,
+	// never on a timer — a probe's noteHandoffObservation and an engine
+	// tick both do literally nothing. Read from every poll goroutine.
+	handoffActive atomic.Bool
+	// handoffDiscoverMu serialises accountHandoffDiscover (#6817 final
+	// review): compute and store run under the same hold, so a discovery
+	// that began before a newer config apply cannot win the store with a
+	// stale answer — whoever computes under the lock sees the newest config.
+	handoffDiscoverMu sync.Mutex
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once

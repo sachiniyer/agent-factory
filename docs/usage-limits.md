@@ -587,6 +587,59 @@ The project default is preselected when it is another registered, logged-in
 account. In the web, use **Handoff** beside **Retry**, then choose the agent and account. Both
 pickers list accounts belonging to the selected agent.
 
+## Shadow-mode automatic handoff
+
+`[account_handoff] mode = "shadow"` turns on the automatic-handoff engine in
+**observe-only** mode ([epic #6776](https://github.com/sachiniyer/agent-factory/issues/6776)):
+every ~45 seconds the daemon assembles each session's facts — liveness, wall
+banner, working/idle, composer draft, account evidence — runs the same
+decision the live mover will run, and appends the verdict to an
+edge-triggered JSONL log at
+`~/.agent-factory/instances/auto-handoff-events-YYYYMMDD.jsonl`. It never
+moves a session. Shadow exists so the decision engine can be audited against
+reality — and against an external watcher you may already run — before it is
+allowed to touch anything.
+
+```toml
+[account_handoff]
+mode = "shadow"
+```
+
+- **Edge-triggered.** A session emits rows when its verdict *changes* — wall
+  seen, candidate chosen, draft blocking, pinned-ineligible — plus at most one
+  unchanged-verdict heartbeat every 30 minutes. Rows are JSON with
+  `ts`, `kind`, `session_key`, `agent`, `title`, `from`, `to`, `reason_code`,
+  `params`, `mode`; files rotate daily and prune after seven days.
+- **Same evidence as live.** Shadow reads the daemon's existing status
+  snapshot — no extra pane reads — the durable wall ledger, the bounded usage
+  indexer, and the registered-account drift check. A candidate whose
+  `config.toml` runtime settings (`model`, `model_reasoning_effort`,
+  `approval_policy`, `sandbox_mode`) differ from the session's home is
+  reported `config-drift` and skipped; one af cannot verify is skipped too.
+- **A composer draft blocks every move**, and a pane whose composer cannot be
+  located counts as draft-present — a move must never eat half-typed input.
+- **Pinned sessions stay pinned** unless `include_pinned = true`; an automatic
+  move under that mode *consumes* the pin (the session lands auto-selected on
+  the target) rather than carrying it. `exclude_sessions` keeps named sessions
+  out regardless.
+- **`default_login = "move"`** extends governance to sessions running on the
+  agent's ambient login (no `--account`). A working ambient session needs a
+  qualifying usage reading to move; a provably idle one may leave on the
+  banner alone.
+- **Opt-in discovery is event-driven, not polled.** The daemon looks for
+  `mode = "shadow"` at startup and on every `af config` write — never on a
+  timer, and never on session create: `[account_handoff]` is rejected in
+  in-repo config, so an opt-in can only arrive through an applied write.
+  Hand-editing a personal project's config file takes effect on the next
+  `af config` write or daemon restart.
+- **`probe_ttl` currently has no effect.** There is no live usage probe in
+  this version: wall confirmation uses the banner plus the account store's
+  own `rate_limits` records. The leaf is staged configuration for a later
+  slice — writing it is harmless, it just changes nothing yet.
+- **`mode = "live"` is rejected at load.** Live moves, verification, and
+  recovery land in later slices; until then `shadow` and `off` are the only
+  accepted spellings.
+
 ## Hand off to another agent
 
 Waiting is not the only option. If the work should not sit until the window

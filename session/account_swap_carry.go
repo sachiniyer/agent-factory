@@ -71,6 +71,37 @@ func carrySupportedAgent(agent string) bool {
 	return agent == tmux.ProgramClaude || agent == tmux.ProgramCodex
 }
 
+// CarrySupportedAgent is the carry capability the handoff engine's
+// require_carry fact reads — the same provider check the swap path makes.
+func CarrySupportedAgent(agent string) bool {
+	return carrySupportedAgent(agent)
+}
+
+// AccountSwapCarryPossible reports whether THIS session could carry its
+// conversation through an account swap — the same feasibility predicate
+// planAccountSwapCarry applies at admission: a carry-supporting provider
+// with a recorded conversation that belongs to it. The provider is what
+// the launch command resolves to (resolvedAgentLocked, the #6811
+// resolver), not the configured enum, so a program-override session is
+// judged by the runtime it actually runs. A local claude/codex session
+// with no recorded conversation — or one recorded under a different
+// provider — reads false, matching admission's "no recorded conversation
+// id" refusal, so the shadow engine's require_carry fact never logs moves
+// live would refuse (#6817 review).
+func (i *Instance) AccountSwapCarryPossible() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	agent := i.resolvedAgentLocked()
+	if !carrySupportedAgent(agent) {
+		return false
+	}
+	conv := i.reportedConversation
+	if len(i.Tabs) > 0 {
+		conv = i.Tabs[0].Conversation
+	}
+	return conv.HasID() && conv.Agent == agent
+}
+
 // AccountSwapCarryIntended reports whether a same-agent account swap would
 // ATTEMPT to carry its conversation, judging only the preconditions the
 // confirming user can know before the swap runs (#4367, #4504). It is a

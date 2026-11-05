@@ -1,0 +1,461 @@
+// Package handoffengine is the daemon-side wiring of the pure handoff
+// decision leaf (#6776, slice 4): assemble Facts from the status snapshot the
+// poll already produced — zero additional pane reads — call handoff.Decide,
+// and write the resulting edge-triggered rows to the shadow event log.
+//
+// The engine never moves a session. mode="shadow" is the only mode that
+// runs; anything else resolves to inactivity, and a corrupt handoff state
+// fails the pass closed rather than guessing rails.
+package handoffengine
+
+import (
+	"fmt"
+	"log"
+	"strings"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/handoff"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// Reannounce bounds the unchanged-verdict heartbeat (design R14).
+const Reannounce = 30 * time.Minute
+
+// Freshness bounds the pane capture the engine evaluates: the poll's snapshot
+// is consumed, never re-read, and a capture older than the tick is reported
+// as unknowable rather than stale.
+const Freshness = 60 * time.Second
+
+// driftUnverifiable is the AccountFacts.Drift value when the target's runtime
+// settings cannot be read — ineligible like a drifted candidate, but named
+// honestly (R9).
+const driftUnverifiable = "unverifiable"
+
+// SessionInput is one live session row the daemon feeds the engine. Content
+// is the poll's own pane capture — it is evaluated here and never logged.
+type SessionInput struct {
+	Key      string // stableSessionKey(repoID, inst) — never the title
+	Title    string
+	RepoID   string // report_to resolution (slice PR3)
+	RepoRoot string // resolved-config root
+	Agent    string // accountSwapAgent's answer: configured, pinned, or ambient
+	Account  string // "" = ambient default login
+	Auto     bool   // af chose the account; false = explicit pin
+	Started  bool
+	Live     bool
+	Working  bool // the poll's own verdict — LiveRunning, which folds in
+	// churn + the agent's in-turn indicator; never IsWorkingContent, whose
+	// unsupported agents (codex) always read idle (#6817 review)
+	Parked         bool // limit-parked liveness = wall liveness
+	Attached       bool
+	VSCodeTab      bool
+	PendingOp      bool // in-flight op or pending account swap
+	SwapCapable    bool
+	CarryPossible  bool      // local worktree + carry-capable agent
+	HomeDir        string    // the runtime-bound account home (codex), "" elsewhere
+	LimitAccount   string    // parked-on account, from instance limit facts
+	WallObservedAt time.Time // durable wall sighting; zero for banner-only
+	Captured       bool      // the poll produced a frame this pass
+	CapturedAt     time.Time
+	Content        string
+}
+
+// Deps injects every environment read so the engine is testable without a
+// daemon, a disk, or an account registry.
+type Deps struct {
+	Now             func() time.Time
+	ResolveConfig   func(repoRoot string) (*config.ResolvedConfig, error)
+	LoadState       func() (handoff.State, error)
+	Registered      func(agent string) ([]string, error)
+	LimitedAccounts func(agent string) (map[string]bool, error)
+	AccountDir      func(agent, name string) (string, error)
+	// ReadUsage refreshes the bounded index for an account home; carried is
+	// the carried-prefix map from durable handoff state (R3's rule).
+	ReadUsage func(dir string, carried map[string]int64) handoff.ReadingFacts
+	// DriftKey compares effective codex runtime settings; the caller injects
+	// the agentaccount helper (incomparable=false, key="" for other agents).
+	DriftKey   func(agent, sourceDir, targetDir string) (key string, incomparable bool)
+	DetectWall func(content, agent string) bool
+	WriteRows  func(rows []handoff.EventRow) error
+	LogWarn    func(format string, args ...any)
+	// ResetGrace and ProofMargin are the daemon's skew constants: the
+	// limit-resume grace a resets_at gets before it counts as past, and the
+	// reconcile's write margin a calm record must clear of a wall sighting.
+	ResetGrace  time.Duration
+	ProofMargin time.Duration
+}
+
+// Engine holds the per-daemon wiring: injected deps, the edge tracker, and
+// nothing else — Facts are rebuilt fresh every tick.
+type Engine struct {
+	deps  Deps
+	edges *handoff.EdgeTracker
+	warnf func(format string, args ...any)
+}
+
+// New returns an engine; a nil LogWarn falls back to the package logger.
+func New(deps Deps) *Engine {
+	e := &Engine{deps: deps, edges: handoff.NewEdgeTracker(), warnf: deps.LogWarn}
+	if e.warnf == nil {
+		e.warnf = func(format string, args ...any) { log.Printf("handoff engine: "+format, args...) }
+	}
+	return e
+}
+
+// governed is one resolved in-scope session plus its config.
+type governed struct {
+	in  SessionInput
+	cfg *config.ResolvedConfig
+}
+
+// moverRowKey is the edge-tracker/row key for mover-level events — the
+// halted announcement is the mover's own, not any one session's (#6818
+// round-2 review).
+const moverRowKey = "mover"
+
+// namespace is the evidence shared by every session in one agent's account
+// registry: who is registered, who still-excluding evidence marks limited.
+type namespace struct {
+	registered map[string]bool
+	limited    map[string]bool
+	// failed marks a namespace whose limit evidence could not be loaded —
+	// its sessions are skipped entirely rather than judged on a half-known
+	// exclusion set.
+	failed bool
+}
+
+// Tick runs one shadow pass over the sessions the daemon fed. It returns the
+// count of sessions whose resolved config opted into shadow — the daemon's
+// poll-observation gate keys off it (#6817 review). It exits before touching
+// state, registry, evidence, or disk unless at least one session's resolved
+// config opts into mode="shadow" — the "does nothing unless" contract the
+// lane's tests pin.
+func (e *Engine) Tick(sessions []SessionInput) (int, error) {
+	now := e.deps.Now()
+
+	// Resolve config once per repo root; keep only sessions opting into
+	// shadow. A resolution error skips that root's sessions — fail closed.
+	resolved := map[string]*config.ResolvedConfig{}
+	var gov []governed
+	for _, in := range sessions {
+		cfg, ok := resolved[in.RepoRoot]
+		if !ok {
+			var err error
+			cfg, err = e.deps.ResolveConfig(in.RepoRoot)
+			if err != nil {
+				resolved[in.RepoRoot] = nil
+				e.warnf("resolve config for %s: %v (session %q skipped)", in.RepoRoot, err, in.Key)
+				continue
+			}
+			resolved[in.RepoRoot] = cfg
+		}
+		if cfg == nil || cfg.AccountHandoff.Mode != config.AccountHandoffModeShadow {
+			continue
+		}
+		gov = append(gov, governed{in: in, cfg: cfg})
+	}
+	liveKeys := map[string]bool{}
+	for _, g := range gov {
+		liveKeys[g.in.Key] = true
+	}
+	// The mover-level row keeps its edge alive alongside the sessions'
+	// (a pruned "mover" edge would re-announce a persistent halt every
+	// tick — the N-immediate-prompts bug of #6818 round-2 review).
+	liveKeys[moverRowKey] = true
+	// Pruning commits immediately — a dropped edge is the safe direction
+	// (the returning session re-announces rather than staying suppressed).
+	e.edges.Prune(liveKeys)
+	if len(gov) == 0 {
+		return 0, nil
+	}
+
+	// Rails + carried-prefix evidence: one locked read. A corrupt file fails
+	// the pass closed — the same rule the ledger holds for the live mover.
+	state, err := e.deps.LoadState()
+	if err != nil {
+		return len(gov), fmt.Errorf("load handoff state: %w", err)
+	}
+
+	// Occupancy counts EVERY started, live session's account, per
+	// agent-namespace account — including sessions in projects that never
+	// opted in (#6817 round-3 review). An opted-out session still consumes
+	// the same registered account, so under target_order="emptiest" a
+	// candidate busy in another project must not read as empty. Live
+	// sessions only: retained selections on dead/archived rows must not
+	// skew the tiebreak either.
+	occupancy := map[string]int{}
+	for _, in := range sessions {
+		if in.Account != "" && in.Started && in.Live {
+			occupancy[in.Agent+"\x00"+in.Account]++
+		}
+	}
+
+	// Evidence shared per agent namespace: registered names + limited set.
+	// A namespace whose limit evidence cannot be read fails CLOSED — an
+	// unavailable exclusion set is not an unlimited-account claim, and a
+	// candidate with no usage reading is otherwise eligible for a confirmed
+	// wall move (#6817 review).
+	namespaces := map[string]*namespace{}
+	nsFor := func(agent string) *namespace {
+		ns, ok := namespaces[agent]
+		if !ok {
+			ns = &namespace{registered: map[string]bool{}, limited: map[string]bool{}}
+			if names, err := e.deps.Registered(agent); err == nil {
+				for _, name := range names {
+					ns.registered[name] = true
+				}
+			} else {
+				e.warnf("list %s accounts: %v (candidates treated unregistered)", agent, err)
+			}
+			if limited, err := e.deps.LimitedAccounts(agent); err == nil {
+				ns.limited = limited
+			} else {
+				e.warnf("limited %s accounts: %v (namespace skipped — evidence unreadable)", agent, err)
+				ns.failed = true
+			}
+			namespaces[agent] = ns
+		}
+		return ns
+	}
+
+	// Usage evidence reads once per account home per tick: a walled session
+	// and its own drift candidates may name the same directories, and an
+	// unchanged rollout file is the only cheap second read (#6817 review).
+	readings := map[string]handoff.ReadingFacts{}
+	readUsage := func(dir string, carried map[string]int64) handoff.ReadingFacts {
+		if r, ok := readings[dir]; ok {
+			return r
+		}
+		r := e.deps.ReadUsage(dir, carried)
+		readings[dir] = r
+		return r
+	}
+
+	// Edges filter on a pending clone and commit only after the log write
+	// succeeds — a failed append must not suppress the verdict's retry on
+	// the next tick (#6817 review).
+	pending := e.edges.Clone()
+
+	var rows []handoff.EventRow
+	// A halt is a MOVER-level event (#6818 round-2 review): one row while
+	// the rails say stopped — edge-triggered on the mover key, so a
+	// persistent halt announces once per episode, not once per walled
+	// session per tick.
+	if state.Halted != nil {
+		ev := handoff.Event{
+			Kind:   handoff.EventHalted,
+			Reason: handoff.ReasonMoverHalted,
+			Params: map[string]string{
+				"halt_reason": state.Halted.Reason,
+				"halted_at":   state.Halted.At.UTC().Format(time.RFC3339),
+			},
+		}
+		for _, ev := range pending.Filter(moverRowKey, []handoff.Event{ev}, now, Reannounce) {
+			rows = append(rows, handoff.EventRow{
+				TS: now, Kind: ev.Kind, SessionKey: moverRowKey,
+				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
+			})
+		}
+	}
+	for _, g := range gov {
+		// The leaf's Phase-A scope gates run here BEFORE any evidence read:
+		// a pinned session excluded by include_pinned=false, an
+		// exclude_sessions entry, a dead/archived row, an unsupported agent,
+		// or an ambient seat the config ignores never touches the account
+		// registry or a usage file (#6817 review). It still reaches Decide —
+		// on empty accounts — so its pinned-ineligible edge can fire.
+		var facts handoff.Facts
+		if outOfScope(g) {
+			facts = e.bareFacts(g, state, now)
+		} else {
+			ns := nsFor(g.in.Agent)
+			if ns.failed {
+				continue
+			}
+			facts = e.factsFor(g, ns, occupancy, state, now, readUsage)
+		}
+		decision := handoff.Decide(facts)
+		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
+		for _, ev := range events {
+			rows = append(rows, handoff.EventRow{
+				TS: now, Kind: ev.Kind, SessionKey: g.in.Key, Agent: g.in.Agent,
+				Title: g.in.Title, From: ev.From, To: ev.To,
+				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
+			})
+		}
+	}
+	if len(rows) > 0 {
+		if err := e.deps.WriteRows(rows); err != nil {
+			return len(gov), fmt.Errorf("write shadow rows: %w", err)
+		}
+	}
+	e.edges = pending
+	return len(gov), nil
+}
+
+// outOfScope reproduces the leaf's Phase-A scope gates — the cheap checks
+// Decide runs before it would ever consult account evidence — so the engine
+// can skip the registry, usage, and drift reads those gates make moot. Keep
+// it in lockstep with handoff.Decide's scope phase: the cases and their order
+// are the same, and a divergence shows up as a session silently un-governed.
+func outOfScope(g governed) bool {
+	in, cfg := g.in, g.cfg.AccountHandoff
+	switch {
+	case !in.Started || !in.Live:
+		return true
+	case in.Agent == "":
+		return true
+	case !in.SwapCapable:
+		return true
+	case excludedTitle(cfg.ExcludeSessions, in.Title):
+		return true
+	case in.Account != "" && !in.Auto && !cfg.IncludePinned:
+		return true
+	case in.Account == "" && cfg.DefaultLogin != config.AccountHandoffDefaultLoginMove:
+		return true
+	}
+	return false
+}
+
+// excludedTitle mirrors decide.go's exclude_sessions match: exact title after
+// trimming the configured entry.
+func excludedTitle(excludes []string, title string) bool {
+	for _, entry := range excludes {
+		if strings.TrimSpace(entry) == title {
+			return true
+		}
+	}
+	return false
+}
+
+// bareFacts builds the evidence-free Facts an out-of-scope session reaches
+// Decide with — Phase A returns before it would read Accounts or a reading,
+// so skipping those fields cannot change the verdict, only the cost.
+func (e *Engine) bareFacts(g governed, state handoff.State, now time.Time) handoff.Facts {
+	in := g.in
+	s := handoff.SessionFacts{
+		Key:          in.Key,
+		Title:        in.Title,
+		Agent:        in.Agent,
+		Account:      in.Account,
+		AutoSelected: in.Auto,
+		Started:      in.Started,
+		Live:         in.Live,
+		Parked:       in.Parked,
+		SwapCapable:  in.SwapCapable,
+	}
+	rails := handoff.RailsFacts{Halted: state.Halted != nil}
+	return handoff.Facts{
+		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
+		Session: s, Rails: rails, Config: g.cfg.AccountHandoff,
+	}
+}
+
+// factsFor assembles one session's Facts from the snapshot fields — the only
+// pane-content reads in this file are evaluations (wall banner, working,
+// composer draft) of the capture the poll already took.
+func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, state handoff.State, now time.Time, readUsage func(string, map[string]int64) handoff.ReadingFacts) handoff.Facts {
+	in, cfg := g.in, g.cfg
+	fresh := in.Captured && !in.CapturedAt.IsZero() && now.Sub(in.CapturedAt) <= Freshness
+	s := handoff.SessionFacts{
+		Key:            in.Key,
+		Title:          in.Title,
+		Agent:          in.Agent,
+		Account:        in.Account,
+		AutoSelected:   in.Auto,
+		Started:        in.Started,
+		Live:           in.Live,
+		Parked:         in.Parked,
+		LimitAccount:   in.LimitAccount,
+		WallObservedAt: in.WallObservedAt,
+		Captured:       fresh,
+		Working:        in.Working,
+		Attached:       in.Attached,
+		VSCodeTab:      in.VSCodeTab,
+		PendingOp:      in.PendingOp,
+		SwapCapable:    in.SwapCapable,
+		CarryPossible:  in.CarryPossible,
+	}
+	if fresh {
+		s.WallBanner = e.deps.DetectWall(in.Content, in.Agent)
+		s.Draft, s.DraftCertain = tmux.ComposerDraftPresent(in.Content)
+	}
+	// The session's own reading: codex identity homes only — the home the
+	// runtime command bound, never the configured enum (#6817 review).
+	// (#6794: codex alone writes the rate_limits record).
+	srcDir := ""
+	if in.Agent == tmux.ProgramCodex {
+		srcDir = in.HomeDir
+		if srcDir != "" {
+			s.Reading = readUsage(srcDir, state.CarriedPrefixes)
+		} else {
+			s.Reading = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
+		}
+	} else {
+		s.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+
+	// Rails. MaxMovesWindow is validated by config resolution, so a parse
+	// failure here means the table was hand-built — fall back to no window
+	// (counting nothing) rather than a fabricated bound.
+	window, _ := time.ParseDuration(cfg.AccountHandoff.MaxMovesWindow)
+	rails := handoff.RailsFacts{Halted: state.Halted != nil}
+	if state.Halted != nil {
+		rails.HaltReason = state.Halted.Reason
+	}
+	if window > 0 {
+		cutoff := now.Add(-window)
+		for _, mv := range state.RecentMoves {
+			if mv.SessionKey == in.Key && !mv.At.Before(cutoff) {
+				rails.MovesInWindow++
+			}
+		}
+	}
+	if until, ok := state.RefusedUntil[in.Key]; ok && until.After(now) {
+		rails.RefusedUntil = until
+	}
+
+	// Candidates: the resolved configured order, each against the
+	// namespace's registration/limit evidence and its own account home.
+	accounts := make([]handoff.AccountFacts, 0, len(cfg.LimitAccountCandidates))
+	for _, name := range cfg.LimitAccountCandidates {
+		af := handoff.AccountFacts{
+			Name:       name,
+			Registered: ns.registered[name],
+			Limited:    ns.limited[name],
+		}
+		dir, err := e.deps.AccountDir(in.Agent, name)
+		if err != nil || dir == "" {
+			af.Reading = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
+			if in.Agent == tmux.ProgramCodex {
+				af.Drift = driftUnverifiable
+			}
+		} else if in.Agent == tmux.ProgramCodex {
+			af.Reading = readUsage(dir, state.CarriedPrefixes)
+			if srcDir == "" {
+				af.Drift = driftUnverifiable
+			} else if key, incomparable := e.deps.DriftKey(in.Agent, srcDir, dir); incomparable {
+				af.Drift = driftUnverifiable
+			} else {
+				af.Drift = key
+			}
+		} else {
+			af.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
+		}
+		af.Occupancy = occupancy[in.Agent+"\x00"+name]
+		if window > 0 {
+			cutoff := now.Add(-window)
+			for _, mv := range state.RecentMoves {
+				if mv.Account == name && !mv.At.Before(cutoff) {
+					af.RecentMoveCredits++
+				}
+			}
+		}
+		accounts = append(accounts, af)
+	}
+	return handoff.Facts{
+		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
+		Session: s, Accounts: accounts, Rails: rails, Config: cfg.AccountHandoff,
+	}
+}

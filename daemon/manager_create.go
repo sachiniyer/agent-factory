@@ -946,12 +946,14 @@ func (m *Manager) keepUncertainCreate(repoID, title string, instance *session.In
 func (m *Manager) persistFailedCreate(repoID, title string, instance *session.Instance) error {
 	key := daemonInstanceKey(repoID, title)
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	m.instances[key] = instance
-	if err := appendInstanceData(repoID, instance.ToInstanceData()); err != nil {
+	err := appendInstanceData(repoID, instance.ToInstanceData())
+	if err != nil {
 		delete(m.instances, key)
+		m.mu.Unlock()
 		return err
 	}
 	instance.PinStorageRepoID(repoID)
+	m.mu.Unlock()
 	return nil
 }

@@ -180,13 +180,22 @@ func usageReadingProof(reading rateindex.AccountReading, wallPercent int, now ti
 // usageIndexer lazily builds the rollout indexer the reconcile refreshes
 // through. It is kept on the manager because its per-file memoization is the
 // point: an unchanged rollout costs zero bytes on the next pass, which is
-// what makes a 45-second refresh cadence cheap. Called only from the
-// reconcile goroutine (and tests driving it directly).
+// what makes a 45-second refresh cadence cheap. The caller must hold
+// rateIndexerMu — use refreshAccountUsage, which takes it.
 func (m *Manager) usageIndexer() *rateindex.Indexer {
 	if m.rateIndexer == nil {
 		m.rateIndexer = rateindex.New()
 	}
 	return m.rateIndexer
+}
+
+// refreshAccountUsage runs one bounded index pass under rateIndexerMu: the
+// reconcile and the shadow-engine ticker are two goroutines sharing this one
+// memo, and the Indexer's maps are not internally synchronized.
+func (m *Manager) refreshAccountUsage(dir string, carried map[string]int64) rateindex.AccountReading {
+	m.rateIndexerMu.Lock()
+	defer m.rateIndexerMu.Unlock()
+	return m.usageIndexer().Refresh(dir, rateindex.Options{CarriedPrefixes: carried})
 }
 
 // accountLimitProofWorthScanning is the cheap gate that keeps the 45-second
@@ -368,7 +377,7 @@ func (m *Manager) reconcileAccountLimitProofs() {
 			continue
 		}
 		provenAt, ok := usageReadingProof(
-			m.usageIndexer().Refresh(dir, rateindex.Options{CarriedPrefixes: inputs.carriedPrefixes}),
+			m.refreshAccountUsage(dir, inputs.carriedPrefixes),
 			inputs.wallPercent, now)
 		if !ok {
 			continue

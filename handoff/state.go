@@ -45,6 +45,23 @@ type State struct {
 	// unaffected. Written by the rails slice; read by `af quota` and the
 	// status surface so a halted mover is never silent (design R16).
 	Halted *Halt `json:"halted,omitempty"`
+	// RecentMoves are the committed automatic moves the switch-loop rail
+	// (max_moves inside max_moves_window, counted per session_key) and the
+	// anti-pile-on credits (counted per target account) read. Written by the
+	// live-mover slice; shadow reads them as zero when absent.
+	RecentMoves []RecentMove `json:"recent_moves,omitempty"`
+	// RefusedUntil maps stableSessionKey → the instant until which the
+	// engine leaves the session alone after it refused every candidate.
+	RefusedUntil map[string]time.Time `json:"refused_until,omitempty"`
+}
+
+// RecentMove is one committed automatic account move: when, and to which
+// account. Decay is the reader's job — entries outside max_moves_window
+// simply count for nothing.
+type RecentMove struct {
+	SessionKey string    `json:"session_key"`
+	Account    string    `json:"account"`
+	At         time.Time `json:"at"`
 }
 
 // Halt is the durable halt record: when the mover stopped and why.
@@ -112,6 +129,16 @@ func decodeState(path string, raw []byte) (State, error) {
 	for file, prefix := range state.CarriedPrefixes {
 		if prefix < 0 {
 			return State{}, fmt.Errorf("%s carries a negative prefix length for %s", path, file)
+		}
+	}
+	for i, move := range state.RecentMoves {
+		if move.SessionKey == "" || move.Account == "" || move.At.IsZero() {
+			return State{}, fmt.Errorf("%s recent_moves[%d] is missing session_key, account, or at", path, i)
+		}
+	}
+	for key := range state.RefusedUntil {
+		if key == "" {
+			return State{}, fmt.Errorf("%s refused_until carries an empty session key", path)
 		}
 	}
 	return state, nil

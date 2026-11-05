@@ -422,6 +422,39 @@ func (i *Instance) codexHomeForLaunch(program, workDir string) (string, error) {
 	return tmux.CodexHomeFromCommand(program, workDir)
 }
 
+// SessionCodexHomeDir resolves the Codex account home this session's live
+// runtime actually writes against — the account dir for a named selection,
+// or the ambient home derived from the launch command's CODEX_HOME. It is
+// bound to the command that launched the runtime (RuntimeProgram evidence,
+// with the launch resolution's fallback for rows that predate it), so a
+// program_overrides edit cannot redirect the read to a different home
+// (#6817 review). "" when the session isn't a local codex runtime or its
+// home cannot be resolved.
+func (i *Instance) SessionCodexHomeDir() string {
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+		return ""
+	}
+	// The provider is what the launch command resolves to, not the
+	// configured enum — resolvedAgentLocked is the #6811 resolver: a
+	// session whose program_overrides entry launches codex under another
+	// agent name still writes a codex home (#6817 review).
+	if i.ResolvedAgent() != tmux.ProgramCodex {
+		return ""
+	}
+	program := i.RuntimeProgram()
+	if strings.TrimSpace(program) == "" {
+		program = resolveLaunchProgramForInstance(i).command
+	}
+	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex {
+		return ""
+	}
+	home, err := i.codexHomeForLaunch(program, i.GetWorktreePath())
+	if err != nil || strings.TrimSpace(home) == "" {
+		return ""
+	}
+	return home
+}
+
 // SessionCodexCaptureBaseline builds the capture snapshot a deferred arming
 // needs when the launch-time one is gone — after a daemon restart, or for a
 // session that predates capture. It binds the store and working directory to
