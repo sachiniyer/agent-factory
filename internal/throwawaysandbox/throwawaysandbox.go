@@ -75,8 +75,10 @@ type Marker struct {
 	// TmuxTmpdir is the sandbox's private TMUX_TMPDIR when it has one. The
 	// teardown kills tmux servers through the sockets under this directory.
 	TmuxTmpdir string `json:"tmux_tmpdir,omitempty"`
-	// SandboxRoot is the sandbox's top-level scratch directory, recorded
-	// for evidence only.
+	// SandboxRoot is the sandbox's top-level scratch directory. It is the
+	// anchor for the tmux-dir proof: the reaper trusts the recorded tmux
+	// dir only when the root carries the RootSentinelName file this marker
+	// created it with.
 	SandboxRoot string `json:"sandbox_root,omitempty"`
 }
 
