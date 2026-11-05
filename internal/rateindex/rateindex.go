@@ -193,20 +193,18 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 		return AccountReading{Status: StatusUnknown, Reason: "store-unreadable"}
 	}
 	result := AccountReading{Files: len(enum.files)}
-	indeterminate := enum.bounded
+	// Record timestamps are not bounded by a file's mtime — a backdated or
+	// skewed record can postdate it — so no unexamined content is ever proven
+	// irrelevant: a deadline-truncated walk, a MaxFiles drop, or a certified
+	// directory skip all leave the refresh indeterminate.
+	indeterminate := enum.bounded || enum.hasMissed
 
 	var best *fileClaim
 	for _, c := range enum.files {
-		if best != nil && c.modTime.Before(best.sortAt) {
-			// Sorted mtime-desc: no remaining file can hold a newer claim
-			// (a file's newest record cannot postdate its own mtime).
-			break
-		}
 		if ix.now().After(deadline) || result.BytesRead >= opts.MaxTotalBytes {
-			// The first unexamined file could still hold the newest claim.
-			if best == nil || !c.modTime.Before(best.sortAt) {
-				indeterminate = true
-			}
+			// An unexamined file can hold the newest claim regardless of its
+			// mtime.
+			indeterminate = true
 			break
 		}
 		// Clamp the file's window to the remaining total budget so the cap
@@ -218,10 +216,8 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 		}
 		claim, bounded, bytesRead, readErr := ix.fileClaim(c, opts, window)
 		result.BytesRead += bytesRead
-		if readErr != nil {
-			bounded = true // an unreadable file could hold the newest claim
-		}
-		if bounded && (best == nil || !c.modTime.Before(best.sortAt)) {
+		if readErr != nil || bounded {
+			// An unreadable or partially-read file can hold the newest claim.
 			indeterminate = true
 		}
 		if claim.verdict == quota.RateLimitsAbsent {
@@ -230,14 +226,6 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 		if best == nil || claim.sortAt.After(best.sortAt) {
 			best = &claim
 		}
-	}
-	// Content skipped during enumeration — candidates the MaxFiles cap
-	// dropped and directories the certified stop passed over — can still hold
-	// the newest claim whenever its ceiling exceeds the best found. Skips
-	// whose ceiling cannot beat the best claim are proven irrelevant and stay
-	// out of the verdict.
-	if enum.hasMissed && (best == nil || enum.missedCeiling.After(best.sortAt)) {
-		indeterminate = true
 	}
 	switch {
 	case best == nil && indeterminate:
@@ -264,28 +252,23 @@ type candidate struct {
 
 // candidateWalk carries one enumeration's mutable state.
 type candidateWalk struct {
-	top           []candidate
-	maxFiles      int
-	deadline      time.Time
-	now           func() time.Time
-	seen          int
-	stopped       bool      // horizon-certified remainder: unexamined dirs cannot compete
-	hasMissed     bool      // unexamined content exists (cap drops or certified dir skips)
-	missedCeiling time.Time // newest record timestamp any skipped file could still hold
+	top       []candidate
+	maxFiles  int
+	deadline  time.Time
+	now       func() time.Time
+	seen      int
+	stopped   bool // horizon-bound stop: no skipped dir can join the mtime slate
+	hasMissed bool // unexamined content exists: cap drops or the early-stop remainder
 }
 
 // enumeration is candidates' result: the candidate slate plus what the scan
-// must know about content the walk left unexamined.
+// must know about content the walk left unexamined. Skipped content is
+// reported, not ranked — a record timestamp is not bounded by file mtime, so
+// an unexamined file can hold the newest claim no matter how old it looks.
 type enumeration struct {
-	files   []candidate
-	bounded bool // the deadline truncated the walk in uncertified territory
-	// hasMissed/missedCeiling bound the claim timestamps content skipped by
-	// the MaxFiles cap or the certified early stop could still hold: a cap
-	// drop contributes its mtime (its records cannot postdate it), a skipped
-	// day directory its dayEnd+horizon ceiling. A skip is only proven
-	// irrelevant once a found claim postdates the ceiling.
-	hasMissed     bool
-	missedCeiling time.Time
+	files     []candidate
+	bounded   bool // the deadline truncated the walk in uncertified territory
+	hasMissed bool // content was skipped unexamined (drops or the early stop)
 }
 
 // candidates enumerates rollout files under <home>/sessions NEWEST-FIRST and
@@ -314,21 +297,10 @@ func candidates(home string, maxFiles int, deadline time.Time, now func() time.T
 	}
 	sort.Slice(walk.top, func(i, j int) bool { return walk.top[i].modTime.After(walk.top[j].modTime) })
 	return enumeration{
-		files:         walk.top,
-		bounded:       errors.Is(err, errDeadline),
-		hasMissed:     walk.hasMissed,
-		missedCeiling: walk.missedCeiling,
+		files:     walk.top,
+		bounded:   errors.Is(err, errDeadline),
+		hasMissed: walk.hasMissed,
 	}, nil
-}
-
-// noteMissed records that a file or directory was left unexamined, tracking
-// the newest record timestamp it could still hold (the ceiling the final
-// verdict compares the best found claim against).
-func (w *candidateWalk) noteMissed(ceiling time.Time) {
-	if !w.hasMissed || ceiling.After(w.missedCeiling) {
-		w.missedCeiling = ceiling
-	}
-	w.hasMissed = true
 }
 
 // dir processes one directory level: files are statted into the top-k slate,
@@ -377,14 +349,14 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 			modTime: info.ModTime(),
 		}, w.maxFiles)
 		if dropped != nil {
-			// Its records cannot postdate its mtime — that is the ceiling the
-			// verdict compares the best found claim against.
-			w.noteMissed(dropped.modTime)
+			// A file that lost the mtime race still counts as unexamined
+			// content — its records are not bounded by that mtime.
+			w.hasMissed = true
 		}
 	}
 	for _, entry := range entries {
 		if w.stopped {
-			// A descendant certified the remainder: unwind without further
+			// A descendant hit the early-stop bound: unwind without further
 			// deadline checks so a completed walk is never mislabeled
 			// truncated.
 			return nil
@@ -392,15 +364,15 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 		if !entry.IsDir() {
 			continue
 		}
-		// The certified-remainder check runs before the deadline check on
-		// purpose: a remainder the horizon bound certifies cannot compete,
-		// deadline or not — stopping there is completeness, not truncation.
-		if depth == 2 {
-			if cutoff, certified := w.pastHorizon(year, month, entry.Name()); certified {
-				w.noteMissed(cutoff)
-				w.stopped = true
-				return nil
-			}
+		// The early-stop bound runs before the deadline check on purpose: it
+		// certifies that no skipped directory can join the mtime slate, so
+		// stopping there bounds enumeration cost rather than truncating it.
+		// The skipped content is still reported — unexamined records can hold
+		// the newest claim.
+		if depth == 2 && w.pastHorizon(year, month, entry.Name()) {
+			w.hasMissed = true
+			w.stopped = true
+			return nil
 		}
 		if w.now().After(w.deadline) {
 			return errDeadline
@@ -421,14 +393,14 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 
 // pastHorizon reports whether the day directory named day under year/month is
 // old enough — relative to the weakest candidate already held — that no file
-// in it, or in any still-older directory (the walk descends), can displace a
-// held candidate, along with the ceiling a skipped file's records could still
-// reach. Certification requires a full candidate slate and a parseable
-// YYYY/MM/DD date; anything else keeps walking — an unfilled slate can still
-// be displaced by an old directory's newer claim.
-func (w *candidateWalk) pastHorizon(year, month, day string) (time.Time, bool) {
+// in it, or in any still-older directory (the walk descends), can join the
+// mtime-ordered candidate slate. The bound certifies SLATE membership only:
+// a skipped file can still hold a newer record timestamp, which is why its
+// content counts as missed. Certification requires a full candidate slate and
+// a parseable YYYY/MM/DD date; anything else keeps walking.
+func (w *candidateWalk) pastHorizon(year, month, day string) bool {
 	if len(w.top) < w.maxFiles {
-		return time.Time{}, false
+		return false
 	}
 	yy, errY := strconv.Atoi(year)
 	mm, errM := strconv.Atoi(month)
@@ -436,20 +408,21 @@ func (w *candidateWalk) pastHorizon(year, month, day string) (time.Time, bool) {
 	if errY != nil || errM != nil || errD != nil ||
 		len(year) != 4 || len(month) != 2 || len(day) != 2 ||
 		mm < 1 || mm > 12 || dd < 1 || dd > 31 {
-		return time.Time{}, false
+		return false
 	}
 	// The latest possible mtime of a file under this day is the end of its day
 	// plus the append horizon. If even that precedes the weakest held mtime,
-	// nothing here can compete — and every still-older directory fails harder.
+	// nothing here can join the slate — and every still-older directory fails
+	// harder.
 	cutoff := time.Date(yy, time.Month(mm), dd, 0, 0, 0, 0, time.UTC).
 		AddDate(0, 0, 1).Add(stillAppendingHorizon)
-	return cutoff, cutoff.Before(w.top[w.maxFiles-1].modTime)
+	return cutoff.Before(w.top[w.maxFiles-1].modTime)
 }
 
 // insertCandidate maintains top as a mtime-desc list of at most maxFiles,
 // reporting the entry the insertion displaced — the rejected candidate or the
-// evicted weakest — which joins the unexamined-content ceiling: a file that
-// lost the mtime race can still hold the newest record timestamp.
+// evicted weakest — which counts as unexamined content: a file that lost the
+// mtime race can still hold the newest record timestamp.
 func insertCandidate(top []candidate, c candidate, maxFiles int) ([]candidate, *candidate) {
 	if len(top) == maxFiles && !c.modTime.After(top[len(top)-1].modTime) {
 		return top, &c
