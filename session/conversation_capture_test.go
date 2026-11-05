@@ -146,6 +146,57 @@ func TestCaptureAgentConversation_CodexUncorrelatableMetadataDoesNotGuess(t *tes
 	require.False(t, conv.HasID(), "unknown metadata could still belong to the launch cwd")
 }
 
+// An account probe (#6776) runs `codex exec` with its cwd inside
+// <af-home>/probe/<run> — the private af-owned directory — so its rollout's
+// session_meta cwd can never equal a session's launch working directory: af
+// never launches a session there. This pins that the cwd filter keeps probe
+// rollouts out of the newest-thread correlation for a worktree session,
+// while their rate_limits records remain in the account's store where the
+// usage-reading evidence wants them.
+func TestCaptureAgentConversation_CodexProbeCwdRolloutNeverCorrelates(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	probeCwd := filepath.Join(t.TempDir(), ".agent-factory", "probe", "run-3f2a")
+	require.NoError(t, os.MkdirAll(probeCwd, 0o700))
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", probeCwd)
+
+	// The probe rollout alone cannot be mistaken for the session's thread.
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.False(t, conv.HasID(), "a probe-cwd rollout is not the session's conversation")
+
+	// And with the session's own rollout appearing afterward beside it,
+	// capture still correlates to the launch cwd — the probe file does not
+	// even count as ambiguity. The same snapshot sees both as new files.
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+	conv, err = CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-75b6-7f68-88e3-6d5e1f15bb6a", conv.ID)
+}
+
+// The residual the filter does not close, pinned so it stays a deliberate
+// answer: a session with NO recorded working dir admits every new rollout,
+// probe-cwd included, as a correlation candidate — an unfiltered probe on
+// the same account can then appear among them.
+func TestCaptureAgentConversation_CodexProbeCwdResidualNoWorkingDir(t *testing.T) {
+	codexHome := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, "")
+
+	probeCwd := filepath.Join(t.TempDir(), ".agent-factory", "probe", "run-9c4e")
+	require.NoError(t, os.MkdirAll(probeCwd, 0o700))
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", probeCwd)
+
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
+		"with no launch working dir the filter cannot exclude a probe rollout")
+}
+
 func TestCaptureAgentConversation_CodexRetriesIncompleteConcurrentMetadata(t *testing.T) {
 	codexHome := t.TempDir()
 	workDirA := filepath.Join(t.TempDir(), "session-a")
