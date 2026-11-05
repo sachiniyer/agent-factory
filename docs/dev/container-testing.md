@@ -337,8 +337,9 @@ Two safety nets share the marker:
   sandbox's own private tmux server — proven by the socket the kernel
   reports it holding, inside a tmux dir the sentinel verifies the sandbox
   created — or when its (pid, start id) was recorded in the home's
-  `throwaway-pids.json` (the daemon records itself at startup, which is how
-  teardown still reaches it after it reparents to init). Off Linux there is
+  `throwaway-pids.json` scoped to the boot and PID namespace it was written
+  in (the daemon records itself at startup, which is how teardown still
+  reaches it after it reparents to init). Off Linux there is
   no socket evidence, so recorded pids are the only members; a marker
   without a usable private tmux dir likewise yields only recorded members.
   Everything else — shared servers, their panes, foreign sockets — is left

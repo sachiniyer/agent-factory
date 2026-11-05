@@ -288,16 +288,48 @@ func TestRootSentinelBindsToCreatedUnix(t *testing.T) {
 	}
 }
 
+// TestTrustedOwnedDir pins the root-directory trust bar the reaper added:
+// the recorded sandbox root must be a real directory owned by this uid —
+// a symlink could redirect the proof into a tree the sandbox never made.
+func TestTrustedOwnedDir(t *testing.T) {
+	dir := t.TempDir()
+	if err := TrustedOwnedDir(dir); err != nil {
+		t.Fatalf("a real owned dir was refused: %v", err)
+	}
+	real := filepath.Join(t.TempDir(), "real")
+	if err := os.Mkdir(real, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(real, link); err != nil {
+		t.Skip("cannot create symlink fixture")
+	}
+	if err := TrustedOwnedDir(link); err == nil {
+		t.Fatal("a symlinked dir passed the trust bar")
+	}
+	f := filepath.Join(t.TempDir(), "file")
+	if err := os.WriteFile(f, []byte("x"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if err := TrustedOwnedDir(f); err == nil {
+		t.Fatal("a regular file passed the dir trust bar")
+	}
+}
+
 // TestRecordedPIDsRoundTrip covers the write/read path the daemon and the
-// teardown share: entries merge without duplicating, and a missing file
-// reads as ErrNotExist.
+// teardown share: entries merge without duplicating, scope fields
+// round-trip, and a missing file reads as ErrNotExist.
 func TestRecordedPIDsRoundTrip(t *testing.T) {
 	home := t.TempDir()
 	if _, err := ReadRecordedPIDs(home); !errors.Is(err, os.ErrNotExist) {
 		t.Fatalf("empty home: %v", err)
 	}
-	for _, rec := range []RecordedPID{{PID: 10, StartID: 100}, {PID: 11, StartID: 110}, {PID: 10, StartID: 100}} {
-		if err := WriteRecordedPID(home, rec.PID, rec.StartID); err != nil {
+	for _, rec := range []RecordedPID{
+		{PID: 10, StartID: 100, BootID: "b", NSID: "n"},
+		{PID: 11, StartID: 110, BootID: "b", NSID: "n"},
+		{PID: 10, StartID: 100, BootID: "b", NSID: "n"},
+	} {
+		if err := WriteRecordedPID(home, rec); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -307,6 +339,9 @@ func TestRecordedPIDsRoundTrip(t *testing.T) {
 	}
 	if len(recs) != 2 {
 		t.Fatalf("recorded %d entries after dedupe, want 2: %v", len(recs), recs)
+	}
+	if recs[0].BootID != "b" || recs[0].NSID != "n" {
+		t.Fatalf("the boot/namespace scope did not round-trip: %+v", recs[0])
 	}
 }
 
@@ -325,7 +360,7 @@ func TestRecordedPIDsRefusesUntrustedAndMalformed(t *testing.T) {
 	if _, err := ReadRecordedPIDs(home); err == nil {
 		t.Fatal("a symlinked recorded-pid file was read")
 	}
-	if err := WriteRecordedPID(home, 1, 1); err == nil {
+	if err := WriteRecordedPID(home, RecordedPID{PID: 1, StartID: 1}); err == nil {
 		t.Fatal("a symlinked recorded-pid file was written through")
 	}
 
@@ -336,7 +371,7 @@ func TestRecordedPIDsRefusesUntrustedAndMalformed(t *testing.T) {
 	if _, err := ReadRecordedPIDs(home2); err == nil {
 		t.Fatal("a malformed recorded-pid file was read")
 	}
-	if err := WriteRecordedPID(home2, 1, 1); err == nil {
+	if err := WriteRecordedPID(home2, RecordedPID{PID: 1, StartID: 1}); err == nil {
 		t.Fatal("a malformed recorded-pid file was silently clobbered")
 	}
 }
