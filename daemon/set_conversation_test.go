@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -143,4 +144,29 @@ func TestSetConversationRefusesDuringAnOperation(t *testing.T) {
 	// Once the operation settles the same id is admitted.
 	inst.SetInFlightOpForTest(session.OpNone)
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
+}
+
+// An id recorded while a capture attempt polled the store — an operator's
+// repair — stands: the daemon's commit re-checks under the op-lock, and the
+// rollout the poll discovered must not replace the record (#6769 review).
+// The baseline is taken empty, then two rollouts land: the repair's (which
+// set-conversation validates against) and a second one the capture poll
+// discovers as new.
+func TestCaptureAgentConversationSkipsARecordedRepair(t *testing.T) {
+	shrinkConversationCaptureForTest(t)
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	writeDaemonCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-10T10-17-35-"+setConversationDaemonID+".jsonl", inst.Path)
+
+	snap := session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, inst.Path)
+	writeDaemonCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-10T10-18-00-029f386f-7206-7fc2-803b-f7045e07a299.jsonl", inst.Path)
+
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
+	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
+
+	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
+		inst.AgentRuntimeToken(), 50*time.Millisecond))
+	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID,
+		"a capture that discovered a rollout must not replace the operator's record")
 }

@@ -37,8 +37,14 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 			"session %q runs off this host: its conversation store is not inspectable from here — run set-conversation on the host that owns the rollout store",
 			i.Title)
 	}
-	resolution := resolveLaunchProgramForInstance(i)
-	program := resolution.command
+	// Bind to the command that launched the live runtime, not a re-resolution
+	// of current config: a program_overrides edit after launch must not move
+	// the store or directory this repair validates against — the same
+	// evidence rule SessionCodexCaptureBaseline applies (#6769 review).
+	program := i.RuntimeProgram()
+	if strings.TrimSpace(program) == "" {
+		program = resolveLaunchProgramForInstance(i).command
+	}
 	agent := i.AgentProgram()
 	if agent != tmux.ProgramCodex || tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex {
 		shown := agent

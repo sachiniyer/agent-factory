@@ -307,6 +307,15 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	if current != inst || inst.UserKilled() || inst.IsArchived() {
 		return nil
 	}
+	// An id recorded while this attempt polled the store — an operator's
+	// set-conversation repair, a sibling capture's commit — stands: this
+	// discovery is older evidence than the record and must not replace it
+	// (#6769 review). The check sits inside the same op-lock the repair
+	// takes, so either order is safe: a committed repair suppresses this
+	// write, and a committed capture lets the repair overwrite it next.
+	if inst.AgentConversation().HasID() {
+		return nil
+	}
 	if !inst.SetAgentConversationForRuntime(token, conv) {
 		return nil
 	}

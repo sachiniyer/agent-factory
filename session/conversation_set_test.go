@@ -178,3 +178,27 @@ func TestValidateSettableConversation_AccountStore(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, setConversationID, conv.ID)
 }
+
+// A program_overrides edit after launch must not re-point the repair: the
+// validator binds the runtime's recorded command, which carries the store the
+// pane actually writes to.
+func TestValidateSettableConversation_BindsRuntimeProgram(t *testing.T) {
+	setConversationConfig(t)
+	runtimeHome := t.TempDir()
+	t.Setenv("CODEX_HOME", t.TempDir()) // ambient store stays empty
+	workDir := t.TempDir()
+	writeCodexRolloutFileWithCwd(t, runtimeHome, "rollout-2026-07-06T10-17-35-"+setConversationID+".jsonl", workDir)
+
+	inst := setConversationInstance(t, workDir)
+	inst.setRuntimeProgram("CODEX_HOME=" + runtimeHome + " codex")
+
+	conv, err := ValidateSettableConversation(inst, setConversationID)
+	require.NoError(t, err)
+	assert.Equal(t, setConversationID, conv.ID,
+		"the store the running command declares is where the rollout lives")
+}
+
+// The sibling guarantee — a capture that discovers a rollout must not replace
+// an id the operator just recorded — lives in the daemon's commit path under
+// the op-lock: TestCaptureAgentConversationSkipsARecordedRepair (CI per the
+// daemon-test rule).
