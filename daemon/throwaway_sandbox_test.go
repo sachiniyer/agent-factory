@@ -228,6 +228,79 @@ func TestSweepDropsMissingMarkerEntries(t *testing.T) {
 	}
 }
 
+// TestSweepConvergesPastBound is the Codex P2 regression: the sweep bound
+// must cap TEARDOWNS, not SCANS — otherwise a retained prefix (live homes,
+// missing markers) starves every entry behind it forever. With more
+// entries than the cap, a markerless entry anywhere in the set must still
+// be dropped and an expired one still reaped, wherever the hash order puts
+// them.
+func TestSweepConvergesPastBound(t *testing.T) {
+	self := markedHome(t, nil)
+	regDir := filepath.Join(t.TempDir(), "registry")
+	if err := os.Mkdir(regDir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	var reaped []string
+	oldReg, oldNow, oldTeardown := throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn
+	oldLookup, oldScope := throwawayLookupFn, throwawayScopeIDsFn
+	throwawayRegistryDirFn = func() string { return regDir }
+	throwawayNowFn = func() time.Time { return time.Unix(100000, 0) }
+	throwawayTeardownFn = func(home string, m *throwawaysandbox.Marker) { reaped = append(reaped, home) }
+	throwawayLookupFn = func(int) (proctree.Process, error) { return proctree.Process{}, proctree.ErrProcessExited }
+	throwawayScopeIDsFn = func() (string, string) { return "", "" }
+	defer func() {
+		throwawayRegistryDirFn, throwawayNowFn, throwawayTeardownFn = oldReg, oldNow, oldTeardown
+		throwawayLookupFn, throwawayScopeIDsFn = oldLookup, oldScope
+	}()
+	register := func(home string) {
+		canon, err := canonicalDir(home)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if err := throwawaysandbox.WriteRegistryEntry(regDir, canon); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// throwawaySweepMaxHomes+1 markerless entries: every one must be dropped,
+	// so the bound cannot have stopped the scan early.
+	for i := 0; i < throwawaySweepMaxHomes+1; i++ {
+		register(t.TempDir())
+	}
+	for i := 0; i < 5; i++ {
+		young := markedHome(t, func(m *throwawaysandbox.Marker) {
+			m.CreatedUnix = 99900
+			m.MaxLifetimeSeconds = 21600
+		})
+		register(young)
+	}
+	expired := markedHome(t, func(m *throwawaysandbox.Marker) {
+		m.CreatedUnix = 1
+		m.MaxLifetimeSeconds = 60
+	})
+	register(expired)
+	sweepThrowawaySandboxes(self)
+	expiredCanon, err := canonicalDir(expired)
+	if err != nil {
+		t.Fatal(err)
+	}
+	found := false
+	for _, h := range reaped {
+		if h == expiredCanon {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatal("an expired entry behind the sweep bound was never examined")
+	}
+	homes, _, err := throwawaysandbox.ReadRegistryHomes(regDir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(homes) != 5 {
+		t.Fatalf("%d entries remain registered, want the 5 live homes only: %v", len(homes), homes)
+	}
+}
+
 func TestProcessBoundToThrowawayHome(t *testing.T) {
 	home := t.TempDir()
 	canonHome, err := canonicalDir(home)
@@ -695,6 +768,7 @@ func TestThrowawayPrivateTmuxDirIsAnAllowlist(t *testing.T) {
 	for _, tmpdir := range []string{"/tmp", "/var/tmp"} {
 		t.Run("TMPDIR="+tmpdir, func(t *testing.T) {
 			t.Setenv("TMPDIR", tmpdir)
+			t.Setenv("TMUX_TMPDIR", "")
 			for _, tc := range []struct {
 				name    string
 				root    string
@@ -719,6 +793,50 @@ func TestThrowawayPrivateTmuxDirIsAnAllowlist(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestThrowawayPrivateTmuxDirInheritedEnv is the Codex P2 regression: a
+// marked daemon INHERITS the sandbox's private TMUX_TMPDIR, so the reaper's
+// own environment must not make that dir count as shared. The exemption is
+// narrow — only when the inherited dir IS the one the marker recorded —
+// so an env dir the marker does not claim stays shared.
+func TestThrowawayPrivateTmuxDirInheritedEnv(t *testing.T) {
+	sandbox := t.TempDir()
+	home := filepath.Join(sandbox, "home")
+	if err := os.MkdirAll(home, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	tmuxDir := filepath.Join(sandbox, "tmux")
+	marker := func(root, tmux string) *throwawaysandbox.Marker {
+		return &throwawaysandbox.Marker{Version: 1, CreatedUnix: 1, MaxLifetimeSeconds: 60, TmuxTmpdir: tmux, SandboxRoot: root}
+	}
+	t.Run("inherited private dir is allowed", func(t *testing.T) {
+		t.Setenv("TMUX_TMPDIR", tmuxDir)
+		if dir, refuse := throwawayPrivateTmuxDir(canonHome, marker(sandbox, tmuxDir)); dir == "" {
+			t.Fatalf("the sandbox's own inherited tmux dir refused: %q", refuse)
+		}
+	})
+	t.Run("inherited dir the marker does not claim stays shared", func(t *testing.T) {
+		// env names a DIFFERENT dir inside the same root: the exemption
+		// must not leak to a dir the marker never recorded.
+		other := filepath.Join(sandbox, "other")
+		t.Setenv("TMUX_TMPDIR", other)
+		if dir, _ := throwawayPrivateTmuxDir(canonHome, marker(sandbox, tmuxDir)); dir != "" {
+			t.Fatal("an env dir inside the root but not claimed exempted the root anyway")
+		}
+	})
+	t.Run("claimed env dir outside any root still refused", func(t *testing.T) {
+		// Exemption only rescues the shared check; containment still applies.
+		real := filepath.Join(t.TempDir(), "real-tmux")
+		t.Setenv("TMUX_TMPDIR", real)
+		if dir, _ := throwawayPrivateTmuxDir(canonHome, marker(sandbox, real)); dir != "" {
+			t.Fatal("an env dir outside the sandbox root was exempted anyway")
+		}
+	})
 }
 
 func TestThrowawayWatchdogDeadlineFires(t *testing.T) {

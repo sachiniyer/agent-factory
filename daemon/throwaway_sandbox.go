@@ -70,11 +70,13 @@ var (
 // wedged server cannot stall the unwind.
 const throwawayKillTimeout = 3 * time.Second
 
-// The startup sweep runs inside daemon startup, so it is bounded in both
-// directions: throwawaySweepMaxHomes caps how many registry entries one
-// start will reap, and throwawaySweepBudget caps the wall clock. Remainders
-// are left for the next marked start — orphan reaping is convergence, not a
-// gate on readiness.
+// The startup sweep runs inside daemon startup, so the EXPENSIVE half is
+// bounded: throwawaySweepMaxHomes caps how many teardowns one start will
+// run, and throwawaySweepBudget caps the wall clock. Every entry is still
+// EXAMINED — scanning is cheap (a marker read plus a liveness check) —
+// because capping the scan itself would let a retained prefix starve the
+// entries behind it forever. Remainders are left for the next marked
+// start — orphan reaping is convergence, not a gate on readiness.
 const throwawaySweepMaxHomes = 64
 
 var throwawaySweepBudget = 30 * time.Second
@@ -264,9 +266,11 @@ func sweepThrowawaySandboxes(selfHome string) {
 	}
 	now := throwawayNowFn()
 	started := time.Now()
-	for i, registered := range homes {
-		if i >= throwawaySweepMaxHomes || time.Since(started) > throwawaySweepBudget {
-			log.WarningLog.Printf("throwaway sandbox sweep bound reached at %d entries; %d remain for the next marked start", i, len(homes)-i)
+	reaped := 0
+sweep:
+	for _, registered := range homes {
+		if time.Since(started) > throwawaySweepBudget {
+			log.WarningLog.Printf("throwaway sandbox sweep budget exhausted; some entries remain for the next marked start")
 			break
 		}
 		home, err := canonicalDir(registered)
@@ -298,8 +302,13 @@ func sweepThrowawaySandboxes(selfHome string) {
 		default:
 			continue
 		}
+		if reaped >= throwawaySweepMaxHomes {
+			log.WarningLog.Printf("throwaway sandbox teardown bound reached at %d; %s remains for the next marked start", reaped, home)
+			break sweep
+		}
 		log.InfoLog.Printf("reaping throwaway sandbox %s (kind %s): %s", home, m.Kind, reason)
 		throwawayTeardownFn(home, m)
+		reaped++
 		if err := throwawaysandbox.RemoveRegistryEntry(dir, registered); err != nil {
 			log.WarningLog.Printf("throwaway sandbox %s could not be deregistered after teardown: %v", home, err)
 		}
@@ -376,13 +385,25 @@ func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (stri
 		return "", ""
 	}
 	sep := string(os.PathSeparator)
-	if refuse := sharedDirCollision(root, "sandbox root"); refuse != "" {
+	// The reaper's own TMUX_TMPDIR is shared evidence — EXCEPT when it is
+	// exactly the dir this marker recorded: a marked daemon inherits the
+	// sandbox's private dir, so its own env would otherwise refuse the
+	// sandbox it serves. The exemption is narrow — only the claimed dir
+	// itself, and only after it also passes the root/home proofs below —
+	// so an env dir the marker does not record stays shared.
+	exempt := ""
+	if env := os.Getenv("TMUX_TMPDIR"); env != "" {
+		if ec, err := canonicalDir(env); err == nil && ec == tmuxDir {
+			exempt = ec
+		}
+	}
+	if refuse := sharedDirCollision(root, "sandbox root", exempt); refuse != "" {
 		return "", refuse
 	}
 	if canonHome != root && !strings.HasPrefix(canonHome, root+sep) {
 		return "", fmt.Sprintf("marked home %s is not inside recorded sandbox root %s", canonHome, root)
 	}
-	if refuse := sharedDirCollision(tmuxDir, "recorded tmux dir"); refuse != "" {
+	if refuse := sharedDirCollision(tmuxDir, "recorded tmux dir", exempt); refuse != "" {
 		return "", refuse
 	}
 	if tmuxDir == root || !strings.HasPrefix(tmuxDir, root+sep) {
@@ -393,10 +414,15 @@ func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (stri
 
 // sharedDirCollision refuses when dir IS a shared directory or an ANCESTOR
 // of one: sockets under an ancestor's subtree include the shared dir itself,
-// so walking/killing through it is the same hazard as naming it.
-func sharedDirCollision(dir, what string) string {
+// so walking/killing through it is the same hazard as naming it. exempt
+// names the marker's own claimed tmux dir — the one shape that is sandbox-
+// owned by construction and must not collide with itself.
+func sharedDirCollision(dir, what, exempt string) string {
 	sep := string(os.PathSeparator)
 	for _, shared := range throwawaySharedDirs() {
+		if shared == exempt {
+			continue
+		}
 		if dir == shared || strings.HasPrefix(shared, dir+sep) {
 			return fmt.Sprintf("%s %s is or contains shared directory %s", what, dir, shared)
 		}
