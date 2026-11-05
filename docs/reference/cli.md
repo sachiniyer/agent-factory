@@ -948,6 +948,10 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
+  account_handoff            compact JSON object of automatic account-handoff settings (staged; not active yet — mode = "live" is rejected)
+  account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
+                             prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
+                             max_moves_window, refused_backoff, on_failure, report_to
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)
@@ -973,7 +977,7 @@ With --project <id-or-path> the value is written to a registered project's
 machine-local config instead of the global file, as a personal override that
 beats the checked-in in-repo value on this machine and is never committed. Only
 the preference keys the manifest admits per project are accepted there
-(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates); a global-only key
+(default_program, program_overrides, program_overrides.<agent>, default_accounts, default_accounts.<agent>, root_agent, root_agent.enabled, root_agent.program, branch_prefix, on_archive_command, limit_account_candidates, account_handoff, account_handoff.<leaf>); a global-only key
 is rejected with the location it actually belongs to. One caveat: a
 per-project branch_prefix is accepted and stored but ignored for now — the
 global prefix applies to every project until #4539 lands the real feature.

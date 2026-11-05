@@ -440,6 +440,14 @@ type Config struct {
 	// reset time WAS parsed (that schedules against the reset time + grace).
 	// Global-only, like limit_auto_resume. See LimitRetryIntervalDuration.
 	LimitRetryInterval string `json:"limit_retry_interval" toml:"limit_retry_interval"`
+	// AccountHandoff is the staged [account_handoff] table for the automatic
+	// account-handoff engine (#6776): mode, thresholds, and safety rails.
+	// NOTHING reads it yet — this slice is parser/schema only, and an absent
+	// table resolves to the compiled defaults (mode "off"), which is exactly
+	// today's behaviour. Global + personal-project only, TOML-only (the frozen
+	// config.json reader predates it), like the TOML-only [keys] table: a repo
+	// can never opt a clone's machine into spending different accounts.
+	AccountHandoff AccountHandoffConfig `json:"-" toml:"account_handoff,omitempty"`
 	// VSCodeServerBinary overrides the binary a VS Code tab (--kind vscode) is
 	// served by. Empty (the default) DETECTS one on PATH: code-server first, then
 	// openvscode-server. af never bundles or installs either — when neither is
@@ -791,5 +799,6 @@ func staticDefaultConfig() *Config {
 			TerminalFontSizePhone:   defaultWebTerminalFontSizePhone,
 			TerminalFontSizeDesktop: defaultWebTerminalFontSizeDesktop,
 		},
+		AccountHandoff: defaultAccountHandoffConfig(),
 	}
 }

@@ -204,6 +204,12 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
+	// Staged for the account-handoff engine (#6776): nothing reads the table
+	// yet, so a changed value is reported pending — the honest bucket until
+	// the engine slice lands and claims a live effect.
+	"account_handoff": func(a, b *config.Config) bool {
+		return !reflect.DeepEqual(a.AccountHandoff, b.AccountHandoff)
+	},
 	// The watcher supervisor snapshots this cap when the daemon constructs it
 	// (daemon.go) and is not rebuilt by ApplyConfig, so a change waits for the next
 	// daemon start (config/effect.go classifies it EffectNextDaemonStart).

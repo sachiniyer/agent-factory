@@ -104,6 +104,18 @@ func CurrentValue(cfg *Config, key string) (string, bool) {
 		}
 		return editorValue(reflect.ValueOf(value)), true
 	}
+	// account_handoff gets the same presence-aware render for a different
+	// reason: its compiled table is all-defaults, so an absent table would
+	// otherwise render the whole default block as though the user wrote it.
+	// The on-disk shape keeps {} honest and a sparse table sparse.
+	if key == "account_handoff" && cfg.source.shape != nil {
+		shape, _ := cfg.source.topLevel("account_handoff")
+		table, present := shape.(map[string]any)
+		if !present {
+			return "{}", true
+		}
+		return editorValue(accountHandoffSparseCurrentValue(field, table)), true
+	}
 	// The comma-list form is per-key opt-in (isCommaListKey), never inferred from
 	// the []string type: a future list whose elements can contain a comma keeps the
 	// unambiguous compact-JSON rendering rather than silently displaying one entry
