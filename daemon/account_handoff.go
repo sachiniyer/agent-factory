@@ -243,19 +243,18 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 			if err != nil {
 				return handoff.Snapshot{}, err
 			}
-			state, err := store.Load()
-			if err != nil {
-				return handoff.Snapshot{}, err
-			}
 			railsStore, err := handoff.DefaultRailsStore()
 			if err != nil {
 				return handoff.Snapshot{}, err
 			}
-			rails, err := railsStore.Load()
-			if err != nil {
-				return handoff.Snapshot{}, err
+			snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
+			if stateErr != nil {
+				return handoff.Snapshot{}, stateErr
 			}
-			return handoff.Snapshot{State: state, Rails: rails}, nil
+			if railsErr != nil {
+				return handoff.Snapshot{}, railsErr
+			}
+			return snap, nil
 		},
 		PruneRails: func(maxWindow time.Duration, now time.Time) error {
 			railsStore, err := handoff.DefaultRailsStore()

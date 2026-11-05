@@ -142,6 +142,69 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 	return out
 }
 
+// LoadSnapshot reads both durable record files into one Snapshot whose
+// carried-prefix exclusions are fail-closed under a concurrent carry
+// commit. A naive state-then-rails pair can interleave with that commit —
+// a state-file watermark write followed by a rails-file marker clear —
+// and pair the retired marker's absence with the watermark it superseded:
+// bytes the commit just disowned then count toward the target's wall.
+// Reading each file a second time and merging worst-case closes the
+// window: watermarks merge by per-path MAXIMUM and quarantine markers by
+// UNION, so an interleaved commit can only ever over-exclude claims —
+// never count bytes a completed carry disowned. Every other field takes
+// the later read; each lives in exactly one file, where the second load
+// is simply the fresher consistent cut.
+//
+// stateErr and railsErr report each file's decode independently: a caller
+// that surfaces per-file unreadability keeps both, while a fail-closed
+// caller (engine, usage proof) collapses them into one error. On a decode
+// failure the Snapshot still carries whichever reads succeeded, for
+// callers that degrade rather than fail.
+func LoadSnapshot(store *Store, railsStore *RailsStore) (snap Snapshot, stateErr, railsErr error) {
+	return loadSnapshot(store.Load, railsStore.Load)
+}
+
+// loadSnapshot is LoadSnapshot's body behind injectable reads — the tests
+// script a commit landing between the loads, which no on-disk fixture can
+// reproduce deterministically.
+func loadSnapshot(loadState func() (State, error), loadRails func() (Rails, error)) (Snapshot, error, error) {
+	r1, railsErr := loadRails()
+	s1, stateErr := loadState()
+	snap := Snapshot{State: s1, Rails: r1}
+	if stateErr != nil || railsErr != nil {
+		return snap, stateErr, railsErr
+	}
+	r2, err := loadRails()
+	if err != nil {
+		// A file that decoded a moment ago but not now is unreadable for
+		// the caller to surface; the earlier consistent read still fills
+		// the returned snapshot.
+		return snap, nil, err
+	}
+	s2, err := loadState()
+	if err != nil {
+		return snap, err, nil
+	}
+	snap = Snapshot{State: s2, Rails: r2}
+	for path, n := range s1.CarriedPrefixes {
+		if n > snap.State.CarriedPrefixes[path] {
+			if snap.State.CarriedPrefixes == nil {
+				snap.State.CarriedPrefixes = map[string]int64{}
+			}
+			snap.State.CarriedPrefixes[path] = n
+		}
+	}
+	for path, marked := range r1.UnrecordedCarries {
+		if _, ok := snap.Rails.UnrecordedCarries[path]; !ok {
+			if snap.Rails.UnrecordedCarries == nil {
+				snap.Rails.UnrecordedCarries = map[string]time.Time{}
+			}
+			snap.Rails.UnrecordedCarries[path] = marked
+		}
+	}
+	return snap, nil, nil
+}
+
 // RailsStore reads and mutates one auto-handoff-rails file. statePath is
 // the shared state file's location — the lift source for pre-split homes.
 type RailsStore struct {

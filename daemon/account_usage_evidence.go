@@ -114,30 +114,33 @@ func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
 	if err != nil {
 		return accountLimitProofInput{}, err
 	}
-	state, err := store.Load()
-	if err != nil {
-		// A missing state file is an empty map — an af home that never
-		// carried has no watermarks and every byte is eligible. A CORRUPT
-		// one fails the pass: an observed reading might sit inside a carried
-		// prefix, and the carried bytes are the other account's evidence.
-		return accountLimitProofInput{}, fmt.Errorf("carried-prefix watermarks: %w", err)
-	}
 	railsStore, err := handoff.DefaultRailsStore()
 	if err != nil {
 		return accountLimitProofInput{}, err
 	}
-	rails, err := railsStore.Load()
-	if err != nil {
+	// One consistent pair of reads: LoadSnapshot double-reads each file
+	// and merges worst-case so a carry committing mid-load can only
+	// over-exclude claims, never let a superseded watermark stand in for
+	// a retired quarantine (#6776 review).
+	snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
+	if stateErr != nil {
+		// A missing state file is an empty map — an af home that never
+		// carried has no watermarks and every byte is eligible. A CORRUPT
+		// one fails the pass: an observed reading might sit inside a carried
+		// prefix, and the carried bytes are the other account's evidence.
+		return accountLimitProofInput{}, fmt.Errorf("carried-prefix watermarks: %w", stateErr)
+	}
+	if railsErr != nil {
 		// Same closed posture for the rails file: its unrecorded-carries
 		// quarantine is the record that a carried rollout's claims cannot
 		// be trusted AT ALL — a corrupt file hides that record, so the
 		// pass cannot know which readings are poison (#6776 review).
-		return accountLimitProofInput{}, fmt.Errorf("handoff rails: %w", err)
+		return accountLimitProofInput{}, fmt.Errorf("handoff rails: %w", railsErr)
 	}
 	return accountLimitProofInput{
 		home:            home,
 		wallPercent:     wallPercent,
-		carriedPrefixes: handoff.Snapshot{State: state, Rails: rails}.EffectiveCarriedPrefixes(),
+		carriedPrefixes: snap.EffectiveCarriedPrefixes(),
 	}, nil
 }
 

@@ -44,14 +44,22 @@ func collectAccountEvidence(result *Result) {
 	}
 
 	var state handoff.State
-	var stateErr error
-	if store, err := handoff.DefaultStore(); err == nil {
-		state, stateErr = store.Load()
-	}
 	var rails handoff.Rails
-	var railsErr error
-	if store, err := handoff.DefaultRailsStore(); err == nil {
-		rails, railsErr = store.Load()
+	var stateErr, railsErr error
+	store, storeErr := handoff.DefaultStore()
+	railsStore, railsStoreErr := handoff.DefaultRailsStore()
+	switch {
+	case storeErr == nil && railsStoreErr == nil:
+		// One consistent pair of reads — a carry committing mid-collect
+		// can only over-exclude claims, never pair a retired quarantine
+		// with the watermark it superseded (#6776 review).
+		var snap handoff.Snapshot
+		snap, stateErr, railsErr = handoff.LoadSnapshot(store, railsStore)
+		state, rails = snap.State, snap.Rails
+	case storeErr == nil:
+		state, stateErr = store.Load()
+	case railsStoreErr == nil:
+		rails, railsErr = railsStore.Load()
 	}
 
 	// Only the durable records that mean "the mover acted" — a halt or held

@@ -154,8 +154,13 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	now := e.deps.Now()
 
 	// Resolve config once per repo root; keep only sessions opting into
-	// shadow. A resolution error skips that root's sessions — fail closed.
+	// shadow. A resolution error skips that root's sessions — fail closed —
+	// and leaves its move window UNKNOWN: the shared-ledger prune below is
+	// destructive, so it must wait for a tick where every tracked root
+	// resolved rather than cut records an unseen wider window still
+	// counts (#6776 review).
 	resolved := map[string]*config.ResolvedConfig{}
+	resolutionFailed := false
 	var gov []governed
 	for _, in := range sessions {
 		if in.Persisted {
@@ -167,6 +172,7 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 			cfg, err = e.deps.ResolveConfig(in.RepoRoot)
 			if err != nil {
 				resolved[in.RepoRoot] = nil
+				resolutionFailed = true
 				e.warnf("resolve config for %s: %v (session %q skipped)", in.RepoRoot, err, in.Key)
 				continue
 			}
@@ -203,8 +209,11 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	// Retention: prune the rails file once per tick, with the WIDEST window
 	// any governed session resolved — a project that narrows the window
 	// must not erase records a wider one still counts. Unbounded wins:
-	// window <= 0 means records never age out anywhere.
-	if e.deps.PruneRails != nil {
+	// window <= 0 means records never age out anywhere. A root whose config
+	// failed to resolve has an unknown window: pruning at the resolved
+	// roots' bound could erase moves it still counts, so the pass waits
+	// for a fully resolved tick (#6776 review).
+	if e.deps.PruneRails != nil && !resolutionFailed {
 		maxWindow := time.Duration(0)
 		unbounded := false
 		for _, g := range gov {

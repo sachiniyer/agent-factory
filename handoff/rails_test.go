@@ -479,3 +479,114 @@ func TestRailsMutatePreservesUnknownFields(t *testing.T) {
 		t.Fatalf("rails mutate dropped an unknown field: %s", written)
 	}
 }
+
+// A carry commit landing between the two naive file reads pairs a retired
+// quarantine marker with the watermark it superseded: bytes the commit
+// just disowned would count toward the target's wall. LoadSnapshot reads
+// each file twice and merges worst-case — watermarks by per-path maximum,
+// markers by union — so an interleaved commit can only ever over-exclude
+// claims (Codex P2 on #6852).
+func TestLoadSnapshotMergesAcrossAnInterleavedCommit(t *testing.T) {
+	marked := time.Date(2026, 11, 5, 18, 0, 0, 0, time.UTC)
+	// The scripted interleave: r1 sees the marker, s1 the old watermark,
+	// then the commit lands — s2 sees the new watermark, r2 the cleared
+	// marker. (loadSnapshot reads rails, state, rails, state.)
+	states := []State{
+		{CarriedPrefixes: map[string]int64{"/r.jsonl": 10}},
+		{CarriedPrefixes: map[string]int64{"/r.jsonl": 42}},
+	}
+	railReads := []Rails{
+		{UnrecordedCarries: map[string]time.Time{"/r.jsonl": marked}},
+		{},
+	}
+	si, ri := 0, 0
+	snap, stateErr, railsErr := loadSnapshot(
+		func() (State, error) { s := states[si]; si++; return s, nil },
+		func() (Rails, error) { r := railReads[ri]; ri++; return r, nil })
+	if stateErr != nil || railsErr != nil {
+		t.Fatalf("errs: %v %v", stateErr, railsErr)
+	}
+	if got := snap.EffectiveCarriedPrefixes()["/r.jsonl"]; got != math.MaxInt64 {
+		t.Fatalf("effective prefix = %d, want MaxInt64 — a marker retired mid-read must still quarantine", got)
+	}
+
+	// The same watermark tear WITHOUT a marker in either read: the larger
+	// boundary applies — the consistent post-commit cut, not the stale one.
+	si, ri = 0, 0
+	railReads[0] = Rails{}
+	snap, stateErr, railsErr = loadSnapshot(
+		func() (State, error) { s := states[si]; si++; return s, nil },
+		func() (Rails, error) { r := railReads[ri]; ri++; return r, nil })
+	if stateErr != nil || railsErr != nil {
+		t.Fatalf("errs: %v %v", stateErr, railsErr)
+	}
+	if got := snap.EffectiveCarriedPrefixes()["/r.jsonl"]; got != 42 {
+		t.Fatalf("effective prefix = %d, want 42 — the torn smaller watermark must not stand", got)
+	}
+
+	// Marker present in BOTH reads keeps quarantining even while the
+	// watermark advanced underneath it.
+	si, ri = 0, 0
+	railReads[0] = Rails{UnrecordedCarries: map[string]time.Time{"/r.jsonl": marked}}
+	railReads[1] = railReads[0]
+	snap, _, _ = loadSnapshot(
+		func() (State, error) { s := states[si]; si++; return s, nil },
+		func() (Rails, error) { r := railReads[ri]; ri++; return r, nil })
+	if got := snap.EffectiveCarriedPrefixes()["/r.jsonl"]; got != math.MaxInt64 {
+		t.Fatalf("effective prefix = %d, want MaxInt64 — live marker wins", got)
+	}
+}
+
+// Per-file decode errors surface independently — a caller degrading on one
+// file keeps the other's successful read — and a read that fails on the
+// second pass is reported too.
+func TestLoadSnapshotReportsEachFileErrorIndependently(t *testing.T) {
+	stateFail := fmt.Errorf("state corrupt")
+	snap, stateErr, railsErr := loadSnapshot(
+		func() (State, error) { return State{}, stateFail },
+		func() (Rails, error) {
+			return Rails{ReportsHeld: &ReportsHeld{Since: time.Now()}}, nil
+		})
+	if stateErr == nil || railsErr != nil {
+		t.Fatalf("errs = %v / %v, want state only", stateErr, railsErr)
+	}
+	if snap.Rails.ReportsHeld == nil {
+		t.Fatal("the healthy rails read was dropped with the state error")
+	}
+
+	// A second-pass failure after clean first reads is still an error —
+	// the file went unreadable mid-load.
+	calls := 0
+	_, stateErr, railsErr = loadSnapshot(
+		func() (State, error) { return State{}, nil },
+		func() (Rails, error) {
+			calls++
+			if calls == 2 {
+				return Rails{}, fmt.Errorf("vanished")
+			}
+			return Rails{}, nil
+		})
+	if stateErr != nil || railsErr == nil {
+		t.Fatalf("errs = %v / %v, want second-pass rails error", stateErr, railsErr)
+	}
+}
+
+// On real files with no writer, the merged snapshot equals either single
+// load — the double read is invisible when nothing interleaves.
+func TestLoadSnapshotConsistentWhenNothingInterleaves(t *testing.T) {
+	rails, store := railsFixture(t)
+	if err := store.RecordCarriedPrefix("/r.jsonl", 42); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
+	}
+	if _, err := rails.NoteUnrecordedCarry("/q.jsonl", time.Now()); err != nil {
+		t.Fatalf("NoteUnrecordedCarry: %v", err)
+	}
+	snap, stateErr, railsErr := LoadSnapshot(store, rails)
+	if stateErr != nil || railsErr != nil {
+		t.Fatalf("errs: %v %v", stateErr, railsErr)
+	}
+	eff := snap.EffectiveCarriedPrefixes()
+	if eff["/r.jsonl"] != 42 || eff["/q.jsonl"] != math.MaxInt64 {
+		t.Fatalf("effective prefixes = %v", eff)
+	}
+}

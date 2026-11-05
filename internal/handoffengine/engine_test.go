@@ -31,6 +31,7 @@ type depCounts struct {
 	mode                                                     string
 	reportTo                                                 string
 	reportToByRoot                                           map[string]string
+	resolveErrRoots                                          map[string]bool
 	stateErr                                                 error
 	haltState                                                handoff.State
 	railsState                                               handoff.Rails
@@ -50,6 +51,9 @@ func (d *depCounts) deps() Deps {
 		Now: func() time.Time { return testNow },
 		ResolveConfig: func(root string) (*config.ResolvedConfig, error) {
 			d.resolve++
+			if d.resolveErrRoots[root] {
+				return nil, fmt.Errorf("resolve %s: boom", root)
+			}
 			cfg := &config.ResolvedConfig{ProjectRoot: root}
 			order := d.targetOrder
 			if order == "" {
@@ -686,6 +690,33 @@ func TestTickPrunesRailsOnceWithResolvedWindow(t *testing.T) {
 	// no store to prune.
 	if _, err := New(d.deps()).Tick([]SessionInput{shadowSession()}); err != nil {
 		t.Fatalf("nil-PruneRails tick: %v", err)
+	}
+}
+
+// A root whose config will not resolve leaves its move window UNKNOWN:
+// pruning the shared ledger at the resolved roots' widest bound could
+// erase moves the unresolved root still counts, so the destructive pass
+// waits for a fully resolved tick (Codex P2 on #6852).
+func TestTickSkipsPruneWhileARootIsUnresolved(t *testing.T) {
+	var pruned []time.Duration
+	d := &depCounts{mode: "shadow", resolveErrRoots: map[string]bool{"/repo-bad": true}}
+	deps := d.deps()
+	deps.PruneRails = func(maxWindow time.Duration, now time.Time) error {
+		pruned = append(pruned, maxWindow)
+		return nil
+	}
+	e := New(deps)
+	bad := shadowSession()
+	bad.Key, bad.RepoRoot = "sess-bad", "/repo-bad"
+	n, err := e.Tick([]SessionInput{shadowSession(), bad})
+	if err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("governed = %d, want 1 — the unresolved root's session is skipped", n)
+	}
+	if len(pruned) != 0 {
+		t.Fatalf("pruned %v with a root unresolved — retention must wait for a resolved tick", pruned)
 	}
 }
 
