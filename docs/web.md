@@ -245,7 +245,7 @@ see [VS Code tabs](#vs-code-tabs) for the required host editor. The **×** on a
 deletable tab opens a confirmation naming the tab and session; the Agent tab
 cannot be deleted independently. Confirm with **Delete tab** or choose Cancel.
 Hiding a pane leaves the tab available; deletion requests runtime cleanup. Double-click
-a process, web, or VS Code tab's label to rename it. Drag a tab onto a pane edge
+a process, web, VS Code, or docs tab's label to rename it. Drag a tab onto a pane edge
 to split that pane, or onto its center to replace the displayed tab.
 
 There is no nine-tab limit: the strip scrolls as it fills. In navigation mode,

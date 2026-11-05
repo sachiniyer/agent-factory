@@ -14,7 +14,8 @@ form), prepares a workspace, and starts the agent inside it.
 
 A session is the unit everything else is scoped to. It has a status you can scan
 without attaching, a **tab strip** — its agent tab plus any shell, process, web,
-or VS Code tabs you add in the same workspace — and an explicit lifecycle:
+VS Code, or docs (proposal) tabs you add in the same workspace — and an explicit
+lifecycle:
 
 - **Archive** is the default way to finish. The processes stop, the workspace
   moves aside, and the record and branch stay restorable.

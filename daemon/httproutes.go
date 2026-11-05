@@ -399,7 +399,7 @@ var httpRoutes = []HTTPRoute{
 		Method:         http.MethodPost,
 		sandboxAllowed: true,
 		Path:           "/v1/RenameTab",
-		Description:    "Rename a tab of a session. Only web, process and VS Code tabs can be renamed — agent and shell tabs render fixed labels. The name is sanitized and made unique, so the resolved name is returned. Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back.",
+		Description:    "Rename a tab of a session. Only web, process, VS Code and docs tabs can be renamed — agent and shell tabs render fixed labels. The name is sanitized and made unique, so the resolved name is returned. Address the tab by tab_id (its stable id) when you have one: it wins over tab_name/tab_index, which name a tab that may since have been closed and had its name or slot reused. A tab_id that no longer resolves is refused rather than falling back.",
 		requestType:    reflect.TypeOf(RenameTabRequest{}),
 		handler:        func(cs *controlServer) http.HandlerFunc { return rpcHandlerCtx(cs.renameTabScoped) },
 	},

@@ -240,7 +240,7 @@ func (m *Manager) RenameTab(req RenameTabRequest) (string, error) {
 		return "", fmt.Errorf("the agent tab of session %q can't be renamed: it always displays as %q", title, "Agent")
 	}
 	if !session.TabKindRenameable(tabs[idx].Kind) {
-		return "", fmt.Errorf("tab %q of session %q can't be renamed: shell tabs always display as %q. Only web, process and VS Code tabs show a custom name — create one with 'af sessions tab-create --kind web' or '--command'", prevName, title, "Terminal")
+		return "", fmt.Errorf("tab %q of session %q can't be renamed: shell tabs always display as %q. Only web, process, VS Code and docs tabs show a custom name — create one with 'af sessions tab-create --kind web' or '--command'", prevName, title, "Terminal")
 	}
 	targetID, err := stableTabTargetID(tabs[idx], title)
 	if err != nil {

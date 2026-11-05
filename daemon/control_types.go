@@ -507,8 +507,9 @@ type CloseTabResponse struct {
 // actually applied. A NewName that sanitizes to nothing is an error, not a
 // silent fall back to a default.
 //
-// Only tabs that display their name can be renamed — web, process and VS Code
-// tabs (session.TabKindRenameable). The agent and shell tabs render fixed labels
+// Only tabs that display their name can be renamed — web, process, VS Code
+// and docs tabs (session.TabKindRenameable). The agent and shell tabs render
+// fixed labels
 // ("Agent"/"Terminal") on every
 // surface, so renaming them would be a no-op and is refused. Remote sessions'
 // tabs are fixed by their hook config, and an archived session's tabs are inert
