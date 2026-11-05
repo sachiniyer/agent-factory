@@ -23,6 +23,7 @@ package rateindex
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -149,14 +150,17 @@ type Indexer struct {
 
 // fileMemo is the cached outcome of scanning one file's eligible region at one
 // (size, mtime, watermark, window cap): the newest claim found, or that none
-// was found, or that the window closed before one was.
+// was found, or that the window closed before one was. The window key is the
+// EFFECTIVE cap applied — the smaller of the per-file bound and the remaining
+// total budget — so a truncated-by-budget result is never replayed as a fuller
+// scan.
 type fileMemo struct {
-	size       int64
-	modTime    time.Time
-	watermark  int64
-	perFileCap int64
-	claim      fileClaim
-	bounded    bool
+	size      int64
+	modTime   time.Time
+	watermark int64
+	window    int64
+	claim     fileClaim
+	bounded   bool
 }
 
 // fileClaim is one file's newest rate_limits claim. sortAt is the record's own
@@ -184,15 +188,15 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 	opts = opts.withDefaults()
 	deadline := ix.now().Add(opts.Deadline)
 
-	files, boundedEnum, err := candidates(home, opts.MaxFiles, deadline, ix.now)
+	enum, err := candidates(home, opts.MaxFiles, deadline, ix.now)
 	if err != nil {
 		return AccountReading{Status: StatusUnknown, Reason: "store-unreadable"}
 	}
-	result := AccountReading{Files: len(files)}
-	indeterminate := boundedEnum
+	result := AccountReading{Files: len(enum.files)}
+	indeterminate := enum.bounded
 
 	var best *fileClaim
-	for _, c := range files {
+	for _, c := range enum.files {
 		if best != nil && c.modTime.Before(best.sortAt) {
 			// Sorted mtime-desc: no remaining file can hold a newer claim
 			// (a file's newest record cannot postdate its own mtime).
@@ -205,7 +209,14 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 			}
 			break
 		}
-		claim, bounded, bytesRead, readErr := ix.fileClaim(c, opts)
+		// Clamp the file's window to the remaining total budget so the cap
+		// holds exactly; a window that cannot cover the eligible region is a
+		// bounded read, not a complete one.
+		window := opts.MaxPerFileBytes
+		if remaining := opts.MaxTotalBytes - result.BytesRead; remaining < window {
+			window = remaining
+		}
+		claim, bounded, bytesRead, readErr := ix.fileClaim(c, opts, window)
 		result.BytesRead += bytesRead
 		if readErr != nil {
 			bounded = true // an unreadable file could hold the newest claim
@@ -219,6 +230,14 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 		if best == nil || claim.sortAt.After(best.sortAt) {
 			best = &claim
 		}
+	}
+	// Content skipped during enumeration — candidates the MaxFiles cap
+	// dropped and directories the certified stop passed over — can still hold
+	// the newest claim whenever its ceiling exceeds the best found. Skips
+	// whose ceiling cannot beat the best claim are proven irrelevant and stay
+	// out of the verdict.
+	if enum.hasMissed && (best == nil || enum.missedCeiling.After(best.sortAt)) {
+		indeterminate = true
 	}
 	switch {
 	case best == nil && indeterminate:
@@ -245,12 +264,28 @@ type candidate struct {
 
 // candidateWalk carries one enumeration's mutable state.
 type candidateWalk struct {
-	top      []candidate
-	maxFiles int
-	deadline time.Time
-	now      func() time.Time
-	seen     int
-	stopped  bool // horizon-certified remainder: unexamined dirs cannot compete
+	top           []candidate
+	maxFiles      int
+	deadline      time.Time
+	now           func() time.Time
+	seen          int
+	stopped       bool      // horizon-certified remainder: unexamined dirs cannot compete
+	hasMissed     bool      // unexamined content exists (cap drops or certified dir skips)
+	missedCeiling time.Time // newest record timestamp any skipped file could still hold
+}
+
+// enumeration is candidates' result: the candidate slate plus what the scan
+// must know about content the walk left unexamined.
+type enumeration struct {
+	files   []candidate
+	bounded bool // the deadline truncated the walk in uncertified territory
+	// hasMissed/missedCeiling bound the claim timestamps content skipped by
+	// the MaxFiles cap or the certified early stop could still hold: a cap
+	// drop contributes its mtime (its records cannot postdate it), a skipped
+	// day directory its dayEnd+horizon ceiling. A skip is only proven
+	// irrelevant once a found claim postdates the ceiling.
+	hasMissed     bool
+	missedCeiling time.Time
 }
 
 // candidates enumerates rollout files under <home>/sessions NEWEST-FIRST and
@@ -268,17 +303,32 @@ type candidateWalk struct {
 // there is no held evidence to beat. An expired deadline in uncertified
 // territory reports the partial list as bounded rather than pretending
 // completeness.
-func candidates(home string, maxFiles int, deadline time.Time, now func() time.Time) ([]candidate, bool, error) {
+func candidates(home string, maxFiles int, deadline time.Time, now func() time.Time) (enumeration, error) {
 	walk := &candidateWalk{maxFiles: maxFiles, deadline: deadline, now: now}
 	err := walk.dir(filepath.Join(home, "sessions"), 0, "", "")
 	if err != nil && !errors.Is(err, errDeadline) {
 		if os.IsNotExist(err) {
-			return nil, false, nil
+			return enumeration{}, nil
 		}
-		return nil, false, err
+		return enumeration{}, err
 	}
 	sort.Slice(walk.top, func(i, j int) bool { return walk.top[i].modTime.After(walk.top[j].modTime) })
-	return walk.top, errors.Is(err, errDeadline), nil
+	return enumeration{
+		files:         walk.top,
+		bounded:       errors.Is(err, errDeadline),
+		hasMissed:     walk.hasMissed,
+		missedCeiling: walk.missedCeiling,
+	}, nil
+}
+
+// noteMissed records that a file or directory was left unexamined, tracking
+// the newest record timestamp it could still hold (the ceiling the final
+// verdict compares the best found claim against).
+func (w *candidateWalk) noteMissed(ceiling time.Time) {
+	if !w.hasMissed || ceiling.After(w.missedCeiling) {
+		w.missedCeiling = ceiling
+	}
+	w.hasMissed = true
 }
 
 // dir processes one directory level: files are statted into the top-k slate,
@@ -302,11 +352,16 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 	// approximately newest-first inside a day directory too.
 	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
 	for _, entry := range entries {
-		if entry.IsDir() || !codexRolloutFileRE.MatchString(entry.Name()) {
-			continue
-		}
+		// Every visited entry advances the cadence counter BEFORE the
+		// eligibility filter: a directory full of compressed rollouts or a
+		// tree of empty day directories must trip the deadline just like one
+		// full of candidates — a walk that outlives its budget without
+		// finding claims is not "no evidence".
 		if w.seen++; w.seen%256 == 0 && w.now().After(w.deadline) {
 			return errDeadline
+		}
+		if entry.IsDir() || !codexRolloutFileRE.MatchString(entry.Name()) {
+			continue
 		}
 		info, err := entry.Info()
 		if err != nil {
@@ -315,22 +370,37 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 			}
 			return err
 		}
-		w.top = insertCandidate(w.top, candidate{
+		var dropped *candidate
+		w.top, dropped = insertCandidate(w.top, candidate{
 			path:    filepath.Join(path, entry.Name()),
 			size:    info.Size(),
 			modTime: info.ModTime(),
 		}, w.maxFiles)
+		if dropped != nil {
+			// Its records cannot postdate its mtime — that is the ceiling the
+			// verdict compares the best found claim against.
+			w.noteMissed(dropped.modTime)
+		}
 	}
 	for _, entry := range entries {
+		if w.stopped {
+			// A descendant certified the remainder: unwind without further
+			// deadline checks so a completed walk is never mislabeled
+			// truncated.
+			return nil
+		}
 		if !entry.IsDir() {
 			continue
 		}
 		// The certified-remainder check runs before the deadline check on
 		// purpose: a remainder the horizon bound certifies cannot compete,
 		// deadline or not — stopping there is completeness, not truncation.
-		if depth == 2 && w.pastHorizon(year, month, entry.Name()) {
-			w.stopped = true
-			return nil
+		if depth == 2 {
+			if cutoff, certified := w.pastHorizon(year, month, entry.Name()); certified {
+				w.noteMissed(cutoff)
+				w.stopped = true
+				return nil
+			}
 		}
 		if w.now().After(w.deadline) {
 			return errDeadline
@@ -352,12 +422,13 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 // pastHorizon reports whether the day directory named day under year/month is
 // old enough — relative to the weakest candidate already held — that no file
 // in it, or in any still-older directory (the walk descends), can displace a
-// held candidate. Certification requires a full candidate slate and a
-// parseable YYYY/MM/DD date; anything else keeps walking — an unfilled slate
-// can still be displaced by an old directory's newer claim.
-func (w *candidateWalk) pastHorizon(year, month, day string) bool {
+// held candidate, along with the ceiling a skipped file's records could still
+// reach. Certification requires a full candidate slate and a parseable
+// YYYY/MM/DD date; anything else keeps walking — an unfilled slate can still
+// be displaced by an old directory's newer claim.
+func (w *candidateWalk) pastHorizon(year, month, day string) (time.Time, bool) {
 	if len(w.top) < w.maxFiles {
-		return false
+		return time.Time{}, false
 	}
 	yy, errY := strconv.Atoi(year)
 	mm, errM := strconv.Atoi(month)
@@ -365,50 +436,57 @@ func (w *candidateWalk) pastHorizon(year, month, day string) bool {
 	if errY != nil || errM != nil || errD != nil ||
 		len(year) != 4 || len(month) != 2 || len(day) != 2 ||
 		mm < 1 || mm > 12 || dd < 1 || dd > 31 {
-		return false
+		return time.Time{}, false
 	}
 	// The latest possible mtime of a file under this day is the end of its day
 	// plus the append horizon. If even that precedes the weakest held mtime,
 	// nothing here can compete — and every still-older directory fails harder.
 	cutoff := time.Date(yy, time.Month(mm), dd, 0, 0, 0, 0, time.UTC).
 		AddDate(0, 0, 1).Add(stillAppendingHorizon)
-	return cutoff.Before(w.top[w.maxFiles-1].modTime)
+	return cutoff, cutoff.Before(w.top[w.maxFiles-1].modTime)
 }
 
-// insertCandidate maintains top as a mtime-desc list of at most maxFiles.
-func insertCandidate(top []candidate, c candidate, maxFiles int) []candidate {
+// insertCandidate maintains top as a mtime-desc list of at most maxFiles,
+// reporting the entry the insertion displaced — the rejected candidate or the
+// evicted weakest — which joins the unexamined-content ceiling: a file that
+// lost the mtime race can still hold the newest record timestamp.
+func insertCandidate(top []candidate, c candidate, maxFiles int) ([]candidate, *candidate) {
 	if len(top) == maxFiles && !c.modTime.After(top[len(top)-1].modTime) {
-		return top
+		return top, &c
 	}
 	pos := sort.Search(len(top), func(i int) bool { return c.modTime.After(top[i].modTime) })
 	top = append(top, candidate{})
 	copy(top[pos+1:], top[pos:])
 	top[pos] = c
+	var dropped *candidate
 	if len(top) > maxFiles {
+		evicted := top[maxFiles]
+		dropped = &evicted
 		top = top[:maxFiles]
 	}
-	return top
+	return top, dropped
 }
 
 // fileClaim returns one file's newest claim inside its eligible region —
 // memoized on (path, size, mtime, watermark, window cap): a file that has not
 // grown and whose watermark and cap are unchanged cannot hold a different
-// claim.
-func (ix *Indexer) fileClaim(c candidate, opts Options) (fileClaim, bool, int64, error) {
+// claim. window is the effective cap applied this refresh — the remaining
+// total budget can tighten it below Options.MaxPerFileBytes.
+func (ix *Indexer) fileClaim(c candidate, opts Options, window int64) (fileClaim, bool, int64, error) {
 	watermark := opts.CarriedPrefixes[c.path]
 	ix.mu.Lock()
 	prev, seen := ix.memo[c.path]
 	ix.mu.Unlock()
 	if seen && prev.size == c.size && prev.modTime.Equal(c.modTime) &&
-		prev.watermark == watermark && prev.perFileCap == opts.MaxPerFileBytes {
+		prev.watermark == watermark && prev.window == window {
 		return prev.claim, prev.bounded, 0, nil
 	}
-	claim, bounded, bytesRead, err := scanTail(c.path, c.size, watermark, opts.MaxPerFileBytes)
+	claim, bounded, bytesRead, err := scanTail(c.path, c.size, watermark, window)
 	if err == nil {
 		ix.mu.Lock()
 		ix.memo[c.path] = fileMemo{
 			size: c.size, modTime: c.modTime, watermark: watermark,
-			perFileCap: opts.MaxPerFileBytes, claim: claim, bounded: bounded,
+			window: window, claim: claim, bounded: bounded,
 		}
 		ix.mu.Unlock()
 	}
@@ -416,18 +494,19 @@ func (ix *Indexer) fileClaim(c candidate, opts Options) (fileClaim, bool, int64,
 }
 
 // scanTail reads the eligible tail of one rollout — [watermark, size), capped
-// at perFileCap — and reports its newest rate_limits claim. bounded reports
-// that the eligible region could not be scanned whole, so an unscanned claim
-// may exist in it.
+// at window — and reports its newest rate_limits claim. bounded reports that
+// the eligible region could not be scanned whole: the unscanned prefix may
+// still hold a newer record timestamp even when the tail yielded a claim,
+// because record order is not timestamp order.
 //
 // Only lines whose START offset lies at or past the watermark count: the
 // watermark is a record boundary by contract, and anything below it is the
 // source account's copied bytes.
-func scanTail(path string, size, watermark, perFileCap int64) (fileClaim, bool, int64, error) {
+func scanTail(path string, size, watermark, window int64) (fileClaim, bool, int64, error) {
 	if size <= watermark {
 		return fileClaim{verdict: quota.RateLimitsAbsent}, false, 0, nil
 	}
-	lo := size - perFileCap
+	lo := size - window
 	if lo < watermark {
 		lo = watermark
 	}
@@ -479,9 +558,14 @@ func scanTail(path string, size, watermark, perFileCap int64) (fileClaim, bool, 
 		case quota.RateLimitsParsed:
 			sortAt = reading.RecordedAt
 		case quota.RateLimitsMalformed:
-			// The record's timestamp cannot be trusted — order the claim by
-			// the file's mtime, an upper bound on when it was written.
-			sortAt = mtime
+			// A malformed snapshot can still carry a valid record timestamp —
+			// order by it so an old malformed claim cannot shadow the newer
+			// valid claims its file keeps accruing. The file's mtime is the
+			// fallback only when the timestamp itself is invalid.
+			var ok bool
+			if sortAt, ok = recordTimestamp(line); !ok {
+				sortAt = mtime
+			}
 		default:
 			continue
 		}
@@ -490,7 +574,29 @@ func scanTail(path string, size, watermark, perFileCap int64) (fileClaim, bool, 
 			found = true
 		}
 	}
-	// No claim in the window: if the window reached the region's bottom the
-	// answer is "none"; if the per-file cap closed first it is "bounded".
-	return claim, !found && lo > watermark && lo > 0, int64(read), nil
+	// If the window did not reach the eligible region's bottom, the unscanned
+	// prefix could still hold a newer record timestamp — bounded whether or
+	// not the tail yielded a claim.
+	return claim, lo > watermark, int64(read), nil
+}
+
+// recordTimestamp extracts a rollout line's envelope timestamp for ordering a
+// malformed claim — the snapshot shape may be wrong while the record's own
+// timestamp is still a usable ordering key.
+func recordTimestamp(line []byte) (time.Time, bool) {
+	var envelope struct {
+		Timestamp json.RawMessage `json:"timestamp"`
+	}
+	if err := json.Unmarshal(line, &envelope); err != nil {
+		return time.Time{}, false
+	}
+	var text string
+	if err := json.Unmarshal(envelope.Timestamp, &text); err != nil {
+		return time.Time{}, false
+	}
+	parsed, err := time.Parse(time.RFC3339Nano, text)
+	if err != nil {
+		return time.Time{}, false
+	}
+	return parsed, true
 }
