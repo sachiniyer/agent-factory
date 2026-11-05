@@ -658,11 +658,22 @@ mode = "shadow"
 
 ### Inspecting and resetting the rails
 
-The engine keeps its durable record — the mover halt, refusal backoffs, and
-the recent-move ledger the switch-loop rail (`max_moves` inside
-`max_moves_window`) and the anti-pile-on move credits count — in
-`~/.agent-factory/instances/auto-handoff-state.json`, keyed by stable session
-identity, never by title. Two operator verbs read and repair it:
+The engine keeps its durable record across two files under
+`~/.agent-factory/instances/`, both keyed by stable session identity, never
+by title:
+
+- `auto-handoff-state.json` — the file older af versions already read and
+  write: carried-prefix watermarks and the mover halt.
+- `auto-handoff-rails.json` — the records the mover keeps for itself:
+  refusal backoffs, the recent-move ledger the switch-loop rail
+  (`max_moves` inside `max_moves_window`) and the anti-pile-on move credits
+  count, held-report markers, and the unrecorded-carry quarantine. Keeping
+  these out of the shared file means a downgrade's carry rewrite cannot
+  erase them.
+
+Both files preserve fields a later version adds, refuse symlinked paths,
+and fail closed on corruption: a corrupt file is an error on every surface,
+never an empty report. Two operator verbs read and repair the records:
 
 ```
 af accounts handoff status
@@ -670,10 +681,12 @@ af accounts handoff reset <halt|backoff|moves> [--session <key>]
 ```
 
 - **status** prints the resolved `account_handoff.mode` (the absent table is
-  `off`, exactly the pre-feature behavior), whether the daemon's engine is
+  `off`, exactly the pre-feature behavior; a personal-project opt-in reports
+  the mode the engine actually resolved), whether the daemon's engine is
   observing, the recorded halt with its reason and timestamp, live refusal
-  backoffs, and the recent-move entries alongside the `max_moves`/`window`
-  they are counted against. A corrupt state file is an error, not an empty
+  backoffs — expired ones stay in the file for the next prune but never
+  print — and the recent-move entries alongside the `max_moves`/`window`
+  they are counted against. Either file corrupt is an error, not an empty
   report — the rails fail closed.
 - **reset clears only the record you name.** `halt` clears the mover halt;
   `backoff` and `moves` clear refusal backoffs and recent-move entries,

@@ -668,10 +668,47 @@ func TestConversationCarryWatermarksOnlyTheSourcePrefix(t *testing.T) {
 		"the verified prefix is the source's; the destination's tail is its own")
 }
 
-// The watermark is part of the commit: when it cannot be recorded, a rollout
-// the copy installed must not stay behind — its bytes are unverifiable
-// source claims the reconcile would read as the target's own.
-func TestConversationCarryUnwindsTheRolloutWhenTheWatermarkCannotBeRecorded(t *testing.T) {
+// A corrupt watermark file must never cost the conversation (#6776 review):
+// the copy already landed, so the carry COMMITS and the rollout goes into
+// the rails file's unrecorded-carry quarantine — every claim in it distrusted
+// until a real watermark lands — instead of a fresh start losing the user's
+// context.
+func TestConversationCarryQuarantinesTheRolloutWhenTheWatermarkCannotBeRecorded(t *testing.T) {
+	afHome := t.TempDir()
+	srcHome := t.TempDir()
+	// A corrupt state file fails every watermark write AND every state read
+	// — but the rails file still takes the quarantine marker.
+	require.NoError(t, os.MkdirAll(filepath.Join(afHome, "instances"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances", "auto-handoff-state.json"),
+		[]byte("{not json"), 0o600))
+	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
+	require.NoError(t, os.MkdirAll(dstDir, 0o700))
+	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
+	require.NoError(t, err)
+	rel := "sessions/2026/11/10/rollout-x.jsonl"
+	writeCarryFile(t, srcHome, rel, "claim\n")
+
+	carry := &conversationCarry{
+		agent: tmux.ProgramCodex, id: "x",
+		srcHome: srcHome, dstHome: dstDir,
+		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
+		transcript: rel,
+	}
+	require.NoError(t, carry.copy(),
+		"the copy succeeded — a record-keeping failure must not strand the user's context")
+	require.FileExists(t, filepath.Join(dstDir, rel),
+		"the carried rollout stays behind — it IS the conversation")
+
+	quarantined, err := handoff.NewRailsStore(filepath.Join(afHome, "instances", handoff.RailsFileName), filepath.Join(afHome, "instances", handoff.StateFileName)).Load()
+	require.NoError(t, err)
+	require.Contains(t, quarantined.UnrecordedCarries, filepath.Join(dstDir, rel),
+		"the unrecorded rollout is quarantined end-to-end — no claim in it can free a wall")
+}
+
+// Even when NO record can land — the instances directory itself is gone —
+// the carry still commits: the copy is the user's context, and the louder
+// warning tells the operator the rollout's claims are unquarantined.
+func TestConversationCarryCarriesOnWhenNoRecordCanBeWritten(t *testing.T) {
 	afHome := t.TempDir()
 	srcHome := t.TempDir()
 	// instances exists as a FILE, so no state write can land beneath it.
@@ -689,21 +726,20 @@ func TestConversationCarryUnwindsTheRolloutWhenTheWatermarkCannotBeRecorded(t *t
 		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
 		transcript: rel,
 	}
-	require.Error(t, carry.copy(), "a carry that cannot record its watermark is not a commit")
-	require.NoFileExists(t, filepath.Join(dstDir, rel),
-		"the unrecorded rollout is unwound rather than left to mint a false retraction")
+	require.NoError(t, carry.copy(), "record-keeping must never strand the conversation")
+	require.FileExists(t, filepath.Join(dstDir, rel))
 }
 
-// A failed carry leaves the destination exactly as it was: when the copy
-// replaced a shorter matching transcript and the watermark then could not
-// be recorded, the displaced original comes back byte-for-byte — deleting
-// the install would take the account's own transcript with it (#6802 Codex
-// review, data loss).
-func TestConversationCarryRestoresADisplacedDestinationWhenTheWatermarkCannotBeRecorded(t *testing.T) {
+// When the watermark write fails and a shorter matching destination was
+// displaced, the carried copy still wins: the carry committed, so the kept
+// transcript is the source's full content, and the quarantine covers every
+// byte in it.
+func TestConversationCarryKeepsTheNewCopyWhenTheWatermarkCannotBeRecorded(t *testing.T) {
 	afHome := t.TempDir()
 	srcHome := t.TempDir()
-	// instances exists as a FILE, so no state write can land beneath it.
-	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances"), []byte("x"), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Join(afHome, "instances"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(afHome, "instances", "auto-handoff-state.json"),
+		[]byte("{not json"), 0o600))
 	dstDir := filepath.Join(afHome, "accounts", "codex", "work")
 	require.NoError(t, os.MkdirAll(dstDir, 0o700))
 	dstRoot, err := accountCarryRoot(afHome, tmux.ProgramCodex, "work", dstDir)
@@ -718,15 +754,15 @@ func TestConversationCarryRestoresADisplacedDestinationWhenTheWatermarkCannotBeR
 		srcRoot: ambientCarryRoot(srcHome), dstRoot: dstRoot,
 		transcript: rel,
 	}
-	require.Error(t, carry.copy(), "a carry that cannot record its watermark is not a commit")
+	require.NoError(t, carry.copy())
 
 	got, err := os.ReadFile(dstPath)
-	require.NoError(t, err, "the pre-carry destination must still be there")
-	require.Equal(t, "claim one\n", string(got),
-		"the displaced original is restored byte-for-byte, not deleted with the failed install")
-	entries, err := os.ReadDir(filepath.Dir(dstPath))
 	require.NoError(t, err)
-	require.Len(t, entries, 1, "the restore consumes its backup — no carry debris beside the transcript")
+	require.Equal(t, "claim one\nclaim two\n", string(got),
+		"the committed carry's full copy stays — the displaced original does not come back over it")
+	quarantined, err := handoff.NewRailsStore(filepath.Join(afHome, "instances", handoff.RailsFileName), filepath.Join(afHome, "instances", handoff.StateFileName)).Load()
+	require.NoError(t, err)
+	require.Contains(t, quarantined.UnrecordedCarries, dstPath)
 }
 
 // The happy path drops its backup too: a committed replace leaves only the

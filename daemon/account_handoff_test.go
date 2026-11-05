@@ -220,7 +220,9 @@ func TestAccountHandoffTickNeverReactivatesAfterApplyConfig(t *testing.T) {
 			cfg.AccountHandoff.Mode = config.AccountHandoffModeShadow
 			return cfg, nil
 		},
-		LoadState:       func() (handoff.State, error) { return handoff.State{SchemaVersion: 1}, nil },
+		LoadState: func() (handoff.Snapshot, error) {
+			return handoff.Snapshot{State: handoff.State{SchemaVersion: 1}}, nil
+		},
 		Registered:      func(string) ([]string, error) { return nil, nil },
 		LimitedAccounts: func(string) (map[string]bool, error) { return map[string]bool{}, nil },
 		AccountDir:      func(string, string) (string, error) { return "", nil },
@@ -306,12 +308,12 @@ func TestReportHeldBackoffAndWarnOnce(t *testing.T) {
 	if entry.backoff != 2*reportFlushInterval {
 		t.Fatalf("backoff did not double: %v", entry.backoff)
 	}
-	store, err := handoff.DefaultStore()
+	store, err := handoff.DefaultRailsStore()
 	require.NoError(t, err)
-	state, err := store.Load()
+	rails, err := store.Load()
 	require.NoError(t, err)
-	if state.ReportsHeld == nil || !state.ReportsHeld.Since.Equal(entry.heldSince) {
-		t.Fatalf("ReportsHeld = %+v, want since %v", state.ReportsHeld, entry.heldSince)
+	if rails.ReportsHeld == nil || !rails.ReportsHeld.Since.Equal(entry.heldSince) {
+		t.Fatalf("ReportsHeld = %+v, want since %v", rails.ReportsHeld, entry.heldSince)
 	}
 
 	// The latch holds: further holds never re-warn and backoff caps.
@@ -325,13 +327,13 @@ func TestReportHeldBackoffAndWarnOnce(t *testing.T) {
 	// Draining the last warned backlog clears the durable record; a
 	// still-warned sibling keeps it standing.
 	m.clearReportsHeldIf(map[string]*reportPending{"k": entry, "other": {warned: true}}, entry)
-	state, _ = store.Load()
-	if state.ReportsHeld == nil {
+	rails, _ = store.Load()
+	if rails.ReportsHeld == nil {
 		t.Fatalf("record cleared while another backlog is held")
 	}
 	m.clearReportsHeldIf(map[string]*reportPending{"k": entry}, entry)
-	state, _ = store.Load()
-	if state.ReportsHeld != nil {
+	rails, _ = store.Load()
+	if rails.ReportsHeld != nil {
 		t.Fatalf("record survived the last held backlog draining")
 	}
 }
@@ -412,12 +414,12 @@ func TestHandoffReportWorkerReconcilesHeldMarkerOnStart(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 
-	store, err := handoff.DefaultStore()
+	store, err := handoff.DefaultRailsStore()
 	require.NoError(t, err)
 	require.NoError(t, store.NoteReportsHeld(time.Now().Add(-time.Hour)))
-	state, err := store.Load()
+	rails, err := store.Load()
 	require.NoError(t, err)
-	require.NotNil(t, state.ReportsHeld)
+	require.NotNil(t, rails.ReportsHeld)
 
 	m := &Manager{
 		cfg:             &config.Config{},
@@ -430,9 +432,9 @@ func TestHandoffReportWorkerReconcilesHeldMarkerOnStart(t *testing.T) {
 
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		state, err := store.Load()
+		rails, err := store.Load()
 		require.NoError(t, err)
-		if state.ReportsHeld == nil {
+		if rails.ReportsHeld == nil {
 			break
 		}
 		if time.Now().After(deadline) {
@@ -489,7 +491,7 @@ func TestQueueReportRowReplaceClearsHeldMarker(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
 
-	store, err := handoff.DefaultStore()
+	store, err := handoff.DefaultRailsStore()
 	require.NoError(t, err)
 	require.NoError(t, store.NoteReportsHeld(time.Now()))
 
@@ -497,9 +499,9 @@ func TestQueueReportRowReplaceClearsHeldMarker(t *testing.T) {
 	pending := map[string]*reportPending{"k": {spec: "observer", warned: true}}
 	m.queueReportRow(pending,
 		handoffReportJob{key: "k", spec: "monitoring/observer"}, handoff.EventRow{})
-	state, err := store.Load()
+	rails, err := store.Load()
 	require.NoError(t, err)
-	if state.ReportsHeld != nil {
+	if rails.ReportsHeld != nil {
 		t.Fatal("replaced backlog's held marker survived its retirement")
 	}
 
@@ -511,9 +513,9 @@ func TestQueueReportRowReplaceClearsHeldMarker(t *testing.T) {
 	}
 	m.queueReportRow(pending,
 		handoffReportJob{key: "k", spec: "monitoring/observer"}, handoff.EventRow{})
-	state, err = store.Load()
+	rails, err = store.Load()
 	require.NoError(t, err)
-	if state.ReportsHeld == nil {
+	if rails.ReportsHeld == nil {
 		t.Fatal("marker cleared while another recipient's warned backlog still stands")
 	}
 }

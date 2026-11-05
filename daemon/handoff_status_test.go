@@ -8,6 +8,8 @@ package daemon
 
 import (
 	"os"
+	"os/exec"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -53,7 +55,7 @@ func TestAccountHandoffTick_SkipsWhileMoveInFlight(t *testing.T) {
 }
 
 // handoffStatusFixture builds a controlServer over a temp af home whose
-// config resolves the given mode and whose state file the test writes.
+// config resolves the given mode and whose state files the test writes.
 func handoffStatusFixture(t *testing.T, mode string) *controlServer {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
@@ -63,16 +65,27 @@ func handoffStatusFixture(t *testing.T, mode string) *controlServer {
 	return &controlServer{manager: &Manager{instances: map[string]*session.Instance{}}}
 }
 
-func TestHandoffStatus_ReportsModeRecordsAndEngagement(t *testing.T) {
-	s := handoffStatusFixture(t, config.AccountHandoffModeShadow)
+func handoffStatusStores(t *testing.T) (*handoff.Store, *handoff.RailsStore) {
+	t.Helper()
 	store, err := handoff.DefaultStore()
 	require.NoError(t, err)
+	rails, err := handoff.DefaultRailsStore()
+	require.NoError(t, err)
+	return store, rails
+}
+
+func TestHandoffStatus_ReportsModeRecordsAndEngagement(t *testing.T) {
+	s := handoffStatusFixture(t, config.AccountHandoffModeShadow)
+	store, rails := handoffStatusStores(t)
 	haltAt := time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)
-	until := time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC)
+	until := time.Now().Add(time.Hour)
 	moveAt := time.Date(2026, 11, 6, 9, 30, 0, 0, time.UTC)
 	require.NoError(t, store.RecordHalt("move-failed", haltAt))
-	require.NoError(t, store.SetRefusedUntil("sess-gone", until))
-	require.NoError(t, store.RecordMove("sess-1", "account-b", moveAt))
+	require.NoError(t, rails.SetRefusedUntil("sess-gone", until))
+	// A dead backoff is dead history — the engine no longer honors it, so
+	// status must not report it (#6776 review).
+	require.NoError(t, rails.SetRefusedUntil("sess-expired", time.Now().Add(-time.Minute)))
+	require.NoError(t, rails.RecordMove("sess-1", "codex", "account-b", moveAt))
 	s.manager.handoffActive.Store(true)
 
 	var resp HandoffStatusResponse
@@ -87,6 +100,7 @@ func TestHandoffStatus_ReportsModeRecordsAndEngagement(t *testing.T) {
 	require.Equal(t, "sess-gone", resp.Backoffs[0].SessionKey)
 	require.Empty(t, resp.Backoffs[0].Title, "a record for a session af no longer tracks still prints under its key")
 	require.Len(t, resp.RecentMoves, 1)
+	require.Equal(t, "codex", resp.RecentMoves[0].Agent)
 	require.Equal(t, "account-b", resp.RecentMoves[0].Account)
 }
 
@@ -94,11 +108,10 @@ func TestHandoffStatus_ReportsModeRecordsAndEngagement(t *testing.T) {
 // identity (R13): titles are never what the rail records.
 func TestHandoffStatus_LabelsLiveSessionsByKey(t *testing.T) {
 	s := handoffStatusFixture(t, config.AccountHandoffModeOff)
-	store, err := handoff.DefaultStore()
-	require.NoError(t, err)
+	_, rails := handoffStatusStores(t)
 	inst := &session.Instance{Title: "alpha", ID: "sess-1"}
 	s.manager.instances[daemonInstanceKey("repo", "alpha")] = inst
-	require.NoError(t, store.SetRefusedUntil(stableSessionKey("repo", inst), time.Now().Add(time.Hour)))
+	require.NoError(t, rails.SetRefusedUntil(stableSessionKey("repo", inst), time.Now().Add(time.Hour)))
 
 	var resp HandoffStatusResponse
 	require.NoError(t, s.HandoffStatus(HandoffStatusRequest{}, &resp))
@@ -107,12 +120,41 @@ func TestHandoffStatus_LabelsLiveSessionsByKey(t *testing.T) {
 	require.Equal(t, "alpha", resp.Backoffs[0].Title)
 }
 
-// A corrupt rails file IS the answer status exists to find — it errors
-// rather than rendering an authoritative empty status.
+// The mode status reports is the one the ENGINE resolved (#6776 review): a
+// personal-project opt-in engages the mover even when the global table says
+// nothing, and reporting the global mode would lie about the policy in
+// force.
+func TestHandoffStatus_ReportsResolvedPersonalProjectMode(t *testing.T) {
+	s := handoffStatusFixture(t, config.AccountHandoffModeOff)
+	// A registered project whose personal [account_handoff] opts in — the
+	// same layer accountHandoffDiscover resolves per live session root.
+	repo := testguard.SocketTempDir(t)
+	init := exec.Command("git", "init", "--quiet")
+	init.Dir = repo
+	init.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null")
+	out, err := init.CombinedOutput()
+	require.NoError(t, err, "git init: %s", out)
+	project, err := config.RegisterProject(repo)
+	require.NoError(t, err)
+	personal, err := config.ProjectConfigTomlPath(project.ID)
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(filepath.Dir(personal), 0o700))
+	require.NoError(t, os.WriteFile(personal,
+		[]byte("[account_handoff]\nmode = \"shadow\"\n"), 0o600))
+	inst := &session.Instance{Title: "opted", ID: "sess-1", Path: repo}
+	s.manager.instances[daemonInstanceKey("repo", "opted")] = inst
+
+	var resp HandoffStatusResponse
+	require.NoError(t, s.HandoffStatus(HandoffStatusRequest{}, &resp))
+	require.Equal(t, config.AccountHandoffModeShadow, resp.Mode,
+		"global is off but the session's project opted in — the engine's resolved mode must show")
+}
+
+// A corrupt record file IS the answer status exists to find — either file
+// errors rather than rendering an authoritative empty status.
 func TestHandoffStatus_FailsClosedOnCorruptState(t *testing.T) {
 	s := handoffStatusFixture(t, config.AccountHandoffModeOff)
-	store, err := handoff.DefaultStore()
-	require.NoError(t, err)
+	store, rails := handoffStatusStores(t)
 	require.NoError(t, store.RecordHalt("move-failed", time.Now()))
 	require.NoError(t, os.WriteFile(store.Path(), []byte("{not json"), 0o600))
 
@@ -121,6 +163,14 @@ func TestHandoffStatus_FailsClosedOnCorruptState(t *testing.T) {
 	// And the reset path fails closed the same way — it must never rebuild
 	// over a file it cannot read.
 	require.Error(t, s.HandoffReset(HandoffResetRequest{Record: "halt"}, &HandoffResetResponse{}))
+
+	// The rails file fails closed identically: an unreadable file cannot
+	// stand in for "nothing recorded" either.
+	require.NoError(t, os.WriteFile(store.Path(), []byte(`{"schema_version": 1}`), 0o600))
+	require.NoError(t, os.MkdirAll(filepath.Dir(rails.Path()), 0o700))
+	require.NoError(t, os.WriteFile(rails.Path(), []byte("{also not json"), 0o600))
+	require.Error(t, s.HandoffStatus(HandoffStatusRequest{}, &resp))
+	require.Error(t, s.HandoffReset(HandoffResetRequest{Record: "moves"}, &HandoffResetResponse{}))
 }
 
 // The reset grammar's safety property: clearing one record leaves every
@@ -128,11 +178,10 @@ func TestHandoffStatus_FailsClosedOnCorruptState(t *testing.T) {
 // counters or the backoffs with it.
 func TestHandoffReset_ClearsOnlyTheNamedRecord(t *testing.T) {
 	s := handoffStatusFixture(t, config.AccountHandoffModeShadow)
-	store, err := handoff.DefaultStore()
-	require.NoError(t, err)
+	store, rails := handoffStatusStores(t)
 	require.NoError(t, store.RecordHalt("move-failed", time.Now()))
-	require.NoError(t, store.SetRefusedUntil("sess-1", time.Now().Add(time.Hour)))
-	require.NoError(t, store.RecordMove("sess-1", "account-b", time.Now()))
+	require.NoError(t, rails.SetRefusedUntil("sess-1", time.Now().Add(time.Hour)))
+	require.NoError(t, rails.RecordMove("sess-1", "codex", "account-b", time.Now()))
 
 	var resp HandoffResetResponse
 	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "halt"}, &resp))
@@ -140,20 +189,37 @@ func TestHandoffReset_ClearsOnlyTheNamedRecord(t *testing.T) {
 	state, err := store.Load()
 	require.NoError(t, err)
 	require.Nil(t, state.Halted)
-	require.Len(t, state.RefusedUntil, 1, "a halt reset must not touch the backoffs")
-	require.Len(t, state.RecentMoves, 1, "a halt reset must not touch the move ledger")
+	railsState, err := rails.Load()
+	require.NoError(t, err)
+	require.Len(t, railsState.RefusedUntil, 1, "a halt reset must not touch the backoffs")
+	require.Len(t, railsState.RecentMoves, 1, "a halt reset must not touch the move ledger")
 
 	// A scoped clear drops only that session's entries.
 	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "backoff", SessionKey: "sess-1"}, &resp))
-	state, err = store.Load()
+	railsState, err = rails.Load()
 	require.NoError(t, err)
-	require.Empty(t, state.RefusedUntil)
-	require.Len(t, state.RecentMoves, 1)
+	require.Empty(t, railsState.RefusedUntil)
+	require.Len(t, railsState.RecentMoves, 1)
 
 	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "moves"}, &resp))
-	state, err = store.Load()
+	railsState, err = rails.Load()
 	require.NoError(t, err)
-	require.Empty(t, state.RecentMoves)
+	require.Empty(t, railsState.RecentMoves)
+}
+
+// A reset on a home with no record file writes nothing — absent IS the
+// "nothing recorded" answer (#6776 review).
+func TestHandoffReset_MissingFileStaysMissing(t *testing.T) {
+	s := handoffStatusFixture(t, config.AccountHandoffModeOff)
+	store, rails := handoffStatusStores(t)
+	var resp HandoffResetResponse
+	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "halt"}, &resp))
+	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "backoff"}, &resp))
+	require.NoError(t, s.HandoffReset(HandoffResetRequest{Record: "moves"}, &resp))
+	for _, path := range []string{store.Path(), rails.Path()} {
+		_, err := os.Stat(path)
+		require.True(t, os.IsNotExist(err), "reset materialized %s", path)
+	}
 }
 
 func TestHandoffReset_ValidatesTheNamedRecord(t *testing.T) {
@@ -181,9 +247,9 @@ func TestHandoffRoutesAreNotSandboxReachable(t *testing.T) {
 }
 
 // A recorded mover halt gates only engine-originated moves: the ordinary
-// wait-for-reset resume path never consults the rails file, so a parked
-// session must resume on its own schedule while the mover is halted. This is
-// the contract the live-mover slice cannot later drift (design R16).
+// wait-for-reset resume path never consults the durable halt record, so a
+// parked session must resume on its own schedule while the mover is halted.
+// This is the contract the live-mover slice cannot later drift (design R16).
 func TestResumeLimitedSessions_IgnoresRecordedHandoffHalt(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()

@@ -138,6 +138,45 @@ func (m *Manager) accountHandoffDiscover() {
 	m.handoffActive.Store(active)
 }
 
+// handoffResolvedMode is the mode the engine actually resolves for the
+// status surface (#6776 review): the global config's mode is the fallback,
+// but a personal-project opt-in engages the mover too, so the answer walks
+// the same session roots accountHandoffDiscover does. An unreadable
+// personal layer cannot silently widen the policy — a resolution failure
+// simply contributes nothing, and the global answer stands.
+func (m *Manager) handoffResolvedMode(global string) string {
+	if cfg := m.Config(); cfg != nil && cfg.AccountHandoffEnabled() {
+		return cfg.AccountHandoff.Mode
+	}
+	m.mu.Lock()
+	roots := make([]string, 0, len(m.instances))
+	for _, inst := range m.instances {
+		if inst == nil {
+			continue
+		}
+		root := inst.GetRepoPath()
+		if root == "" {
+			root = inst.Path
+		}
+		if root != "" {
+			roots = append(roots, root)
+		}
+	}
+	m.mu.Unlock()
+	seen := map[string]bool{}
+	for _, root := range roots {
+		if seen[root] {
+			continue
+		}
+		seen[root] = true
+		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
+		if err == nil && cfg != nil && cfg.AccountHandoff.Mode == config.AccountHandoffModeShadow {
+			return cfg.AccountHandoff.Mode
+		}
+	}
+	return global
+}
+
 // accountHandoffTick is one shadow pass: gather the session inputs from the
 // manager's own records, run the engine, warn on failure. Every leg failing
 // is a warn-and-retry — the next tick assembles fresh facts from scratch.
@@ -189,12 +228,31 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 		ResolveConfig: func(repoRoot string) (*config.ResolvedConfig, error) {
 			return config.ResolveConfigForIdentityDecisionFromGlobal(repoRoot, m.Config())
 		},
-		LoadState: func() (handoff.State, error) {
+		LoadState: func() (handoff.Snapshot, error) {
 			store, err := handoff.DefaultStore()
 			if err != nil {
-				return handoff.State{}, err
+				return handoff.Snapshot{}, err
 			}
-			return store.Load()
+			state, err := store.Load()
+			if err != nil {
+				return handoff.Snapshot{}, err
+			}
+			railsStore, err := handoff.DefaultRailsStore()
+			if err != nil {
+				return handoff.Snapshot{}, err
+			}
+			rails, err := railsStore.Load()
+			if err != nil {
+				return handoff.Snapshot{}, err
+			}
+			return handoff.Snapshot{State: state, Rails: rails}, nil
+		},
+		PruneRails: func(maxWindow time.Duration, now time.Time) error {
+			railsStore, err := handoff.DefaultRailsStore()
+			if err != nil {
+				return err
+			}
+			return railsStore.PruneExpired(maxWindow, now)
 		},
 		Registered: func(agent string) ([]string, error) {
 			home, err := config.GetConfigDir()
@@ -534,7 +592,7 @@ func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.W
 		// (#6818 review): reconcile it at worker start. A held episode that
 		// re-forms warns and records again — the marker only ever means the
 		// CURRENT process holds a warned backlog.
-		if store, err := handoff.DefaultStore(); err == nil {
+		if store, err := handoff.DefaultRailsStore(); err == nil {
 			if cerr := store.ClearReportsHeld(); cerr != nil {
 				manager.warn().Printf("account-handoff: reconcile held-report record: %v", cerr)
 			}
@@ -606,7 +664,7 @@ func (m *Manager) noteReportHeld(key string, entry *reportPending) {
 	entry.warned = true
 	m.warn().Printf("account-handoff: report delivery to %s held %s — recipient composer never proves empty",
 		key, now.Sub(entry.heldSince).Round(time.Minute))
-	if store, err := handoff.DefaultStore(); err == nil {
+	if store, err := handoff.DefaultRailsStore(); err == nil {
 		if werr := store.NoteReportsHeld(entry.heldSince); werr != nil {
 			m.warn().Printf("account-handoff: record held report: %v", werr)
 		}
@@ -625,7 +683,7 @@ func (m *Manager) clearReportsHeldIf(pending map[string]*reportPending, entry *r
 			return
 		}
 	}
-	if store, err := handoff.DefaultStore(); err == nil {
+	if store, err := handoff.DefaultRailsStore(); err == nil {
 		if cerr := store.ClearReportsHeld(); cerr != nil {
 			m.warn().Printf("account-handoff: clear held-report record: %v", cerr)
 		}

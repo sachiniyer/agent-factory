@@ -9,6 +9,7 @@ package handoffengine
 import (
 	"errors"
 	"fmt"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -32,9 +33,11 @@ type depCounts struct {
 	reportToByRoot                                           map[string]string
 	stateErr                                                 error
 	haltState                                                handoff.State
+	railsState                                               handoff.Rails
 	reports                                                  []reportCall
 	warns                                                    []string
 	exclude                                                  []string
+	targetOrder                                              string
 }
 
 type reportCall struct {
@@ -48,8 +51,12 @@ func (d *depCounts) deps() Deps {
 		ResolveConfig: func(root string) (*config.ResolvedConfig, error) {
 			d.resolve++
 			cfg := &config.ResolvedConfig{ProjectRoot: root}
+			order := d.targetOrder
+			if order == "" {
+				order = "listed"
+			}
 			cfg.AccountHandoff = config.AccountHandoffConfig{
-				Mode: d.mode, IncludePinned: false, TargetOrder: "listed",
+				Mode: d.mode, IncludePinned: false, TargetOrder: order,
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
 				MaxMovesWindow: "30m", ExcludeSessions: d.exclude,
@@ -58,14 +65,16 @@ func (d *depCounts) deps() Deps {
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
 			return cfg, nil
 		},
-		LoadState: func() (handoff.State, error) {
+		LoadState: func() (handoff.Snapshot, error) {
 			d.state++
 			if d.stateErr != nil {
-				return handoff.State{}, d.stateErr
+				return handoff.Snapshot{}, d.stateErr
 			}
 			s := d.haltState
 			s.SchemaVersion = 1
-			return s, nil
+			r := d.railsState
+			r.SchemaVersion = 1
+			return handoff.Snapshot{State: s, Rails: r}, nil
 		},
 		Registered: func(agent string) ([]string, error) {
 			d.registered++
@@ -652,5 +661,171 @@ func TestTickReportPersistedSoloMatchIsNotLive(t *testing.T) {
 	}
 	if len(d.reports) != 0 {
 		t.Fatalf("report delivered to a persisted-only recipient: %+v", d.reports)
+	}
+}
+
+// The retention pass runs once per tick at the WIDEST resolved window — one
+// meaning for max_moves_window everywhere it is read: records older than
+// the window count for nothing and are pruned (#6776 review).
+func TestTickPrunesRailsOnceWithResolvedWindow(t *testing.T) {
+	var pruned []time.Duration
+	d := &depCounts{mode: "shadow"}
+	deps := d.deps()
+	deps.PruneRails = func(maxWindow time.Duration, now time.Time) error {
+		pruned = append(pruned, maxWindow)
+		return nil
+	}
+	e := New(deps)
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(pruned) != 1 || pruned[0] != 30*time.Minute {
+		t.Fatalf("pruned = %v, want one pass at the resolved 30m window", pruned)
+	}
+	// A nil dep skips the pass cleanly — tests and hand-built wiring carry
+	// no store to prune.
+	if _, err := New(d.deps()).Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("nil-PruneRails tick: %v", err)
+	}
+}
+
+// A carry that copied bytes without recording its watermark leaves the file
+// quarantined end-to-end: the effective watermark for that rollout is the
+// maximum offset, so no claim inside it can free a wall (#6776 review).
+func TestTickUnrecordedCarryQuarantinesTheWholeRollout(t *testing.T) {
+	d := &depCounts{mode: "shadow"}
+	d.railsState.UnrecordedCarries = map[string]time.Time{
+		"/poisoned/rollout.jsonl": testNow.Add(-time.Hour),
+	}
+	var carried map[string]int64
+	deps := d.deps()
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		carried = c
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	e := New(deps)
+	if _, err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if carried["/poisoned/rollout.jsonl"] != math.MaxInt64 {
+		t.Fatalf("unrecorded rollout is not fully quarantined: %v", carried)
+	}
+}
+
+// Move credits key on agent + account — "work" on codex is a different seat
+// than "work" on claude, the same namespacing occupancy counts (#6776
+// review). A same-named credit on another provider must not push this
+// agent's candidate down the emptiest order.
+func TestTickMoveCreditsKeyOnAgentAndAccount(t *testing.T) {
+	moveEvent := func(t *testing.T, moves []handoff.RecentMove) string {
+		t.Helper()
+		d := &depCounts{mode: "shadow", targetOrder: config.AccountHandoffTargetOrderEmptiest}
+		d.railsState.RecentMoves = moves
+		in := shadowSession()
+		// The session sits on a third account so both candidates are
+		// eligible; the wall is proven by a hot reading on the session's own
+		// home, and the composer pane is provably empty.
+		in.Account, in.LimitAccount = "third", "third"
+		in.HomeDir = "/home/codex/third"
+		in.Content = "You've hit your usage limit\n› Ask Codex to do anything\n"
+		deps := d.deps()
+		deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+			if dir == in.HomeDir {
+				return handoff.ReadingFacts{
+					Status:     handoff.ReadingObserved,
+					Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: 98}},
+					RecordedAt: testNow.Add(-time.Minute), Complete: true,
+				}
+			}
+			return handoff.ReadingFacts{Status: handoff.ReadingNone}
+		}
+		e := New(deps)
+		if _, err := e.Tick([]SessionInput{in}); err != nil {
+			t.Fatalf("tick: %v", err)
+		}
+		for _, row := range d.rows {
+			if row.Kind == handoff.EventMove {
+				return row.To
+			}
+		}
+		return ""
+	}
+
+	at := testNow.Add(-time.Minute)
+	// Another provider's move to "work" does not credit codex/work: the
+	// tie falls back to candidate order, so "work" still leads.
+	if to := moveEvent(t, []handoff.RecentMove{
+		{SessionKey: "other", Agent: "claude", Account: "work", At: at},
+	}); to != "work" {
+		t.Fatalf("cross-agent credit counted — moved to %q, want work", to)
+	}
+	// This agent's move to "work" DOES credit it — "personal" is now the
+	// emptiest seat.
+	if to := moveEvent(t, []handoff.RecentMove{
+		{SessionKey: "other", Agent: "codex", Account: "work", At: at},
+	}); to != "personal" {
+		t.Fatalf("same-agent credit ignored — moved to %q, want personal", to)
+	}
+}
+
+// The switch-loop rail counts THIS session's moves inside max_moves_window
+// — max_moves reached defers the session with a switch-loop edge; another
+// session's moves and moves outside the window do not count.
+func TestTickMovesInWindowIsSessionAndWindowScoped(t *testing.T) {
+	moves := func(key string, n int, at time.Time) (out []handoff.RecentMove) {
+		for i := 0; i < n; i++ {
+			out = append(out, handoff.RecentMove{SessionKey: key, Agent: "codex", Account: "work", At: at})
+		}
+		return out
+	}
+	hasLoopEdge := func(t *testing.T, d *depCounts) bool {
+		for _, row := range d.rows {
+			if row.Kind == handoff.EventSwitchLoop {
+				return true
+			}
+		}
+		return false
+	}
+	at := testNow.Add(-time.Minute)
+	old := testNow.Add(-time.Hour) // outside the 30m fake window
+
+	// A proven wall — hot reading on the session's own home plus a provably
+	// empty composer — so the decision reaches the blockers phase.
+	newDeps := func(d *depCounts, in SessionInput) Deps {
+		deps := d.deps()
+		deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+			if dir == in.HomeDir {
+				return handoff.ReadingFacts{
+					Status:     handoff.ReadingObserved,
+					Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: 98}},
+					RecordedAt: testNow.Add(-time.Minute), Complete: true,
+				}
+			}
+			return handoff.ReadingFacts{Status: handoff.ReadingNone}
+		}
+		return deps
+	}
+	in := shadowSession()
+	in.Content = "You've hit your usage limit\n› Ask Codex to do anything\n"
+
+	// Three in-window moves for THIS session hit the cap.
+	d := &depCounts{mode: "shadow"}
+	d.railsState.RecentMoves = moves("sess-1", 3, at)
+	if _, err := New(newDeps(d, in)).Tick([]SessionInput{in}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if !hasLoopEdge(t, d) {
+		t.Fatalf("three in-window moves did not trip the switch-loop rail: %+v", d.rows)
+	}
+
+	// The same count split across other sessions — plus one stale move —
+	// leaves the rail untripped.
+	d = &depCounts{mode: "shadow"}
+	d.railsState.RecentMoves = append(moves("sess-other", 3, at), moves("sess-1", 1, old)...)
+	if _, err := New(newDeps(d, in)).Tick([]SessionInput{in}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if hasLoopEdge(t, d) {
+		t.Fatalf("other sessions' or out-of-window moves counted: %+v", d.rows)
 	}
 }

@@ -9,6 +9,7 @@ import (
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/printsafety"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/quota"
 )
@@ -185,8 +186,12 @@ func printHandoffStatus(cmd *cobra.Command, resp daemon.HandoffStatusResponse) {
 		}
 		fmt.Fprintln(cmd.OutOrStdout(), header+":")
 		for _, mv := range resp.RecentMoves {
+			target := printsafety.Field(mv.Account)
+			if mv.Agent != "" {
+				target = printsafety.Field(mv.Agent) + "/" + target
+			}
 			fmt.Fprintf(cmd.OutOrStdout(), "  %s  → %s  at %s\n",
-				handoffSessionLabel(mv.SessionKey, mv.Title), mv.Account, mv.At.UTC().Format(time.RFC3339))
+				handoffSessionLabel(mv.SessionKey, mv.Title), target, mv.At.UTC().Format(time.RFC3339))
 		}
 	}
 	for _, warning := range resp.Warnings {
@@ -196,11 +201,15 @@ func printHandoffStatus(cmd *cobra.Command, resp daemon.HandoffStatusResponse) {
 
 // handoffSessionLabel prints the stable key with the live session's title as
 // a label — never the reverse: the key is the identity the rail recorded.
+// Both fields are stored strings, so they pass printsafety on the way out —
+// the local print path applies the same strip the daemon applies
+// server-side.
 func handoffSessionLabel(key, title string) string {
+	key = printsafety.Field(key)
 	if title == "" {
 		return key
 	}
-	return fmt.Sprintf("%s (%s)", key, title)
+	return fmt.Sprintf("%s (%s)", key, printsafety.Field(title))
 }
 
 func init() {

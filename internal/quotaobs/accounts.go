@@ -13,17 +13,21 @@ import (
 // (configured mode and any recorded halt).
 //
 // It is key-gated on the auto-handoff machinery being engaged — an enabled
-// [account_handoff] mode in the global config, OR an auto-handoff state file
-// that machinery already wrote RECORDS to. With neither, it does nothing: a
-// mode of "off" — absent table, materialized default, or written out by hand
-// — stays byte-identical to before the feature existed (#6776, "absent table
-// ≡ off ≡ today"). A state file that carries a record still engages it,
-// because a halt recorded there must surface even after the mode returns to
-// "off" — a halted mover is never silent (R16).
+// [account_handoff] mode in the global config, OR a REAL MOVER RECORD the
+// machinery already wrote: a halt or held reports (#6776 review). With
+// neither, it does nothing: a mode of "off" — absent table, materialized
+// default, or written out by hand — stays byte-identical to before the
+// feature existed ("absent table ≡ off ≡ today"). Ordinary operator swaps
+// leave watermarks, move credits and refusal entries behind as a matter of
+// course; those records must never opt a mode-off surface in, or every
+// carry would enrol its home in a feature it never enabled. A halt or held
+// report still engages after the mode returns to "off" — a halted mover is
+// never silent (R16). An UNREADABLE file engages too: corrupt durable state
+// is itself the evidence this surface exists to show.
 //
 // Every read failure degrades honestly rather than hiding: an unreadable
-// account list or state file is reported through the Result's warning fields
-// instead of being presented as an empty or healthy section.
+// account list or record file is reported through the Result's warning
+// fields instead of being presented as an empty or healthy section.
 func collectAccountEvidence(result *Result) {
 	mode := config.AccountHandoffModeOff
 	enabled := false
@@ -44,18 +48,19 @@ func collectAccountEvidence(result *Result) {
 	if store, err := handoff.DefaultStore(); err == nil {
 		state, stateErr = store.Load()
 	}
+	var rails handoff.Rails
+	var railsErr error
+	if store, err := handoff.DefaultRailsStore(); err == nil {
+		rails, railsErr = store.Load()
+	}
 
-	// A file engages the section only when it carries evidence — a halt,
-	// held reports, move/backoff records, carry watermarks — or when it
-	// exists but cannot be read (an unreadable file IS the evidence). A
-	// missing file decodes to an empty state without error, and an empty
-	// file records nothing either: both answer "the machinery never ran
-	// here", so neither opts the section in. That matters because a no-op
-	// durable write (e.g. an older daemon's startup reconcile) must not
-	// enrol a home in a feature it never enabled.
-	recorded := stateErr != nil || state.Halted != nil ||
-		state.ReportsHeld != nil || len(state.RecentMoves) > 0 ||
-		len(state.RefusedUntil) > 0 || len(state.CarriedPrefixes) > 0
+	// Only the durable records that mean "the mover acted" — a halt or held
+	// reports — engage a mode-off surface. Watermarks, move credits, and
+	// refusal backoffs accrete from ordinary operation and a recorded state
+	// file can outlive the mode that wrote it; neither must opt the home in
+	// (#6776 review). A file that will not decode IS evidence either way.
+	recorded := stateErr != nil || railsErr != nil ||
+		state.Halted != nil || rails.ReportsHeld != nil
 	if !enabled && !recorded {
 		// ConfigUnreadable (if set) still warns: an unreadable config does
 		// not establish that handoff is disabled, and hiding that failure
@@ -69,7 +74,8 @@ func collectAccountEvidence(result *Result) {
 		mover.Mode = ""
 		mover.ModeUnknown = true
 	}
-	if stateErr != nil {
+	unreadable := stateErr != nil || railsErr != nil
+	if unreadable {
 		mover.StateUnreadable = true
 		result.HandoffUnreadable = true
 	} else if state.Halted != nil {
@@ -77,8 +83,8 @@ func collectAccountEvidence(result *Result) {
 		mover.HaltReason = state.Halted.Reason
 		mover.HaltAt = state.Halted.At
 	}
-	if state.ReportsHeld != nil {
-		mover.ReportsHeldSince = state.ReportsHeld.Since
+	if rails.ReportsHeld != nil {
+		mover.ReportsHeldSince = rails.ReportsHeld.Since
 	}
 	result.Mover = mover
 
@@ -93,6 +99,10 @@ func collectAccountEvidence(result *Result) {
 		return
 	}
 
+	// The watermarks the indexer honors merge recorded carried prefixes
+	// with the unrecorded-carry quarantine — a carried file whose watermark
+	// never landed counts as fully poisoned (#6776 review).
+	carried := (handoff.Snapshot{State: state, Rails: rails}).EffectiveCarriedPrefixes()
 	indexer := rateindex.New()
 	for _, name := range names {
 		dir, err := agentaccount.Dir(home, "codex", name)
@@ -105,8 +115,8 @@ func collectAccountEvidence(result *Result) {
 		}
 		result.Accounts = append(result.Accounts,
 			accountFromReading(name, indexer.Refresh(dir, rateindex.Options{
-				CarriedPrefixes: state.CarriedPrefixes,
-			}), stateErr == nil))
+				CarriedPrefixes: carried,
+			}), stateErr == nil && railsErr == nil))
 	}
 }
 

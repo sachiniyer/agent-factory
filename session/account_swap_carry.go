@@ -425,24 +425,22 @@ func (c *conversationCarry) launch(resolvedProgram string) (string, AgentConvers
 	}, true
 }
 
-// copy performs the carry. Only the transcript decides success — and for a
-// codex carry the commit has a second half: the durable carried-prefix
-// watermark telling the usage reader that the copied bytes hold the SOURCE
-// account's claims. Without it the carried rollout's records count for the
-// target, and a healthy prefix could free a wall on the previous account's
-// numbers (#6802 review). A carry that cannot record its watermark is not a
-// commit; the caller replans the swap as a fresh conversation.
+// copy performs the carry. Only the transcript decides success. For a codex
+// carry the commit has a second half: the durable carried-prefix watermark
+// telling the usage reader that the copied bytes hold the SOURCE account's
+// claims (#6802 review). A watermark that cannot be recorded does NOT fail
+// the carry (#6776 review): the copied bytes are already on disk, so a
+// fresh conversation would only lose the user's context — instead the
+// rollout is quarantined end-to-end in the rails file, which makes every
+// claim in it untrusted for proof and retraction until a real watermark
+// lands.
 func (c *conversationCarry) copy() error {
 	outcome, err := carryConversationFileOutcome(c.srcRoot, c.dstRoot, c.transcript, !c.committed)
 	if err != nil {
 		return err
 	}
 	if err := c.commitCarriedPrefix(outcome); err != nil {
-		// The commit failed: put back whatever the install displaced, or
-		// remove a fresh install — a failed carry leaves the destination
-		// exactly as it was (#6802 Codex review).
-		restoreCarryDisplacement(c.dstRoot, c.transcript, outcome)
-		return err
+		c.quarantineUnrecorded(err)
 	}
 	// The commit landed: the displaced original is gone for good now.
 	discardCarryDisplacement(c.dstRoot, c.transcript, outcome)
@@ -463,12 +461,10 @@ func (c *conversationCarry) copy() error {
 // writes usage claims into its rollout files, so other carries copy nothing
 // the reader would quarantine.
 //
-// The watermark is part of the commit because the copied bytes are the
-// poison: a rollout whose source-account records could count for the target
-// must not outlive a failed record. On failure the caller unwinds the
-// install — the displaced destination is restored byte-for-byte, or a fresh
-// install is removed — while a destination the carry only verified is left
-// untouched (it predates this carry and is not af's to delete).
+// A failure here does not unwind the copy (#6776 review): the caller
+// quarantines the rollout through the rails file's unrecorded-carries
+// marker instead, so the file's claims stay untrusted for usage proof
+// while the conversation still carries.
 func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error {
 	if c.agent != tmux.ProgramCodex || outcome.covered == 0 {
 		return nil
@@ -480,11 +476,48 @@ func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error 
 	// The store lives under the AF home the carry itself resolved, not a
 	// fresh GetConfigDir lookup — the watermark must land beside the
 	// accounts/ tree the copy targeted.
-	store := handoff.NewStore(filepath.Join(c.dstRoot.base, "instances", handoff.StateFileName))
+	instances := filepath.Join(c.dstRoot.base, "instances")
+	store := handoff.NewStore(filepath.Join(instances, handoff.StateFileName))
 	if err := store.RecordCarriedPrefix(path, outcome.covered); err != nil {
 		return carryFailure("the carried-prefix watermark could not be recorded", err)
 	}
+	// A real watermark retires the unrecorded-carry quarantine for this file:
+	// the precise prefix replaces the whole-file distrust (#6776 review).
+	rails := handoff.NewRailsStore(filepath.Join(instances, handoff.RailsFileName),
+		filepath.Join(instances, handoff.StateFileName))
+	if err := rails.ClearUnrecordedCarry(path); err != nil {
+		log.WarningLog.Printf("account swap carried %s conversation %s but its quarantine record could not be retired: %v",
+			c.agent, c.id, err)
+	}
 	return nil
+}
+
+// quarantineUnrecorded records in the rails file that this carry copied
+// source-account bytes but could not record its watermark (cause). Every
+// claim in the carried rollout then counts as carried end-to-end — the
+// usage reader treats the file as fully poisoned — so the target's
+// readings cannot free a wall on records that still belong to the source
+// account (#6776 review). The marker is best-effort: a home that refuses
+// the rails write too gets a louder warning and nothing more — the carry
+// itself always proceeds.
+func (c *conversationCarry) quarantineUnrecorded(cause error) {
+	path := c.carriedCodexRolloutPath()
+	if c.dstRoot.base == "" || path == "" {
+		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v), and the rollout cannot be named for quarantine — its usage claims are unquarantined",
+			c.agent, c.id, cause)
+		return
+	}
+	instances := filepath.Join(c.dstRoot.base, "instances")
+	store := handoff.NewRailsStore(
+		filepath.Join(instances, handoff.RailsFileName),
+		filepath.Join(instances, handoff.StateFileName))
+	if err := store.NoteUnrecordedCarry(path, time.Now()); err != nil {
+		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v) or a quarantine record — rollout %s cannot be excluded from usage accounting: %v",
+			c.agent, c.id, cause, path, err)
+		return
+	}
+	log.WarningLog.Printf("account swap carried %s conversation %s but its watermark could not be recorded (%v) — rollout %s is quarantined from usage accounting end-to-end",
+		c.agent, c.id, cause, path)
 }
 
 func (c *conversationCarry) clone() *conversationCarry {

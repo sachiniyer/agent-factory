@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
+	"github.com/sachiniyer/agent-factory/internal/printsafety"
 )
 
 // HandoffStatus serves `af accounts handoff status` (#6776 slice 5): the
@@ -27,6 +28,14 @@ func (s *controlServer) HandoffStatus(_ HandoffStatusRequest, resp *HandoffStatu
 	if err != nil {
 		return err
 	}
+	railsStore, err := handoff.DefaultRailsStore()
+	if err != nil {
+		return err
+	}
+	rails, err := railsStore.Load()
+	if err != nil {
+		return err
+	}
 	if s.manager != nil {
 		resp.Engaged = s.manager.handoffActive.Load()
 	}
@@ -36,7 +45,14 @@ func (s *controlServer) HandoffStatus(_ HandoffStatusRequest, resp *HandoffStatu
 		resp.Warnings = append(resp.Warnings,
 			"the global config could not be read, so the resolved account_handoff.mode is unknown")
 	} else if load.Config != nil {
+		// Status reports the mode the ENGINE actually resolved (#6776
+		// review): the global file is only the fallback — a personal-project
+		// opt-in is what engaged the mover, and reporting global "off" while
+		// the engine observes would lie about the policy in force.
 		resp.Mode = load.Config.AccountHandoff.Mode
+		if s.manager != nil {
+			resp.Mode = s.manager.handoffResolvedMode(resp.Mode)
+		}
 		resp.MaxMoves = load.Config.AccountHandoff.MaxMoves
 		resp.MaxMovesWindow = load.Config.AccountHandoff.MaxMovesWindow
 		resp.RefusedBackoff = load.Config.AccountHandoff.RefusedBackoff
@@ -44,21 +60,28 @@ func (s *controlServer) HandoffStatus(_ HandoffStatusRequest, resp *HandoffStatu
 	}
 	if state.Halted != nil {
 		resp.Halted = true
-		resp.HaltReason = state.Halted.Reason
+		resp.HaltReason = printsafety.Field(state.Halted.Reason)
 		at := state.Halted.At
 		resp.HaltAt = &at
 	}
-	if state.ReportsHeld != nil {
-		since := state.ReportsHeld.Since
+	if rails.ReportsHeld != nil {
+		since := rails.ReportsHeld.Since
 		resp.ReportsHeldSince = &since
 	}
 	// Session keys are stable identities, not titles (R13): the title is
 	// attached only as a label for sessions the manager still tracks, and a
 	// record whose session is gone still prints under its key.
 	titles := s.sessionTitles()
-	for key, until := range state.RefusedUntil {
+	now := nowFunc()
+	// Only LIVE backoffs print (#6776 review): an expired entry is dead
+	// history the next prune retires — showing it would report a deferral
+	// the engine no longer honors.
+	for key, until := range rails.RefusedUntil {
+		if !until.After(now) {
+			continue
+		}
 		resp.Backoffs = append(resp.Backoffs, HandoffBackoffEntry{
-			SessionKey: key, Title: titles[key], Until: until,
+			SessionKey: printsafety.Field(key), Title: printsafety.Field(titles[key]), Until: until,
 		})
 	}
 	sort.Slice(resp.Backoffs, func(i, j int) bool {
@@ -67,10 +90,10 @@ func (s *controlServer) HandoffStatus(_ HandoffStatusRequest, resp *HandoffStatu
 		}
 		return resp.Backoffs[i].SessionKey < resp.Backoffs[j].SessionKey
 	})
-	for _, mv := range state.RecentMoves {
+	for _, mv := range rails.RecentMoves {
 		resp.RecentMoves = append(resp.RecentMoves, HandoffMoveEntry{
-			SessionKey: mv.SessionKey, Title: titles[mv.SessionKey],
-			Account: mv.Account, At: mv.At,
+			SessionKey: printsafety.Field(mv.SessionKey), Title: printsafety.Field(titles[mv.SessionKey]),
+			Agent: printsafety.Field(mv.Agent), Account: printsafety.Field(mv.Account), At: mv.At,
 		})
 	}
 	sort.Slice(resp.RecentMoves, func(i, j int) bool {
@@ -114,14 +137,14 @@ func (s *controlServer) HandoffReset(req HandoffResetRequest, resp *HandoffReset
 	if err := s.requireMutationAdmission(); err != nil {
 		return err
 	}
-	store, err := handoff.DefaultStore()
-	if err != nil {
-		return err
-	}
 	switch req.Record {
 	case "halt":
 		if req.SessionKey != "" {
 			return fmt.Errorf(`record "halt" is mover-level — it takes no session scope`)
+		}
+		store, err := handoff.DefaultStore()
+		if err != nil {
+			return err
 		}
 		cleared, err := store.ClearHalt()
 		if err != nil {
@@ -133,10 +156,13 @@ func (s *controlServer) HandoffReset(req HandoffResetRequest, resp *HandoffReset
 		}
 		resp.Changed = true
 		resp.Summary = fmt.Sprintf("cleared halt %q recorded at %s — automatic handoff moves may proceed again",
-			cleared.Reason, cleared.At.Format(time.RFC3339))
+			printsafety.Field(cleared.Reason), cleared.At.Format(time.RFC3339))
 	case "backoff", "moves":
+		store, err := handoff.DefaultRailsStore()
+		if err != nil {
+			return err
+		}
 		var n int
-		var err error
 		if req.Record == "backoff" {
 			n, err = store.ClearRefused(req.SessionKey)
 		} else {
@@ -146,14 +172,15 @@ func (s *controlServer) HandoffReset(req HandoffResetRequest, resp *HandoffReset
 			return err
 		}
 		resp.Changed = n > 0
+		key := printsafety.Field(req.SessionKey)
 		switch {
-		case n == 0 && req.SessionKey != "":
-			resp.Summary = fmt.Sprintf("no %s entries were recorded for session %q", req.Record, req.SessionKey)
+		case n == 0 && key != "":
+			resp.Summary = fmt.Sprintf("no %s entries were recorded for session %q", req.Record, key)
 		case n == 0:
 			resp.Summary = fmt.Sprintf("no %s entries were recorded", req.Record)
-		case req.SessionKey != "":
+		case key != "":
 			resp.Summary = fmt.Sprintf("cleared %d %s %s for session %q",
-				n, req.Record, plural(n, "entry", "entries"), req.SessionKey)
+				n, req.Record, plural(n, "entry", "entries"), key)
 		default:
 			resp.Summary = fmt.Sprintf("cleared %d %s %s", n, req.Record, plural(n, "entry", "entries"))
 		}

@@ -1,6 +1,7 @@
 package handoff
 
 import (
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"sync"
@@ -149,176 +150,6 @@ func TestRecordCarriedPrefixNeverShrinks(t *testing.T) {
 	}
 }
 
-// #6818 final review: a held report backlog is recorded durably so af
-// quota's mover line can say it — first-writer-wins, cleared on drain.
-func TestNoteAndClearReportsHeld(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	since := time.Date(2026, 11, 5, 13, 0, 0, 0, time.UTC)
-	later := since.Add(5 * time.Minute)
-
-	if err := store.NoteReportsHeld(since); err != nil {
-		t.Fatalf("NoteReportsHeld: %v", err)
-	}
-	if err := store.NoteReportsHeld(later); err != nil {
-		t.Fatalf("NoteReportsHeld second: %v", err)
-	}
-	state, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if state.ReportsHeld == nil || !state.ReportsHeld.Since.Equal(since) {
-		t.Fatalf("ReportsHeld = %+v — the older hold must win", state.ReportsHeld)
-	}
-	if err := store.ClearReportsHeld(); err != nil {
-		t.Fatalf("ClearReportsHeld: %v", err)
-	}
-	state, err = store.Load()
-	if err != nil {
-		t.Fatalf("Load after clear: %v", err)
-	}
-	if state.ReportsHeld != nil {
-		t.Fatalf("cleared hold still recorded: %+v", state.ReportsHeld)
-	}
-	if err := store.NoteReportsHeld(time.Time{}); err == nil {
-		t.Fatalf("zero since was accepted")
-	}
-}
-
-// The daemon's startup reconcile calls ClearReportsHeld on every home,
-// including ones the machinery never touched. A no-op clear must not write
-// the file into existence — its mere presence opts the quota mover line
-// in for a home that never enabled handoff (#6776).
-func TestClearReportsHeldLeavesAbsentFileAbsent(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	if err := store.ClearReportsHeld(); err != nil {
-		t.Fatalf("ClearReportsHeld on untouched home: %v", err)
-	}
-	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
-		t.Fatalf("ClearReportsHeld materialized %s — absent is itself the "+
-			"'nothing recorded' answer (stat err=%v)", store.Path(), err)
-	}
-}
-
-func TestReportsHeldWithoutSinceFailsClosed(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "instances", StateFileName)
-	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
-		t.Fatal(err)
-	}
-	raw := `{"schema_version": 1, "reports_held": {}}`
-	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
-		t.Fatal(err)
-	}
-	if _, err := NewStore(path).Load(); err == nil {
-		t.Fatalf("reports_held without since was accepted")
-	}
-}
-
-// The rails mutators (#6776 slice 5): recent-move records feed the
-// switch-loop counter and the account credits, refusal backoff feeds the
-// defer rail, and the halt record is the on_failure="halt" landing. Every
-// one of these must round-trip durably and fail closed on garbage — the
-// file is the rails' only memory across a daemon restart.
-func TestRecordMoveRoundTrip(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	if err := store.RecordMove("sess-1", "account-b", at); err != nil {
-		t.Fatalf("RecordMove: %v", err)
-	}
-	if err := store.RecordMove("sess-1", "account-c", at.Add(time.Minute)); err != nil {
-		t.Fatalf("RecordMove: %v", err)
-	}
-	state, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(state.RecentMoves) != 2 || state.RecentMoves[0].SessionKey != "sess-1" ||
-		state.RecentMoves[0].Account != "account-b" || !state.RecentMoves[0].At.Equal(at) {
-		t.Fatalf("RecentMoves = %+v", state.RecentMoves)
-	}
-	if err := store.RecordMove("", "a", at); err == nil {
-		t.Fatal("empty session key was accepted")
-	}
-	if err := store.RecordMove("k", "", at); err == nil {
-		t.Fatal("empty account was accepted")
-	}
-	if err := store.RecordMove("k", "a", time.Time{}); err == nil {
-		t.Fatal("zero timestamp was accepted")
-	}
-}
-
-func TestSetAndClearRefused(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	until := time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC)
-	for _, key := range []string{"sess-1", "sess-2"} {
-		if err := store.SetRefusedUntil(key, until); err != nil {
-			t.Fatalf("SetRefusedUntil: %v", err)
-		}
-	}
-	state, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(state.RefusedUntil) != 2 {
-		t.Fatalf("RefusedUntil = %+v", state.RefusedUntil)
-	}
-	// A session-scoped clear drops only that session's entry.
-	n, err := store.ClearRefused("sess-1")
-	if err != nil {
-		t.Fatalf("ClearRefused: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("cleared %d entries, want 1", n)
-	}
-	state, err = store.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(state.RefusedUntil) != 1 || state.RefusedUntil["sess-1"].Equal(until) {
-		t.Fatalf("scoped clear hit the wrong entries: %+v", state.RefusedUntil)
-	}
-	// An empty scope clears everything; clearing again is not an error.
-	n, err = store.ClearRefused("")
-	if err != nil {
-		t.Fatalf("ClearRefused all: %v", err)
-	}
-	if n != 1 {
-		t.Fatalf("cleared %d, want 1", n)
-	}
-	if n, err = store.ClearRefused(""); err != nil || n != 0 {
-		t.Fatalf("re-clear = %d, %v", n, err)
-	}
-	if err := store.SetRefusedUntil("", until); err == nil {
-		t.Fatal("empty session key was accepted")
-	}
-	if err := store.SetRefusedUntil("k", time.Time{}); err == nil {
-		t.Fatal("zero until was accepted")
-	}
-}
-
-func TestClearMovesIsSessionScoped(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	for _, mv := range [][2]string{{"sess-1", "a"}, {"sess-2", "a"}, {"sess-1", "b"}} {
-		if err := store.RecordMove(mv[0], mv[1], at); err != nil {
-			t.Fatalf("RecordMove: %v", err)
-		}
-	}
-	n, err := store.ClearMoves("sess-1")
-	if err != nil {
-		t.Fatalf("ClearMoves: %v", err)
-	}
-	if n != 2 {
-		t.Fatalf("cleared %d, want 2", n)
-	}
-	state, err := store.Load()
-	if err != nil {
-		t.Fatalf("Load: %v", err)
-	}
-	if len(state.RecentMoves) != 1 || state.RecentMoves[0].SessionKey != "sess-2" {
-		t.Fatalf("scoped clear hit the wrong entries: %+v", state.RecentMoves)
-	}
-}
-
 func TestRecordAndClearHalt(t *testing.T) {
 	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
 	at := time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)
@@ -350,6 +181,20 @@ func TestRecordAndClearHalt(t *testing.T) {
 	}
 }
 
+// A reset on a home with no file is a no-op, not a materialization: absent
+// IS the "no halt" answer, and writing an empty state file would opt the
+// quota mover line in for a home that never enabled handoff (#6776).
+func TestClearHaltLeavesAbsentFileAbsent(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	cleared, err := store.ClearHalt()
+	if err != nil || cleared != nil {
+		t.Fatalf("ClearHalt on untouched home = %+v, %v", cleared, err)
+	}
+	if _, err := os.Stat(store.Path()); !os.IsNotExist(err) {
+		t.Fatalf("ClearHalt materialized %s (stat err=%v)", store.Path(), err)
+	}
+}
+
 func TestHaltWithoutReasonFailsClosed(t *testing.T) {
 	path := filepath.Join(t.TempDir(), "instances", StateFileName)
 	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
@@ -364,49 +209,155 @@ func TestHaltWithoutReasonFailsClosed(t *testing.T) {
 	}
 }
 
-func TestPruneExpiredDropsOnlyDeadRecords(t *testing.T) {
-	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
-	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
-	if err := store.SetRefusedUntil("old", now.Add(-time.Minute)); err != nil {
-		t.Fatalf("SetRefusedUntil: %v", err)
+// The durable contract going forward: a read-modify-write preserves every
+// top-level field the writing binary does not model, so a later slice's
+// fields survive an older writer (#6776 review).
+func TestMutatePreservesUnknownFields(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
 	}
-	if err := store.SetRefusedUntil("live", now.Add(time.Hour)); err != nil {
-		t.Fatalf("SetRefusedUntil: %v", err)
+	raw := `{"schema_version": 1, "future_thing": {"a": [1, 2]}, "carried_prefix_len": {"/x": 8}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
 	}
-	for _, mv := range []struct {
-		key string
-		at  time.Time
-	}{{"in", now.Add(-10 * time.Minute)}, {"out", now.Add(-time.Hour)}} {
-		if err := store.RecordMove(mv.key, "a", mv.at); err != nil {
-			t.Fatalf("RecordMove: %v", err)
-		}
+	store := NewStore(path)
+	if err := store.RecordCarriedPrefix("/y", 4); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
 	}
-	if err := store.PruneExpired(30*time.Minute, now); err != nil {
-		t.Fatalf("PruneExpired: %v", err)
-	}
-	state, err := store.Load()
+	written, err := os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatal(err)
 	}
-	if len(state.RefusedUntil) != 1 || state.RefusedUntil["live"].IsZero() {
-		t.Fatalf("live backoff was pruned: %+v", state.RefusedUntil)
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(written, &fields); err != nil {
+		t.Fatal(err)
 	}
-	if len(state.RecentMoves) != 1 || state.RecentMoves[0].SessionKey != "in" {
-		t.Fatalf("in-window move was pruned: %+v", state.RecentMoves)
+	if _, ok := fields["future_thing"]; !ok {
+		t.Fatalf("mutate dropped the field it does not model: %s", written)
 	}
-	// An unbounded window keeps every move — the counters only read
-	// in-window entries, so nothing is lost by keeping the history.
-	if err := store.PruneExpired(0, now.Add(24*time.Hour)); err != nil {
-		t.Fatalf("PruneExpired unbounded: %v", err)
+	// And a field the mutation CLEARED must not resurrect through the
+	// preserved copy: ClearHalt writes no halted key at all.
+	if err := store.RecordHalt("why", time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)); err != nil {
+		t.Fatal(err)
 	}
-	state, err = store.Load()
+	if _, err := store.ClearHalt(); err != nil {
+		t.Fatal(err)
+	}
+	written, err = os.ReadFile(path)
 	if err != nil {
-		t.Fatalf("Load: %v", err)
+		t.Fatal(err)
 	}
-	if len(state.RecentMoves) != 1 {
-		t.Fatalf("unbounded window dropped moves: %+v", state.RecentMoves)
+	fields = map[string]json.RawMessage{}
+	if err := json.Unmarshal(written, &fields); err != nil {
+		t.Fatal(err)
 	}
-	if len(state.RefusedUntil) != 0 {
-		t.Fatalf("the expired backoff outlived the clock: %+v", state.RefusedUntil)
+	if _, ok := fields["halted"]; ok {
+		t.Fatalf("cleared halt resurrected through field preservation: %s", written)
+	}
+}
+
+// LOW-5 / #3672: a symlinked record file is a tampering signal — reads
+// refuse to follow it, never load whatever it points at.
+func TestLoadRefusesSymlink(t *testing.T) {
+	dir := t.TempDir()
+	target := filepath.Join(dir, "real.json")
+	if err := os.WriteFile(target, []byte(`{"schema_version": 1, "halted": {"at": "2026-11-06T08:00:00Z", "reason": "x"}}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	link := filepath.Join(dir, "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(link), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink(target, link); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(link).Load(); err == nil {
+		t.Fatal("a symlinked state file was followed")
+	}
+}
+
+// The downgrade round trip with v1.0.345's exact field set: the release
+// models {schema_version, carried_prefix_len, halted} and rewrites only
+// those on every carry — so on downgrade the shared file loses anything
+// extra while the rails file survives untouched. This is why the rails
+// live in their own file (#6776 review).
+func TestDowngradeRoundTripKeepsRailsAndHalt(t *testing.T) {
+	dir := t.TempDir()
+	instances := filepath.Join(dir, "instances")
+	if err := os.MkdirAll(instances, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	statePath := filepath.Join(instances, StateFileName)
+	railsPath := filepath.Join(instances, RailsFileName)
+
+	// A current build's home: records in BOTH files plus a field a future
+	// slice will add.
+	stateRaw := `{"schema_version": 1, "carried_prefix_len": {"/a": 12}, "halted": {"at": "2026-11-06T08:00:00Z", "reason": "x"}, "future_field": true}`
+	if err := os.WriteFile(statePath, []byte(stateRaw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	railsRaw := `{"schema_version": 1, "recent_moves": [{"session_key": "s1", "agent": "codex", "account": "work", "at": "2026-11-06T09:00:00Z"}], "reports_held": {"since": "2026-11-06T09:30:00Z"}}`
+	if err := os.WriteFile(railsPath, []byte(railsRaw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// Simulate v1.0.345's writer: it decodes exactly its field set and
+	// rewrites ONLY that — unknown keys do not survive its mutation.
+	type oldState struct {
+		SchemaVersion   int              `json:"schema_version"`
+		CarriedPrefixes map[string]int64 `json:"carried_prefix_len,omitempty"`
+		Halted          *Halt            `json:"halted,omitempty"`
+	}
+	var old oldState
+	read, err := os.ReadFile(statePath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := json.Unmarshal(read, &old); err != nil {
+		t.Fatal(err)
+	}
+	old.CarriedPrefixes["/b"] = 99 // the carry's watermark write
+	v345Out, err := json.Marshal(old)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(statePath, v345Out, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// The downgrade dropped the future field from the state file — that is
+	// the documented cost — but every modeled field survived, including
+	// the halt.
+	after, err := NewStore(statePath).Load()
+	if err != nil {
+		t.Fatalf("v1.0.345 output does not load on the new build: %v", err)
+	}
+	if after.Halted == nil || after.CarriedPrefixes["/a"] != 12 || after.CarriedPrefixes["/b"] != 99 {
+		t.Fatalf("downgraded state lost modeled records: %+v", after)
+	}
+	var fields map[string]json.RawMessage
+	if err := json.Unmarshal(v345Out, &fields); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := fields["future_field"]; ok {
+		t.Fatal("the old-binary simulation kept an unknown field — the fixture is wrong")
+	}
+
+	// The rails file is untouched — a file the release never opens cannot
+	// lose records to its rewrite.
+	railsRead, err := os.ReadFile(railsPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(railsRead) != railsRaw {
+		t.Fatalf("downgrade touched the rails file: %s", railsRead)
+	}
+	rails, err := NewRailsStore(railsPath, statePath).Load()
+	if err != nil {
+		t.Fatalf("rails did not load after downgrade: %v", err)
+	}
+	if len(rails.RecentMoves) != 1 || rails.RecentMoves[0].Agent != "codex" || rails.ReportsHeld == nil {
+		t.Fatalf("rails records did not survive: %+v", rails)
 	}
 }

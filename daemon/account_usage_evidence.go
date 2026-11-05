@@ -110,7 +110,6 @@ func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
 	if load.Config != nil {
 		wallPercent = load.Config.AccountHandoff.WallPercent
 	}
-	var prefixes map[string]int64
 	store, err := handoff.DefaultStore()
 	if err != nil {
 		return accountLimitProofInput{}, err
@@ -123,11 +122,22 @@ func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
 		// prefix, and the carried bytes are the other account's evidence.
 		return accountLimitProofInput{}, fmt.Errorf("carried-prefix watermarks: %w", err)
 	}
-	prefixes = state.CarriedPrefixes
+	railsStore, err := handoff.DefaultRailsStore()
+	if err != nil {
+		return accountLimitProofInput{}, err
+	}
+	rails, err := railsStore.Load()
+	if err != nil {
+		// Same closed posture for the rails file: its unrecorded-carries
+		// quarantine is the record that a carried rollout's claims cannot
+		// be trusted AT ALL — a corrupt file hides that record, so the
+		// pass cannot know which readings are poison (#6776 review).
+		return accountLimitProofInput{}, fmt.Errorf("handoff rails: %w", err)
+	}
 	return accountLimitProofInput{
 		home:            home,
 		wallPercent:     wallPercent,
-		carriedPrefixes: prefixes,
+		carriedPrefixes: handoff.Snapshot{State: state, Rails: rails}.EffectiveCarriedPrefixes(),
 	}, nil
 }
 

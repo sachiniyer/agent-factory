@@ -17,10 +17,13 @@ type HandoffBackoffEntry struct {
 }
 
 // HandoffMoveEntry is one recorded automatic move — what the switch-loop
-// rail counts per SessionKey and the anti-pile-on credits count per Account.
+// rail counts per SessionKey and the anti-pile-on credits count per
+// Agent + Account (#6776 review: "work" on codex is a different seat than
+// "work" on claude, the same namespacing occupancy counts).
 type HandoffMoveEntry struct {
 	SessionKey string    `json:"session_key"`
 	Title      string    `json:"title,omitempty"`
+	Agent      string    `json:"agent,omitempty"`
 	Account    string    `json:"account"`
 	At         time.Time `json:"at"`
 }
