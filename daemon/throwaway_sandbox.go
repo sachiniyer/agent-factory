@@ -415,12 +415,13 @@ func throwawayPrivateTmuxDir(canonHome string, m *throwawaysandbox.Marker) (stri
 // sharedDirCollision refuses when dir IS a shared directory or an ANCESTOR
 // of one: sockets under an ancestor's subtree include the shared dir itself,
 // so walking/killing through it is the same hazard as naming it. exempt
-// names the marker's own claimed tmux dir — the one shape that is sandbox-
-// owned by construction and must not collide with itself.
+// names the marker's own claimed tmux dir: it and its whole subtree (the
+// tmux-<uid> socket dir derived under it) are sandbox-owned by construction
+// and must not collide with themselves.
 func sharedDirCollision(dir, what, exempt string) string {
 	sep := string(os.PathSeparator)
 	for _, shared := range throwawaySharedDirs() {
-		if shared == exempt {
+		if exempt != "" && (shared == exempt || strings.HasPrefix(shared, exempt+sep)) {
 			continue
 		}
 		if dir == shared || strings.HasPrefix(shared, dir+sep) {
