@@ -2,6 +2,7 @@ package handoff
 
 import (
 	"encoding/json"
+	"fmt"
 	"math"
 	"os"
 	"path/filepath"
@@ -324,7 +325,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(state.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rails.NoteUnrecordedCarry("/rollout-a", time.Now()); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", time.Now()); err != nil {
 		t.Fatalf("the marker must outlive the corrupt watermark file: %v", err)
 	}
 	got := mustLoadRails(t, rails).UnrecordedCarries
@@ -335,7 +336,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 	if err := os.WriteFile(rails.Path(), []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if err := rails.NoteUnrecordedCarry("/rollout-b", time.Now()); err == nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-b", time.Now()); err == nil {
 		t.Fatal("the marker rebuilt over a corrupt rails file")
 	}
 }
@@ -343,7 +344,7 @@ func TestNoteUnrecordedCarryLandsOverACorruptStateFile(t *testing.T) {
 func TestUnrecordedCarriesQuarantineWholeFile(t *testing.T) {
 	rails, state := railsFixture(t)
 	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
-	if err := rails.NoteUnrecordedCarry("/rollout-a", at); err != nil {
+	if _, err := rails.NoteUnrecordedCarry("/rollout-a", at); err != nil {
 		t.Fatalf("NoteUnrecordedCarry: %v", err)
 	}
 	if err := state.RecordCarriedPrefix("/rollout-b", 64); err != nil {
@@ -357,24 +358,81 @@ func TestUnrecordedCarriesQuarantineWholeFile(t *testing.T) {
 	if effective["/rollout-b"] != 64 {
 		t.Fatalf("recorded watermark lost: %v", effective)
 	}
-	// A recorded watermark wins over a stale unrecorded marker — the real
-	// boundary replaces the blanket distrust.
+	// A stale recorded watermark must NOT beat the marker: the carry that
+	// landed after it may have taken fresh source bytes past the recorded
+	// boundary, so the file stays fully poisoned until the watermark write
+	// retires the marker (Codex review on the merge semantics).
 	if err := state.RecordCarriedPrefix("/rollout-a", 128); err != nil {
 		t.Fatal(err)
 	}
 	snap = Snapshot{State: mustLoad(t, state), Rails: mustLoadRails(t, rails)}
-	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != 128 {
-		t.Fatalf("recorded watermark lost to the marker: %d", got)
+	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != math.MaxInt64 {
+		t.Fatalf("stale watermark overrode the quarantine: %d", got)
 	}
-	// And clearing the marker writes nothing when there is none.
+	// Only the explicit retire lifts the distrust — then the recorded
+	// boundary governs again.
 	if err := rails.ClearUnrecordedCarry("/rollout-c"); err != nil {
 		t.Fatal(err)
 	}
 	if err := rails.ClearUnrecordedCarry("/rollout-a"); err != nil {
 		t.Fatal(err)
 	}
+	snap = Snapshot{State: mustLoad(t, state), Rails: mustLoadRails(t, rails)}
+	if got := snap.EffectiveCarriedPrefixes()["/rollout-a"]; got != 128 {
+		t.Fatalf("retired marker still quarantines: %d", got)
+	}
 	if got := mustLoadRails(t, rails).UnrecordedCarries; len(got) != 0 {
 		t.Fatalf("marker survived its clear: %+v", got)
+	}
+}
+
+// At the entry bound the evicted marker is reported, never silently
+// re-trusted — and a file that no longer exists retires before the
+// oldest live one (Codex review on the cap).
+func TestNoteUnrecordedCarryEvictsGoneFilesBeforeTheOldest(t *testing.T) {
+	rails, _ := railsFixture(t)
+	// Seed the file at capacity: one entry whose rollout exists, the rest
+	// naming files that are gone.
+	live := filepath.Join(t.TempDir(), "live.jsonl")
+	if err := os.WriteFile(live, []byte("claim\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	oldest := time.Date(2020, 1, 1, 0, 0, 0, 0, time.UTC)
+	entries := map[string]time.Time{live: oldest}
+	for i := 1; i < unrecordedCarryCap; i++ {
+		entries[fmt.Sprintf("/gone/%d", i)] = oldest.Add(time.Duration(i) * time.Minute)
+	}
+	raw, err := json.Marshal(map[string]any{
+		"schema_version":     1,
+		"unrecorded_carries": entries,
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.MkdirAll(filepath.Dir(rails.Path()), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(rails.Path(), raw, 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	// A marker over capacity retires a GONE file, not the live record.
+	evicted, err := rails.NoteUnrecordedCarry("/new-carry", time.Now())
+	if err != nil {
+		t.Fatalf("NoteUnrecordedCarry: %v", err)
+	}
+	if evicted == "" || evicted == live || evicted == "/new-carry" {
+		t.Fatalf("eviction picked %q — a gone file or the new entry was not chosen", evicted)
+	}
+	got := mustLoadRails(t, rails).UnrecordedCarries
+	if _, ok := got[live]; !ok {
+		t.Fatal("the live rollout's marker was evicted over a dead one")
+	}
+	if _, ok := got["/new-carry"]; !ok {
+		t.Fatal("the carry that just landed lost its own marker")
+	}
+	if len(got) != unrecordedCarryCap {
+		t.Fatalf("quarantine grew past the bound: %d", len(got))
 	}
 }
 

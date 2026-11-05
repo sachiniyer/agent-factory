@@ -123,7 +123,8 @@ func TestHandoffStatus_LabelsLiveSessionsByKey(t *testing.T) {
 // The mode status reports is the one the ENGINE resolved (#6776 review): a
 // personal-project opt-in engages the mover even when the global table says
 // nothing, and reporting the global mode would lie about the policy in
-// force.
+// force. The rail limits travel with it (Codex review): the project's own
+// max_moves bounds its ledger, not the global table's.
 func TestHandoffStatus_ReportsResolvedPersonalProjectMode(t *testing.T) {
 	s := handoffStatusFixture(t, config.AccountHandoffModeOff)
 	// A registered project whose personal [account_handoff] opts in — the
@@ -140,7 +141,7 @@ func TestHandoffStatus_ReportsResolvedPersonalProjectMode(t *testing.T) {
 	require.NoError(t, err)
 	require.NoError(t, os.MkdirAll(filepath.Dir(personal), 0o700))
 	require.NoError(t, os.WriteFile(personal,
-		[]byte("[account_handoff]\nmode = \"shadow\"\n"), 0o600))
+		[]byte("[account_handoff]\nmode = \"shadow\"\nmax_moves = 7\nmax_moves_window = \"2h\"\n"), 0o600))
 	inst := &session.Instance{Title: "opted", ID: "sess-1", Path: repo}
 	s.manager.instances[daemonInstanceKey("repo", "opted")] = inst
 
@@ -148,6 +149,9 @@ func TestHandoffStatus_ReportsResolvedPersonalProjectMode(t *testing.T) {
 	require.NoError(t, s.HandoffStatus(HandoffStatusRequest{}, &resp))
 	require.Equal(t, config.AccountHandoffModeShadow, resp.Mode,
 		"global is off but the session's project opted in — the engine's resolved mode must show")
+	require.Equal(t, 7, resp.MaxMoves,
+		"the ledger's bound is the governed project's, not the global table's")
+	require.Equal(t, "2h", resp.MaxMovesWindow)
 }
 
 // A corrupt record file IS the answer status exists to find — either file

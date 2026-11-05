@@ -138,15 +138,22 @@ func (m *Manager) accountHandoffDiscover() {
 	m.handoffActive.Store(active)
 }
 
-// handoffResolvedMode is the mode the engine actually resolves for the
-// status surface (#6776 review): the global config's mode is the fallback,
-// but a personal-project opt-in engages the mover too, so the answer walks
-// the same session roots accountHandoffDiscover does. An unreadable
-// personal layer cannot silently widen the policy — a resolution failure
-// simply contributes nothing, and the global answer stands.
-func (m *Manager) handoffResolvedMode(global string) string {
-	if cfg := m.Config(); cfg != nil && cfg.AccountHandoffEnabled() {
-		return cfg.AccountHandoff.Mode
+// resolvedHandoffPolicy returns the [account_handoff] table the engine
+// actually runs under (#6776 review): the global table when IT opts in,
+// else the first session root whose resolved config says shadow — the
+// same session-root walk accountHandoffDiscover performs, but carrying
+// the whole table so status reports the rail limits the records are
+// really counted against (Codex review: a personal opt-in's max_moves is
+// not the global one). Several governed roots with differing tables
+// resolve to the FIRST shadow root's policy — the records are per-session
+// anyway; the printed limits are the legend, not the ledger. An
+// unreadable personal layer cannot silently widen the policy — a
+// resolution failure simply contributes nothing, and the global answer
+// stands.
+func (m *Manager) resolvedHandoffPolicy() config.AccountHandoffConfig {
+	global := m.Config()
+	if global != nil && global.AccountHandoffEnabled() {
+		return global.AccountHandoff
 	}
 	m.mu.Lock()
 	roots := make([]string, 0, len(m.instances))
@@ -169,12 +176,15 @@ func (m *Manager) handoffResolvedMode(global string) string {
 			continue
 		}
 		seen[root] = true
-		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, m.Config())
+		cfg, err := config.ResolveConfigForIdentityDecisionFromGlobal(root, global)
 		if err == nil && cfg != nil && cfg.AccountHandoff.Mode == config.AccountHandoffModeShadow {
-			return cfg.AccountHandoff.Mode
+			return cfg.AccountHandoff
 		}
 	}
-	return global
+	if global != nil {
+		return global.AccountHandoff
+	}
+	return config.AccountHandoffConfig{}
 }
 
 // accountHandoffTick is one shadow pass: gather the session inputs from the

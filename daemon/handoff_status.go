@@ -45,18 +45,23 @@ func (s *controlServer) HandoffStatus(_ HandoffStatusRequest, resp *HandoffStatu
 		resp.Warnings = append(resp.Warnings,
 			"the global config could not be read, so the resolved account_handoff.mode is unknown")
 	} else if load.Config != nil {
-		// Status reports the mode the ENGINE actually resolved (#6776
+		// Status reports the policy the ENGINE actually resolved (#6776
 		// review): the global file is only the fallback — a personal-project
-		// opt-in is what engaged the mover, and reporting global "off" while
-		// the engine observes would lie about the policy in force.
-		resp.Mode = load.Config.AccountHandoff.Mode
+		// opt-in is what engaged the mover, and reporting the global table
+		// while the engine observes under a project table would lie about
+		// both the mode and the limits the records are counted against.
+		policy := load.Config.AccountHandoff
 		if s.manager != nil {
-			resp.Mode = s.manager.handoffResolvedMode(resp.Mode)
+			policy = s.manager.resolvedHandoffPolicy()
+			if policy.Mode == "" {
+				policy = load.Config.AccountHandoff
+			}
 		}
-		resp.MaxMoves = load.Config.AccountHandoff.MaxMoves
-		resp.MaxMovesWindow = load.Config.AccountHandoff.MaxMovesWindow
-		resp.RefusedBackoff = load.Config.AccountHandoff.RefusedBackoff
-		resp.OnFailure = load.Config.AccountHandoff.OnFailure
+		resp.Mode = policy.Mode
+		resp.MaxMoves = policy.MaxMoves
+		resp.MaxMovesWindow = policy.MaxMovesWindow
+		resp.RefusedBackoff = policy.RefusedBackoff
+		resp.OnFailure = policy.OnFailure
 	}
 	if state.Halted != nil {
 		resp.Halted = true

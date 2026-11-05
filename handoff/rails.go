@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"os"
 	"path/filepath"
 	"time"
 
@@ -120,8 +121,10 @@ type Snapshot struct {
 // EffectiveCarriedPrefixes merges the recorded watermarks with the
 // unrecorded-carry quarantine: a carried file whose watermark never landed
 // is treated as carried end-to-end (MaxInt64), so no claim inside it can
-// free a wall. A recorded watermark wins over a stale unrecorded marker —
-// the record that landed knows the real boundary.
+// free a wall. The marker always wins over a recorded watermark — the
+// watermark may describe an OLDER carry's boundary while the file has
+// since taken fresh source bytes past it. The marker retires only when a
+// successful watermark write explicitly clears it.
 func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 	var out map[string]int64
 	for path, n := range s.State.CarriedPrefixes {
@@ -134,9 +137,7 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 		if out == nil {
 			out = map[string]int64{}
 		}
-		if _, recorded := out[path]; !recorded {
-			out[path] = math.MaxInt64
-		}
+		out[path] = math.MaxInt64
 	}
 	return out
 }
@@ -527,29 +528,50 @@ func (s *RailsStore) mutateLiftTolerant(fn func(*Rails) error) error {
 // corrupt STATE file: it exists precisely for the home whose watermark
 // file cannot be written, and that file holds no readable records to lose
 // (mutateLiftTolerant). A corrupt rails file still fails closed.
-func (s *RailsStore) NoteUnrecordedCarry(path string, at time.Time) error {
+//
+// At the entry bound an eviction is required; it is reported (never
+// silent — evicting re-trusts a file) and chosen fail-safe-first: a
+// marker whose file no longer exists protects nothing, so gone files
+// retire before the oldest live one.
+func (s *RailsStore) NoteUnrecordedCarry(path string, at time.Time) (evicted string, err error) {
 	if path == "" || at.IsZero() {
-		return fmt.Errorf("unrecorded carry needs a path and a timestamp, got %q / %v", path, at)
+		return "", fmt.Errorf("unrecorded carry needs a path and a timestamp, got %q / %v", path, at)
 	}
-	return s.mutateLiftTolerant(func(rails *Rails) error {
+	err = s.mutateLiftTolerant(func(rails *Rails) error {
 		if rails.UnrecordedCarries == nil {
 			rails.UnrecordedCarries = map[string]time.Time{}
 		}
 		if _, ok := rails.UnrecordedCarries[path]; !ok {
 			rails.UnrecordedCarries[path] = at
 			if len(rails.UnrecordedCarries) > unrecordedCarryCap {
-				var oldest string
-				var oldestAt time.Time
-				for key, keyAt := range rails.UnrecordedCarries {
-					if oldest == "" || keyAt.Before(oldestAt) {
-						oldest, oldestAt = key, keyAt
-					}
-				}
-				delete(rails.UnrecordedCarries, oldest)
+				evicted = evictUnrecordedCarry(rails.UnrecordedCarries, path)
+				delete(rails.UnrecordedCarries, evicted)
 			}
 		}
 		return nil
 	})
+	return evicted, err
+}
+
+// evictUnrecordedCarry picks the marker to retire: a path whose file is
+// gone (quarantining nothing), else the oldest entry — the residual
+// exposure lands on the stalest record, never the carry that just landed
+// (Codex review on the cap).
+func evictUnrecordedCarry(entries map[string]time.Time, keep string) string {
+	var oldest string
+	var oldestAt time.Time
+	for path, at := range entries {
+		if path == keep {
+			continue
+		}
+		if _, err := os.Stat(path); os.IsNotExist(err) {
+			return path
+		}
+		if oldest == "" || at.Before(oldestAt) {
+			oldest, oldestAt = path, at
+		}
+	}
+	return oldest
 }
 
 // ClearUnrecordedCarry retires one quarantine marker — a recorded
