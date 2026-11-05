@@ -1,0 +1,118 @@
+package handoff
+
+import (
+	"os"
+	"path/filepath"
+	"sync"
+	"testing"
+	"time"
+)
+
+func TestLoadMissingFileIsEmptyState(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load on missing file: %v", err)
+	}
+	if state.SchemaVersion != stateSchemaVersion || len(state.CarriedPrefixes) != 0 || state.Halted != nil {
+		t.Fatalf("empty state = %+v", state)
+	}
+}
+
+func TestRecordCarriedPrefixRoundTrip(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	if err := store.RecordCarriedPrefix("/home/fake/.codex/sessions/2026/10/31/rollout-a-00000000-0000-4000-8000-000000000001.jsonl", 4096); err != nil {
+		t.Fatalf("RecordCarriedPrefix: %v", err)
+	}
+	prefixes, err := store.CarriedPrefixes()
+	if err != nil {
+		t.Fatalf("CarriedPrefixes: %v", err)
+	}
+	if got := prefixes["/home/fake/.codex/sessions/2026/10/31/rollout-a-00000000-0000-4000-8000-000000000001.jsonl"]; got != 4096 {
+		t.Fatalf("prefix = %d, want 4096", got)
+	}
+}
+
+func TestCorruptStateFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	store := NewStore(path)
+	if _, err := store.Load(); err == nil {
+		t.Fatal("a corrupt state file loaded cleanly — rails state must fail closed, never rebuild silently")
+	}
+	// A mutation over a corrupt file must also refuse rather than rebuild on
+	// top of it.
+	if err := store.RecordCarriedPrefix("/x", 1); err == nil {
+		t.Fatal("RecordCarriedPrefix rebuilt over a corrupt file")
+	}
+}
+
+func TestWrongSchemaVersionFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, []byte(`{"schema_version": 999}`), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(path).Load(); err == nil {
+		t.Fatal("a state file with a future schema_version loaded cleanly")
+	}
+}
+
+func TestRecordCarriedPrefixValidates(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	if err := store.RecordCarriedPrefix("", 10); err == nil {
+		t.Fatal("empty path recorded")
+	}
+	if err := store.RecordCarriedPrefix("/x", -1); err == nil {
+		t.Fatal("negative length recorded")
+	}
+}
+
+func TestConcurrentMutationsBothSurvive(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			path := filepath.Join("/home/fake/.codex/sessions/2026/10/31/", string(rune('a'+i))+".jsonl")
+			if err := store.RecordCarriedPrefix(path, int64(i+1)); err != nil {
+				t.Errorf("RecordCarriedPrefix %d: %v", i, err)
+			}
+		}(i)
+	}
+	wg.Wait()
+	prefixes, err := store.CarriedPrefixes()
+	if err != nil {
+		t.Fatalf("CarriedPrefixes: %v", err)
+	}
+	if len(prefixes) != 8 {
+		t.Fatalf("prefixes = %v, want 8 entries — a racing mutator was clobbered", prefixes)
+	}
+}
+
+func TestHaltedAtReadsTheRecord(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	haltedAt := time.Date(2026, 10, 31, 4, 0, 0, 0, time.UTC)
+	raw := `{"schema_version": 1, "halted": {"at": "2026-10-31T04:00:00Z", "reason": "move-failed"}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	halt, err := NewStore(path).HaltedAt()
+	if err != nil {
+		t.Fatalf("HaltedAt: %v", err)
+	}
+	if halt == nil || !halt.At.Equal(haltedAt) || halt.Reason != "move-failed" {
+		t.Fatalf("halt = %+v", halt)
+	}
+}
