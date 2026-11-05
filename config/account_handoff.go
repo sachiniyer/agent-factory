@@ -279,6 +279,9 @@ func validateAccountHandoffLeaf(leaf, value string) error {
 			if strings.TrimSpace(entry) == "" {
 				return fmt.Errorf("account_handoff.exclude_sessions[%d] must not be empty", i)
 			}
+			if strings.ContainsAny(entry, "[]\"") {
+				return fmt.Errorf("account_handoff.exclude_sessions[%d] %q: elements cannot contain brackets or quotes; this leaf is comma-separated — use the whole-table JSON form (af config set account_handoff '{\"exclude_sessions\":[\"...\"]}') for titles containing commas or special characters", i, entry)
+			}
 		}
 		return nil
 	default:

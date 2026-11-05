@@ -115,3 +115,66 @@ func TestFormatValueIsTheBareScalarRenderer(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestFormatValueForKeyCommaJoinsCommaListKeys pins the get→set round-trip fix:
+// a cfgStringList leaf (isCommaListKey) renders as the comma-joined form `af
+// config set` accepts back, not JSON — so copy-pasting `af config get` output
+// into `af config set` does not silently corrupt the list.
+func TestFormatValueForKeyCommaJoinsCommaListKeys(t *testing.T) {
+	// A comma-list key renders comma-joined.
+	if got := FormatValueForKey("network.cors_allowed_origins", []string{"https://a.example.com", "https://b.example.com"}); got != "https://a.example.com,https://b.example.com" {
+		t.Fatalf("comma-list key must render comma-joined, got %q", got)
+	}
+	// A dotted subkey that opted into cfgStringList also renders comma-joined.
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("dotted comma-list subkey must render comma-joined, got %q", got)
+	}
+	// An empty comma-list renders as "" (the form that clears via set).
+	if got := FormatValueForKey("network.cors_allowed_origins", []string{}); got != "" {
+		t.Fatalf("empty comma-list must render as empty string, got %q", got)
+	}
+	if got := FormatValueForKey("network.cors_allowed_origins", []string(nil)); got != "" {
+		t.Fatalf("nil comma-list must render as empty string, got %q", got)
+	}
+	// A non-comma-list []string key stays JSON.
+	if got := FormatValueForKey("session_env_passthrough", []string{"FOO", "BAR"}); got != `["FOO","BAR"]` {
+		t.Fatalf("non-comma-list key must stay JSON, got %q", got)
+	}
+	// A scalar key is unchanged.
+	if got := FormatValueForKey("default_program", "claude"); got != "claude" {
+		t.Fatalf("scalar key must render bare, got %q", got)
+	}
+}
+
+// TestFormatExplainValueForKeyCommaJoinsCommaListKeys pins the explain-path
+// counterpart: an empty comma-list shows as `""` (to distinguish it from an
+// absent value), and a non-empty one shows comma-joined.
+func TestFormatExplainValueForKeyCommaJoinsCommaListKeys(t *testing.T) {
+	if got := FormatExplainValueForKey("network.cors_allowed_origins", []string{"https://a.example.com"}); got != "https://a.example.com" {
+		t.Fatalf("non-empty comma-list must render comma-joined, got %q", got)
+	}
+	if got := FormatExplainValueForKey("network.cors_allowed_origins", []string{}); got != `""` {
+		t.Fatalf("empty comma-list must render as %q, got %q", `""`, got)
+	}
+	// A non-comma-list key delegates to FormatExplainValue (JSON for []string).
+	if got := FormatExplainValueForKey("session_env_passthrough", []string{"FOO"}); got != `["FOO"]` {
+		t.Fatalf("non-comma-list key must stay JSON, got %q", got)
+	}
+}
+
+// TestFormatExplainValueForKeyCommaJoinsAnyList pins that the explain trace's
+// candidate values — which arrive as []any (from map[string]any TOML decode)
+// rather than []string — also render comma-joined for a cfgStringList key, so
+// the effective value and the candidate values in the --explain trace agree.
+func TestFormatExplainValueForKeyCommaJoinsAnyList(t *testing.T) {
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []any{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("[]any comma-list must render comma-joined, got %q", got)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("[]any comma-list must render comma-joined, got %q", got)
+	}
+	// A []any with non-string elements falls back to JSON (not a string list).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{1, 2}); got != `[1,2]` {
+		t.Fatalf("non-string []any must fall back to JSON, got %q", got)
+	}
+}

@@ -953,6 +953,9 @@ Settable keys:
   account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
                              prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
                              max_moves_window, refused_backoff, on_failure, report_to
+  account_handoff.exclude_sessions  comma-separated session titles to exclude from automatic handoff, or "" to clear —
+                             the whole list is replaced; elements cannot contain commas, brackets, or quotes (use the
+                             whole-table JSON form for titles containing those characters)
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)

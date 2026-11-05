@@ -129,6 +129,12 @@ func ExplainGlobalValue(keyPath string) (ResolvedValue, error) {
 // composites as compact JSON. It is the one renderer the CLI's get/list output,
 // --explain's values, and the TUI explain view share, so no surface spells the
 // same value differently.
+//
+// FormatValueForKey is the key-aware counterpart: a cfgStringList leaf
+// (isCommaListKey) renders as the comma-joined form `af config set` accepts back
+// rather than JSON, so a get→set round-trip does not silently corrupt the list.
+// Use FormatValueForKey anywhere the key is known; FormatValue remains the
+// fallback when it is not (and for non-comma-list keys the two are identical).
 func FormatValue(v any) string {
 	switch x := v.(type) {
 	case string:
@@ -146,6 +152,22 @@ func FormatValue(v any) string {
 	}
 }
 
+// FormatValueForKey renders a resolved config value for human output, keyed off
+// the config key so a cfgStringList leaf (isCommaListKey) renders as the
+// comma-joined form `af config set` accepts back rather than JSON. For every
+// other key it is identical to FormatValue. It is the renderer `af config get`
+// and `af config list` use for a typed value whose key is known, so a get→set
+// round-trip is byte-identical for comma-list keys (cors_allowed_origins,
+// allowed_hosts, limit_account_candidates, account_handoff.exclude_sessions).
+func FormatValueForKey(key string, v any) string {
+	if isCommaListKey(key) {
+		if joined, ok := commaJoinStringList(v); ok {
+			return joined
+		}
+	}
+	return FormatValue(v)
+}
+
 // FormatExplainValue renders a value inside an explanation: an explicitly
 // configured empty string stays visible as `""` — a bare blank would read as
 // absent — while everything else prints as FormatValue.
@@ -154,6 +176,45 @@ func FormatExplainValue(value any) string {
 		return `""`
 	}
 	return FormatValue(value)
+}
+
+// FormatExplainValueForKey is the key-aware counterpart of FormatExplainValue: a
+// cfgStringList leaf (isCommaListKey) renders as the comma-joined form (with an
+// empty list shown as `""` to distinguish it from an absent value) rather than
+// JSON, so the explain trace and the concise get output agree. For every other
+// key it is identical to FormatExplainValue.
+func FormatExplainValueForKey(key string, value any) string {
+	if isCommaListKey(key) {
+		if joined, ok := commaJoinStringList(value); ok {
+			if joined == "" {
+				return `""`
+			}
+			return joined
+		}
+	}
+	return FormatExplainValue(value)
+}
+
+// commaJoinStringList renders a []string or []any-of-strings as a comma-joined
+// string. The explain trace's candidate values come from map[string]any (TOML
+// decode) which produces []any rather than []string, so both spellings are
+// accepted. ok is false for any other type, leaving the caller to its fallback.
+func commaJoinStringList(v any) (string, bool) {
+	switch list := v.(type) {
+	case []string:
+		return strings.Join(list, ","), true
+	case []any:
+		parts := make([]string, len(list))
+		for i, elem := range list {
+			s, ok := elem.(string)
+			if !ok {
+				return "", false
+			}
+			parts[i] = s
+		}
+		return strings.Join(parts, ","), true
+	}
+	return "", false
 }
 
 // UnknownConfigKeyError reports a key no manifest entry or root_agent leaf can
