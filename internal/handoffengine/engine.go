@@ -177,13 +177,17 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		return len(gov), fmt.Errorf("load handoff state: %w", err)
 	}
 
-	// Occupancy is the governed set's own count, per agent-namespace account
-	// — live sessions only: retained selections on dead/archived rows must
-	// not skew the emptiest-order tiebreak (#6817 review).
+	// Occupancy counts EVERY started, live session's account, per
+	// agent-namespace account — including sessions in projects that never
+	// opted in (#6817 round-3 review). An opted-out session still consumes
+	// the same registered account, so under target_order="emptiest" a
+	// candidate busy in another project must not read as empty. Live
+	// sessions only: retained selections on dead/archived rows must not
+	// skew the tiebreak either.
 	occupancy := map[string]int{}
-	for _, g := range gov {
-		if g.in.Account != "" && g.in.Started && g.in.Live {
-			occupancy[g.in.Agent+"\x00"+g.in.Account]++
+	for _, in := range sessions {
+		if in.Account != "" && in.Started && in.Live {
+			occupancy[in.Agent+"\x00"+in.Account]++
 		}
 	}
 
