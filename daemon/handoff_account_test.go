@@ -67,6 +67,27 @@ func TestHandoffAccountRefusesUnknownTarget(t *testing.T) {
 	require.ErrorContains(t, err, `account "missing" is not registered for claude`)
 }
 
+// TestHandoffAccountRefusesVSCodeTabNamingReasonAndRemedy is the #6773 property
+// for the manual swap's one hard boundary: a VS Code tab's integrated terminals
+// read shell startup files, so af cannot prove the identity boundary
+// (vscode_account_env.go). The refusal must say that AND name the way out —
+// closing the tab — rather than a bare "cannot switch accounts".
+func TestHandoffAccountRefusesVSCodeTabNamingReasonAndRemedy(t *testing.T) {
+	m, repo, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, m, "personal")
+	inst.Account = "work"
+	inst.ClearLimitReached()
+	_, err := inst.AddVSCodeTab("editor")
+	require.NoError(t, err)
+
+	_, err = m.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repo, Account: "personal"})
+	require.ErrorContains(t, err, "VS Code tab")
+	require.ErrorContains(t, err, "identity boundary",
+		"the manual refusal must carry the same reason the automatic one states")
+	require.ErrorContains(t, err, "close the VS Code tab",
+		"the refusal must name the remedy, not just the reason")
+}
+
 func TestHandoffAccountRefusesWalledTarget(t *testing.T) {
 	m, repo, inst, backend := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, m, "personal")

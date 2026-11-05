@@ -828,6 +828,60 @@ func TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry(t *testing.T) {
 	require.ErrorContains(t, busy.ValidateHandoffRuntimeAction("", "work"), "busy")
 }
 
+// TestPendingAccountSwapRefusalsNameAccountsAndRetry is the #6773 property for
+// the committed-swap fence: every refusal on the same condition must say why
+// AND what to do next. The next step is the one request the fence admits — a
+// handoff naming the swap's committed account
+// (TestPendingAccountSwapHandoffAdmitsOnlySameTargetRetry) — so each refusal
+// names that retry with the accounts it commits between, instead of "retry
+// that account swap" with neither spelled out.
+func TestPendingAccountSwapRefusalsNameAccountsAndRetry(t *testing.T) {
+	newPending := func() *Instance {
+		inst := accountSwapTestInstance("claude")
+		_, err := inst.SelectAccountForHandoff("work", "personal", "claude", "claude", false, HandoffReasonManual, "", "continue the mission")
+		require.NoError(t, err)
+		inst.inFlightOp = OpNone
+		return inst
+	}
+
+	for _, tc := range []struct {
+		name   string
+		refuse func(*Instance) error
+	}{
+		{"archive", func(i *Instance) error { return i.Transition(BeginArchive()) }},
+		{"lifecycle action", func(i *Instance) error { return i.ValidateRuntimeAction(RuntimeActionHandoff) }},
+		{"tab spawn", func(i *Instance) error { return i.TabSpawnBlocked() }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			err := tc.refuse(newPending())
+			require.Error(t, err)
+			require.Contains(t, err.Error(), `"work"`,
+				"the refusal must name the committed swap's outgoing account")
+			require.Contains(t, err.Error(), `"personal"`,
+				"the refusal must name the committed swap's target account")
+			require.Contains(t, err.Error(), "af sessions handoff swap --account personal",
+				"the refusal must name the one request that discharges the committed swap")
+		})
+	}
+}
+
+// TestPendingAccountSwapRefusalNamesAmbientSource covers the same refusal when
+// the committed swap leaves the ambient identity: From is empty there, and the
+// message must still say where the identity is coming FROM rather than quoting
+// an empty string.
+func TestPendingAccountSwapRefusalNamesAmbientSource(t *testing.T) {
+	inst := accountSwapTestInstance("claude")
+	_, err := inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	inst.inFlightOp = OpNone
+
+	err = inst.ValidateRuntimeAction(RuntimeActionHandoff)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "ambient",
+		"a swap out of the ambient identity must still name its source")
+	require.Contains(t, err.Error(), "af sessions handoff swap --account work")
+}
+
 type captureAccountSwapEnvironmentPty struct {
 	cmd *exec.Cmd
 }

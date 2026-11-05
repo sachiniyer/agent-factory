@@ -78,6 +78,28 @@ func TestAdmitAccountSwapRefusesUnreadablePersonalIdentityPolicy(t *testing.T) {
 	}
 }
 
+// TestAdmitAccountSwapRefusesVSCodeTabNamingReasonAndRemedy is the #6773
+// property for the automatic swap's one hard boundary: the refusal already
+// states the reason (integrated login shells can override the selected account
+// from shell startup files, so af cannot prove their identity boundary), and it
+// must also say what to do next — close the tab so the swap can proceed —
+// rather than reporting a bare dead end.
+func TestAdmitAccountSwapRefusesVSCodeTabNamingReasonAndRemedy(t *testing.T) {
+	manager, _, inst, _ := newAutoResumeManager(t, "", true, "continue", time.Now().Add(time.Hour))
+	configureLimitAccountCandidate(t, manager, "work")
+	_, err := inst.AddVSCodeTab("editor")
+	require.NoError(t, err)
+	require.NoError(t, inst.BeginLimitResume())
+	defer inst.EndLimitResume()
+
+	_, err = manager.admitAccountSwap(inst, manager.Config())
+	require.ErrorContains(t, err, "VS Code tab")
+	require.ErrorContains(t, err, "identity boundary",
+		"the automatic refusal must state the reason the boundary cannot be proven")
+	require.ErrorContains(t, err, "close the VS Code tab",
+		"the refusal must name the remedy, not just the reason")
+}
+
 func TestResumeLimitedSessions_SwapsAmbientSessionToConfiguredUnblockedAccount(t *testing.T) {
 	advance := withFrozenClock(t)
 	base := nowFunc()
