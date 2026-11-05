@@ -34,7 +34,9 @@
 //     af can scope.
 //   - output is size-capped (the tail, where a wall message lands), treated
 //     as data for the wall scan, and never logged or carried on a verdict.
-//   - a hard timeout kills the child; timeout is Unknown, never Walled.
+//   - a hard timeout kills the child (and WaitDelay bounds the post-kill
+//     wait on inherited pipes); the deadline is checked before any positive
+//     read — timeout is Unknown, unconditionally, never Walled.
 //   - executions are single-flight per account, capped globally, and always
 //     on a worker goroutine — never the caller's (poll) goroutine.
 //
@@ -167,6 +169,10 @@ const (
 	defaultMaxInFlight   = 8
 	outputCap            = 32 << 10 // captured tail, bytes
 	messageFileCap       = 64 << 10 // success-token file read bound, bytes
+	// waitDelay bounds the post-exit wait on inherited output pipes: a
+	// descendant holding stdout open cannot stall Run past this once the
+	// child is dead or the deadline has fired.
+	waitDelay = 5 * time.Second
 )
 
 // scrubbedEnvNames are removed from the base environment before the account
@@ -379,10 +385,13 @@ func (p *AgentProbe) work(key, account string, f *flight) {
 
 // execProbe is the one bounded, synchronous run. Everything it can produce is
 // a Verdict: refusals and infrastructure failures are Unknown of a class,
-// never a Go error a caller could drop.
-func (p *AgentProbe) execProbe(account string) Verdict {
+// never a Go error a caller could drop. The verdict stamps at completion —
+// the TTL measures how fresh the evidence IS, so At belongs to the moment the
+// run produced it, not the moment the request arrived.
+func (p *AgentProbe) execProbe(account string) (v Verdict) {
 	r := p.runner
-	v := Verdict{Kind: KindUnknown, At: r.now()}
+	v = Verdict{Kind: KindUnknown}
+	defer func() { v.At = r.now() }()
 
 	if account == "" {
 		v.Class = ClassRefused
@@ -433,11 +442,25 @@ func (p *AgentProbe) execProbe(account string) Verdict {
 	c := exec.CommandContext(ctx, p.spec.argv[0], p.spec.argv[1:]...)
 	c.Dir = runDir
 	c.Env = env
+	// CommandContext kills the direct child at the deadline, but Run can then
+	// still hang on the output-copy goroutine if a descendant inherited the
+	// pipes — with no WaitDelay the hard timeout would not bound the wait at
+	// all and stuck runs could exhaust the global cap. The bound is on af's
+	// side of the wait; the descendant is the CLI's own problem.
+	c.WaitDelay = waitDelay
 	tail := newTailWriter(outputCap)
 	c.Stdout = tail
 	c.Stderr = tail
 	runErr := r.exec.Run(c)
 
+	// A run the deadline had to kill proves nothing — not the wall its
+	// captured tail happens to show, and not the turn a last-write file
+	// claims. Timeout is Unknown unconditionally: that ordering is the
+	// contract this boundary exists to keep.
+	if errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		v.Class = ClassTimeout
+		return v
+	}
 	// The success token is a FILE, not output text: the CLI writes its final
 	// message to the af-named path under the private cwd, so a completed
 	// turn is proven structurally rather than scraped from prose. The file
@@ -453,8 +476,6 @@ func (p *AgentProbe) execProbe(account string) Verdict {
 		return v
 	}
 	switch {
-	case errors.Is(ctx.Err(), context.DeadlineExceeded):
-		v.Class = ClassTimeout
 	case runErr != nil:
 		var exitErr *exec.ExitError
 		if errors.As(runErr, &exitErr) {

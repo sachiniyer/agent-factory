@@ -22,9 +22,10 @@ import (
 // tests ever spawns a real agent CLI: the probe's contract is proven against
 // the exec.Cmd it BUILDS (argv, env, cwd, writer caps), not against a provider.
 type recordedRun struct {
-	args []string
-	env  []string
-	dir  string
+	args      []string
+	env       []string
+	dir       string
+	waitDelay time.Duration
 }
 
 type fakeExec struct {
@@ -39,9 +40,10 @@ type fakeExec struct {
 func (f *fakeExec) Run(c *exec.Cmd) error {
 	f.mu.Lock()
 	f.calls = append(f.calls, recordedRun{
-		args: append([]string(nil), c.Args...),
-		env:  append([]string(nil), c.Env...),
-		dir:  c.Dir,
+		args:      append([]string(nil), c.Args...),
+		env:       append([]string(nil), c.Env...),
+		dir:       c.Dir,
+		waitDelay: c.WaitDelay,
 	})
 	f.inFlight++
 	if f.inFlight > f.maxSeen {
@@ -274,23 +276,67 @@ func TestProbe_RefusesDefaultLogin(t *testing.T) {
 	require.Equal(t, 0, fx.numCalls(), "a refused probe must never exec")
 }
 
-// A hard timeout is Unknown, never Walled: a killed probe is the absence of
-// evidence, not evidence of a wall.
+// A hard timeout is Unknown, never Walled — unconditionally: a killed probe
+// is the absence of evidence, and the deadline is checked before the token
+// file and the wall scan, so a run that shows the banner or even writes the
+// token and then hangs past its deadline still reads timeout.
 func TestProbe_TimeoutIsUnknownNeverWalled(t *testing.T) {
-	fx := &fakeExec{runFn: func(c *exec.Cmd) error {
-		_, _ = c.Stdout.Write([]byte("thinking\nsome ordinary output\n"))
-		time.Sleep(2 * time.Second)
-		return nil
-	}}
-	r, _ := newTestRunner(t, fx, []string{"PATH=/usr/bin"}, func(o *Options) {
-		o.Timeout = 50 * time.Millisecond
-	})
+	for _, tc := range []struct {
+		name  string
+		runFn func(c *exec.Cmd) error
+	}{
+		{
+			name: "ordinary output",
+			runFn: func(c *exec.Cmd) error {
+				_, _ = c.Stdout.Write([]byte("thinking\nsome ordinary output\n"))
+				time.Sleep(300 * time.Millisecond)
+				return nil
+			},
+		},
+		{
+			name: "wall banner in the tail",
+			runFn: func(c *exec.Cmd) error {
+				_, _ = c.Stderr.Write([]byte("You've hit your usage limit. Try again at Nov 6, 2026 3:30 PM.\n"))
+				time.Sleep(300 * time.Millisecond)
+				return nil
+			},
+		},
+		{
+			name: "success token written",
+			runFn: func(c *exec.Cmd) error {
+				writeSuccess(c, "ok")
+				time.Sleep(300 * time.Millisecond)
+				return nil
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			fx := &fakeExec{runFn: tc.runFn}
+			r, _ := newTestRunner(t, fx, []string{"PATH=/usr/bin"}, func(o *Options) {
+				o.Timeout = 50 * time.Millisecond
+			})
+			p, ok := r.AccountProbe("codex")
+			require.True(t, ok)
+
+			v := collect(t, p.Request("work"))
+			require.Equal(t, KindUnknown, v.Kind)
+			require.Equal(t, ClassTimeout, v.Class)
+		})
+	}
+}
+
+// The hard timeout bounds the whole wait, not just the direct child's life:
+// WaitDelay keeps a descendant holding the output pipes open from stalling
+// Run — and its semaphore slot — forever.
+func TestProbe_BoundsPostKillPipeWait(t *testing.T) {
+	fx := &fakeExec{runFn: func(c *exec.Cmd) error { return nil }}
+	r, _ := newTestRunner(t, fx, []string{"PATH=/usr/bin"}, nil)
 	p, ok := r.AccountProbe("codex")
 	require.True(t, ok)
 
-	v := collect(t, p.Request("work"))
-	require.Equal(t, KindUnknown, v.Kind)
-	require.Equal(t, ClassTimeout, v.Class)
+	collect(t, p.Request("work"))
+	require.Equal(t, waitDelay, fx.call(0).waitDelay,
+		"WaitDelay must bound the wait on inherited pipes after a kill")
 }
 
 // Output is capped and treated as data. The cap keeps the TAIL, where the
@@ -331,15 +377,21 @@ func TestProbe_OutputCappedToTail(t *testing.T) {
 }
 
 // Single-flight: concurrent requests for one account join one exec and share
-// its verdict; the TTL cache then serves repeats without any exec at all.
+// its verdict; the TTL cache then serves repeats without any exec at all. The
+// verdict stamps at completion — a two-second run's verdict is dated by when
+// it finished, not when it was asked for, so the TTL measures real freshness.
 func TestProbe_SingleFlightPerAccountAndTTLCache(t *testing.T) {
 	release := make(chan struct{})
-	fx := &fakeExec{
-		release: release,
-		runFn:   func(c *exec.Cmd) error { writeSuccess(c, "ok\n"); return nil },
-	}
 	now := time.Now()
 	clock := func() time.Time { return now }
+	fx := &fakeExec{
+		release: release,
+		runFn: func(c *exec.Cmd) error {
+			now = now.Add(2 * time.Second) // the run took two seconds
+			writeSuccess(c, "ok\n")
+			return nil
+		},
+	}
 	r, _ := newTestRunner(t, fx, []string{"PATH=/usr/bin"}, func(o *Options) {
 		o.Now = clock
 		o.TTL = time.Minute
@@ -350,12 +402,15 @@ func TestProbe_SingleFlightPerAccountAndTTLCache(t *testing.T) {
 	chA := p.Request("work")
 	chB := p.Request("work")
 	close(release)
-	require.Equal(t, collect(t, chA), collect(t, chB))
+	vA := collect(t, chA)
+	require.Equal(t, vA, collect(t, chB))
+	require.True(t, vA.At.Equal(now), "verdict must stamp at completion, not at request time")
 	require.Equal(t, 1, fx.numCalls(), "two requests for one account must share one exec")
 
 	// Inside the TTL the verdict is served from cache — no second exec.
 	v := collect(t, p.Request("work"))
 	require.Equal(t, KindHealthy, v.Kind)
+	require.Equal(t, vA, v)
 	require.Equal(t, 1, fx.numCalls())
 
 	// Past the TTL the evidence is stale and the probe runs again.
