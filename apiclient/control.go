@@ -116,16 +116,18 @@ func (c *Client) PruneSessions(req daemon.PruneSessionsRequest) (daemon.PruneSes
 
 // ResumeFromLimit asks the daemon to resume a usage-limit-blocked session
 // (#1146) — the action behind the TUI's `c` key and the web's Retry button.
-// The CLI reaches the same public handler over its gob control transport.
-func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
+// The CLI reaches the same public handler over its gob control transport. The
+// response travels with the error so its conversation outcome (#6768) survives
+// the not-performed and committed paths.
+func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 	var resp daemon.ResumeFromLimitResponse
 	if err := c.call("ResumeFromLimit", req, &resp); err != nil {
-		return err
+		return resp, err
 	}
 	if !resp.OK {
-		return fmt.Errorf("resume was not performed: %s", resp.Reason)
+		return resp, fmt.Errorf("resume was not performed: %s", resp.Reason)
 	}
-	return nil
+	return resp, nil
 }
 
 // ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
@@ -134,19 +136,19 @@ func (c *Client) ResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
 // supported way out of a startup-unknown wedge. It never resends: a daemon
 // predating the verb refuses loudly (route not served) rather than run a retry
 // against a mission that may already be executing.
-func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) error {
+func (c *Client) ConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) (daemon.ConfirmHandoffDeliveryResponse, error) {
 	var resp daemon.ConfirmHandoffDeliveryResponse
 	err := c.call("ConfirmHandoffDelivery", req, &resp)
 	if IsRouteNotServed(err) {
-		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+		return resp, fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
 	}
 	if err != nil {
-		return err
+		return resp, err
 	}
 	if !resp.OK {
-		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+		return resp, fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
 	}
-	return nil
+	return resp, nil
 }
 
 // HandoffSession asks the daemon to continue a session under a different agent,

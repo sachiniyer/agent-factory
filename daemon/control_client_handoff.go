@@ -15,16 +15,18 @@ var ErrAccountHandoffUnsupported = errors.New("daemon does not serve the version
 // ResumeFromLimit asks the daemon to retry a session parked at a usage-limit
 // wall. The TUI and web reach the identical controlServer handler over HTTP;
 // this wrapper gives the CLI its existing gob-control-socket transport without
-// duplicating the recovery action.
-func ResumeFromLimit(req ResumeFromLimitRequest) error {
+// duplicating the recovery action. The response is returned with the error so
+// a caller can still read its conversation outcome (#6768) — including on the
+// not-performed and committed paths, where the envelope still answers it.
+func ResumeFromLimit(req ResumeFromLimitRequest) (ResumeFromLimitResponse, error) {
 	var resp ResumeFromLimitResponse
 	if err := callDaemon("ResumeFromLimit", req, &resp); err != nil {
-		return err
+		return resp, err
 	}
 	if !resp.OK {
-		return fmt.Errorf("resume was not performed: %s", resp.Reason)
+		return resp, fmt.Errorf("resume was not performed: %s", resp.Reason)
 	}
-	return nil
+	return resp, nil
 }
 
 // ConfirmHandoffDelivery asks the daemon to retire a pending handoff mission
@@ -32,19 +34,19 @@ func ResumeFromLimit(req ResumeFromLimitRequest) error {
 // delivered" exit for a sent-unverified or could-not-confirm verdict. A
 // pre-verb daemon cannot serve the method; isRPCMethodMissing surfaces that as
 // a clean refusal rather than a silent retry.
-func ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) error {
+func ConfirmHandoffDelivery(req ConfirmHandoffDeliveryRequest) (ConfirmHandoffDeliveryResponse, error) {
 	var resp ConfirmHandoffDeliveryResponse
 	err := callDaemon("ConfirmHandoffDelivery", req, &resp)
 	if isRPCMethodMissing(err) {
-		return fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
+		return resp, fmt.Errorf("this daemon does not support confirming a handoff delivery (upgrade the daemon), so the pending mission was left untouched")
 	}
 	if err != nil {
-		return err
+		return resp, err
 	}
 	if !resp.OK {
-		return fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
+		return resp, fmt.Errorf("delivery was not confirmed: %s", resp.Reason)
 	}
-	return nil
+	return resp, nil
 }
 
 // HandoffSession asks the daemon to continue a session under a different agent,

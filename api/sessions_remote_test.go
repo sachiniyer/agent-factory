@@ -53,7 +53,8 @@ func TestRoutedLifecycleVerbsReachRemoteTarget(t *testing.T) {
 	st, err := routedSendPrompt(daemon.SendPromptRequest{Title: "a", Prompt: "hi"})
 	require.NoError(t, err)
 	require.Equal(t, session.PromptDelivered, st)
-	require.NoError(t, routedResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "a"}))
+	_, err = routedResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "a"})
+	require.NoError(t, err)
 
 	mu.Lock()
 	defer mu.Unlock()
@@ -79,7 +80,7 @@ func TestRoutedMutationUncertainOutcomeIsNamed(t *testing.T) {
 	apiclient.FlagDaemonURL = srv.URL
 	t.Cleanup(func() { apiclient.FlagDaemonURL = oldURL })
 
-	err := routedResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "a"})
+	_, err := routedResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "a"})
 	require.Error(t, err)
 	require.Contains(t, err.Error(), "outcome")
 	require.Contains(t, err.Error(), "not re-sent")

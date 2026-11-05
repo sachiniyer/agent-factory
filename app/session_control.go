@@ -349,7 +349,8 @@ var rebindProjectThroughDaemon = func(projectID, expectedRoot, expectedCheckoutI
 // daemon.
 var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		return c.ResumeFromLimit(request)
+		_, err := c.ResumeFromLimit(request)
+		return err
 	})
 }
 
@@ -359,7 +360,8 @@ var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) e
 // app test suite can stub it without dialing a real daemon.
 var confirmHandoffDeliveryThroughDaemon = func(request daemon.ConfirmHandoffDeliveryRequest) error {
 	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		return c.ConfirmHandoffDelivery(request)
+		_, err := c.ConfirmHandoffDelivery(request)
+		return err
 	})
 }
 

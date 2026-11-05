@@ -271,7 +271,7 @@ func TestControlRoundTrips(t *testing.T) {
 		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.ResumeFromLimitResponse{OK: true})
 		})
-		if err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err != nil {
+		if _, err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err != nil {
 			t.Fatalf("ResumeFromLimit: %v", err)
 		}
 	})
@@ -279,7 +279,7 @@ func TestControlRoundTrips(t *testing.T) {
 		c := routeServer(t, "ResumeFromLimit", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.ResumeFromLimitResponse{Reason: "another operation owns the retry"})
 		})
-		if err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err == nil {
+		if _, err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"}); err == nil {
 			t.Fatal("ResumeFromLimit must not report success when the daemon performed no retry")
 		}
 	})
@@ -292,7 +292,7 @@ func TestControlRoundTrips(t *testing.T) {
 				},
 			})
 		})
-		err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"})
+		_, err := c.ResumeFromLimit(daemon.ResumeFromLimitRequest{Title: "alpha"})
 		if !IsMutationCommitted(err) {
 			t.Fatalf("ResumeFromLimit error = %T %v, want committed warning", err, err)
 		}

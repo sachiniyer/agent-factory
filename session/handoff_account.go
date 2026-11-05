@@ -526,6 +526,7 @@ func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 	// Retire the launch plan with the transaction, as ClearPendingAccountSwap
 	// does: tabSpawnBlockedLocked refuses on either, so leaving the plan behind
 	// would keep new tabs refused until the daemon restarted.
+	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
 	i.accountSwapLaunch = nil
 	// The confirmed mission is work the incoming agent already has (#5023):

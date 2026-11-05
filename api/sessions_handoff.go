@@ -58,6 +58,13 @@ made, the new account starts a fresh conversation, and its brief says why. An
 off-box (listed-host sandbox) account swap cannot reach the previous account's
 transcript and always starts a fresh conversation with a notice saying why.
 
+The output's conversation object reports the same outcome to the caller:
+carried=true when the transcript was copied and resumed, or carried=false
+with carry_failure naming why the replacement starts fresh — a copy that
+could not be made, a sandbox store af cannot reach, or a different program
+that cannot read its predecessor's transcript. A completed handoff's ledger
+entry keeps the same answer under 'af sessions get'.
+
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
@@ -120,11 +127,12 @@ Examples:
 		}
 
 		output := map[string]any{
-			"ok":       true,
-			"title":    title,
-			"from":     resp.From,
-			"to":       resp.To,
-			"head_sha": resp.HeadSHA,
+			"ok":           true,
+			"title":        title,
+			"from":         resp.From,
+			"to":           resp.To,
+			"head_sha":     resp.HeadSHA,
+			"conversation": resp.Conversation,
 		}
 		if warning != "" {
 			output["warning"] = warning

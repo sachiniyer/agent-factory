@@ -99,28 +99,30 @@ func routedSendPrompt(req daemon.SendPromptRequest) (session.PromptDeliveryStatu
 	return st, remoteMutationError("send-prompt", err)
 }
 
-func routedResumeFromLimit(req daemon.ResumeFromLimitRequest) error {
+func routedResumeFromLimit(req daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.ResumeFromLimit(req)
 	}
 	c, err := remoteSessionClient()
 	if err != nil {
-		return err
+		return daemon.ResumeFromLimitResponse{}, err
 	}
 	defer c.CloseIdleConnections()
-	return remoteMutationError("retry-limit", c.ResumeFromLimit(req))
+	resp, err := c.ResumeFromLimit(req)
+	return resp, remoteMutationError("retry-limit", err)
 }
 
-func routedConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) error {
+func routedConfirmHandoffDelivery(req daemon.ConfirmHandoffDeliveryRequest) (daemon.ConfirmHandoffDeliveryResponse, error) {
 	if !apiclient.IsRemoteTarget() {
 		return daemon.ConfirmHandoffDelivery(req)
 	}
 	c, err := remoteSessionClient()
 	if err != nil {
-		return err
+		return daemon.ConfirmHandoffDeliveryResponse{}, err
 	}
 	defer c.CloseIdleConnections()
-	return remoteMutationError("retry-limit --delivered", c.ConfirmHandoffDelivery(req))
+	resp, err := c.ConfirmHandoffDelivery(req)
+	return resp, remoteMutationError("retry-limit --delivered", err)
 }
 
 func routedHandoffSession(req daemon.HandoffSessionRequest) (daemon.HandoffSessionResponse, error) {

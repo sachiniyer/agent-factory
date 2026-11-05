@@ -2540,6 +2540,13 @@ made, the new account starts a fresh conversation, and its brief says why. An
 off-box (listed-host sandbox) account swap cannot reach the previous account's
 transcript and always starts a fresh conversation with a notice saying why.
 
+The output's conversation object reports the same outcome to the caller:
+carried=true when the transcript was copied and resumed, or carried=false
+with carry_failure naming why the replacement starts fresh — a copy that
+could not be made, a sandbox store af cannot reach, or a different program
+that cannot read its predecessor's transcript. A completed handoff's ledger
+entry keeps the same answer under 'af sessions get'.
+
 This is the answer to an agent that has stopped and cannot continue — most often
 one blocked at its provider's usage limit, where the alternative is waiting for
 the window to reset (see 'af sessions list' for a [limit] badge, and
@@ -2838,6 +2845,13 @@ mission a second time.
 The command fails when neither recovery obligation exists. Use 'af sessions
 list' to find sessions carrying the [limit] badge; the TUI and web expose
 Retry handoff and Mark delivered for an unconfirmed handoff.
+
+The output's conversation object says whether the agent serving the session
+afterwards can read its previous conversation: carried=true when the retry
+resumed it (the committed account swap's carry, the recorded conversation id,
+or a worktree-scoped resume), or carried=false with carry_failure naming why
+it starts fresh — including a retry that had no recorded conversation id to
+resume and came up clean rather than guessing at the account's latest.
 
 Example:
   af sessions retry-limit fix-auth

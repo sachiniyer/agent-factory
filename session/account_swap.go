@@ -720,6 +720,7 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 	if i.pendingAccountSwap == nil || i.pendingAccountSwap.From != from || i.pendingAccountSwap.To != to {
 		return false
 	}
+	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
 	// The notice was just delivered, so the agent's new work ends the run on
 	// its own idle edge — see ClearPendingHandoffMission for why a held edge

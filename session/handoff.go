@@ -56,6 +56,13 @@ type AgentHandoff struct {
 	// reading a ledger written by a future af still learns whether a human was in
 	// the loop, rather than inferring it from the af version.
 	Automatic bool `json:"automatic,omitempty"`
+	// Conversation is what the incoming agent can read of the outgoing
+	// conversation: the carry a same-agent account swap committed, or the reason
+	// it starts fresh. Written when the swap's delivery obligation retires — the
+	// outcome is only final once no re-plan can still demote it — so a recorded
+	// entry answers the handoff's conversation question after the pending record
+	// is gone (#6768).
+	Conversation HandoffConversation `json:"conversation,omitzero"`
 }
 
 // HandoffSwap is the process-local transaction token returned when the ledger

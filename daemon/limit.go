@@ -227,6 +227,13 @@ type ResumeFromLimitRequest struct {
 type ResumeFromLimitResponse struct {
 	OK     bool   `json:"ok"`
 	Reason string `json:"reason,omitempty"`
+	// Conversation is what the agent serving the session after the retry can
+	// read of its previous conversation (#6768): the carry a committed account
+	// swap landed, the previous conversation a re-spawn resumed by id or
+	// worktree scope, or the reason it starts fresh — including the
+	// no-recorded-id fresh start the re-spawn could only log before. It is
+	// independent of OK, which still says whether the resume was performed.
+	Conversation session.HandoffConversation `json:"conversation"`
 	// An explicit handoff retry can deliver its mission before the final
 	// settlement checkpoint fails. Carry that committed outcome structurally so
 	// neither HTTP nor net/rpc turns an unsafe-to-repeat retry into a failure.
@@ -239,7 +246,7 @@ type ResumeFromLimitResponse struct {
 // (resumeNotPerformed): both return a nil error, and only the former is a
 // success worth logging. The manual-retry path exposes this same distinction
 // through ResumeFromLimitResponse.OK (outcome == resumePerformed).
-func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, error) {
+func (m *Manager) resumeFromLimitLockedWithAccount(repoID, key string, instance *session.Instance, requestedTitle string, swap *autoAccountSwap) (resumeFromLimitOutcome, session.HandoffConversation, error) {
 	return m.resumeFromLimitLockedOutcome(repoID, key, instance, requestedTitle, swap, false)
 }
 
@@ -289,7 +296,7 @@ func (m *Manager) publishSessionSnapshot(repoID string, instance *session.Instan
 // take the two locks before calling in, so this body never acquires either itself.
 // operatorInitiated selects the liveness-probe budget: the explicit RPC uses
 // probeLivenessForOperator; the poll-driven scheduler keeps the short poll budget.
-func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap, operatorInitiated bool) (outcome resumeFromLimitOutcome, resultErr error) {
+func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *session.Instance, requestedTitle string, accountSwap *autoAccountSwap, operatorInitiated bool) (outcome resumeFromLimitOutcome, conversation session.HandoffConversation, resultErr error) {
 	// Set by the respawn arm's settlement below and reported at the very end, so a
 	// failed durable write neither aborts the resume nor disappears from it.
 	var settleErr error
@@ -321,17 +328,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		return m.reparkLimitUnderResumeFence(instance, resetAt)
 	}
 	if !instance.LimitReached() && !manual {
-		return resumeNotPerformed, nil
+		return resumeNotPerformed, conversation, nil
 	}
 	m.mu.Lock()
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != instance || instance.IsTearingDown() {
-		return resumeNotPerformed, nil
+		return resumeNotPerformed, conversation, nil
 	}
 	if instance.UserKilled() || session.IsReservedTitle(instance.Title) {
-		return resumeNotPerformed, fmt.Errorf("session %q cannot be resumed", requestedTitle)
+		return resumeNotPerformed, conversation, fmt.Errorf("session %q cannot be resumed", requestedTitle)
 	}
 
 	// Re-spawn only when the agent's session actually exited while blocked (the
@@ -374,7 +381,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		begin = instance.BeginManualAccountSwap
 	}
 	if err := begin(); err != nil {
-		return resumeNotPerformed, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
+		return resumeNotPerformed, conversation, fmt.Errorf("cannot resume %q: %w", requestedTitle, err)
 	}
 	// Tell the clients. The web rail is event-driven and performs no optimistic update
 	// for a resume, so without this an already-connected client keeps the PRE-fence
@@ -465,7 +472,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// already-due ordinary same-account retry. Committed replacements use
 			// the independent recovery path and never enter this branch.
 			releaseAccountSwapFences()
-			return resumeNotPerformed, nil
+			return resumeNotPerformed, conversation, nil
 		}
 
 		root := instance.GetRepoPath()
@@ -506,18 +513,26 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
-				return resumeNotPerformed, swapErr
+				return resumeNotPerformed, conversation, swapErr
 			}
 			accountSwap = nil
 			releaseAccountSwapFences()
 		} else if offBox != nil {
 			releaseAccountSwapFences()
-			return resumePerformed, m.finishOffBoxFailover(repoID, key, instance, accountSwap, *offBox)
+			return resumePerformed, session.HandoffConversation{CarryFailure: offBoxAccountNoConversation}, m.finishOffBoxFailover(repoID, key, instance, accountSwap, *offBox)
 		} else {
 			identityCommittedThisAttempt = true
 			releaseAccountSwapFences()
 			forceRespawn = true
 		}
+	}
+
+	// A committed swap already chose its conversation outcome — the carried
+	// conversation its checkpoint recorded, or why the replacement launches
+	// fresh — so capture it before the pending record can retire with the
+	// delivery below (#6768).
+	if accountSwap != nil {
+		conversation = instance.PendingAccountSwapConversation()
 	}
 
 	as := instance.AgentServer()
@@ -544,19 +559,19 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			}
 			if repairErr != nil {
 				if err := instance.ValidateAccountSwap(accountSwap.to); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+					return resumeNotPerformed, conversation, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+					return resumeNotPerformed, conversation, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				if err := instance.StopForAccountSwap(); err != nil {
-					return resumeNotPerformed, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
+					return resumeNotPerformed, conversation, fmt.Errorf("cannot repair incomplete account replacement for %q (%v): %w", requestedTitle, repairErr, err)
 				}
 				shouldRespawn = true
 			}
 		}
 	case probeUnknown:
-		return resumeNotPerformed, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
+		return resumeNotPerformed, conversation, fmt.Errorf("cannot resume %q: its agent-server did not answer the liveness probe; not re-spawning, because re-provisioning a sandbox that may still be running would orphan it and discard its unpushed work", requestedTitle)
 	case probeAnsweredDead:
 		// It ANSWERED: the agent is gone, the sandbox is not. For a REMOTE session
 		// Respawn is recoverSandbox → reprovisionRemote, which tears the sandbox down
@@ -569,25 +584,30 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// session and ResumeFromLimitRequest has no force option, so the
 			// forced-reap hatch cannot open from this door (Codex on #2967).
 			if err := m.preserveSandboxBeforeReap(repoID, key, instance, killSuggestionFor(instance)); err != nil {
-				return resumeNotPerformed, err
+				return resumeNotPerformed, conversation, err
 			}
 			if err := requireDurableSandboxBranch(repoID, instance); err != nil {
-				return resumeNotPerformed, err
+				return resumeNotPerformed, conversation, err
 			}
 		}
 		fallthrough
 	case probeAbsent:
 		if accountSwap != nil && !forceRespawn {
 			if accountSwap.alreadySet {
-				if err := revalidateGoneAccountSwap(instance, accountSwap.to); err != nil {
-					return resumeNotPerformed, err
+				revalidateErr := revalidateGoneAccountSwap(instance, accountSwap.to)
+				// A carried replacement that never proved itself is demoted
+				// to a stated fresh start inside the revalidation; answer
+				// with the record as it now stands (#6768).
+				conversation = instance.PendingAccountSwapConversation()
+				if revalidateErr != nil {
+					return resumeNotPerformed, conversation, revalidateErr
 				}
 			}
 			if err := m.stopVSCodeForAccountSwap(key, instance); err != nil {
-				return resumeNotPerformed, err
+				return resumeNotPerformed, conversation, err
 			}
 			if err := instance.StopRemainingPanesForAccountSwap(); err != nil {
-				return resumeNotPerformed, err
+				return resumeNotPerformed, conversation, err
 			}
 		}
 		shouldRespawn = true
@@ -621,7 +641,14 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			if rerr == nil {
 				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
 			}
+			// The launch can demote a committed carry to a fresh start;
+			// the answer is the pending record's state as it now stands
+			// (#6768).
+			conversation = instance.PendingAccountSwapConversation()
 		} else {
+			// Answer the conversation question BEFORE the respawn rewrites the
+			// recorded state it is asked about (#6768).
+			conversation = instance.ResumeConversationOutcome()
 			rerr = instance.RespawnWithLiveBoundary(beforeLive)
 		}
 		if rerr != nil {
@@ -679,9 +706,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 						"re-spawn for %q failed after recovery rebuilt its worktree at %s, and the rebuilt state could not be written to disk (%v) — retry the resume once the cause clears: %w",
 						requestedTitle, instance.GetWorktreePath(), persistErr, rerr)
 				}
-				return resumeNotPerformed, &mutationCommittedError{err: failure}
+				return resumeNotPerformed, conversation, &mutationCommittedError{err: failure}
 			}
-			return resumeNotPerformed, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
+			return resumeNotPerformed, conversation, fmt.Errorf("failed to re-spawn agent for %q: %w", requestedTitle, rerr)
 		}
 		// The runtime this session's failure history was about is gone; the fresh
 		// sandbox must not inherit it (#1794).
@@ -714,7 +741,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// while any op is in flight — it would no-op here and lose this episode's
 		// reset time, which the auto-resume scheduler schedules off.
 		if perr := restorePendingLiveness(resetAt); perr != nil {
-			return resumeNotPerformed, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
+			return resumeNotPerformed, conversation, fmt.Errorf("failed to restore the limit window for %q: %w", requestedTitle, perr)
 		}
 		// Write the respawn's durable state NOW, not at the end of the happy path
 		// (#1854). Respawn shares LocalBackend.respawn, so reaching this line can mean
@@ -746,8 +773,17 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if settleErr != nil {
 			m.warn().Printf("limit resume for %q: %v", instance.Title, settleErr)
 		}
+	} else if accountSwap == nil {
+		// The agent kept the runtime it was already in — and so the
+		// conversation; only its prompt needed re-delivering.
+		conversation = session.HandoffConversation{Carried: true}
 	}
 	if accountSwap != nil {
+		// The launch and readiness work above can demote a committed carry —
+		// a copy that failed, or a carried replacement that never proved
+		// itself — so answer with the pending record's final state, the same
+		// read the notice below renders (#6768).
+		conversation = instance.PendingAccountSwapConversation()
 		// A committed-swap recovery that re-established the runtime after a
 		// post-commit blind teardown (ErrAccountSwapAgentTeardownBlind) entered
 		// with StartupStateUnknown set and started cleared. The probe or the
@@ -765,12 +801,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if err := instance.ValidateAccountSwapReplacementPanes(); err != nil {
 			boundaryErr := fmt.Errorf("account replacement for %q did not restore every expected pane: %w", requestedTitle, err)
 			if settleErr != nil {
-				return resumeNotPerformed, errors.Join(boundaryErr, settleErr)
+				return resumeNotPerformed, conversation, errors.Join(boundaryErr, settleErr)
 			}
-			return resumeNotPerformed, boundaryErr
+			return resumeNotPerformed, conversation, boundaryErr
 		}
 		if err := instance.SynchronizeAccountSwapRuntimeMetadata(); err != nil {
-			return resumeNotPerformed, err
+			return resumeNotPerformed, conversation, err
 		}
 		// The fresh runtime may be parked on Codex's directory-trust modal — alive
 		// but idle, writing no rollout. Run the shared readiness/dismissal
@@ -780,9 +816,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			repoID, key, requestedTitle, instance, accountSwap, shouldRespawn, accountConversationCapture)
 		if err != nil {
 			if settleErr != nil {
-				return resumeNotPerformed, errors.Join(err, settleErr)
+				return resumeNotPerformed, conversation, errors.Join(err, settleErr)
 			}
-			return resumeNotPerformed, err
+			return resumeNotPerformed, conversation, err
 		}
 		if !shouldRespawn && instance.AgentRuntimeToken().Agent() == tmux.ProgramCodex &&
 			!instance.AgentConversation().HasID() {
@@ -851,12 +887,12 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// path there is nothing to make the settlement moot — the gap is still
 			// open and the caller has to hear about it alongside the prompt failure.
 			// Joined, not wrapped, so errors.Is still finds either one.
-			return resumeNotPerformed, errors.Join(resumeErr, settleErr)
+			return resumeNotPerformed, conversation, errors.Join(resumeErr, settleErr)
 		}
-		return resumeNotPerformed, resumeErr
+		return resumeNotPerformed, conversation, resumeErr
 	}
 	if accountSwap != nil && !instance.ClearPendingAccountSwap(accountSwap.from, accountSwap.to) {
-		return resumeNotPerformed, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
+		return resumeNotPerformed, conversation, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
 	// place the limit block is lifted on either arm.
@@ -911,7 +947,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 	if persistErr != nil {
 		m.warn().Printf("failed to persist instance %q: %v", instance.Title, persistErr)
 		if manual {
-			return resumePerformed, &mutationCommittedError{err: fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
+			return resumePerformed, conversation, &mutationCommittedError{err: fmt.Errorf("handed off %q and delivered its mission, but completion has a pending settlement; the daemon retries the disk write, and an unclean exit before it lands could repeat the mission: %w",
 				requestedTitle, errors.Join(settleErr, persistErr))}
 		}
 	}
@@ -920,9 +956,9 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// but the respawn's durable state did not. Say both, so a caller cannot read
 		// this as a failed resume, and cannot read a successful resume as meaning
 		// everything is on disk (#2883).
-		return resumePerformed, &mutationCommittedError{err: fmt.Errorf(
+		return resumePerformed, conversation, &mutationCommittedError{err: fmt.Errorf(
 			"resumed %q, but the state its respawn rebuilt could not be written to disk: %w",
 			requestedTitle, settleErr)}
 	}
-	return resumePerformed, nil
+	return resumePerformed, conversation, nil
 }
