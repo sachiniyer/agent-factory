@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/throwawaysandbox"
 )
 
@@ -320,7 +321,14 @@ func scopedPID(t *testing.T, home string, pid int, startID uint64, boot, ns stri
 // canonical home (what the reaper compares against), and the tmux dir.
 func sandboxTreeFixture(t *testing.T, createdUnix int64) (root, canonHome, tmuxDir string) {
 	t.Helper()
-	root = t.TempDir()
+	// The tree holds a tmux socket, so it must fit darwin's 104-byte sun_path:
+	// t.TempDir() embeds the test name under a ~48-byte /var/folders base and
+	// overflows it (bind: invalid argument). Resolve symlinks so every derived
+	// path is canonical (/tmp is /private/tmp on macOS).
+	root, err := filepath.EvalSymlinks(testguard.SocketTempDir(t))
+	if err != nil {
+		t.Fatal(err)
+	}
 	home := filepath.Join(root, "af-home")
 	tmuxDir = filepath.Join(root, "tmux")
 	for _, d := range []string{home, tmuxDir} {
@@ -331,7 +339,7 @@ func sandboxTreeFixture(t *testing.T, createdUnix int64) (root, canonHome, tmuxD
 	if err := throwawaysandbox.WriteRootSentinel(root, createdUnix); err != nil {
 		t.Fatal(err)
 	}
-	canonHome, err := canonicalDir(home)
+	canonHome, err = canonicalDir(home)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -742,7 +750,7 @@ func TestKillThrowawayTmuxSocketsRequiresCreatedRoot(t *testing.T) {
 	if len(killed) != 0 {
 		t.Fatalf("a sentinel-free root's sockets were killed: %v", killed)
 	}
-	outside := unixSock(t, t.TempDir())
+	outside := unixSock(t, testguard.SocketTempDir(t))
 	killThrowawayTmuxSockets(canonHome, marker(root, filepath.Dir(outside)))
 	if len(killed) != 0 {
 		t.Fatalf("an out-of-root marker killed sockets: %v", killed)

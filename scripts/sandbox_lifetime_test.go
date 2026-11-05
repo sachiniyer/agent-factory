@@ -141,8 +141,14 @@ func TestSandboxMarkAbsolutizesRelativeRoot(t *testing.T) {
 	m := markForTest(t,
 		`cd "$4" && throwaway_sandbox_mark "$1" "$2" "$3"`,
 		home, home, "sbx", "audit", work)
-	if m.SandboxRoot != root {
-		t.Fatalf("relative root persisted as %q, want %q", m.SandboxRoot, root)
+	// The script persists the resolved path: on macOS t.TempDir() lives under
+	// /var/folders, a symlink to /private/var/folders.
+	want, err := filepath.EvalSymlinks(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if m.SandboxRoot != want {
+		t.Fatalf("relative root persisted as %q, want %q", m.SandboxRoot, want)
 	}
 }
 
