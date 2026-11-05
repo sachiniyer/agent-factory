@@ -298,6 +298,56 @@ func TestProcessBoundToThrowawayHome(t *testing.T) {
 	})
 }
 
+// TestProcessBoundResolvesInTargetFrame pins the #6844 review finding: a
+// relative AGENT_FACTORY_HOME spells a home only inside the TARGET process's
+// cwd — the reaping daemon's own cwd is the marked home, so resolving "." in
+// ours would bind every same-uid process carrying a relative value.
+func TestProcessBoundResolvesInTargetFrame(t *testing.T) {
+	home := t.TempDir()
+	canonHome, err := canonicalDir(home)
+	if err != nil {
+		t.Fatal(err)
+	}
+	otherDir := t.TempDir()
+	selfUID := os.Getuid()
+	cases := []struct {
+		name   string
+		env    map[string]string
+		cwd    string
+		cwdOK  bool
+		want   bool
+		proven bool
+	}{
+		{"dot in target's home cwd", map[string]string{"AGENT_FACTORY_HOME": "."}, home, true, true, true},
+		{"dot in a foreign cwd", map[string]string{"AGENT_FACTORY_HOME": "."}, otherDir, true, false, true},
+		{"relative basename in target cwd", map[string]string{"AGENT_FACTORY_HOME": filepath.Base(home)}, filepath.Dir(home), true, true, true},
+		{"relative with unreadable cwd", map[string]string{"AGENT_FACTORY_HOME": "."}, "", false, false, true},
+		{"tilde against target HOME", map[string]string{"AGENT_FACTORY_HOME": "~", "HOME": home}, "", false, true, true},
+		{"tilde-path against target HOME", map[string]string{"AGENT_FACTORY_HOME": "~/" + filepath.Base(home), "HOME": filepath.Dir(home)}, "", false, true, true},
+		{"tilde with absent HOME", map[string]string{"AGENT_FACTORY_HOME": "~"}, "", false, false, true},
+		{"tilde-user is unresolvable", map[string]string{"AGENT_FACTORY_HOME": "~root/x"}, "", false, false, true},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			oldUID, oldEnv, oldCwd := throwawayUIDFn, throwawayLookupEnvFn, throwawayWorkingDirFn
+			throwawayUIDFn = func(int) (int, bool) { return selfUID, true }
+			throwawayLookupEnvFn = func(_ int, key string) (string, proctree.EnvStatus) {
+				v, ok := tc.env[key]
+				if !ok {
+					return "", proctree.EnvAbsent
+				}
+				return v, proctree.EnvFound
+			}
+			throwawayWorkingDirFn = func(int) (string, bool) { return tc.cwd, tc.cwdOK }
+			defer func() { throwawayUIDFn, throwawayLookupEnvFn, throwawayWorkingDirFn = oldUID, oldEnv, oldCwd }()
+			bound, proven := processBoundToThrowawayHome(1234, canonHome, "")
+			if bound != tc.want || proven != tc.proven {
+				t.Fatalf("bound=%v proven=%v, want %v/%v", bound, proven, tc.want, tc.proven)
+			}
+		})
+	}
+}
+
 func TestThrowawayBoundProcessesSelectsTrees(t *testing.T) {
 	home := t.TempDir()
 	canonHome, err := canonicalDir(home)

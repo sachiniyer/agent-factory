@@ -73,6 +73,7 @@ var (
 	throwawayLookupFn      = proctree.Lookup
 	throwawayLookupEnvFn   = proctree.LookupEnv
 	throwawayUIDFn         = proctree.UID
+	throwawayWorkingDirFn  = proctree.WorkingDir
 	throwawayScopeIDsFn    = func() (boot, ns string) {
 		b, _ := proctree.BootID()
 		n, _ := proctree.PIDNamespaceID()
@@ -278,10 +279,16 @@ func sweepThrowawaySandboxes(selfHome string) {
 }
 
 // teardownThrowawaySandbox ends everything the marked home can claim. The
-// order matters: tmux servers on the recorded private sockets first, so the
-// pane trees get SIGHUP through the normal channel, then every process still
-// environment-bound to the home — including the driver that spawned it and
-// the daemon serving it when the sweep runs — plus their trees.
+// order matters: the bound process set is captured FIRST, while bound
+// parents are still alive to anchor their trees — a detached helper with a
+// cleared environment is only reachable through an environment-bound
+// ancestor, and letting tmux kill that ancestor first would reparent the
+// helper to init and lose it (the same lesson session/tmux/reap.go encodes).
+// Then the recorded private tmux servers die so the pane trees get SIGHUP
+// through the normal channel, and finally every captured process —
+// including the driver that spawned the sandbox and the daemon serving it
+// when the sweep runs — is signalled by identity. Members the SIGHUP
+// already reaped are skipped by the identity check, never re-killed.
 func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 	canonHome, err := canonicalDir(home)
 	if err != nil {
@@ -292,8 +299,8 @@ func teardownThrowawaySandbox(home string, m *throwawaysandbox.Marker) {
 		log.ErrorLog.Printf("refusing to tear down the default AF home %s", canonHome)
 		return
 	}
-	killThrowawayTmuxSockets(canonHome, m)
 	procs, unresolved := throwawayBoundProcesses(canonHome, m)
+	killThrowawayTmuxSockets(canonHome, m)
 	if len(procs) == 0 {
 		return
 	}
@@ -441,17 +448,15 @@ func processBoundToThrowawayHome(pid int, canonHome, canonTmux string) (bound bo
 	if v, st := throwawayLookupEnvFn(pid, "AGENT_FACTORY_HOME"); st != proctree.EnvUnknown {
 		proven = true
 		if st == proctree.EnvFound {
-			if h, err := config.ConfigDirFor(v); err == nil {
-				if c, err := canonicalDir(h); err == nil && c == canonHome {
-					return true, true
-				}
+			if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonHome {
+				return true, true
 			}
 		}
 	}
 	if v, st := throwawayLookupEnvFn(pid, sessiontmux.EnvMarkerHome); st != proctree.EnvUnknown {
 		proven = true
 		if st == proctree.EnvFound {
-			if c, err := canonicalDir(v); err == nil && c == canonHome {
+			if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonHome {
 				return true, true
 			}
 		}
@@ -461,7 +466,7 @@ func processBoundToThrowawayHome(pid int, canonHome, canonTmux string) (bound bo
 		if v, st := throwawayLookupEnvFn(pid, "TMUX_TMPDIR"); st != proctree.EnvUnknown {
 			proven = true
 			if st == proctree.EnvFound {
-				if c, err := canonicalDir(v); err == nil && c == canonTmux {
+				if c, ok := resolveEnvPathInProcFrame(pid, v); ok && c == canonTmux {
 					return true, true
 				}
 			}
@@ -470,7 +475,7 @@ func processBoundToThrowawayHome(pid int, canonHome, canonTmux string) (bound bo
 			proven = true
 			if st == proctree.EnvFound {
 				if sock, _, _ := strings.Cut(v, ","); sock != "" {
-					if c, err := canonicalDir(sock); err == nil && strings.HasPrefix(c, canonTmux+sep) {
+					if c, ok := resolveEnvPathInProcFrame(pid, sock); ok && strings.HasPrefix(c, canonTmux+sep) {
 						return true, true
 					}
 				}
@@ -478,4 +483,47 @@ func processBoundToThrowawayHome(pid int, canonHome, canonTmux string) (bound bo
 		}
 	}
 	return false, proven
+}
+
+// resolveEnvPathInProcFrame absolutizes an environment-derived path the way
+// the process carrying it resolves it, and canonicalizes the result. A
+// relative or tilde spelling means something only in THAT process's frame —
+// the reaping daemon's own cwd is the marked home after chdirToNeutralHome,
+// so joining "." to it would bind every same-user process that happens to
+// carry a relative AGENT_FACTORY_HOME (the same hazard classifyDaemonHome
+// resolves through resolveHomeInDaemonFrame). Absolute spellings pass
+// through; "~"/"~/" expand against the target's own HOME; "~user" forms are
+// unresolvable, matching config.ConfigDirFor's rejection; and anything else
+// joins /proc/<pid>/cwd. ok=false means the frame cannot be proven — the
+// caller leaves the process alone rather than guessing in ours.
+func resolveEnvPathInProcFrame(pid int, p string) (string, bool) {
+	var joined string
+	switch {
+	case p == "":
+		return "", false
+	case filepath.IsAbs(p):
+		joined = p
+	case p == "~" || strings.HasPrefix(p, "~/"):
+		home, st := throwawayLookupEnvFn(pid, "HOME")
+		if st != proctree.EnvFound || home == "" {
+			return "", false
+		}
+		joined = filepath.Join(home, strings.TrimPrefix(strings.TrimPrefix(p, "~"), "/"))
+	case strings.HasPrefix(p, "~"):
+		return "", false
+	default:
+		cwd, ok := throwawayWorkingDirFn(pid)
+		if !ok || cwd == "" {
+			return "", false
+		}
+		joined = filepath.Join(cwd, p)
+	}
+	if !filepath.IsAbs(joined) {
+		return "", false
+	}
+	c, err := canonicalDir(joined)
+	if err != nil {
+		return "", false
+	}
+	return c, true
 }
