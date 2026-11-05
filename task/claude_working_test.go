@@ -74,7 +74,7 @@ func TestClaudeUsageLimitFixtureIsALimitHit(t *testing.T) {
 	if err != nil {
 		t.Fatalf("read fixture: %v", err)
 	}
-	if hit, _, _ := NewLimitDetector(nil).Check(string(raw), tmux.ProgramClaude, time.Now()); !hit {
+	if hit, _, _, _ := NewLimitDetector(nil).Check(string(raw), tmux.ProgramClaude, time.Now()); !hit {
 		t.Error("LimitDetector missed the usage-limit banner in claude_usage_limit.ansi")
 	}
 }

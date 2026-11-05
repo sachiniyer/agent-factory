@@ -62,7 +62,7 @@ func TestLimitBannerNeedsToOpenItsRow(t *testing.T) {
 	}
 	for _, tc := range falsePositives {
 		t.Run("not a limit/"+tc.name, func(t *testing.T) {
-			if hit, _, _ := det.Check(tc.pane, tc.agent, now); hit {
+			if hit, _, _, _ := det.Check(tc.pane, tc.agent, now); hit {
 				t.Fatalf("a banner that does not open its row parked the session:\n%s", tc.pane)
 			}
 		})
@@ -84,7 +84,7 @@ func TestLimitBannerNeedsToOpenItsRow(t *testing.T) {
 	}
 	for _, tc := range truePositives {
 		t.Run("limit/"+tc.name, func(t *testing.T) {
-			hit, reset, has := det.Check(tc.pane, tc.agent, now)
+			hit, reset, has, _ := det.Check(tc.pane, tc.agent, now)
 			if !hit {
 				t.Fatalf("a banner that opens its row was missed (the #4718 failure):\n%s", tc.pane)
 			}
@@ -100,7 +100,7 @@ func TestLimitBannerQuotedAboveARealOneUsesTheRealReset(t *testing.T) {
 	now := time.Date(2026, 9, 19, 12, 0, 0, 0, time.UTC)
 	pane := "● Earlier it said \"Claude usage limit reached. Your limit will reset at 7pm (America/New_York).\"\n" +
 		"  ⎿  " + claudeBanner + "\n\n❯ "
-	hit, reset, has := NewLimitDetector(nil).Check(pane, tmux.ProgramClaude, now)
+	hit, reset, has, _ := NewLimitDetector(nil).Check(pane, tmux.ProgramClaude, now)
 	if !hit || !has || !reset.Equal(time.Date(2026, 9, 19, 18, 0, 0, 0, time.UTC)) {
 		t.Fatalf("hit=%v reset=%v has=%v, want the 2pm banner's reset", hit, reset, has)
 	}
@@ -115,14 +115,14 @@ func TestClaudeFixtureBannerOpensItsRowButItsQuotationDoesNot(t *testing.T) {
 	}
 	pane := string(raw)
 	det := NewLimitDetector(nil)
-	if hit, _, _ := det.Check(pane, tmux.ProgramClaude, time.Now()); !hit {
+	if hit, _, _, _ := det.Check(pane, tmux.ProgramClaude, time.Now()); !hit {
 		t.Fatal("the recorded banner frame is no longer a hit")
 	}
 	quoted := strings.Replace(pane, "⎿  \x1b[38;5;211mClaude usage limit reached.", "● it printed: Claude usage limit reached.", 1)
 	if quoted == pane {
 		t.Fatal("fixture shape changed; update this test")
 	}
-	if hit, _, _ := det.Check(quoted, tmux.ProgramClaude, time.Now()); hit {
+	if hit, _, _, _ := det.Check(quoted, tmux.ProgramClaude, time.Now()); hit {
 		t.Fatal("the same words inside the agent's reply parked the session")
 	}
 }
@@ -130,7 +130,7 @@ func TestClaudeFixtureBannerOpensItsRowButItsQuotationDoesNot(t *testing.T) {
 // limit_patterns is the user's own regex: it keeps matching wherever it matches.
 func TestLimitPatternOverrideIsNotLineAnchored(t *testing.T) {
 	det := NewLimitDetector(map[string]string{tmux.ProgramClaude: `weekly cap hit`})
-	if hit, _, _ := det.Check("note: weekly cap hit again", tmux.ProgramClaude, time.Now()); !hit {
+	if hit, _, _, _ := det.Check("note: weekly cap hit again", tmux.ProgramClaude, time.Now()); !hit {
 		t.Fatal("a user pattern was line-anchored")
 	}
 }
@@ -165,7 +165,7 @@ func TestDevinBannerPrefixesTheEvidenceAdmits(t *testing.T) {
 			if styled {
 				pane = "\x1b[31m" + lead + "\x1b[0m\x1b[1mQuota exhausted\x1b[0m: usage quota has been exhausted\n\n> "
 			}
-			if hit, _, _ := det.Check(pane, tmux.ProgramDevin, now); !hit {
+			if hit, _, _, _ := det.Check(pane, tmux.ProgramDevin, now); !hit {
 				t.Errorf("%s (styled=%v) was missed:\n%q", name, styled, pane)
 			}
 		}

@@ -286,6 +286,15 @@ type Instance struct {
 	// carried in the daemon snapshot so the badge survives a restart; PR3's
 	// auto-resume scheduler reads it. Mutex-protected.
 	limitResetAt time.Time
+	// limitResetEvidence is the reset phrase the poll's parse consumed to
+	// produce limitResetAt (#6765). An unchanged banner re-parses to the same
+	// phrase, so SetLimitReachedAtEpoch keeps the stored instant — the first
+	// parse is nearest the wall the provider printed — instead of letting a
+	// time-only or relative form drift forward on every tick. Empty when the
+	// stored reset came from a path that observed no phrase (a send-path park,
+	// a TUI mirror, or an unparseable banner). Persisted beside limitResetAt so
+	// a restart does not lose the pairing.
+	limitResetEvidence string
 	// limitAgent and limitAccount attribute the current limit after Program or
 	// Account changes. Account labels are scoped to an agent, so neither field
 	// alone identifies the provider identity that produced the wall.

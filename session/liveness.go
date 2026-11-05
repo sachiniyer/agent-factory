@@ -620,18 +620,38 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 // The check and the write are one critical section under i.mu, which is the whole
 // point: an epoch read followed by a separate SetLimitReached would leave the same
 // window it closes.
-func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, epoch uint64) bool {
+//
+// evidence is the reset phrase the detector consumed to produce resetAt. A poll
+// re-reads the same phrase whenever the banner is unchanged, and that re-read is
+// not a new observation (#6765): the time-only and relative forms re-resolve to
+// a LATER instant on every parse, so applying the re-read would move the reset
+// — and postpone the auto-resume — forever. The first parse of a phrase is the
+// one nearest the wall the provider printed, so an already-parked instance keeps
+// it. A different phrase (or one seen while not yet parked) is new evidence and
+// applies.
+func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, epoch uint64) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
 		return false
 	}
-	return i.setLimitReachedLocked(resetAt)
+	if i.liveness == LiveLimitReached && evidence != "" && i.limitResetEvidence == evidence {
+		return true
+	}
+	if !i.setLimitReachedLocked(resetAt) {
+		return false
+	}
+	i.limitResetEvidence = evidence
+	return true
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
 // record its reset time, skipping a row with any operation in flight so it never
 // clobbers that operation's fence. Reports whether it applied. Caller holds i.mu.
+//
+// The written reset carries no observed reset phrase — callers that parse one
+// (the epoch path) record it themselves — so the evidence slot is cleared here
+// rather than left describing a reset it did not produce (#6765).
 func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	if i.inFlightOp != OpNone {
 		return false
@@ -639,6 +659,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
+	i.limitResetEvidence = ""
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
@@ -709,6 +730,9 @@ func (i *Instance) SetLimitResetAt(resetAt time.Time) {
 	defer i.mu.Unlock()
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.limitResetAt = resetAt
+	// A mirrored reset carries no reset phrase; the slot must not keep
+	// describing a parse it did not produce (#6765).
+	i.limitResetEvidence = ""
 	i.noteStateChangeLocked(lv, op, prevReset)
 }
 
@@ -749,6 +773,8 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 	// (#5371 review). The teardown obligation stays armed on its own flag and
 	// re-runs inside the retry's respawn regardless of what the row reads.
 	i.liveness = LiveLimitReached
+	// The reset is the one the owner read off this row when it began the
+	// attempt — the stored evidence still describes it, so the slot stays.
 	i.limitResetAt = resetAt
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
@@ -791,6 +817,7 @@ func (i *Instance) ClearLimitReached() {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
+	i.limitResetEvidence = ""
 	i.limitAgent = ""
 	i.limitAccount = ""
 	// The epoch bump here is what a racing poll checks: it is the resume's
