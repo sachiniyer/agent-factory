@@ -6,10 +6,13 @@
 //
 // The walk is deliberately cheap and bounded, so a refresh can run off the
 // daemon's poll goroutine on its own cadence: candidate files are picked by
-// stat, each contributes at most its newest rate_limits claim from a capped
-// tail window, and per-file results are memoized on (path, size, mtime,
-// watermark) so an unchanged file is never re-read. Hard caps bound every
-// refresh; hitting them reports unknown — a laggy read must not be mistaken
+// stat while descending the store's year/month/day directories NEWEST-FIRST,
+// so a deadline truncation or the early-stop bound can only leave older
+// directories unexamined, never the newest ones. Each file contributes at
+// most its newest rate_limits claim from a capped tail window, and per-file
+// results are memoized on (path, size, mtime, watermark) so an unchanged file
+// is never re-read. Hard caps bound every refresh; hitting one outside a
+// certified remainder reports unknown — a laggy read must not be mistaken
 // for a healthy account.
 //
 // Carried-prefix watermarks (handoff.State.CarriedPrefixes) scope the poison:
@@ -27,6 +30,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"sort"
+	"strconv"
 	"sync"
 	"syscall"
 	"time"
@@ -123,6 +127,16 @@ func (o Options) withDefaults() Options {
 var codexRolloutFileRE = regexp.MustCompile(`(?i)^rollout-.+-[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\.jsonl$`)
 
 var errDeadline = errors.New("rateindex: enumeration deadline")
+
+// stillAppendingHorizon is the documented early-stop bound: how long past the
+// end of its day directory a rollout file may still be appended to. A file
+// keeps being written only while its session lives, so a parked session
+// resumed within a weekly-limit window stretches that furthest — 30 days
+// covers stragglers with a wide margin. The residual the bound accepts: a
+// resume of a conversation older than the horizon appends outside it, so a
+// skipped directory could hide the truly-newest claim — the reading then lags
+// one file, which the mover re-verifies around rather than treating as truth.
+const stillAppendingHorizon = 30 * 24 * time.Hour
 
 // Indexer memoizes per-file scan results so a refresh costs reads only on
 // files that changed since the last one. The memo holds no file content —
@@ -229,50 +243,136 @@ type candidate struct {
 	modTime time.Time
 }
 
-// candidates enumerates rollout files under <home>/sessions and keeps the
-// newest maxFiles by mtime. Enumeration is stat-only; content is never read
-// here. The deadline check inside the walk keeps a huge store from stalling
-// the refresh before a single file is read; an expired deadline reports the
-// partial list as bounded rather than pretending completeness.
+// candidateWalk carries one enumeration's mutable state.
+type candidateWalk struct {
+	top      []candidate
+	maxFiles int
+	deadline time.Time
+	now      func() time.Time
+	seen     int
+	stopped  bool // horizon-certified remainder: unexamined dirs cannot compete
+}
+
+// candidates enumerates rollout files under <home>/sessions NEWEST-FIRST and
+// keeps the newest maxFiles by mtime. Codex lays the store out as
+// sessions/YYYY/MM/DD/rollout-*.jsonl (UTC); descending those zero-padded
+// directory names is chronological order, so any cut — the deadline, or the
+// early-stop bound below — leaves only OLDER directories unexamined.
+// Enumeration is stat-only; content is never read here.
+//
+// The walk stops early once the candidate slate is full and every remaining
+// day directory is past stillAppendingHorizon relative to the weakest held
+// mtime: a file under such a directory last wrote no later than
+// dayEnd+horizon, so it cannot displace a held candidate. A slate that is not
+// yet full keeps walking — an old directory can still hold a newer claim when
+// there is no held evidence to beat. An expired deadline in uncertified
+// territory reports the partial list as bounded rather than pretending
+// completeness.
 func candidates(home string, maxFiles int, deadline time.Time, now func() time.Time) ([]candidate, bool, error) {
-	root := filepath.Join(home, "sessions")
-	top := make([]candidate, 0, maxFiles)
-	seen := 0
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		if d.IsDir() || !codexRolloutFileRE.MatchString(d.Name()) {
-			return nil
-		}
-		if seen++; seen%256 == 0 && now().After(deadline) {
-			return errDeadline
-		}
-		info, err := d.Info()
-		if err != nil {
-			if os.IsNotExist(err) {
-				return nil
-			}
-			return err
-		}
-		top = insertCandidate(top, candidate{path: path, size: info.Size(), modTime: info.ModTime()}, maxFiles)
-		return nil
-	})
-	if err != nil {
-		if errors.Is(err, errDeadline) {
-			sort.Slice(top, func(i, j int) bool { return top[i].modTime.After(top[j].modTime) })
-			return top, true, nil
-		}
+	walk := &candidateWalk{maxFiles: maxFiles, deadline: deadline, now: now}
+	err := walk.dir(filepath.Join(home, "sessions"), 0, "", "")
+	if err != nil && !errors.Is(err, errDeadline) {
 		if os.IsNotExist(err) {
 			return nil, false, nil
 		}
 		return nil, false, err
 	}
-	sort.Slice(top, func(i, j int) bool { return top[i].modTime.After(top[j].modTime) })
-	return top, false, nil
+	sort.Slice(walk.top, func(i, j int) bool { return walk.top[i].modTime.After(walk.top[j].modTime) })
+	return walk.top, errors.Is(err, errDeadline), nil
+}
+
+// dir processes one directory level: files are statted into the top-k slate,
+// subdirectories are descended in descending name order. depth counts levels
+// below sessions/ — 0 is the year level, 1 month, 2 the level whose children
+// are day directories. year and month carry the ancestor directory names the
+// day-date check needs at depth 2.
+func (w *candidateWalk) dir(path string, depth int, year, month string) error {
+	if w.stopped {
+		return nil
+	}
+	entries, err := os.ReadDir(path)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil
+		}
+		return err
+	}
+	// Descending name order is newest-first for the zero-padded date
+	// directories; rollout filenames embed their creation timestamp, so it is
+	// approximately newest-first inside a day directory too.
+	sort.Slice(entries, func(i, j int) bool { return entries[i].Name() > entries[j].Name() })
+	for _, entry := range entries {
+		if entry.IsDir() || !codexRolloutFileRE.MatchString(entry.Name()) {
+			continue
+		}
+		if w.seen++; w.seen%256 == 0 && w.now().After(w.deadline) {
+			return errDeadline
+		}
+		info, err := entry.Info()
+		if err != nil {
+			if os.IsNotExist(err) {
+				continue
+			}
+			return err
+		}
+		w.top = insertCandidate(w.top, candidate{
+			path:    filepath.Join(path, entry.Name()),
+			size:    info.Size(),
+			modTime: info.ModTime(),
+		}, w.maxFiles)
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		// The certified-remainder check runs before the deadline check on
+		// purpose: a remainder the horizon bound certifies cannot compete,
+		// deadline or not — stopping there is completeness, not truncation.
+		if depth == 2 && w.pastHorizon(year, month, entry.Name()) {
+			w.stopped = true
+			return nil
+		}
+		if w.now().After(w.deadline) {
+			return errDeadline
+		}
+		nextYear, nextMonth := year, month
+		switch depth {
+		case 0:
+			nextYear = entry.Name()
+		case 1:
+			nextMonth = entry.Name()
+		}
+		if err := w.dir(filepath.Join(path, entry.Name()), depth+1, nextYear, nextMonth); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pastHorizon reports whether the day directory named day under year/month is
+// old enough — relative to the weakest candidate already held — that no file
+// in it, or in any still-older directory (the walk descends), can displace a
+// held candidate. Certification requires a full candidate slate and a
+// parseable YYYY/MM/DD date; anything else keeps walking — an unfilled slate
+// can still be displaced by an old directory's newer claim.
+func (w *candidateWalk) pastHorizon(year, month, day string) bool {
+	if len(w.top) < w.maxFiles {
+		return false
+	}
+	yy, errY := strconv.Atoi(year)
+	mm, errM := strconv.Atoi(month)
+	dd, errD := strconv.Atoi(day)
+	if errY != nil || errM != nil || errD != nil ||
+		len(year) != 4 || len(month) != 2 || len(day) != 2 ||
+		mm < 1 || mm > 12 || dd < 1 || dd > 31 {
+		return false
+	}
+	// The latest possible mtime of a file under this day is the end of its day
+	// plus the append horizon. If even that precedes the weakest held mtime,
+	// nothing here can compete — and every still-older directory fails harder.
+	cutoff := time.Date(yy, time.Month(mm), dd, 0, 0, 0, 0, time.UTC).
+		AddDate(0, 0, 1).Add(stillAppendingHorizon)
+	return cutoff.Before(w.top[w.maxFiles-1].modTime)
 }
 
 // insertCandidate maintains top as a mtime-desc list of at most maxFiles.

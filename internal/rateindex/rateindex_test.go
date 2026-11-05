@@ -290,6 +290,108 @@ func TestRefreshSymlinkedRolloutIsUnknown(t *testing.T) {
 	}
 }
 
+// The walk descends year/month/day directories newest-first, so a deadline
+// truncation covers the newest part of the store and the early-stop bound
+// certifies the rest. Here the newest day directory fills MaxFiles before the
+// clock expires; the many older directories are all past the append horizon,
+// so the walk stops certified — the result is observed, not scan-bounded.
+// Under the old ascending WalkDir order the same clock died in the oldest
+// directories and reported unknown.
+func TestRefreshDescendsNewestDirsFirst(t *testing.T) {
+	home := t.TempDir()
+	now := mustTime(t, "2026-11-05T12:00:00.000Z")
+	for i := 0; i < 5; i++ {
+		writeRollout(t, home, "2026/11/05", rolloutName(i+1), []string{
+			claimLine("2026-11-05T11:00:00.000Z", 40.0),
+		}, now)
+	}
+	for _, day := range []string{"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"} {
+		writeRollout(t, home, "2026/09/"+day, rolloutName(100), []string{
+			claimLine("2026-09-05T10:00:00.000Z", 1.0),
+		}, now.Add(-61*24*time.Hour))
+	}
+	calls := 0
+	clock := func() time.Time {
+		calls++
+		// The descending walk reaches a horizon-certified directory within a
+		// handful of dir checks and stops before ever consulting an expired
+		// clock; the old ascending order burned its checks on the September
+		// directories first. The margin also covers the per-file scan loop,
+		// which consults the clock once per candidate.
+		if calls <= 10 {
+			return now
+		}
+		return now.Add(time.Hour)
+	}
+	got := newForTest(clock).Refresh(home, Options{MaxFiles: 4, Deadline: time.Minute})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 40.0 {
+		t.Fatalf("got = %+v — the newest directory's claim must survive the deadline", got)
+	}
+}
+
+// A file in yesterday's directory can hold today's mtime — its session kept
+// appending across midnight — so the early-stop bound must not skip it: the
+// bound is the append horizon relative to the weakest held mtime, not the
+// directory's calendar age.
+func TestRefreshYesterdayDirWithTodayMtimeIsFound(t *testing.T) {
+	home := t.TempDir()
+	now := mustTime(t, "2026-11-05T12:00:00.000Z")
+	for i := 0; i < 5; i++ {
+		writeRollout(t, home, "2026/11/05", rolloutName(i+1), []string{
+			claimLine("2026-11-05T10:00:00.000Z", 30.0),
+		}, now)
+	}
+	// Still being appended — its mtime is the newest in the store.
+	writeRollout(t, home, "2026/11/04", rolloutName(50), []string{
+		claimLine("2026-11-05T11:30:00.000Z", 88.0),
+	}, now.Add(time.Minute))
+	got := newForTest(func() time.Time { return now }).Refresh(home, Options{MaxFiles: 4})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 88.0 {
+		t.Fatalf("got = %+v — the still-appended yesterday-dir claim is the newest", got)
+	}
+}
+
+// The accepted residual, documented on stillAppendingHorizon: a file still
+// being appended inside a directory older than the horizon is certified out
+// once the slate is full, so its newer claim is missed and the reading lags.
+// The test pins the bound's exact failure shape so it is a reviewed choice,
+// not an accident.
+func TestRefreshHorizonBoundSkipsStillAppendedOldDir(t *testing.T) {
+	home := t.TempDir()
+	now := mustTime(t, "2026-11-05T12:00:00.000Z")
+	for i := 0; i < 5; i++ {
+		writeRollout(t, home, "2026/11/05", rolloutName(i+1), []string{
+			claimLine("2026-11-05T10:00:00.000Z", 30.0),
+		}, now)
+	}
+	// 51 days old: end of day + 30d horizon precedes the held floor.
+	writeRollout(t, home, "2026/09/15", rolloutName(60), []string{
+		claimLine("2026-11-05T11:45:00.000Z", 99.0),
+	}, now)
+	got := newForTest(func() time.Time { return now }).Refresh(home, Options{MaxFiles: 4})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 30.0 {
+		t.Fatalf("got = %+v — past-horizon dirs are certified out once the slate is full", got)
+	}
+}
+
+// The bound only certifies a remainder when the slate is FULL: with fewer
+// than MaxFiles candidates, old directories are still walked — a stale claim
+// beats nothing.
+func TestRefreshUnfilledSlateStillWalksOldDirs(t *testing.T) {
+	home := t.TempDir()
+	now := mustTime(t, "2026-11-05T12:00:00.000Z")
+	writeRollout(t, home, "2026/11/05", rolloutName(1), []string{
+		claimLine("2026-11-05T10:00:00.000Z", 30.0),
+	}, now)
+	writeRollout(t, home, "2026/09/15", rolloutName(60), []string{
+		claimLine("2026-11-05T11:45:00.000Z", 71.0),
+	}, now)
+	got := newForTest(func() time.Time { return now }).Refresh(home, Options{MaxFiles: 4})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 71.0 {
+		t.Fatalf("got = %+v — an unfilled slate must keep walking into old dirs", got)
+	}
+}
+
 func mustTime(t *testing.T, value string) time.Time {
 	t.Helper()
 	parsed, err := time.Parse(time.RFC3339Nano, value)
