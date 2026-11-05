@@ -593,6 +593,13 @@ func (c *ConfigPane) commitEdit() {
 	// and would write straight through this check.
 	//
 	// Two signals, both required:
+	//   - value == entry.Value: the field holds exactly the raw stored value.
+	//     This is the honest no-op for a sanitizer-stable value the user edited
+	//     and then restored — dirty stays true from the edit, but the field
+	//     landed back on the raw value, so there is no semantic change to
+	//     write. Without this arm, restoring an ordinary single-line value
+	//     would bypass the guard below and run the config writer / daemon
+	//     apply path (and risk an admission refusal) for nothing.
 	//   - value == c.editSeed: the field holds exactly what beginEdit seeded
 	//     it with, read back AFTER the textinput sanitizer ran (so control
 	//     runes the sanitizer drops — not just the whitespace flattenToOneLine
@@ -606,9 +613,13 @@ func (c *ConfigPane) commitEdit() {
 	//     with that single-line text would be silently blocked by a
 	//     value-equality guard alone. dirty is set in handleEditKey only
 	//     when the input value changes, so a genuine edit (even one that
-	//     lands back on the flattened seed) writes through.
-	// See beginEdit and TestConfigPaneMultiLineValueUntouchedSaveIsNoOp.
-	if !c.dirty && value == c.editSeed {
+	//     lands back on the flattened seed) writes through. The raw-value
+	//     arm above does not weaken this: a multi-line entry.Value can never
+	//     equal the single-line field, so the replace-with-flattened-text
+	//     case never hits the raw-value arm and still needs the dirty flag.
+	// See beginEdit and TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and
+	// TestConfigPaneEditRestoreIsNoOp.
+	if value == entry.Value || (!c.dirty && value == c.editSeed) {
 		c.cancelEdit()
 		return
 	}
