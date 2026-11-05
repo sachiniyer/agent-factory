@@ -89,6 +89,12 @@ var allowedBareMkdirAll = map[string]struct {
 		"Writes generated plugin files into an af SOURCE CHECKOUT selected by " +
 			"--plugin-root, which the caller has already validated by reading its " +
 			"go.mod module path. Never the AF home."},
+	"internal/throwawaysandbox/throwawaysandbox.go:WriteRegistryEntry": {1,
+		"Creates the per-user registry af-throwaway-sandboxes-<uid> directly under " +
+			"os.TempDir() (#6844). Its whole purpose is outliving the marked home: the " +
+			"next marked daemon start reads it to find sandboxes whose own daemon is " +
+			"gone, so placing any of it under an AF home would chain the sweep to the " +
+			"thing it reaps. Callers pass RegistryDir(os.TempDir(), uid)."},
 }
 
 func TestNoBareMkdirAllUnderTheAFHome(t *testing.T) {
