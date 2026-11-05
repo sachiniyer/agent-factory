@@ -145,6 +145,9 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 			}
 			return log_.Append(rows)
 		},
+		DeliverReport: func(recipient handoffengine.SessionInput, rows []handoff.EventRow) {
+			m.enqueueHandoffReport(recipient.Key, rows)
+		},
 		LogWarn: m.warn().Printf,
 		// The reconcile's own skew constants: the resume grace a resets_at
 		// gets before it counts as past, and the write margin a calm record
@@ -197,7 +200,7 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 			VSCodeTab:      instanceHasVSCodeTab(inst),
 			PendingOp:      inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
 			SwapCapable:    inst.SupportsAutomaticAccountSwap(),
-			CarryPossible:  session.CarrySupportedAgent(accountSwapAgent(inst)) && inst.GetWorktreePath() != "",
+			CarryPossible:  session.CarrySupportedAgent(accountSwapAgent(inst)) && !isRemoteWorkspace(inst),
 			LimitAccount:   limitAccountFor(inst),
 			WallObservedAt: wallObservedAtFor(inst),
 			Captured:       obs.captured,
@@ -274,5 +277,92 @@ func readingFactsFrom(reading rateindex.AccountReading) handoff.ReadingFacts {
 		return handoff.ReadingFacts{Status: handoff.ReadingUnknown}
 	default:
 		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+}
+
+// handoffReportJob is one resolved report_to delivery: the recipient's stable
+// session key plus the rows the engine emitted for that spec this tick.
+type handoffReportJob struct {
+	key  string
+	rows []handoff.EventRow
+}
+
+// reportFlushInterval caps the digest cadence (R15): at most one digest a
+// minute per recipient; halted and move-failed jump the window.
+var reportFlushInterval = time.Minute
+
+// startHandoffReportLoop runs the report_to delivery worker. It owns the
+// prompt sends so the decision ticker never blocks on a remote transport:
+// the ticker only ever does a non-blocking channel write.
+func startHandoffReportLoop(manager *Manager, stopCh <-chan struct{}, wg *sync.WaitGroup) {
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		flush := time.NewTicker(reportFlushInterval)
+		defer flush.Stop()
+		pending := map[string][]handoff.EventRow{} // recipient key → digest rows
+		sentImmediate := map[string]bool{}         // delivered-once dedupe
+		for {
+			select {
+			case <-stopCh:
+				return
+			case job := <-manager.handoffReportCh:
+				for _, row := range job.rows {
+					if handoff.ImmediateReport(row) {
+						sig := handoff.EventRowSignature(row)
+						if !sentImmediate[sig] {
+							sentImmediate[sig] = true
+							manager.deliverHandoffReport(job.key, handoff.ReportLine(row))
+						}
+						continue
+					}
+					pending[job.key] = append(pending[job.key], row)
+				}
+			case <-flush.C:
+				for key, rows := range pending {
+					manager.deliverHandoffReport(key, handoff.ReportDigest(rows))
+				}
+				pending = map[string][]handoff.EventRow{}
+			}
+		}
+	}()
+}
+
+// enqueueHandoffReport hands the worker one job. The send is non-blocking by
+// contract: a saturated queue drops the rows with a warn rather than stall
+// the engine tick behind an operator's recipient.
+func (m *Manager) enqueueHandoffReport(key string, rows []handoff.EventRow) {
+	select {
+	case m.handoffReportCh <- handoffReportJob{key: key, rows: rows}:
+	default:
+		m.warn().Printf("account-handoff report queue full — dropped %d row(s) for %s", len(rows), key)
+	}
+}
+
+// deliverHandoffReport sends one fixed-template prompt to the resolved
+// recipient session. A session that vanished between resolution and send
+// warns and drops — a report is never retried into a different session.
+func (m *Manager) deliverHandoffReport(key, text string) {
+	m.mu.Lock()
+	var target *session.Instance
+	for k, inst := range m.instances {
+		repoID, _ := splitDaemonInstanceKey(k)
+		if inst != nil && stableSessionKey(repoID, inst) == key {
+			target = inst
+			break
+		}
+	}
+	m.mu.Unlock()
+	if target == nil {
+		m.warn().Printf("account-handoff report recipient %s is gone — dropped", key)
+		return
+	}
+	status, err := target.SendPromptWithEvidence(text, nowFunc)
+	if err != nil {
+		m.warn().Printf("account-handoff report to %q: %v", target.Title, err)
+		return
+	}
+	if status != session.PromptDelivered {
+		m.warn().Printf("account-handoff report to %q: delivery status %s", target.Title, status)
 	}
 }

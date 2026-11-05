@@ -626,6 +626,12 @@ mode = "shadow"
   agent's ambient login (no `--account`). A working ambient session needs a
   qualifying usage reading to move; a provably idle one may leave on the
   banner alone.
+- **`report_to` prompts another session** with the structured events:
+  `<project>/<title>` or a unique bare title resolves one live session —
+  ambiguous or absent matches are skipped and logged, never guessed. Reports
+  use a fixed template of reason codes and parameters (never pane text),
+  batch into a digest at most once a minute, and `halted`/`move-failed`
+  deliver immediately but only once each. Delivery never delays a tick.
 - **`probe_ttl` currently has no effect.** There is no live usage probe in
   this version: wall confirmation uses the banner plus the account store's
   own `rate_limits` records. The leaf is staged configuration for a later

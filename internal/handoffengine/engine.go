@@ -11,6 +11,7 @@ package handoffengine
 import (
 	"fmt"
 	"log"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -79,7 +80,11 @@ type Deps struct {
 	DriftKey   func(agent, sourceDir, targetDir string) (key string, incomparable bool)
 	DetectWall func(content, agent string) bool
 	WriteRows  func(rows []handoff.EventRow) error
-	LogWarn    func(format string, args ...any)
+	// DeliverReport hands one report_to recipient's emitted rows to the
+	// delivery path. It must never block the tick — the wiring enqueues and
+	// a separate worker sends.
+	DeliverReport func(recipient SessionInput, rows []handoff.EventRow)
+	LogWarn       func(format string, args ...any)
 	// ResetGrace and ProofMargin are the daemon's skew constants: the
 	// limit-resume grace a resets_at gets before it counts as past, and the
 	// reconcile's write margin a calm record must clear of a wall sighting.
@@ -193,22 +198,86 @@ func (e *Engine) Tick(sessions []SessionInput) error {
 	}
 
 	var rows []handoff.EventRow
+	reportRows := map[string][]handoff.EventRow{} // report_to spec → emitted rows
+	specByKey := map[string]string{}
+	for _, g := range gov {
+		specByKey[g.in.Key] = g.cfg.AccountHandoff.ReportTo
+	}
 	for _, g := range gov {
 		facts := e.factsFor(g, nsFor(g.in.Agent), occupancy, state, now)
 		decision := handoff.Decide(facts)
 		events := e.edges.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
-			rows = append(rows, handoff.EventRow{
+			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: g.in.Key, Agent: g.in.Agent,
 				Title: g.in.Title, From: ev.From, To: ev.To,
 				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
-			})
+			}
+			rows = append(rows, row)
+			if spec := specByKey[g.in.Key]; spec != "" {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
 		}
 	}
-	if len(rows) == 0 {
+	if len(rows) > 0 {
+		if err := e.deps.WriteRows(rows); err != nil {
+			return fmt.Errorf("write shadow rows: %w", err)
+		}
+	}
+	// report_to delivery happens after the log write — the durable record is
+	// the primary artifact — and on the wiring's own async path (R15).
+	if e.deps.DeliverReport == nil {
 		return nil
 	}
-	return e.deps.WriteRows(rows)
+	for spec, specRows := range reportRows {
+		recipient, found, ambiguous := resolveRecipient(spec, sessions)
+		switch {
+		case ambiguous:
+			e.warnf("report_to %q matches multiple sessions — skipped", spec)
+		case !found:
+			e.warnf("report_to %q matches no session — skipped", spec)
+		default:
+			e.deps.DeliverReport(recipient, specRows)
+		}
+	}
+	return nil
+}
+
+// resolveRecipient applies the report_to grammar (R15): "<project>/<title>"
+// resolves the session whose project and title both name it — the project
+// part matching the repo's path, basename, or repoID — while a bare title
+// must name exactly one live session. Ambiguity is a skip, never a guess.
+func resolveRecipient(spec string, inputs []SessionInput) (SessionInput, bool, bool) {
+	project, title, qualified := strings.Cut(spec, "/")
+	var matches []SessionInput
+	for _, in := range inputs {
+		if !in.Live || !in.Started {
+			continue
+		}
+		if qualified {
+			if in.Title != title {
+				continue
+			}
+			base := in.RepoRoot
+			if i := strings.LastIndexByte(base, '/'); i >= 0 {
+				base = base[i+1:]
+			}
+			if project != in.RepoID && project != in.RepoRoot && project != base {
+				continue
+			}
+		} else if in.Title != spec {
+			continue
+		}
+		matches = append(matches, in)
+	}
+	switch len(matches) {
+	case 0:
+		return SessionInput{}, false, false
+	case 1:
+		return matches[0], true, false
+	default:
+		return SessionInput{}, false, true
+	}
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only

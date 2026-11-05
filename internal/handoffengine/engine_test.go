@@ -8,6 +8,7 @@ package handoffengine
 
 import (
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 	"time"
@@ -26,7 +27,15 @@ type depCounts struct {
 	writeErr                                                 error
 	rows                                                     []handoff.EventRow
 	mode                                                     string
+	reportTo                                                 string
 	stateErr                                                 error
+	reports                                                  []reportCall
+	warns                                                    []string
+}
+
+type reportCall struct {
+	key  string
+	rows []handoff.EventRow
 }
 
 func (d *depCounts) deps() Deps {
@@ -40,6 +49,7 @@ func (d *depCounts) deps() Deps {
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
 				MaxMovesWindow: "30m", ExcludeSessions: []string{},
+				ReportTo: d.reportTo,
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
 			return cfg, nil
@@ -83,7 +93,12 @@ func (d *depCounts) deps() Deps {
 			d.rows = append(d.rows, rows...)
 			return nil
 		},
-		LogWarn:     func(string, ...any) {},
+		DeliverReport: func(recipient SessionInput, rows []handoff.EventRow) {
+			d.reports = append(d.reports, reportCall{key: recipient.Key, rows: rows})
+		},
+		LogWarn: func(format string, args ...any) {
+			d.warns = append(d.warns, fmt.Sprintf(format, args...))
+		},
 		ResetGrace:  time.Minute,
 		ProofMargin: 30 * time.Minute,
 	}
@@ -169,6 +184,69 @@ func TestTickCorruptStateFailsClosed(t *testing.T) {
 	}
 	if d.writes != 0 {
 		t.Fatalf("corrupt state still wrote rows")
+	}
+}
+
+func observerSession() SessionInput {
+	in := shadowSession()
+	in.Key, in.Title = "sess-obs", "observer"
+	in.Account, in.Auto, in.Parked, in.LimitAccount = "", true, false, ""
+	in.WallObservedAt = time.Time{}
+	return in
+}
+
+func TestTickReportsToResolvedRecipient(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	in := shadowSession()
+	if err := e.Tick([]SessionInput{in, observerSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("reports = %+v", d.reports)
+	}
+	if len(d.reports[0].rows) == 0 {
+		t.Fatalf("report carried no rows")
+	}
+}
+
+func TestTickReportQualifiedResolvesByProject(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "repo/observer"}
+	e := New(d.deps())
+	obs := observerSession()
+	obs.RepoRoot = "/home/u/repo"
+	if err := e.Tick([]SessionInput{shadowSession(), obs}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 1 || d.reports[0].key != "sess-obs" {
+		t.Fatalf("qualified report did not resolve: %+v", d.reports)
+	}
+}
+
+func TestTickReportAmbiguousSkips(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	e := New(d.deps())
+	a, b := observerSession(), observerSession()
+	b.Key, b.RepoID, b.RepoRoot = "sess-obs2", "r2", "/other"
+	if err := e.Tick([]SessionInput{shadowSession(), a, b}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("ambiguous recipient still delivered: %+v", d.reports)
+	}
+	if len(d.warns) == 0 {
+		t.Fatalf("ambiguous recipient was not logged")
+	}
+}
+
+func TestTickReportNoMatchWarns(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "missing"}
+	e := New(d.deps())
+	if err := e.Tick([]SessionInput{shadowSession()}); err != nil {
+		t.Fatalf("tick: %v", err)
+	}
+	if len(d.reports) != 0 || len(d.warns) == 0 {
+		t.Fatalf("unresolvable recipient: reports=%v warns=%v", d.reports, d.warns)
 	}
 }
 

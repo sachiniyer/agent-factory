@@ -636,6 +636,9 @@ type Manager struct {
 	// session — the ONLY pane knowledge the engine sees, so fact assembly
 	// adds zero pane reads. Keyed by stableSessionKey; guarded by m.mu.
 	handoffObserved map[string]handoffObservation
+	// handoffReportCh feeds the report_to delivery worker (R15): buffered so
+	// the decision ticker never blocks — a full queue drops with a warn.
+	handoffReportCh chan handoffReportJob
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
@@ -840,6 +843,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		lostRestoreConfirmations:  make(map[string][]time.Time),
 		limitResumeStates:         make(map[string]*limitResumeState),
 		handoffRetryDue:           make(map[string]time.Time),
+		handoffReportCh:           make(chan handoffReportJob, 64),
 		settleOwed:                make(map[string]settleOwedEntry),
 		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),
