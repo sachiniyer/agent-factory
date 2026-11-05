@@ -197,3 +197,201 @@ func TestReportsHeldWithoutSinceFailsClosed(t *testing.T) {
 		t.Fatalf("reports_held without since was accepted")
 	}
 }
+
+// The rails mutators (#6776 slice 5): recent-move records feed the
+// switch-loop counter and the account credits, refusal backoff feeds the
+// defer rail, and the halt record is the on_failure="halt" landing. Every
+// one of these must round-trip durably and fail closed on garbage — the
+// file is the rails' only memory across a daemon restart.
+func TestRecordMoveRoundTrip(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	if err := store.RecordMove("sess-1", "account-b", at); err != nil {
+		t.Fatalf("RecordMove: %v", err)
+	}
+	if err := store.RecordMove("sess-1", "account-c", at.Add(time.Minute)); err != nil {
+		t.Fatalf("RecordMove: %v", err)
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RecentMoves) != 2 || state.RecentMoves[0].SessionKey != "sess-1" ||
+		state.RecentMoves[0].Account != "account-b" || !state.RecentMoves[0].At.Equal(at) {
+		t.Fatalf("RecentMoves = %+v", state.RecentMoves)
+	}
+	if err := store.RecordMove("", "a", at); err == nil {
+		t.Fatal("empty session key was accepted")
+	}
+	if err := store.RecordMove("k", "", at); err == nil {
+		t.Fatal("empty account was accepted")
+	}
+	if err := store.RecordMove("k", "a", time.Time{}); err == nil {
+		t.Fatal("zero timestamp was accepted")
+	}
+}
+
+func TestSetAndClearRefused(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	until := time.Date(2026, 11, 6, 11, 0, 0, 0, time.UTC)
+	for _, key := range []string{"sess-1", "sess-2"} {
+		if err := store.SetRefusedUntil(key, until); err != nil {
+			t.Fatalf("SetRefusedUntil: %v", err)
+		}
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RefusedUntil) != 2 {
+		t.Fatalf("RefusedUntil = %+v", state.RefusedUntil)
+	}
+	// A session-scoped clear drops only that session's entry.
+	n, err := store.ClearRefused("sess-1")
+	if err != nil {
+		t.Fatalf("ClearRefused: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cleared %d entries, want 1", n)
+	}
+	state, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RefusedUntil) != 1 || state.RefusedUntil["sess-1"].Equal(until) {
+		t.Fatalf("scoped clear hit the wrong entries: %+v", state.RefusedUntil)
+	}
+	// An empty scope clears everything; clearing again is not an error.
+	n, err = store.ClearRefused("")
+	if err != nil {
+		t.Fatalf("ClearRefused all: %v", err)
+	}
+	if n != 1 {
+		t.Fatalf("cleared %d, want 1", n)
+	}
+	if n, err = store.ClearRefused(""); err != nil || n != 0 {
+		t.Fatalf("re-clear = %d, %v", n, err)
+	}
+	if err := store.SetRefusedUntil("", until); err == nil {
+		t.Fatal("empty session key was accepted")
+	}
+	if err := store.SetRefusedUntil("k", time.Time{}); err == nil {
+		t.Fatal("zero until was accepted")
+	}
+}
+
+func TestClearMovesIsSessionScoped(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	at := time.Date(2026, 11, 6, 9, 0, 0, 0, time.UTC)
+	for _, mv := range [][2]string{{"sess-1", "a"}, {"sess-2", "a"}, {"sess-1", "b"}} {
+		if err := store.RecordMove(mv[0], mv[1], at); err != nil {
+			t.Fatalf("RecordMove: %v", err)
+		}
+	}
+	n, err := store.ClearMoves("sess-1")
+	if err != nil {
+		t.Fatalf("ClearMoves: %v", err)
+	}
+	if n != 2 {
+		t.Fatalf("cleared %d, want 2", n)
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RecentMoves) != 1 || state.RecentMoves[0].SessionKey != "sess-2" {
+		t.Fatalf("scoped clear hit the wrong entries: %+v", state.RecentMoves)
+	}
+}
+
+func TestRecordAndClearHalt(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	at := time.Date(2026, 11, 6, 8, 0, 0, 0, time.UTC)
+	if err := store.RecordHalt("move-failed", at); err != nil {
+		t.Fatalf("RecordHalt: %v", err)
+	}
+	halt, err := store.HaltedAt()
+	if err != nil {
+		t.Fatalf("HaltedAt: %v", err)
+	}
+	if halt == nil || halt.Reason != "move-failed" || !halt.At.Equal(at) {
+		t.Fatalf("halt = %+v", halt)
+	}
+	cleared, err := store.ClearHalt()
+	if err != nil {
+		t.Fatalf("ClearHalt: %v", err)
+	}
+	if cleared == nil || cleared.Reason != "move-failed" {
+		t.Fatalf("cleared = %+v — the caller must learn what it removed", cleared)
+	}
+	if halt, err := store.HaltedAt(); err != nil || halt != nil {
+		t.Fatalf("cleared halt still recorded: %+v, %v", halt, err)
+	}
+	if err := store.RecordHalt("", at); err == nil {
+		t.Fatal("a reasonless halt was accepted — a halt must never be silent about why")
+	}
+	if err := store.RecordHalt("x", time.Time{}); err == nil {
+		t.Fatal("a timeless halt was accepted")
+	}
+}
+
+func TestHaltWithoutReasonFailsClosed(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "instances", StateFileName)
+	if err := os.MkdirAll(filepath.Dir(path), 0o700); err != nil {
+		t.Fatal(err)
+	}
+	raw := `{"schema_version": 1, "halted": {"at": "2026-11-06T08:00:00Z"}}`
+	if err := os.WriteFile(path, []byte(raw), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := NewStore(path).Load(); err == nil {
+		t.Fatal("a halted record without a reason was accepted")
+	}
+}
+
+func TestPruneExpiredDropsOnlyDeadRecords(t *testing.T) {
+	store := NewStore(filepath.Join(t.TempDir(), "instances", StateFileName))
+	now := time.Date(2026, 11, 6, 12, 0, 0, 0, time.UTC)
+	if err := store.SetRefusedUntil("old", now.Add(-time.Minute)); err != nil {
+		t.Fatalf("SetRefusedUntil: %v", err)
+	}
+	if err := store.SetRefusedUntil("live", now.Add(time.Hour)); err != nil {
+		t.Fatalf("SetRefusedUntil: %v", err)
+	}
+	for _, mv := range []struct {
+		key string
+		at  time.Time
+	}{{"in", now.Add(-10 * time.Minute)}, {"out", now.Add(-time.Hour)}} {
+		if err := store.RecordMove(mv.key, "a", mv.at); err != nil {
+			t.Fatalf("RecordMove: %v", err)
+		}
+	}
+	if err := store.PruneExpired(30*time.Minute, now); err != nil {
+		t.Fatalf("PruneExpired: %v", err)
+	}
+	state, err := store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RefusedUntil) != 1 || state.RefusedUntil["live"].IsZero() {
+		t.Fatalf("live backoff was pruned: %+v", state.RefusedUntil)
+	}
+	if len(state.RecentMoves) != 1 || state.RecentMoves[0].SessionKey != "in" {
+		t.Fatalf("in-window move was pruned: %+v", state.RecentMoves)
+	}
+	// An unbounded window keeps every move — the counters only read
+	// in-window entries, so nothing is lost by keeping the history.
+	if err := store.PruneExpired(0, now.Add(24*time.Hour)); err != nil {
+		t.Fatalf("PruneExpired unbounded: %v", err)
+	}
+	state, err = store.Load()
+	if err != nil {
+		t.Fatalf("Load: %v", err)
+	}
+	if len(state.RecentMoves) != 1 {
+		t.Fatalf("unbounded window dropped moves: %+v", state.RecentMoves)
+	}
+	if len(state.RefusedUntil) != 0 {
+		t.Fatalf("the expired backoff outlived the clock: %+v", state.RefusedUntil)
+	}
+}

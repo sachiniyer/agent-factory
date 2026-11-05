@@ -72,12 +72,16 @@ test("quotaReport: the rendered rows and warnings pass through untouched", async
       },
     ],
     warnings: ["1 project record file(s) could not be read, so this report is INCOMPLETE; sessions in them are not counted: [repo-a]"],
+    mover: "halted: move-failed since 2026-01-01T09:00:00Z",
   });
   const resp = await quotaReport("tok");
   assert.equal(resp.agents[0].program, "codex");
   assert.equal(resp.agents[0].observed, "limit reached");
   assert.equal(resp.agents[0].limited_sessions, 1);
   assert.equal(resp.warnings?.length, 1);
+  // The mover line is the daemon's own words — a recorded halt arrives verbatim
+  // so the Usage section can never silently drop it (#6776 R16).
+  assert.equal(resp.mover, "halted: move-failed since 2026-01-01T09:00:00Z");
 });
 
 test("emptyQuotaState: the shell's starting point renders as 'nothing yet', not as an error", () => {

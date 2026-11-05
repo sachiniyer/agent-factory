@@ -137,10 +137,24 @@ func resetAccountsJSONFlags() {
 	for _, cmd := range accountsCmd.Commands() {
 		// Every bound boolean, not just --json: `login` also binds --no-attach, and
 		// cobra keeps flag values and Changed across Execute calls, so a leaked
-		// --no-attach would silently decide a later case's branch.
+		// --no-attach would silently decide a later case's branch. The handoff
+		// verbs nest a level deeper, so their bound flags are reset the same
+		// way rather than leaking --session or --json between cases.
 		for _, name := range []string{"json", "no-attach"} {
 			if flag := cmd.Flags().Lookup(name); flag != nil {
 				_ = flag.Value.Set("false")
+				flag.Changed = false
+			}
+		}
+		for _, sub := range cmd.Commands() {
+			for _, name := range []string{"json"} {
+				if flag := sub.Flags().Lookup(name); flag != nil {
+					_ = flag.Value.Set("false")
+					flag.Changed = false
+				}
+			}
+			if flag := sub.Flags().Lookup("session"); flag != nil {
+				_ = flag.Value.Set("")
 				flag.Changed = false
 			}
 		}

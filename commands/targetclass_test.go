@@ -47,6 +47,12 @@ var verbTargetClass = map[string]string{
 	// whoami reads the TMUX pane it runs in, which only exists on this machine.
 	"af sessions whoami": classLocal,
 
+	// The handoff rails verbs route: the durable record is the daemon's
+	// authority, so --daemon-url must reach the targeted daemon rather than
+	// answer about this machine.
+	"af accounts handoff reset":  classRouted,
+	"af accounts handoff status": classRouted,
+
 	"af tasks add":     classRouted,
 	"af tasks get":     classRouted,
 	"af tasks list":    classRouted,
