@@ -1,0 +1,1 @@
+{"timestamp":"2026-10-31T04:55:00.000Z","type":"event_msg","payload":{"type":"token_count","info":null,"rate_limits":{"limit_id":null,"limit_name":null,"primary":{"used_percent":12.0,"window_minutes":300,"resets_at":1761906000},"secondary":null,"credits":null,"individual_limit":null,"spend_control_reached":null,"plan_type":null,"rate_limit_reached_type":null}}}
