@@ -37,6 +37,11 @@ type fakeStream struct {
 	// deterministically instead of racing it (#2417). Set before New; never held
 	// under s.mu, so a concurrent sender can still record while it runs.
 	resizeGate func()
+	// inputGate, when set, runs at the START of SendInput — the seam a test needs
+	// to hold the flush's network write open deterministically, e.g. to prove the
+	// input pipe keeps draining while a backlog flush is mid-write. Set before
+	// New; never held under s.mu.
+	inputGate func()
 }
 
 func newFakeStream(startSeq uint64) *fakeStream {
@@ -57,6 +62,9 @@ func (s *fakeStream) Recv(ctx context.Context) (Event, error) {
 }
 
 func (s *fakeStream) SendInput(_ context.Context, b []byte) error {
+	if s.inputGate != nil {
+		s.inputGate()
+	}
 	s.mu.Lock()
 	s.input = append(s.input, b...)
 	s.inputFrames = append(s.inputFrames, append([]byte(nil), b...))
@@ -729,6 +737,68 @@ func TestQueuedInputFlushesInServerBoundedChunks(t *testing.T) {
 		require.LessOrEqualf(t, n, inputFlushChunkSize,
 			"INPUT frame %d of %d bytes exceeds the flush bound (server read limit is 32 KiB)", i, n)
 	}
+}
+
+// TestSendKeyNeverBlocksDuringBacklogFlush pins the drain/flush split (PR #6849
+// review): while a reconnect backlog is flushing — a network write that can sit
+// inside SendInput for writeTimeout per chunk, scaled by the whole backlog — the
+// send pump must keep draining the emulator's synchronous input pipe. If the
+// drain waited on the flush, the next SendKey would freeze the entire event loop
+// (no pane switching, no closing) for the duration of the backlog.
+//
+// Deterministic: the fake stream's inputGate parks the flusher mid-write on
+// command, so the test holds the flush open while it types into the pipe.
+func TestSendKeyNeverBlocksDuringBacklogFlush(t *testing.T) {
+	dialGate := make(chan struct{})
+	sendStarted := make(chan struct{})
+	sendGate := make(chan struct{})
+	s := newFakeStream(0)
+	var gateOnce sync.Once
+	s.inputGate = func() {
+		gateOnce.Do(func() { close(sendStarted) })
+		<-sendGate
+	}
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		select {
+		case <-dialGate:
+			return s, nil
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	// Queue a multi-chunk backlog while disconnected, then connect: the flusher
+	// starts sending chunk 1 and parks inside SendInput.
+	prefix := strings.Repeat("x", 2*inputFlushChunkSize)
+	require.True(t, tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(prefix)}))
+	close(dialGate)
+	select {
+	case <-sendStarted:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the backlog flush never reached the stream")
+	}
+
+	// The network write is wedged mid-flush — typing must still return promptly
+	// because the pipe drains into the queue independently of the flusher.
+	sent := make(chan bool, 1)
+	go func() {
+		sent <- tp.SendKey(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("tail")})
+	}()
+	select {
+	case ok := <-sent:
+		require.True(t, ok)
+	case <-time.After(5 * time.Second):
+		t.Fatal("SendKey blocked behind an in-flight backlog flush — the event loop would freeze")
+	}
+
+	// Release the write: the backlog plus the tail arrive whole and in order.
+	close(sendGate)
+	require.Eventually(t, func() bool {
+		return s.sentInput() == prefix+"tail"
+	}, 10*time.Second, 20*time.Millisecond,
+		"backlog + tail must flush whole and in order once the write unblocks")
 }
 
 // TestSendKeyNeverBlocksWhileDisconnected pins the pump-drain contract: the
