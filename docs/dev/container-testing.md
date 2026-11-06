@@ -355,7 +355,10 @@ Scaffolds that run their driver under a private tmux server get the whole
 pane tree as members automatically — that is what `$TMUX_TMPDIR` inside the
 sandbox root plus the marker's `tmux_tmpdir` record is for. Processes a
 scaffold starts outside the private server can be added to
-`throwaway-pids.json` by writing `{"pid": N, "start_id": M}` entries.
+`throwaway-pids.json` by writing
+`{"pid": N, "start_id": M, "boot_id": "<boot id>", "ns_id": "<pidns id>"}`
+entries scoped to the current boot and PID namespace — an unscoped record
+is never selected.
 `AF_SANDBOX_OWNER_PID`, when used, must name a durable process — the driver
 pane or a dedicated keeper — not `$$` inside the marking shell, which dies
 with the call and trips the owner-death watchdog immediately.
