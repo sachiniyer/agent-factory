@@ -151,6 +151,12 @@ SESSION_DEAD=probe-noserver
 # unambiguous to permute. Substring caveat as above, and it bites here: this may NOT
 # be "probe-arrange", which contains "probe-a" and would wedge that session's row().
 SESSION_ORDER=probe-order
+# The #2347 geometry-reclaim session: DEDICATED, like SESSION_VITE. Its assertion
+# samples the emulator ~50ms after activation, so a sibling-tab roster churn on
+# shared probe-a can re-mint a shell tab's id mid-window — the forced pane rebuild
+# then re-asserts the peer's grid inside the read window (run 42244518786). Only
+# the one test may open tabs here.
+SESSION_GEOM=probe-geometry
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
 # release); without this it would self-update on boot and restart the daemon
@@ -418,6 +424,7 @@ cleanup() {
     "$BIN" sessions kill "$SESSION_MIS" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_DEAD" >/dev/null 2>&1 || true
     "$BIN" sessions kill "$SESSION_ORDER" >/dev/null 2>&1 || true
+    "$BIN" sessions kill "$SESSION_GEOM" >/dev/null 2>&1 || true
     # Sweep hook-provisioned sessions the named list cannot know: the serial
     # create test submits through the modal, so if an assertion fails the row
     # outlives its test and its detached agent-server contaminates every later
@@ -831,6 +838,20 @@ done
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_ORDER" --command "sleep 300" --name beta >/dev/null
 "$BIN" sessions tab-create --repo "$MOCK" "$SESSION_ORDER" --command "sleep 300" --name gamma >/dev/null
 
+# --- the #2347 geometry-reclaim session --------------------------------------
+# Seeded, not created mid-test: a launch dependency inside the assertion window
+# would add a second flake class to the one being removed. Nothing but the #2347
+# spec may open tabs on it — a sibling roster churn re-minting a tab id is the
+# remount that re-stranded the just-activated pane in run 42244518786.
+echo ">>> creating geometry session $SESSION_GEOM (#2347) ..."
+"$BIN" sessions create --repo "$MOCK" --name "$SESSION_GEOM" --program claude >/dev/null
+for i in $(seq 1 30); do
+    if "$BIN" sessions get "$SESSION_GEOM" >/dev/null 2>&1; then
+        break
+    fi
+    sleep 1
+done
+
 # --- seed the URL-less web tab through the daemon's OWN store (#1818) -------
 # ORDER MATTERS: this block STOPS the daemon to write its store, so it must come
 # after every seeding step that drives the live daemon over the CLI (the #1809
@@ -936,6 +957,7 @@ export AF_WEB_SESSION_VITE="$SESSION_VITE"
 export AF_WEB_SESSION_MIS="$SESSION_MIS"
 export AF_WEB_SESSION_DEAD="$SESSION_DEAD"
 export AF_WEB_SESSION_ORDER="$SESSION_ORDER"
+export AF_WEB_SESSION_GEOM="$SESSION_GEOM"
 export AF_WEB_DEAD_PORT="$DEAD_PORT"
 export AF_VITE_MARKER="$VITE_MARKER"
 export AF_VITE_ABS_TITLE="$VITE_ABS_TITLE"
