@@ -317,8 +317,8 @@ The default is `system`. See the [global example](https://github.com/sachiniyer/
 
 System detects the terminal background through OSC 11, with `COLORFGBG` as the
 terminal library's fallback and **dark** when no background is available.
-Explicit Light/Dark bypass detection. The browser keeps its independent local
-header preference and follows OS appearance for System. The CLI edits the TUI
+Explicit Light/Dark bypass detection. The browser keeps its independent local preference — a Theme select in
+Config's **This browser** section — and follows OS appearance for System. The CLI edits the TUI
 preference; it has no persistent visual renderer and does not set the browser
 preference. Agent-owned ANSI output remains unchanged.
 

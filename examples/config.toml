@@ -2,5 +2,5 @@
 # This setting is not accepted in a repository's .agent-factory/config.toml.
 # TUI appearance on next launch: "light", "dark", or "system" (default).
 # System follows terminal background, falling back to dark.
-# The browser has an independent Light / Dark / System header preference.
+# The browser has an independent Light / Dark / System preference (Config → This browser).
 appearance = "system"
