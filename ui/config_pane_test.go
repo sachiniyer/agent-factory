@@ -707,6 +707,302 @@ func TestSavingAnUntouchedFieldWritesNothing(t *testing.T) {
 	}
 }
 
+// seedConfigWithMultiLineValue writes a throwaway config.toml holding a
+// multi-line on_archive_command (a hand-edited TOML multi-line string, the
+// shape the prose in docs/configuration.md acknowledges) and returns its path
+// and the value the loader produces. Never the real AF home.
+func seedConfigWithMultiLineValue(t *testing.T) (path, value string) {
+	t.Helper()
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	path = filepath.Join(home, "config.toml")
+	// A multi-line shell script: several lines of commands, the shape a user
+	// hand-edits into config.toml with a TOML ''' literal string. The loader
+	// preserves the embedded newlines verbatim.
+	body := "on_archive_command = '''echo start\necho mid\necho end'''\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("config does not load with a multi-line on_archive_command: %v", err)
+	}
+	value = cfg.OnArchiveCommand
+	if !strings.Contains(value, "\n") {
+		t.Fatalf("precondition: the loaded value is not multi-line: %q", value)
+	}
+	return path, value
+}
+
+// TestConfigPaneMultiLineValueUntouchedSaveIsNoOp is the regression test for the
+// sanitizer-flattening bug in beginEdit/commitEdit.
+//
+// A multi-line config value (a hand-edited TOML multi-line string for a
+// plain-string key such as on_archive_command) loads with literal newlines.
+// bubbles v0.20.0's textinput.SetValue runs a sanitizer that replaces newlines
+// and tabs with spaces, so beginEdit — which pre-filled the field with the raw
+// entry.Value — flattened the value inside the field BEFORE the user typed
+// anything. commitEdit's untouched-field guard then compared the flattened field
+// against the unflattened entry.Value, always read it as an edit, and rewrote
+// config.toml with the collapsed single-line value — silent data corruption of
+// a value the user only looked at, with a success echo.
+//
+// The fix: beginEdit seeds the field with the pre-flattened value (via
+// flattenToOneLine, the same flattener the sanitizer applies), and commitEdit
+// compares against that same flattened form — so open + commit is a true no-op.
+func TestConfigPaneMultiLineValueUntouchedSaveIsNoOp(t *testing.T) {
+	path, multiLine := seedConfigWithMultiLineValue(t)
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+
+	// The field is seeded with the FLATTENED value, not the raw multi-line one.
+	// The sanitizer flattens newlines to spaces, and beginEdit pre-flattens so
+	// the seed is stable under the field's own round trip. The field is a
+	// single-line textinput, so it cannot hold newlines — this is the honest
+	// representation of what the field can save, not a corruption of the stored
+	// value (which is untouched on disk).
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field on on_archive_command")
+	}
+	if got := c.input.Value(); strings.Contains(got, "\n") {
+		t.Errorf("the field holds a newline — the single-line field cannot, and the sanitizer should have flattened it: %q", got)
+	}
+	if got := c.input.Value(); got == multiLine {
+		t.Errorf("the field holds the raw multi-line value — the sanitizer should have flattened it: %q", got)
+	}
+
+	// Commit without typing anything. This must be a no-op: the file is unchanged
+	// and the write path is never called.
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if writes != 0 {
+		t.Errorf("saving an untouched multi-line field issued %d write(s); it must issue none — the flattened-field guard was defeated by the sanitizer", writes)
+	}
+	if c.restartNotice != "" {
+		t.Error("a no-op told the user to restart for a multi-line value they did not change")
+	}
+	if c.status != "" {
+		t.Errorf("a no-op echoed a status for a multi-line value the user did not change: %q", c.status)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("an untouched multi-line on_archive_command was rewritten — the sanitizer-flattening bug corrupted a value the user only looked at.\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+	if !strings.Contains(string(after), "echo start\necho mid\necho end") {
+		t.Errorf("the multi-line value was destroyed on disk:\n%s", after)
+	}
+}
+
+// TestConfigPaneMultiLineValueEditStillWrites proves the fix does not block
+// real edits: opening a multi-line value, typing a new single-line value, and
+// committing must write through the real path and land in the file.
+func TestConfigPaneMultiLineValueEditStillWrites(t *testing.T) {
+	path, _ := seedConfigWithMultiLineValue(t)
+
+	c := openPaneOn(t, path, "on_archive_command")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field")
+	}
+	// Clear the pre-filled field and type a new single-line value.
+	c.input.SetValue("")
+	typeInto(c, "echo replaced")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if c.IsEditing() {
+		t.Fatal("a successful save must close the value field")
+	}
+	if c.statusIsError {
+		t.Fatalf("save failed: %s", c.status)
+	}
+	if want := "set on_archive_command = echo replaced"; !strings.Contains(c.status, want) {
+		t.Errorf("the pane must echo what was written.\n got: %q\nwant substring: %q", c.status, want)
+	}
+
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.Contains(string(raw), "on_archive_command = 'echo replaced'") {
+		t.Errorf("the edit did not reach config.toml:\n%s", raw)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("config.toml does not load after the edit: %v", err)
+	}
+	if cfg.OnArchiveCommand != "echo replaced" {
+		t.Errorf("loaded on_archive_command = %q, want %q", cfg.OnArchiveCommand, "echo replaced")
+	}
+}
+
+// TestConfigPaneMultiLineValueEscCancelsWithoutWriting proves the fix does not
+// interfere with the cancel path: opening a multi-line value and pressing esc
+// must abandon the edit without writing, leaving the file untouched.
+func TestConfigPaneMultiLineValueEscCancelsWithoutWriting(t *testing.T) {
+	path, _ := seedConfigWithMultiLineValue(t)
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field")
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
+	if c.IsEditing() {
+		t.Error("esc must abandon the edit")
+	}
+	if writes != 0 {
+		t.Errorf("esc issued %d write(s); it must issue none", writes)
+	}
+
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("esc rewrote the file:\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+}
+
+// TestConfigPaneControlRuneValueUntouchedSaveIsNoOp pins the sanitizer-faithful
+// seed: a value containing a control rune that flattenToOneLine does NOT fold
+// (ESC, which bubbles v0.20.0's textinput sanitizer drops via
+// unicode.IsControl, but flattenToOneLine only folds whitespace controls) must
+// still be a no-op on open + commit. A guard seeded from a flatten-only
+// approximation would leave the ESC in the seed while the field's own
+// round trip drops it, read the untouched field as edited, and rewrite the
+// value without the rune. beginEdit reads the seed back from the field, so the
+// seed is exactly what the sanitizer produced and the untouched field matches.
+func TestConfigPaneControlRuneValueUntouchedSaveIsNoOp(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	t.Setenv("SHELL", "/bin/sh")
+	path := filepath.Join(home, "config.toml")
+	// A TOML basic string holding an ESC rune via the \u001b escape. ESC is a
+	// control character that flattenToOneLine does NOT fold (it only folds
+	// whitespace controls) but the textinput sanitizer drops (unicode.IsControl),
+	// which is the asymmetry the seed must account for.
+	body := "on_archive_command = \"echo \\u001bstart\"\n"
+	if err := os.WriteFile(path, []byte(body), 0644); err != nil {
+		t.Fatal(err)
+	}
+	orig := []byte(body)
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("config does not load with a control-rune on_archive_command: %v", err)
+	}
+	if !strings.Contains(cfg.OnArchiveCommand, "\x1b") {
+		t.Fatalf("precondition: the loaded value lost the ESC rune: %q", cfg.OnArchiveCommand)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field on on_archive_command")
+	}
+	// The field is single-line and the sanitizer must have dropped the ESC.
+	if strings.Contains(c.input.Value(), "\x1b") {
+		t.Errorf("the field holds an ESC rune — the sanitizer should have dropped it: %q", c.input.Value())
+	}
+
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if writes != 0 {
+		t.Errorf("saving an untouched control-rune field issued %d write(s); it must issue none — the seed was not sanitizer-faithful and the untouched field read as edited", writes)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("an untouched control-rune on_archive_command was rewritten — the sanitizer-faithful seed is missing.\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+}
+
+// TestConfigPaneNavigationKeysDoNotMarkDirty pins the dirty-flag fix in
+// handleEditKey. Opening a multi-line value and pressing cursor-only keys
+// (Left/Right/Home/End) that route through the default branch but do NOT
+// change the input content, then Enter, must be a no-op. Before the fix
+// every key in the default branch set dirty=true, so navigation bypassed
+// the untouched-field guard and Enter rewrote the file with the flattened
+// field text — destroying the multi-line value on disk.
+func TestConfigPaneNavigationKeysDoNotMarkDirty(t *testing.T) {
+	path, _ := seedConfigWithMultiLineValue(t)
+	orig, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	c := openPaneOn(t, path, "on_archive_command")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !c.IsEditing() {
+		t.Fatal("enter must open the value field on on_archive_command")
+	}
+	for _, k := range []tea.KeyType{tea.KeyLeft, tea.KeyRight, tea.KeyHome, tea.KeyEnd, tea.KeyLeft, tea.KeyRight} {
+		c.HandleKeyPress(tea.KeyMsg{Type: k})
+	}
+	if !c.IsEditing() {
+		t.Fatal("navigation must not close the field")
+	}
+	if c.input.Value() != c.editSeed {
+		t.Fatalf("navigation changed the field value: got %q, want seed %q", c.input.Value(), c.editSeed)
+	}
+
+	var writes int
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		writes++
+		return &config.SetResult{Key: k, Value: v, Path: path, RequiresRestart: true},
+			config.EffectNotice(k, config.ApplyOutcome{DaemonApply: config.DaemonApplyApplied}), nil
+	}
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if writes != 0 {
+		t.Errorf("saving after cursor-only navigation issued %d write(s); it must issue none — navigation keys must not mark the field dirty", writes)
+	}
+	after, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if string(after) != string(orig) {
+		t.Errorf("cursor-only navigation + Enter rewrote the multi-line value.\n--- before ---\n%s\n--- after ---\n%s", orig, after)
+	}
+	if !strings.Contains(string(after), "echo start\necho mid\necho end") {
+		t.Errorf("the multi-line value was destroyed on disk:\n%s", after)
+	}
+}
+
 // TestConfigPaneWindowsWithAZeroBudget pins the degenerate size. A pane sized
 // before SetSize has run, or squeezed to nothing by a tiny terminal, must not
 // panic or slice out of range — and must still keep the selection on screen when

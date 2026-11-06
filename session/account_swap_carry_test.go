@@ -230,13 +230,20 @@ func TestValidateAccountSwapCarriesCodexConversationFromRegisteredAccount(t *tes
 	require.NotEqual(t, plan.conversation.CapturedAt, conv.CapturedAt,
 		"an unchanged id must still commit as a new observation, or the caller reads it as a lost runtime")
 
-	// A provider that forked on resume would mint one new rollout for this
-	// directory; capture follows it rather than pinning a stale thread.
-	const forkID = "0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
-	writeCarryFile(t, target, codexRolloutRelDay(forkID, time.Now()), codexRollout(inst.GetWorktreePath()))
+	// A sibling rollout that appears during the capture window cannot be
+	// distinguished from a real fork by appearance alone, so carried capture
+	// fails closed: the carried id stands rather than adopt the sibling's.
+	// The sibling must sit in the day dir a real recorder would mint it in —
+	// the bounded scan never descends into provably-older directories, so a
+	// stale-dated sibling would exercise nothing (#6845).
+	const siblingID = "0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
+	writeCarryFile(t, target, codexRolloutRelDay(siblingID, time.Now()), codexRollout(inst.GetWorktreePath()))
 	conv, err = CaptureAgentConversation(tmux.ProgramCodex, plan.conversationCapture, 5*time.Second)
 	require.NoError(t, err)
-	require.Equal(t, forkID, conv.ID)
+	require.Equal(t, carryTestID, conv.ID,
+		"a sibling rollout appearing during carried capture must not steal the carried conversation id")
+	require.Equal(t, ConversationCaptureCarried, conv.CaptureKind,
+		"the carried id is re-stamped as a carried observation, not a rollout capture")
 }
 
 func TestValidateAccountSwapStatesWhyItCannotCarry(t *testing.T) {

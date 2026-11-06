@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"unicode"
 )
 
 // The explain surface (#2216): which config layers supplied an effective value.
@@ -129,6 +130,12 @@ func ExplainGlobalValue(keyPath string) (ResolvedValue, error) {
 // composites as compact JSON. It is the one renderer the CLI's get/list output,
 // --explain's values, and the TUI explain view share, so no surface spells the
 // same value differently.
+//
+// FormatValueForKey is the key-aware counterpart: a cfgStringList leaf
+// (isCommaListKey) renders as the comma-joined form `af config set` accepts back
+// rather than JSON, so a get→set round-trip does not silently corrupt the list.
+// Use FormatValueForKey anywhere the key is known; FormatValue remains the
+// fallback when it is not (and for non-comma-list keys the two are identical).
 func FormatValue(v any) string {
 	switch x := v.(type) {
 	case string:
@@ -146,6 +153,22 @@ func FormatValue(v any) string {
 	}
 }
 
+// FormatValueForKey renders a resolved config value for human output, keyed off
+// the config key so a cfgStringList leaf (isCommaListKey) renders as the
+// comma-joined form `af config set` accepts back rather than JSON. For every
+// other key it is identical to FormatValue. It is the renderer `af config get`
+// and `af config list` use for a typed value whose key is known, so a get→set
+// round-trip is byte-identical for comma-list keys (cors_allowed_origins,
+// allowed_hosts, limit_account_candidates, account_handoff.exclude_sessions).
+func FormatValueForKey(key string, v any) string {
+	if isCommaListKey(key) {
+		if joined, ok := commaJoinStringList(key, v); ok {
+			return joined
+		}
+	}
+	return FormatValue(v)
+}
+
 // FormatExplainValue renders a value inside an explanation: an explicitly
 // configured empty string stays visible as `""` — a bare blank would read as
 // absent — while everything else prints as FormatValue.
@@ -154,6 +177,91 @@ func FormatExplainValue(value any) string {
 		return `""`
 	}
 	return FormatValue(value)
+}
+
+// FormatExplainValueForKey is the key-aware counterpart of FormatExplainValue: a
+// cfgStringList leaf (isCommaListKey) renders as the comma-joined form (with an
+// empty list shown as `""` to distinguish it from an absent value) rather than
+// JSON, so the explain trace and the concise get output agree. For every other
+// key it is identical to FormatExplainValue.
+func FormatExplainValueForKey(key string, value any) string {
+	if isCommaListKey(key) {
+		if joined, ok := commaJoinStringList(key, value); ok {
+			if joined == "" {
+				return `""`
+			}
+			return joined
+		}
+	}
+	return FormatExplainValue(value)
+}
+
+// commaJoinStringList renders a []string or []any-of-strings as a comma-joined
+// string. The explain trace's candidate values come from map[string]any (TOML
+// decode) which produces []any rather than []string, so both spellings are
+// accepted. ok is false for any other type, leaving the caller to its fallback.
+//
+// ok is also false when the joined form would not round-trip back through the
+// leaf setter exactly: an element containing a comma (the setter splits on
+// commas), an element that splitListValue would alter (it trims surrounding
+// whitespace and drops empty elements, so " work " or "" would silently change
+// the list on the way back), an element the per-key leaf validator rejects
+// (e.g. exclude_sessions titles containing brackets or quotes), or an element
+// containing a control character (a whole-table value may carry one, and the
+// raw join would write terminal control sequences where JSON marshaling would
+// escape them). The comma form is returned only when re-splitting and re-validating the joined string
+// reproduces every original element; otherwise the caller falls back to JSON —
+// the unambiguous form that signals "use the whole-table form to set this back"
+// rather than a value that looks round-trippable but is not.
+func commaJoinStringList(key string, v any) (string, bool) {
+	var list []string
+	switch l := v.(type) {
+	case []string:
+		list = l
+	case []any:
+		parts := make([]string, len(l))
+		for i, elem := range l {
+			s, ok := elem.(string)
+			if !ok {
+				return "", false
+			}
+			parts[i] = s
+		}
+		list = parts
+	default:
+		return "", false
+	}
+	for _, s := range list {
+		if strings.ContainsRune(s, ',') {
+			return "", false
+		}
+		// A whole-table element may legally contain a control character (the
+		// exclude_sessions validator rejects only trim-empty titles), and
+		// emitting such a title raw would write terminal control sequences
+		// verbatim through `config get` and the explain table — JSON marshaling
+		// escapes them, and the TUI path strips them with explainSafe. Treat
+		// control-bearing elements as non-representable so they keep the JSON
+		// fallback instead of corrupting terminal output.
+		if strings.ContainsFunc(s, unicode.IsControl) {
+			return "", false
+		}
+	}
+	joined := strings.Join(list, ",")
+	roundTripped := splitListValue(joined)
+	if len(roundTripped) != len(list) {
+		return "", false
+	}
+	for i := range list {
+		if roundTripped[i] != list[i] {
+			return "", false
+		}
+	}
+	if _, leaf, spec, ok := resolveSettable(key); ok && spec.validate != nil {
+		if err := spec.validate(leaf, joined); err != nil {
+			return "", false
+		}
+	}
+	return joined, true
 }
 
 // UnknownConfigKeyError reports a key no manifest entry or root_agent leaf can

@@ -67,16 +67,20 @@ func (c *Client) WorkspaceFacts(ctx context.Context, req daemon.WorkspaceFactsRe
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
-// relocated worktree's new path.
-func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, error) {
+// relocated worktree's new path alongside where an off-box session's work lives
+// (the preserved directory on its host, or the pushed branch — #5571 W8.5). The
+// workspace is the authoritative value the daemon computed and returned; the
+// CLI threads it straight to its output instead of re-deriving it through a
+// snapshot read-back whose sandbox projection strips the field (#5804).
+func (c *Client) ArchiveSession(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 	var resp daemon.ArchiveSessionResponse
 	err := c.call("ArchiveSession", req, &resp)
 	// call() classifies a committed outcome generically; this only keeps the
 	// payload, which a committed archive still needs to report where it landed.
 	if err != nil && !IsMutationCommitted(err) {
-		return "", err
+		return "", nil, err
 	}
-	return resp.ArchivedPath, err
+	return resp.ArchivedPath, resp.ArchivedWorkspace, err
 }
 
 // RestoreSession asks the daemon to restore an archived, Lost, or Dead session.

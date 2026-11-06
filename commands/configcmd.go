@@ -185,10 +185,11 @@ func loadGlobalConfigEntries() ([]configEntry, error) {
 }
 
 // formatConfigValue renders a value for human output, delegating to
-// config.FormatValue — the one renderer the CLI's get/list output, --explain's
-// values, and the TUI explain view share.
-func formatConfigValue(v any) string {
-	return config.FormatValue(v)
+// config.FormatValueForKey — the key-aware renderer that comma-joins
+// cfgStringList leaves (isCommaListKey) and JSON-marshals everything else,
+// so `af config get` prints the form `af config set` accepts back.
+func formatConfigValue(key string, v any) string {
+	return config.FormatValueForKey(key, v)
 }
 
 // formatConfigListValue makes absence visible without hiding an explicit
@@ -200,11 +201,11 @@ func formatConfigValue(v any) string {
 func formatConfigListValue(entry configEntry) string {
 	rendered := ""
 	if !isEmptyConfigValue(entry.Value) {
-		rendered = formatConfigValue(entry.Value)
+		rendered = formatConfigValue(entry.Key, entry.Value)
 	} else if !entry.configured {
 		rendered = "(unset)"
 	} else {
-		rendered = config.FormatExplainValue(entry.Value)
+		rendered = config.FormatExplainValueForKey(entry.Key, entry.Value)
 	}
 	if entry.note != "" {
 		rendered += " " + entry.note
@@ -281,8 +282,21 @@ var configGetCmd = &cobra.Command{
 auto_update, update_channel). By default the current repository's legacy,
 checked-in, and personal layers participate; outside git, the command falls back
 to global defaults. Run "af config list" to see every key. Scalar values print
-bare; composite values (program_overrides, root_agents, limit_patterns, keys)
-print as JSON.
+bare; comma-list leaves (network.cors_allowed_origins, network.allowed_hosts,
+limit_account_candidates, account_handoff.exclude_sessions) print comma-joined
+in the form "af config set" accepts back; other composite values
+(program_overrides, root_agents, limit_patterns, keys) print as JSON. A comma-list
+leaf whose value the comma form cannot represent without loss — an element
+containing a comma, surrounding whitespace, or a control character, or an element
+the per-key leaf validator rejects (e.g. account_handoff.exclude_sessions titles
+containing brackets or quotes) — prints JSON instead. The restore path depends
+on the key:
+account_handoff.exclude_sessions has a whole-table setter ('af config set
+account_handoff {"exclude_sessions":["..."]}'); the other comma-list leaves
+(network.cors_allowed_origins, network.allowed_hosts, limit_account_candidates)
+have no whole-table setter, so a value their leaf setter rejects must be
+corrected by editing config.toml directly — there is no 'af config set' form
+that restores it.
 
 Use --repo <repository-path> to inspect another project. The path is a selector
 only; this command does not register a project or write identity state.
@@ -382,7 +396,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 			if entry.note != "" {
 				fmt.Fprintln(cmd.ErrOrStderr(), entry.Key+" "+entry.note)
 			}
-			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Value))
+			fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(entry.Key, entry.Value))
 			return nil
 		}
 
@@ -396,7 +410,7 @@ is refused rather than ignored. Run it on the daemon host to ask about that host
 				if configJSONFlag {
 					return apiproto.WriteEnvelope(cmd.OutOrStdout(), apiproto.Success(e))
 				}
-				fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(e.Value))
+				fmt.Fprintln(cmd.OutOrStdout(), formatConfigValue(e.Key, e.Value))
 				return nil
 			}
 		}
@@ -558,6 +572,9 @@ Settable keys:
   account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
                              prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
                              max_moves_window, refused_backoff, on_failure, report_to
+  account_handoff.exclude_sessions  comma-separated session titles to exclude from automatic handoff, or "" to clear —
+                             the whole list is replaced; elements cannot contain commas, brackets, or quotes (use the
+                             whole-table JSON form for titles containing those characters)
   global_agent_skills        true | false
   docker.mount_agent_credentials  true | false  (let a docker session mount the operator's credential for that session's own agent, read-only)
   ssh.host_key_verification  strict | accept-new | insecure  (how the ssh backend verifies a remote host key; strict is the default)

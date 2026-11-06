@@ -4,6 +4,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
 )
 
@@ -62,10 +63,11 @@ func TestConfirmPendingAccountSwapDeliveryReleasesTabSpawn(t *testing.T) {
 
 // The startup-unknown and orphaned-fence shapes are the ones this verb exists
 // for: the daemon has probed the pane, so the confirm lifts both. A row parked
-// at its usage-limit wall keeps LiveLimitReached (#5023): it is already
-// not-idle to fleet watch, and ResumeLimitedSessions only owns rows still
-// carrying it — flattening it to LiveRunning would strand the session while an
-// attached client's paused poll never re-detects the wall.
+// at the INCOMING identity's own usage-limit wall keeps LiveLimitReached
+// (#5023, ParkManualAccountSwapAtLimit): it is already not-idle to fleet
+// watch, and ResumeLimitedSessions only owns rows still carrying it —
+// flattening it to LiveRunning would strand the session while an attached
+// client's paused poll never re-detects the wall.
 func TestConfirmPendingAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	inst := confirmableManualSwap(PromptSentUnverified)
 	inst.startupStateUnknown = true
@@ -73,6 +75,10 @@ func TestConfirmPendingAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	inst.inFlightOp = OpRespawning
 	inst.liveness = LiveLimitReached
 	inst.limitResetAt = time.Now().Add(time.Hour)
+	// The wall is attributed to the incoming identity (ParkManualAccountSwapAtLimit
+	// shape, limit_account == pending.To): the confirm keeps it.
+	inst.limitAgent = "claude"
+	inst.limitAccount = "personal"
 	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
 
 	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
@@ -81,7 +87,7 @@ func TestConfirmPendingAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	require.True(t, inst.Started(), "and restores the started bit the flag lowered")
 	require.Equal(t, OpNone, inst.GetInFlightOp(), "the orphaned respawn fence is dropped")
 	require.Equal(t, LiveLimitReached, inst.GetLiveness(),
-		"a confirmed delivery on a limit-blocked row keeps the wall — ResumeLimitedSessions owns it")
+		"a confirmed delivery on a row parked at the incoming identity's wall keeps it — ResumeLimitedSessions owns it")
 	if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
 		t.Fatal("the limit reset time must survive the confirm or the resume pass loses its schedule")
 	}
@@ -116,6 +122,155 @@ func TestConfirmPendingAccountSwapDeliveryAutomaticClearsTheOutgoingWall(t *test
 	require.Nil(t, inst.pendingAccountSwap)
 	require.Nil(t, inst.accountSwapLaunch)
 	require.NoError(t, inst.TabSpawnBlocked())
+}
+
+// A MANUAL swap confirmed while parked at the OUTGOING ambient identity's wall
+// (the #6764 shape: limit_account == "" != pending.To) must clear the wall.
+// The confirm nils the PendingAccountSwap pointer that
+// AccountLimitEvidenceFromData guards against re-attributing the wall to the
+// committed replacement, so keeping it would mint a durable quota observation
+// for the healthy incoming account on every re-derivation — the exact #6764
+// regression.
+func TestConfirmPendingAccountSwapDeliveryManualClearsTheOutgoingAmbientWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	inst.pendingAccountSwap.From = "" // ambient outgoing identity
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	// The wall is the outgoing ambient identity's: limit_account == "" != pending.To.
+	inst.limitAgent = "claude"
+	inst.limitAccount = ""
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("", "personal"))
+
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the outgoing ambient wall retires with the confirmed swap — the replacement is already running")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the outgoing identity's wall retires with the swap")
+	}
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Nil(t, inst.accountSwapLaunch)
+	require.NoError(t, inst.TabSpawnBlocked())
+}
+
+// A MANUAL swap confirmed while parked at a named OUTGOING identity's wall
+// (limit_account == "work" != pending.To "personal") must likewise clear the
+// wall: the confirm retires the transaction, and the wall's attribution to the
+// outgoing identity is stale once the replacement is already running.
+func TestConfirmPendingAccountSwapDeliveryManualClearsTheNamedOutgoingWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	// confirmableManualSwap has From: "work", To: "personal", Account: "personal".
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	inst.limitAgent = "claude"
+	inst.limitAccount = "work" // named outgoing wall, != pending.To "personal"
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
+
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the outgoing identity's wall retires with the confirmed swap — the replacement is already running")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the outgoing identity's wall retires with the swap")
+	}
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Nil(t, inst.accountSwapLaunch)
+	require.NoError(t, inst.TabSpawnBlocked())
+}
+
+// A MANUAL cross-agent swap that reuses the outgoing label in a different
+// provider's namespace (Claude `work` → Codex `work`, the shape exercised in
+// daemon/handoff_account_round12_test.go) must still retire an outgoing wall
+// even though limitAccount == pending.To: the wall's agent namespace
+// (limitAgent "claude") does not match the transaction's incoming AccountAgent
+// ("codex"), so it is the outgoing provider's wall, not the replacement's.
+func TestConfirmPendingAccountSwapDeliveryManualClearsTheCrossAgentSameLabelWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	// Same account label on both sides of a cross-agent swap; the incoming
+	// agent namespace is Codex.
+	inst.pendingAccountSwap.From = "work"
+	inst.pendingAccountSwap.To = "work"
+	inst.pendingAccountSwap.AccountAgent = tmux.ProgramCodex
+	inst.Account = "work"
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	// The wall is the outgoing Claude identity's: same label, different agent.
+	inst.limitAgent = tmux.ProgramClaude
+	inst.limitAccount = "work"
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "work"))
+
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the outgoing provider's wall retires with the confirmed cross-agent swap — the replacement is already running")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the outgoing identity's wall retires with the swap")
+	}
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Nil(t, inst.accountSwapLaunch)
+	require.NoError(t, inst.TabSpawnBlocked())
+}
+
+// The #6764 end-to-end regression: confirming a MANUAL swap parked at the
+// outgoing ambient wall must not leave a row whose evidence re-derivation
+// mints a durable quota observation for the healthy incoming account. The
+// confirm clears the wall (so AccountLimitEvidenceFromData returns no
+// observation), and a daemon restart reloads the row without the wall or the
+// invented observation — the #6764 symptom does not materialize.
+func TestConfirmPendingAccountSwapDeliveryManualOutgoingWallEvidenceNotMinted(t *testing.T) {
+	resetAt := time.Date(2026, 11, 3, 6, 34, 0, 0, time.UTC)
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	inst.pendingAccountSwap.From = "" // ambient outgoing identity
+	inst.pendingAccountSwap.ReplacementPanesStarted = true
+	inst.Program = tmux.ProgramCodex
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = resetAt
+	inst.limitAgent = "claude"
+	inst.limitAccount = "" // outgoing ambient wall, != pending.To "personal"
+
+	// Pre-confirm: the swap pointer is still present, so the #6764 guard in
+	// AccountLimitEvidenceFromData holds — the wall is attributed to the
+	// outgoing identity, not the replacement.
+	preData := inst.ToInstanceData().ForStorage()
+	preAccount, preObs := AccountLimitEvidenceFromData(preData)
+	require.Equal(t, "", preAccount,
+		"pre-confirm: the wall is attributed to the outgoing identity, not the replacement")
+	require.Empty(t, preObs,
+		"pre-confirm: no observation is minted for the incoming identity")
+
+	// Confirm the swap: retires the transaction, nils the swap pointer, and
+	// clears the outgoing wall.
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("", "personal"))
+
+	// Post-confirm: the wall is cleared, so the evidence function cannot mint
+	// a wrong observation for the healthy incoming account — even though the
+	// swap pointer that guarded against re-attribution is now nil.
+	postData := inst.ToInstanceData().ForStorage()
+	postAccount, postObs := AccountLimitEvidenceFromData(postData)
+	require.Equal(t, "", postAccount,
+		"post-confirm: no wall is attributed to the replacement account")
+	require.Empty(t, postObs,
+		"post-confirm: no observation is minted for the incoming identity")
+
+	// A daemon restart reloads the row without the wall and without the
+	// invented observation — the #6764 symptom does not materialize.
+	// StartupStateUnknown keeps the reload inert so FromInstanceData does not
+	// try to re-attach a tmux session (the test has no live runtime); it does
+	// not affect the evidence derivation, which runs before the inert return.
+	postData.Path = t.TempDir()
+	postData.Worktree = GitWorktreeData{
+		RepoPath:     t.TempDir(),
+		WorktreePath: t.TempDir(),
+		SessionName:  "swapped",
+		BranchName:   "af/swapped",
+	}
+	postData.StartupStateUnknown = true
+	reloaded, err := FromInstanceData(postData)
+	require.NoError(t, err)
+	_, _, ok := reloaded.LimitIdentity()
+	require.False(t, ok, "a restart must not load the replacement as limited")
+	require.Empty(t, reloaded.AccountLimitObservations(),
+		"a restart must not retain an invented observation for the replacement")
 }
 
 func TestCanConfirmPendingAccountSwapDelivery(t *testing.T) {

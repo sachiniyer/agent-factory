@@ -133,7 +133,7 @@ func writeConfigExplanations(w io.Writer, resolved *config.ResolvedConfig, value
 }
 
 func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error {
-	fmt.Fprintf(w, "%s = %s\n", value.Key, config.FormatExplainValue(value.Value))
+	fmt.Fprintf(w, "%s = %s\n", value.Key, config.FormatExplainValueForKey(value.Key, value.Value))
 	if value.Default != "" {
 		fmt.Fprintf(w, "default: %s\n", value.Default)
 	}
@@ -144,7 +144,7 @@ func writeConfigValueExplanation(w io.Writer, value config.ResolvedValue) error 
 	for _, candidate := range value.Candidates {
 		candidateValue := "—"
 		if candidate.Present {
-			candidateValue = config.FormatExplainValue(candidate.Value)
+			candidateValue = config.FormatExplainValueForKey(value.Key, candidate.Value)
 		}
 		location := "compiled default"
 		if candidate.Path != "" {

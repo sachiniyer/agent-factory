@@ -126,6 +126,19 @@ func TestPruneApply_RefusesWhatTheVerdictRefusesAndNamesThePath(t *testing.T) {
 			gitOut(t, a, "add", "extra.txt")
 			gitOut(t, a, "commit", "-qm", "only here")
 		}, []string{"could not be verified as this session's worktree", "occupant"}},
+		// A detached-HEAD commit returned to the branch tip passes the
+		// occupant-identity check (the worktree is back on the session's
+		// branch) and the HEAD == branch-tip equality, but the abandoned
+		// commit's only reachability root is the leaf's logs/HEAD reflog,
+		// which prune deletes. The reflog guard catches it.
+		{"detached commit returned to the branch tip", func(t *testing.T, a string) {
+			branch := gitOut(t, a, "rev-parse", "--abbrev-ref", "HEAD")
+			gitOut(t, a, "checkout", "--detach")
+			require.NoError(t, os.WriteFile(filepath.Join(a, "detached.txt"), []byte("x"), 0o644))
+			gitOut(t, a, "add", "detached.txt")
+			gitOut(t, a, "commit", "-qm", "detached then returned")
+			gitOut(t, a, "checkout", "-q", branch)
+		}, []string{"reflog", "does not contain"}},
 		{"occupant nonce replaced", func(t *testing.T, a string) {
 			gitDir := gitOut(t, a, "rev-parse", "--absolute-git-dir")
 			require.NoError(t, os.WriteFile(filepath.Join(gitDir, "af-archive-nonce"), []byte("someone-else\n"), 0o600))

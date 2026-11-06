@@ -191,7 +191,7 @@ their worktree. Local archives print the relocated worktree path on success.`,
 
 		// --self's reason for existing: same SIGHUP shield as kill (#5182).
 		defer ignoreTeardownHangup()()
-		archivedPath, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID, Push: sessionsArchivePush})
+		archivedPath, workspace, err := archiveSessionViaDaemon(daemon.ArchiveSessionRequest{ID: sessionID, Title: title, RepoID: repoID, Push: sessionsArchivePush})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
@@ -204,10 +204,38 @@ their worktree. Local archives print the relocated worktree path on success.`,
 			result["warning"] = warning
 		}
 		// Where an off-box session's work lives: the preserved directory on its
-		// host, or the pushed branch (#5571 W8.5). Best-effort, from the archived
-		// row; a local archive has none and the key is absent.
-		if loc := archivedWorkspaceOf(repoID, sessionID, title); loc != nil {
-			result["archived_workspace"] = loc
+		// host, or the pushed branch (#5571 W8.5). The daemon computes and
+		// returns this in the ArchiveSessionResponse, so thread it straight
+		// through — the snapshot read-back below cannot recover it for a
+		// sandbox caller: the daemon's sandbox projection
+		// (sandboxSafeInstanceData) strips ArchivedWorkspace from every row, so
+		// the only reachable route for an off-box --self archive can never see
+		// the field (#5804). Keep the read-back as a best-effort fallback for an
+		// older daemon whose response omits the additive field (gob/JSON
+		// additive safety); a local archive has none and the key is absent.
+		if workspace == nil {
+			workspace = archivedWorkspaceOf(repoID, sessionID, title)
+		}
+		if workspace != nil {
+			// A sandbox caller's ArchiveSession response passes through the
+			// sandbox response boundary (daemon/sandbox_scrub.go), which
+			// classifies ArchivedWorkspaceData.host and .dir as withheld and
+			// omits them (daemon/sandbox_classify.go): the sandbox must not
+			// learn the daemon host's layout. A non-push preserve then arrives
+			// as a non-nil workspace with only pushed:false, which looks
+			// complete but names no location. Say so instead of echoing the
+			// hollow object (#5804). A pushed branch is the sandbox's own repo
+			// data, so a push archive still names it. An operator's response
+			// carries host and/or dir verbatim and takes the plain path.
+			if !workspace.Pushed && workspace.Host == "" && workspace.Dir == "" {
+				result["archived_workspace"] = map[string]any{
+					"pushed":   false,
+					"withheld": true,
+					"note":     "the work was preserved on the session's host; its location is withheld from sandbox callers",
+				}
+			} else {
+				result["archived_workspace"] = workspace
+			}
 		}
 		return jsonOut(result)
 	},

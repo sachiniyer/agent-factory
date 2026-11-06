@@ -55,6 +55,19 @@ type ConfigPane struct {
 	editing bool
 	input   textinput.Model
 
+	// editSeed is the field's value immediately after beginEdit seeds it —
+	// read back from the input so it reflects whatever the textinput sanitizer
+	// did to the seed (whitespace flattened AND other control runes dropped),
+	// not a separately-computed approximation. commitEdit's untouched-field
+	// guard compares the live field against this. dirty tracks whether the
+	// user typed anything since beginEdit: because flattening is not injective,
+	// a value-equality check alone cannot tell an untouched field from one the
+	// user cleared and retyped into the same flattened form (which is a real
+	// edit — replacing a multi-line value with that single-line text), so the
+	// guard only fires when nothing was typed.
+	editSeed string
+	dirty    bool
+
 	// scrollTop is the first row-line rendered, so a list taller than the pane
 	// keeps the selection on screen. It persists between renders: recomputing it
 	// from scratch each frame would snap the view around while the user reads.
@@ -509,7 +522,17 @@ func (c *ConfigPane) beginEdit() {
 	c.editing = true
 	c.clearStatus()
 	c.sizeEditField()
-	c.input.SetValue(entry.Value)
+	// Seed the field with the pre-flattened value. bubbles v0.20.0's
+	// textinput.SetValue runs a sanitizer that folds newlines/tabs to spaces,
+	// so seeding with the raw multi-line value would flatten it inside the
+	// field and let commitEdit's guard read the untouched field as edited.
+	c.input.SetValue(flattenToOneLine(entry.Value))
+	// Read the seed back AFTER the sanitizer runs: it drops not just
+	// whitespace but every unicode.IsControl rune (e.g. ESC from a TOML
+	// \u001b escape), so a flatten-only seed would diverge from the field
+	// and rewrite an untouched value that lost a control rune.
+	c.editSeed = c.input.Value()
+	c.dirty = false
 	c.input.CursorEnd()
 	c.input.Focus()
 }
@@ -532,8 +555,12 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 		return true
 	default:
 		var cmd tea.Cmd
+		before := c.input.Value()
 		c.input, cmd = c.input.Update(msg)
 		_ = cmd
+		if c.input.Value() != before {
+			c.dirty = true
+		}
 		return true
 	}
 }
@@ -562,9 +589,26 @@ func (c *ConfigPane) commitEdit() {
 	// notice, telling the user they changed something when they did not.
 	//
 	// The GUARANTEE against truncation is the absent CharLimit above, not this:
-	// a truncating field would make value != entry.Value, which reads as an edit
+	// a truncating field would make value != editSeed, which reads as an edit
 	// and would write straight through this check.
-	if value == entry.Value {
+	//
+	// Two no-op signals, either sufficient:
+	//   - value == entry.Value: the field holds the raw stored value again,
+	//     a true no-op even when dirty is true (e.g. the user edited a
+	//     sanitizer-stable single-line value and restored it — without this
+	//     arm that would run the config writer / daemon apply path for no
+	//     semantic change).
+	//   - !c.dirty && value == c.editSeed: the field is untouched since
+	//     beginEdit. editSeed is read back AFTER the textinput sanitizer ran,
+	//     so control runes the sanitizer drops (not just the whitespace
+	//     flattenToOneLine folds) are gone from both sides. flattenToOneLine
+	//     is not injective (a\nb and "a b" both flatten to "a b"), so a
+	//     value-equality guard alone would block a genuine edit that lands
+	//     back on the flattened seed; dirty, set only when the input value
+	//     changes, lets that write through. A multi-line entry.Value can
+	//     never equal the single-line field, so the first arm does not weaken
+	//     this. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and TestConfigPaneEditRestoreIsNoOp.
+	if value == entry.Value || (!c.dirty && value == c.editSeed) {
 		c.cancelEdit()
 		return
 	}
