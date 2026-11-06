@@ -292,8 +292,15 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 	cmd := exec.Command(script, "1.0.1")
 	cmd.Dir = work
 	cmd.Env = env
-	if out, err := cmd.CombinedOutput(); err != nil {
+	out, err := cmd.CombinedOutput()
+	if err != nil {
 		t.Fatalf("release-bump.sh failed on a mid-build merge (#1927): %v\n%s", err, out)
+	}
+	// A real non-fast-forward is the one rejection that earns the "master
+	// advanced" line and the rebase-retry (#6747): the log must name what
+	// actually failed.
+	if !strings.Contains(string(out), "master advanced during the build") {
+		t.Fatalf("a non-fast-forward push was not reported as master advancing:\n%s", out)
 	}
 
 	// The bump landed on the NEW tip: master carries both commits, main.go is
@@ -399,11 +406,15 @@ func runReleaseScript(t *testing.T, dir string, env []string, version string) (o
 }
 
 // TestReleaseBumpBoundsRetriesOnPersistentReject locks the retry BOUND: with a
-// remote that rejects every push to master (a racer that never lets the push
-// through) and RELEASE_PUSH_MAX_ATTEMPTS=1, the script must give up non-zero —
-// not spin forever — and must leave the remote pristine (no bump on master, no
-// tag). This fails CI if a future edit drops the MAX_ATTEMPTS guard and
-// reintroduces an unbounded loop (the run would hang and hit the timeout).
+// remote that keeps out-racing every push (each attempt a genuine
+// non-fast-forward — the one rejection the loop retries, #6747), the script
+// must give up non-zero after MAX_ATTEMPTS, not spin forever, and must leave
+// the remote pristine (no bump on master, no tag). A fake `git` on PATH
+// answers every push with the non-fast-forward rejection while delegating
+// everything else to the real binary, so the fetch and rebase inside the loop
+// still run for real. This fails CI if a future edit drops the MAX_ATTEMPTS
+// guard and reintroduces an unbounded loop (the run would hang and hit the
+// timeout).
 func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
@@ -413,20 +424,38 @@ func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
 	env := isolatedGitEnv(home)
 
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
-
-	// A pre-receive hook that declines every push stands in for a racer that
-	// keeps the master push rejecting no matter how often we rebase and retry.
-	writeExecutable(t, filepath.Join(origin, "hooks", "pre-receive"),
-		"#!/bin/sh\necho 'push rejected by test (persistent racer)' >&2\nexit 1\n")
 	masterBefore := gitOutEnv(t, origin, env, "rev-parse", "master")
 
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("locate real git: %v", err)
+	}
+	fakeBin := filepath.Join(base, "fakebin")
+	writeExecutable(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
+if [ "$1" = "push" ]; then
+	echo " ! [rejected]        HEAD -> master (non-fast-forward)" >&2
+	echo "error: failed to push some refs to 'origin'" >&2
+	exit 1
+fi
+exec "`+realGit+`" "$@"
+`)
+
 	out, timedOut, err := runReleaseScript(t, work,
-		isolatedGitEnv(home, "RELEASE_PUSH_MAX_ATTEMPTS=1"), "1.0.1")
+		isolatedGitEnv(home,
+			"RELEASE_PUSH_MAX_ATTEMPTS=3",
+			"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH")),
+		"1.0.1")
 	if timedOut {
 		t.Fatalf("script did not terminate — the retry loop is unbounded?\n%s", out)
 	}
 	if err == nil {
 		t.Fatalf("expected non-zero exit when the push keeps rejecting; got success\n%s", out)
+	}
+	if !strings.Contains(out, "master advanced") {
+		t.Fatalf("a genuine non-fast-forward must take the named retry path (#6747):\n%s", out)
+	}
+	if !strings.Contains(out, "after 3 attempts") {
+		t.Fatalf("the bound must report the attempt count it gave up at:\n%s", out)
 	}
 
 	// The remote stayed pristine: master unmoved, no bump commit, no tag.
@@ -438,6 +467,81 @@ func TestReleaseBumpBoundsRetriesOnPersistentReject(t *testing.T) {
 	}
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed despite the push never landing: %q", tags)
+	}
+}
+
+// TestReleaseBumpFailsOnAuthWithoutRebase is the #6747 regression: a push that
+// fails for anything OTHER than a non-fast-forward must fail on git's own
+// error — no "master advanced" misdiagnosis, no rebase-retry loop. The
+// stand-in is the exact 2026-11-04 incident signature (#6744): the ssh
+// transport rejects the deploy key. A fake GIT_SSH_COMMAND emits
+// "Permission denied (publickey)", records every invocation so a retry fetch
+// or push is observable, and never touches a real network.
+func TestReleaseBumpFailsOnAuthWithoutRebase(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	env := isolatedGitEnv(home)
+
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+	masterBefore := gitOutEnv(t, origin, env, "rev-parse", "master")
+
+	// Re-point origin at an ssh: URL whose key is refused — the same
+	// "Permission denied (publickey) / Could not read from remote repository"
+	// pair #6744 logged.
+	sshCalls := filepath.Join(base, "ssh-calls")
+	writeFile(t, sshCalls, "")
+	fakeSSH := filepath.Join(base, "fake-ssh")
+	writeExecutable(t, fakeSSH, `#!/bin/sh
+printf '%s\n' "$*" >> "$FAKE_SSH_CALLS"
+echo "git@github.com: Permission denied (publickey)." >&2
+exit 255
+`)
+	runGitEnv(t, work, env, "remote", "set-url", "origin",
+		"git@github.com:sachiniyer/agent-factory.git")
+
+	out, timedOut, err := runReleaseScript(t, work,
+		isolatedGitEnv(home,
+			"GIT_SSH_COMMAND="+fakeSSH,
+			"FAKE_SSH_CALLS="+sshCalls),
+		"1.0.1")
+	if timedOut {
+		t.Fatalf("script hung on an auth failure instead of failing fast\n%s", out)
+	}
+	if err == nil {
+		t.Fatalf("expected non-zero exit on an auth failure; got success\n%s", out)
+	}
+
+	// The log must carry git's own verdict — not the #1927 diagnosis, which is
+	// only true of a non-fast-forward.
+	if !strings.Contains(out, "Permission denied (publickey)") {
+		t.Fatalf("git's auth error was not reported:\n%s", out)
+	}
+	if strings.Contains(out, "master advanced") {
+		t.Fatalf("an auth failure was misreported as master advancing (#6747):\n%s", out)
+	}
+
+	// Exactly one transport attempt — the failed push. A rebase-retry would
+	// add the loop's `git fetch origin master` and further pushes.
+	raw, err := os.ReadFile(sshCalls)
+	if err != nil {
+		t.Fatalf("read ssh calls: %v", err)
+	}
+	if calls := strings.Count(string(raw), "\n"); calls != 1 {
+		t.Fatalf("expected exactly 1 ssh invocation (the single failed push), got %d:\n%s\noutput:\n%s", calls, raw, out)
+	}
+
+	// The remote stayed pristine: master unmoved, no bump commit, no tag.
+	if tip := gitOutEnv(t, origin, env, "rev-parse", "master"); tip != masterBefore {
+		t.Fatalf("master moved (%s → %s) despite the push never authenticating", masterBefore, tip)
+	}
+	if log := gitOutEnv(t, origin, env, "log", "--format=%s", "master"); strings.Contains(log, "chore: release") {
+		t.Fatalf("a bump commit reached master despite the auth failure:\n%s", log)
+	}
+	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
+		t.Fatalf("a tag was pushed despite the auth failure: %q", tags)
 	}
 }
 
