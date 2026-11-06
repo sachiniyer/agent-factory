@@ -301,6 +301,20 @@ type Instance struct {
 	limitAgent string
 	// Empty means the agent's ambient identity.
 	limitAccount string
+	// limitBannerPrefix and limitBannerCount are the banner anchor the detector
+	// recorded at the park (#6823): the pane bytes before the LAST banner match
+	// (its absolute position in that capture) and how many banner matches the
+	// capture held. A later poll re-reading (resetAt=zero, evidence="") cannot
+	// from the claim alone tell a clipped re-read of the recorded banner from
+	// a new wall printed after it — comparing the recorded anchor to the new
+	// sighting's is what proves "the same banner is still the last match" (its
+	// position ends the capture the same way) versus "a banner now sits below
+	// the recorded reset clause or pushes the count past what was recorded"
+	// (a new wall). Memory-only: it names a position inside a captured pane,
+	// meaningless after a restart — and the re-load path re-parks from a fresh
+	// poll sighting anyway.
+	limitBannerPrefix string
+	limitBannerCount  int
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
 	// accountLimitObsUnpersisted marks an observation change — a fresh wall or

@@ -1137,7 +1137,7 @@ func TestPollWritesNothingForAnUnchangedWallResighting(t *testing.T) {
 	// The unchanged banner re-parks on every idle tick through the epoch
 	// path: it must be a complete no-op.
 	_, epoch := inst.InFlightOpAndEpoch()
-	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", epoch))
+	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", session.LimitBanner{}, epoch))
 	require.False(t, inst.AccountLimitObservationsUnpersisted(),
 		"re-seeing the unchanged banner flags nothing")
 	persistUnchangedAxes()

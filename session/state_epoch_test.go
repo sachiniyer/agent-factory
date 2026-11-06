@@ -67,7 +67,7 @@ func TestSetLimitReachedAtEpoch_DropsSupersededDecision(t *testing.T) {
 	_, observed := inst.InFlightOpAndEpoch()
 	inst.ClearLimitReached()
 
-	if applied := inst.SetLimitReachedAtEpoch(resetAt, "", observed); applied {
+	if applied := inst.SetLimitReachedAtEpoch(resetAt, "", LimitBanner{}, observed); applied {
 		t.Fatal("a decision from a superseded epoch must not apply (#2135)")
 	}
 	if inst.LimitReached() {
@@ -80,7 +80,7 @@ func TestSetLimitReachedAtEpoch_DropsSupersededDecision(t *testing.T) {
 	// A decision made about the CURRENT state still applies — the guard is
 	// per-observation, not a window in which detection is suppressed.
 	_, currentEpoch := inst.InFlightOpAndEpoch()
-	if applied := inst.SetLimitReachedAtEpoch(resetAt, "", currentEpoch); !applied {
+	if applied := inst.SetLimitReachedAtEpoch(resetAt, "", LimitBanner{}, currentEpoch); !applied {
 		t.Fatal("a decision at the current epoch must apply")
 	}
 	if !inst.LimitReached() {

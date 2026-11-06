@@ -39,11 +39,17 @@ func finishCreateStart(instance *session.Instance, prompt string, startErr error
 	}
 	var limitErr *task.LimitReachedError
 	if errors.As(startErr, &limitErr) {
-		instance.SetLimitReachedAtEvidence(limitErr.ResetAt, limitErr.Evidence)
+		instance.SetLimitReachedAtEvidence(limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr))
 		instance.SetPrompt(prompt)
 		return nil
 	}
 	return startErr
+}
+
+// limitBannerOf adapts a send-path park error's detection anchor (#6823) to the
+// session's recorded-sighting form.
+func limitBannerOf(limitErr *task.LimitReachedError) session.LimitBanner {
+	return session.LimitBanner{Prefix: limitErr.BannerPrefix, Count: limitErr.BannerCount}
 }
 
 // createdTaskStatus maps a freshly created session's data to the task-run status
@@ -94,11 +100,14 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	// injected clock) and also returns the phrase itself: an unchanged banner
 	// re-parses to the same phrase every tick, so the session keeps its stored
 	// reset rather than letting a time-only or relative form drift forward
-	// forever (#6765).
-	if hit, resetAt, _, evidence := m.limitDetector.Load().Check(content, agent, nowFunc()); hit {
+	// forever (#6765). The sighting's banner anchor rides along so a parked row
+	// can tell a clipped re-read of its recorded banner from a wall the pane
+	// shows afterward (#6823) — the claim alone cannot make that distinction.
+	if s := m.limitDetector.Load().Sight(content, agent, nowFunc()); s.Hit {
 		// Returns false when the decision was superseded; nothing to do about it
 		// here — the next tick observes the session as it is now.
-		_ = m.setLimitReachedAtEpoch(instance, resetAt, evidence, epoch)
+		_ = m.setLimitReachedAtEpoch(instance, s.ResetAt, s.Evidence,
+			session.LimitBanner{Prefix: s.BannerPrefix, Count: s.BannerCount}, epoch)
 		return
 	}
 	if task.IsWorkingContent(content, agent) {

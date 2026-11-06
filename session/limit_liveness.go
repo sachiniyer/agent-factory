@@ -12,6 +12,23 @@ import (
 // for the loop that un-parks it (#2997). The axis itself lives in
 // liveness.go; this file is everything the wall needs beyond it.
 
+// LimitBanner is the detector's anchor for WHICH banner produced a usage-limit
+// read (#6823): where the last banner match sat inside the captured pane and
+// how many matches the capture held. The claim fields (resetAt, evidence) say
+// what the wall advertised; the anchor says which banner advertised it — the
+// signal that lets a parked session tell a clipped re-read of its recorded
+// banner from a banner printed after it, a distinction the claim fields alone
+// cannot make: both degrade to (zero, "") identically.
+type LimitBanner struct {
+	// Prefix is the captured pane's bytes before the last banner match — the
+	// match's absolute position inside that capture.
+	Prefix string
+	// Count is the number of banner matches the capture held. Zero means the
+	// read carried no anchor (a path that observed no pane, like a legacy or
+	// mirrored park), in which case nothing about position can be proven.
+	Count int
+}
+
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
 // sets the LiveLimitReached liveness and stores the parsed reset time (zero
 // when the banner carried none) for the sidebar badge and the auto-resume
@@ -25,7 +42,7 @@ import (
 // accompanies its reset — without it the daemon's first poll fails the
 // same-phrase dedupe and re-parses against a later clock (#6765).
 func (i *Instance) SetLimitReached(resetAt time.Time) {
-	i.SetLimitReachedAtEvidence(resetAt, "")
+	i.SetLimitReachedAtEvidence(resetAt, "", LimitBanner{})
 }
 
 // SetLimitReachedAtEvidence is SetLimitReached for a park that parsed a reset
@@ -36,10 +53,14 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 // so its phrase must be recorded rather than cleared — otherwise a time-only
 // phrase re-parsed after the stated clock time resolves to the next day and the
 // drift becomes durable once the poll adopts the phrase.
-func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string) {
+//
+// banner is the detector's anchor for the sighting (#6823) — the pane bytes
+// before the last banner match and the match count — recorded beside the claim
+// so a later clipped re-read can be told apart from a banner printed after it.
+func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string, banner LimitBanner) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setLimitReachedLocked(resetAt, evidence)
+	i.setLimitReachedLocked(resetAt, evidence, banner)
 }
 
 // SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
@@ -62,7 +83,7 @@ func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string)
 // one nearest the wall the provider printed, so an already-parked instance keeps
 // it. A different phrase (or one seen while not yet parked) is new evidence and
 // applies.
-func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, epoch uint64) bool {
+func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
@@ -78,24 +99,25 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ep
 		// per second for as long as it stayed parked (#6802 review).
 		return true
 	}
-	if !i.setLimitReachedLocked(resetAt, evidence) {
+	if !i.setLimitReachedLocked(resetAt, evidence, banner) {
 		return false
 	}
 	return true
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
-// record its reset time and evidence, skipping a row with any operation in flight
-// so it never clobbers that operation's fence. Reports whether it applied.
-// Caller holds i.mu.
+// record its reset time, evidence, and banner anchor, skipping a row with any
+// operation in flight so it never clobbers that operation's fence. Reports
+// whether it applied. Caller holds i.mu.
 //
 // evidence is the reset phrase the detector consumed to produce resetAt. A park
 // that parsed a phrase (the send-path park via task.LimitReachedError) records
 // it so the daemon's first poll recognizes the re-read as the same observation
 // and keeps the first parse's reset (#6765). A park that resolved a reset
 // without a phrase passes "" — the slot is cleared rather than left describing
-// a reset it did not produce.
-func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string) bool {
+// a reset it did not produce. banner carries the sighting's anchor (#6823);
+// a caller that observed no pane passes the zero LimitBanner.
+func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner) bool {
 	if i.inFlightOp != OpNone {
 		return false
 	}
@@ -103,6 +125,8 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string) boo
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.limitResetEvidence = evidence
+	i.limitBannerPrefix = banner.Prefix
+	i.limitBannerCount = banner.Count
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, lv == LiveLimitReached)
 	i.noteStateChangeLocked(lv, op, prevReset)
@@ -295,6 +319,8 @@ func (i *Instance) ClearLimitReached() {
 	i.limitResetEvidence = ""
 	i.limitAgent = ""
 	i.limitAccount = ""
+	i.limitBannerPrefix = ""
+	i.limitBannerCount = 0
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
 	// it is stale by definition and must not land (#2135).
@@ -335,6 +361,18 @@ func (i *Instance) LimitResetEvidence() string {
 		return ""
 	}
 	return i.limitResetEvidence
+}
+
+// LimitBannerAnchor returns the banner anchor recorded with the current wall
+// (#6823), zero-valued off the limit wall. The handoff re-park reads it to
+// carry the recorded sighting's anchor onto the row it restores.
+func (i *Instance) LimitBannerAnchor() LimitBanner {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return LimitBanner{}
+	}
+	return LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount}
 }
 
 // LimitAccount returns the account whose runtime produced the current limit

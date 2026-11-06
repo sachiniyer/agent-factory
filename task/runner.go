@@ -122,10 +122,16 @@ var postWorktreeHooksDoneForWait = func(instance *session.Instance) <-chan struc
 // parse IS the first parse of the banner, so its phrase must accompany its reset
 // — otherwise the daemon's first poll over the still-displayed banner fails the
 // same-phrase dedupe and re-parses against a later clock, moving the stored reset
-// (a time-only phrase past its stated time jumps a full day).
+// (a time-only phrase past its stated time jumps a full day). BannerPrefix and
+// BannerCount are the detection anchor (#6823): the pane bytes before the last
+// banner match and the total match count, which the parked session records so a
+// later clipped re-read of the same banner is told apart from a banner printed
+// after it — the (ResetAt, Evidence) pair alone cannot make that distinction.
 type LimitReachedError struct {
-	ResetAt  time.Time
-	Evidence string
+	ResetAt      time.Time
+	Evidence     string
+	BannerPrefix string
+	BannerCount  int
 }
 
 // ErrLimitReached is the sentinel LimitReachedError wraps so callers can match
@@ -821,10 +827,17 @@ func capturePreview(ctx context.Context, instance *session.Instance) (string, er
 // reset so the send-path park records the phrase that produced its reset — the
 // park's parse is the FIRST parse of the banner, and without the phrase the
 // daemon's next poll fails the same-phrase dedupe and re-parses against a
-// later clock (#6765).
+// later clock (#6765). The banner anchor (prefix + count) rides along too so
+// the park records WHICH banner produced the read — the signal that lets the
+// next poll tell a clipped re-read of it from a banner printed after (#6823).
 func limitParkError(detector LimitDetector, content, agent string) error {
-	if hit, resetAt, _, evidence := detector.Check(content, agent, waitLimitNow()); hit {
-		return &LimitReachedError{ResetAt: resetAt, Evidence: evidence}
+	if s := detector.Sight(content, agent, waitLimitNow()); s.Hit {
+		return &LimitReachedError{
+			ResetAt:      s.ResetAt,
+			Evidence:     s.Evidence,
+			BannerPrefix: s.BannerPrefix,
+			BannerCount:  s.BannerCount,
+		}
 	}
 	return nil
 }

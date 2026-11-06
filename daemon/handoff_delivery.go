@@ -142,7 +142,7 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// normal limit-resume path replays exactly Instance.Prompt.
 		delivery.instance.SetPrompt(delivery.mission)
 		if terr := settle(func() error {
-			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt, limitErr.Evidence)
+			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr))
 		}, true); terr != nil {
 			return fmt.Errorf(
 				"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",

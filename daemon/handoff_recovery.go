@@ -195,7 +195,8 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		entry.instance.SetPrompt(mission)
 		if op == session.OpReplacing {
 			resetAt, _ := entry.instance.LimitResetAt()
-			if err := m.parkHandoffAtLimit(entry.instance, resetAt, entry.instance.LimitResetEvidence()); err != nil {
+			if err := m.parkHandoffAtLimit(entry.instance, resetAt, entry.instance.LimitResetEvidence(),
+				entry.instance.LimitBannerAnchor()); err != nil {
 				return false, err
 			}
 		}
@@ -260,11 +261,11 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		if errors.As(err, &limitErr) {
 			entry.instance.SetPrompt(mission)
 			if op == session.OpReplacing {
-				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt, limitErr.Evidence); terr != nil {
+				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr)); terr != nil {
 					return false, errors.Join(err, terr)
 				}
 			} else {
-				m.setLimitReached(entry.instance, limitErr.ResetAt, limitErr.Evidence)
+				m.setLimitReached(entry.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr))
 			}
 			if !entry.instance.ClearPendingHandoffMission(mission) {
 				return false, fmt.Errorf("pending mission changed while parking its usage limit")
