@@ -110,14 +110,25 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
 		}
 	})
-	t.Run("identical invalid table form in read-only is comparable and equal", func(t *testing.T) {
+	t.Run("malformed inactive table is incomparable not silently equal", func(t *testing.T) {
 		// codexRuntimeSource does not shape-validate the table outside
-		// workspace-write, so an invalid form is inert, not incomparable:
-		// the compare skips it and the homes compare equal.
+		// workspace-write, so a wrong-type value is not inert: the compare
+		// rejects it as incomparable rather than treating the unvalidated
+		// form as equal.
 		writeCodexConfig(t, src, "sandbox_mode = \"read-only\"\nsandbox_workspace_write = \"nonsense\"\n")
 		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\nsandbox_workspace_write = \"nonsense\"\n")
-		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "" || inc {
-			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || !inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",true)", key, inc)
+		}
+	})
+	t.Run("omitted sandbox mode with differing tables is drift not silently equal", func(t *testing.T) {
+		// An omitted sandbox_mode may default to workspace-write upstream
+		// (project trust), so a differing table is not presumed inert: the
+		// compare catches it rather than silently widening the sandbox.
+		writeCodexConfig(t, src, "[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "[sandbox_workspace_write]\nnetwork_access = false\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
 		}
 	})
 	t.Run("cross-mode asymmetry drifts on sandbox_mode not workspace options", func(t *testing.T) {

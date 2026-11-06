@@ -16,9 +16,13 @@ import (
 // leftover [sandbox_workspace_write] table when the mode changes, so in any
 // other mode a stale table is inert. Comparing it there would report drift on
 // a non-effective option and let an unvalidated form reach DeepEqual. The
-// compare therefore skips the key unless either side is in workspace-write;
-// any cross-mode asymmetry is already caught by the sandbox_mode key earlier
-// in this list, so this gate cannot hide a widening.
+// compare therefore skips the key only when both sides are explicitly in a
+// non-workspace mode; an omitted sandbox_mode is not presumed inert (upstream
+// Codex may default it to workspace-write under project trust), and a
+// malformed inactive table is incomparable here because codexRuntimeSource
+// does not validate it outside workspace-write. Any cross-mode asymmetry is
+// already caught by the sandbox_mode key earlier in this list, so this gate
+// cannot hide a widening.
 var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "approval_policy", "sandbox_mode", "sandbox_workspace_write"}
 
 // CodexRuntimeDriftKey compares the effective runtime settings of a source
@@ -57,15 +61,33 @@ func CodexRuntimeDriftKey(sourceDir, targetDir string) (key string, incomparable
 		return "", true
 	}
 	for _, k := range codexRuntimeCompareKeys {
-		// sandbox_workspace_write is inert outside workspace-write: the seeder
-		// never strips a leftover table, and codexRuntimeSource only shape-
-		// validates it under workspace-write. Skip the key unless either side
-		// is in workspace-write, matching that gate; sandbox_mode is compared
-		// earlier in this list, so a cross-mode widening is already caught.
+		// sandbox_workspace_write is only effective under workspace-write.
+		// codexRuntimeSource shape-validates the table only in that mode, and
+		// the seeder never strips an operator's leftover [sandbox_workspace_write]
+		// when the mode changes, so in another mode a stale table is inert.
+		// The compare skips the key only when both sides are explicitly in a
+		// non-workspace mode: an omitted sandbox_mode is not presumed inert,
+		// because upstream Codex may default it to workspace-write (project
+		// trust), and silently skipping a differing table there could widen
+		// the sandbox. Because codexRuntimeSource does not validate the table
+		// outside workspace-write, a malformed inactive table (e.g. a
+		// wrong-type value) is incomparable here, never silently equal.
+		// sandbox_mode is compared earlier in this list, so a cross-mode
+		// widening is already caught and cannot be hidden by this gate.
 		if k == "sandbox_workspace_write" {
 			sm, _ := source["sandbox_mode"].(string)
 			tm, _ := target["sandbox_mode"].(string)
-			if sm != "workspace-write" && tm != "workspace-write" {
+			if sm != "workspace-write" {
+				if opts, exists := source["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
+					return k, true
+				}
+			}
+			if tm != "workspace-write" {
+				if opts, exists := target["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
+					return k, true
+				}
+			}
+			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" {
 				continue
 			}
 		}
