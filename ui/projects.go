@@ -410,7 +410,32 @@ func (p *ProjectsPane) String() string {
 			p.offset--
 		}
 		start = p.offset
-		end, _, _ = fitWindow(heights, start, avail)
+		var topInd, botInd bool
+		end, topInd, botInd = fitWindow(heights, start, avail)
+		// A force-included row can push the window's lines past the rect: at
+		// the section's floor height the degraded notice plus both markers
+		// leave one budgeted row, so an interior scroll is one line too many
+		// and the ▼ marker is what the clamp would cut. The notice is
+		// expendable where the count is not — drop it and refit so hidden
+		// rows stay counted (#6883).
+		if p.degraded {
+			used := 0
+			for i := start; i < end; i++ {
+				used += heights[i]
+			}
+			indLines := 0
+			if topInd {
+				indLines++
+			}
+			if botInd {
+				indLines++
+			}
+			if len(lines)+indLines+used > p.rect.H {
+				lines = lines[:1]
+				avail++
+				end, _, _ = fitWindow(heights, start, avail)
+			}
+		}
 		hiddenAbove = start
 		hiddenBelow = len(p.projects) - end
 	} else {
