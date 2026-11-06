@@ -359,9 +359,11 @@ func readLeafHeadReflogSHAs(leaf string) ([]string, error) {
 // as the branch's value (the new id of each entry). Every old value is the new
 // value of the preceding entry, so this set covers every value the branch ref
 // has ever pointed to — the recoverability roots gc keeps after the leaf is
-// gone.
+// gone. The trailing -- keeps the refname a revision: in a bare origin a
+// refname that exists as a path under refs/ could otherwise be read as a path
+// filter and silently empty the root set (#6906, Codex).
 func branchReflogRoots(repoRoot, branch string) ([]string, error) {
-	out, err := runBoundedWorktreeGit(repoRoot, true, "--no-optional-locks", "log", "-g", "--format=%H", "refs/heads/"+branch)
+	out, err := runBoundedWorktreeGit(repoRoot, true, "--no-optional-locks", "log", "-g", "--format=%H", "refs/heads/"+branch, "--")
 	if err != nil {
 		return nil, fmt.Errorf("could not read the reflog of branch %s in %s: %w", branch, repoRoot, err)
 	}
@@ -404,19 +406,40 @@ func survivingRefRoots(repoRoot string) ([]string, error) {
 
 // leafReflogOnlyCommits returns the given leaf-reflog commits that exist
 // ONLY in that reflog — the ones no surviving root reaches. `git rev-list
-// <shas> --not HEAD <refs> <reflog roots>` prints exactly those: the main
-// worktree's HEAD, every ref, and each kept-branch reflog value count as
-// roots, and a single bounded traversal judges the whole reflog at once
-// (one timeout for the verdict) rather than one `merge-base --is-ancestor`
-// per SHA. The output is proportional to the commits that are actually
-// unrecoverable — a positive `rev-list <roots>` would instead enumerate
-// the repository's whole reachable history into a set the check then
-// queries (#6903).
+// <shas> --not <resolved HEAD> <refs> <reflog roots> --` prints exactly
+// those: the main worktree's HEAD (when it resolves), every ref, and each
+// kept-branch reflog value count as roots, and a single bounded traversal
+// judges the whole reflog at once (one timeout for the verdict) rather
+// than one `merge-base --is-ancestor` per SHA. The output is proportional
+// to the commits that are actually unrecoverable — a positive `rev-list
+// <roots>` would instead enumerate the repository's whole reachable
+// history into a set the check then queries (#6903).
+//
+// Every argument must BE a revision, which is what the trailing --
+// guarantees: without it, git reinterprets an argument that does not
+// resolve — and everything after it — as path filters, silently narrowing
+// the traversal until it reports nothing lost (#6906, Codex). A bare
+// origin makes the trap literal: its root holds a HEAD file and a refs/
+// tree, so a dangling HEAD or an unlucky object id is a valid path there.
 func leafReflogOnlyCommits(repoRoot string, shas, refs, reflogRoots []string) ([]string, error) {
 	args := append([]string{"--no-optional-locks", "rev-list"}, shas...)
-	args = append(args, "--not", "HEAD")
+	args = append(args, "--not")
+	// HEAD counts as a root only when it resolves to a commit — a bare
+	// origin's HEAD can name a branch nobody ever created — and the resolved
+	// object id is passed rather than re-reading HEAD inside the traversal.
+	// A HEAD that does not resolve is left out on purpose; passing the token
+	// through would either error the whole check (non-bare) or, worse, become
+	// the HEAD path filter described above (bare) and hide lost work.
+	if head, err := runBoundedWorktreeGit(repoRoot, false,
+		"--no-optional-locks", "rev-parse", "--verify", "--quiet", "HEAD^{commit}"); err == nil {
+		args = append(args, strings.TrimSpace(string(head)))
+	}
 	args = append(args, refs...)
 	args = append(args, reflogRoots...)
+	// -- terminates the revision arguments: a leaf sha or reflog root whose
+	// object is missing — or a ref deleted since survivingRefRoots listed it —
+	// fails the command instead of silently narrowing it into a path filter.
+	args = append(args, "--")
 	out, err := runBoundedWorktreeGit(repoRoot, false, args...)
 	if err != nil {
 		return nil, fmt.Errorf("could not judge the reachability of the worktree's HEAD-reflog commits in %s: %w", repoRoot, err)
