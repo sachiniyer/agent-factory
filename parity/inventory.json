@@ -180,7 +180,7 @@
       },
       "verdict": "real-gap",
       "issue": "#5289",
-      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. The #2216 epic has closed; TUI/web exposure is in flight as PR #4947, which is also the write half's (#5157) sequencing dependency."
+      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. The #2216 epic has closed; TUI/web exposure is in flight as PR #4947, which is also the write half's (#5157) sequencing dependency. UPDATE 2026-11-06: #4947 has been on 'hold' since 2026-09-27 for an owner decision on the three surface questions it raises — a new 'p' scope binding in the TUI config editor, the GetConfig repo_path request field, and a read-only project scope on the web — and it now conflicts with master. The gap itself is real (both editors render the global value for a project-overridden key while looking authoritative), but its implementation shape adds canonical-surface affordances, which is the owner's call; do not re-pick this row until he answers."
     },
     {
       "id": "appearance.select",
