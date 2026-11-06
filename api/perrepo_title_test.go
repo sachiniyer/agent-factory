@@ -359,8 +359,11 @@ func TestGetSessionByTitle_SnapshotMissUnionsDiskRows(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// The daemon's snapshot knows only someone-else: repo-alpha's row failed
 	// to restore at startup (worktree/tmux gone), so it never reached the
-	// projection — but it IS still held by a project.
-	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "ghost", Path: "/repos/alpha", BackendType: "docker"})
+	// projection — but it IS still held by a project. Its persisted LiveReady
+	// is last-saved state, not an observation: the row resolves, but reported
+	// as Lost — the live daemon could not confirm it — so watch can never
+	// complete on the stale "ready" (#6882 review).
+	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "ghost", Path: "/repos/alpha", BackendType: "docker", Liveness: session.LiveReady})
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
 		return []session.InstanceData{{Title: "someone-else", Path: "/repos/alpha"}}, nil
 	})
@@ -371,6 +374,9 @@ func TestGetSessionByTitle_SnapshotMissUnionsDiskRows(t *testing.T) {
 	}
 	if got.Title != "ghost" || got.Path != "/repos/alpha" {
 		t.Fatalf("resolved the wrong row: %+v", got)
+	}
+	if got.Liveness != session.LiveLost {
+		t.Fatalf("a disk-only row's live liveness must project as LiveLost, got %v", got.Liveness)
 	}
 }
 
@@ -478,7 +484,7 @@ func TestGetSessionByTitleInScope_ScopedMissStaysBare(t *testing.T) {
 // in-memory miss.
 func TestGetSessionByTitleInScope_SnapshotMissUnionsDiskRows(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "ghost", Path: "/repos/alpha", BackendType: "docker"})
+	saveOneRepoInstances(t, "repo-alpha", session.InstanceData{Title: "ghost", Path: "/repos/alpha", BackendType: "docker", Liveness: session.LiveReady})
 	stubSnapshot(t, func(daemon.SnapshotRequest) ([]session.InstanceData, error) {
 		return []session.InstanceData{{Title: "someone-else", Path: "/repos/alpha"}}, nil
 	})
@@ -489,6 +495,9 @@ func TestGetSessionByTitleInScope_SnapshotMissUnionsDiskRows(t *testing.T) {
 	}
 	if got.Title != "ghost" || got.Path != "/repos/alpha" {
 		t.Fatalf("resolved the wrong row: %+v", got)
+	}
+	if got.Liveness != session.LiveLost {
+		t.Fatalf("a disk-only row's live liveness must project as LiveLost, got %v", got.Liveness)
 	}
 
 	// The scope still confines it: repo-beta does not hold the title, on disk

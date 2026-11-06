@@ -201,7 +201,7 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			got, _, derr := findInstanceByTitle(title)
 			switch {
 			case derr == nil:
-				view := got.ForClientRead()
+				view := unconfirmedLiveProjection(got.ForClientRead())
 				return &view, "", nil
 			case !errors.Is(derr, errTitleNotFound):
 				return nil, "", derr

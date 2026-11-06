@@ -323,6 +323,28 @@ func corruptedReposError(corrupted []string) error {
 		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
 }
 
+// unconfirmedLiveProjection coerces a disk-only row's live-state claim into
+// the verdict a LIVE daemon gives a record it could not materialize (#6882
+// review): the persisted liveness is the last-saved value, not an observation,
+// and the snapshot's silence on this row is exactly the daemon failing to
+// confirm it. Reporting a live liveness as Lost keeps `sessions watch` from
+// completing on a stale "ready" and `sessions get` from displaying confirmed
+// idle — both consumers fail toward "cannot be proven", which is the truth.
+// Terminal and unset liveness pass through: an archived or already-lost row is
+// an honest record, and a liveness-less legacy row has no claim to retract.
+//
+// Deliberately applied only where a RUNNING daemon's snapshot missed the row —
+// the daemon-down fallback still reports last-known state, since with nothing
+// to contradict it the persisted value is the best answer there is.
+func unconfirmedLiveProjection(d session.InstanceData) session.InstanceData {
+	switch session.RecordedLiveness(d) {
+	case session.LiveRunning, session.LiveReady, session.LiveLimitReached:
+		d.Liveness = session.LiveLost
+		d.IdleReason = session.IdleReasonFor(d)
+	}
+	return d
+}
+
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon
 // is reachable (#1029 PR 2). It reproduces the pre-daemon read behavior exactly
 // — repo-scoped or all-repos, keeping the loud corrupt-file error on the

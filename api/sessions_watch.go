@@ -227,7 +227,8 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, stri
 			}
 			for i := range disk {
 				if disk[i].Title == title {
-					return &disk[i], "", nil
+					view := unconfirmedLiveProjection(disk[i])
+					return &view, "", nil
 				}
 			}
 		}
