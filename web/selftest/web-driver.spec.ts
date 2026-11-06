@@ -118,10 +118,10 @@ const DEAD_PORT = process.env.AF_WEB_DEAD_PORT ?? "8892";
 // they run in file order against the state the previous one left.
 const SESSION_ORDER = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
 // The #2347 geometry-reclaim session: dedicated because the assertion samples the
-// emulator ~50ms after activation, and on SHARED probe-a a sibling tab close (or a
-// respawned session's roster rebuild) re-mints a shell tab's id mid-window — the
-// resulting forced pane rebuild re-asserts the peer's grid inside the read window
-// (run 42244518786). No other test may open tabs on this session.
+// emulator ~50ms after activation, and on SHARED probe-a the peer's pane sat on
+// the agent stream until peer-fit-2347's roster row landed — then re-bound on
+// activation, a fresh attach force-sending the peer's grid inside the read
+// window (run 42244518786, #6892). No other test may open tabs on this session.
 const SESSION_GEOM = process.env.AF_WEB_SESSION_GEOM ?? "probe-geometry";
 
 /** session.TabKindWeb — the kind travels as a bare int in the snapshot projection
