@@ -14,11 +14,11 @@ import "fmt"
 // This is the canonical predicate behind the rename guard, and it is a mirror of
 // the label mapping (ui/tree/labels.go textForTab and its web twin): an agent tab
 // always renders "Agent" and a shell tab always renders "Terminal", both
-// ignoring Name entirely, while web, process and VS Code tabs render Name
-// (falling back to "Web"/"Tab"/"VS Code"). Renaming an agent or shell tab would
-// therefore write a field no surface reads — a silent no-op the user would
-// reasonably read as a bug — so callers reject it up front with an actionable
-// message instead.
+// ignoring Name entirely, while web, process, VS Code and docs tabs render
+// Name (falling back to "Web"/"Tab"/"VS Code"/"Proposal"). Renaming an agent
+// or shell tab would therefore write a field no surface reads — a silent
+// no-op the user would reasonably read as a bug — so callers reject it up
+// front with an actionable message instead.
 //
 // If the label mapping ever starts reading Name for another kind, this predicate
 // must change with it; keeping the rule in one exported place is what stops the

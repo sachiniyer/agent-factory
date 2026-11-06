@@ -40,7 +40,7 @@ func bindTabDeleteFlags(c *cobra.Command) {
 
 var sessionsTabCreateCmd = &cobra.Command{
 	Use:   "tab-create <title>",
-	Short: "Spawn a shell, process, web, or VS Code tab in a session",
+	Short: "Spawn a shell, process, web, VS Code, or docs tab in a session",
 	Long: `Create a new tab in an existing session.
 
 Shell tab (--kind shell): starts the user's $SHELL in the session's git
@@ -306,11 +306,11 @@ var sessionsTabRenameCmd = &cobra.Command{
 	Long: `Rename an existing tab — the fix for a name you have to live with all day,
 typically one an agent picked when it created the tab.
 
-Only web, process and VS Code tabs can be renamed: those are the tabs that
-display their name. The agent tab always shows "Agent" and shell tabs always show
-"Terminal" on every surface, so renaming one would change the handle you address
-it by without changing anything you can see — confusing rather than useful, so it
-is refused.
+Only web, process, VS Code and docs tabs can be renamed: those are the tabs
+that display their name. The agent tab always shows "Agent" and shell tabs always
+show "Terminal" on every surface, so renaming one would change the handle you
+address it by without changing anything you can see — confusing rather than
+useful, so it is refused.
 
 --new-name follows the same rules as tab-create's --name: characters outside
 [A-Za-z0-9_-] become "-", and the name is made unique within the session
@@ -461,7 +461,7 @@ var sessionsTabsReorderCmd = &cobra.Command{
 
 var sessionsTabsCreateCmd = &cobra.Command{
 	Use:   "create <title>",
-	Short: "Spawn a shell, process, web, or VS Code tab in a session",
+	Short: "Spawn a shell, process, web, VS Code, or docs tab in a session",
 	Long:  `Alias for "sessions tab-create". See "af sessions tab-create --help" for details.`,
 	Args:  cobra.ExactArgs(1),
 	RunE:  runTabCreate,

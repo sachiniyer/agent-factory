@@ -83,12 +83,12 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions set-conversation`](#af-sessions-set-conversation) — Record a session's provider conversation id
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, VS Code, or docs tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
 - [`af sessions tabs`](#af-sessions-tabs) — Manage a session's tabs (create/delete/rename/reorder)
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, or VS Code tab in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, VS Code, or docs tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -2373,7 +2373,7 @@ af sessions
 - [`af sessions retry-limit`](#af-sessions-retry-limit) — Retry a usage-limit resume or inspected handoff
 - [`af sessions send-prompt`](#af-sessions-send-prompt) — Send a prompt to a session (or broadcast to all with --all)
 - [`af sessions set-conversation`](#af-sessions-set-conversation) — Record a session's provider conversation id
-- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, or VS Code tab in a session
+- [`af sessions tab-create`](#af-sessions-tab-create) — Spawn a shell, process, web, VS Code, or docs tab in a session
 - [`af sessions tab-delete`](#af-sessions-tab-delete) — Delete a single tab from a session
 - [`af sessions tab-rename`](#af-sessions-tab-rename) — Rename a tab of a session
 - [`af sessions tab-reorder`](#af-sessions-tab-reorder) — Move a tab within a session's tab order
@@ -3097,7 +3097,7 @@ af sessions set-conversation <title> <id>
 
 ## af sessions tab-create
 
-Spawn a shell, process, web, or VS Code tab in a session
+Spawn a shell, process, web, VS Code, or docs tab in a session
 
 Create a new tab in an existing session.
 
@@ -3231,11 +3231,11 @@ Rename a tab of a session
 Rename an existing tab — the fix for a name you have to live with all day,
 typically one an agent picked when it created the tab.
 
-Only web, process and VS Code tabs can be renamed: those are the tabs that
-display their name. The agent tab always shows "Agent" and shell tabs always show
-"Terminal" on every surface, so renaming one would change the handle you address
-it by without changing anything you can see — confusing rather than useful, so it
-is refused.
+Only web, process, VS Code and docs tabs can be renamed: those are the tabs
+that display their name. The agent tab always shows "Agent" and shell tabs always
+show "Terminal" on every surface, so renaming one would change the handle you
+address it by without changing anything you can see — confusing rather than
+useful, so it is refused.
 
 --new-name follows the same rules as tab-create's --name: characters outside
 [A-Za-z0-9_-] become "-", and the name is made unique within the session
@@ -3328,7 +3328,7 @@ af sessions tabs
 
 **Subcommands**
 
-- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, or VS Code tab in a session
+- [`af sessions tabs create`](#af-sessions-tabs-create) — Spawn a shell, process, web, VS Code, or docs tab in a session
 - [`af sessions tabs delete`](#af-sessions-tabs-delete) — Delete a single tab from a session
 - [`af sessions tabs rename`](#af-sessions-tabs-rename) — Rename a tab of a session
 - [`af sessions tabs reorder`](#af-sessions-tabs-reorder) — Move a tab within a session's tab order
@@ -3344,7 +3344,7 @@ af sessions tabs
 
 ## af sessions tabs create
 
-Spawn a shell, process, web, or VS Code tab in a session
+Spawn a shell, process, web, VS Code, or docs tab in a session
 
 Alias for "sessions tab-create". See "af sessions tab-create --help" for details.
 
