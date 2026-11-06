@@ -403,3 +403,185 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
     })
     .toBeGreaterThan(60);
 });
+
+// #6635 (the 2026-11-06 #2347 recurrence, run 42219554428): the admission flag
+// was spent only by a TERM-DIVERGENT echo. A client that already owned the
+// authority saw its subscribe replay as a no-op — `rows === term.rows` — so the
+// flag survived to the FIRST FOREIGN echo, a live peer write. That write took
+// the admission's free pass without seeding the contest record; the peer's
+// counter to the pane's claim then read as a fresh sighting inside the yield
+// window instead of a repeat. The pane re-claimed where it must yield — and the
+// reclaim it landed on the peer WAS the repeat inside the peer's window: the
+// peer stood down to the grid the pane had just re-written, stranding the
+// active client at 34 rows for the whole 15s poll.
+//
+// The strand needs only one state-machine fact: the pane's first delivered
+// echo must be a NO-OP — the replayed authority equals its own emulator grid.
+// That is forced, not raced: a first context (A) claims the grid a second
+// context (B) will fit — both are 1280x2000, so both hosts produce the same
+// rows/cols — and B subscribes while A's grid is already the broker's
+// authority. B's replay is its own size: on master the flag survives to the
+// probe's first write below; on the fix it is spent there regardless.
+// The probe then plays the insistent peer verbatim — claim, then the counter
+// inside the yield window — and B must stand down: no reclaim may leave the
+// wire after the repeat, and B's emulator must rest on the peer's grid.
+test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields to the peer's counter — the replay consumes the admission even as a no-op", async ({
+  browser,
+  request,
+}) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
+  expect(selected?.id).toBeTruthy();
+
+  const ctxA = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  const ctxB = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  try {
+    const settleFonts = (p: Page) =>
+      p.evaluate(
+        () =>
+          document.fonts.ready.then(
+            () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+          ),
+      );
+    const attach = async (p: Page) => {
+      await p.goto("/");
+      await p.locator("#app[data-af-resync-settled]").waitFor();
+      await settleFonts(p);
+      await p.evaluate((sessionId) => {
+        window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+      }, selected.id);
+      await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open", {
+        timeout: 15_000,
+      });
+      const rows = () => p.locator(".af-term-host .xterm-rows > div").count();
+      await expect.poll(rows, { timeout: 10_000 }).toBeGreaterThan(60);
+      return rows;
+    };
+
+    const pageA = await ctxA.newPage();
+    const rowsA = await attach(pageA);
+    const gridRows = await rowsA();
+
+    // The ordering probe on the same broker, seeded while A's grid is already
+    // the authority — its own subscribe replay is therefore gridRows, which
+    // anchors the echo indices below.
+    await pageA.evaluate(
+      async ({ sessionId }) => {
+        const w = window as unknown as {
+          __echoes: number[];
+          __probe: WebSocket;
+          __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+        };
+        w.__echoes = [];
+        const ws = new WebSocket(
+          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
+            `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
+        );
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== "string") {
+            return;
+          }
+          try {
+            const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
+            if (msg.type === "resize" && typeof msg.rows === "number") {
+              w.__echoes.push(msg.rows);
+            }
+          } catch {
+            // not a control frame
+          }
+        };
+        w.__waitRows = (pred, after, label) =>
+          new Promise<number>((resolve, reject) => {
+            const timer = setTimeout(
+              () =>
+                reject(new Error(`no ${label} resize echo within 10s (saw ${w.__echoes.join(",")})`)),
+              10_000,
+            );
+            const poll = setInterval(() => {
+              const at = w.__echoes.findIndex((r, i) => i >= after && pred(r));
+              if (at >= 0) {
+                clearTimeout(timer);
+                clearInterval(poll);
+                resolve(at);
+              }
+            }, 20);
+          });
+        w.__probe = ws;
+        await new Promise<void>((resolve, reject) => {
+          ws.onopen = () => resolve();
+          ws.onerror = () => reject(new Error("probe stream failed to open"));
+        });
+      },
+      { sessionId: selected.id },
+    );
+    const waitEchoEq = (want: number, after: number, label: string) =>
+      pageA.evaluate(
+        ([n, a, l]) => {
+          const w = window as unknown as {
+            __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+          };
+          return w.__waitRows((r) => r === n, a, l);
+        },
+        [want, after, label] as const,
+      );
+
+    // B attaches under A's grid: its subscribe replay echoes gridRows, which is
+    // exactly what B's emulator already fits — the no-op replay that on master
+    // left the admission standing for the probe's first write.
+    const pageB = await ctxB.newPage();
+    const rowsB = await attach(pageB);
+    // B's connect claim lands as a same-grid write; its echo (the first
+    // gridRows after the probe's own subscribe replay at index 0) is a no-op
+    // for every subscriber and only proves the epoch is live.
+    const atBClaim = await waitEchoEq(gridRows, 1, "B's subscribe claim");
+
+    // The peer's claim: 34x100 differs from every grid on the wire. Both panes
+    // re-assert their host fit — two gridRows echoes — and the peer's counter
+    // must land inside the yield window measured from B's sighting, so the two
+    // writes are written as tightly as the echoes allow.
+    const staleRows = 34;
+    const staleCols = 100;
+    const writeForeign = () =>
+      pageA.evaluate(
+        ({ staleRows, staleCols }) => {
+          const w = window as unknown as { __probe: WebSocket };
+          w.__probe.send(new Uint8Array([0x02, staleRows >> 8, staleRows & 0xff, 0, staleCols]));
+        },
+        { staleRows, staleCols },
+      );
+    await writeForeign();
+    const atClaim = await waitEchoEq(staleRows, atBClaim + 1, "peer's foreign claim");
+    await waitEchoEq(gridRows, atClaim + 1, "first pane's reclaim");
+    await waitEchoEq(gridRows, atClaim + 2, "second pane's reclaim");
+
+    // The peer's counter — a repeat of the SAME foreign grid inside the yield
+    // window. On master it reads fresh to B (the record was never seeded) and
+    // B re-claims: a gridRows echo leaves the wire, which A then contests
+    // afresh, and the pair keeps last-resize-wins on the grid the pane had no
+    // business re-writing. On the fix B yields: nothing follows the repeat,
+    // and B's emulator rests at the peer's 34 rows.
+    await writeForeign();
+    const atRepeat = await waitEchoEq(staleRows, atClaim + 1, "peer's repeat");
+    await expect
+      .poll(rowsB, {
+        message: "the yielded pane's emulator rests on the insistent peer's grid",
+        timeout: 10_000,
+      })
+      .toBe(staleRows);
+    // Any >60-row echo after the repeat can only be a forfeited reclaim: A
+    // yields to the same repeat either way, so the writer could only be B.
+    await pageA.waitForTimeout(2500);
+    const trailing = await pageA.evaluate(
+      (after) =>
+        (window as unknown as { __echoes: number[] }).__echoes.filter(
+          (r, i) => i > after && r > 60,
+        ),
+      atRepeat,
+    );
+    expect(trailing, "no reclaim may leave the wire after the pane yields").toEqual([]);
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
