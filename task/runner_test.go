@@ -906,6 +906,35 @@ func TestSubmittedTurnContent(t *testing.T) {
 			want:    true,
 		},
 		{
+			name:  "devin timed thinking row, current wording (#6879)",
+			agent: "devin",
+			// Captured from devin 3000.11.234 mid-turn.
+			content: "⡎⢱ Thinking · 3s (esc twice to interrupt) · (174c)\n",
+			want:    true,
+		},
+		{
+			name:  "devin running-tools row, #6879's captured shape",
+			agent: "devin",
+			// The row quoted in #6879 from a production task run.
+			content: "⣄⠀ Running tools · 5m 52s (esc twice to interrupt)\n",
+			want:    true,
+		},
+		{
+			name:  "codex working row above the composer (#6879)",
+			agent: "codex",
+			// Codex 0.163.0's in-turn row: the hint rides a timed Working row
+			// drawn ABOVE the composer, not a bare hint row below it.
+			content: "› earlier prompt\n\n• Working (2s • esc to interrupt)\n\n› Ask Codex to do anything\n",
+			want:    true,
+		},
+		{
+			name:  "codex working row, long status form (#6879)",
+			agent: "codex",
+			// The same row carrying codex's background-terminal segment.
+			content: "• Working (18s • esc to interrupt) · 1 background terminal running · /ps to view · /stop to close\n\n› Ask Codex to do anything\n",
+			want:    true,
+		},
+		{
 			name:    "devin hint without timer is prose",
 			agent:   "devin",
 			content: "docs say esc to interrupt\n❭ ",
@@ -1141,6 +1170,32 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("a running turn repaints its timer inside the window")
+		}
+	})
+
+	// #6879: devin's current status row says "esc twice to interrupt"; the tick
+	// contract is unchanged.
+	t.Run("devin row ticking under the current wording upgrades", func(t *testing.T) {
+		var calls atomic.Int32
+		inst := newPreviewInstanceWithProgram(t, "devin", func() (string, error) {
+			n := calls.Add(1)
+			return fmt.Sprintf("⡎⢱ Thinking · %ds (esc twice to interrupt) · (17%dc)\n❭ \n", n+2, n), nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("the current devin status row ticking is the agent's own in-turn proof")
+		}
+	})
+
+	// #6879: codex 0.163.0 draws "• Working (Ns • esc to interrupt)" ABOVE the
+	// composer — a timed row, so it upgrades on its tick like devin's.
+	t.Run("codex working row ticking upgrades", func(t *testing.T) {
+		var calls atomic.Int32
+		inst := newPreviewInstanceWithProgram(t, "codex", func() (string, error) {
+			n := calls.Add(1)
+			return fmt.Sprintf("• Working (%ds • esc to interrupt)\n\n› Ask Codex to do anything\n", n+1), nil
+		})
+		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
+			t.Fatal("codex's Working row ticking is its in-turn chrome")
 		}
 	})
 
