@@ -900,8 +900,10 @@ func TestSubmittedTurnContent(t *testing.T) {
 			want:    false,
 		},
 		{
-			name:    "devin timed thinking row",
-			agent:   "devin",
+			name:  "devin timed thinking row, legacy wording",
+			agent: "devin",
+			// The pre-3000.11.x phrasing — still matched, so an older devin
+			// keeps working (#6879).
 			content: "⠀⡆ Thinking · 3s (esc to interrupt) · (425c · ctrl+o for details)\n",
 			want:    true,
 		},
@@ -1049,7 +1051,7 @@ func TestSubmittedTurnVisible(t *testing.T) {
 			{
 				name:    "devin prose with a duration",
 				agent:   "devin",
-				content: "the doc says 3s (esc to interrupt)\n❭ ",
+				content: "the doc says 3s (esc twice to interrupt)\n❭ ",
 			},
 		} {
 			t.Run(tc.name, func(t *testing.T) {
@@ -1120,7 +1122,7 @@ func TestSubmittedTurnVisible(t *testing.T) {
 				agent: "devin",
 				frames: []string{
 					"❭ ",
-					"⠀⡆ Thinking · 3s (esc to interrupt)\n❭ [Pasted text]",
+					"⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ [Pasted text]",
 				},
 			},
 		} {
@@ -1164,9 +1166,9 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		inst := newPreviewInstanceWithProgram(t, "devin", func() (string, error) {
 			n := calls.Add(1)
 			if n == 1 {
-				return "⠀⡆ Thinking · 3s (esc to interrupt)\n", nil
+				return "⠀⡆ Thinking · 3s (esc twice to interrupt)\n", nil
 			}
-			return "⠀⡆ Thinking · 4s (esc to interrupt)\n", nil
+			return "⠀⡆ Thinking · 4s (esc twice to interrupt)\n", nil
 		})
 		if !submittedTurnVisible(context.Background(), instanceReadinessTarget{inst: inst}) {
 			t.Fatal("a running turn repaints its timer inside the window")

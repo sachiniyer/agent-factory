@@ -69,9 +69,9 @@ func TestTurnWatch_DevinNewRowNeverFires(t *testing.T) {
 	frames := []string{
 		"❭ ",
 		// The row is new in this capture: nothing for it to have ticked from.
-		"⠀⡆ Thinking · 3s (esc to interrupt)\n❭ [Pasted text]",
+		"⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ [Pasted text]",
 		// It then stands still.
-		"⠀⡆ Thinking · 3s (esc to interrupt)\n❭ [Pasted text]",
+		"⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ [Pasted text]",
 	}
 	for i, frame := range frames {
 		if w.Observe(frame, time.Now()) {
@@ -85,22 +85,22 @@ func TestTurnWatch_DevinNewRowNeverFires(t *testing.T) {
 // age, so the turn began after the prompt went out.
 func TestTurnWatch_DevinTickingRowFires(t *testing.T) {
 	w := NewTurnWatch("devin", time.Now().Add(-time.Minute))
-	if w.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ", time.Now()) {
+	if w.Observe("⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("the first capture establishes the row; it cannot already be a tick")
 	}
-	if w.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ", time.Now()) {
+	if w.Observe("⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("a row that stood still has not ticked")
 	}
-	if !w.Observe("⠀⡆ Thinking · 4s (esc to interrupt)\n❭ ", time.Now()) {
+	if !w.Observe("⠀⡆ Thinking · 4s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("the same row with a growing timer is the agent's own in-turn proof")
 	}
 }
 
 // Devin 3000.11.234 reworded its in-turn hint to "esc twice to interrupt"
 // (#6879): the same timed row must still fire the watch. The frames below are
-// real captures: the verb varies ("Thinking", "Running tools"), a context
-// count rides the row's tail, and the spinner glyph cycles between captures —
-// all of it is the same row.
+// real captures: a context count rides the row's tail and flickers off again,
+// the spinner glyph cycles, and the verb even changes mid-turn — all of it is
+// the same row repainting its slot.
 func TestTurnWatch_DevinTickingRowFiresTwiceWording(t *testing.T) {
 	w := NewTurnWatch("devin", time.Now().Add(-time.Minute))
 	if w.Observe("⡎⢱ Thinking · 3s (esc twice to interrupt) · (174c)\n❭ ", time.Now()) {
@@ -219,7 +219,7 @@ func TestTurnWatch_PreBoundaryTurnNeverFires(t *testing.T) {
 	// The unrelated turn began minutes before the prompt boundary.
 	w := NewTurnWatch("devin", time.Now().Add(-30*time.Second))
 	for _, elapsed := range []string{"4m12s", "4m13s", "4m14s"} {
-		if w.Observe("⠀⡆ Thinking · "+elapsed+" (esc to interrupt)\n❭ ", time.Now()) {
+		if w.Observe("⠀⡆ Thinking · "+elapsed+" (esc twice to interrupt)\n❭ ", time.Now()) {
 			t.Fatalf("elapsed %s exceeds the boundary's age: a pre-boundary turn is not the prompt's", elapsed)
 		}
 	}
@@ -227,8 +227,8 @@ func TestTurnWatch_PreBoundaryTurnNeverFires(t *testing.T) {
 	if w.Observe("work so far\n❭ ", time.Now()) {
 		t.Fatal("the pane going quiet is not a turn")
 	}
-	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc to interrupt)\n❭ ", time.Now())
-	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc to interrupt)\n❭ ", time.Now()) {
+	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc twice to interrupt)\n❭ ", time.Now())
+	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("a turn younger than the boundary's age is the prompt's own")
 	}
 }
@@ -285,14 +285,14 @@ func TestTurnWatch_PreBoundaryTurnRejectsAtCaptureTime(t *testing.T) {
 	// seconds; at capture T+2s the boundary is only 2s old, so a row showing
 	// 3s elapsed cannot have begun after it — even if the daemon only applies
 	// the frame seconds later.
-	w.Observe("⠀⡆ Thinking · 2s (esc to interrupt)\n❭ ", boundary.Add(1500*time.Millisecond))
-	if w.Observe("⠀⡆ Thinking · 3s (esc to interrupt)\n❭ ", boundary.Add(2*time.Second)) {
+	w.Observe("⠀⡆ Thinking · 2s (esc twice to interrupt)\n❭ ", boundary.Add(1500*time.Millisecond))
+	if w.Observe("⠀⡆ Thinking · 3s (esc twice to interrupt)\n❭ ", boundary.Add(2*time.Second)) {
 		t.Fatal("a row older than the boundary at capture must not fire, whatever the apply delay")
 	}
 	// After the unrelated turn ends, a young row is the prompt's own turn.
 	w.Observe("work so far\n❭ ", boundary.Add(4*time.Second))
-	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc to interrupt)\n❭ ", boundary.Add(5*time.Second))
-	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc to interrupt)\n❭ ", boundary.Add(6*time.Second)) {
+	w.Observe("work so far\n⠀⡆ Thinking · 1s (esc twice to interrupt)\n❭ ", boundary.Add(5*time.Second))
+	if !w.Observe("work so far\n⠀⡆ Thinking · 2s (esc twice to interrupt)\n❭ ", boundary.Add(6*time.Second)) {
 		t.Fatal("a turn younger than the boundary's capture-age still fires")
 	}
 }
