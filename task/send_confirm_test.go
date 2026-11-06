@@ -108,6 +108,42 @@ func TestSendConfirmation_AgentAlreadyBusyIsNotEvidence(t *testing.T) {
 	})
 }
 
+// #6879: codex 0.163.0's in-turn chrome is the timed Working row above the
+// composer, "• Working (Ns • esc to interrupt)" — a clocked row like devin's.
+// One ticking inside the send's age promotes; a row whose own clock outdates
+// the send is an earlier turn and stays unverified.
+func TestSendConfirmation_CodexWorkingRow(t *testing.T) {
+	working := func(elapsed string) string {
+		return "• Working (" + elapsed + " • esc to interrupt)\n\n› Ask Codex to do anything\n"
+	}
+	t.Run("ticking row inside the send's age promotes", func(t *testing.T) {
+		pane := &scriptedPane{agent: "codex", frames: []string{
+			"› Ask Codex to do anything\n",
+			working("1s"), working("2s"), working("3s"),
+		}}
+		if !confirms(t, pane, 30*time.Second) {
+			t.Fatal("a Working row ticking inside the send's age is codex's in-turn chrome")
+		}
+	})
+	t.Run("row older than the send never promotes", func(t *testing.T) {
+		pane := &scriptedPane{agent: "codex", frames: []string{
+			"› Ask Codex to do anything\n",
+			working("9m 1s"), working("9m 2s"), working("9m 3s"),
+		}}
+		if confirms(t, pane, 30*time.Second) {
+			t.Fatal("a Working row whose clock outdates the send belongs to an earlier turn")
+		}
+	})
+	t.Run("busy pane at send time stays unconfirmed", func(t *testing.T) {
+		pane := &scriptedPane{agent: "codex", frames: []string{
+			working("40s"), working("41s"), working("42s"),
+		}}
+		if confirms(t, pane, 30*time.Second) {
+			t.Fatal("a Working row already up at the send is not this prompt's")
+		}
+	})
+}
+
 // A pane that cannot be read, or an agent with no in-turn signature, never
 // promotes.
 func TestSendConfirmation_UnsignaturedAgentNeverPromotes(t *testing.T) {

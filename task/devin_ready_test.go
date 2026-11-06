@@ -5,9 +5,11 @@ import (
 	"testing"
 )
 
-// The devin panes below are transcribed from driving the real devin 3000.2.17
-// binary in an isolated PTY (pyte-rendered) in a throwaway git repo — the same
-// states TmuxSession.CapturePaneContent feeds isReadyContent in production. Only
+// The devin panes below are transcribed from driving real devin binaries in an
+// isolated tmux session (capture-pane) in a throwaway git repo — the same
+// states TmuxSession.CapturePaneContent feeds isReadyContent in production. The
+// header/ready pane is the 3000.2.17 shape; the working row was refreshed from
+// 3000.11.234, whose hint reads "esc twice to interrupt" (#6879). Only
 // the load-bearing lines are kept (the composer glyph "❭", the header, the
 // working indicator); the box rules are truncated for readability. isReadyContent
 // matches the raw "❭" glyph (no ANSI strip, like codex's "›"), so a transcribed
@@ -28,7 +30,7 @@ const devinReady = "⠀⣴⣾⣶⡄\n" +
 // not isReadyContent, decides idle-vs-running among ready panes).
 const devinWorking = "❭ Reply with exactly one word: pong\n" +
 	"\n" +
-	"⠀⡆ Thinking · 3s (esc to interrupt) · (425c · ctrl+o for details)\n" +
+	"⡎⢱ Thinking · 3s (esc twice to interrupt) · (174c)\n" +
 	"────────────────────────────────────────\n" +
 	"❭ Guide Devin while it works\n" +
 	"────────────────────────────────────────\n" +
@@ -100,7 +102,7 @@ func TestDevinReadyIsStricterThanTheDefaultBranch(t *testing.T) {
 // for codex and claude, which also repaint continuously and have no case here. A
 // positive signal is only added for agents that hold their pane STILL mid-turn
 // (amp, opencode). If a future devin stops repainting mid-turn, add a case keyed
-// on its "esc to interrupt" marker (scoped below the composer, like opencode's).
+// on its "esc twice to interrupt" marker (scoped below the composer, like opencode's).
 func TestIsWorkingContentDevinFallsToChurn(t *testing.T) {
 	// No case → the default arm returns false; the daemon relies on churn.
 	if IsWorkingContent(devinWorking, "devin") {
