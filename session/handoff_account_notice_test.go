@@ -103,6 +103,37 @@ func TestSettlePendingAccountSwapNoticeDelivery(t *testing.T) {
 	}
 }
 
+// The #6799 settle twin: pane evidence retires the notice obligation but must
+// NOT lift a wall attributed to the swap's INCOMING identity — the proof is
+// that the notice landed, not that the agent's quota recovered. limit_account
+// == pending.To is the Park{Manual,Automatic}AccountSwapAtLimit attribution:
+// a readiness wait that found the replacement's own quota. A row flattened
+// to LiveRunning here leaves ResumeLimitedSessions' scan and, behind an
+// attached client's paused poll, never re-parks — stranded outside the
+// scheduled recovery the parked row was waiting for.
+func TestSettlePendingAccountSwapNoticeDeliveryKeepsTheIncomingWall(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	for _, manual := range []bool{false, true} {
+		inst := noticePendingSwap(manual, PromptCouldNotConfirm, attemptAt)
+		if manual {
+			// The manual transaction records the incoming agent namespace;
+			// attribution matches on both axes.
+			inst.pendingAccountSwap.AccountAgent = "claude"
+		}
+		inst.limitResetAt = time.Now().Add(time.Hour)
+		inst.limitAgent = "claude"
+		inst.limitAccount = "personal" // == pending.To: the incoming identity's wall
+		require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "personal", attemptAt))
+		require.Nil(t, inst.pendingAccountSwap, "the evidence retires the pending swap")
+		require.Nil(t, inst.accountSwapLaunch)
+		require.Equal(t, LiveLimitReached, inst.GetLiveness(),
+			"an incoming-account limit survives the evidence settle")
+		if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
+			t.Fatal("the incoming wall's reset must survive the settle")
+		}
+	}
+}
+
 func TestSettlePendingAccountSwapNoticeDeliveryRefusals(t *testing.T) {
 	attemptAt := time.Now().Add(-time.Minute)
 	for _, tc := range []struct {

@@ -124,6 +124,42 @@ func TestConfirmPendingAccountSwapDeliveryAutomaticClearsTheOutgoingWall(t *test
 	require.NoError(t, inst.TabSpawnBlocked())
 }
 
+// The #6799 regression: the incoming-wall preservation must extend to the
+// AUTOMATIC kind. settleReplacementRuntime parks the row with
+// ParkAutomaticAccountSwapAtLimit when the replacement's own readiness wait
+// hits its quota — attributing the wall to the incoming identity
+// (limit_account == pending.To) while the notice verdict stays ambiguous. An
+// operator's truthful "the notice landed" confirm retires the transaction,
+// but must keep that wall: the agent really is quota-blocked, the parked row
+// already publishes not-idle, and only a row still carrying LiveLimitReached
+// stays inside ResumeLimitedSessions' scan. Flattening it strands the
+// session outside scheduled recovery.
+func TestConfirmPendingAccountSwapDeliveryAutomaticKeepsTheIncomingWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	inst.pendingAccountSwap.Manual = false
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	// The wall is attributed to the incoming identity — the
+	// ParkAutomaticAccountSwapAtLimit shape, limit_account == pending.To.
+	inst.limitAgent = "claude"
+	inst.limitAccount = "personal"
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
+
+	require.Nil(t, inst.pendingAccountSwap, "the confirm retires the pending swap")
+	require.Nil(t, inst.accountSwapLaunch)
+	require.Equal(t, LiveLimitReached, inst.GetLiveness(),
+		"an incoming-account limit survives the confirm — the agent really is quota-blocked")
+	if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
+		t.Fatal("the incoming wall's reset must survive or scheduled recovery loses its schedule")
+	}
+	agent, account, ok := inst.LimitIdentity()
+	require.True(t, ok, "the wall's attribution survives with it")
+	require.Equal(t, "claude", agent)
+	require.Equal(t, "personal", account)
+}
+
 // A MANUAL swap confirmed while parked at the OUTGOING ambient identity's wall
 // (the #6764 shape: limit_account == "" != pending.To) must clear the wall.
 // The confirm nils the PendingAccountSwap pointer that
