@@ -108,7 +108,7 @@ func (c *ConfigPane) renderExplainView() string {
 func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 	var logical []string
 	logical = append(logical,
-		fmt.Sprintf("%s = %s", v.Key, explainSafe(config.FormatExplainValue(v.Value))))
+		fmt.Sprintf("%s = %s", v.Key, explainSafe(config.FormatExplainValueForKey(v.Key, v.Value))))
 	if v.Default != "" {
 		logical = append(logical, "default: "+explainSafe(v.Default))
 	}
@@ -121,7 +121,7 @@ func (c *ConfigPane) wrappedExplainLines(v config.ResolvedValue) []string {
 		logical = append(logical, cand.Layer+": "+result)
 		value := "—"
 		if cand.Present {
-			value = explainSafe(config.FormatExplainValue(cand.Value))
+			value = explainSafe(config.FormatExplainValueForKey(v.Key, cand.Value))
 		}
 		location := "compiled default"
 		if cand.Path != "" {

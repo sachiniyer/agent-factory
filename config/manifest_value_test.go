@@ -143,6 +143,41 @@ func TestCurrentValueCommaJoinsOnlyOptedInLists(t *testing.T) {
 	}
 }
 
+// TestIsCommaListKeyResolvesSubkeys pins the fix for the single-opt-in invariant:
+// isCommaListKey resolves a dotted leaf of a structured table (e.g.
+// account_handoff.exclude_sessions) through the parent's subkeys, so the get
+// path's FormatValueForKey renders the leaf in the comma-joined form the writer
+// accepts back — restoring the invariant isCommaListKey's own doc advertises.
+func TestIsCommaListKeyResolvesSubkeys(t *testing.T) {
+	cases := []struct {
+		key  string
+		want bool
+	}{
+		// Top-level comma-list keys.
+		{"network.cors_allowed_origins", true},
+		{"network.allowed_hosts", true},
+		{"limit_account_candidates", true},
+		// A dotted leaf of a structured table whose subkey kind is cfgStringList.
+		{"account_handoff.exclude_sessions", true},
+		// A dotted leaf whose subkey kind is NOT cfgStringList.
+		{"account_handoff.mode", false},
+		{"account_handoff.wall_percent", false},
+		{"root_agent.enabled", false},
+		{"web.terminal_font_size_phone", false},
+		// A dynamic family is never a comma list.
+		{"program_overrides.claude", false},
+		// A non-settable key.
+		{"session_env_passthrough", false},
+		{"no_such_key", false},
+		{"account_handoff.nonexistent", false},
+	}
+	for _, c := range cases {
+		if got := isCommaListKey(c.key); got != c.want {
+			t.Errorf("isCommaListKey(%q) = %v, want %v", c.key, got, c.want)
+		}
+	}
+}
+
 // TestEditorWriteKeepsConfigHandEditable is the external-user guard: config.toml
 // is a file the README tells people to hand-edit, and an edit made from a UI must
 // leave it exactly as hand-editable as it found it — every comment, blank line,

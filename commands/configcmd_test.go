@@ -94,19 +94,24 @@ func resetCobraSilence(cmd *cobra.Command) {
 func TestFormatConfigValue(t *testing.T) {
 	cases := []struct {
 		name string
+		key  string
 		in   any
 		want string
 	}{
-		{"string bare", "claude", "claude"},
-		{"bool", true, "true"},
-		{"int", 1000, "1000"},
-		{"map as json", map[string]string{"claude": "x"}, `{"claude":"x"}`},
-		{"nil map", map[string]string(nil), "null"},
+		{"string bare", "default_program", "claude", "claude"},
+		{"bool", "auto_update", true, "true"},
+		{"int", "log_max_size_mb", 1000, "1000"},
+		{"map as json", "program_overrides", map[string]string{"claude": "x"}, `{"claude":"x"}`},
+		{"nil map", "program_overrides", map[string]string(nil), "null"},
+		{"comma list joined", "network.cors_allowed_origins", []string{"https://a.example.com", "https://b.example.com"}, "https://a.example.com,https://b.example.com"},
+		{"comma list empty", "network.cors_allowed_origins", []string{}, ""},
+		{"comma list nil", "network.cors_allowed_origins", []string(nil), ""},
+		{"non-comma list stays json", "session_env_passthrough", []string{"FOO", "BAR"}, `["FOO","BAR"]`},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			if got := formatConfigValue(c.in); got != c.want {
-				t.Fatalf("formatConfigValue(%v) = %q, want %q", c.in, got, c.want)
+			if got := formatConfigValue(c.key, c.in); got != c.want {
+				t.Fatalf("formatConfigValue(%q, %v) = %q, want %q", c.key, c.in, got, c.want)
 			}
 		})
 	}
@@ -115,22 +120,25 @@ func TestFormatConfigValue(t *testing.T) {
 func TestFormatConfigListValue(t *testing.T) {
 	cases := []struct {
 		name       string
+		key        string
 		value      any
 		configured bool
 		want       string
 	}{
-		{"unset string", "", false, "(unset)"},
-		{"unset nil list", []string(nil), false, "(unset)"},
-		{"unset empty map", map[string]string{}, false, "(unset)"},
-		{"configured empty string", "", true, `""`},
-		{"configured nil list", []string(nil), true, "null"},
-		{"configured empty list", []string{}, true, "[]"},
-		{"configured empty map", map[string]string{}, true, "{}"},
-		{"false is a value", false, false, "false"},
+		{"unset string", "default_program", "", false, "(unset)"},
+		{"unset nil list", "network.cors_allowed_origins", []string(nil), false, "(unset)"},
+		{"unset empty map", "program_overrides", map[string]string{}, false, "(unset)"},
+		{"configured empty string", "default_program", "", true, `""`},
+		{"configured nil list non-comma", "session_env_passthrough", []string(nil), true, "null"},
+		{"configured empty list non-comma", "session_env_passthrough", []string{}, true, "[]"},
+		{"configured empty map", "program_overrides", map[string]string{}, true, "{}"},
+		{"configured nil list comma-list", "network.cors_allowed_origins", []string(nil), true, `""`},
+		{"configured empty list comma-list", "network.cors_allowed_origins", []string{}, true, `""`},
+		{"false is a value", "auto_update", false, false, "false"},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			entry := configEntry{Value: c.value, configured: c.configured}
+			entry := configEntry{Key: c.key, Value: c.value, configured: c.configured}
 			if got := formatConfigListValue(entry); got != c.want {
 				t.Fatalf("formatConfigListValue(%#v) = %q, want %q", entry, got, c.want)
 			}
@@ -536,7 +544,7 @@ cors_allowed_origins = []
 		"network.preview_listen_addr":    `""`,
 		"network.require_token":          "false",
 		"network.require_loopback_token": "false",
-		"network.cors_allowed_origins":   "[]",
+		"network.cors_allowed_origins":   `""`,
 	} {
 		if got := rows[key]; got != want {
 			t.Errorf("canonical grouped winner for %s = %q, want %q", key, got, want)
@@ -887,5 +895,80 @@ func TestPrintListenerAddrSaysNothingWithoutAnAddress(t *testing.T) {
 	printListenerAddr(cmd, "")
 	if got := out.String(); got != "" {
 		t.Fatalf("expected no output, got %q", got)
+	}
+}
+
+// TestConfigGetSetExcludeSessionsRoundTrips is the end-to-end fix for the
+// get→set corruption: `af config get account_handoff.exclude_sessions` prints
+// the comma-joined form, and copy-pasting that output back into `af config set`
+// preserves the value rather than silently corrupting it. The JSON spellings
+// `get` used to print (["alpha","beta"], []) are rejected by `set` with a
+// clear error instead of being stored as corrupted elements.
+func TestConfigGetSetExcludeSessionsRoundTrips(t *testing.T) {
+	tempAFHome(t)
+
+	// Set a valid comma-separated value.
+	if _, err := config.SetGlobalConfigValue("account_handoff.exclude_sessions", "alpha,beta"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+
+	// `af config get` must print the comma-joined form, not JSON.
+	var getOut bytes.Buffer
+	getCmd := &cobra.Command{}
+	getCmd.SetOut(&getOut)
+	if err := configGetCmd.RunE(getCmd, []string{"account_handoff.exclude_sessions"}); err != nil {
+		t.Fatalf("config get: %v", err)
+	}
+	got := strings.TrimSpace(getOut.String())
+	if got != "alpha,beta" {
+		t.Fatalf("config get account_handoff.exclude_sessions = %q, want comma-joined %q", got, "alpha,beta")
+	}
+
+	// Copy-pasting the get output back into set must round-trip.
+	if _, err := config.SetGlobalConfigValue("account_handoff.exclude_sessions", got); err != nil {
+		t.Fatalf("round-trip set: %v", err)
+	}
+	cfg, err := config.LoadConfig()
+	if err != nil {
+		t.Fatalf("load: %v", err)
+	}
+	if !reflect.DeepEqual(cfg.AccountHandoff.ExcludeSessions, []string{"alpha", "beta"}) {
+		t.Fatalf("round-trip stored %v, want [alpha beta]", cfg.AccountHandoff.ExcludeSessions)
+	}
+}
+
+// TestConfigGetSetExcludeSessionsRejectsJSON is the silent-corruption guard: the
+// JSON spellings `af config get` used to print are rejected by `set` with a
+// clear error instead of being stored as corrupted elements.
+func TestConfigGetSetExcludeSessionsRejectsJSON(t *testing.T) {
+	tempAFHome(t)
+	for _, bad := range []string{
+		`["alpha","beta"]`,
+		`[]`,
+		`["alpha"]`,
+	} {
+		if _, err := config.SetGlobalConfigValue("account_handoff.exclude_sessions", bad); err == nil {
+			t.Errorf("set exclude_sessions %q must be rejected, not silently corrupted", bad)
+		}
+	}
+}
+
+// TestConfigGetCORSAllowedOriginsCommaJoined pins that the get path renders
+// a top-level cfgStringList key as comma-joined (not JSON), so the get→set
+// round-trip works for every comma-list key — not just account_handoff.
+func TestConfigGetCORSAllowedOriginsCommaJoined(t *testing.T) {
+	tempAFHome(t)
+	if _, err := config.SetGlobalConfigValue("cors_allowed_origins", "https://a.example.com,https://b.example.com"); err != nil {
+		t.Fatalf("set: %v", err)
+	}
+	var out bytes.Buffer
+	cmd := &cobra.Command{}
+	cmd.SetOut(&out)
+	if err := configGetCmd.RunE(cmd, []string{"network.cors_allowed_origins"}); err != nil {
+		t.Fatalf("config get: %v", err)
+	}
+	got := strings.TrimSpace(out.String())
+	if got != "https://a.example.com,https://b.example.com" {
+		t.Fatalf("config get network.cors_allowed_origins = %q, want comma-joined", got)
 	}
 }

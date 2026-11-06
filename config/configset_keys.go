@@ -307,15 +307,30 @@ func validateCORSOrigin(origin string) error {
 // isCommaListKey reports whether key is settable as a comma-separated list
 // (its spec kind is cfgStringList). It is the SINGLE per-key opt-in for the comma
 // syntax: the writer (canonicalizeScalar) comma-splits input for exactly these
-// keys, and the editor/get renderer (CurrentValue) comma-joins exactly these keys.
-// Both gate on this one property so they cannot drift, and a []string key that has
-// NOT opted in is never comma-split or comma-joined by its type alone — which
-// would silently mangle a value whose elements can contain a comma. A dynamic
-// family is never a comma list (its leaves are scalars).
+// keys, and the editor/get renderer (CurrentValue/FormatValueForKey) comma-joins
+// exactly these keys. Both gate on this one property so they cannot drift, and a
+// []string key that has NOT opted in is never comma-split or comma-joined by its
+// type alone — which would silently mangle a value whose elements can contain a
+// comma. A dynamic family is never a comma list (its leaves are scalars).
+//
+// A dotted leaf of a structured table (e.g. account_handoff.exclude_sessions)
+// resolves through the parent's subkeys: the writer (resolveSettable) synthesizes
+// a spec from the leaf's kind, and this function does the same so the get path
+// renders the leaf in the form the writer accepts back.
 func isCommaListKey(key string) bool {
 	key = canonicalConfigKey(key)
-	spec, ok := settableKeySpecs[key]
-	return ok && !spec.dynamic && spec.kind == cfgStringList
+	if spec, ok := settableKeySpecs[key]; ok {
+		return !spec.dynamic && spec.kind == cfgStringList
+	}
+	if i := strings.IndexByte(key, '.'); i > 0 {
+		prefix, rest := key[:i], key[i+1:]
+		if parent, found := settableKeySpecs[prefix]; found && rest != "" && !strings.Contains(rest, ".") {
+			if leafSpec, allowed := parent.subkeys[rest]; allowed {
+				return !parent.dynamic && leafSpec.kind == cfgStringList
+			}
+		}
+	}
+	return false
 }
 
 // SettableKeys returns the sorted, human-facing list of keys `config set`
