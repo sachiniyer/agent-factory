@@ -1287,6 +1287,8 @@ func TestShowHooksOverlayNoOpConfirmDoesNotClobberOutOfBandHook(t *testing.T) {
 
 	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // enter edit mode
 	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // confirm without changes
+	assert.False(t, hp.IsDirty(),
+		"a no-op confirm must not dirty the pane — a clean close writes nothing (#6790)")
 
 	// Save: the out-of-band hook must survive.
 	require.NoError(t, h.saveContentPaneState())
@@ -1294,4 +1296,52 @@ func TestShowHooksOverlayNoOpConfirmDoesNotClobberOutOfBandHook(t *testing.T) {
 	require.NoError(t, err)
 	assert.Contains(t, cfg.PostWorktreeCommands, "echo out-of-band",
 		"the out-of-band hook must survive a no-op confirm save")
+}
+
+// TestHooksEscAfterCleanSaveKeepsOutOfBandHookOnDisk is the #6790 regression
+// test. Before the fix a successful save updated only the sidebar hook count
+// and left the pane dirty for the rest of the session, so #6742's re-read on
+// open was skipped (it is gated on !IsDirty) and every later Esc or quit
+// re-saved the stale in-memory list — deleting hooks added to
+// .agent-factory/config.toml in the meantime.
+//
+// Sequence: an in-pane edit saved by an Esc close, then a hook added to the
+// on-disk config out-of-band, then reopen + Esc. A successful save leaves the
+// pane clean, and a clean pane writes nothing on close, so the on-disk hook
+// must survive.
+func TestHooksEscAfterCleanSaveKeepsOutOfBandHookOnDisk(t *testing.T) {
+	h := hooksOverlayRepoHome(t, []string{"echo one"})
+	hp := h.hooksPane
+	h.errBox.SetSize(500, 1)
+
+	// The first successful save: add a hook in the pane, close with Esc.
+	_, _ = h.showHooksOverlay()
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("n")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("echo user edit")})
+	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyEsc})
+	require.Equal(t, stateDefault, h.state)
+	require.Empty(t, h.errBox.String(), "the first save must succeed")
+
+	cfg, _, err := config.LoadInRepoConfig(h.repoRoot)
+	require.NoError(t, err)
+	require.Equal(t, []string{"echo one", "echo user edit"}, cfg.PostWorktreeCommands,
+		"precondition: the in-pane edit landed on disk")
+	assert.False(t, hp.IsDirty(),
+		"a successful save must leave the pane clean, holding exactly what was written (#6790)")
+
+	// An out-of-band edit (a hand edit, a second TUI) lands on disk next.
+	writeInRepoConfig(t, h.repoRoot,
+		`post_worktree_commands = ["echo one", "echo user edit", "echo out-of-band"]`+"\n")
+
+	// Reopen (a clean pane re-reads, so the on-disk hook is in the list) and
+	// close with Esc: nothing was edited, so the close must write nothing.
+	_, _ = h.showHooksOverlay()
+	require.False(t, hp.IsDirty(), "a clean re-read must leave the pane clean")
+	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyEsc})
+
+	cfg, _, err = config.LoadInRepoConfig(h.repoRoot)
+	require.NoError(t, err)
+	assert.Contains(t, cfg.PostWorktreeCommands, "echo out-of-band",
+		"Esc on a clean pane writes nothing — the on-disk hook must survive (#6790)")
 }
