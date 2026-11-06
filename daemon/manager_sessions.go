@@ -578,11 +578,14 @@ func (m *Manager) sendPromptGuarded(req SendPromptRequest, guard func(inst *sess
 		}
 		return status, fmt.Errorf("failed to send prompt: %w", err)
 	}
-	if !req.TaskOrigin && status != session.PromptNotDelivered {
+	if !req.TaskOrigin && status == session.PromptDelivered {
 		// A delivered prompt is the user's answer, same as a keystroke into the
 		// pane — and the only answer a client with no PTY input can send. Task
 		// deliveries are automation, not the user, and PromptNotDelivered (which
-		// returns nil) means the answer never arrived.
+		// returns nil) means the answer never arrived. The ambiguous nil-error
+		// verdicts (PromptSentUnverified, PromptCouldNotConfirm) prove the RPC
+		// completed, not that the pane received the text, so they must not clear
+		// the request — only a proven delivery settles the obligation.
 		if answered != nil {
 			m.queueAttentionClear(instance, answered.SetAt)
 		}
