@@ -20,7 +20,10 @@ import (
 
 func writeCodexRolloutFile(t *testing.T, codexHome, name string) string {
 	t.Helper()
-	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	// Rollouts a capture must observe must sit in the day dir Codex would
+	// mint them in now: the bounded scan prunes directories provably older
+	// than the snapshot window (#6845).
+	path := filepath.Join(codexRolloutDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta"}`+"\n"), 0644))
 	return path
@@ -37,7 +40,7 @@ func writeCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) str
 // predate the field).
 func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, source any) string {
 	t.Helper()
-	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	path := filepath.Join(codexRolloutDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	payload := map[string]any{"cwd": cwd}
 	if source != nil {
@@ -239,7 +242,7 @@ func writeEmptyCodexRolloutFile(t *testing.T, codexHome, name string) string {
 	t.Helper()
 	// Same directory as writeCodexRolloutFile so a later write to the same name
 	// settles THIS file rather than creating a sibling.
-	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	path := filepath.Join(codexRolloutDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	require.NoError(t, os.WriteFile(path, nil, 0644))
 	return path
@@ -1038,7 +1041,7 @@ func TestWaitForPromptReceipt_UncorrelatedSettlesIntoReceipt(t *testing.T) {
 func TestWaitForPromptReceipt_RejectsNamedPipeWithoutBlocking(t *testing.T) {
 	codexHome := t.TempDir()
 	snap := BeginConversationCaptureAtCodexHome(codexHome)
-	rolloutDir := filepath.Join(codexHome, "sessions", "2026", "07", "30")
+	rolloutDir := codexRolloutDayDir(codexHome, time.Now())
 	require.NoError(t, os.MkdirAll(rolloutDir, 0755))
 	fifo := filepath.Join(rolloutDir,
 		"rollout-2026-07-30T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")

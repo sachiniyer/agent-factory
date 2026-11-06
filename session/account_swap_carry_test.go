@@ -62,7 +62,16 @@ func claudeTranscriptRel(worktree, id string) string {
 }
 
 func codexRolloutRel(id string) string {
-	return filepath.Join("sessions", "2026", "09", "16", "rollout-2026-09-16T01-02-03-"+id+".jsonl")
+	return codexRolloutRelDay(id, time.Date(2026, 9, 16, 0, 0, 0, 0, time.Local))
+}
+
+// codexRolloutRelDay is codexRolloutRel under the day dir Codex would use for
+// a rollout minted on day. A rollout a live capture must observe must sit in
+// the dir the recorder would mint it in now — the bounded scan prunes
+// directories provably older than the snapshot window (#6845).
+func codexRolloutRelDay(id string, day time.Time) string {
+	return filepath.Join("sessions", day.Format("2006"), day.Format("01"), day.Format("02"),
+		"rollout-"+day.Format("2006-01-02")+"T01-02-03-"+id+".jsonl")
 }
 
 func codexRollout(cwd string) string {
@@ -224,7 +233,7 @@ func TestValidateAccountSwapCarriesCodexConversationFromRegisteredAccount(t *tes
 	// A provider that forked on resume would mint one new rollout for this
 	// directory; capture follows it rather than pinning a stale thread.
 	const forkID = "0a0b0c0d-1e2f-4a3b-8c4d-5e6f7a8b9c0d"
-	writeCarryFile(t, target, codexRolloutRel(forkID), codexRollout(inst.GetWorktreePath()))
+	writeCarryFile(t, target, codexRolloutRelDay(forkID, time.Now()), codexRollout(inst.GetWorktreePath()))
 	conv, err = CaptureAgentConversation(tmux.ProgramCodex, plan.conversationCapture, 5*time.Second)
 	require.NoError(t, err)
 	require.Equal(t, forkID, conv.ID)

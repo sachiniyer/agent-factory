@@ -401,12 +401,24 @@ func newConfigAgentCodexFixture(t *testing.T, mode string) (*Manager, string, st
 	return manager, program, configAgentCodexFixtureRollout(codexHome)
 }
 
+// configAgentCodexFixtureRollout names the deterministic rollout the fake
+// Codex writes at spawn time. Its directory must be the day dir a real
+// recorder would mint now — the bounded capture scan prunes directories
+// provably older than the snapshot window, so a fixture dated in the past
+// would be invisible to the receipt check it feeds (#6845).
 func configAgentCodexFixtureRollout(codexHome string) string {
+	now := time.Now()
 	return filepath.Join(
-		codexHome,
-		"sessions", "2026", "07", "20",
-		"rollout-2026-07-20T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl",
+		configAgentCodexDayDir(codexHome, now),
+		"rollout-"+now.Format("2006-01-02")+"T12-00-00-019f386f-7206-7fc2-803b-f7045e07a242.jsonl",
 	)
+}
+
+// configAgentCodexDayDir mirrors the recorder's sessions/YYYY/MM/DD layout
+// for a rollout minted on day.
+func configAgentCodexDayDir(codexHome string, day time.Time) string {
+	return filepath.Join(codexHome,
+		"sessions", day.Format("2006"), day.Format("01"), day.Format("02"))
 }
 
 func runConfigAgentCodexFixture(mode string) error {
@@ -726,9 +738,8 @@ func TestConfigAgentLateReceiptRecheckIgnoresSiblingRollout(t *testing.T) {
 	// A second config agent's rollout appears in the same AF home after this
 	// spawn's receipt wait already identified its own file during the initial
 	// window.
-	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
-		"sessions", "2026", "07", "21",
-		"rollout-2026-07-21T09-00-00-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
+	sibling := filepath.Join(configAgentCodexDayDir(os.Getenv("CODEX_HOME"), time.Now()),
+		"rollout-"+time.Now().Format("2006-01-02")+"T09-00-00-029f386f-7206-7fc2-803b-f7045e07a243.jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0755))
 	meta, err := json.Marshal(map[string]any{
 		"type":    "session_meta",
@@ -807,9 +818,8 @@ func TestConfigAgentResumeLastConfirmsBriefingFromPool(t *testing.T) {
 	// The empty-thread trap: a newer same-directory rollout with no recorded
 	// turns. Any prediction of Codex's selection rules can land here; the pool
 	// covers both files so the receipt needs no prediction.
-	trap := filepath.Join(os.Getenv("CODEX_HOME"),
-		"sessions", "2026", "07", "21",
-		"rollout-2026-07-21T23-59-59-039f386f-7206-7fc2-803b-f7045e07a244.jsonl")
+	trap := filepath.Join(configAgentCodexDayDir(os.Getenv("CODEX_HOME"), time.Now()),
+		"rollout-"+time.Now().Format("2006-01-02")+"T23-59-59-039f386f-7206-7fc2-803b-f7045e07a244.jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(trap), 0755))
 	trapMeta, err := json.Marshal(map[string]any{
 		"type":    "session_meta",
@@ -911,9 +921,8 @@ func TestConfigAgentResumeRemoteIgnoresLocalRollout(t *testing.T) {
 	// brand-new rollout is the false-positive shape from the finding: local
 	// scanning is disabled for remote launches, so this candidate must be
 	// invisible to the remote session's receipt check (#5486 review).
-	sibling := filepath.Join(os.Getenv("CODEX_HOME"),
-		"sessions", "2026", "07", "21",
-		"rollout-2026-07-21T00-00-01-049f386f-7206-7fc2-803b-f7045e07a245.jsonl")
+	sibling := filepath.Join(configAgentCodexDayDir(os.Getenv("CODEX_HOME"), time.Now()),
+		"rollout-"+time.Now().Format("2006-01-02")+"T00-00-01-049f386f-7206-7fc2-803b-f7045e07a245.jsonl")
 	require.NoError(t, os.MkdirAll(filepath.Dir(sibling), 0755))
 	siblingMeta, err := json.Marshal(map[string]any{
 		"type":    "session_meta",

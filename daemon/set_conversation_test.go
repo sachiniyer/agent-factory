@@ -37,7 +37,7 @@ const setConversationDaemonID = "019f386f-7206-7fc2-803b-f7045e07a299"
 // session_meta source — the sub-agent marker the validator must refuse.
 func writeDaemonCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, source any) {
 	t.Helper()
-	path := filepath.Join(codexHome, "sessions", "2026", "08", "10", name)
+	path := filepath.Join(configAgentCodexDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	data, err := json.Marshal(map[string]any{
 		"type":    "session_meta",
