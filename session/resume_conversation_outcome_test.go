@@ -1,6 +1,7 @@
 package session
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -61,18 +62,87 @@ func TestResumeConversationOutcomeNamesTheFreshStart(t *testing.T) {
 		inst.ResumeConversationOutcome())
 }
 
-// A sandbox session's conversation lives in the previous host's store; the
-// re-provisioned sandbox never holds it (the same reason ExactResume gives).
+// A sandbox (remote-workspace) session never reports Carried: the driving
+// daemon cannot prove whether its respawn carried the conversation — the
+// rollout or transcript that proves a resume lives in the sandbox's own store,
+// which the daemon cannot read off-box, and which branch the respawn takes
+// (in-place relaunch or re-provision) is decided later inside
+// RespawnWithLiveBoundary, not by a capability probe taken here. Under-reporting
+// is the honest direction, so the CarryFailure text is the same whichever
+// branch the respawn actually takes and does not depend on CanRelaunchInPlace
+// or --force-reap (the user-visible part of #6863). A correct carried:true for
+// a sandbox session needs the relaunch to report its outcome back from the
+// sandbox, which is a protocol change tracked separately.
 func TestResumeConversationOutcomeSandboxNeverCarries(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	inst := exactResumeSession(t, tmux.ProgramClaude)
-	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
-	require.Equal(t, HandoffConversation{Carried: true}, inst.ResumeConversationOutcome(),
+	const sandboxCarryFailure = "this session runs in a sandbox, and af cannot prove from the driving daemon that its respawn carried the conversation"
+
+	// Control: a local session resumes its recorded conversation. The sandbox
+	// refusal below is what changes the answer, not the recorded id.
+	localInst := exactResumeSession(t, tmux.ProgramClaude)
+	localInst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	require.Equal(t, HandoffConversation{Carried: true}, localInst.ResumeConversationOutcome(),
 		"the control: a local session resumes its recorded conversation")
 
+	// A relaunch-capable sandbox: the sandbox advertises the relaunch feature,
+	// so an in-place relaunch is available. The verdict still does not answer
+	// Carried — the daemon cannot prove the in-place relaunch resumes the
+	// conversation off-box — and the text is the same regardless of the
+	// recorded id, the program, or --force-reap.
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "version": "x", "features": []string{"tab-api", RelaunchFeature}})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	rc := srv.client(t, httpSrv.URL)
+
+	relaunchCapable := func(t *testing.T, program, id string) *Instance {
+		t.Helper()
+		inst := exactResumeSession(t, program)
+		inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: program, ID: id, CapturedAt: time.Now()}}}
+		inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+		inst.mu.Lock()
+		inst.remoteClient = rc
+		inst.agentSrv = nil
+		inst.mu.Unlock()
+		return inst
+	}
+
+	// Relaunch-capable with a recorded id (Claude): would carry locally, but the
+	// daemon cannot prove the sandbox's in-place relaunch resumes it.
+	inst := relaunchCapable(t, tmux.ProgramClaude, "conv-1")
+	require.True(t, inst.CanRelaunchInPlace(),
+		"precondition: the sandbox advertises the relaunch feature")
+	require.Equal(t, HandoffConversation{CarryFailure: sandboxCarryFailure}, inst.ResumeConversationOutcome(),
+		"a relaunch-capable sandbox must not be reported Carried from the driving daemon")
+
+	// Relaunch-capable with no recorded id (Codex, Amp): the in-place relaunch
+	// starts fresh, but the verdict reports the same honest non-carry, not the
+	// per-program fresh-start reason a local respawn would give.
+	for _, program := range []string{tmux.ProgramCodex, tmux.ProgramAmp} {
+		inst := relaunchCapable(t, program, "")
+		require.True(t, inst.CanRelaunchInPlace(),
+			"precondition: the sandbox advertises the relaunch feature")
+		require.Equal(t, HandoffConversation{CarryFailure: sandboxCarryFailure},
+			inst.ResumeConversationOutcome(), program)
+	}
+
+	// --force-reap re-provisions even a relaunch-capable sandbox: the
+	// replacement sandbox starts fresh, and the verdict is the same honest
+	// non-carry — it must not depend on the capability probe or the override.
+	inst = relaunchCapable(t, tmux.ProgramClaude, "conv-1")
+	inst.SetForceSandboxReplacement(true)
+	require.True(t, inst.CanRelaunchInPlace(),
+		"precondition: --force-reap overrides a relaunch-capable sandbox")
+	require.Equal(t, HandoffConversation{CarryFailure: sandboxCarryFailure}, inst.ResumeConversationOutcome())
+
+	// A sandbox with no live agent-server cannot relaunch in place, so the
+	// respawn re-provisions: the replacement sandbox starts fresh, and the
+	// verdict is the same honest non-carry.
+	inst = exactResumeSession(t, tmux.ProgramClaude)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
 	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
-	require.Equal(t,
-		HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"},
-		inst.ResumeConversationOutcome())
+	require.False(t, inst.CanRelaunchInPlace(),
+		"precondition: a sandbox with no live agent-server cannot relaunch in place")
+	require.Equal(t, HandoffConversation{CarryFailure: sandboxCarryFailure}, inst.ResumeConversationOutcome())
 }

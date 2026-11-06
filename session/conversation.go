@@ -524,6 +524,17 @@ func (i *Instance) ExactResume() (bool, string) {
 	if i.Capabilities().Workspace == WorkspaceRemote {
 		return false, "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"
 	}
+	return i.exactResumeVerdict()
+}
+
+// exactResumeVerdict is the sandbox-agnostic verdict a local (non-remote)
+// respawn of this session would reach: whether it resumes its own recorded
+// conversation, and when not, why. ExactResume reaches it after its blanket
+// refusal for a remote-workspace (sandbox) restore, and handoffConversationForRespawn
+// shares it for a local session's respawn. A remote-workspace session's respawn
+// is not judged here: ResumeConversationOutcome answers it separately with an
+// honest non-carry, because the driving daemon cannot prove a sandbox carry.
+func (i *Instance) exactResumeVerdict() (bool, string) {
 	program := resolveLaunchProgramForInstance(i).command
 	_, ok, refusal := prepareExactResumeConversation(i, program)
 	if ok {
@@ -551,10 +562,36 @@ func (i *Instance) ExactResume() (bool, string) {
 // the recorded id or the worktree-scoped resume form the exact-only rewrite
 // keeps; otherwise the reason it starts a fresh conversation, the fact the
 // respawn could previously only log.
+//
+// A sandbox (remote-workspace) session's respawn goes through
+// relaunchOrRecoverSandbox (session/relaunch.go): an in-place relaunch when the
+// sandbox supports it (CanRelaunchInPlace), re-provisioning only when it does
+// not. The driving daemon is not in a position to prove the outcome of either
+// branch: the rollout or transcript that proves a resume lives in the sandbox's
+// own store, which the daemon cannot read off-box, and which branch the respawn
+// actually takes is decided later inside RespawnWithLiveBoundary, not by a
+// capability probe taken here. So a sandbox session never reports Carried —
+// under-reporting is the honest direction, since the reverse would tell someone
+// their context survived when it did not. The CarryFailure text is true
+// whichever branch the respawn takes and does not depend on a capability probe
+// taken before the respawn (the user-visible part of #6863). A correct
+// carried:true for a sandbox session needs the relaunch itself to report its
+// outcome back from the sandbox, which is a protocol change tracked separately.
 func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 	if i.Capabilities().Workspace == WorkspaceRemote {
-		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
+		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and af cannot prove from the driving daemon that its respawn carried the conversation"}
 	}
+	return i.handoffConversationForRespawn()
+}
+
+// handoffConversationForRespawn is the determination a local (non-remote)
+// respawn of this session's runtime makes about its conversation — the answer a
+// local session's Recover owes. It is sandbox-agnostic: a remote-workspace
+// (sandbox) session never reaches it, because ResumeConversationOutcome answers
+// a sandbox respawn separately with an honest non-carry above (the driving
+// daemon cannot prove a sandbox carry), so ExactResume's blanket sandbox refusal
+// is not used here.
+func (i *Instance) handoffConversationForRespawn() HandoffConversation {
 	program := resolveLaunchProgramForInstance(i).command
 	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return HandoffConversation{Carried: true}
@@ -562,7 +599,7 @@ func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 	if tmux.ProgramResumesConversation(program) {
 		return HandoffConversation{Carried: true}
 	}
-	if _, why := i.ExactResume(); why != "" {
+	if ok, why := i.exactResumeVerdict(); !ok {
 		return HandoffConversation{CarryFailure: why}
 	}
 	return HandoffConversation{CarryFailure: "af cannot prove the launched program resumes this session's conversation"}
