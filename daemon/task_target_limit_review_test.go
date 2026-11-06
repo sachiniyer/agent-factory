@@ -329,7 +329,7 @@ func TestTaskDeliveryWaitsForHealthySnapshotToClearLimit(t *testing.T) {
 		release:          make(chan struct{}),
 	}
 	inst := registerStarted(t, manager, repoID, repoPath, "clearing-limit", backend, true, session.Running)
-	manager.setLimitReached(inst, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(inst, time.Now().Add(time.Hour), "", session.LimitBanner{})
 
 	pollDone := make(chan struct{})
 	go func() {
@@ -440,7 +440,7 @@ func TestSlowTaskPromptDoesNotBlockAnUnrelatedTarget(t *testing.T) {
 	}
 	limitDone := make(chan struct{})
 	go func() {
-		manager.setLimitReached(limitTarget, time.Now().Add(time.Hour), "")
+		manager.setLimitReached(limitTarget, time.Now().Add(time.Hour), "", session.LimitBanner{})
 		close(limitDone)
 	}()
 
@@ -498,7 +498,7 @@ func TestExistingBacklogIsProtectedBeforeLimitBurstCanEvict(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "limited-backlog", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.setLimitReached(inst, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(inst, time.Now().Add(time.Hour), "", session.LimitBanner{})
 	if err := task.AddTask(task.Task{
 		ID: "a4223102", Name: "watch-existing-backlog", Prompt: "event: {{line}}",
 		WatchCmd: "watch.sh", TargetSession: "limited-backlog", ProjectPath: repoPath,
@@ -532,7 +532,7 @@ func TestLimitedTargetQueuesBeforeLiveRateDrop(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "limited-rate", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.setLimitReached(inst, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(inst, time.Now().Add(time.Hour), "", session.LimitBanner{})
 	if err := task.AddTask(task.Task{
 		ID: "a4223110", Name: "watch-limited-rate", Prompt: "event: {{line}}",
 		WatchCmd: "watch.sh", TargetSession: "limited-rate", ProjectPath: repoPath,
@@ -749,7 +749,7 @@ func TestAgedBacklogObservesTargetLimitBeforeExpiringHead(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "limited-aged", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.setLimitReached(inst, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(inst, time.Now().Add(time.Hour), "", session.LimitBanner{})
 	if err := task.AddTask(task.Task{
 		ID: "a4223106", Name: "watch-aged-backlog", Prompt: "event: {{line}}",
 		WatchCmd: "watch.sh", TargetSession: "limited-aged", ProjectPath: repoPath,
@@ -894,7 +894,7 @@ func TestWatchQueueAdmissionProtectsInFlightLimitResume(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	manager, repoID, repoPath := newStatusTestManager(t)
 	inst := registerStarted(t, manager, repoID, repoPath, "resuming-limit", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.setLimitReached(inst, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(inst, time.Now().Add(time.Hour), "", session.LimitBanner{})
 	if err := inst.BeginLimitResume(); err != nil {
 		t.Fatalf("BeginLimitResume: %v", err)
 	}

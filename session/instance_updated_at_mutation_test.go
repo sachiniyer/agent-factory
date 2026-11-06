@@ -40,7 +40,9 @@ func TestUpdatedAtMutations(t *testing.T) {
 		{"restore", func(t *testing.T, i *Instance) { i.liveness = LiveArchived }, func(t *testing.T, i *Instance) { require.NoError(t, i.Transition(BeginRestore())) }},
 		{"liveness", nil, func(t *testing.T, i *Instance) { require.NoError(t, i.Transition(ObserveLiveness(LiveRunning))) }},
 		{"limit", nil, func(t *testing.T, i *Instance) { i.SetLimitReached(clock.Add(time.Hour)) }},
-		{"limit at epoch", nil, func(t *testing.T, i *Instance) { i.SetLimitReachedAtEpoch(clock.Add(time.Hour), "", i.stateEpoch) }},
+		{"limit at epoch", nil, func(t *testing.T, i *Instance) {
+			i.SetLimitReachedAtEpoch(clock.Add(time.Hour), "", LimitBanner{}, i.stateEpoch)
+		}},
 		{"limit reset", nil, func(t *testing.T, i *Instance) { i.SetLimitResetAt(clock.Add(time.Hour)) }},
 		{"clear limit", func(t *testing.T, i *Instance) { i.liveness = LiveLimitReached }, func(t *testing.T, i *Instance) { i.ClearLimitReached() }},
 		{"repark limit", func(t *testing.T, i *Instance) { i.inFlightOp = OpRespawning }, func(t *testing.T, i *Instance) { require.NoError(t, i.ReparkLimitUnderResumeFence(clock)) }},

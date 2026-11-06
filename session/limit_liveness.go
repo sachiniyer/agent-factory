@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -11,6 +12,23 @@ import (
 // ledger that outlives the parked state, and the resume-fence bookkeeping
 // for the loop that un-parks it (#2997). The axis itself lives in
 // liveness.go; this file is everything the wall needs beyond it.
+
+// LimitBanner is the detector's anchor for WHICH banner produced a usage-limit
+// read (#6823): where the last banner match sat inside the captured pane and
+// how many matches the capture held. The claim fields (resetAt, evidence) say
+// what the wall advertised; the anchor says which banner advertised it — the
+// signal that lets a parked session tell a clipped re-read of its recorded
+// banner from a banner printed after it, a distinction the claim fields alone
+// cannot make: both degrade to (zero, "") identically.
+type LimitBanner struct {
+	// Prefix is the captured pane's bytes before the last banner match — the
+	// match's absolute position inside that capture.
+	Prefix string
+	// Count is the number of banner matches the capture held. Zero means the
+	// read carried no anchor (a path that observed no pane, like a legacy or
+	// mirrored park), in which case nothing about position can be proven.
+	Count int
+}
 
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
 // sets the LiveLimitReached liveness and stores the parsed reset time (zero
@@ -25,7 +43,7 @@ import (
 // accompanies its reset — without it the daemon's first poll fails the
 // same-phrase dedupe and re-parses against a later clock (#6765).
 func (i *Instance) SetLimitReached(resetAt time.Time) {
-	i.SetLimitReachedAtEvidence(resetAt, "")
+	i.SetLimitReachedAtEvidence(resetAt, "", LimitBanner{})
 }
 
 // SetLimitReachedAtEvidence is SetLimitReached for a park that parsed a reset
@@ -36,10 +54,14 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 // so its phrase must be recorded rather than cleared — otherwise a time-only
 // phrase re-parsed after the stated clock time resolves to the next day and the
 // drift becomes durable once the poll adopts the phrase.
-func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string) {
+//
+// banner is the detector's anchor for the sighting (#6823) — the pane bytes
+// before the last banner match and the match count — recorded beside the claim
+// so a later clipped re-read can be told apart from a banner printed after it.
+func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string, banner LimitBanner) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setLimitReachedLocked(resetAt, evidence)
+	i.setLimitReachedLocked(resetAt, evidence, banner)
 }
 
 // SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
@@ -62,40 +84,126 @@ func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string)
 // one nearest the wall the provider printed, so an already-parked instance keeps
 // it. A different phrase (or one seen while not yet parked) is new evidence and
 // applies.
-func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, epoch uint64) bool {
+//
+// The one shape the claim cannot self-describe is a parked re-read of
+// (resetAt=zero, evidence=""): a capture of the recorded banner after its reset
+// clause scrolled out of the visible pane and a banner the wall printed
+// afterward BOTH report it (#6823). applyDegradedResightLocked decides from the
+// banner anchor and the current identity what can be proven — and, when nothing
+// can, holds the wall at "unknown reset" without dirtying the durable record
+// rather than guessing.
+func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
 		return false
 	}
-	if i.liveness == LiveLimitReached && evidence == i.limitResetEvidence {
-		// Already parked on the SAME wall claim — a re-read of an unchanged
-		// banner is not a new observation, whatever shape its reset took: the
-		// stored reset stays (the first parse is nearest the real window) and
-		// no durable fact moved, so nothing below may run. The empty-evidence
-		// half is what a no-reset banner re-parks on every idle tick; letting
-		// it through is what rewrote the row and republished the session once
-		// per second for as long as it stayed parked (#6802 review).
-		return true
+	if i.liveness == LiveLimitReached {
+		if resetAt.IsZero() && evidence == "" {
+			return i.applyDegradedResightLocked(banner)
+		}
+		if evidence == i.limitResetEvidence {
+			// Already parked on the SAME wall claim — a re-read of an
+			// unchanged banner is not a new observation, whatever shape its
+			// reset took: the stored reset stays (the first parse is nearest
+			// the real window) and no durable fact moved, so nothing below may
+			// run.
+			return true
+		}
 	}
-	if !i.setLimitReachedLocked(resetAt, evidence) {
+	if !i.setLimitReachedLocked(resetAt, evidence, banner) {
 		return false
 	}
 	return true
 }
 
+// applyDegradedResightLocked classifies a (resetAt=zero, evidence="") hit over
+// an already-parked session (#6823). The claim alone is ambiguous — a clipped
+// re-read of the recorded banner and a banner the wall printed afterward
+// degrade to it identically — so the decision falls to the signals around the
+// read:
+//
+//   - CURRENT IDENTITY: the recorded wall is attributed to limitAgent/
+//     limitAccount; a banner still on the pane after the identity moved (an
+//     account swap committed, the program changed) is not that wall re-read —
+//     it is the current identity's wall, recorded and attributed as one.
+//   - BANNER POSITION: the recorded banner is still the last match when the
+//     capture ends at the same place relative to it — the pane lines ABOVE the
+//     match's own row are byte-identical or suffix-related (the capture window
+//     slid while the banner sat still; the match row's own lead marker is not
+//     positional evidence, see sameLimitBannerPosition). That proves a clipped
+//     re-read: detection already stands, so nothing else may run — the first
+//     parse's reset, its phrase, and the recorded observations all stay, and
+//     nothing is dirtied.
+//   - BANNER ORDER/COUNT: the recorded reset clause still in view in the new
+//     prefix means the match that produced this hit sits BELOW it — a banner
+//     printed after the recorded wall. More matches than the recorded sighting
+//     counted proves the same. Either is a genuinely new wall and is recorded.
+//
+// When none of that distinguishes the read — a moved position with no visible
+// clause, an unchanged count — the poll holds the wall but claims only what the
+// capture verifiably shows: a wall with NO known reset. The stored instant is
+// dropped rather than kept: keeping it could schedule a resume — or release
+// the live parked wall's account exclusion — at a deadline the wall no longer
+// verifiably owns, the exact fail-open the issue names. The recorded identity
+// stays (re-attributing on a guess could blame a healthy account), and nothing
+// durable is minted: the recorded observations keep their own bounds and no
+// never-expiring untimed row is appended on a guess.
+func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
+	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) {
+		return true
+	}
+	if i.limitResetEvidence != "" && strings.Contains(banner.Prefix, i.limitResetEvidence) {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if i.limitBannerCount > 0 && banner.Count > i.limitBannerCount {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if i.inFlightOp != OpNone {
+		return false
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.limitResetAt = time.Time{}
+	i.limitResetEvidence = ""
+	i.noteStateChangeLocked(lv, op, prevReset)
+	return true
+}
+
+// sameLimitBannerPosition reports whether two banner prefixes describe the same
+// last-match position — the capture ended at the same place relative to the
+// banner (the window may have slid while the banner sat still). The comparison
+// uses only the full lines ABOVE the match's own row: the row's trailing bytes
+// are the agent's banner lead marker ("⎿  ", "■ "), identical for every
+// anchored match of that agent, so they carry no positional information — a
+// recorded prefix that IS just the marker would suffix-match any later
+// banner's gutter and falsely prove a re-read of a different wall.
+// A banner whose capture starts at its own row has no context above it and
+// proves nothing.
+func sameLimitBannerPosition(stored, current string) bool {
+	storedBody := stored[:strings.LastIndexByte(stored, '\n')+1]
+	currentBody := current[:strings.LastIndexByte(current, '\n')+1]
+	if storedBody == "" || currentBody == "" {
+		return false
+	}
+	return strings.HasSuffix(currentBody, storedBody) || strings.HasSuffix(storedBody, currentBody)
+}
+
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
-// record its reset time and evidence, skipping a row with any operation in flight
-// so it never clobbers that operation's fence. Reports whether it applied.
-// Caller holds i.mu.
+// record its reset time, evidence, and banner anchor, skipping a row with any
+// operation in flight so it never clobbers that operation's fence. Reports
+// whether it applied. Caller holds i.mu.
 //
 // evidence is the reset phrase the detector consumed to produce resetAt. A park
 // that parsed a phrase (the send-path park via task.LimitReachedError) records
 // it so the daemon's first poll recognizes the re-read as the same observation
 // and keeps the first parse's reset (#6765). A park that resolved a reset
 // without a phrase passes "" — the slot is cleared rather than left describing
-// a reset it did not produce.
-func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string) bool {
+// a reset it did not produce. banner carries the sighting's anchor (#6823);
+// a caller that observed no pane passes the zero LimitBanner.
+func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner) bool {
 	if i.inFlightOp != OpNone {
 		return false
 	}
@@ -103,6 +211,8 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string) boo
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.limitResetEvidence = evidence
+	i.limitBannerPrefix = banner.Prefix
+	i.limitBannerCount = banner.Count
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, lv == LiveLimitReached)
 	i.noteStateChangeLocked(lv, op, prevReset)
@@ -295,6 +405,8 @@ func (i *Instance) ClearLimitReached() {
 	i.limitResetEvidence = ""
 	i.limitAgent = ""
 	i.limitAccount = ""
+	i.limitBannerPrefix = ""
+	i.limitBannerCount = 0
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
 	// it is stale by definition and must not land (#2135).
@@ -335,6 +447,18 @@ func (i *Instance) LimitResetEvidence() string {
 		return ""
 	}
 	return i.limitResetEvidence
+}
+
+// LimitBannerAnchor returns the banner anchor recorded with the current wall
+// (#6823), zero-valued off the limit wall. The handoff re-park reads it to
+// carry the recorded sighting's anchor onto the row it restores.
+func (i *Instance) LimitBannerAnchor() LimitBanner {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	if i.liveness != LiveLimitReached {
+		return LimitBanner{}
+	}
+	return LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount}
 }
 
 // LimitAccount returns the account whose runtime produced the current limit

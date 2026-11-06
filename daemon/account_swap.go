@@ -90,22 +90,22 @@ var testHookAccountSwapBeforeFinalFence = func() {}
 // setLimitReached records a live limit through the manager-owned publication
 // boundary, so a final account-swap admission observes either the whole limit
 // publication or the whole durable identity commit.
-func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time, evidence string) {
+func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner) {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	instance.SetLimitReachedAtEvidence(resetAt, evidence)
+	instance.SetLimitReachedAtEvidence(resetAt, evidence, banner)
 }
 
-func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, epoch uint64) bool {
+func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner, epoch uint64) bool {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.SetLimitReachedAtEpoch(resetAt, evidence, epoch)
+	return instance.SetLimitReachedAtEpoch(resetAt, evidence, banner, epoch)
 }
 
-func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string) error {
+func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner) error {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.Transition(session.ParkHandoff(resetAt, evidence))
+	return instance.Transition(session.ParkHandoff(resetAt, evidence, banner))
 }
 
 func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetAt time.Time) error {

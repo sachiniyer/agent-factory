@@ -196,6 +196,33 @@ type LimitDetector struct {
 	matchers map[string]agentLimitMatcher
 }
 
+// LimitSighting is everything one captured pane says about a usage-limit wall:
+// Check's four claims plus the anchor that names WHICH banner produced them.
+// The anchor is what a parked session compares against its recorded sighting to
+// tell "the same banner, reset clause clipped out of the capture" from "a new
+// banner printed after it" — the (resetAt, evidence) pair alone cannot make
+// that distinction: both shapes degrade to (zero, "") identically (#6823).
+type LimitSighting struct {
+	// Hit reports whether a usage-limit banner matched at all.
+	Hit bool
+	// ResetAt is the parsed absolute UTC reset, zero when none parsed.
+	ResetAt time.Time
+	// HasResetTime reports whether ResetAt came from a parsed reset phrase.
+	HasResetTime bool
+	// Evidence is the reset phrase the parse consumed — identical whenever an
+	// unchanged banner is re-read (#6765).
+	Evidence string
+	// BannerPrefix is the capture's bytes before the LAST banner match — the
+	// match's absolute position inside this capture. Comparing it to the
+	// prefix a parked session recorded is what proves the last match sits at
+	// the same place (a clipped re-read) or moved (a later banner).
+	BannerPrefix string
+	// BannerCount is the number of banner matches in the capture. A capture can
+	// legitimately hold several (a retry trips the limit again before the
+	// first banner scrolls off); more than were recorded means a newer banner.
+	BannerCount int
+}
+
 // NewLimitDetector builds a detector from per-agent detect-pattern overrides
 // (config.LimitPatterns; nil/empty yields the built-in matchers). An override
 // for an agent with no built-in matcher, or an uncompilable pattern, is logged
@@ -212,6 +239,14 @@ func NewLimitDetector(overrides map[string]string) LimitDetector {
 // hit=false.
 func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool, evidence string) {
 	return isLimitContent(content, agent, d.matchers, now)
+}
+
+// Sight is Check's full form (#6823): the same detection plus the banner anchor
+// (prefix and count) a parked session needs to tell a clipped re-read of its
+// recorded banner from a genuinely new wall printed after it. The daemon poll
+// uses this; callers that only need detection keep Check.
+func (d LimitDetector) Sight(content, agent string, now time.Time) LimitSighting {
+	return isLimitSighting(content, agent, d.matchers, now)
 }
 
 // isLimitContent reports whether the captured pane content shows a usage-limit
@@ -235,9 +270,18 @@ func (d LimitDetector) Check(content, agent string, now time.Time) (hit bool, re
 // now is the injected clock used to turn time-of-day-only and relative reset
 // phrases into an absolute instant.
 func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher, now time.Time) (hit bool, resetAt time.Time, hasResetTime bool, evidence string) {
+	s := isLimitSighting(content, agent, matchers, now)
+	return s.Hit, s.ResetAt, s.HasResetTime, s.Evidence
+}
+
+// isLimitSighting is the detection core behind Check and Sight. On a miss it
+// returns the zero sighting; on a hit it fills the banner anchor — the bytes
+// before the last match and the match count — so the caller can compare WHICH
+// banner produced the claim, not just what it claimed (#6823).
+func isLimitSighting(content, agent string, matchers map[string]agentLimitMatcher, now time.Time) LimitSighting {
 	matcher, ok := matchers[agent]
 	if !ok || matcher.detect == nil {
-		return false, time.Time{}, false, ""
+		return LimitSighting{}
 	}
 	// The captured pane can legitimately contain multiple genuine usage-limit
 	// banners (e.g. the user hits the retry key and trips the limit again before
@@ -248,16 +292,17 @@ func isLimitContent(content, agent string, matchers map[string]agentLimitMatcher
 		matches = anchoredMatches(content, matches, matcher.lead)
 	}
 	if len(matches) == 0 {
-		return false, time.Time{}, false, ""
+		return LimitSighting{}
 	}
 	last := matches[len(matches)-1]
+	s := LimitSighting{Hit: true, BannerPrefix: content[:last[0]], BannerCount: len(matches)}
 	if matcher.parseReset == nil {
-		return true, time.Time{}, false, ""
+		return s
 	}
 	if reset, phrase, parsed := matcher.parseReset(content[last[0]:], now); parsed {
-		return true, reset.UTC(), true, phrase
+		s.ResetAt, s.HasResetTime, s.Evidence = reset.UTC(), true, phrase
 	}
-	return true, time.Time{}, false, ""
+	return s
 }
 
 // bannerLeadMarkers are the glyphs an agent draws in front of its own error or

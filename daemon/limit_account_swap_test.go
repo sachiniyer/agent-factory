@@ -163,7 +163,7 @@ func TestResumeLimitedSessions_SerializesFinalAdmissionWithLiveLimitPublication(
 
 	published := make(chan struct{})
 	go func() {
-		manager.setLimitReached(other, base.Add(time.Hour), "")
+		manager.setLimitReached(other, base.Add(time.Hour), "", session.LimitBanner{})
 		close(published)
 	}()
 	select {

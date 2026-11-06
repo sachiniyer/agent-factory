@@ -480,3 +480,69 @@ func TestCheckReturnsResetPhraseEvidence(t *testing.T) {
 		t.Fatalf("an unparseable reset clause must detect with no evidence: hit=%v hasReset=%v evidence=%q", hit, hasReset, evidence)
 	}
 }
+
+// TestSight pins the banner anchor (#6823): Sight reports Check's claims plus
+// the bytes before the LAST banner match and the anchored match count — the
+// pair a parked session compares against its recorded sighting to tell a
+// clipped re-read of that banner from a banner printed after it, which the
+// (resetAt, evidence) claim alone cannot do once both degrade to (zero, "").
+func TestSight(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+	det := NewLimitDetector(nil)
+
+	// Two genuine banners (a retry tripped the wall again before the first
+	// scrolled off): the anchor must name the SECOND one's position, matching
+	// the banner whose reset the claim carries — exactly like the parse.
+	two := strings.Join([]string{
+		"output before the wall",
+		"⎿  Claude usage limit reached. Your limit will reset at 2pm (America/New_York)",
+		"user pressed retry",
+		"⎿  Claude usage limit reached. Your limit will reset at 7pm (America/New_York)",
+		"trailing composer line",
+	}, "\n")
+	s := det.Sight(two, tmux.ProgramClaude, now)
+	if !s.Hit || !s.HasResetTime {
+		t.Fatalf("two-banner sighting: got hit=%v hasReset=%v", s.Hit, s.HasResetTime)
+	}
+	lastIdx := strings.LastIndex(two, "Claude usage limit reached.")
+	if s.BannerPrefix != two[:lastIdx] {
+		t.Fatalf("BannerPrefix must be the bytes before the LAST banner match")
+	}
+	if s.BannerCount != 2 {
+		t.Fatalf("BannerCount = %d, want 2 anchored banners", s.BannerCount)
+	}
+	if !strings.HasPrefix(two[lastIdx:], "Claude usage limit reached.") {
+		t.Fatalf("test fixture lost its last match")
+	}
+
+	// A clipped re-read — the same banner with its reset clause scrolled out —
+	// still anchors: Hit stands with no reset, and the prefix/count still name
+	// the banner the session recorded.
+	clipped := "output before the wall\n⎿  Claude usage limit reached."
+	s = det.Sight(clipped, tmux.ProgramClaude, now)
+	if !s.Hit || s.HasResetTime || s.Evidence != "" || !s.ResetAt.IsZero() {
+		t.Fatalf("clipped sighting: got hit=%v hasReset=%v evidence=%q", s.Hit, s.HasResetTime, s.Evidence)
+	}
+	if s.BannerPrefix != "output before the wall\n⎿  " || s.BannerCount != 1 {
+		t.Fatalf("clipped sighting must still anchor: prefix=%q count=%d", s.BannerPrefix, s.BannerCount)
+	}
+
+	// A mid-line mention of the banner's words is not an anchored match
+	// (#4721), so it contributes neither the hit nor the count.
+	s = det.Sight("the agent said: Claude usage limit reached. — quoting docs", tmux.ProgramClaude, now)
+	if s.Hit || s.BannerCount != 0 {
+		t.Fatalf("an unanchored mention must not sight: %+v", s)
+	}
+
+	// A miss reports the zero sighting.
+	if s = det.Sight("an ordinary idle pane", tmux.ProgramClaude, now); s != (LimitSighting{}) {
+		t.Fatalf("a miss must be the zero sighting, got %+v", s)
+	}
+	// Check and Sight agree on the claim fields.
+	hit, resetAt, hasReset, evidence := det.Check(two, tmux.ProgramClaude, now)
+	s = det.Sight(two, tmux.ProgramClaude, now)
+	if s.Hit != hit || !s.ResetAt.Equal(resetAt) || s.HasResetTime != hasReset || s.Evidence != evidence {
+		t.Fatalf("Check and Sight disagree: (%v,%v,%v,%q) vs %+v", hit, resetAt, hasReset, evidence, s)
+	}
+}

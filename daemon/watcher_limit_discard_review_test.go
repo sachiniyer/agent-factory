@@ -83,7 +83,7 @@ func TestTargetLimitObservationRejectsConcurrentTaskRebind(t *testing.T) {
 	manager, repoID, repoPath := newStatusTestManager(t)
 	registerStarted(t, manager, repoID, repoPath, "healthy-a", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
 	limited := registerStarted(t, manager, repoID, repoPath, "limited-b", readyFakeBackend{session.NewFakeBackend()}, true, session.Running)
-	manager.setLimitReached(limited, time.Now().Add(time.Hour), "")
+	manager.setLimitReached(limited, time.Now().Add(time.Hour), "", session.LimitBanner{})
 	const taskID = "a4226123"
 	if err := task.AddTask(task.Task{
 		ID: taskID, Name: "watch-rebound-target", Prompt: "event: {{line}}",

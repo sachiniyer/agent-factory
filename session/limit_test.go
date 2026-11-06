@@ -124,7 +124,7 @@ func TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset(t *testing.T) {
 	first := time.Date(2026, 11, 3, 9, 0, 0, 0, time.UTC)
 	phrase := "try again in 4 days 2 hours 46 minutes."
 
-	require.True(t, i.SetLimitReachedAtEpoch(first, phrase, i.stateEpoch))
+	require.True(t, i.SetLimitReachedAtEpoch(first, phrase, LimitBanner{}, i.stateEpoch))
 	require.True(t, i.LimitReached())
 	reset, ok := i.LimitResetAt()
 	require.True(t, ok)
@@ -132,7 +132,7 @@ func TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset(t *testing.T) {
 
 	// A re-read of the same banner re-parses to a later instant but must not
 	// move the stored reset — the phrase already produced this row's reset.
-	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Minute), phrase, i.stateEpoch))
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Minute), phrase, LimitBanner{}, i.stateEpoch))
 	reset, _ = i.LimitResetAt()
 	require.True(t, reset.Equal(first), "an unchanged banner's re-read must not move the stored reset")
 
@@ -141,13 +141,13 @@ func TestSetLimitReachedAtEpoch_UnchangedEvidenceKeepsReset(t *testing.T) {
 	require.Equal(t, phrase, i.ToInstanceData().LimitResetEvidence)
 
 	// A different phrase is NEW evidence and applies normally.
-	require.True(t, i.SetLimitReachedAtEpoch(first.Add(time.Hour), "try again at 9:00 AM", i.stateEpoch))
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(time.Hour), "try again at 9:00 AM", LimitBanner{}, i.stateEpoch))
 	reset, _ = i.LimitResetAt()
 	require.True(t, reset.Equal(first.Add(time.Hour)))
 
 	// A reset that arrives without a phrase always applies — and clears the
 	// slot so it cannot keep describing this reset.
-	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Hour), "", i.stateEpoch))
+	require.True(t, i.SetLimitReachedAtEpoch(first.Add(2*time.Hour), "", LimitBanner{}, i.stateEpoch))
 	reset, _ = i.LimitResetAt()
 	require.True(t, reset.Equal(first.Add(2*time.Hour)))
 	require.Empty(t, i.ToInstanceData().LimitResetEvidence)
@@ -174,7 +174,7 @@ func TestSetLimitReachedAtEvidence(t *testing.T) {
 	reset := time.Date(2026, 11, 4, 6, 34, 0, 0, time.UTC)
 	phrase := "try again at 6:34 AM"
 
-	i.SetLimitReachedAtEvidence(reset, phrase)
+	i.SetLimitReachedAtEvidence(reset, phrase, LimitBanner{})
 	require.True(t, i.LimitReached())
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)

@@ -387,7 +387,7 @@ func TestRebuildTeardownPending_HoldsLimitObservationsLost(t *testing.T) {
 	epoch := i.LifecycleView().StateEpoch
 
 	resetAt := time.Now().Add(time.Hour)
-	require.True(t, i.SetLimitReachedAtEpoch(resetAt, "", epoch),
+	require.True(t, i.SetLimitReachedAtEpoch(resetAt, "", LimitBanner{}, epoch),
 		"the limit observation applies its account evidence even under the gate")
 	assert.Equal(t, LiveLost, i.GetLiveness(),
 		"a limit banner from the stale pane must not lift the row out of Lost")

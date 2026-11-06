@@ -118,6 +118,7 @@ type TransitionEvent struct {
 	lv          Liveness
 	resetAt     time.Time
 	evidence    string
+	banner      LimitBanner
 	epoch       uint64
 	epochScoped bool
 	churnOnly   bool
@@ -245,8 +246,10 @@ func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHand
 // phrase the detector consumed to produce resetAt (#6765): the send-path park's
 // parse is the first parse of the banner, so its phrase must accompany its
 // reset to keep the daemon's first poll from re-parsing against a later clock.
-func ParkHandoff(resetAt time.Time, evidence string) TransitionEvent {
-	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence}
+// banner is the sighting's anchor (#6823), recorded so a later clipped re-read
+// of this banner is told apart from a wall printed after it.
+func ParkHandoff(resetAt time.Time, evidence string, banner LimitBanner) TransitionEvent {
+	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence, banner: banner}
 }
 
 // AbortHandoff drops a replacement fence whose runtime swap did not complete.
@@ -785,13 +788,19 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 	case limitResetClear:
 		i.limitResetAt = time.Time{}
 		i.limitResetEvidence = ""
+		i.limitBannerPrefix = ""
+		i.limitBannerCount = 0
 	case limitResetFromEvent:
 		// The event's reset arrives with the phrase that produced it (the
 		// handoff wait path resolved both), so the evidence slot records it —
 		// keeping the daemon's first poll from re-parsing the unchanged banner
-		// against a later clock (#6765).
+		// against a later clock (#6765). The banner anchor rides with it for
+		// the same reason (#6823): the poll must be able to tell a clipped
+		// re-read of THIS banner from a wall the pane shows afterward.
 		i.limitResetAt = ev.resetAt
 		i.limitResetEvidence = ev.evidence
+		i.limitBannerPrefix = ev.banner.Prefix
+		i.limitBannerCount = ev.banner.Count
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

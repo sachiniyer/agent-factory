@@ -202,8 +202,10 @@ func (i *Instance) ConfirmPendingHandoffDelivery(mission string) error {
 			// stays inside ResumeLimitedSessions' scan. CommitHandoff would
 			// publish LiveRunning and drop the reset bookkeeping outright.
 			// Preserve the already-stored evidence so the daemon's poll keeps
-			// the first parse's reset (#6765).
-			ev = ParkHandoff(resetAt, i.limitResetEvidence)
+			// the first parse's reset (#6765) — and the already-stored banner
+			// anchor, which describes the same recorded wall (#6823).
+			ev = ParkHandoff(resetAt, i.limitResetEvidence,
+				LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
 		}
 		if err := i.transitionLocked(ev); err != nil {
 			return err
