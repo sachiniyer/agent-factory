@@ -47,13 +47,16 @@ type SessionInput struct {
 	Working  bool // the poll's own verdict — LiveRunning, which folds in
 	// churn + the agent's in-turn indicator; never IsWorkingContent, whose
 	// unsupported agents (codex) always read idle (#6817 review)
-	Parked         bool // limit-parked liveness = wall liveness
-	Attached       bool
-	VSCodeTab      bool
-	PendingOp      bool // in-flight op or pending account swap
-	SwapCapable    bool
-	CarryPossible  bool      // local worktree + carry-capable agent
-	HomeDir        string    // the runtime-bound account home (codex), "" elsewhere
+	Parked        bool // limit-parked liveness = wall liveness
+	Attached      bool
+	VSCodeTab     bool
+	PendingOp     bool // in-flight op or pending account swap
+	SwapCapable   bool
+	CarryPossible bool   // local worktree + carry-capable agent
+	HomeDir       string // the runtime-bound account home (codex), "" elsewhere
+	Program       string // the recorded launch command (RuntimeProgram); the
+	// drift compare reads its command-line overrides — a session launched with
+	// `codex -s workspace-write` takes that mode over config.toml's (#6902)
 	LimitAccount   string    // parked-on account, from instance limit facts
 	WallObservedAt time.Time // durable wall sighting; zero for banner-only
 	Captured       bool      // the poll produced a frame this pass
@@ -89,7 +92,9 @@ type Deps struct {
 	ReadUsage func(dir string, carried map[string]int64) handoff.ReadingFacts
 	// DriftKey compares effective codex runtime settings; the caller injects
 	// the agentaccount helper (incomparable=false, key="" for other agents).
-	DriftKey   func(agent, sourceDir, targetDir string) (key string, incomparable bool)
+	// program is the session's recorded launch command, whose command-line
+	// overrides settle the effective mode before the configs do (#6902).
+	DriftKey   func(agent, sourceDir, targetDir, program string) (key string, incomparable bool)
 	DetectWall func(content, agent string) bool
 	WriteRows  func(rows []handoff.EventRow) error
 	// DeliverReport hands one report_to recipient's emitted rows to the
@@ -647,7 +652,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 			af.Reading = readUsage(dir, carried)
 			if srcDir == "" {
 				af.Drift = driftUnverifiable
-			} else if key, incomparable := e.deps.DriftKey(in.Agent, srcDir, dir); incomparable {
+			} else if key, incomparable := e.deps.DriftKey(in.Agent, srcDir, dir, in.Program); incomparable {
 				af.Drift = driftUnverifiable
 			} else {
 				af.Drift = key

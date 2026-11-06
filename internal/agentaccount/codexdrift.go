@@ -27,9 +27,12 @@ var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "appro
 
 // CodexRuntimeDriftKey compares the effective runtime settings of a source
 // home (the session's own account dir, or the ambient home) against a
-// candidate account home. It answers the one question the engine's candidate
-// filter needs: does moving to target keep the session's model, effort,
-// approval, and sandbox — or is the candidate ineligible?
+// candidate account home. program is the session's recorded launch command —
+// a command-line sandbox override in it applies before config.toml's
+// sandbox_mode, so the mode that will actually take effect is not the config's
+// alone (#6902). It answers the one question the engine's candidate filter
+// needs: does moving to target keep the session's model, effort, approval,
+// and sandbox — or is the candidate ineligible?
 //
 // (key, false): the candidate is ineligible — it sets a different value, or
 // sets/omits a key asymmetrically. No presence gap is presumed harmless:
@@ -38,12 +41,13 @@ var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "appro
 // effective runtime, not a seedable gap.
 // ("", false): comparable and equal.
 // ("", true): unevaluable — an unreadable or unparseable config on either
-// side, or a doc whose runtime cannot be verified. Unevaluable also makes the
-// candidate ineligible; the caller names the reason.
+// side, a doc whose runtime cannot be verified, or a program whose effective
+// sandbox mode cannot be proven. Unevaluable also makes the candidate
+// ineligible; the caller names the reason.
 //
 // No credential material, profile, or provider configuration is compared or
 // copied — the same boundary the registration seeder holds.
-func CodexRuntimeDriftKey(sourceDir, targetDir string) (key string, incomparable bool) {
+func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, incomparable bool) {
 	_, sourceDoc, err := readCodexSettings(filepath.Join(sourceDir, "config.toml"))
 	if err != nil || sourceDoc == nil {
 		return "", true
