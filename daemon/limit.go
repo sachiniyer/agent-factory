@@ -497,13 +497,14 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// probe infrastructure detail.
 		lockEntered := false
 		var offBox *session.OffBoxAccountSwap // a listed-host sandbox swaps in place (W7.6)
+		var settle func() error
 		lockErr := config.WithProjectConfigLockForRoot(root, func() error {
 			lockEntered = true
 			var err error
 			if offBox, err = m.tryOffBoxAccountSwap(instance, accountSwap, liveConfig, &fallbackEligible); offBox != nil || err != nil {
 				return err
 			}
-			fallbackEligible, err = m.commitNewAccountSwapIdentity(
+			fallbackEligible, settle, err = m.commitNewAccountSwapIdentity(
 				repoID, key, requestedTitle, instance, accountSwap, liveConfig, operatorInitiated, accountSwapProbe, probeComputed)
 			return err
 		})
@@ -511,18 +512,31 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		if !lockEntered && precheckErr != nil {
 			swapErr = precheckErr
 		}
+		// Release the config-apply and account-limit fences BEFORE running the
+		// settlement persist. The persist takes the per-repo start lock
+		// (persistSettlement), and CreateSession holds that same start lock and
+		// then blocks on accountLimitMu when a new session's startup hits a
+		// usage-limit wall. Holding the fences across the persist inverts the
+		// lock order (fences -> start lock vs CreateSession's start lock ->
+		// accountLimitMu) and deadlocks the daemon — the fence <-> start-lock
+		// ABBA introduced by the account-swap feature (#6197 inversion class).
+		// The "durable before launch" property is preserved because the persist
+		// lands between fence release and the replacement runtime's spawn below.
+		releaseAccountSwapFences()
+		if settle != nil {
+			if settleErr := settle(); settleErr != nil {
+				swapErr = errors.Join(swapErr, settleErr)
+			}
+		}
 		if swapErr != nil {
 			if !fallbackEligible || !fallBackFromUncommittedAccountSwap(requestedTitle, accountSwap, swapErr) {
 				return resumeNotPerformed, conversation, swapErr
 			}
 			accountSwap = nil
-			releaseAccountSwapFences()
 		} else if offBox != nil {
-			releaseAccountSwapFences()
 			return resumePerformed, session.HandoffConversation{CarryFailure: offBoxAccountNoConversation}, m.finishOffBoxFailover(repoID, key, instance, accountSwap, *offBox)
 		} else {
 			identityCommittedThisAttempt = true
-			releaseAccountSwapFences()
 			forceRespawn = true
 		}
 	}

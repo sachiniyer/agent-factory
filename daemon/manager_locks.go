@@ -44,6 +44,16 @@ import "sync"
 // A path that needs the start lock (a persist through persistInstanceErr) must not
 // be holding admission when it asks for it: that is the inversion CreateSession's
 // start -> admission order deadlocks against (#6197, fixed by #6198).
+//
+// The config-apply and account-limit fences (configApplyMu, accountLimitMu) live
+// in a SEPARATE hierarchy (see task_target_limit_fence.go) and must never be held
+// when acquiring the per-repo start lock. CreateSession holds the start lock
+// across its whole body and then blocks on accountLimitMu when a new session's
+// startup hits a usage-limit wall, so a fenced path that takes the start lock
+// (e.g. persistSettlement) while holding the fences closes the same ABBA cycle
+// from the other side. The account-swap resume path releases the fences before
+// its settlement persist for this reason (the fence <-> start-lock ABBA, #6197
+// inversion class).
 func (m *Manager) startLockForRepo(repoID string) *sync.Mutex {
 	m.mu.Lock()
 	defer m.mu.Unlock()
