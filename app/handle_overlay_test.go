@@ -1321,7 +1321,7 @@ func TestHooksEscAfterCleanSaveKeepsOutOfBandHookOnDisk(t *testing.T) {
 	hp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	_, _ = h.handleStateHooks(tea.KeyMsg{Type: tea.KeyEsc})
 	require.Equal(t, stateDefault, h.state)
-	require.Empty(t, h.errBox.String(), "the first save must succeed")
+	require.Empty(t, h.errBox.FullError(), "the first save must succeed")
 
 	cfg, _, err := config.LoadInRepoConfig(h.repoRoot)
 	require.NoError(t, err)
