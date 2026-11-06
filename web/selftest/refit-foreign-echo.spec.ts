@@ -537,9 +537,14 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
     const atBClaim = await waitEchoEq(gridRows, 1, "B's subscribe claim");
 
     // The peer's claim: 34x100 differs from every grid on the wire. Both panes
-    // re-assert their host fit — two gridRows echoes — and the peer's counter
-    // must land inside the yield window measured from B's sighting, so the two
-    // writes are written as tightly as the echoes allow.
+    // re-assert their host fit, but the wire need not show two reclaim echoes:
+    // whichever OpResize lands first supplies the gridRows echo the second
+    // pane's sendResize then dedupes, and two writes arriving between a
+    // subscriber's reads coalesce into one. Wait for the first reclaim echo —
+    // some pane must write, so one is guaranteed — then settle past the 250ms
+    // classification twin so a second, if any exists, lands before the counter
+    // (which must stay inside the yield window measured from B's first
+    // sighting; the settle leaves a wide margin under it).
     const staleRows = 34;
     const staleCols = 100;
     const writeForeign = () =>
@@ -552,8 +557,8 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
       );
     await writeForeign();
     const atClaim = await waitEchoEq(staleRows, atBClaim + 1, "peer's foreign claim");
-    await waitEchoEq(gridRows, atClaim + 1, "first pane's reclaim");
-    await waitEchoEq(gridRows, atClaim + 2, "second pane's reclaim");
+    await waitEchoEq(gridRows, atClaim + 1, "a pane's reclaim");
+    await pageA.waitForTimeout(700);
 
     // The peer's counter — a repeat of the SAME foreign grid inside the yield
     // window. On master it reads fresh to B (the record was never seeded) and
@@ -563,14 +568,8 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
     // and B's emulator rests at the peer's 34 rows.
     await writeForeign();
     const atRepeat = await waitEchoEq(staleRows, atClaim + 1, "peer's repeat");
-    await expect
-      .poll(rowsB, {
-        message: "the yielded pane's emulator rests on the insistent peer's grid",
-        timeout: 10_000,
-      })
-      .toBe(staleRows);
-    // Any >60-row echo after the repeat can only be a forfeited reclaim: A
-    // yields to the same repeat either way, so the writer could only be B.
+    // Give a forfeited reclaim its full delivery before reading the wire: on
+    // master a gridRows echo lands here within a few frames of the repeat.
     await pageA.waitForTimeout(2500);
     const trailing = await pageA.evaluate(
       (after) =>
@@ -580,6 +579,15 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
       atRepeat,
     );
     expect(trailing, "no reclaim may leave the wire after the pane yields").toEqual([]);
+    // And the emulator shows the stand-down: B rests on the yielded authority.
+    // On master it re-claims its own grid instead — it may flicker through 34
+    // on the way there, so the settled DOM is what discriminates.
+    await expect
+      .poll(rowsB, {
+        message: "the yielded pane's emulator rests on the insistent peer's grid",
+        timeout: 10_000,
+      })
+      .toBe(staleRows);
   } finally {
     await ctxA.close();
     await ctxB.close();
