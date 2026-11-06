@@ -178,6 +178,39 @@ func TestConfirmPendingAccountSwapDeliveryManualClearsTheNamedOutgoingWall(t *te
 	require.NoError(t, inst.TabSpawnBlocked())
 }
 
+// A MANUAL cross-agent swap that reuses the outgoing label in a different
+// provider's namespace (Claude `work` → Codex `work`, the shape exercised in
+// daemon/handoff_account_round12_test.go) must still retire an outgoing wall
+// even though limitAccount == pending.To: the wall's agent namespace
+// (limitAgent "claude") does not match the transaction's incoming AccountAgent
+// ("codex"), so it is the outgoing provider's wall, not the replacement's.
+func TestConfirmPendingAccountSwapDeliveryManualClearsTheCrossAgentSameLabelWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	// Same account label on both sides of a cross-agent swap; the incoming
+	// agent namespace is Codex.
+	inst.pendingAccountSwap.From = "work"
+	inst.pendingAccountSwap.To = "work"
+	inst.pendingAccountSwap.AccountAgent = tmux.ProgramCodex
+	inst.Account = "work"
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	// The wall is the outgoing Claude identity's: same label, different agent.
+	inst.limitAgent = tmux.ProgramClaude
+	inst.limitAccount = "work"
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "work"))
+
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the outgoing provider's wall retires with the confirmed cross-agent swap — the replacement is already running")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the outgoing identity's wall retires with the swap")
+	}
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Nil(t, inst.accountSwapLaunch)
+	require.NoError(t, inst.TabSpawnBlocked())
+}
+
 // The #6764 end-to-end regression: confirming a MANUAL swap parked at the
 // outgoing ambient wall must not leave a row whose evidence re-derivation
 // mints a durable quota observation for the healthy incoming account. The
