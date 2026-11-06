@@ -100,4 +100,45 @@ func TestCodexRuntimeDriftKey(t *testing.T) {
 			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
 		}
 	})
+	t.Run("read-only leftover table on one side is not drift", func(t *testing.T) {
+		// sandbox_workspace_write is inert under read-only; a leftover table
+		// (the seeder never strips it) must not be treated as an effective
+		// setting, or a stale operator edit becomes a false config-drift edge.
+		writeCodexConfig(t, src, "sandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "" || inc {
+			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
+		}
+	})
+	t.Run("malformed inactive table is incomparable not silently equal", func(t *testing.T) {
+		// codexRuntimeSource does not shape-validate the table outside
+		// workspace-write, so a wrong-type value is not inert: the compare
+		// rejects it as incomparable rather than treating the unvalidated
+		// form as equal.
+		writeCodexConfig(t, src, "sandbox_mode = \"read-only\"\nsandbox_workspace_write = \"nonsense\"\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\nsandbox_workspace_write = \"nonsense\"\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || !inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",true)", key, inc)
+		}
+	})
+	t.Run("omitted sandbox mode with differing tables is drift not silently equal", func(t *testing.T) {
+		// An omitted sandbox_mode may default to workspace-write upstream
+		// (project trust), so a differing table is not presumed inert: the
+		// compare catches it rather than silently widening the sandbox.
+		writeCodexConfig(t, src, "[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "[sandbox_workspace_write]\nnetwork_access = false\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_workspace_write" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
+		}
+	})
+	t.Run("cross-mode asymmetry drifts on sandbox_mode not workspace options", func(t *testing.T) {
+		// source is workspace-write with a table, target is read-only with a
+		// leftover table: the modes differ, so drift is reported on
+		// sandbox_mode (compared earlier), never reaching the gated key.
+		writeCodexConfig(t, src, "sandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt); key != "sandbox_mode" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_mode\",false)", key, inc)
+		}
+	})
 }
