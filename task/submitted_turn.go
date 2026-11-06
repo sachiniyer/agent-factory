@@ -415,33 +415,18 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 // tickingTimedRow is timedRowTicked lifted to name the row that moved, so the
 // caller can check the ticking row's own elapsed against the prompt boundary.
 //
-// Two proofs, same strength. The identity match is the ordinary one. The slot
-// match covers the rest of a live row's repainting: devin swaps its verb
-// mid-turn ("Thinking" → "Running tools"), a transition that changes the row's
-// text faster than any poll can bridge. When each capture holds exactly ONE
-// timed row and they sit in the same slot, the only thing that can connect
-// them is the live row repainting — static text cannot rewrite its own timer.
-// It needs both singletons: a quote sitting beside the live row is exactly the
-// mix where "the only timed row each capture has" stops being true.
+// Identity stays authoritative for unscoped rows: a scrolling transcript that
+// carries one quoted timed row out of the viewport while a different quote
+// enters the same slot must never read as a tick (#6881 review). The cost of
+// that strictness is at most one poll — when devin swaps its verb mid-turn
+// ("Thinking" → "Running tools") the transition frame's identity changes too,
+// and the row re-proves itself on the next tick under its new text.
 func tickingTimedRow(prev, cur map[string]timedRow) (timedRow, bool) {
 	for id, now := range cur {
 		before, ok := prev[id]
 		if ok && before.count == 1 && now.count == 1 &&
 			before.fromBottom == now.fromBottom && now.elapsed > before.elapsed {
 			return now, true
-		}
-	}
-	if len(prev) != 1 || len(cur) != 1 {
-		return timedRow{}, false
-	}
-	for _, now := range cur {
-		if now.count != 1 {
-			return timedRow{}, false
-		}
-		for _, before := range prev {
-			if before.count == 1 && before.fromBottom == now.fromBottom && now.elapsed > before.elapsed {
-				return now, true
-			}
 		}
 	}
 	return timedRow{}, false

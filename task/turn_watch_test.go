@@ -100,7 +100,10 @@ func TestTurnWatch_DevinTickingRowFires(t *testing.T) {
 // (#6879): the same timed row must still fire the watch. The frames below are
 // real captures: a context count rides the row's tail and flickers off again,
 // the spinner glyph cycles, and the verb even changes mid-turn — all of it is
-// the same row repainting its slot.
+// the same row repainting its slot. A verb swap costs one frame (the row's
+// identity changes with its text, and the transcript could scroll a different
+// quote into the same slot — #6881 review), then the new wording ticks under
+// its own identity.
 func TestTurnWatch_DevinTickingRowFiresTwiceWording(t *testing.T) {
 	w := NewTurnWatch("devin", time.Now().Add(-time.Minute))
 	if w.Observe("⡎⢱ Thinking · 3s (esc twice to interrupt) · (174c)\n❭ ", time.Now()) {
@@ -109,7 +112,10 @@ func TestTurnWatch_DevinTickingRowFiresTwiceWording(t *testing.T) {
 	if w.Observe("⡜⢣ Thinking · 3s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("a row that stood still has not ticked")
 	}
-	if !w.Observe("⣄⠀ Running tools · 4s (esc twice to interrupt) · (190c)\n❭ ", time.Now()) {
+	if w.Observe("⣄⠀ Running tools · 4s (esc twice to interrupt) · (190c)\n❭ ", time.Now()) {
+		t.Fatal("the verb changed with the frame — that is a new identity, not a tick")
+	}
+	if !w.Observe("⢣⡜ Running tools · 5s (esc twice to interrupt)\n❭ ", time.Now()) {
 		t.Fatal("the current devin status row ticking is the turn's own chrome")
 	}
 }
