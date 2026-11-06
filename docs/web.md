@@ -863,8 +863,10 @@ tab survives a restart and simply starts a new editor when you next open it.
     The editor's WebSocket, which carries that terminal, is accepted
     only from the editor's own page: af refuses a handshake whose `Origin` names any
     other origin, on every address the editor is served on. It works behind the
-    same front doors the web UI's own streams do: a proxy that rewrites `Host` must
-    forward the browser's in `X-Forwarded-Host` (see [behind a reverse
+    same front doors the web UI's own streams do: the front-door name must be in
+    `network.allowed_hosts`, and a proxy that rewrites `Host` must forward the
+    browser's in `X-Forwarded-Host` (see [Host names the daemon answers
+    to](remote-http-auth.md#host-names-the-daemon-answers-to) and [behind a reverse
     proxy](remote-http-auth.md#behind-a-reverse-proxy)). An **off-box** session's
     editor is never served on the web UI's address at all (above). Do not expose the
     daemon's listener to a network you do not trust.
