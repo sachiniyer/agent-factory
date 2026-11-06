@@ -710,17 +710,21 @@ func KillSession(req KillSessionRequest) error {
 }
 
 // ArchiveSession asks the daemon to archive a session (#1028) and returns the
-// relocated worktree's new path.
-func ArchiveSession(req ArchiveSessionRequest) (string, error) {
+// relocated worktree's new path alongside where an off-box session's work lives
+// (the preserved directory on its host, or the pushed branch — #5571 W8.5). The
+// workspace is the authoritative value the daemon computed and returned; the
+// CLI threads it straight to its output instead of re-deriving it through a
+// snapshot read-back whose sandbox projection strips the field (#5804).
+func ArchiveSession(req ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 	var resp ArchiveSessionResponse
 	err := callDaemon("ArchiveSession", req, &resp)
 	// callDaemon classifies the committed outcome generically. Keep the payload
 	// on that path: the archive IS durable, and the CLI still has to report
 	// where it landed. Only a clean failure has no path to report.
 	if err != nil && !isMutationCommitted(err) {
-		return "", err
+		return "", nil, err
 	}
-	return resp.ArchivedPath, err
+	return resp.ArchivedPath, resp.ArchivedWorkspace, err
 }
 
 // PruneSessions asks the daemon to evaluate archived sessions against a

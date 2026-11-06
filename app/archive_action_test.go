@@ -42,7 +42,10 @@ func TestHandleArchive_LiveRowConfirms(t *testing.T) {
 
 	called := false
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) { called = true; return "", nil }
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		called = true
+		return "", nil, nil
+	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 
 	model, _ := h.handleArchive()
@@ -203,9 +206,9 @@ func TestArchiveInstanceCmd_CallsDaemon(t *testing.T) {
 
 	var gotRequest daemon.ArchiveSessionRequest
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionThroughDaemon = func(request daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotRequest = request
-		return "/archive/path", nil
+		return "/archive/path", nil, nil
 	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 
@@ -224,8 +227,8 @@ func TestArchiveInstanceCmd_CallsDaemon(t *testing.T) {
 func TestArchiveInstanceCmd_SurfacesError(t *testing.T) {
 	h := newTestHome(t)
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
-		return "", errors.New("cannot archive in-place session")
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "", nil, errors.New("cannot archive in-place session")
 	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 
@@ -242,8 +245,8 @@ func TestArchiveInstanceCmdCommitsRowAndSurfacesHookWarning(t *testing.T) {
 	target := captureSessionActionTarget(inst, h.repoID)
 
 	prev := archiveSessionThroughDaemon
-	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, error) {
-		return "/archive/worker", committedArchiveWarningTestError{}
+	archiveSessionThroughDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		return "/archive/worker", nil, committedArchiveWarningTestError{}
 	}
 	defer func() { archiveSessionThroughDaemon = prev }()
 

@@ -75,7 +75,7 @@ func tuiMutations() map[string]func() error {
 		},
 		"/v1/KillSession": func() error { return killSessionThroughDaemon(daemon.KillSessionRequest{ID: "i"}) },
 		"/v1/ArchiveSession": func() error {
-			_, err := archiveSessionThroughDaemon(daemon.ArchiveSessionRequest{ID: "i"})
+			_, _, err := archiveSessionThroughDaemon(daemon.ArchiveSessionRequest{ID: "i"})
 			return err
 		},
 		"/v1/RestoreSession": func() error {
