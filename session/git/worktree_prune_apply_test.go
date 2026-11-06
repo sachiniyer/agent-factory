@@ -272,6 +272,85 @@ func TestVerifyWorktreeHeadReflogRecoverable(t *testing.T) {
 	})
 }
 
+// #6906 Codex P1: the reachability check builds its command entirely from
+// revision arguments — leaf-reflog shas, surviving refs, kept-branch reflog
+// values and the main worktree's HEAD — so every argument must BE a revision.
+// Without a terminating --, an argument that does not resolve is read as a
+// PATH filter: a bare repository carries a literal HEAD file and a refs/ tree
+// at its root, so a dangling HEAD silently swallows itself and the exclusions
+// after it and the traversal reports nothing lost — prune would then delete
+// the only reflog holding the work. HEAD therefore joins the roots only when
+// it resolves to a commit, and a root whose object is missing fails the whole
+// check rather than narrowing it.
+func TestLeafReflogOnlyCommitsNeverReadsAnArgumentAsAPath(t *testing.T) {
+	// bareRepoDanglingHead builds Codex's exact repro shape: a bare repository
+	// whose HEAD names a branch that does not exist — populated only with
+	// other refs — plus a commit no ref reaches (the work a leaf reflog could
+	// be the last root of). Plumbing builds the objects, so no ref ever names
+	// the detached commit.
+	bareRepoDanglingHead := func(t *testing.T) (bare, kept, detached string) {
+		parent := tempRoot(t)
+		bare = filepath.Join(parent, "origin.git")
+		gitIn(t, parent, "init", "--bare", "-b", "main", bare)
+		emptyTree := gitIn(t, bare, "mktree")
+		kept = gitIn(t, bare, "commit-tree", emptyTree, "-m", "kept")
+		gitIn(t, bare, "update-ref", "refs/heads/af-kept", kept)
+		detached = gitIn(t, bare, "commit-tree", emptyTree, "-m", "detached work")
+		return bare, kept, detached
+	}
+
+	// Codex's repro verbatim: the detached commit is absent from every
+	// surviving ref, so the check must report it — the unterminated command
+	// read HEAD and the trailing refs as path filters inside the bare repo
+	// and printed nothing with exit 0. (No reflog roots: a bare repo records
+	// no branch reflogs by default, so production passes an empty list here.)
+	t.Run("a bare repo whose HEAD names a nonexistent branch", func(t *testing.T) {
+		bare, _, detached := bareRepoDanglingHead(t)
+		refs, err := survivingRefRoots(bare)
+		require.NoError(t, err)
+		lost, err := leafReflogOnlyCommits(bare, []string{detached}, refs, nil)
+		require.NoError(t, err)
+		assert.Equal(t, []string{detached}, lost, "the detached commit exists only in the leaf reflog")
+	})
+
+	// The same commit in a non-bare repository whose HEAD is dangling must be
+	// reported the same way — exercised end to end through the guard. The
+	// assertion is the refusal's signature, not just the sha: a traversal
+	// error echoes the arguments, which contain the sha, without reporting it.
+	t.Run("a non-bare repo with a dangling HEAD", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		tip := gitIn(t, wt, "rev-parse", "HEAD")
+		gitIn(t, wt, "checkout", "--detach")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "gone.txt"), []byte("g"), 0o644))
+		gitIn(t, wt, "add", "gone.txt")
+		gitIn(t, wt, "commit", "-qm", "detached experiment")
+		detached := gitIn(t, wt, "rev-parse", "HEAD")
+		gitIn(t, wt, "checkout", "-q", tip)
+		gitIn(t, repo, "symbolic-ref", "HEAD", "refs/heads/gone")
+
+		err := VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p")
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no ref reaches", "the guard reports the leaf-only commit")
+		assert.Contains(t, err.Error(), detached)
+	})
+
+	// A reflog root whose object is missing — a commit the reflog recorded and
+	// gc later destroyed — must fail the check, never narrow it. The planted
+	// file named like the missing object id is the extreme of "any argument
+	// can collide with a path": the unterminated command read the root as a
+	// path filter and answered empty with exit 0.
+	t.Run("a reflog root whose object is missing fails the check", func(t *testing.T) {
+		bare, _, detached := bareRepoDanglingHead(t)
+		missing := gitIn(t, bare, "commit-tree", gitIn(t, bare, "mktree"), "-m", "collected")
+		require.NoError(t, os.Remove(filepath.Join(bare, "objects", missing[:2], missing[2:])))
+		require.NoError(t, os.WriteFile(filepath.Join(bare, missing), []byte("x"), 0o644))
+
+		_, err := leafReflogOnlyCommits(bare, []string{detached},
+			[]string{"refs/heads/af-kept"}, []string{missing})
+		require.Error(t, err, "a root whose object is missing fails closed — never an empty result")
+	})
+}
+
 // Only the recorded leaf is removed, and only while it still carries the recorded
 // nonce: another session's stale registration (which `git worktree prune` would
 // drop) stays, and a replacement that now occupies the same path is left alone.
