@@ -174,7 +174,7 @@ func WorktreeCommitsBeyondRepo(repoRoot, worktreePath string) (int, error) {
 		return 0, fmt.Errorf("could not merge-base %s against %s's HEAD: %w", worktreePath, repoRoot, err)
 	}
 	out, err := runBoundedWorktreeGit(worktreePath, true, "--no-optional-locks",
-		"rev-list", "--count", strings.TrimSpace(string(base))+"..HEAD")
+		"rev-list", "--count", strings.TrimSpace(string(base))+"..HEAD", "--")
 	if err != nil {
 		return 0, fmt.Errorf("could not count commits in %s beyond its merge-base: %w", worktreePath, err)
 	}
