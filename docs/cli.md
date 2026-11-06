@@ -248,7 +248,7 @@ Bare `get`/`list` report the current repository's effective values (defaults plu
 For TUI appearance, use `af config set appearance light`, `dark`, or `system`
 (default); `af config get appearance` reads the choice. It takes effect at the
 next TUI launch on that machine. The CLI has no persistent renderer, and the
-browser's header preference is independent. System uses terminal background
+browser's preference is independent. System uses terminal background
 with a dark fallback in the TUI and OS appearance in the browser.
 
 The CLI rejects `theme` and all `theme.*` CLI keys
