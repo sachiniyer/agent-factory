@@ -201,6 +201,34 @@ func TestProjectsFullWindowFlagsBothDirections(t *testing.T) {
 		"nothing is hidden below once the last row is in view")
 }
 
+// TestProjectsDegradedFloorKeepsBothMarkers is the floor-size edge the review
+// caught: a 4-row degraded section budgets title + notice + one row, so an
+// interior scroll needs title + notice + ▲ + row + ▼ — one line more than
+// the rect — and the clamp would silently cut the ▼. The notice is the
+// expendable line: it yields, and both markers still count exactly.
+func TestProjectsDegradedFloorKeepsBothMarkers(t *testing.T) {
+	p := newTestProjects(nSimpleProjects(8))
+	p.SetRect(layout.Rect{W: 40, H: 4})
+	p.SetDegraded(true)
+	p.Focus()
+
+	// Scroll the cursor to an interior project: both directions hide rows.
+	for i := 0; i < 4; i++ {
+		p.ScrollDown()
+	}
+	lines := plainLines(p.View())
+	require.Len(t, lines, 4)
+	joined := strings.Join(lines, "\n")
+	assert.Contains(t, joined, "▲ 4 more",
+		"the project rows hidden above must stay counted:\n%s", joined)
+	assert.Contains(t, joined, "▼ 3 more",
+		"the project rows hidden below must survive the clamp:\n%s", joined)
+	assert.Contains(t, joined, "project-4",
+		"the cursor's row must stay inside the window")
+	assert.NotContains(t, joined, "registry unreadable",
+		"the degraded notice is the expendable line at this size — it yields to the markers")
+}
+
 // TestProjectsNoIndicatorWhenEverythingFits: the taller control on the
 // Projects rail — a window that reaches every row draws no marker.
 func TestProjectsNoIndicatorWhenEverythingFits(t *testing.T) {
