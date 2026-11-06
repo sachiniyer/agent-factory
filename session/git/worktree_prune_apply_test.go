@@ -104,17 +104,18 @@ func TestWorktreeHeadMatchesBranch(t *testing.T) {
 	require.Error(t, err, "a commit only the detached HEAD references is not on the kept branch")
 }
 
-// VerifyWorktreeHeadReflogReachableFromBranch closes the gap the
+// VerifyWorktreeHeadReflogRecoverable closes the gap the
 // WorktreeHeadMatchesBranch guard cannot see: a commit made on a detached HEAD
 // and then abandoned by a checkout back to the branch tip passes the HEAD ==
-// branch-tip equality, but its only reachability root is the leaf's logs/HEAD
-// reflog, which prune deletes. The guard must refuse such rows, while passing
-// the common case (clean worktree) and not penalizing reset --hard (whose
-// dropped commit the branch reflog keeps).
-func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
+// branch-tip equality, but its only reachability root may be the leaf's
+// logs/HEAD reflog, which prune deletes. The guard must refuse such rows,
+// while passing the common case (clean worktree), not penalizing reset --hard
+// (whose dropped commit the branch reflog keeps), and not refusing commits
+// another surviving root reaches (#6903).
+func TestVerifyWorktreeHeadReflogRecoverable(t *testing.T) {
 	t.Run("a clean worktree on the branch tip passes", func(t *testing.T) {
 		repo, wt := pruneWorktree(t)
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a commit on the branch passes", func(t *testing.T) {
@@ -122,7 +123,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0o644))
 		gitIn(t, wt, "add", "c.txt")
 		gitIn(t, wt, "commit", "-qm", "on-branch work")
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a detached-HEAD commit returned to the tip is refused", func(t *testing.T) {
@@ -139,7 +140,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, tip, head)
 		// …but the reflog guard catches the abandoned detached commit.
-		err = VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p")
+		err = VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), detached, "the refusal names the orphaned commit")
 		assert.Contains(t, err.Error(), "af/p")
@@ -151,7 +152,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(wt, "e.txt"), []byte("e"), 0o644))
 		gitIn(t, wt, "add", "e.txt")
 		gitIn(t, wt, "commit", "-qm", "still detached")
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a reset --hard on the branch is not refused (the branch reflog keeps it)", func(t *testing.T) {
@@ -162,7 +163,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		gitIn(t, wt, "reset", "--hard", "HEAD~1")
 		// HEAD == branch tip again, and the dropped commit is in the branch
 		// reflog, which prune never deletes.
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"),
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"),
 			"reset --hard is safe: the branch reflog keeps the commit")
 	})
 
@@ -177,12 +178,12 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		gitIn(t, wt, "add", "m2.txt")
 		gitIn(t, wt, "commit", "-qm", "detached 2")
 		gitIn(t, wt, "checkout", "-q", tip)
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a missing branch fails closed", func(t *testing.T) {
 		repo, wt := pruneWorktree(t)
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "no-such-branch"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "no-such-branch"))
 	})
 
 	// #6903 (a): the leaf reflog records every position HEAD visited, and a
@@ -201,7 +202,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		head, err := WorktreeHeadMatchesBranch(wt, repo, "af/p")
 		require.NoError(t, err)
 		assert.NotEqual(t, mainTip, head, "premise: af/p does not contain main's tip")
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	// #6903: a commit the leaf reflog recorded is also safe when ANY ref that
@@ -214,7 +215,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		gitIn(t, wt, "commit", "-qm", "detached but tagged")
 		gitIn(t, wt, "tag", "af-test-keep", "HEAD")
 		gitIn(t, wt, "checkout", "-q", "af/p")
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	// #6903 (b): `git rebase main` detaches HEAD at main's tip; a conflict on
@@ -238,7 +239,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 
 		_, err := WorktreeHeadMatchesBranch(wt, repo, "af/p")
 		require.NoError(t, err)
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	// #6903 (c): an autosquash rebase amends the picked commit once per fixup,
@@ -265,7 +266,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		out, err := rebase.CombinedOutput()
 		require.NoError(t, err, string(out))
 
-		err = VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p")
+		err = VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p")
 		require.Error(t, err, "the intermediate squash commit exists only in the leaf reflog")
 		assert.Contains(t, err.Error(), "reflog")
 	})

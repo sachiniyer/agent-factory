@@ -478,11 +478,12 @@ func pruneFilesystemRefusal(data session.InstanceData) (head, reason string) {
 	if err != nil {
 		return "", fmt.Sprintf("%s holds work the kept branch does not: %v", wtPath, err)
 	}
-	// The leaf's per-worktree HEAD reflog (logs/HEAD) is the only reachability
-	// root for commits made on a detached HEAD and then abandoned by a checkout
-	// back to the branch tip. Prune deletes the leaf, so such commits must be
-	// caught here, before the leaf is removed.
-	if err := sessiongit.VerifyWorktreeHeadReflogReachableFromBranch(wtPath, repoPath, pruneBranchFor(data)); err != nil {
+	// The leaf's per-worktree HEAD reflog (logs/HEAD) may be the only
+	// reachability root for commits made on a detached HEAD and then abandoned
+	// by a checkout back to the branch tip. Prune deletes the leaf, so commits
+	// no surviving root reaches must be caught here, before the leaf is
+	// removed.
+	if err := sessiongit.VerifyWorktreeHeadReflogRecoverable(wtPath, repoPath, pruneBranchFor(data)); err != nil {
 		return "", fmt.Sprintf("%s holds work the kept branch does not: %v", wtPath, err)
 	}
 	return head, ""
