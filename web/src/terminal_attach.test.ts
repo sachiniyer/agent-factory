@@ -814,6 +814,77 @@ test("the subscribe admission echo is not a contested sighting — the activatio
   }
 });
 
+// #6635 (the 2026-11-06 #2347 recurrence, run 42219554428): the admission flag
+// was spent only on a TERM-DIVERGENT echo — so a client that already owned the
+// authority (the whole reason the replay matched its emulator) left the flag
+// standing for its first FOREIGN echo: a live peer write, not the replay. That
+// write took the admission's free pass without seeding the contest record, so
+// the peer's counter to our claim read as a fresh sighting — the pane re-claimed
+// where it must yield — and the reclaim it landed on the peer was the repeat
+// the peer then yielded to: the stranded-34 signature. The admission is the
+// first DELIVERED echo, divergent or not.
+test("a replay that already matches the emulator still spends the admission — the peer's counter is a yield, not a fresh contest", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    // A pane whose socket just opened while it already owned the authority:
+    // the broker replays its own 40x120 grid — a no-op for the emulator.
+    Object.assign(terminal, { admittedEcho: false });
+    echo(40, 120);
+    assert.deepEqual(calls, [], "the replay changes nothing on the emulator");
+    // The peer's first real write is a contested sighting, not the replay: it
+    // seeds the record and earns the reclaim. On master this echo instead
+    // consumed the leftover admission — nothing was seeded, and its counter
+    // below read fresh rather than insistent.
+    echo(24, 80);
+    win.runAllFrames();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize"]);
+    // The peer's counter inside the yield window is the insistent writer: the
+    // pane yields, emulator AND wire. On master the un-seeded record made it a
+    // fresh contest — a second reclaim left the wire, which the peer read as
+    // the repeat and yielded to.
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80],
+      "the emulator follows the authoritative repeat");
+    assert.deepEqual(calls, ["fit", "resize"],
+      "no second reclaim leaves the wire");
+  } finally {
+    win.restore();
+  }
+});
+
+// The same yield must also disarm whatever the forfeited claim left armed: the
+// deferred wire half of a contested reclaim, or a parked page's wake probe.
+// Delivered after the yield, that work would refit the emulator off the
+// authoritative grid and write the conceded size back out — the pane re-claiming
+// by accident the grid it just stood down from.
+test("a yield disarms the forfeited reclaim — no queued delivery may write the conceded grid", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    echo(24, 80);
+    // The contested reclaim already refit locally; its wire half is armed and
+    // has not delivered yet when the peer's repeat lands.
+    assert.deepEqual(calls, ["fit"]);
+    assert.notEqual(terminal.visibleFitFrame, null);
+    echo(24, 80);
+    assert.deepEqual([term.rows, term.cols], [24, 80], "the pane yields to the repeat");
+    // The armed delivery died with the claim it carried: a frame now would
+    // refit the emulator off the yielded grid AND flush the conceded write —
+    // a stale claim landed by the forfeiting side.
+    win.runAllFrames();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit"], "nothing delivers after the yield");
+    assert.deepEqual([term.rows, term.cols], [24, 80],
+      "the emulator rests on the yielded authority");
+    assert.equal(terminal.visibleFitFrame, null);
+    assert.equal(terminal.visibleFitTimer, null);
+  } finally {
+    win.restore();
+  }
+});
+
 test("alternating foreign grids cannot bypass the yield window — contest history is per-grid", async () => {
   const win = stubWindow();
   try {
