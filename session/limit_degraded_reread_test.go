@@ -30,11 +30,11 @@ import (
 
 const (
 	// panePreamble is representative pane text above the recorded banner — the
-	// stored anchor's Prefix.
-	panePreamble = "$ claude\n⎿ wrote three files\nworking on the next step…\n"
+	// stored anchor's Prefix, including the banner line's own lead marker.
+	panePreamble = "$ claude\n⎿ wrote three files\nworking on the next step…\n⎿  "
 	// panePreambleShifted is an unrelated preamble: neither a suffix of the
 	// recorded one nor its prefix — the "position moved, nothing proven" shape.
-	panePreambleShifted = "redrawn alternate-screen frame\n⎿ different prior rows\n"
+	panePreambleShifted = "redrawn alternate-screen frame\n⎿ different prior rows\n⎿  "
 )
 
 // parkAtLimit drives the epoch-scoped park the daemon poll performs on a
@@ -75,7 +75,7 @@ func TestDegradedResightSameBannerLeavesEverythingStored(t *testing.T) {
 			// the issue's exact shape: the banner is still the last match but
 			// less of the pane above it is in view.
 			name:   "window slid down past the banner",
-			prefix: "working on the next step…\n",
+			prefix: "working on the next step…\n⎿  ",
 		},
 		{
 			// The window's top moved UP (a resize revealed more scrollback):
@@ -153,6 +153,45 @@ func TestDegradedResightClauseStillVisibleRecordsNewWall(t *testing.T) {
 	require.Equal(t, "work", obs[1].Account)
 	require.True(t, i.AccountLimitObservationsUnpersisted(),
 		"the new observation is a durable change that must reach the row")
+}
+
+// TestDegradedResightMarkerOnlyPrefixCannotProveSame pins the P2 review
+// finding: when the recorded banner sat at the top of its capture, the stored
+// prefix is just the banner line's lead marker ("⎿  ") — and a LATER banner's
+// prefix ends in that same marker, so a naive suffix check would falsely prove
+// a re-read of the new wall. Positional proof must come from the lines above
+// the match row; a marker-only recorded prefix proves nothing, and the new
+// wall below the still-visible recorded clause is recorded.
+func TestDegradedResightMarkerOnlyPrefixCannotProveSame(t *testing.T) {
+	reset := time.Date(2026, 11, 10, 18, 0, 0, 0, time.UTC)
+	const phrase = "reset at 2pm (America/New_York)"
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	// Parked with the banner at the capture's very top — everything above it
+	// had already scrolled off, so the recorded prefix is only the marker.
+	parkAtLimit(t, i, reset, phrase, LimitBanner{Prefix: "⎿  ", Count: 1})
+
+	// The pane now shows the recorded banner — clause and all — ABOVE a second
+	// banner whose own prefix ends in the same "⎿  " gutter.
+	second := "⎿  Claude usage limit reached. Your limit will " + phrase + "\n" +
+		"the user pressed retry\n⎿  "
+	require.True(t, degradedResight(t, i, LimitBanner{Prefix: second, Count: 2}),
+		"the shared gutter is not positional proof — the second wall still applies")
+
+	_, ok := i.LimitResetAt()
+	require.False(t, ok)
+	obs := i.AccountLimitObservations()
+	require.Len(t, obs, 2, "the second wall is a distinct fact, not a re-read")
+	require.True(t, obs[1].ResetAt.IsZero())
+
+	// The pure-marker variant stays ambiguous rather than proven-same: a
+	// different banner that happens to open at the capture's top cannot be
+	// told from the recorded one by position alone.
+	i2 := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	parkAtLimit(t, i2, reset, phrase, LimitBanner{Prefix: "⎿  ", Count: 1})
+	require.True(t, degradedResight(t, i2, LimitBanner{Prefix: "other rows\n⎿  ", Count: 1}))
+	_, ok = i2.LimitResetAt()
+	require.False(t, ok, "marker-only position proves nothing — the claim degrades")
+	require.Len(t, i2.AccountLimitObservations(), 1, "nothing is minted on the ambiguous read")
 }
 
 // TestDegradedResightMoreBannersRecordsNewWall is the count half of the order

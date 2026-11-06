@@ -128,11 +128,13 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 //     account swap committed, the program changed) is not that wall re-read —
 //     it is the current identity's wall, recorded and attributed as one.
 //   - BANNER POSITION: the recorded banner is still the last match when the
-//     capture ends at the same place relative to it — the two prefixes
-//     byte-identical, or either a suffix of the other (the capture window slid
-//     while the banner sat still). That proves a clipped re-read: detection
-//     already stands, so nothing else may run — the first parse's reset, its
-//     phrase, and the recorded observations all stay, and nothing is dirtied.
+//     capture ends at the same place relative to it — the pane lines ABOVE the
+//     match's own row are byte-identical or suffix-related (the capture window
+//     slid while the banner sat still; the match row's own lead marker is not
+//     positional evidence, see sameLimitBannerPosition). That proves a clipped
+//     re-read: detection already stands, so nothing else may run — the first
+//     parse's reset, its phrase, and the recorded observations all stay, and
+//     nothing is dirtied.
 //   - BANNER ORDER/COUNT: the recorded reset clause still in view in the new
 //     prefix means the match that produced this hit sits BELOW it — a banner
 //     printed after the recorded wall. More matches than the recorded sighting
@@ -151,9 +153,7 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount {
 		return i.setLimitReachedLocked(time.Time{}, "", banner)
 	}
-	if i.limitBannerPrefix != "" && banner.Prefix != "" &&
-		(strings.HasSuffix(banner.Prefix, i.limitBannerPrefix) ||
-			strings.HasSuffix(i.limitBannerPrefix, banner.Prefix)) {
+	if sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) {
 		return true
 	}
 	if i.limitResetEvidence != "" && strings.Contains(banner.Prefix, i.limitResetEvidence) {
@@ -170,6 +170,25 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 	i.limitResetEvidence = ""
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
+}
+
+// sameLimitBannerPosition reports whether two banner prefixes describe the same
+// last-match position — the capture ended at the same place relative to the
+// banner (the window may have slid while the banner sat still). The comparison
+// uses only the full lines ABOVE the match's own row: the row's trailing bytes
+// are the agent's banner lead marker ("⎿  ", "■ "), identical for every
+// anchored match of that agent, so they carry no positional information — a
+// recorded prefix that IS just the marker would suffix-match any later
+// banner's gutter and falsely prove a re-read of a different wall.
+// A banner whose capture starts at its own row has no context above it and
+// proves nothing.
+func sameLimitBannerPosition(stored, current string) bool {
+	storedBody := stored[:strings.LastIndexByte(stored, '\n')+1]
+	currentBody := current[:strings.LastIndexByte(current, '\n')+1]
+	if storedBody == "" || currentBody == "" {
+		return false
+	}
+	return strings.HasSuffix(currentBody, storedBody) || strings.HasSuffix(storedBody, currentBody)
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
