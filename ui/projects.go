@@ -319,7 +319,12 @@ func (p *ProjectsPane) String() string {
 
 	// 1-line degraded summary (mirrors the Automations compact mode). A "?"
 	// marks a count built over a failed registry read: it may be missing
-	// registered projects (#3298).
+	// registered projects (#3298). The summary has no room for project rows,
+	// so every project it counts is hidden below the header — the strip says
+	// so with the rail's overflow vocabulary rather than leaving the header
+	// as the last visible row while its rows are clipped (#6883). The marker
+	// takes the #1560 margin's slot at the 2-row strip; at any taller compact
+	// rect the margin still pads the bottom.
 	if p.compact || p.rect.H <= 1 {
 		style := projectsTitleDimStyle
 		if p.focused {
@@ -329,8 +334,11 @@ func (p *ProjectsPane) String() string {
 		if p.degraded {
 			count += "?"
 		}
-		return layout.ClampToRect(
-			p.titleLine(railHeader{noun: "Projects:", counts: count}, style), p.rect)
+		lines := []string{p.titleLine(railHeader{noun: "Projects:", counts: count}, style)}
+		if n := len(p.projects); n > 0 {
+			lines = append(lines, railWindowIndicator("▼", n, p.rect.W-2))
+		}
+		return layout.ClampToRect(strings.Join(lines, "\n"), p.rect)
 	}
 
 	nameStyle := projectsTitleDimStyle
@@ -363,31 +371,81 @@ func (p *ProjectsPane) String() string {
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold
-	// scrolls into view instead of moving invisibly. The degraded notice above
-	// occupies one of the content rows.
-	visible := contentH - 1
-	if p.degraded {
-		visible--
+	// scrolls into view instead of moving invisibly, and mark the rows the
+	// window hides on either side with the rail's "▲/▼ N more" vocabulary —
+	// the same fit as the sessions rail's, so a clipped header is never the
+	// last visible row while its rows go uncounted (#6883). The degraded
+	// notice (or the empty-state row) above occupies one of the content rows.
+	avail := contentH - len(lines)
+	if avail < 0 {
+		avail = 0
 	}
-	if visible < 0 {
-		visible = 0
+	heights := make([]int, len(p.projects))
+	for i := range heights {
+		heights[i] = 1
 	}
-	if p.offset > p.selected {
-		p.offset = p.selected
-	}
-	if visible > 0 && p.selected >= p.offset+visible {
-		p.offset = p.selected - visible + 1
-	}
-	if max := len(p.projects) - visible; p.offset > max {
-		p.offset = max
-	}
-	if p.offset < 0 {
+
+	start, end, hiddenAbove, hiddenBelow := 0, len(p.projects), 0, 0
+	if avail > 0 && len(p.projects) > avail {
+		// Scroll minimally so the selected row lands inside the rendered
+		// window, then fill from the bottom so a tail that fits one row
+		// earlier scrolls up rather than leaving dead space below the last
+		// project (the sidebar's own scrolling policy).
+		if p.offset > p.selected {
+			p.offset = p.selected
+		}
+		if p.offset < 0 {
+			p.offset = 0
+		}
+		for p.offset < p.selected {
+			if e, _, _ := fitWindow(heights, p.offset, avail); p.selected < e {
+				break
+			}
+			p.offset++
+		}
+		for p.offset > 0 {
+			if e, _, _ := fitWindow(heights, p.offset-1, avail); e < len(p.projects) {
+				break
+			}
+			p.offset--
+		}
+		start = p.offset
+		var topInd, botInd bool
+		end, topInd, botInd = fitWindow(heights, start, avail)
+		// A force-included row can push the window's lines past the rect: at
+		// the section's floor height the degraded notice plus both markers
+		// leave one budgeted row, so an interior scroll is one line too many
+		// and the ▼ marker is what the clamp would cut. The notice is
+		// expendable where the count is not — drop it and refit so hidden
+		// rows stay counted (#6883).
+		if p.degraded {
+			used := 0
+			for i := start; i < end; i++ {
+				used += heights[i]
+			}
+			indLines := 0
+			if topInd {
+				indLines++
+			}
+			if botInd {
+				indLines++
+			}
+			if len(lines)+indLines+used > p.rect.H {
+				lines = lines[:1]
+				avail++
+				end, _, _ = fitWindow(heights, start, avail)
+			}
+		}
+		hiddenAbove = start
+		hiddenBelow = len(p.projects) - end
+	} else {
 		p.offset = 0
 	}
-	for i := p.offset; i < len(p.projects); i++ {
-		if len(lines) >= contentH {
-			break
-		}
+
+	if hiddenAbove > 0 {
+		lines = append(lines, railWindowIndicator("▲", hiddenAbove, p.rect.W-2))
+	}
+	for i := start; i < end; i++ {
 		selected := p.focused && i == p.selected
 		rowStart := len(lines)
 		lines = append(lines, p.projectRow(p.projects[i], selected))
@@ -396,6 +454,9 @@ func (p *ProjectsPane) String() string {
 				X: p.rect.X, Y: p.rect.Y + rowStart, W: p.rect.W, H: 1,
 			})
 		}
+	}
+	if hiddenBelow > 0 {
+		lines = append(lines, railWindowIndicator("▼", hiddenBelow, p.rect.W-2))
 	}
 	return layout.ClampToRect(strings.Join(lines, "\n"), p.rect)
 }

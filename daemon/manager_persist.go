@@ -319,7 +319,11 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 		sort.Strings(corrupted)
 		return nil, "", fmt.Errorf("instance %q not found; %d repo(s) have a corrupted instances.json that may be hiding it: %s", title, len(corrupted), strings.Join(corrupted, ", "))
 	}
-	return nil, "", fmt.Errorf("instance %q %w", title, errSessionNotFound)
+	// The none-held half of the contract (#6882): the scan just covered every
+	// project, so the miss says no project holds the title and how to scope
+	// the next request rather than a bare "not found" that reads as data
+	// loss. Its Unwrap keeps the clean-miss sentinel reachable.
+	return nil, "", unscopedInstanceMissError{title: title}
 }
 
 // ghostKillTmuxByName issues a tmux kill-session for a persisted sanitized

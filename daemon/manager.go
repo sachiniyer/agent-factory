@@ -636,6 +636,9 @@ type Manager struct {
 	// session — the ONLY pane knowledge the engine sees, so fact assembly
 	// adds zero pane reads. Keyed by stableSessionKey; guarded by m.mu.
 	handoffObserved map[string]handoffObservation
+	// handoffReportCh feeds the report_to delivery worker (R15): buffered so
+	// the decision ticker never blocks — a full queue drops with a warn.
+	handoffReportCh chan handoffReportJob
 	// handoffActive is the poll hook's and tick's cheap gate (#6817 round-2
 	// review): while no resolved config has engaged shadow — recomputed by
 	// accountHandoffDiscover at daemon start and on every config apply,
@@ -647,6 +650,11 @@ type Manager struct {
 	// that began before a newer config apply cannot win the store with a
 	// stale answer — whoever computes under the lock sees the newest config.
 	handoffDiscoverMu sync.Mutex
+	// handoffMoveMu is the one-move-at-a-time rail (design R14): the live
+	// mover (slice 6) must hold it for the WHOLE move — swap, verification,
+	// recovery — and the tick must only ever TryLock, never Lock, so a busy
+	// mover skips the tick instead of queueing behind a minutes-long move.
+	handoffMoveMu sync.Mutex
 	// sendReverifyRearmOnce runs the boot re-arm once on the first sweep: the
 	// watches are memory-only while their verdict rows are durable (#6590).
 	sendReverifyRearmOnce sync.Once
@@ -851,6 +859,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		lostRestoreConfirmations:  make(map[string][]time.Time),
 		limitResumeStates:         make(map[string]*limitResumeState),
 		handoffRetryDue:           make(map[string]time.Time),
+		handoffReportCh:           make(chan handoffReportJob, 64),
 		settleOwed:                make(map[string]settleOwedEntry),
 		dischargeOwed:             make(map[string]dischargeRetryEntry),
 		remoteLossStates:          make(map[string]*remoteLossState),

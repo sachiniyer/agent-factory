@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"encoding/json"
 	"fmt"
+	"path/filepath"
 	"sync"
 	"time"
 
@@ -91,6 +92,11 @@ type accountLimitProofInput struct {
 	home            string
 	wallPercent     int
 	carriedPrefixes map[string]int64
+	// quarantinedAccounts holds the account homes whose carry quarantine
+	// overflowed the marker cap — the home can no longer name which
+	// rollout is poison, so no claim from one may free a wall (#6852
+	// review: a full quarantine fails closed rather than evicting).
+	quarantinedAccounts map[string]bool
 }
 
 func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
@@ -110,24 +116,42 @@ func loadAccountLimitProofInputs() (accountLimitProofInput, error) {
 	if load.Config != nil {
 		wallPercent = load.Config.AccountHandoff.WallPercent
 	}
-	var prefixes map[string]int64
 	store, err := handoff.DefaultStore()
 	if err != nil {
 		return accountLimitProofInput{}, err
 	}
-	state, err := store.Load()
+	railsStore, err := handoff.DefaultRailsStore()
 	if err != nil {
+		return accountLimitProofInput{}, err
+	}
+	// One consistent pair of reads: LoadSnapshot double-reads each file
+	// and merges worst-case so a carry committing mid-load can only
+	// over-exclude claims, never let a superseded watermark stand in for
+	// a retired quarantine (#6776 review).
+	snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
+	if stateErr != nil {
 		// A missing state file is an empty map — an af home that never
 		// carried has no watermarks and every byte is eligible. A CORRUPT
 		// one fails the pass: an observed reading might sit inside a carried
 		// prefix, and the carried bytes are the other account's evidence.
-		return accountLimitProofInput{}, fmt.Errorf("carried-prefix watermarks: %w", err)
+		return accountLimitProofInput{}, fmt.Errorf("carried-prefix watermarks: %w", stateErr)
 	}
-	prefixes = state.CarriedPrefixes
+	if railsErr != nil {
+		// Same closed posture for the rails file: its unrecorded-carries
+		// quarantine is the record that a carried rollout's claims cannot
+		// be trusted AT ALL — a corrupt file hides that record, so the
+		// pass cannot know which readings are poison (#6776 review).
+		return accountLimitProofInput{}, fmt.Errorf("handoff rails: %w", railsErr)
+	}
+	quarantined := make(map[string]bool, len(snap.Rails.QuarantinedAccounts))
+	for dir := range snap.Rails.QuarantinedAccounts {
+		quarantined[filepath.Clean(dir)] = true
+	}
 	return accountLimitProofInput{
-		home:            home,
-		wallPercent:     wallPercent,
-		carriedPrefixes: prefixes,
+		home:                home,
+		wallPercent:         wallPercent,
+		carriedPrefixes:     snap.EffectiveCarriedPrefixes(),
+		quarantinedAccounts: quarantined,
 	}, nil
 }
 
@@ -374,6 +398,11 @@ func (m *Manager) reconcileAccountLimitProofs() {
 		if err != nil {
 			// A walled identity with no readable account directory has no
 			// store to scan — no evidence, so nothing proves it.
+			continue
+		}
+		if inputs.quarantinedAccounts[filepath.Clean(dir)] {
+			// The account's carry quarantine overflowed — no claim from
+			// it may free a wall (#6852 review: the cap fails closed).
 			continue
 		}
 		provenAt, ok := usageReadingProof(

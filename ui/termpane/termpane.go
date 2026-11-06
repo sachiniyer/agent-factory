@@ -50,8 +50,9 @@ import (
 )
 
 const (
-	// closeDrainDeadline bounds how long Close waits for the run/send goroutines to
-	// drain after the context is cancelled and the emulator pipe closed. They exit
+	// closeDrainDeadline bounds how long Close waits for the run/send/flush
+	// goroutines to drain after the context is cancelled and the emulator pipe
+	// closed. They exit
 	// in milliseconds in practice; if they don't, Close returns anyway rather than
 	// freezing the event loop (a leaked goroutine beats a wedged UI).
 	closeDrainDeadline = 2 * time.Second
@@ -67,6 +68,15 @@ const (
 	// pane when its binding disappears, so this loop never needs its own give-up.
 	reconnectMinBackoff = 50 * time.Millisecond
 	reconnectMaxBackoff = 3 * time.Second
+
+	// inputFlushChunkSize bounds one INPUT frame's payload. The daemon's WS accept
+	// keeps coder/websocket's 32 KiB default read limit (the client raises only
+	// its own — apiclient/stream.go), so a flush that packed a long disconnected
+	// backlog into one message would be rejected server-side and, once written,
+	// silently lost from the queue. 16 KiB leaves the opcode byte and WS header
+	// ample margin, and a longer backlog simply rides more frames: INPUT is a
+	// byte stream, so chunk boundaries are invisible to the receiving program.
+	inputFlushChunkSize = 16384
 )
 
 // EventKind discriminates a stream Event between output bytes, a resize echo, a
@@ -148,13 +158,16 @@ type Dialer func(ctx context.Context, since uint64) (Stream, error)
 // emulator.
 //
 // Concurrency: New, Resize, Render, SendKey, SendMouse, and Close are called on
-// the bubbletea event loop; the run loop (inbound) and send pump (outbound) run on
-// their own goroutines. gridMu guards the emulator grid between the run loop's
-// writes and Render's reads; connMu guards the current stream + cursor + desired
-// size between the loops and the event-loop mutators; resizeMu serializes the two
-// RESIZE senders so the newest size is always the one written last (assertSize).
-// resizeMu is ordered before connMu, and no lock here is ever held across stream
-// I/O. Close is safe to call more than once.
+// the bubbletea event loop; the run loop (inbound), the send pump (input-pipe
+// draining) and the flush loop (outbound INPUT writes) run on their own
+// goroutines. gridMu guards the emulator grid between the run loop's writes and
+// Render's reads; connMu guards the current stream + cursor + desired size
+// between the loops and the event-loop mutators; resizeMu serializes the two
+// RESIZE senders so the newest size is always the one written last (assertSize);
+// inputMu guards the undelivered-input queue. resizeMu is ordered before
+// connMu, and no lock is ever held across stream I/O — the flush loop is the
+// only INPUT sender and its writes are bounded by writeTimeout. Close is safe
+// to call more than once.
 type TermPane struct {
 	gridMu sync.RWMutex
 	emu    *vt.Emulator
@@ -200,6 +213,19 @@ type TermPane struct {
 	// the other way round.
 	resizeMu sync.Mutex
 
+	// inputMu guards inputQueue — user input the emulator already accepted but no
+	// stream has carried yet, in encoded order. sendPump appends every drained
+	// pipe write; the flush loop takes each pending prefix under inputMu, so
+	// bytes leave in the order the emulator produced them (#6848: a drained byte
+	// must never be silently discarded just because no stream exists to carry it).
+	inputMu    sync.Mutex
+	inputQueue []byte
+	// flushKick wakes the flush loop — sendPump kicks after every append and the
+	// run loop kicks on each connect. Capacity 1: a pending kick means "the queue
+	// may hold unsent bytes", and a woken flusher drains the whole queue, so
+	// kicks coalesce without losing work.
+	flushKick chan struct{}
+
 	ctx       context.Context
 	cancel    context.CancelFunc
 	wg        sync.WaitGroup
@@ -233,6 +259,7 @@ func New(dial Dialer, width, height int) *TermPane {
 		ctx:           ctx,
 		cancel:        cancel,
 		done:          make(chan struct{}),
+		flushKick:     make(chan struct{}, 1),
 	}
 	// The callback fires from emu.Write — always under gridMu's write lock — so the
 	// field write is ordered against Render's locked reads.
@@ -259,8 +286,9 @@ func New(dial Dialer, width, height int) *TermPane {
 		},
 	})
 
-	t.wg.Add(2)
+	t.wg.Add(3)
 	go func() { defer t.wg.Done(); t.sendPump() }()
+	go func() { defer t.wg.Done(); t.flushLoop() }()
 	go func() { defer t.wg.Done(); t.run() }()
 	go func() { t.wg.Wait(); close(t.done) }()
 	return t
@@ -297,6 +325,11 @@ func (t *TermPane) run() {
 		t.cursor = stream.StartSeq()
 		t.stream = stream
 		t.connMu.Unlock()
+
+		// Input accepted while disconnected is queued, never dropped — wake the
+		// flush loop so the backlog rides the new stream; the queue is FIFO, so
+		// nothing typed later can overtake it (#6848).
+		t.kickFlush()
 
 		t.gridMu.Lock()
 		// Direction matters: a start ahead of our request crossed an unretained
@@ -401,29 +434,81 @@ func (t *TermPane) readStream(stream Stream) {
 	}
 }
 
-// sendPump is the persistent outbound pump: it drains the emulator's input pipe
+// sendPump is the persistent input drain: it moves the emulator's input pipe
 // (the encoded keystrokes SendKey/SendMouse inject, plus terminal-query replies)
-// and writes them as INPUT frames to the CURRENT stream. It must ALWAYS drain the
-// pipe even while disconnected — the pipe is unbuffered and synchronous, so a
-// pump that stopped reading would block the next SendKey on the event loop forever
-// (the #1089 lesson). While disconnected it drops the bytes; reconnect is fast and
-// input to a disconnected pane is not meaningful.
+// into inputQueue and wakes the flush loop. It must ALWAYS drain the pipe, and
+// it never writes to the stream itself — the pipe is unbuffered and synchronous,
+// so a pump that stopped reading, or that ran a network flush inline, would
+// block the next SendKey on the event loop for as long as that flush took
+// (the #1089 lesson; a reconnect backlog can span many bounded writes with no
+// overall deadline). Bytes drained with no stream to carry them are QUEUED, not
+// dropped: a WS drop does not change the pane's program, so input spanning a
+// reconnect gap must still reach the pane, in order, on the next stream — the
+// old drain-and-discard let a paste lose its head while the tail ran as a
+// different command (#6848).
 func (t *TermPane) sendPump() {
 	buf := make([]byte, 4096)
 	for {
 		n, rerr := t.emu.Read(buf)
 		if n > 0 {
-			t.connMu.Lock()
-			stream := t.stream
-			t.connMu.Unlock()
-			if stream != nil {
-				wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
-				_ = stream.SendInput(wctx, buf[:n])
-				cancel()
-			}
+			t.inputMu.Lock()
+			t.inputQueue = append(t.inputQueue, buf[:n]...)
+			t.inputMu.Unlock()
+			t.kickFlush()
 		}
 		if rerr != nil {
 			return
+		}
+	}
+}
+
+// kickFlush wakes the flush loop without blocking. The channel holds one pending
+// wake and a woken flusher drains the whole queue, so bursts of kicks collapse
+// into a single pass.
+func (t *TermPane) kickFlush() {
+	select {
+	case t.flushKick <- struct{}{}:
+	default:
+	}
+}
+
+// flushLoop is the sole INPUT sender. On each wake it pushes queued input to the
+// CURRENT stream — re-read per chunk so a mid-flush reconnect switches streams —
+// in FIFO order, keeping whatever a failed write could not deliver: the queue is
+// a byte stream, so re-sending the retained prefix after a dropped or wedged
+// frame preserves order and never turns an unconfirmed partial delivery into
+// shell input (#6848). A slow stream can hold the flusher for writeTimeout per
+// chunk without ever stalling the input reader, and ctx cancellation ends the
+// loop on Close even mid-write.
+func (t *TermPane) flushLoop() {
+	for {
+		select {
+		case <-t.ctx.Done():
+			return
+		case <-t.flushKick:
+		}
+		for {
+			t.connMu.Lock()
+			stream := t.stream
+			t.connMu.Unlock()
+			if stream == nil {
+				break
+			}
+			t.inputMu.Lock()
+			data := append([]byte(nil), t.inputQueue[:min(len(t.inputQueue), inputFlushChunkSize)]...)
+			t.inputMu.Unlock()
+			if len(data) == 0 {
+				break
+			}
+			wctx, cancel := context.WithTimeout(t.ctx, writeTimeout)
+			err := stream.SendInput(wctx, data)
+			cancel()
+			if err != nil {
+				break
+			}
+			t.inputMu.Lock()
+			t.inputQueue = t.inputQueue[len(data):]
+			t.inputMu.Unlock()
 		}
 	}
 }

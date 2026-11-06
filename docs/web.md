@@ -11,9 +11,9 @@ With the daemon running, open **<http://127.0.0.1:8443>** on the same machine.
 The default listener needs no configuration or token. If nothing answers,
 `af daemon status` reports whether the daemon is running without starting it.
 Run `af` in a git repository to open the TUI and start the daemon. A port conflict
-can leave the daemon running without the web listener; check its logs if the
-browser still cannot connect. For automatic startup at login, use
-`af daemon install`.
+can leave the daemon running without the web listener; `af doctor` and
+`af daemon status` name the conflict and the fix if the browser still cannot
+connect. For automatic startup at login, use `af daemon install`.
 
 For another machine or a shared host, read [Beyond localhost](#beyond-localhost)
 after the tour. [Remote daemon access](remote-http-auth.md) is the full setup guide.
@@ -863,8 +863,10 @@ tab survives a restart and simply starts a new editor when you next open it.
     The editor's WebSocket, which carries that terminal, is accepted
     only from the editor's own page: af refuses a handshake whose `Origin` names any
     other origin, on every address the editor is served on. It works behind the
-    same front doors the web UI's own streams do: a proxy that rewrites `Host` must
-    forward the browser's in `X-Forwarded-Host` (see [behind a reverse
+    same front doors the web UI's own streams do: the front-door name must be in
+    `network.allowed_hosts`, and a proxy that rewrites `Host` must forward the
+    browser's in `X-Forwarded-Host` (see [Host names the daemon answers
+    to](remote-http-auth.md#host-names-the-daemon-answers-to) and [behind a reverse
     proxy](remote-http-auth.md#behind-a-reverse-proxy)). An **off-box** session's
     editor is never served on the web UI's address at all (above). Do not expose the
     daemon's listener to a network you do not trust.

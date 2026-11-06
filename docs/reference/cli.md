@@ -11,6 +11,9 @@ Run `af <command> --help` for the same information at the terminal. For a narrat
 - [`af`](#af) — Agent Factory - Manage multiple AI agents like Claude Code, Aider, Codex, Gemini, and Amp.
 - [`af accounts`](#af-accounts) — Manage per-session agent credential directories
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts handoff`](#af-accounts-handoff) — Inspect and reset the automatic account-handoff rails
+- [`af accounts handoff reset`](#af-accounts-handoff-reset) — Clear one named automatic handoff record
+- [`af accounts handoff status`](#af-accounts-handoff-status) — Show the automatic account-handoff rails state
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 - [`af agent-server`](#af-agent-server) — Run a headless single-workspace backend (not the web UI — that is 'af daemon')
@@ -241,6 +244,7 @@ af accounts
 **Subcommands**
 
 - [`af accounts add`](#af-accounts-add) — Register a credential directory for an agent account
+- [`af accounts handoff`](#af-accounts-handoff) — Inspect and reset the automatic account-handoff rails
 - [`af accounts list`](#af-accounts-list) — List registered agent accounts
 - [`af accounts login`](#af-accounts-login) — Log in to an agent account by running the agent's own login flow
 
@@ -266,6 +270,101 @@ settings may be seeded; notices explaining them are printed to stderr.
 
 ```
 af accounts add <agent> <name> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff
+
+Inspect and reset the automatic account-handoff rails
+
+Inspect and reset the durable rails the automatic account handoff keeps.
+
+status shows the resolved mode, whether the daemon's engine is observing, the
+recorded halt, refusal backoffs, and the recent-move ledger the switch-loop
+rail and move credits count. reset clears the ONE record you name — halt,
+backoff, or moves — and nothing else, so clearing a halt can never silently
+take the loop history or a held report with it.
+
+The rails live in the daemon host's af home; both verbs go through the daemon
+API. With --daemon-url (or AF_DAEMON_URL) they act on the targeted daemon.
+
+```
+af accounts handoff
+```
+
+**Subcommands**
+
+- [`af accounts handoff reset`](#af-accounts-handoff-reset) — Clear one named automatic handoff record
+- [`af accounts handoff status`](#af-accounts-handoff-status) — Show the automatic account-handoff rails state
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff reset
+
+Clear one named automatic handoff record
+
+Clear one durable rail record, and only the one named:
+
+  af accounts handoff reset halt                    clear the recorded mover halt
+  af accounts handoff reset backoff [--session K]   clear refusal backoffs
+  af accounts handoff reset moves   [--session K]   clear recent-move entries
+
+--session scopes backoff and moves to one stable session key (see
+`af accounts handoff status`); halt is mover-level and takes none.
+A reset that matches nothing reports so — it is not an error. The change lands
+through the daemon, on the daemon the command targets.
+
+```
+af accounts handoff reset <halt|backoff|moves> [flags]
+```
+
+**Flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--json` |  | Output the {data,error} JSON envelope |
+| `--session` | `string` | Scope backoff/moves to one stable session key |
+
+**Global flags**
+
+| Flag | Type | Description |
+|------|------|-------------|
+| `--daemon-url` | `string` | Target a REMOTE daemon at this http://, ws://, https:// or wss:// URL instead of the local unix socket (env: AF_DAEMON_URL). https:// and wss:// are verified against the system CAs, for a daemon behind a TLS front such as tailscale serve. |
+| `--token` | `string` | Bearer token for a remote daemon set with --daemon-url (env: AF_DAEMON_TOKEN). Get it with 'af token show' on the daemon host. |
+
+## af accounts handoff status
+
+Show the automatic account-handoff rails state
+
+Show the durable rails the automatic account handoff keeps:
+
+the resolved account_handoff.mode (absent table ≡ off ≡ no machinery), whether
+the daemon's engine is observing, the recorded mover halt, refusal backoffs,
+and the recent-move ledger — the records the switch-loop rail (max_moves inside
+max_moves_window) and the anti-pile-on move credits count.
+
+The records are keyed by stable session identity, never by title; a live
+session's title is attached only as a label.
+
+```
+af accounts handoff status [flags]
 ```
 
 **Flags**
@@ -949,7 +1048,7 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
-  account_handoff            compact JSON object of automatic account-handoff settings (staged; not active yet — mode = "live" is rejected)
+  account_handoff            compact JSON object of automatic account-handoff settings (shadow mode active; mode = "live" is rejected)
   account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
                              prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
                              max_moves_window, refused_backoff, on_failure, report_to
@@ -2495,7 +2594,8 @@ name can exist in several repos. The title resolves inside the repo given by
 
 With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
-those projects instead of guessing between them.
+those projects instead of guessing between them. A title no project holds
+reports that no project holds it, with the ways to scope the lookup.
 
 ```
 af sessions get <title>
@@ -2642,7 +2742,7 @@ List sessions in the current project
 
 List sessions in the current project.
 
-Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed — one stderr line says so, so an empty list cannot be misread as an empty fleet. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
 
 Every row names its own integers. liveness_name is the one --status matches, and it round-trips exactly; status_name only names the legacy status integer and is not a filter value. tabs[].kind_name uses the tab_kinds[].kind words.
 
@@ -3022,7 +3122,7 @@ The tab persists and reconnects across a daemon/af restart like every other
 tab — for a process tab "reconnect" means reattach-only, never re-running the
 command (see above).
 
---name sets a process, web, VS Code, or docs tab's name — the handle every other tab
+--name sets a process, web, VS Code, or Proposal tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:

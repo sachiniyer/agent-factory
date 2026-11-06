@@ -276,7 +276,19 @@ func fitWindow(heights []int, offset, avail int) (end int, topInd, botInd bool) 
 // renderWindowIndicator renders the one-line "▲ N more" / "▼ N more" marker
 // shown in place of rows scrolled out of the window.
 func (s *Sidebar) renderWindowIndicator(arrow string, hidden int) string {
-	w := s.contentWidth()
+	return railWindowIndicator(arrow, hidden, s.contentWidth())
+}
+
+// railWindowIndicator renders the rail's shared overflow marker — the
+// "▲ N more" / "▼ N more" row the sessions rail draws where its window hides
+// items — at the given content width. The bottom rail sections speak the same
+// vocabulary so a hidden row announces itself identically in every section
+// (#6883).
+func railWindowIndicator(arrow string, hidden, width int) string {
+	w := width
+	if w < 0 {
+		w = 0
+	}
 	text := fmt.Sprintf("%s %d more", arrow, hidden)
 	if w > 0 && runewidth.StringWidth(text) > w {
 		// Same narrow-width handling as renderHeader: drop the "…" tail when

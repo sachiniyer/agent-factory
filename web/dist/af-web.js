@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f29ebbd1ee8e";
+var CLIENT_VERSION = "5c0851cb9c61";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7534,7 +7534,7 @@ async function listAccounts(token2, repoPath = "") {
 }
 async function quotaReport(token2) {
   const resp = await af("QuotaReport", {}, token2);
-  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [] };
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [], mover: resp?.mover ?? "" };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -8453,7 +8453,7 @@ function appendStatus(row, status, agent, name) {
 
 // src/quota.ts
 function emptyQuotaState() {
-  return { agents: [], warnings: [], loaded: false, error: "" };
+  return { agents: [], warnings: [], mover: "", loaded: false, error: "" };
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
 function renderQuotaSection(state) {
@@ -8475,6 +8475,9 @@ function renderQuotaSection(state) {
       h("p", { class: "af-quota-error", role: "alert" }, `Usage limits could not be read: ${state.error}`)
     );
     return section;
+  }
+  if (state.mover !== "") {
+    section.append(h("p", { class: "af-quota-note" }, `mover: ${state.mover}`));
   }
   for (const warning of state.warnings) {
     section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
@@ -11545,12 +11548,18 @@ var AttachTerminal = class {
   // ping-pong. Entries older than the window are pruned on each use.
   contestedEchoes = /* @__PURE__ */ new Map();
   // Whether this connection has consumed its subscribe admission — the FIRST
-  // foreign-sized echo after (re)connect. The broker replays the current
-  // authority to every fresh subscriber, so that echo is the grid the world
-  // already had, not a contested answer to a claim this pane had not yet made.
-  // Recording it would let the peer's FIRST real answer to our claim read as
-  // a repeat inside the yield window — the activation would stand down to the
-  // grid it was meant to take (#6635, the #2347 recurrence).
+  // delivered echo after (re)connect, divergent or not. The broker replays the
+  // current authority to every fresh subscriber, so that echo is the grid the
+  // world already had, not a contested answer to a claim this pane had not yet
+  // made. Recording it would let the peer's FIRST real answer to our claim read
+  // as a repeat inside the yield window — the activation would stand down to
+  // the grid it was meant to take (#6635, the #2347 recurrence). Spending it
+  // only on a divergent echo has the mirror defect: a pane that already owns
+  // the authority sees its replay as a no-op, so the peer's first real write
+  // takes the admission's pass instead, leaves the contest record un-seeded,
+  // and the peer's counter reads as a fresh sighting this pane re-claims —
+  // landing on the peer as the repeat it then yields to (#6635, the
+  // 2026-11-06 recurrence).
   admittedEcho = false;
   // A peer resize can temporarily collapse this client's scrollback (for example,
   // 60 lines fit in a peer's 111-row grid). Anchor the actual visible buffer line,
@@ -12579,6 +12588,8 @@ var AttachTerminal = class {
   applyEchoedSize(rows, cols) {
     this.lastRows = rows;
     this.lastCols = cols;
+    const admitted = this.admittedEcho;
+    this.admittedEcho = true;
     if (rows !== this.term.rows || cols !== this.term.cols) {
       if (this.pendingViewport === null) {
         const buffer = this.term.buffer.active;
@@ -12598,8 +12609,7 @@ var AttachTerminal = class {
       } catch {
       }
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
-        if (!this.admittedEcho) {
-          this.admittedEcho = true;
+        if (!admitted) {
           this.reassertHostFit();
         } else {
           const now = Date.now();
@@ -12613,6 +12623,8 @@ var AttachTerminal = class {
             }
             this.contestedEchoes.set(key, now);
             this.reassertHostFit();
+          } else {
+            this.cancelVisibleFitFrame();
           }
         }
       }
@@ -22978,7 +22990,7 @@ var quotaRefetcher = createFencedRefetcher({
   fetch: quotaReport,
   commit: (resp) => {
     store.set({
-      quota: { agents: resp.agents, warnings: resp.warnings ?? [], error: "", loaded: true }
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], mover: resp.mover ?? "", error: "", loaded: true }
     });
   },
   onError: (err) => {

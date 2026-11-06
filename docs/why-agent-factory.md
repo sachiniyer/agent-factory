@@ -105,5 +105,6 @@ for those tradeoffs.
   discard.
 - **Treat automation as first-class.** Cron tasks, watch scripts, CLI calls, and
   API calls should share the same state model as interactive use.
-- **Stay local by default.** The HTTP API is local-only over a Unix socket, and
-  remote execution is explicit through repo-owned hooks.
+- **Stay local by default.** The daemon's API listens on a local Unix socket
+  and a loopback TCP port — a network-reachable bind is opt-in — and remote
+  execution is explicit through operator-configured hosts or repo-owned hooks.

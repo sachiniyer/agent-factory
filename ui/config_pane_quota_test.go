@@ -27,7 +27,7 @@ func quotaPane(t *testing.T, rows []QuotaRow, warnings []string) *ConfigPane {
 		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
 	}}, "/tmp/config.toml")
 	pane.SetAccounts(nil, nil, nil)
-	pane.SetQuota(rows, warnings, nil)
+	pane.SetQuota(rows, warnings, "", nil)
 	pane.SetFocus(true)
 	return pane
 }
@@ -97,11 +97,37 @@ func TestConfigPaneQuota_RowsAreSelectableSoTheWindowCanReachThem(t *testing.T) 
 // exists to refuse.
 func TestConfigPaneQuota_FailedReadRendersUnavailableRatherThanEmpty(t *testing.T) {
 	pane := quotaPane(t, nil, nil)
-	pane.SetQuota(nil, nil, errors.New("daemon: cannot read session records: boom"))
+	pane.SetQuota(nil, nil, "", errors.New("daemon: cannot read session records: boom"))
 
 	out := pane.String()
 	if !strings.Contains(out, "Cannot read usage limits") || !strings.Contains(out, "boom") {
 		t.Fatalf("a failed read must surface its reason:\n%s", out)
+	}
+}
+
+// The served mover line is fleet state the section must not drop: a recorded
+// halt renders where the operator opens the config view (#6776 R16), and an
+// absent line renders nothing — the absent-table shape stays no line at all.
+func TestConfigPaneQuota_MoverLineRendersWhenServed(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "limit reached", Sessions: 1, LimitedSessions: 1, Detail: "parked"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	out := pane.String()
+	if !strings.Contains(out, "mover: halted: move-failed") {
+		t.Fatalf("a served mover line must render in the Usage section:\n%s", out)
+	}
+}
+
+func TestConfigPaneQuota_NoMoverLineWhenUnserved(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+
+	out := pane.String()
+	if strings.Contains(out, "mover:") {
+		t.Fatalf("the absent-table shape is no mover line at all:\n%s", out)
 	}
 }
 

@@ -16,12 +16,13 @@ import (
 // verdict to delivered. Split from runner.go, which owns readiness and the send.
 
 var (
-	// runningTimer matches the elapsed-seconds fragment claude and devin print on
-	// the SAME row as their interrupt hint ("(12s · esc to interrupt)"). It is a
-	// shape test, NOT proof of a live turn: prose can hold both fragments on one
-	// row ("after 12s press esc to interrupt"), and this repository's own source
-	// quotes the chrome verbatim, so an agent printing that file would render a
-	// matching row. What separates chrome from text is that chrome TICKS — see
+	// runningTimer matches the elapsed-seconds fragment claude, devin and
+	// codex print on the SAME row as their interrupt hint
+	// ("(12s · esc to interrupt)"). It is a shape test, NOT proof of a live
+	// turn: prose can hold both fragments on one row ("after 12s press esc to
+	// interrupt"), and this repository's own source quotes the chrome
+	// verbatim, so an agent printing that file would render a matching row.
+	// What separates chrome from text is that chrome TICKS — see
 	// submittedTurnVisible.
 	runningTimer = regexp.MustCompile(`\d+s`)
 	// elapsedTimer reads the elapsed time off a timed status row — "12s", and
@@ -56,21 +57,26 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 	if agent == "" {
 		return false
 	}
-	// Claude and devin print an elapsed timer on their in-turn row, and that is
-	// the only part of this pane a running turn is guaranteed to rewrite.
-	// Claude's row is scoped to the status slot above the live composer but
-	// shares no row with its interrupt hint (that moved to the footer, #6590);
-	// devin's still carries both fragments on one unscopeable line. For devin,
-	// presence alone would accept prose that merely holds the same two
-	// fragments, including a verbatim quote of the chrome or a stale line a
-	// failed paste scrolled into view. So the proof for both is the timer
-	// ADVANCING on one row: the same status row, found once in each of two
-	// consecutive captures, with a larger elapsed time in the later one. Chrome
-	// ticks; text stands still, and a row that merely scrolls into view has no
-	// earlier self to have ticked from (timedRowTicked). The other agents'
-	// indicators are already scoped to their live frame, so for them the row's
-	// presence there is the proof.
-	timed := agent == tmux.ProgramClaude || agent == tmux.ProgramDevin
+	// Claude, devin and codex print an elapsed timer on their in-turn row, and
+	// that is the only part of this pane a running turn is guaranteed to
+	// rewrite. Claude's row is scoped to the status slot above the live
+	// composer but shares no row with its interrupt hint (that moved to the
+	// footer, #6590). Devin's still carries both fragments on one unscopeable
+	// line, and codex 0.163.0's "• Working (Ns • esc to interrupt)" sits above
+	// its composer the same way (#6879). For the unscoped rows, presence alone
+	// would accept prose that merely holds the same two fragments, including a
+	// verbatim quote of the chrome or a stale line a failed paste scrolled
+	// into view. So the proof for all three is the timer ADVANCING on one row:
+	// the same status row, found once in each of two consecutive captures,
+	// with a larger elapsed time in the later one. Chrome ticks; text stands
+	// still, and a row that merely scrolls into view has no earlier self to
+	// have ticked from (timedRowTicked).
+	//
+	// Codex's older chrome generation — a bare "esc to interrupt" row below
+	// the composer with no timer — has nothing to tick, but its position below
+	// the live composer already scopes it: presence there is the proof on its
+	// own, same as amp's and opencode's frame-scoped indicators.
+	timed := agent == tmux.ProgramClaude || agent == tmux.ProgramDevin || agent == tmux.ProgramCodex
 	var prev map[string]timedRow
 	deadline := time.Now().Add(postSubmitDeliveredBudget)
 	for {
@@ -86,7 +92,8 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 			}
 		default:
 			cur := timedRowsFor(content, agent)
-			if timedRowTicked(prev, cur) {
+			if timedRowTicked(prev, cur) ||
+				(agent == tmux.ProgramCodex && codexInterruptHintBelowComposer(content)) {
 				return true
 			}
 			prev = cur
@@ -104,36 +111,23 @@ func submittedTurnVisible(ctx context.Context, target ReadinessTarget) bool {
 
 // submittedTurnContent reports whether the captured pane shows the resolved
 // agent mid-turn — its own "I am busy" chrome, never an inference from the
-// pane changing. Per-arm scoping is the whole contract: each agent's indicator
-// is matched where the agent actually draws it, so transcript prose quoting
-// the hint cannot pass.
+// pane changing. Per-arm scoping is the contract: each agent's indicator is
+// matched where the agent actually draws it, so transcript prose quoting the
+// hint cannot pass. The timed-row agents (devin, codex) are the exception the
+// promotion paths close: their row shape is prose-holdable on one line, so
+// this function is only the busy/eligibility answer for them, and the ticking
+// requirement lives in submittedTurnVisible and TurnWatch (timedRowTicked).
 func submittedTurnContent(content, agent string) bool {
 	switch agent {
 	case tmux.ProgramAmp, tmux.ProgramOpencode:
 		return IsWorkingContent(content, agent)
 	case tmux.ProgramCodex:
-		// Codex draws "esc to interrupt" as a bare hint row BELOW its
-		// line-leading composer (the daemon/configagent_delivery_test.go
-		// pane shape). The composer glyph is "›" or, under the Ultra
-		// reasoning tier, "»" — tmux.IsCodexComposerLine owns the set (#5383).
-		// Anchoring on the composer keeps a transcript that quotes the hint
-		// from qualifying.
-		lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
-		composer := -1
-		for i, line := range lines {
-			if tmux.IsCodexComposerLine(line) {
-				composer = i
-			}
-		}
-		if composer < 0 {
-			return false
-		}
-		for _, line := range lines[composer+1:] {
-			if escToInterruptHint.MatchString(line) {
-				return true
-			}
-		}
-		return false
+		// Codex's in-turn chrome comes in two generations (#6879). Older codex
+		// drew a bare "esc to interrupt" hint row BELOW its composer; 0.163.0
+		// draws "• Working (Ns • esc to interrupt)" ABOVE it — the same
+		// hint-and-timer-on-one-row shape devin has. Either form showing is
+		// in-turn chrome for the busy question this function answers.
+		return codexInterruptHintBelowComposer(content) || len(timedTurnRows(content)) > 0
 	case tmux.ProgramClaude:
 		// Claude draws its timed status row in the slot above the live
 		// composer and its interrupt hint on a separate footer below it —
@@ -143,7 +137,8 @@ func submittedTurnContent(content, agent string) bool {
 		return isClaudeWorkingContent(content)
 	case tmux.ProgramDevin:
 		// Devin still embeds the hint in a timed status row —
-		// "Thinking · 3s (esc to interrupt)". The shape alone is not proof
+		// "Thinking · 3s (esc twice to interrupt)" on current builds (the
+		// wording drifted in 3000.11.x, #6879). The shape alone is not proof
 		// that a turn is running; submittedTurnVisible is what requires the
 		// row to tick.
 		return len(timedTurnRows(content)) > 0
@@ -151,17 +146,43 @@ func submittedTurnContent(content, agent string) bool {
 	return false
 }
 
-// timedTurnRows returns the rows shaped like claude's or devin's in-turn status
-// row: the interrupt hint and an elapsed timer on the SAME row.
+// codexInterruptHintBelowComposer reports whether codex's older in-turn
+// chrome — the bare "esc to interrupt" hint row — sits below its line-leading
+// composer (the daemon/configagent_delivery_test.go pane shape). The composer
+// glyph is "›" or, under the Ultra reasoning tier, "»" —
+// tmux.IsCodexComposerLine owns the set (#5383). Anchoring on the composer
+// keeps a transcript that quotes the hint from qualifying.
+func codexInterruptHintBelowComposer(content string) bool {
+	lines := strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n")
+	composer := -1
+	for i, line := range lines {
+		if tmux.IsCodexComposerLine(line) {
+			composer = i
+		}
+	}
+	if composer < 0 {
+		return false
+	}
+	for _, line := range lines[composer+1:] {
+		if escToInterruptHint.MatchString(line) {
+			return true
+		}
+	}
+	return false
+}
+
+// timedTurnRows returns the rows shaped like devin's or codex's in-turn status
+// row (and claude's older one): the interrupt hint and an elapsed timer on the
+// SAME row.
 //
-// Shape only. Unlike codex, amp and opencode — whose indicators this file scopes
-// to a live frame or to the status bar below the composer — claude and devin draw
-// their row above the composer, with the transcript above that and no boundary
-// between the two that a capture can see. So a row of prose that happens to hold
-// both fragments matches, and one can arrive without the agent writing it: a
-// paste that fails to submit pushes the view up and can scroll an older line into
-// frame. The caller separates the two by watching one row's timer ADVANCE —
-// see timedRowTicked.
+// Shape only. Unlike amp and opencode — whose indicators this file scopes to a
+// live frame or to the status bar below the composer — claude, devin and codex
+// draw their timed row above the composer, with the transcript above that and
+// no boundary between the two that a capture can see. So a row of prose that
+// happens to hold both fragments matches, and one can arrive without the agent
+// writing it: a paste that fails to submit pushes the view up and can scroll an
+// older line into frame. The caller separates the two by watching one row's
+// timer ADVANCE — see timedRowTicked.
 func timedTurnRows(content string) []string {
 	var rows []string
 	for _, line := range strings.Split(paneAnsiEscape.ReplaceAllString(content, ""), "\n") {
@@ -188,8 +209,10 @@ type timedRow struct {
 // timedRowsFor returns a capture's timed status rows under the resolved
 // agent's own pane contract. Claude moved its interrupt hint off the status
 // row and onto a footer below the composer (#6590), so its timed row is the
-// spinner row in the slot the composer scopes; devin's row still carries hint
-// and timer on one line.
+// spinner row in the slot the composer scopes. Devin's and codex's rows still
+// carry hint and timer on one line — devin's "Thinking · Ns (esc twice to
+// interrupt)", codex 0.163.0's "• Working (Ns • esc to interrupt)" — so they
+// share the whole-pane identity walk.
 func timedRowsFor(content, agent string) map[string]timedRow {
 	if agent == tmux.ProgramClaude {
 		return claudeTimedRows(content)
@@ -240,6 +263,14 @@ func timedTurnRowsByIdentity(content string) map[string]timedRow {
 		// without meaning anything, so drop it along with the numbers.
 		id := strings.TrimLeftFunc(row, func(r rune) bool { return !unicode.IsLetter(r) && !unicode.IsDigit(r) })
 		id = statusRowNumber.ReplaceAllString(id, "#")
+		// Everything the row draws after the hint repaints with the turn —
+		// devin's context count "(NNc · ctrl+o for details)", codex's
+		// "· N background terminal running · /ps to view" tail — so the
+		// identity ends where the hint does, or a flickering suffix would
+		// split one live row's frames into different rows (#6879).
+		if m := escToInterruptHint.FindStringIndex(id); m != nil {
+			id = id[:m[1]]
+		}
 		if byID == nil {
 			byID = make(map[string]timedRow)
 		}
@@ -353,6 +384,25 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 		// displayed+1s, so demanding that fit inside the boundary's age makes a
 		// strictly-pre-boundary turn unrepresentable (#5221 review).
 		return ticked && row.elapsed+time.Second <= at.Sub(w.boundary)
+	case tmux.ProgramCodex:
+		// Codex's chrome comes in two generations (#6879). 0.163.0's
+		// "• Working (Ns • esc to interrupt)" above the composer is a timed
+		// row, so the same tick proof as devin's applies — its own elapsed
+		// clock bounds the turn's start against the boundary. The older bare
+		// "esc to interrupt" row below the composer carries no clock, so it
+		// keeps the clockless contract: seen absent once before a present
+		// frame counts.
+		cur := timedRowsFor(content, w.agent)
+		row, ticked := tickingTimedRow(w.prev, cur)
+		w.prev = cur
+		if ticked && row.elapsed+time.Second <= at.Sub(w.boundary) {
+			return true
+		}
+		if !codexInterruptHintBelowComposer(content) {
+			w.armed = true
+			return false
+		}
+		return w.armed
 	default:
 		if !submittedTurnContent(content, w.agent) {
 			w.armed = true
@@ -364,6 +414,13 @@ func (w *TurnWatch) Observe(content string, at time.Time) bool {
 
 // tickingTimedRow is timedRowTicked lifted to name the row that moved, so the
 // caller can check the ticking row's own elapsed against the prompt boundary.
+//
+// Identity stays authoritative for unscoped rows: a scrolling transcript that
+// carries one quoted timed row out of the viewport while a different quote
+// enters the same slot must never read as a tick (#6881 review). The cost of
+// that strictness is at most one poll — when devin swaps its verb mid-turn
+// ("Thinking" → "Running tools") the transition frame's identity changes too,
+// and the row re-proves itself on the next tick under its new text.
 func tickingTimedRow(prev, cur map[string]timedRow) (timedRow, bool) {
 	for id, now := range cur {
 		before, ok := prev[id]
@@ -376,10 +433,10 @@ func tickingTimedRow(prev, cur map[string]timedRow) (timedRow, bool) {
 }
 
 // turnSignaturedAgent reports whether the resolved agent draws in-turn chrome
-// submittedTurnVisible can find (#5221 review): scoped indicators for codex,
-// amp, and opencode; timed status rows for claude and devin. A signatureless
-// agent's pane has nothing the watch can attribute — running it would only
-// burn the post-submit budget.
+// submittedTurnVisible can find (#5221 review): scoped indicators for amp and
+// opencode; timed status rows for claude, devin and codex, plus codex's older
+// scoped hint. A signatureless agent's pane has nothing the watch can
+// attribute — running it would only burn the post-submit budget.
 func turnSignaturedAgent(agent string) bool {
 	switch agent {
 	case tmux.ProgramClaude, tmux.ProgramDevin, tmux.ProgramCodex, tmux.ProgramAmp, tmux.ProgramOpencode:

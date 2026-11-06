@@ -90,10 +90,10 @@ var testHookAccountSwapBeforeFinalFence = func() {}
 // setLimitReached records a live limit through the manager-owned publication
 // boundary, so a final account-swap admission observes either the whole limit
 // publication or the whole durable identity commit.
-func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time) {
+func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time, evidence string) {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	instance.SetLimitReached(resetAt)
+	instance.SetLimitReachedAtEvidence(resetAt, evidence)
 }
 
 func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, epoch uint64) bool {
@@ -102,10 +102,10 @@ func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt tim
 	return instance.SetLimitReachedAtEpoch(resetAt, evidence, epoch)
 }
 
-func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time) error {
+func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string) error {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.Transition(session.ParkHandoff(resetAt))
+	return instance.Transition(session.ParkHandoff(resetAt, evidence))
 }
 
 func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetAt time.Time) error {
@@ -389,12 +389,24 @@ func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *confi
 	return admitted, err
 }
 
-// commitNewAccountSwapIdentity performs the destructive, durable half of a new
-// automatic replacement. The caller holds the config-apply, account-limit, and
-// personal-project policy fences. fallbackEligible is true only while no
-// identity has been selected, so an already-due ordinary resume may retain the
-// old identity after an admission or teardown refusal, but never after a failed
-// identity checkpoint.
+// commitNewAccountSwapIdentity performs the destructive half of a new automatic
+// replacement: admission, runtime teardown, conversation carry, and identity
+// selection. The caller holds the config-apply, account-limit, and
+// personal-project policy fences across this work. fallbackEligible is true
+// only while no identity has been selected, so an already-due ordinary resume
+// may retain the old identity after an admission or teardown refusal, but
+// never after a failed identity checkpoint.
+//
+// The durable half — the settlement persist that writes the new identity to
+// disk — is NOT performed here. It is returned as the settle closure for the
+// caller to invoke AFTER releasing the fences. persistSettlement takes the
+// per-repo start lock, and CreateSession holds that same start lock and then
+// blocks on accountLimitMu when a new session's startup hits a usage-limit
+// wall. Performing the persist under the fences would invert the lock order
+// (fences -> start lock vs CreateSession's start lock -> accountLimitMu) and
+// deadlock the daemon — the fence <-> start-lock ABBA (#6197 inversion class).
+// The "durable before launch" property is preserved because the caller runs
+// settle between fence release and the replacement runtime's spawn.
 //
 // probe is the liveness probe the caller computed BEFORE acquiring the global
 // fences (see resumeFromLimitLockedOutcome and prepareRuntimeForAccountSwap):
@@ -420,7 +432,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	operatorInitiated bool,
 	probe livenessProbe,
 	probeComputed bool,
-) (fallbackEligible bool, err error) {
+) (fallbackEligible bool, settle func() error, err error) {
 	fallbackDue := scheduled.fallbackDue
 	var admitted *autoAccountSwap
 	if scheduled.manual {
@@ -429,7 +441,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		admitted, err = m.admitAccountSwap(instance, global)
 	}
 	if err != nil {
-		return true, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
+		return true, nil, fmt.Errorf("no configured account can replace the limited identity for %q: %w", requestedTitle, err)
 	}
 	admitted.fallbackDue = fallbackDue
 	// Update the scheduler-owned opportunity too: the first candidate can be
@@ -468,7 +480,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 			instance.MarkStartupStateUnknown()
 			refusal := fmt.Errorf("account handoff for %q refused; automatic recovery disabled: inspect worktree %q and vanished agent pane %q for a detached child still writing before explicitly removing or replacing the session: %w",
 				requestedTitle, instance.GetWorktreePath(), instance.TabTmuxName(0), err)
-			return false, errors.Join(refusal, m.persistSettlement(repoID, key, instance))
+			return false, func() error { return m.persistSettlement(repoID, key, instance) }, refusal
 		}
 		if scheduled.manual && !instance.LimitReached() {
 			// Operator one-shot RPC: use the operator probe budget, not the
@@ -478,10 +490,10 @@ func (m *Manager) commitNewAccountSwapIdentity(
 				// The agent may have stopped before a sibling refused teardown.
 				// No identity was selected: persist ordinary recovery on the old one.
 				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-				err = errors.Join(err, m.persistSettlement(repoID, key, instance))
+				return true, func() error { return m.persistSettlement(repoID, key, instance) }, err
 			}
 		}
-		return true, err
+		return true, nil, err
 	}
 	var previousConversation session.AgentConversationData
 	var handoff session.HandoffSwap
@@ -506,7 +518,7 @@ func (m *Manager) commitNewAccountSwapIdentity(
 		previousConversation, err = instance.SelectAccountAutomatically(scheduled.from, scheduled.to)
 	}
 	if err != nil {
-		return false, err
+		return false, nil, err
 	}
 	scheduled.previousConversation = previousConversation
 	if scheduled.manual && strings.TrimSpace(scheduled.promptOverride) != "" {
@@ -514,25 +526,30 @@ func (m *Manager) commitNewAccountSwapIdentity(
 	}
 	// The old runtime is conclusively stopped. Make the new identity durable
 	// BEFORE starting it, so a crash can never relaunch on the old account while
-	// the session reports the replacement.
-	if err := m.persistSettlement(repoID, key, instance); err != nil {
-		if scheduled.manual {
-			_ = instance.RevertHandoff(handoff)
-			instance.SetPrompt(previousPrompt)
+	// the session reports the replacement. The settle closure runs the persist
+	// after the caller releases the fences, so it takes the per-repo start lock
+	// without spanning the fence <-> start-lock hierarchy (#6197 inversion).
+	settle = func() error {
+		if perr := m.persistSettlement(repoID, key, instance); perr != nil {
+			if scheduled.manual {
+				_ = instance.RevertHandoff(handoff)
+				instance.SetPrompt(previousPrompt)
+			}
+			_ = instance.RestoreAccountSelectionUnderResumeFence(
+				scheduled.previousAccount, scheduled.previousAccountAgent,
+				scheduled.previousAuto, scheduled.previousConversation)
+			if scheduled.manual && !instance.LimitReached() {
+				// Teardown already succeeded, and the prepared launch belongs to the
+				// rejected target identity. Hand the restored old identity to ordinary
+				// Lost recovery, with a settlement obligation if disk is still down.
+				_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
+				perr = errors.Join(perr, m.persistSettlement(repoID, key, instance))
+			}
+			return perr
 		}
-		_ = instance.RestoreAccountSelectionUnderResumeFence(
-			scheduled.previousAccount, scheduled.previousAccountAgent,
-			scheduled.previousAuto, scheduled.previousConversation)
-		if scheduled.manual && !instance.LimitReached() {
-			// Teardown already succeeded, and the prepared launch belongs to the
-			// rejected target identity. Hand the restored old identity to ordinary
-			// Lost recovery, with a settlement obligation if disk is still down.
-			_ = instance.Transition(session.ObserveLiveness(session.LiveLost))
-			err = errors.Join(err, m.persistSettlement(repoID, key, instance))
-		}
-		return false, err
+		return nil
 	}
-	return false, nil
+	return false, settle, nil
 }
 
 // revalidateGoneAccountSwap re-plans a committed replacement whose runtime is
@@ -736,11 +753,11 @@ func (m *Manager) settleReplacementRuntime(
 		var parkErr error
 		if swap.manual {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
+			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
 			m.accountLimitMu.Unlock()
 		} else {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt)
+			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
 			m.accountLimitMu.Unlock()
 		}
 		return false, errors.Join(

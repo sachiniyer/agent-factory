@@ -591,7 +591,7 @@ func accountSwapDataEqual(a, b *AccountSwapData) bool {
 
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
 // identity without releasing the account transaction's fence or its mission.
-func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
+func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
@@ -600,10 +600,10 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
-	// The wait path resolved this reset; the phrase it parsed is not threaded
-	// here, so the evidence slot cannot keep describing an earlier wall's
-	// reset (#6765). The next poll re-derives it if the banner stands.
-	i.limitResetEvidence = ""
+	// The wait path resolved this reset and parsed its phrase; recording the
+	// phrase keeps the daemon's first poll from re-parsing the unchanged banner
+	// against a later clock and moving the stored reset (#6765).
+	i.limitResetEvidence = evidence
 	i.attributeLimitIdentityLocked()
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
@@ -653,7 +653,7 @@ func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
 // (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
 // swap is not manual), and the automatic resume path retries after the recorded
 // reset unconditionally, with no operator-delivery step.
-func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
+func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
@@ -662,10 +662,9 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
-	// See ParkManualAccountSwapAtLimit: the reset arrives without its phrase,
-	// so the evidence slot is cleared rather than left describing an earlier
-	// wall's reset (#6765).
-	i.limitResetEvidence = ""
+	// See ParkManualAccountSwapAtLimit: the reset's phrase accompanies it so the
+	// daemon's first poll recognizes the re-read as the same observation (#6765).
+	i.limitResetEvidence = evidence
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
 	i.noteStateChangeLocked(lv, op, prevReset)

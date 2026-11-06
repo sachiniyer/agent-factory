@@ -44,9 +44,9 @@ type Result struct {
 	// [account_handoff] presence could not be determined — meaningful only
 	// when the section rendered anyway (on the state file alone).
 	ConfigUnreadable bool
-	// HandoffUnreadable reports that the auto-handoff state file exists but
-	// would not decode: carried-prefix watermarks and the halt record are
-	// then unknowable.
+	// HandoffUnreadable reports that an auto-handoff record file (the
+	// state file or the rails file) exists but would not decode:
+	// carried-prefix watermarks and the halt record are then unknowable.
 	HandoffUnreadable bool
 	// AccountsUnreadable reports that the registered-account list could not
 	// be read, so the ACCOUNTS section may be missing accounts.
@@ -74,7 +74,7 @@ func (r Result) Warnings() []string {
 	}
 	if r.HandoffUnreadable {
 		warnings = append(warnings,
-			"the auto-handoff state file could not be read, so carried-prefix watermarks and any recorded mover halt are unknown")
+			"an auto-handoff record file could not be read, so carried-prefix watermarks and any recorded mover halt are unknown")
 	}
 	if r.AccountsUnreadable {
 		warnings = append(warnings,

@@ -91,11 +91,15 @@ var (
 	// line in the transcript forever, and "Build ·" also sits inside the live
 	// composer — keying on either would pin an idle session at Running permanently.
 	opencodeWorkingIndicator = regexp.MustCompile(`esc +interrupt`)
-	// escToInterruptHint matches the "esc to interrupt" chrome several supported
-	// agents draw only while a turn is in flight. It is matched on the
-	// ANSI-stripped pane and always scoped per agent in submittedTurnContent —
-	// never trusted whole-pane, where transcript prose could quote it.
-	escToInterruptHint = regexp.MustCompile(`esc +to +interrupt`)
+	// escToInterruptHint matches the interrupt-hint chrome several supported
+	// agents draw only while a turn is in flight. devin reworded its hint in
+	// 3000.11.x to "esc twice to interrupt" (captured: "⡎⢱ Thinking · 3s
+	// (esc twice to interrupt) · (174c)") — the same class of hint-wording
+	// drift as #6590, where claude moved its hint off the status row (#6879) —
+	// so both phrasings count. It is matched on the ANSI-stripped pane and
+	// always scoped per agent in submittedTurnContent — never trusted
+	// whole-pane, where transcript prose could quote it.
+	escToInterruptHint = regexp.MustCompile(`esc +(twice +)?to +interrupt`)
 )
 
 // postWorktreeHooksDoneForWait resolves the instance's post-worktree hook
@@ -113,9 +117,15 @@ var postWorktreeHooksDoneForWait = func(instance *session.Instance) <-chan struc
 // "waiting for the limit window" status, fire no failure side-effects) and let
 // the existing resume machinery (the daemon auto-resume scheduler, or the manual
 // `c` retry) re-deliver the stored prompt once the window resets. ResetAt is the
-// parsed reset time, zero when the banner carried none.
+// parsed reset time, zero when the banner carried none. Evidence is the reset
+// phrase the detector consumed to produce ResetAt (#6765): the send-path park's
+// parse IS the first parse of the banner, so its phrase must accompany its reset
+// — otherwise the daemon's first poll over the still-displayed banner fails the
+// same-phrase dedupe and re-parses against a later clock, moving the stored reset
+// (a time-only phrase past its stated time jumps a full day).
 type LimitReachedError struct {
-	ResetAt time.Time
+	ResetAt  time.Time
+	Evidence string
 }
 
 // ErrLimitReached is the sentinel LimitReachedError wraps so callers can match
@@ -806,10 +816,15 @@ func capturePreview(ctx context.Context, instance *session.Instance) (string, er
 
 // limitParkError returns a *LimitReachedError when content shows a usage-limit
 // banner for agent, else nil. Factored out so both the ticker and timeout
-// branches of WaitForReady detect the banner identically (#1146 PR4).
+// branches of WaitForReady detect the banner identically (#1146 PR4). The
+// evidence (reset phrase) from Check's 4th return is carried alongside the
+// reset so the send-path park records the phrase that produced its reset — the
+// park's parse is the FIRST parse of the banner, and without the phrase the
+// daemon's next poll fails the same-phrase dedupe and re-parses against a
+// later clock (#6765).
 func limitParkError(detector LimitDetector, content, agent string) error {
-	if hit, resetAt, _, _ := detector.Check(content, agent, waitLimitNow()); hit {
-		return &LimitReachedError{ResetAt: resetAt}
+	if hit, resetAt, _, evidence := detector.Check(content, agent, waitLimitNow()); hit {
+		return &LimitReachedError{ResetAt: resetAt, Evidence: evidence}
 	}
 	return nil
 }

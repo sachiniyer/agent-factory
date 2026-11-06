@@ -156,3 +156,105 @@ func TestValidateAccountSwapCommittedRetryRefusesNonBuiltInFlaggedBase(t *testin
 		})
 	}
 }
+
+// TestValidateAccountSwapCommittedRetrySurvivesConfigDrift is the regression for
+// the drift wedge: a committed account swap whose frozen incoming command
+// carries af's own --dangerously-skip-permissions flag must still succeed on
+// retry after a daemon restart EVEN WHEN program_overrides.claude was edited
+// between the durable commit and the restart's recovery. The committed-retry
+// branch must answer provenance from the commit's own frozen record, not from
+// today's effective override — the same drift-survival intent the namespace
+// resolution in this function already follows ("program_overrides may have
+// moved since"). Before the fix, builtInProgramOverride's effective-resolution
+// gate (Gate 1) refused the frozen command whenever the override moved,
+// wedging the retry forever (#6820 remainder — the same permanent-wedge class
+// 9c8a7c1b fixed for the matching-config case).
+func TestValidateAccountSwapCommittedRetrySurvivesConfigDrift(t *testing.T) {
+	claudePath := fakeDetectedClaude(t)
+	flagged := claudePath + " " + config.DetectedClaudePermissionsFlag
+	inst, _ := committedRetryClaudeInstance(t, flagged)
+
+	// Simulate a program_overrides edit between the durable commit and the
+	// restart's recovery: the user (or a config tool) changed claude's
+	// override while the daemon was down — a plausible action precisely
+	// because a daemon that crashed mid-swap invites touching its config.
+	// The frozen pending.Program is the commit's own record and must not be
+	// re-derived from today's config.
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	cfg.ProgramOverrides[tmux.ProgramClaude] = "claude --model sonnet"
+	require.NoError(t, config.SaveConfig(cfg))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"a committed retry must survive a program_overrides edit for the committed agent between commit and restart")
+	require.NotNil(t, inst.accountSwapLaunch,
+		"the retry must record a launch plan despite the drift")
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.True(t, strings.HasPrefix(plan.program, claudePath),
+		"the retry must relaunch the frozen flagged claude command, not today's override, got %q", plan.program)
+	require.Contains(t, plan.proof.GeneratedArgs, config.DetectedClaudePermissionsFlag,
+		"the proof must declare af's own flag from the frozen record's provenance, not today's override")
+}
+
+// TestValidateAccountSwapCommittedRetrySurvivesConfigRemoval confirms the fix
+// also handles the override-removed drift shape: when program_overrides.claude
+// is removed entirely after commit, the frozen command must still be admitted
+// because the built-in candidate (af's detected claude) matches the frozen
+// argv. Before the fix this case only worked when the frozen spelling
+// byte-equalled the built-in default; a divergent spelling (legacy
+// bare-persisted, #5487 vintage) was refused because Gate 1 compared raw
+// strings, not argv.
+func TestValidateAccountSwapCommittedRetrySurvivesConfigRemoval(t *testing.T) {
+	claudePath := fakeDetectedClaude(t)
+	flagged := claudePath + " " + config.DetectedClaudePermissionsFlag
+	inst, _ := committedRetryClaudeInstance(t, flagged)
+
+	// Simulate program_overrides removal between commit and restart: the
+	// claude entry is deleted from the on-disk config.
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	delete(cfg.ProgramOverrides, tmux.ProgramClaude)
+	require.NoError(t, config.SaveConfig(cfg))
+
+	require.NoError(t, inst.ValidateAccountSwap("work"),
+		"a committed retry must survive a program_overrides removal for the committed agent between commit and restart")
+	require.NotNil(t, inst.accountSwapLaunch,
+		"the retry must record a launch plan despite the removal")
+	plan := cloneAccountSwapLaunchPlan(inst.accountSwapLaunch)
+	require.True(t, strings.HasPrefix(plan.program, claudePath),
+		"the retry must relaunch the frozen flagged claude command, got %q", plan.program)
+	require.Contains(t, plan.proof.GeneratedArgs, config.DetectedClaudePermissionsFlag,
+		"the proof must declare af's own flag from the frozen record's provenance")
+}
+
+// TestValidateAccountSwapCommittedRetryDriftStillRefusesNonBuiltInFlaggedBase
+// confirms the drift fix does not widen what the account boundary admits: a
+// committed retry whose frozen command carries a flag that is NOT af's own
+// built-in override must stay refused EVEN WHEN program_overrides.claude is
+// edited after commit. The built-in candidate comparison alone (without Gate 1)
+// still refuses a different executable or an extra argument beyond the
+// built-in, because LiteralCommandsEqual compares argv and a non-matching argv
+// fails closed.
+func TestValidateAccountSwapCommittedRetryDriftStillRefusesNonBuiltInFlaggedBase(t *testing.T) {
+	claudePath := fakeDetectedClaude(t)
+	for name, program := range map[string]string{
+		"extra argument":       claudePath + " " + config.DetectedClaudePermissionsFlag + " --settings /repo/x.json",
+		"flag only, other exe": "/repo/tools/claude " + config.DetectedClaudePermissionsFlag,
+		"different model flag": "claude --model sonnet",
+		"unrelated operator":   "claude --profile p",
+	} {
+		t.Run(name, func(t *testing.T) {
+			inst, _ := committedRetryClaudeInstance(t, program)
+
+			// Edit the override after commit — the drift scenario.
+			cfg, err := config.LoadConfig()
+			require.NoError(t, err)
+			cfg.ProgramOverrides[tmux.ProgramClaude] = "claude --model sonnet"
+			require.NoError(t, config.SaveConfig(cfg))
+
+			err = inst.ValidateAccountSwap("work")
+			require.Error(t, err,
+				"a non-built-in flagged base must stay refused at the committed retry even under config drift")
+		})
+	}
+}

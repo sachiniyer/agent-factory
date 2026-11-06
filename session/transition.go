@@ -117,6 +117,7 @@ type TransitionEvent struct {
 	kind        transitionKind
 	lv          Liveness
 	resetAt     time.Time
+	evidence    string
 	epoch       uint64
 	epochScoped bool
 	churnOnly   bool
@@ -240,9 +241,12 @@ func BeginHandoff() TransitionEvent { return TransitionEvent{kind: tkBeginHandof
 func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHandoff} }
 
 // ParkHandoff settles an incoming agent that launched but reached its own usage
-// limit before the takeover mission could be delivered.
-func ParkHandoff(resetAt time.Time) TransitionEvent {
-	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt}
+// limit before the takeover mission could be delivered. evidence is the reset
+// phrase the detector consumed to produce resetAt (#6765): the send-path park's
+// parse is the first parse of the banner, so its phrase must accompany its
+// reset to keep the daemon's first poll from re-parsing against a later clock.
+func ParkHandoff(resetAt time.Time, evidence string) TransitionEvent {
+	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence}
 }
 
 // AbortHandoff drops a replacement fence whose runtime swap did not complete.
@@ -782,11 +786,12 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitResetAt = time.Time{}
 		i.limitResetEvidence = ""
 	case limitResetFromEvent:
-		// The event's reset arrives without the phrase that produced it (the
-		// handoff wait path resolved it), so the evidence slot cannot keep
-		// describing an earlier wall's reset (#6765).
+		// The event's reset arrives with the phrase that produced it (the
+		// handoff wait path resolved both), so the evidence slot records it —
+		// keeping the daemon's first poll from re-parsing the unchanged banner
+		// against a later clock (#6765).
 		i.limitResetAt = ev.resetAt
-		i.limitResetEvidence = ""
+		i.limitResetEvidence = ev.evidence
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

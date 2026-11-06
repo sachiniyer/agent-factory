@@ -17,8 +17,9 @@ import (
 
 var (
 	// sendConfirmBudget bounds the re-check and sendConfirmPoll is its interval.
-	// Claude and devin need two captures a tick apart to show a turn running, so
-	// the budget covers several polls. Package vars so tests can compress them.
+	// Claude, devin and codex need two captures a tick apart to show a turn
+	// running, so the budget covers several polls. Package vars so tests can
+	// compress them.
 	sendConfirmBudget = 6 * time.Second
 	sendConfirmPoll   = 500 * time.Millisecond
 )
@@ -46,6 +47,8 @@ type SendConfirmation struct {
 	eligible bool
 	// preAt is when the pre-send frame was requested; clockless is set for
 	// agents whose chrome carries no elapsed clock to bound a turn's start.
+	// Codex keeps it because its older hint generation still needs the armed
+	// edge, even though its 0.163.0 Working row carries a clock (#6879).
 	preAt     time.Time
 	clockless bool
 	// seedStale is set when the pre-send frame is too old to arm a clockless
@@ -58,10 +61,10 @@ type SendConfirmation struct {
 
 // clocklessSeedSlack bounds how long before the send's attempt instant the
 // pre-send frame may have been requested for an agent whose chrome has no
-// clock (codex, amp, opencode). Their watch is armed by "chrome absent" in that
-// frame, so a turn starting between the frame and the attempt would otherwise
-// read as this prompt's; a longer gap (a delayed remote preview) makes the send
-// ineligible instead. Var so tests can pin it.
+// clock (codex's untimed hint, amp, opencode). Their watch is armed by "chrome
+// absent" in that frame, so a turn starting between the frame and the attempt
+// would otherwise read as this prompt's; a longer gap (a delayed remote
+// preview) makes the send ineligible instead. Var so tests can pin it.
 var clocklessSeedSlack = 2 * time.Second
 
 // BeginSendConfirmation captures the pre-send frame. An agent

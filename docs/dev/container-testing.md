@@ -296,6 +296,73 @@ does not shorten an existing run. Custom names outside `af-playtest-` retain
 the self-imposed deadline but are outside the sweep. `af doctor` lists expired
 sandboxes using the same scope and age policy, without removing them.
 
+## Throwaway sandboxes on the host
+
+Play-tests are not the only throwaway sandboxes: audit harnesses and the
+host-side play-test recipe in `.claude/skills/tui-playtest.md` also create
+temporary AF homes whose daemon, driver, and agent processes must never
+outlive the run (#6844). These carry the same lifetime contract, enforced by
+the sandbox's own daemon rather than by a container engine.
+
+A throwaway sandbox is declared by one file —
+`$AGENT_FACTORY_HOME/throwaway-sandbox.json` — written at scaffold time. Any
+host tooling that creates a disposable AF home can mark it with:
+
+```bash
+bash scripts/container/sandbox-lifetime.sh mark "$AGENT_FACTORY_HOME" "$SANDBOX_ROOT" <kind>
+```
+
+The marker records the deadline (`AF_SANDBOX_MAX_LIFETIME` seconds,
+defaulting to `AF_PLAYTEST_MAX_LIFETIME` then six hours), optionally the
+creator's process identity (`AF_SANDBOX_OWNER_PID`), and the sandbox's
+private `TMUX_TMPDIR` when one exists. A scaffold that creates a dedicated
+sandbox root plants the creation sentinel at creation —
+`.af-throwaway-sandbox` in the root, via `sandbox-lifetime.sh create-root`
+— and `mark` adopts its stamp as the marker's `created_unix`. That
+sentinel is the positive proof that this sandbox made the tree; `mark`
+never writes it, so an existing or shared directory can never be blessed
+retroactively. The marker is the ONLY identity the enforcement recognizes
+— nothing is ever reaped by path prefix or process name, and an
+unreadable marker authorizes nothing.
+
+Two safety nets share the marker:
+
+- **Self-enforcement.** A daemon serving a marked home arms a watchdog at
+  startup: at the deadline — or within `AF_THROWAWAY_CHECK_INTERVAL` seconds
+  (default 30) of the declared owner dying — it exits, and its unwind-time
+  teardown kills the proven member set. Membership never reads environment
+  variables — tmux copies a creator's environment into a shared server's
+  global environment, so an inherited `AGENT_FACTORY_HOME` can sit inside a
+  production pane. A process is a member only when it runs under the
+  sandbox's own private tmux server — proven by the socket the kernel
+  reports it holding, inside a tmux dir the sentinel verifies the sandbox
+  created — or when its (pid, start id) was recorded in the home's
+  `throwaway-pids.json` scoped to the boot and PID namespace it was written
+  in (the daemon records itself at startup, which is how teardown still
+  reaches it after it reparents to init). Off Linux there is
+  no socket evidence, so recorded pids are the only members; a marker
+  without a usable private tmux dir likewise yields only recorded members.
+  Everything else — shared servers, their panes, foreign sockets — is left
+  alone.
+- **Next-start sweep.** A marked daemon also registers its home in a
+  per-user registry under `/tmp`. On startup it reaps each registered home
+  that is expired or whose declared owner is provably dead (pid gone,
+  recycled, or stamped to a different boot). Only marked daemons sweep —
+  the real install never does — and teardown refuses the default AF home
+  outright, whatever a file claims.
+
+Scaffolds that run their driver under a private tmux server get the whole
+pane tree as members automatically — that is what `$TMUX_TMPDIR` inside the
+sandbox root plus the marker's `tmux_tmpdir` record is for. Processes a
+scaffold starts outside the private server can be added to
+`throwaway-pids.json` by writing
+`{"pid": N, "start_id": M, "boot_id": "<boot id>", "ns_id": "<pidns id>"}`
+entries scoped to the current boot and PID namespace — an unscoped record
+is never selected.
+`AF_SANDBOX_OWNER_PID`, when used, must name a durable process — the driver
+pane or a dedicated keeper — not `$$` inside the marking shell, which dies
+with the call and trips the owner-death watchdog immediately.
+
 Set `AF_PLAYTEST_AGENT=codex` (and optionally
 `AF_PLAYTEST_CODEX_RELEASE`) before the detached target to use the same real-agent
 path there.

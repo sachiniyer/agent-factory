@@ -29,7 +29,7 @@ serves.
 
 ## Transport & socket path
 
-The API is served over a dedicated Unix socket, **not** a TCP port:
+The API is served over a dedicated Unix socket:
 
 ```
 $AGENT_FACTORY_HOME/daemon-http.sock
@@ -51,7 +51,7 @@ is not running.
 
 ## Authentication
 
-There is **no token and no TCP port**. Authentication is the filesystem:
+On this socket there is **no token**. Authentication is the filesystem:
 
 - The socket is a **Unix domain socket**, reachable only from the local host —
   never the network.
@@ -342,7 +342,7 @@ apply not finish and belongs in a re-run's plan. An archived
 worktree still holding uncommitted or ignored files is **refused**, not
 counted: the kept branch does not contain them and they are the only copy —
 restore the session or clean the tree first. `older_than` is required and
-must be a positive Go duration measured from each session's archive time;
+must be a positive duration measured from each session's archive time;
 the request needs a scope — `repo_id` or `all: true`, which are mutually
 exclusive. `reclaimable_bytes` counts **allocated** disk
 blocks (`st_blocks` × 512, like `du`): sparse holes are not counted, and a

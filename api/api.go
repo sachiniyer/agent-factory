@@ -160,9 +160,12 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	if len(gaps) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, strings.Join(gaps, "; "))
 	}
-	// Wrap the sentinel so a clean miss stays distinguishable from an
-	// under-read one (#861); the user-facing text is unchanged.
-	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+	// The none-held half of the contract (#6882): this scan already spanned
+	// every project, so the miss says no project holds the title and how to
+	// scope the next lookup rather than a bare "not found" that reads as data
+	// loss. Its Unwrap keeps the clean-miss sentinel distinguishable from an
+	// under-read one (#861).
+	return nil, "", unscopedTitleMiss(title)
 }
 
 // repoPathsOf lists the repo paths of matched sessions, for the ambiguous-title
@@ -318,6 +321,28 @@ func corruptedReposSuffix(corrupted []string) string {
 func corruptedReposError(corrupted []string) error {
 	return fmt.Errorf("%d repo(s) have a corrupted instances.json and their sessions are hidden until it is repaired: %s\n%s",
 		len(corrupted), corruptedRepoPaths(corrupted), corruptedRepoRepairHint)
+}
+
+// unconfirmedLiveProjection coerces a disk-only row's live-state claim into
+// the verdict a LIVE daemon gives a record it could not materialize (#6882
+// review): the persisted liveness is the last-saved value, not an observation,
+// and the snapshot's silence on this row is exactly the daemon failing to
+// confirm it. Reporting a live liveness as Lost keeps `sessions watch` from
+// completing on a stale "ready" and `sessions get` from displaying confirmed
+// idle — both consumers fail toward "cannot be proven", which is the truth.
+// Terminal and unset liveness pass through: an archived or already-lost row is
+// an honest record, and a liveness-less legacy row has no claim to retract.
+//
+// Deliberately applied only where a RUNNING daemon's snapshot missed the row —
+// the daemon-down fallback still reports last-known state, since with nothing
+// to contradict it the persisted value is the best answer there is.
+func unconfirmedLiveProjection(d session.InstanceData) session.InstanceData {
+	switch session.RecordedLiveness(d) {
+	case session.LiveRunning, session.LiveReady, session.LiveLimitReached:
+		d.Liveness = session.LiveLost
+		d.IdleReason = session.IdleReasonFor(d)
+	}
+	return d
 }
 
 // diskListSessions is the disk-read fallback for `sessions list` when no daemon

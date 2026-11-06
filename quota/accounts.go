@@ -7,6 +7,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/printsafety"
 )
 
 // AccountObservation is the verdict on one registered account's recorded usage
@@ -83,25 +85,36 @@ type MoverStatus struct {
 	// beats every other rendering: af must not report an unknowable mover
 	// as idle.
 	StateUnreadable bool
+	// ReportsHeldSince is when report_to delivery first held — a recipient
+	// whose composer never proves empty must not stay silent (#6818 final
+	// review). It appends to the mode line rather than replacing it: a
+	// held backlog in shadow still says "shadow".
+	ReportsHeldSince time.Time
 }
 
 // String is the mover line's vocabulary — the text after "mover: ".
 func (m MoverStatus) String() string {
+	var base string
 	switch {
 	case m.StateUnreadable:
-		return "state file unreadable"
+		base = "state file unreadable"
 	case m.Halted:
-		if m.HaltReason == "" {
-			return fmt.Sprintf("halted since %s", m.HaltAt.UTC().Format(time.RFC3339))
+		if reason := printsafety.Field(m.HaltReason); reason == "" {
+			base = fmt.Sprintf("halted since %s", m.HaltAt.UTC().Format(time.RFC3339))
+		} else {
+			base = fmt.Sprintf("halted: %s since %s", reason, m.HaltAt.UTC().Format(time.RFC3339))
 		}
-		return fmt.Sprintf("halted: %s since %s", m.HaltReason, m.HaltAt.UTC().Format(time.RFC3339))
 	case m.ModeUnknown:
-		return "configured mode unknown"
+		base = "configured mode unknown"
 	case m.Mode == "":
-		return "off"
+		base = "off"
 	default:
-		return m.Mode
+		base = m.Mode
 	}
+	if !m.ReportsHeldSince.IsZero() {
+		base += fmt.Sprintf("; reports held since %s", m.ReportsHeldSince.UTC().Format(time.RFC3339))
+	}
+	return base
 }
 
 // RenderedAccount is one account's row of the section in display form — the

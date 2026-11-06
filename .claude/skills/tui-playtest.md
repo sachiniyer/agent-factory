@@ -117,6 +117,11 @@ them is a failed run, regardless of what else you find.
 ```bash
 RUN_ID="$(date +%Y%m%d-%H%M%S)"
 WORK="/tmp/af-playtest-$RUN_ID"        # keep short: unix socket paths cap at ~104 bytes
+# Exclusive mkdir — the create-root contract: stamp only a root THIS run
+# created, never a pre-existing dir. (sandbox-lifetime.sh create-root is
+# the same two steps once the repo exists; it cannot run before the clone.)
+mkdir "$WORK" || { echo "$WORK already exists — pick a fresh RUN_ID"; exit 1; }
+printf '%s\n' "$(date +%s)" > "$WORK/.af-throwaway-sandbox"
 mkdir -p "$WORK/home" "$WORK/tmux"
 touch "$WORK/pids.txt"                  # record every PID you spawn here
 
@@ -211,10 +216,23 @@ EOF
 paths under `$WORK` only. If it prints anything under the real home, STOP
 and fix the environment first.
 
-**Start the driver session and launch the TUI at 80x24**:
+**Start the driver session, then mark the sandbox as throwaway** (#6844)
+before launching the TUI in it: the daemon serving this home then enforces
+the deadline itself and reaps ownerless siblings on the next marked start.
+`AF_SANDBOX_OWNER_PID` optionally adds owner liveness — it must name a
+process that outlives the marking call; `$$` inside a tool shell dies with
+the call and trips the owner-death watchdog at once. The driver pane is the
+natural owner. `AF_SANDBOX_MAX_LIFETIME=<seconds>` overrides six hours:
 
 ```bash
 tmux -L "$SOCK" new-session -d -s drive -x 80 -y 24
+AF_SANDBOX_OWNER_PID="$(tmux -L "$SOCK" display-message -p -t drive '#{pane_pid}')" \
+    bash "$WORK/src/scripts/container/sandbox-lifetime.sh" mark "$AGENT_FACTORY_HOME" "$WORK" playtest-host
+```
+
+**Launch the TUI at 80x24**:
+
+```bash
 tmux -L "$SOCK" send-keys -t drive "cd $WORK/mock-repo && $AF" Enter
 sleep 2
 tmux -L "$SOCK" capture-pane -p -t drive   # read the screen

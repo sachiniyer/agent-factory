@@ -216,11 +216,6 @@ func flattenToOneLine(s string) string {
 	}, s)
 }
 
-// renderRowLines renders every row to lines, reporting the line span of the
-// selected row so the window can keep it on screen. A row is not one line: the
-// selected row also shows its purpose and its allowed values, so the span is
-// what must stay visible, not a single index.
-
 // displayValue renders a value for the LIST, which is a different job from
 // rendering it into an edit field.
 //
@@ -344,20 +339,6 @@ func compositorWidth(s string) int {
 	return muesliansi.PrintableRuneWidth(s)
 }
 
-// wrapIndented renders prose wrapped to the pane's width, indented under its key.
-//
-// Wrapping HERE rather than letting the overlay frame do it is load-bearing, not
-// cosmetic. The window's budget counts the lines renderRowLines produces, so a
-// line the frame later wraps into three physical rows makes that count a lie and
-// the pane overflows its box anyway — the selection scrolls off exactly as it did
-// before the window existed. A purpose line is genuinely long (worktree_root's is
-// 147 characters, over 2x a 72-column pane), so this is the common case, not an
-// edge one.
-//
-// Prose WRAPS rather than truncating, unlike a value (displayValue): a value's
-// tail is usually noise, but a sentence's is the half that says what the setting
-// does.
-
 // configHint is one fragment of a hint row, with the order it is shed in when
 // the row does not fit the pane. drop 0 means NEVER shed; 1 goes first.
 type configHint struct {
@@ -420,8 +401,3 @@ func joinHints(hints []configHint, shedThrough int) string {
 	}
 	return strings.Join(kept, " · ")
 }
-
-// SetEditValueForTest and EditValueForTest expose the value field's buffer to
-// the app package's tests, which drive the REAL handleStateConfigEditor (where
-// the #1961 quit-key bug class lives) and must assert what actually reached the
-// field. The pane's own tests reach c.input directly; app's cannot.

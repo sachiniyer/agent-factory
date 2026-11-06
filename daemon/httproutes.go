@@ -455,6 +455,28 @@ var httpRoutes = []HTTPRoute{
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.QuotaReport) },
 	},
 
+	// The auto-handoff rails surface (#6776 slice 5): status reads the durable
+	// halt/backoff/move records plus the daemon's engaged flag, and reset
+	// clears the ONE record the operator names. Not sandboxAllowed, like
+	// QuotaReport: status reports the operator's fleet state — stable session
+	// identities, account names, a mover's halt — with no session owner to
+	// narrow to, and reset is the operator's authority over the mover's rails
+	// themselves. A sandbox credential earns neither.
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/HandoffStatus",
+		Description: "Report the auto-handoff rails: the resolved mode, whether the engine is observing, the durable halt record, refusal backoffs, and the recent-move ledger the switch-loop rail and move credits count.",
+		requestType: reflect.TypeOf(HandoffStatusRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffStatus) },
+	},
+	{
+		Method:      http.MethodPost,
+		Path:        "/v1/HandoffReset",
+		Description: "Clear one named auto-handoff rail record — halt, backoff, or moves — optionally scoped to one stable session identity.",
+		requestType: reflect.TypeOf(HandoffResetRequest{}),
+		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.HandoffReset) },
+	},
+
 	// Config. The read/write pair behind the web config editor; both are thin
 	// wrappers over the same config package calls the TUI and `af config set`
 	// make in-process, so the three surfaces cannot validate or write differently.

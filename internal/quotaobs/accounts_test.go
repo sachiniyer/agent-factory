@@ -54,6 +54,17 @@ func writeStateFile(t *testing.T, home, content string) {
 	}
 }
 
+func writeRailsFile(t *testing.T, home, content string) {
+	t.Helper()
+	dir := filepath.Join(home, "instances")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
+		t.Fatalf("mkdir instances: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, "auto-handoff-rails.json"), []byte(content), 0o600); err != nil {
+		t.Fatalf("write rails file: %v", err)
+	}
+}
+
 // claimLine is a sanitized rate_limits record — the shape
 // quota.ParseCodexRateLimitsLine reads, with invented values only.
 const claimLine = `{"timestamp":"2026-10-31T04:52:13.492Z","type":"event_msg","payload":{"type":"token_count","rate_limits":{"primary":{"used_percent":98.5,"window_minutes":300,"resets_at":1761902400},"secondary":{"used_percent":41.2,"window_minutes":10080,"resets_at":1762387200}}}}`
@@ -136,6 +147,24 @@ func TestCollect_TablePresentReadsAccountWindows(t *testing.T) {
 	}
 }
 
+// An EMPTY state file is no more opt-in than an absent one: nothing recorded
+// means nothing to report. This is the shape a no-op durable write leaves
+// behind (e.g. a startup reconcile on a home that never enabled handoff), and
+// it must not enrol the home in the section.
+func TestCollect_EmptyStateFileRendersNothing(t *testing.T) {
+	home := fakeHome(t)
+	writeStateFile(t, home, `{"schema_version":1}`)
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if result.Accounts != nil || result.Mover != nil {
+		t.Fatalf("section materialized off a record-free state file: accounts=%+v mover=%+v",
+			result.Accounts, result.Mover)
+	}
+}
+
 func TestCollect_EnabledWithNoAccountsStillReportsMover(t *testing.T) {
 	home := fakeHome(t)
 	writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
@@ -148,6 +177,102 @@ func TestCollect_EnabledWithNoAccountsStillReportsMover(t *testing.T) {
 	}
 	if result.Mover == nil || result.Mover.String() != "shadow" {
 		t.Fatalf("Mover = %+v, want mover: shadow", result.Mover)
+	}
+}
+
+// Ordinary carry watermarks are not mover engagement (#6776 review): a
+// home whose swaps left records behind shows exactly what it showed before
+// the feature existed — no mover line, no account section. Same for move
+// credits and refusal backoffs in the rails file: only a halt or held
+// reports are "the mover acted" records.
+func TestCollect_WatermarksAndRailsRecordsDoNotEngage(t *testing.T) {
+	home := fakeHome(t)
+	writeStateFile(t, home,
+		`{"schema_version":1,"carried_prefix_len":{"/x":64}}`)
+	writeRailsFile(t, home, `{"schema_version":1,"recent_moves":[{"session_key":"s","agent":"codex","account":"work","at":"2026-11-06T09:00:00Z"}],"refused_until":{"s":"2026-11-07T09:00:00Z"}}`)
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if result.Accounts != nil || result.Mover != nil {
+		t.Fatalf("ordinary records opted the home in: accounts=%+v mover=%+v", result.Accounts, result.Mover)
+	}
+}
+
+// Held reports ARE a mover record (#6776 review): a home with mode off but
+// a standing report_to hold still surfaces the mover line — silent holds
+// are the failure R16 exists to prevent.
+func TestCollect_HeldReportsEngageWithoutMode(t *testing.T) {
+	home := fakeHome(t)
+	writeRailsFile(t, home, `{"schema_version":1,"reports_held":{"since":"2026-11-06T09:30:00Z"}}`)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if result.Mover == nil || result.Mover.ReportsHeldSince.IsZero() {
+		t.Fatalf("Mover = %+v, want the held-reports record surfaced", result.Mover)
+	}
+}
+
+// A corrupt rails file is evidence, not absence: the section renders with
+// the unreadable verdict — it must never stand in for "nothing recorded".
+func TestCollect_CorruptRailsFileReportsUnreadable(t *testing.T) {
+	home := fakeHome(t)
+	writeRailsFile(t, home, `{"schema_version":999,"bogus":`)
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if result.Mover == nil || !result.Mover.StateUnreadable {
+		t.Fatalf("Mover = %+v, want unreadable", result.Mover)
+	}
+	if !result.HandoffUnreadable {
+		t.Fatal("HandoffUnreadable = false, want true")
+	}
+}
+
+// A carried rollout whose watermark never landed is quarantined end-to-end
+// through the rails file's unrecorded marker: every claim in it is the
+// source account's, so the account's own evidence honestly reports none.
+func TestCollect_UnrecordedCarryQuarantinesWholeRollout(t *testing.T) {
+	home := fakeHome(t)
+	writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	rollout := filepath.Join(home, "accounts", "codex", "work",
+		"sessions", "2026", "10", "31",
+		"rollout-2026-10-31T04-00-00-00000000-0000-4000-8000-000000000001.jsonl")
+	writeRailsFile(t, home, `{"schema_version":1,"unrecorded_carries":{"`+rollout+`":"2026-11-06T09:00:00Z"}}`)
+
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(result.Accounts) != 1 || result.Accounts[0].Observation != quota.AccountObservationNone {
+		t.Fatalf("Accounts = %+v, want the quarantined rollout's claims ignored", result.Accounts)
+	}
+}
+
+// An account whose carry quarantine overflowed the marker cap is
+// untrusted for retraction wholesale — the home can no longer name which
+// rollout is poison, so its newest claim reports unknown with the
+// quarantine reason instead of an observed percentage that could free a
+// wall (#6852 review: the cap fails closed, never evicts).
+func TestCollect_QuarantinedAccountReportsUnknown(t *testing.T) {
+	home := fakeHome(t)
+	writeGlobalConfig(t, home, "[account_handoff]\nmode = \"shadow\"\n")
+	writeAccountRollout(t, home, "work", "31", claimLine)
+	dir := filepath.Join(home, "accounts", "codex", "work")
+	writeRailsFile(t, home, `{"schema_version":1,"quarantined_accounts":{"`+dir+`":{"at":"2026-11-06T09:00:00Z","path":"/poisoned.jsonl","covered":64}}}`)
+
+	result, err := Collect()
+	if err != nil {
+		t.Fatalf("Collect: %v", err)
+	}
+	if len(result.Accounts) != 1 ||
+		result.Accounts[0].Observation != quota.AccountObservationUnknown ||
+		result.Accounts[0].Reason != "account quarantined" {
+		t.Fatalf("Accounts = %+v, want one unknown row with the quarantine reason", result.Accounts)
 	}
 }
 
@@ -200,7 +325,7 @@ func TestCollect_CorruptStateFileReportsUnreadable(t *testing.T) {
 	}
 	var found bool
 	for _, warning := range result.Warnings() {
-		found = found || strings.Contains(warning, "auto-handoff state file")
+		found = found || strings.Contains(warning, "auto-handoff record file")
 	}
 	if !found {
 		t.Fatalf("warnings missing the state-file caveat: %v", result.Warnings())

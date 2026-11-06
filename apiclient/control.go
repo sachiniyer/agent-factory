@@ -491,6 +491,29 @@ func (c *Client) QuotaReport() (daemon.QuotaReportResponse, error) {
 	return resp, nil
 }
 
+// HandoffStatus reads the daemon host's auto-handoff rails state (#6776
+// slice 5) — HTTP twin of daemon.HandoffStatus, so a remote
+// `af accounts handoff status` describes the daemon it is pointed at.
+func (c *Client) HandoffStatus() (daemon.HandoffStatusResponse, error) {
+	var resp daemon.HandoffStatusResponse
+	if err := c.call("HandoffStatus", daemon.HandoffStatusRequest{}, &resp); err != nil {
+		return daemon.HandoffStatusResponse{}, err
+	}
+	return resp, nil
+}
+
+// HandoffReset clears one named auto-handoff rail record on the daemon host
+// (#6776 slice 5) — HTTP twin of daemon.HandoffReset. One call is one
+// mutation: c.call does not replay, so an uncertain transport answer is the
+// caller's to surface, never resend behind the operator's back.
+func (c *Client) HandoffReset(req daemon.HandoffResetRequest) (daemon.HandoffResetResponse, error) {
+	var resp daemon.HandoffResetResponse
+	if err := c.call("HandoffReset", req, &resp); err != nil {
+		return daemon.HandoffResetResponse{}, err
+	}
+	return resp, nil
+}
+
 // RegisterAccount creates an account's credential directory on the daemon host
 // without logging in, for the config pane's Accounts section.
 func (c *Client) RegisterAccount(agent, name string) (daemon.RegisterAccountResponse, error) {

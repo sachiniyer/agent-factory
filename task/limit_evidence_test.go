@@ -1,6 +1,7 @@
 package task
 
 import (
+	"errors"
 	"os"
 	"strings"
 	"testing"
@@ -143,6 +144,37 @@ func TestLimitParkErrorIgnoresAQuotedBanner(t *testing.T) {
 	}
 	if err := limitParkError(det, "  ⎿  "+claudeBanner+"\n❯ ", tmux.ProgramClaude); err == nil {
 		t.Fatal("a real banner did not park a starting session")
+	}
+}
+
+// TestLimitParkErrorCarriesEvidence is the send-path half of #6765: limitParkError
+// must return a *LimitReachedError whose Evidence field carries the reset phrase
+// from Check's 4th return, so the send-path park (finishCreateStart →
+// SetLimitReachedAtEvidence) records the phrase that produced its reset. Without
+// it the daemon's first poll over the still-displayed banner fails the
+// same-phrase dedupe and re-parses against a later clock, moving the stored
+// reset — a time-only phrase past its stated time jumps a full day.
+func TestLimitParkErrorCarriesEvidence(t *testing.T) {
+	now := time.Date(2026, 11, 4, 6, 0, 0, 0, time.UTC)
+	prevNow := waitLimitNow
+	waitLimitNow = func() time.Time { return now }
+	t.Cleanup(func() { waitLimitNow = prevNow })
+
+	det := NewLimitDetector(nil)
+	err := limitParkError(det, "■ You've hit your usage limit. Please try again at 6:34 AM.", tmux.ProgramCodex)
+	if err == nil {
+		t.Fatal("a usage-limit banner must park with *LimitReachedError")
+	}
+	var limitErr *LimitReachedError
+	if !errors.As(err, &limitErr) {
+		t.Fatalf("expected *LimitReachedError, got %T: %v", err, err)
+	}
+	if limitErr.Evidence != "try again at 6:34 AM" {
+		t.Fatalf("Evidence = %q, want %q (the reset phrase from Check's 4th return must be carried so the send-path park records it)", limitErr.Evidence, "try again at 6:34 AM")
+	}
+	wantReset := time.Date(2026, 11, 4, 6, 34, 0, 0, time.UTC)
+	if !limitErr.ResetAt.Equal(wantReset) {
+		t.Fatalf("ResetAt = %v, want %v", limitErr.ResetAt, wantReset)
 	}
 }
 

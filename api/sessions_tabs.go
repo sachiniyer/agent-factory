@@ -80,7 +80,7 @@ The tab persists and reconnects across a daemon/af restart like every other
 tab — for a process tab "reconnect" means reattach-only, never re-running the
 command (see above).
 
---name sets a process, web, VS Code, or docs tab's name — the handle every other tab
+--name sets a process, web, VS Code, or Proposal tab's name — the handle every other tab
 verb addresses it by. A shell tab does not accept --name: its canonical name is
 "shell" (auto-suffixed on collision), while the TUI renders the
 presentation-only label "Terminal". Other names are sanitized before use:

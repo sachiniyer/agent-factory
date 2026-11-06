@@ -554,7 +554,7 @@ Settable keys:
   limit_retry_interval       Go duration (e.g. 30m), or "" to never retry
   limit_patterns             compact JSON object of agent-to-regex entries
   limit_patterns.<agent>     usage-limit banner regex for an agent
-  account_handoff            compact JSON object of automatic account-handoff settings (staged; not active yet — mode = "live" is rejected)
+  account_handoff            compact JSON object of automatic account-handoff settings (shadow mode active; mode = "live" is rejected)
   account_handoff.<leaf>     one leaf: mode, include_pinned, target_order, confirm_wall, wall_percent, move_idle_at_percent,
                              prefer_below_percent, probe_ttl, default_login, require_carry, exclude_sessions, max_moves,
                              max_moves_window, refused_backoff, on_failure, report_to

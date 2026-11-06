@@ -29,7 +29,7 @@ each client. Shared daemon palette configuration is retired.
 The TUI reads the preference from its local global config at launch. System
 resolves terminal background (OSC 11, then the terminal library's `COLORFGBG`
 fallback, then dark); explicit Light/Dark bypass detection. The browser stores
-an independent header preference and resolves System from OS appearance.
+an independent client-side preference and resolves System from OS appearance.
 The CLI edits the TUI preference for its next launch and has no persistent
 renderer. A remote config edit changes its named target, not the local TUI's
 preference or the browser's independent choice.

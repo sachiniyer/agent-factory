@@ -117,6 +117,12 @@ const DEAD_PORT = process.env.AF_WEB_DEAD_PORT ?? "8892";
 // gamma(process)] in creation order. The tests below permute and rename these, so
 // they run in file order against the state the previous one left.
 const SESSION_ORDER = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
+// The #2347 geometry-reclaim session: dedicated because the assertion samples the
+// emulator ~50ms after activation, and on SHARED probe-a the peer's pane sat on
+// the agent stream until peer-fit-2347's roster row landed — then re-bound on
+// activation, a fresh attach force-sending the peer's grid inside the read
+// window (run 42244518786, #6892). No other test may open tabs on this session.
+const SESSION_GEOM = process.env.AF_WEB_SESSION_GEOM ?? "probe-geometry";
 
 /** session.TabKindWeb — the kind travels as a bare int in the snapshot projection
  *  (web/src/types.ts TabKind.Web), never as a name. */
@@ -8975,8 +8981,8 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
   try {
     const first = await firstCtx.newPage();
     await openTokenless(first);
-    await row(first, SESSION_A).click();
-    af("sessions", "tab-create", SESSION_A, "--command", "bash", "--name", shellName);
+    await row(first, SESSION_GEOM).click();
+    af("sessions", "tab-create", SESSION_GEOM, "--command", "bash", "--name", shellName);
     created = true;
     const firstShell = first.locator(".af-tabbar .af-tab", { hasText: shellName });
     await expect(firstShell).toHaveCount(1, { timeout: 15_000 });
@@ -9010,7 +9016,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     secondCtx = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
     const second = await secondCtx.newPage();
     await openTokenless(second);
-    await row(second, SESSION_A).click();
+    await row(second, SESSION_GEOM).click();
     const secondShell = second.locator(".af-tabbar .af-tab", { hasText: shellName });
     await expect(secondShell).toHaveCount(1, { timeout: 15_000 });
     await secondShell.click();
@@ -9075,7 +9081,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     await firstCtx.close();
     if (created) {
       try {
-        af("sessions", "tab-delete", SESSION_A, "--name", shellName);
+        af("sessions", "tab-delete", SESSION_GEOM, "--name", shellName);
       } catch {
         // The throwaway daemon may already have removed a failed startup.
       }

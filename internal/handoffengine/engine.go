@@ -59,14 +59,28 @@ type SessionInput struct {
 	Captured       bool      // the poll produced a frame this pass
 	CapturedAt     time.Time
 	Content        string
+	// Persisted marks a session row that exists on disk but never
+	// materialized into m.instances (its restore failed). It is report_to
+	// ambiguity evidence ONLY (#6818 review): a failed restore can hide a
+	// second project's claim on a bare title, so the row must count when
+	// resolveRecipient asks "is this title unique" — and must never be
+	// governed, read for evidence, or receive a report itself.
+	Persisted bool
 }
 
 // Deps injects every environment read so the engine is testable without a
 // daemon, a disk, or an account registry.
 type Deps struct {
-	Now             func() time.Time
-	ResolveConfig   func(repoRoot string) (*config.ResolvedConfig, error)
-	LoadState       func() (handoff.State, error)
+	Now           func() time.Time
+	ResolveConfig func(repoRoot string) (*config.ResolvedConfig, error)
+	LoadState     func() (handoff.Snapshot, error)
+	// PruneRails gives the store's retention pass a production caller: once
+	// per tick the engine hands it the widest max_moves_window any governed
+	// session resolved — one meaning everywhere the value is read: records
+	// older than the window count for nothing and are pruned. A nil dep
+	// skips the pass (tests); a non-positive window is unbounded and prunes
+	// nothing.
+	PruneRails      func(maxWindow time.Duration, now time.Time) error
 	Registered      func(agent string) ([]string, error)
 	LimitedAccounts func(agent string) (map[string]bool, error)
 	AccountDir      func(agent, name string) (string, error)
@@ -78,7 +92,12 @@ type Deps struct {
 	DriftKey   func(agent, sourceDir, targetDir string) (key string, incomparable bool)
 	DetectWall func(content, agent string) bool
 	WriteRows  func(rows []handoff.EventRow) error
-	LogWarn    func(format string, args ...any)
+	// DeliverReport hands one report_to recipient's emitted rows to the
+	// delivery path — spec included so the worker can drop digests whose
+	// mode or target changed since emission (#6818 review). It must never
+	// block the tick — the wiring enqueues and a separate worker sends.
+	DeliverReport func(spec string, recipient SessionInput, rows []handoff.EventRow)
+	LogWarn       func(format string, args ...any)
 	// ResetGrace and ProofMargin are the daemon's skew constants: the
 	// limit-resume grace a resets_at gets before it counts as past, and the
 	// reconcile's write margin a calm record must clear of a wall sighting.
@@ -135,16 +154,25 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	now := e.deps.Now()
 
 	// Resolve config once per repo root; keep only sessions opting into
-	// shadow. A resolution error skips that root's sessions — fail closed.
+	// shadow. A resolution error skips that root's sessions — fail closed —
+	// and leaves its move window UNKNOWN: the shared-ledger prune below is
+	// destructive, so it must wait for a tick where every tracked root
+	// resolved rather than cut records an unseen wider window still
+	// counts (#6776 review).
 	resolved := map[string]*config.ResolvedConfig{}
+	resolutionFailed := false
 	var gov []governed
 	for _, in := range sessions {
+		if in.Persisted {
+			continue // ambiguity evidence only — never governed (#6818 review)
+		}
 		cfg, ok := resolved[in.RepoRoot]
 		if !ok {
 			var err error
 			cfg, err = e.deps.ResolveConfig(in.RepoRoot)
 			if err != nil {
 				resolved[in.RepoRoot] = nil
+				resolutionFailed = true
 				e.warnf("resolve config for %s: %v (session %q skipped)", in.RepoRoot, err, in.Key)
 				continue
 			}
@@ -170,11 +198,41 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		return 0, nil
 	}
 
-	// Rails + carried-prefix evidence: one locked read. A corrupt file fails
-	// the pass closed — the same rule the ledger holds for the live mover.
-	state, err := e.deps.LoadState()
+	// Rails + carried-prefix evidence: one consistent read of both durable
+	// files. A corrupt file fails the pass closed — the same rule the
+	// ledger holds for the live mover.
+	snap, err := e.deps.LoadState()
 	if err != nil {
 		return len(gov), fmt.Errorf("load handoff state: %w", err)
+	}
+
+	// Retention: prune the rails file once per tick, with the WIDEST window
+	// any governed session resolved — a project that narrows the window
+	// must not erase records a wider one still counts. Unbounded wins:
+	// window <= 0 means records never age out anywhere. A root whose config
+	// failed to resolve has an unknown window: pruning at the resolved
+	// roots' bound could erase moves it still counts, so the pass waits
+	// for a fully resolved tick (#6776 review).
+	if e.deps.PruneRails != nil && !resolutionFailed {
+		maxWindow := time.Duration(0)
+		unbounded := false
+		for _, g := range gov {
+			w, werr := time.ParseDuration(g.cfg.AccountHandoff.MaxMovesWindow)
+			switch {
+			case werr != nil || w <= 0:
+				// Parse is config-validated, so a failure or non-positive
+				// value means a hand-built table — the conservative read is
+				// unbounded (everything counts, nothing pruned).
+				unbounded = true
+			case w > maxWindow:
+				maxWindow = w
+			}
+		}
+		if !unbounded && maxWindow > 0 {
+			if err := e.deps.PruneRails(maxWindow, now); err != nil {
+				e.warnf("prune handoff rails: %v", err)
+			}
+		}
 	}
 
 	// Occupancy counts EVERY started, live session's account, per
@@ -227,7 +285,15 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		if r, ok := readings[dir]; ok {
 			return r
 		}
-		r := e.deps.ReadUsage(dir, carried)
+		var r handoff.ReadingFacts
+		if snap.AccountUntrusted(dir) {
+			// The account's carry quarantine overflowed — no claim from
+			// this home may free a wall, so the read is skipped entirely
+			// (#6852 review: a full quarantine fails closed).
+			r = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
+		} else {
+			r = e.deps.ReadUsage(dir, carried)
+		}
 		readings[dir] = r
 		return r
 	}
@@ -238,24 +304,38 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 	pending := e.edges.Clone()
 
 	var rows []handoff.EventRow
+	reportRows := map[string][]handoff.EventRow{} // report_to spec → emitted rows
+	specByKey := map[string]string{}
+	specs := map[string]bool{}
+	for _, g := range gov {
+		specByKey[g.in.Key] = g.cfg.AccountHandoff.ReportTo
+		if g.cfg.AccountHandoff.ReportTo != "" {
+			specs[g.cfg.AccountHandoff.ReportTo] = true
+		}
+	}
 	// A halt is a MOVER-level event (#6818 round-2 review): one row while
 	// the rails say stopped — edge-triggered on the mover key, so a
 	// persistent halt announces once per episode, not once per walled
-	// session per tick.
-	if state.Halted != nil {
+	// session per tick. It rides every report_to spec too — the mover's
+	// alert is exactly what the recipient channel exists for.
+	if snap.State.Halted != nil {
 		ev := handoff.Event{
 			Kind:   handoff.EventHalted,
 			Reason: handoff.ReasonMoverHalted,
 			Params: map[string]string{
-				"halt_reason": state.Halted.Reason,
-				"halted_at":   state.Halted.At.UTC().Format(time.RFC3339),
+				"halt_reason": snap.State.Halted.Reason,
+				"halted_at":   snap.State.Halted.At.UTC().Format(time.RFC3339),
 			},
 		}
 		for _, ev := range pending.Filter(moverRowKey, []handoff.Event{ev}, now, Reannounce) {
-			rows = append(rows, handoff.EventRow{
+			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: moverRowKey,
 				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
-			})
+			}
+			rows = append(rows, row)
+			for spec := range specs {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
 		}
 	}
 	for _, g := range gov {
@@ -267,22 +347,26 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		// on empty accounts — so its pinned-ineligible edge can fire.
 		var facts handoff.Facts
 		if outOfScope(g) {
-			facts = e.bareFacts(g, state, now)
+			facts = e.bareFacts(g, snap, now)
 		} else {
 			ns := nsFor(g.in.Agent)
 			if ns.failed {
 				continue
 			}
-			facts = e.factsFor(g, ns, occupancy, state, now, readUsage)
+			facts = e.factsFor(g, ns, occupancy, snap, now, readUsage)
 		}
 		decision := handoff.Decide(facts)
 		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
-			rows = append(rows, handoff.EventRow{
+			row := handoff.EventRow{
 				TS: now, Kind: ev.Kind, SessionKey: g.in.Key, Agent: g.in.Agent,
 				Title: g.in.Title, From: ev.From, To: ev.To,
 				ReasonCode: ev.Reason, Params: ev.Params, Mode: "shadow",
-			})
+			}
+			rows = append(rows, row)
+			if spec := specByKey[g.in.Key]; spec != "" {
+				reportRows[spec] = append(reportRows[spec], row)
+			}
 		}
 	}
 	if len(rows) > 0 {
@@ -291,6 +375,55 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 		}
 	}
 	e.edges = pending
+	// report_to delivery happens after the log write — the durable record is
+	// the primary artifact — and on the wiring's own async path (R15).
+	if e.deps.DeliverReport == nil {
+		return len(gov), nil
+	}
+	// Every resolved recipient is excluded from EVERY payload, not only its
+	// own spec's (#6818 round-2 review): with two projects pointed at each
+	// other's sessions, A's report prompts a turn in B-sess whose events B's
+	// spec would report back into A-sess — a ping-pong of report prompts.
+	// Resolution covers ALL configured specs, not only specs whose authors
+	// emitted rows this tick: a spec edge-suppressed into silence still
+	// names a recipient whose rows must be excluded, or alternating ticks
+	// restart the ping-pong (#6818 round-3 review).
+	recipientKeys := map[string]bool{}
+	specResolved := map[string]struct {
+		recipient SessionInput
+		found     bool
+		live      bool
+	}{}
+	for spec := range specs {
+		recipient, found, live := resolveRecipient(spec, sessions)
+		specResolved[spec] = struct {
+			recipient SessionInput
+			found     bool
+			live      bool
+		}{recipient, found, live}
+		if found && live {
+			recipientKeys[recipient.Key] = true
+		}
+	}
+	for spec, specRows := range reportRows {
+		r := specResolved[spec]
+		switch {
+		case !r.found:
+			e.warnf("report_to %q matched no session or was ambiguous — skipped", spec)
+		case !r.live:
+			e.warnf("report_to %q resolved to a session that is not live — skipped", spec)
+		default:
+			var own []handoff.EventRow
+			for _, row := range specRows {
+				if !recipientKeys[row.SessionKey] {
+					own = append(own, row)
+				}
+			}
+			if len(own) > 0 {
+				e.deps.DeliverReport(spec, r.recipient, own)
+			}
+		}
+	}
 	return len(gov), nil
 }
 
@@ -332,7 +465,7 @@ func excludedTitle(excludes []string, title string) bool {
 // bareFacts builds the evidence-free Facts an out-of-scope session reaches
 // Decide with — Phase A returns before it would read Accounts or a reading,
 // so skipping those fields cannot change the verdict, only the cost.
-func (e *Engine) bareFacts(g governed, state handoff.State, now time.Time) handoff.Facts {
+func (e *Engine) bareFacts(g governed, snap handoff.Snapshot, now time.Time) handoff.Facts {
 	in := g.in
 	s := handoff.SessionFacts{
 		Key:          in.Key,
@@ -345,18 +478,88 @@ func (e *Engine) bareFacts(g governed, state handoff.State, now time.Time) hando
 		Parked:       in.Parked,
 		SwapCapable:  in.SwapCapable,
 	}
-	rails := handoff.RailsFacts{Halted: state.Halted != nil}
+	rails := handoff.RailsFacts{Halted: snap.State.Halted != nil}
 	return handoff.Facts{
 		Now: now, ResetGrace: e.deps.ResetGrace, ProofMargin: e.deps.ProofMargin,
 		Session: s, Rails: rails, Config: g.cfg.AccountHandoff,
 	}
 }
 
+// resolveRecipient applies the report_to grammar (R15): "<project>/<title>"
+// resolves the session whose project and title both name it — the project
+// part matching the repo's id, full root, or basename — while a bare title
+// must name exactly one session. The spec splits at its LAST slash so a
+// full repository root qualifies too ("/home/u/repo/observer"). A qualifier
+// that itself contains slashes must equal the full root (or repo id)
+// exactly — basename matching is reserved for single-segment qualifiers so
+// "other/repo" cannot collide with "/home/u/repo" (#6818 review).
+//
+// Matching runs over ALL sessions, not only live ones (#6818 review): a
+// lost or archived intended recipient must not let a same-titled session in
+// another project claim its reports. The caller then refuses a found-but-
+// not-live target — ambiguity is a skip, never a guess.
+func resolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
+	project, title, qualified := spec, "", false
+	if i := strings.LastIndex(spec, "/"); i >= 0 {
+		project, title, qualified = spec[:i], spec[i+1:], true
+	}
+	projectIsPath := strings.Contains(project, "/")
+	var matches []SessionInput
+	for _, in := range inputs {
+		if qualified {
+			if in.Title != title {
+				continue
+			}
+			base := in.RepoRoot
+			if i := strings.LastIndexByte(base, '/'); i >= 0 {
+				base = base[i+1:]
+			}
+			projectOK := project == in.RepoID || project == in.RepoRoot ||
+				(!projectIsPath && project == base)
+			if !projectOK {
+				continue
+			}
+		} else if in.Title != spec {
+			continue
+		}
+		matches = append(matches, in)
+	}
+	if len(matches) == 0 && qualified {
+		// A session title may itself carry slashes ("feature/login") —
+		// title shape validation forbids control chars, not slashes
+		// (#6818 round-3 review). A spec that matched nothing under the
+		// project/title grammar retries as a bare title; ambiguity with
+		// a same-titled sibling is still a skip, never a guess.
+		for _, in := range inputs {
+			if in.Title == spec {
+				matches = append(matches, in)
+			}
+		}
+	}
+	if len(matches) != 1 {
+		return SessionInput{}, false, false // absent or ambiguous alike
+	}
+	return matches[0], true, matches[0].Live && matches[0].Started
+}
+
+// ResolveRecipient exposes the spec resolver for the daemon's send-time
+// revalidation (#6818 review): a queued digest must verify its spec still
+// resolves uniquely to the SAME session right before submission — a title
+// claim that appeared while the backlog sat would otherwise redirect it.
+func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
+	return resolveRecipient(spec, inputs)
+}
+
 // factsFor assembles one session's Facts from the snapshot fields — the only
 // pane-content reads in this file are evaluations (wall banner, working,
 // composer draft) of the capture the poll already took.
-func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, state handoff.State, now time.Time, readUsage func(string, map[string]int64) handoff.ReadingFacts) handoff.Facts {
+func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, snap handoff.Snapshot, now time.Time, readUsage func(string, map[string]int64) handoff.ReadingFacts) handoff.Facts {
 	in, cfg := g.in, g.cfg
+	// Effective watermarks merge recorded carried-prefix marks with the
+	// unrecorded-carry quarantine — a carried file whose watermark never
+	// landed counts as fully poisoned, so its target's readings cannot free
+	// a wall (#6776 review MEDIUM 3).
+	carried := snap.EffectiveCarriedPrefixes()
 	fresh := in.Captured && !in.CapturedAt.IsZero() && now.Sub(in.CapturedAt) <= Freshness
 	s := handoff.SessionFacts{
 		Key:            in.Key,
@@ -388,7 +591,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 	if in.Agent == tmux.ProgramCodex {
 		srcDir = in.HomeDir
 		if srcDir != "" {
-			s.Reading = readUsage(srcDir, state.CarriedPrefixes)
+			s.Reading = readUsage(srcDir, carried)
 		} else {
 			s.Reading = handoff.ReadingFacts{Status: handoff.ReadingUnknown}
 		}
@@ -396,23 +599,32 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 		s.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
 	}
 
-	// Rails. MaxMovesWindow is validated by config resolution, so a parse
-	// failure here means the table was hand-built — fall back to no window
-	// (counting nothing) rather than a fabricated bound.
+	// Rails. max_moves_window has ONE meaning everywhere it is read — and
+	// the docs name it: "" or a non-positive duration is an UNBOUNDED
+	// window, so every recorded move counts (the same meaning
+	// PruneExpired keeps when it prunes nothing). Counting nothing here
+	// would make the same value mean "the rail never engages" — a second,
+	// opposite meaning for one leaf (#6852 round-2 review). A parse
+	// failure means a hand-built table; the unbounded answer is also the
+	// fail-closed one, so it serves as the fallback.
 	window, _ := time.ParseDuration(cfg.AccountHandoff.MaxMovesWindow)
-	rails := handoff.RailsFacts{Halted: state.Halted != nil}
-	if state.Halted != nil {
-		rails.HaltReason = state.Halted.Reason
-	}
+	var cutoff time.Time
 	if window > 0 {
-		cutoff := now.Add(-window)
-		for _, mv := range state.RecentMoves {
-			if mv.SessionKey == in.Key && !mv.At.Before(cutoff) {
-				rails.MovesInWindow++
-			}
+		cutoff = now.Add(-window)
+	}
+	inWindow := func(at time.Time) bool {
+		return window <= 0 || !at.Before(cutoff)
+	}
+	rails := handoff.RailsFacts{Halted: snap.State.Halted != nil}
+	if snap.State.Halted != nil {
+		rails.HaltReason = snap.State.Halted.Reason
+	}
+	for _, mv := range snap.Rails.RecentMoves {
+		if mv.SessionKey == in.Key && inWindow(mv.At) {
+			rails.MovesInWindow++
 		}
 	}
-	if until, ok := state.RefusedUntil[in.Key]; ok && until.After(now) {
+	if until, ok := snap.Rails.RefusedUntil[in.Key]; ok && until.After(now) {
 		rails.RefusedUntil = until
 	}
 
@@ -432,7 +644,7 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 				af.Drift = driftUnverifiable
 			}
 		} else if in.Agent == tmux.ProgramCodex {
-			af.Reading = readUsage(dir, state.CarriedPrefixes)
+			af.Reading = readUsage(dir, carried)
 			if srcDir == "" {
 				af.Drift = driftUnverifiable
 			} else if key, incomparable := e.deps.DriftKey(in.Agent, srcDir, dir); incomparable {
@@ -444,12 +656,12 @@ func (e *Engine) factsFor(g governed, ns *namespace, occupancy map[string]int, s
 			af.Reading = handoff.ReadingFacts{Status: handoff.ReadingNone}
 		}
 		af.Occupancy = occupancy[in.Agent+"\x00"+name]
-		if window > 0 {
-			cutoff := now.Add(-window)
-			for _, mv := range state.RecentMoves {
-				if mv.Account == name && !mv.At.Before(cutoff) {
-					af.RecentMoveCredits++
-				}
+		for _, mv := range snap.Rails.RecentMoves {
+			// Credits key on agent + account — "work" on codex is a
+			// different seat than "work" on claude, the same namespacing
+			// occupancy uses (#6776 review).
+			if mv.Agent == in.Agent && mv.Account == name && inWindow(mv.At) {
+				af.RecentMoveCredits++
 			}
 		}
 		accounts = append(accounts, af)
