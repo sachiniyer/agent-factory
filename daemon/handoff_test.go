@@ -227,8 +227,9 @@ func (b *rolloutHandoffBackend) SwapAgent(i *session.Instance, plan session.Agen
 	if err := b.handoffBackend.SwapAgent(i, plan); err != nil {
 		return err
 	}
-	path := filepath.Join(b.codexHome, "sessions", "2026", "07", "21",
-		"rollout-2026-07-21T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	now := time.Now()
+	path := filepath.Join(configAgentCodexDayDir(b.codexHome, now),
+		"rollout-"+now.Format("2006-01-02")+"T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 	if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
 		return err
 	}

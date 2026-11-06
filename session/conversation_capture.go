@@ -10,7 +10,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"regexp"
 	"strings"
 	"sync"
 	"syscall"
@@ -20,8 +19,6 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
-
-var codexRolloutFileRE = regexp.MustCompile(`(?i)^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
 var (
 	// ErrPromptReceiptUnavailable means the provider exposes no receiver-side
@@ -88,8 +85,9 @@ type ConversationCaptureSnapshot struct {
 	workingDir  string
 	codexBefore map[string]struct{}
 	// codexBeforeErr is set when the before-image scan itself failed: the map
-	// can no longer distinguish "new" from "pre-existing", and every check
-	// against this snapshot must surface that failure instead of guessing.
+	// can no longer distinguish "new" from "pre-existing" inside the capture
+	// window, and every check against this snapshot must surface that failure
+	// instead of guessing.
 	codexBeforeErr error
 	// receiptState carries the scan memoization across the separate
 	// WaitForPromptReceipt calls that share one snapshot — the config agent's
@@ -332,9 +330,14 @@ func beginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir string) C
 	if workingDir != "" {
 		workingDir = pathutil.ResolveForCompare(workingDir)
 	}
-	before, beforeErr := codexRolloutFiles(home)
+	startedAt := time.Now()
+	// The baseline is bounded to the same capture window the diff scan uses:
+	// a rollout directory provably older than the snapshot can hold nothing
+	// this session minted, so its contents neither help nor are owed the
+	// fail-closed guarantee a window inside the scan gets (#6845).
+	before, beforeErr := codexRolloutFilesSince(home, codexRolloutScanFloor(startedAt))
 	return ConversationCaptureSnapshot{
-		startedAt:      time.Now(),
+		startedAt:      startedAt,
 		codexHome:      home,
 		workingDir:     workingDir,
 		codexBefore:    before,
@@ -351,9 +354,10 @@ func (s *ConversationCaptureSnapshot) CapturesCodex() bool {
 }
 
 // CodexBaselineFailed reports whether the snapshot's before-image scan itself
-// failed: the map can no longer distinguish "new" from "pre-existing", so a
-// capture armed on it would guess. A re-arm that keeps a failed baseline would
-// only re-ask the same broken question; the baseline must be re-taken instead.
+// failed: the map can no longer distinguish "new" from "pre-existing" inside
+// the capture window, so a capture armed on it would guess. A re-arm that
+// keeps a failed baseline would only re-ask the same broken question; the
+// baseline must be re-taken instead.
 func (s *ConversationCaptureSnapshot) CodexBaselineFailed() bool {
 	return s != nil && s.codexBeforeErr != nil
 }
@@ -654,7 +658,12 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 	if snap.codexBeforeErr != nil {
 		return nil, fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr)
 	}
-	after, err := codexRolloutFiles(snap.codexHome)
+	// The diff scan descends only into day directories that could hold a
+	// rollout minted around or after the snapshot; the daemon re-asks this on
+	// every rearm for the life of an unrecorded session, so its cost must be
+	// bounded by what this session could have produced, not by the size of
+	// the user's whole Codex history (#6845).
+	after, err := codexRolloutFilesSince(snap.codexHome, codexRolloutScanFloor(snap.startedAt))
 	if err != nil {
 		return nil, fmt.Errorf("scan of the Codex rollout store failed: %w", err)
 	}
@@ -929,41 +938,4 @@ func normalizePromptReceiptText(text string) string {
 // anchored to its actual position within the recorded message (#5488).
 func normalizedReceiptPrompt(prompt string) string {
 	return strings.TrimRightFunc(normalizePromptReceiptText(prompt), unicode.IsSpace)
-}
-
-func codexRolloutFiles(codexHome string) (map[string]struct{}, error) {
-	out := make(map[string]struct{})
-	if codexHome == "" {
-		return out, nil
-	}
-	root := filepath.Join(codexHome, "sessions")
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
-		if err != nil {
-			// An entry vanishing mid-walk is normal; a store that cannot be
-			// traversed is NOT an empty store. Swallowing the failure would let
-			// a receipt check report never-arrived for a directory it never
-			// inspected (#5471 review).
-			if errors.Is(err, os.ErrNotExist) {
-				return nil
-			}
-			return err
-		}
-		if d == nil || d.IsDir() {
-			return nil
-		}
-		if codexConversationIDFromPath(path) == "" {
-			return nil
-		}
-		out[path] = struct{}{}
-		return nil
-	})
-	return out, err
-}
-
-func codexConversationIDFromPath(path string) string {
-	matches := codexRolloutFileRE.FindStringSubmatch(filepath.Base(path))
-	if len(matches) != 2 {
-		return ""
-	}
-	return strings.ToLower(matches[1])
 }

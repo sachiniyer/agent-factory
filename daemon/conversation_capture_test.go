@@ -15,16 +15,20 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// Rollouts these fixtures write must sit in the day dir a real recorder
+// would mint them in now — the bounded capture scan prunes directories
+// provably older than the snapshot window, so a file dated in the past is
+// invisible to the very capture path the fixture feeds (#6845).
 func writeDaemonCodexRolloutFile(t *testing.T, codexHome, name string) {
 	t.Helper()
-	path := filepath.Join(codexHome, "sessions", "2026", "07", "06", name)
+	path := filepath.Join(configAgentCodexDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	require.NoError(t, os.WriteFile(path, []byte(`{"type":"session_meta"}`+"\n"), 0644))
 }
 
 func writeDaemonCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd string) {
 	t.Helper()
-	path := filepath.Join(codexHome, "sessions", "2026", "08", "10", name)
+	path := filepath.Join(configAgentCodexDayDir(codexHome, time.Now()), name)
 	require.NoError(t, os.MkdirAll(filepath.Dir(path), 0755))
 	data, err := json.Marshal(map[string]any{
 		"type":    "session_meta",
