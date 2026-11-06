@@ -448,3 +448,49 @@ func resolveRealPath(path string) string {
 	}
 	return abs
 }
+
+// unscopedTitleMissError is the none-held half of AmbiguousTitleError's
+// contract (#6882): a bare title looked up with no project context matched
+// nothing. The lookup already spanned every project af knows, so a bare
+// "not found" reads as "the session is gone" when the truth is "no project
+// holds it" — this names why the lookup had no scope and how to give it one.
+// Unwrap keeps errTitleNotFound reachable for the errors.Is checks that tell
+// a clean miss from an under-read one (#861).
+type unscopedTitleMissError struct {
+	title  string
+	remote string // the daemon a remote lookup searched; "" for a local one
+}
+
+func (e unscopedTitleMissError) Error() string {
+	if e.remote != "" {
+		return fmt.Sprintf("session %q is held by no project on the daemon at %s — the lookup was not scoped by --repo, so every project it holds was searched; pass --repo <path> to scope it", e.title, e.remote)
+	}
+	return fmt.Sprintf("session %q is held by no project — you are outside a git repository, so the lookup spanned every project; cd into one or pass --repo <path> to scope it", e.title)
+}
+
+func (e unscopedTitleMissError) Unwrap() error { return errTitleNotFound }
+
+// unscopedTitleMiss builds the miss for a bare title that matched nothing
+// anywhere, looked up with no project context (#6882). A remote lookup names
+// the daemon it searched — "outside a git repository" would be wrong there,
+// since the client's cwd never scopes a remote; a local lookup names the
+// missing context its empty scope implies.
+func unscopedTitleMiss(title string) error {
+	if apiclient.IsRemoteTarget() {
+		return unscopedTitleMissError{title: title, remote: apiclient.RemoteTargetURL()}
+	}
+	return unscopedTitleMissError{title: title}
+}
+
+// unscopedListNotice is the one-line stderr caveat `sessions list` emits when
+// it ran with no project context (#6882): stdout's JSON is a machine contract,
+// so the notice rides stderr like every other caveat. It says what was
+// searched and names the two flags that change the answer — a remote lookup
+// has no client-side cwd to scope by, so it names the daemon rather than
+// claiming a repo was missed.
+func unscopedListNotice() string {
+	if apiclient.IsRemoteTarget() {
+		return fmt.Sprintf("af sessions list: no --repo given — listing sessions across every project on the daemon at %s; pass --repo <path> to scope to one, or --all to list every project explicitly", apiclient.RemoteTargetURL())
+	}
+	return "af sessions list: not inside a project repo — listing sessions across every project; pass --repo <path> to scope to one, or --all to list every project explicitly"
+}

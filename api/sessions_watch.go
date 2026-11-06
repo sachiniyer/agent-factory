@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
@@ -180,8 +181,10 @@ func validateWatchFlags(interval, timeout time.Duration) error {
 // scoping (unlike the all-repo `sessions get`). An empty repoID preserves the
 // all-repo lookup; a non-empty one confines the lookup to that repo so a
 // same-titled session in a different repo is never watched by mistake. It
-// prefers the daemon's live snapshot and falls back to a scoped disk scan when
-// no daemon is reachable, mirroring getSessionByTitle (#1029 PR 2).
+// prefers the daemon's live snapshot, consults the repo's disk file on a
+// snapshot miss (a persisted row can lag the snapshot's projection, #6882),
+// and falls back to a scoped disk scan when no daemon is reachable, mirroring
+// getSessionByTitle (#1029 PR 2).
 //
 // The second return is getSessionByTitle's ambiguity-widening notice, passed
 // through unchanged; a scoped lookup never runs that check (a single repo
@@ -207,6 +210,27 @@ func getSessionByTitleInScope(repoID, title string) (*session.InstanceData, stri
 		// was dropped at startup and may be hiding the title.
 		if len(skipped) > 0 {
 			return nil, "", skippedReposError(skipped)
+		}
+		// A persisted row can be absent from the snapshot while refresh or
+		// materialization is still catching up (#6882): check the repo's disk
+		// file before claiming the scope does not hold the title, mirroring the
+		// daemon's own scoped resolver (findInstanceDataByTitle) and the
+		// unscoped union in getSessionByTitle. A remote's disk is not local, so
+		// its snapshot miss is the whole answer.
+		if !apiclient.IsRemoteTarget() {
+			disk, derr := diskListSessions(repoID)
+			if derr != nil {
+				// The file could not be read or parsed — it may be hiding the
+				// title, so the miss is not clean (mirrors the disk-fallback
+				// branch below, which returns the same error).
+				return nil, "", derr
+			}
+			for i := range disk {
+				if disk[i].Title == title {
+					view := unconfirmedLiveProjection(disk[i])
+					return &view, "", nil
+				}
+			}
 		}
 		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
 	}

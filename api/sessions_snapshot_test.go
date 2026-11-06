@@ -396,11 +396,15 @@ func TestListSessions_DiskFallbackCorruptLoud(t *testing.T) {
 }
 
 // TestGetSessionByTitle_DaemonUp verifies get resolves from the live snapshot,
-// and that a miss against a reachable daemon returns not-found without reading
-// disk (the daemon is authoritative).
+// that a snapshot miss widens to the disk scan — a persisted row can be absent
+// from the snapshot while refresh or materialization is still catching up, so
+// it resolves rather than claiming no project holds it (#6882), mirroring the
+// daemon's own in-memory-miss-then-disk resolver — and that a title held by
+// neither reports the not-found sentinel.
 func TestGetSessionByTitle_DaemonUp(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
-	// Disk holds the title so a "not found" proves disk was not consulted.
+	// Disk holds a title the snapshot does not: the snapshot-miss disk union
+	// must resolve it.
 	diskJSON, err := json.Marshal([]session.InstanceData{{Title: "ghost"}})
 	if err != nil {
 		t.Fatalf("marshal disk: %v", err)
@@ -420,9 +424,17 @@ func TestGetSessionByTitle_DaemonUp(t *testing.T) {
 		t.Fatalf("got %q, want two", got.Title)
 	}
 
-	_, _, err = getSessionByTitle("ghost")
+	got, _, err = getSessionByTitle("ghost")
+	if err != nil {
+		t.Fatalf("getSessionByTitle(ghost) disk-union: %v", err)
+	}
+	if got.Title != "ghost" {
+		t.Fatalf("got %q, want ghost", got.Title)
+	}
+
+	_, _, err = getSessionByTitle("absent")
 	if err == nil {
-		t.Fatalf("expected not-found for a title absent from the live snapshot")
+		t.Fatalf("expected not-found for a title held by neither snapshot nor disk")
 	}
 	if !errors.Is(err, errTitleNotFound) {
 		t.Fatalf("expected errTitleNotFound sentinel, got: %v", err)
