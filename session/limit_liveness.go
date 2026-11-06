@@ -5,6 +5,8 @@ import (
 	"slices"
 	"strings"
 	"time"
+
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // The usage-limit half of the daemon-owned liveness axis (#1146): parking a
@@ -179,16 +181,22 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 // are the agent's banner lead marker ("⎿  ", "■ "), identical for every
 // anchored match of that agent, so they carry no positional information — a
 // recorded prefix that IS just the marker would suffix-match any later
-// banner's gutter and falsely prove a re-read of a different wall.
-// A banner whose capture starts at its own row has no context above it and
-// proves nothing.
+// banner's gutter and falsely prove a re-read of a different wall. The shared
+// body must also carry distinguishing CONTENT: a shorter body that is only
+// whitespace or ANSI styling (a blank line before the banner leaves
+// storedBody == "\n") suffix-matches every longer capture and proves nothing —
+// a banner whose capture holds no real text above its row has no position.
 func sameLimitBannerPosition(stored, current string) bool {
 	storedBody := stored[:strings.LastIndexByte(stored, '\n')+1]
 	currentBody := current[:strings.LastIndexByte(current, '\n')+1]
-	if storedBody == "" || currentBody == "" {
+	shorter, longer := storedBody, currentBody
+	if len(longer) < len(shorter) {
+		shorter, longer = longer, shorter
+	}
+	if strings.TrimSpace(xansi.Strip(shorter)) == "" {
 		return false
 	}
-	return strings.HasSuffix(currentBody, storedBody) || strings.HasSuffix(storedBody, currentBody)
+	return strings.HasSuffix(longer, shorter)
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
