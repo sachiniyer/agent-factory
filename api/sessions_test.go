@@ -1369,12 +1369,12 @@ func TestSessionsArchive_HonorsRepoScopingAndReturnsPath(t *testing.T) {
 
 	var gotReq daemon.ArchiveSessionRequest
 	prev := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, error) {
+	archiveSessionViaDaemon = func(req daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
 		gotReq = req
 		if req.RepoID == "" {
-			return "", errors.New("RepoID empty: --repo scoping was dropped")
+			return "", nil, errors.New("RepoID empty: --repo scoping was dropped")
 		}
-		return "/home/u/.agent-factory/archived/" + req.RepoID + "/worker", nil
+		return "/home/u/.agent-factory/archived/" + req.RepoID + "/worker", nil, nil
 	}
 	defer func() { archiveSessionViaDaemon = prev }()
 

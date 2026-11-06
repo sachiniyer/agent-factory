@@ -68,8 +68,9 @@ type PruneCandidate struct {
 	// the apply (#5189) reports its estimate as reclaimed_estimate_bytes.
 	ReclaimableBytes int64 `json:"reclaimable_bytes"`
 	// BranchPushed is information, not a gate: the row records whether af ever
-	// saw the branch pushed. The kept local branch is the preservation, and it
-	// holds every commit of the worktree (HEAD == branch tip is a gate).
+	// saw the branch pushed. The kept local branch is the preservation; the
+	// verdict's guards (HEAD == branch tip, plus the leaf reflog check) prove
+	// the worktree's commits are on it.
 	BranchPushed bool `json:"branch_pushed"`
 	// head is the object id the verdict proved equal to the branch tip; it goes
 	// into the durable intent.
@@ -470,10 +471,18 @@ func pruneFilesystemRefusal(data session.InstanceData) (head, reason string) {
 	if len(reasons) > 0 {
 		return "", fmt.Sprintf("worktree holds content the kept branch does not contain: %s", strings.Join(reasons, "; "))
 	}
-	// Every commit of the worktree must be on the kept branch: HEAD is the branch
-	// tip, so nothing detached or extra exists only here.
+	// The worktree's current HEAD is the branch tip. A detached-HEAD commit
+	// returned to the tip is not on the branch and exists only in the leaf's
+	// reflog — the reflog guard below catches it.
 	head, err = sessiongit.WorktreeHeadMatchesBranch(wtPath, repoPath, pruneBranchFor(data))
 	if err != nil {
+		return "", fmt.Sprintf("%s holds work the kept branch does not: %v", wtPath, err)
+	}
+	// The leaf's per-worktree HEAD reflog (logs/HEAD) is the only reachability
+	// root for commits made on a detached HEAD and then abandoned by a checkout
+	// back to the branch tip. Prune deletes the leaf, so such commits must be
+	// caught here, before the leaf is removed.
+	if err := sessiongit.VerifyWorktreeHeadReflogReachableFromBranch(wtPath, repoPath, pruneBranchFor(data)); err != nil {
 		return "", fmt.Sprintf("%s holds work the kept branch does not: %v", wtPath, err)
 	}
 	return head, ""

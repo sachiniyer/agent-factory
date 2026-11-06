@@ -486,3 +486,106 @@ func TestAccountHandoffNoTableNoChange(t *testing.T) {
 		}
 	}
 }
+
+// TestAccountHandoffExcludeSessionsLeafRejectsJSONAndBracketSpellings is the
+// core fix for the get→set corruption: the leaf validator rejects the JSON and
+// bracket spellings `af config get` used to print (and that `set` silently
+// comma-split into corrupted elements), so `set` errors loudly instead of
+// storing two entries that can never match a real title.
+func TestAccountHandoffExcludeSessionsLeafRejectsJSONAndBracketSpellings(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "default_program = \"claude\"\n")
+
+	for _, bad := range []string{
+		`["alpha","beta"]`,  // the exact JSON get prints
+		`["alpha", "beta"]`, // JSON with spaces
+		`[]`,                // the empty-list spelling get prints
+		`["alpha"]`,         // single-element JSON
+	} {
+		_, err := SetGlobalConfigValue("account_handoff.exclude_sessions", bad)
+		require.Error(t, err, "the JSON spelling %q must be rejected, not silently corrupted", bad)
+		assert.Contains(t, err.Error(), "exclude_sessions")
+		assert.Contains(t, err.Error(), "brackets")
+	}
+}
+
+// TestAccountHandoffExcludeSessionsLeafRoundTrips pins the get→set round-trip
+// for valid (comma-free) values: `af config get` prints the comma-joined form,
+// and `af config set` accepts it back byte-for-byte.
+func TestAccountHandoffExcludeSessionsLeafRoundTrips(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "default_program = \"claude\"\n")
+
+	const two = "alpha-session,beta-session"
+	_, err := SetGlobalConfigValue("account_handoff.exclude_sessions", two)
+	require.NoError(t, err)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"alpha-session", "beta-session"}, cfg.AccountHandoff.ExcludeSessions)
+
+	// The get path renders the leaf as the comma-joined form, not JSON.
+	resolved, err := ResolveGlobalConfig()
+	require.NoError(t, err)
+	leaf, ok := resolved.ResolvedValuePath("account_handoff.exclude_sessions")
+	require.True(t, ok)
+	assert.Equal(t, two, FormatValueForKey("account_handoff.exclude_sessions", leaf.Value),
+		"get must print the comma-joined form set accepts back")
+}
+
+// TestAccountHandoffExcludeSessionsLeafClears pins that an empty value clears
+// the list (the cfgStringList contract), and that the JSON empty-list spelling
+// '[]' is rejected rather than stored as a one-element list holding the literal
+// "[]".
+func TestAccountHandoffExcludeSessionsLeafClears(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "default_program = \"claude\"\n")
+
+	_, err := SetGlobalConfigValue("account_handoff.exclude_sessions", "alpha,beta")
+	require.NoError(t, err)
+
+	// An empty value clears the list.
+	_, err = SetGlobalConfigValue("account_handoff.exclude_sessions", "")
+	require.NoError(t, err)
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Empty(t, cfg.AccountHandoff.ExcludeSessions, "an empty value must clear the list")
+}
+
+// TestAccountHandoffExcludeSessionsWholeTablePreservesCommas pins the escape
+// hatch: the whole-table JSON form preserves a comma-bearing title that the
+// leaf form cannot represent (the leaf is comma-separated with no escaping).
+func TestAccountHandoffExcludeSessionsWholeTablePreservesCommas(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "default_program = \"claude\"\n")
+
+	_, err := SetGlobalConfigValue("account_handoff", `{"exclude_sessions":["work, feature X"]}`)
+	require.NoError(t, err)
+
+	cfg, err := LoadConfig()
+	require.NoError(t, err)
+	assert.Equal(t, []string{"work, feature X"}, cfg.AccountHandoff.ExcludeSessions,
+		"the whole-table JSON form preserves a comma-bearing title")
+}
+
+// TestAccountHandoffExcludeSessionsLeafAcceptsValidValues pins that the leaf
+// form still accepts valid comma-free values after the validator tightening.
+func TestAccountHandoffExcludeSessionsLeafAcceptsValidValues(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	writeGlobalTOML(t, home, "default_program = \"claude\"\n")
+
+	for _, good := range []string{
+		"alpha",
+		"alpha,beta",
+		"alpha, beta, gamma",
+		"session-with-dashes",
+	} {
+		_, err := SetGlobalConfigValue("account_handoff.exclude_sessions", good)
+		require.NoError(t, err, "a valid comma-free value %q must be accepted", good)
+	}
+}

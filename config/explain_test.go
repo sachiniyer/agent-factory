@@ -115,3 +115,148 @@ func TestFormatValueIsTheBareScalarRenderer(t *testing.T) {
 		t.Fatalf("got %q", got)
 	}
 }
+
+// TestFormatValueForKeyCommaJoinsCommaListKeys pins the get→set round-trip fix:
+// a cfgStringList leaf (isCommaListKey) renders as the comma-joined form `af
+// config set` accepts back, not JSON — so copy-pasting `af config get` output
+// into `af config set` does not silently corrupt the list.
+func TestFormatValueForKeyCommaJoinsCommaListKeys(t *testing.T) {
+	// A comma-list key renders comma-joined.
+	if got := FormatValueForKey("network.cors_allowed_origins", []string{"https://a.example.com", "https://b.example.com"}); got != "https://a.example.com,https://b.example.com" {
+		t.Fatalf("comma-list key must render comma-joined, got %q", got)
+	}
+	// A dotted subkey that opted into cfgStringList also renders comma-joined.
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("dotted comma-list subkey must render comma-joined, got %q", got)
+	}
+	// An empty comma-list renders as "" (the form that clears via set).
+	if got := FormatValueForKey("network.cors_allowed_origins", []string{}); got != "" {
+		t.Fatalf("empty comma-list must render as empty string, got %q", got)
+	}
+	if got := FormatValueForKey("network.cors_allowed_origins", []string(nil)); got != "" {
+		t.Fatalf("nil comma-list must render as empty string, got %q", got)
+	}
+	// A non-comma-list []string key stays JSON.
+	if got := FormatValueForKey("session_env_passthrough", []string{"FOO", "BAR"}); got != `["FOO","BAR"]` {
+		t.Fatalf("non-comma-list key must stay JSON, got %q", got)
+	}
+	// A scalar key is unchanged.
+	if got := FormatValueForKey("default_program", "claude"); got != "claude" {
+		t.Fatalf("scalar key must render bare, got %q", got)
+	}
+}
+
+// TestFormatExplainValueForKeyCommaJoinsCommaListKeys pins the explain-path
+// counterpart: an empty comma-list shows as `""` (to distinguish it from an
+// absent value), and a non-empty one shows comma-joined.
+func TestFormatExplainValueForKeyCommaJoinsCommaListKeys(t *testing.T) {
+	if got := FormatExplainValueForKey("network.cors_allowed_origins", []string{"https://a.example.com"}); got != "https://a.example.com" {
+		t.Fatalf("non-empty comma-list must render comma-joined, got %q", got)
+	}
+	if got := FormatExplainValueForKey("network.cors_allowed_origins", []string{}); got != `""` {
+		t.Fatalf("empty comma-list must render as %q, got %q", `""`, got)
+	}
+	// A non-comma-list key delegates to FormatExplainValue (JSON for []string).
+	if got := FormatExplainValueForKey("session_env_passthrough", []string{"FOO"}); got != `["FOO"]` {
+		t.Fatalf("non-comma-list key must stay JSON, got %q", got)
+	}
+}
+
+// TestFormatExplainValueForKeyCommaJoinsAnyList pins that the explain trace's
+// candidate values — which arrive as []any (from map[string]any TOML decode)
+// rather than []string — also render comma-joined for a cfgStringList key, so
+// the effective value and the candidate values in the --explain trace agree.
+func TestFormatExplainValueForKeyCommaJoinsAnyList(t *testing.T) {
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []any{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("[]any comma-list must render comma-joined, got %q", got)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("[]any comma-list must render comma-joined, got %q", got)
+	}
+	// A []any with non-string elements falls back to JSON (not a string list).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{1, 2}); got != `[1,2]` {
+		t.Fatalf("non-string []any must fall back to JSON, got %q", got)
+	}
+}
+
+// TestCommaListFallsBackToJSONForCommaBearingElement pins the silent-corruption
+// guard from the round-trip review: when an element contains a comma (only
+// storable via the whole-table JSON escape hatch, since the leaf setter splits
+// on commas), the get path falls back to JSON rather than printing a
+// comma-joined string that the leaf setter would parse back into a different
+// list. The JSON form is unambiguous and signals "use the whole-table form to
+// set this back," instead of a value that looks round-trippable but is not.
+func TestCommaListFallsBackToJSONForCommaBearingElement(t *testing.T) {
+	const want = `["work, feature X"]`
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"work, feature X"}); got != want {
+		t.Fatalf("comma-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []string{"work, feature X"}); got != want {
+		t.Fatalf("explain path must fall back to JSON for comma-bearing element, got %q want %q", got, want)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"work, feature X"}); got != want {
+		t.Fatalf("[]any comma-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	// A comma-free list still renders comma-joined (the round-trip path).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("comma-free list must still render comma-joined, got %q", got)
+	}
+}
+
+// TestCommaListFallsBackToJSONForNonRoundTrippableElement pins the second
+// silent-corruption guard from the round-trip review: the comma form is only
+// safe when re-splitting and re-validating the joined string reproduces every
+// original element. An element with surrounding whitespace would be trimmed by
+// splitListValue (" work " -> "work"), an empty element would be dropped, and a
+// bracket/quote-bearing exclude_sessions title would be rejected by the leaf
+// validator — each would otherwise print a value the leaf setter parses into a
+// different list (or refuses). Fall back to JSON in all of these cases.
+func TestCommaListFallsBackToJSONForNonRoundTrippableElement(t *testing.T) {
+	cases := []struct {
+		name string
+		list []string
+		want string
+	}{
+		{"whitespace-only trim-sensitive", []string{" work "}, `[" work "]`},
+		{"empty element", []string{""}, `[""]`},
+		{"bracket-bearing title", []string{"[work]"}, `["[work]"]`},
+		{"quote-bearing title", []string{`"work"`}, `["\"work\""]`},
+	}
+	for _, c := range cases {
+		if got := FormatValueForKey("account_handoff.exclude_sessions", c.list); got != c.want {
+			t.Fatalf("%s: get path must fall back to JSON, got %q want %q", c.name, got, c.want)
+		}
+		if got := FormatExplainValueForKey("account_handoff.exclude_sessions", c.list); got != c.want {
+			t.Fatalf("%s: explain path must fall back to JSON, got %q want %q", c.name, got, c.want)
+		}
+	}
+	// A clean list with no whitespace, commas, or special characters still
+	// renders comma-joined (the round-trip path).
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("clean list must still render comma-joined, got %q", got)
+	}
+}
+
+// TestCommaListFallsBackToJSONForControlBearingElement pins the terminal-safety
+// guard from the round-trip review: a whole-table exclude_sessions element may
+// legally contain a control character (the validator rejects only trim-empty
+// titles), and emitting the raw joined string would write terminal control
+// sequences verbatim through `config get` and the explain table where JSON
+// marshaling would escape them. Fall back to JSON so a configured title cannot
+// manipulate or corrupt terminal output.
+func TestCommaListFallsBackToJSONForControlBearingElement(t *testing.T) {
+	const want = `["work\u001bX"]`
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"work\x1bX"}); got != want {
+		t.Fatalf("control-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	if got := FormatExplainValueForKey("account_handoff.exclude_sessions", []string{"work\x1bX"}); got != want {
+		t.Fatalf("explain path must fall back to JSON for control-bearing element, got %q want %q", got, want)
+	}
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []any{"work\x1bX"}); got != want {
+		t.Fatalf("[]any control-bearing element must fall back to JSON, got %q want %q", got, want)
+	}
+	// A clean list with no control characters still renders comma-joined.
+	if got := FormatValueForKey("account_handoff.exclude_sessions", []string{"alpha", "beta"}); got != "alpha,beta" {
+		t.Fatalf("clean list must still render comma-joined, got %q", got)
+	}
+}

@@ -88,9 +88,26 @@ func TestControlRoundTrips(t *testing.T) {
 		c := routeServer(t, "ArchiveSession", func([]byte) apiproto.Envelope {
 			return apiproto.Success(daemon.ArchiveSessionResponse{ArchivedPath: "/arch/alpha"})
 		})
-		path, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
+		path, _, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
 		if err != nil || path != "/arch/alpha" {
 			t.Fatalf("ArchiveSession = %q, %v; want /arch/alpha", path, err)
+		}
+	})
+
+	t.Run("ArchiveSession returns workspace", func(t *testing.T) {
+		want := &session.ArchivedWorkspaceData{Host: "box1", Dir: "/home/agent/.agent-factory/sessions/alpha/worktree"}
+		c := routeServer(t, "ArchiveSession", func([]byte) apiproto.Envelope {
+			return apiproto.Success(daemon.ArchiveSessionResponse{
+				ArchivedPath:      "/arch/alpha",
+				ArchivedWorkspace: want,
+			})
+		})
+		path, ws, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
+		if err != nil || path != "/arch/alpha" {
+			t.Fatalf("ArchiveSession = %q, %v; want /arch/alpha", path, err)
+		}
+		if ws == nil || ws.Host != want.Host || ws.Dir != want.Dir {
+			t.Fatalf("ArchiveSession workspace = %+v, want %+v", ws, want)
 		}
 	})
 
@@ -107,7 +124,7 @@ func TestControlRoundTrips(t *testing.T) {
 				},
 			})
 		})
-		path, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
+		path, _, err := c.ArchiveSession(daemon.ArchiveSessionRequest{Title: "alpha"})
 		if path != "/arch/alpha" || !IsMutationCommitted(err) {
 			t.Fatalf("ArchiveSession = %q, %T %v; want path plus committed warning", path, err, err)
 		}

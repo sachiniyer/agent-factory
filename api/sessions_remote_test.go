@@ -47,7 +47,7 @@ func TestRoutedLifecycleVerbsReachRemoteTarget(t *testing.T) {
 
 	_, killErr := routedKillSession(daemon.KillSessionRequest{Title: "a"})
 	require.NoError(t, killErr)
-	p, err := routedArchiveSession(daemon.ArchiveSessionRequest{Title: "a"})
+	p, _, err := routedArchiveSession(daemon.ArchiveSessionRequest{Title: "a"})
 	require.NoError(t, err)
 	require.Equal(t, "/srv/box/arch", p)
 	st, err := routedSendPrompt(daemon.SendPromptRequest{Title: "a", Prompt: "hi"})

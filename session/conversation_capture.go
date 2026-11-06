@@ -487,10 +487,18 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 // told to resume a carried rollout is on. Codex resumes in place — same id,
 // same file (measured for #4367) — so no new rollout for this working
 // directory means the carried id stands, and it returns immediately rather
-// than waiting out the absence timeout. If a future Codex forks on resume
-// instead, the fork is the one new rollout for this directory, and capture
-// follows it. It runs after the readiness wait, when a startup fork would
-// already exist.
+// than waiting out the absence timeout.
+//
+// A new rollout correlated to the working directory is NOT positive evidence
+// that the replacement forked: an unrelated sibling Codex sharing the
+// account-scoped store can mint the lone same-cwd rollout during the capture
+// window, and af cannot tell it from a real fork by appearance alone. The
+// carried rollout is in the before-set, so any new file is by definition a
+// different thread. Fail closed: keep the carried id unless positive evidence
+// (lineage in the rollout header, a recorded briefing match) proves the new
+// rollout is the replacement's own — mirroring codexPromptReceiptOnce, which
+// refuses to attribute identity by first-seen appearance. A store that cannot
+// be enumerated is a real error, not a guess.
 //
 // The returned record is freshly stamped even when the id is unchanged: the
 // caller commits it through SetAgentConversationForRuntime, which reports
@@ -498,19 +506,29 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 func captureCarriedCodexConversation(snap ConversationCaptureSnapshot) (AgentConversationData, error) {
 	settleDeadline := time.Now().Add(codexSessionMetaSettleTimeout)
 	for {
-		conv, _, err := captureCodexConversationOnce(snap)
-		if conv.HasID() {
-			return conv, nil
+		_, retry, err := captureCodexConversationOnce(snap)
+		if errors.Is(err, errCodexCaptureUndecided) && time.Now().Before(settleDeadline) {
+			// A new rollout's session_meta is still mid-write: it could be
+			// the replacement's own fork, so keep waiting for it to settle
+			// rather than decide around a header Codex has not finished
+			// writing. Once it settles, the same fail-closed rule applies.
+			time.Sleep(50 * time.Millisecond)
+			continue
 		}
-		if err == nil {
-			carried := snap.carried
-			carried.CapturedAt = time.Now()
-			return carried, nil
-		}
-		if !errors.Is(err, errCodexCaptureUndecided) || time.Now().After(settleDeadline) {
+		if err != nil && retry && !errors.Is(err, errCodexCaptureUndecided) {
+			// A store that cannot be enumerated is a real error: the before-set
+			// can no longer distinguish "new" from "pre-existing", so
+			// returning the carried id would hide a broken store behind a
+			// false "conversation confirmed".
 			return AgentConversationData{}, err
 		}
-		time.Sleep(50 * time.Millisecond)
+		// No new rollout, ambiguity among new rollouts, an undecided rollout
+		// past the settle window, or a lone same-cwd sibling: all fail closed
+		// to the carried id. The carried id is the known-good thread; only
+		// positive evidence of a fork would justify following a different one.
+		carried := snap.carried
+		carried.CapturedAt = time.Now()
+		return carried, nil
 	}
 }
 

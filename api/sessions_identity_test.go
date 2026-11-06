@@ -99,7 +99,10 @@ func TestSessionsArchiveSelfOutsideTmuxDoesNotTouchSessions(t *testing.T) {
 		return []session.InstanceData{{ID: "unrelated-id", Title: "other", TmuxName: "af_other"}}, nil
 	})
 	previous := archiveSessionViaDaemon
-	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, error) { archives++; return "/archived/other", nil }
+	archiveSessionViaDaemon = func(daemon.ArchiveSessionRequest) (string, *session.ArchivedWorkspaceData, error) {
+		archives++
+		return "/archived/other", nil, nil
+	}
 	t.Cleanup(func() { archiveSessionViaDaemon = previous })
 	sessionsArchiveSelf = true
 	t.Cleanup(func() { sessionsArchiveSelf = false })

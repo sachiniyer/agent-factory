@@ -55,6 +55,19 @@ type ConfigPane struct {
 	editing bool
 	input   textinput.Model
 
+	// editSeed is the field's value immediately after beginEdit seeds it —
+	// read back from the input so it reflects whatever the textinput sanitizer
+	// did to the seed (whitespace flattened AND other control runes dropped),
+	// not a separately-computed approximation. commitEdit's untouched-field
+	// guard compares the live field against this. dirty tracks whether the
+	// user typed anything since beginEdit: because flattening is not injective,
+	// a value-equality check alone cannot tell an untouched field from one the
+	// user cleared and retyped into the same flattened form (which is a real
+	// edit — replacing a multi-line value with that single-line text), so the
+	// guard only fires when nothing was typed.
+	editSeed string
+	dirty    bool
+
 	// scrollTop is the first row-line rendered, so a list taller than the pane
 	// keeps the selection on screen. It persists between renders: recomputing it
 	// from scratch each frame would snap the view around while the user reads.
@@ -509,7 +522,17 @@ func (c *ConfigPane) beginEdit() {
 	c.editing = true
 	c.clearStatus()
 	c.sizeEditField()
-	c.input.SetValue(entry.Value)
+	// Seed the field with the pre-flattened value. bubbles v0.20.0's
+	// textinput.SetValue runs a sanitizer that folds newlines/tabs to spaces,
+	// so seeding with the raw multi-line value would flatten it inside the
+	// field and let commitEdit's guard read the untouched field as edited.
+	c.input.SetValue(flattenToOneLine(entry.Value))
+	// Read the seed back AFTER the sanitizer runs: it drops not just
+	// whitespace but every unicode.IsControl rune (e.g. ESC from a TOML
+	// \u001b escape), so a flatten-only seed would diverge from the field
+	// and rewrite an untouched value that lost a control rune.
+	c.editSeed = c.input.Value()
+	c.dirty = false
 	c.input.CursorEnd()
 	c.input.Focus()
 }
@@ -532,8 +555,12 @@ func (c *ConfigPane) handleEditKey(msg tea.KeyMsg) bool {
 		return true
 	default:
 		var cmd tea.Cmd
+		before := c.input.Value()
 		c.input, cmd = c.input.Update(msg)
 		_ = cmd
+		if c.input.Value() != before {
+			c.dirty = true
+		}
 		return true
 	}
 }
@@ -562,9 +589,26 @@ func (c *ConfigPane) commitEdit() {
 	// notice, telling the user they changed something when they did not.
 	//
 	// The GUARANTEE against truncation is the absent CharLimit above, not this:
-	// a truncating field would make value != entry.Value, which reads as an edit
+	// a truncating field would make value != editSeed, which reads as an edit
 	// and would write straight through this check.
-	if value == entry.Value {
+	//
+	// Two no-op signals, either sufficient:
+	//   - value == entry.Value: the field holds the raw stored value again,
+	//     a true no-op even when dirty is true (e.g. the user edited a
+	//     sanitizer-stable single-line value and restored it — without this
+	//     arm that would run the config writer / daemon apply path for no
+	//     semantic change).
+	//   - !c.dirty && value == c.editSeed: the field is untouched since
+	//     beginEdit. editSeed is read back AFTER the textinput sanitizer ran,
+	//     so control runes the sanitizer drops (not just the whitespace
+	//     flattenToOneLine folds) are gone from both sides. flattenToOneLine
+	//     is not injective (a\nb and "a b" both flatten to "a b"), so a
+	//     value-equality guard alone would block a genuine edit that lands
+	//     back on the flattened seed; dirty, set only when the input value
+	//     changes, lets that write through. A multi-line entry.Value can
+	//     never equal the single-line field, so the first arm does not weaken
+	//     this. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and TestConfigPaneEditRestoreIsNoOp.
+	if value == entry.Value || (!c.dirty && value == c.editSeed) {
 		c.cancelEdit()
 		return
 	}
@@ -744,218 +788,6 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		}
 	}
 	return lines, selStart, selEnd
-}
-
-// window returns the slice of rowLines to render, plus how many lines are hidden
-// above and below, scrolling only as far as it must to reveal the selection.
-//
-// It moves the view by the MINIMUM needed rather than centering the selection:
-// centering would shift the whole list on every keypress, which reads as the
-// content moving under the cursor instead of the cursor moving through it.
-func (c *ConfigPane) window(rowLines []string, selStart, selEnd, budget int) (visible []string, above, below int) {
-	if c.height <= 0 {
-		// No size yet: SetSize has not run. There is no box to fit, so render
-		// everything rather than inventing a window from a height of zero.
-		c.scrollTop = 0
-		return rowLines, 0, 0
-	}
-	if budget <= 0 {
-		// A real but tiny box: the header and footer already consume it. Show one
-		// row — the selected one — rather than dumping all 38 lines into a 5-line
-		// pane, which is what "budget <= 0 means render everything" used to do.
-		// Degenerate, but bounded: the user still sees where they are.
-		budget = 1
-	}
-	if len(rowLines) <= budget {
-		c.scrollTop = 0
-		return rowLines, 0, 0
-	}
-
-	if selStart >= 0 {
-		if selStart < c.scrollTop {
-			c.scrollTop = selStart
-		}
-		// A selected row taller than the window (a long purpose line) pins to its
-		// top: showing its tail and hiding its key would be worse than clipping.
-		if selEnd > c.scrollTop+budget {
-			c.scrollTop = min(selStart, selEnd-budget)
-		}
-	}
-	maxTop := len(rowLines) - budget
-	c.scrollTop = max(0, min(c.scrollTop, maxTop))
-
-	return rowLines[c.scrollTop : c.scrollTop+budget], c.scrollTop, len(rowLines) - (c.scrollTop + budget)
-}
-
-// cueRows is the vertical space reserved for the "↑ n more" / "↓ n more" cues.
-const cueRows = 2
-
-// countLines counts the rendered lines in a fragment. Exact only because every
-// fragment String() composes ends with a newline.
-func countLines(s string) int {
-	if s == "" {
-		return 0
-	}
-	return strings.Count(s, "\n")
-}
-
-// renderEntryRow renders one key row: cursor, key, value (or the live edit
-// field), and its one-line purpose.
-func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) string {
-	var b strings.Builder
-	selected := i == c.selectedIdx
-
-	cursor := "  "
-	if selected {
-		cursor = SelectionMarker("› ")
-	}
-	b.WriteString(cursor)
-
-	keyText := e.Key
-	if selected && c.editing {
-		// Clip the KEY, not the field — see editRowSplit. Clipped as plain text
-		// before styling, so the truncation never lands inside an escape sequence.
-		if budget, _ := c.editRowSplit(e.Key); budget < lipgloss.Width(keyText) {
-			keyText = fitLine(keyText, budget)
-		}
-	}
-	key := configKeyStyle.Render(keyText)
-	if selected {
-		key = configSelectedStyle.Render(keyText)
-	}
-	b.WriteString(key)
-	valueStyle := configValueStyle
-	if selected {
-		valueStyle = configSelectedStyle
-	}
-	b.WriteString(valueStyle.Render("  "))
-
-	if selected && c.editing {
-		b.WriteString(renderConfigInput(&c.input))
-	} else {
-		b.WriteString(valueStyle.Render(c.displayValue(e)))
-	}
-	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
-	// this row, but neither can shrink the KEY: at a narrow pane the key alone
-	// (network.require_loopback_token is 30 cells) plus the cursor and the gap
-	// outgrows the box, and a wrapped row is the failure the height window cannot
-	// survive. The purpose lines below wrap on purpose and are already bounded.
-	line := c.fitPaneLine(b.String())
-	b.Reset()
-	b.WriteString(line)
-	b.WriteString("\n")
-
-	if selected {
-		b.WriteString(c.wrapIndented(e.Purpose, configPurposeStyle))
-		if len(e.Enum) > 0 && e.Type != "table" {
-			b.WriteString(c.wrapIndented("one of: "+configEnumLabels(e), configHintStyle))
-		}
-	}
-	return b.String()
-}
-
-func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {
-	const indent = "    "
-	width := c.width - len(indent) - 2
-	if width < 20 {
-		width = 20
-	}
-	wrapped := style.Width(width).Render(text)
-	var b strings.Builder
-	for _, line := range strings.Split(strings.TrimSuffix(wrapped, "\n"), "\n") {
-		b.WriteString(indent)
-		b.WriteString(line)
-		b.WriteString("\n")
-	}
-	return b.String()
-}
-
-// wrap renders text wrapped to the pane width, one fragment per line, always
-// ending in a newline so countLines stays exact.
-func (c *ConfigPane) wrap(text string, style lipgloss.Style) string {
-	width := c.width - 2
-	if width < 20 {
-		width = 20
-	}
-	return strings.TrimSuffix(style.Width(width).Render(text), "\n") + "\n"
-}
-
-// renderHints renders the footer. Every fragment String() composes ends with a
-// newline so countLines is an exact line count — the window's budget is computed
-// from it, and an off-by-one there is an overflowing pane.
-func (c *ConfigPane) renderHints() string {
-	if c.editing {
-		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
-			{text: "↵ save", drop: 1},
-			{text: "esc cancel"},
-		})) + "\n"
-	}
-	if c.accounts.registering {
-		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
-			{text: "↵ register", drop: 1},
-			{text: "esc cancel"},
-		})) + "\n"
-	}
-	if account := c.selectedAccount(); account != nil {
-		verb := "↵ log in"
-		if account.Register {
-			verb = "↵ register"
-			if c.accounts.busy {
-				verb = "registration pending"
-			}
-		} else if c.accounts.loginRefusal != "" {
-			verb = "login unavailable"
-		}
-		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
-			{text: "↑/↓ move", drop: 2},
-			{text: verb, drop: 3},
-			{text: "C assistant", drop: 4},
-			{text: "esc close"},
-		})) + "\n"
-	}
-	if host := c.selectedHost(); host != nil {
-		verb := "↵ check"
-		if host.Action == hostActionAdd {
-			verb = "↵ add a host"
-		} else if host.Action == hostActionCheckAll {
-			verb = "↵ check all"
-			if c.hostBusy("") {
-				verb = "probing…"
-			}
-		} else if c.hostBusy(host.Name) {
-			verb = "probing…"
-		}
-		hints := []configHint{
-			{text: "↑/↓ move", drop: 2},
-			{text: verb, drop: 3},
-		}
-		if host.Action == "" {
-			// The verdict reader — a saved host's own verb; the action rows
-			// have no verdict to explain.
-			hints = append(hints, configHint{text: "e detail", drop: 4})
-		}
-		hints = append(hints,
-			configHint{text: "C assistant", drop: 5},
-			configHint{text: "esc close"})
-		return "\n" + configHintStyle.Render(c.fitHints(hints)) + "\n"
-	}
-	advanced := "a show advanced"
-	if c.showAdvanced {
-		advanced = "a hide advanced"
-	}
-	// Display order left to right; `drop` is the shed order (see fitHints).
-	//
-	// "C assistant" is the button #2453 adds: the discoverable way to open the
-	// config assistant from the config surface. It sits before "esc close" so the
-	// exit stays last, where a reader looks for it.
-	return "\n" + configHintStyle.Render(c.fitHints([]configHint{
-		{text: "↑/↓ move", drop: 2},
-		{text: "↵ edit", drop: 3},
-		{text: "e explain", drop: 4},
-		{text: advanced, drop: 1},
-		{text: "C assistant", drop: 5},
-		{text: "esc close"},
-	})) + "\n"
 }
 
 func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }
