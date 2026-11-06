@@ -14,7 +14,7 @@
 // is never re-read. Hard caps bound every refresh; content the caps leave
 // unexamined degrades the verdict only while it could still hold the newest
 // record under the documented bound (a file's records may postdate its mtime,
-// but not beyond the still-appending horizon) — a laggy read must not be
+// but only within the record-overshoot bound) — a laggy read must not be
 // mistaken for a healthy account.
 //
 // Carried-prefix watermarks (handoff.State.CarriedPrefixes) scope the poison:
@@ -131,20 +131,36 @@ var codexRolloutFileRE = regexp.MustCompile(`(?i)^rollout-.+-[0-9a-f]{8}-[0-9a-f
 
 var errDeadline = errors.New("rateindex: enumeration deadline")
 
-// stillAppendingHorizon is the documented early-stop bound, applied twice.
-// It bounds how long past the end of its day directory a rollout file may
-// still be appended to (the file's mtime bound), and how far a record
-// timestamp may postdate its file's mtime — a backdated, skewed, or
-// stale-mtime record can run ahead of the last write, so the newest record an
-// unexamined file could hold reaches at most mtime+horizon. A file keeps
-// being written only while its session lives, so a parked session resumed
-// within a weekly-limit window stretches that furthest — 30 days covers
-// stragglers with a wide margin. The residual the bound accepts: a resume of
-// a conversation older than the horizon, or a record claiming beyond it,
-// falls outside the bound, so skipped content could hide the truly-newest
-// claim — the reading then lags one file, which the mover re-verifies around
-// rather than treating as truth.
+// stillAppendingHorizon is the documented early-stop bound: how long past
+// the end of its day directory a rollout file may still be appended to —
+// the mtime bound that certifies a skipped directory cannot join the
+// candidate slate. A file keeps being written only while its session lives,
+// so a parked session resumed within a weekly-limit window stretches that
+// furthest — 30 days covers stragglers with a wide margin. The residual the
+// bound accepts: a resume of a conversation older than the horizon falls
+// outside it, so skipped content could hide the truly-newest claim — the
+// reading then lags one file, which the mover re-verifies around rather
+// than treating as truth.
 const stillAppendingHorizon = 30 * 24 * time.Hour
+
+// recordOvershootBound is the separate, much smaller bound on how far a
+// record's timestamp may run ahead of its OWN file's mtime — the overshoot
+// every unexamined file's ceiling adds on top of its mtime (or the mtime
+// bound a skipped directory's files live under). Normally a record cannot
+// postdate its file's mtime at all: the append that carries it is what
+// stamps the mtime. The overshoot exists only for clocks that disagree —
+// a rollout written on another host into a shared or synced home (the
+// carried-file case), or a store whose mtimes a server stamps — plus an
+// mtime wound back deliberately. Working NTP keeps the first to
+// milliseconds; a broken or suspend-resumed clock runs minutes to hours
+// off, and a day covers every plausible case of it. Beyond a day is
+// deliberate stale-mtime territory, which no finite bound covers and which
+// is the same lag-one-file residual the append horizon already accepts.
+// Reusing the 30-day horizon here was the #6809 defect: it let every
+// dropped file pretend it could hold a claim weeks newer than its own last
+// write, which pinned any account with >MaxFiles recent rollouts at
+// unknown forever.
+const recordOvershootBound = 24 * time.Hour
 
 // Indexer memoizes per-file scan results so a refresh costs reads only on
 // files that changed since the last one. The memo holds no file content —
@@ -205,16 +221,16 @@ func (ix *Indexer) Refresh(home string, opts Options) AccountReading {
 	// possibly a CURRENT one, whose ceiling nothing found can beat.
 	indeterminate := enum.bounded
 	// Content left unexamined in territory the walk DID reach is bounded: a
-	// record can postdate its file's mtime, but not beyond the
-	// still-appending horizon, so the newest record an unexamined file could
-	// hold reaches at most its mtime+horizon ceiling (a skipped day
+	// record can postdate its file's mtime, but only within the
+	// record-overshoot bound, so the newest record an unexamined file could
+	// hold reaches at most its mtime+overshoot ceiling (a skipped day
 	// directory, never statted, reaches its dayEnd+horizon mtime bound plus
 	// the same overshoot). A miss degrades the verdict only while its
 	// ceiling can still beat the newest found claim.
 	suspect := enum.hasMissed
 	suspectCeiling := enum.missedCeiling
 	noteSuspect := func(c candidate) {
-		if ceiling := c.modTime.Add(stillAppendingHorizon); ceiling.After(suspectCeiling) {
+		if ceiling := c.modTime.Add(recordOvershootBound); ceiling.After(suspectCeiling) {
 			suspectCeiling = ceiling
 		}
 		suspect = true
@@ -293,10 +309,11 @@ type candidateWalk struct {
 // enumeration is candidates' result: the candidate slate plus what the scan
 // must know about content the walk left unexamined. Skipped content is
 // reported as a ceiling, not ranked: a record timestamp can postdate its
-// file's mtime, but not beyond the still-appending horizon, so the newest
-// record a skipped file could hold is bounded — by mtime+horizon for a file
-// that lost the slate race, by the day directory's dayEnd+horizon mtime bound
-// plus the same overshoot for a dir the early stop passed over unstat'ed.
+// file's mtime, but only within the record-overshoot bound, so the newest
+// record a skipped file could hold is bounded — by mtime+overshoot for a
+// file that lost the slate race, by the day directory's dayEnd+horizon
+// mtime bound plus the same overshoot for a dir the early stop passed over
+// unstat'ed.
 type enumeration struct {
 	files         []candidate
 	bounded       bool      // the deadline truncated the walk before it finished
@@ -394,8 +411,8 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 		}, w.maxFiles)
 		if dropped != nil {
 			// A file that lost the mtime race was never opened: its records
-			// can postdate that mtime, but not beyond the horizon.
-			w.noteMissed(dropped.modTime.Add(stillAppendingHorizon))
+			// can postdate that mtime, but only within the overshoot bound.
+			w.noteMissed(dropped.modTime.Add(recordOvershootBound))
 		}
 	}
 	for _, entry := range entries {
@@ -413,11 +430,11 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 		// stopping there bounds enumeration cost rather than truncating it.
 		// The skipped content is still reported — its files were never
 		// statted, so their record ceiling is the directory's dayEnd+horizon
-		// mtime bound plus the same horizon of record overshoot — and every
-		// still-older directory's ceiling is lower (the walk descends).
+		// mtime bound plus the record-overshoot bound — and every still-older
+		// directory's ceiling is lower (the walk descends).
 		if depth == 2 {
 			if cutoff, certified := w.pastHorizon(year, month, entry.Name()); certified {
-				w.noteMissed(cutoff.Add(stillAppendingHorizon))
+				w.noteMissed(cutoff.Add(recordOvershootBound))
 				w.stopped = true
 				return nil
 			}
@@ -445,7 +462,7 @@ func (w *candidateWalk) dir(path string, depth int, year, month string) error {
 // mtime-ordered candidate slate, along with the mtime bound its files live
 // under. The bound certifies SLATE membership: a skipped file can still hold
 // a newer record timestamp, which is why its content counts as missed at the
-// returned ceiling plus the record-overshoot horizon. Certification requires
+// returned ceiling plus the record-overshoot bound. Certification requires
 // a full candidate slate and a parseable YYYY/MM/DD date; anything else keeps
 // walking.
 func (w *candidateWalk) pastHorizon(year, month, day string) (time.Time, bool) {

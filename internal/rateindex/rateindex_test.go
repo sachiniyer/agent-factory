@@ -298,9 +298,9 @@ func TestRefreshMaxFilesCapsCandidates(t *testing.T) {
 
 // A store holding more rollouts than MaxFiles is not blanket-unknown (#6809):
 // the candidates the cap dropped are bounded by the documented bound — a
-// record can postdate its file's mtime, but not by more than the
-// still-appending horizon — so drops whose ceilings cannot beat the newest
-// found claim are proven irrelevant and the reading is observed.
+// record can postdate its file's mtime, but only within the record-overshoot
+// bound — so drops whose ceilings cannot beat the newest found claim are
+// proven irrelevant and the reading is observed.
 func TestRefreshOverflowStoreStillObserved(t *testing.T) {
 	home := t.TempDir()
 	// 199 old rollouts: the cap keeps the 32 newest by mtime and drops the
@@ -320,6 +320,40 @@ func TestRefreshOverflowStoreStillObserved(t *testing.T) {
 	}
 }
 
+// The #6809 shape as filed: a store of 200 rollouts spread across the last
+// month, whose newest MaxFiles hold the claims. Every real account home
+// looks like this — the cap drops files written days before the newest
+// claim, and a file written that long ago cannot plausibly hold a record
+// newer than it, so the reading is observed.
+func TestRefreshOverflowStoreWithinMonthStillObserved(t *testing.T) {
+	home := t.TempDir()
+	newest := mustTime(t, "2026-11-05T12:00:00.000Z")
+	// One rollout every 3h back ~25 days. The slate keeps the newest 32 by
+	// mtime — back to ~4 days ago — and drops the rest; the newest dropped
+	// file's ceiling (mtime + the record-overshoot bound) lands days before
+	// the newest claim.
+	for i := 0; i < 200; i++ {
+		mtime := newest.Add(-time.Duration(i) * 3 * time.Hour)
+		pct := 5.0
+		if i == 0 {
+			pct = 42.0
+		}
+		writeRollout(t, home, mtime.Format("2006/01/02"), rolloutName(i+1), []string{
+			claimLine(mtime.Format(time.RFC3339), pct),
+		}, mtime)
+	}
+	got := New().Refresh(home, Options{Deadline: 30 * time.Second})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 42.0 {
+		t.Fatalf("got = %+v — a recent store larger than MaxFiles must still read observed", got)
+	}
+	if !got.Reading.RecordedAt.Equal(newest) {
+		t.Fatalf("recordedAt = %s, want the newest file's claim", got.Reading.RecordedAt)
+	}
+	if got.Files != defaultMaxFiles {
+		t.Fatalf("files = %d, want the capped slate of %d", got.Files, defaultMaxFiles)
+	}
+}
+
 // The other half of the bound: a dropped file whose mtime postdates the
 // newest found claim could still hold a newer record — the refresh stays
 // unknown rather than reporting a stale observation.
@@ -334,6 +368,65 @@ func TestRefreshDropNewerThanFoundClaimIsUnknown(t *testing.T) {
 	got := New().Refresh(home, Options{MaxFiles: 1})
 	if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
 		t.Fatalf("status = %v reason %q — a dropped file whose mtime beats the found claim could hold the newest record", got.Status, got.Reason)
+	}
+}
+
+// The skipped-file bound up close: a dropped file whose mtime is at or
+// after the newest found claim — or within the record-overshoot bound of it
+// — could still hold a newer record. The refresh stays unknown.
+func TestRefreshDropInsideOvershootBoundIsUnknown(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dropMtime time.Time
+	}{
+		// 10:01 — a minute after the 10:00 claim.
+		{"dropped mtime just after the claim", mustTime(t, "2026-10-31T10:01:00.000Z")},
+		// 24h - 1m before the claim: inside the overshoot bound by a minute.
+		{"dropped mtime inside the overshoot bound", mustTime(t, "2026-10-30T10:01:00.000Z")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeRollout(t, home, "2026/10/31", rolloutName(1), []string{
+				claimLine("2026-10-31T10:00:00.000Z", 5.0),
+			}, base)
+			writeRollout(t, home, tc.dropMtime.Format("2006/01/02"), rolloutName(2), []string{
+				claimLine("2026-10-30T09:00:00.000Z", 99.0), // never read: loses the mtime race
+			}, tc.dropMtime)
+			got := New().Refresh(home, Options{MaxFiles: 1})
+			if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
+				t.Fatalf("status = %v reason %q — a dropped file whose ceiling can still beat the found claim must report unknown", got.Status, got.Reason)
+			}
+		})
+	}
+}
+
+// The other edge: a dropped file whose mtime is older than the newest found
+// claim by more than the record-overshoot bound cannot plausibly hold a
+// newer record — the refresh is observed, not blanket-unknown. A ceiling
+// that lands exactly ON the claim cannot strictly beat it either.
+func TestRefreshDropOutsideOvershootBoundIsObserved(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		dropMtime time.Time
+	}{
+		// 24h + 1m before the claim: outside the overshoot bound by a minute.
+		{"dropped mtime just outside the overshoot bound", mustTime(t, "2026-10-30T09:59:00.000Z")},
+		// Exactly claim - 24h: the ceiling equals the claim, which cannot strictly beat it.
+		{"dropped mtime at the overshoot bound", mustTime(t, "2026-10-30T10:00:00.000Z")},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := t.TempDir()
+			writeRollout(t, home, "2026/10/31", rolloutName(1), []string{
+				claimLine("2026-10-31T10:00:00.000Z", 5.0),
+			}, base)
+			writeRollout(t, home, tc.dropMtime.Format("2006/01/02"), rolloutName(2), []string{
+				claimLine("2026-10-30T08:00:00.000Z", 99.0), // never read: loses the mtime race
+			}, tc.dropMtime)
+			got := New().Refresh(home, Options{MaxFiles: 1})
+			if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 5.0 {
+				t.Fatalf("got = %+v — a dropped file that cannot plausibly hold a newer record must not sink the reading", got)
+			}
+		})
 	}
 }
 
@@ -467,33 +560,38 @@ func TestRefreshSymlinkedRolloutIsUnknown(t *testing.T) {
 // The walk descends year/month/day directories newest-first, so a deadline
 // truncation covers the newest part of the store and the early-stop bound
 // ends enumeration cheaply. Here the newest day directory fills MaxFiles
-// before the clock expires; the many older directories are all past the
-// append horizon, so the walk stops — but their unexamined content is still
-// reported, so the refresh is unknown, never a stale observation. Under the
+// before the clock expires; the older directories are past the append
+// horizon, so the walk stops — and their unexamined content is reported as
+// a ceiling that can still beat the found claim (Oct 5's day end + 30d
+// append horizon + 24h record-overshoot bound reaches Nov 6, past the 11:00
+// claim), so the refresh is unknown, never a stale observation. Under the
 // old ascending WalkDir order the same clock died in the oldest directories
-// and reported unknown too; the descending order is a cost optimization, not
-// a verdict difference.
+// and reported unknown too; the descending order is a cost optimization,
+// not a verdict difference.
 func TestRefreshDescendsNewestDirsFirst(t *testing.T) {
 	home := t.TempDir()
 	now := mustTime(t, "2026-11-05T12:00:00.000Z")
 	// Exactly MaxFiles files: the slate fills without a drop, so the only
-	// skipped content is the early-stopped September remainder.
+	// skipped content is the early-stopped October remainder.
 	for i := 0; i < 4; i++ {
 		writeRollout(t, home, "2026/11/05", rolloutName(i+1), []string{
 			claimLine("2026-11-05T11:00:00.000Z", 40.0),
 		}, now)
 	}
-	for _, day := range []string{"01", "02", "03", "04", "05", "06", "07", "08", "09", "10"} {
-		writeRollout(t, home, "2026/09/"+day, rolloutName(100), []string{
-			claimLine("2026-09-05T10:00:00.000Z", 1.0),
-		}, now.Add(-61*24*time.Hour))
+	// Certified to skip: each day end + 30d append horizon precedes the held
+	// floor (Nov 5 12:00). The newest of them — Oct 5 — bounds the rest, and
+	// its ceiling lands a day AFTER the found claim, so the miss degrades.
+	for _, day := range []string{"01", "02", "03", "04", "05"} {
+		writeRollout(t, home, "2026/10/"+day, rolloutName(100), []string{
+			claimLine("2026-10-05T10:00:00.000Z", 1.0),
+		}, now.Add(-31*24*time.Hour))
 	}
 	calls := 0
 	clock := func() time.Time {
 		calls++
 		// The descending walk reaches a horizon-bounded directory within a
 		// handful of dir checks and stops before ever consulting an expired
-		// clock; the old ascending order burned its checks on the September
+		// clock; the old ascending order burned its checks on the October
 		// directories first. The margin also covers the per-file scan loop,
 		// which consults the clock once per candidate.
 		if calls <= 10 {
@@ -503,7 +601,31 @@ func TestRefreshDescendsNewestDirsFirst(t *testing.T) {
 	}
 	got := newForTest(clock).Refresh(home, Options{MaxFiles: 4, Deadline: time.Minute})
 	if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
-		t.Fatalf("got = %+v — unexamined remainder dirs must report unknown, not a stale observation", got)
+		t.Fatalf("got = %+v — a skipped dir whose ceiling can still hold a newer claim must report unknown", got)
+	}
+}
+
+// The other half of the skipped-directory ceiling: a directory certified
+// old enough that even its record-overshoot ceiling lands before the newest
+// found claim cannot hide a newer record — the refresh is observed. This
+// is what lets an account whose rollout history spans the append horizon
+// get a reading at all (#6809).
+func TestRefreshSkippedDirCannotBeatClaimIsObserved(t *testing.T) {
+	home := t.TempDir()
+	now := mustTime(t, "2026-11-05T12:00:00.000Z")
+	for i := 0; i < 5; i++ {
+		writeRollout(t, home, "2026/11/05", rolloutName(i+1), []string{
+			claimLine("2026-11-05T10:00:00.000Z", 30.0),
+		}, now)
+	}
+	// Oct 1: day end + 30d append horizon = Nov 1 (certified to skip), + 24h
+	// overshoot = Nov 2 — still days before the 10:00 claim.
+	writeRollout(t, home, "2026/10/01", rolloutName(60), []string{
+		claimLine("2026-10-01T10:00:00.000Z", 99.0),
+	}, now.Add(-35*24*time.Hour))
+	got := newForTest(func() time.Time { return now }).Refresh(home, Options{MaxFiles: 5})
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 30.0 {
+		t.Fatalf("got = %+v — a skipped dir that cannot hold a newer claim must not sink the reading", got)
 	}
 }
 
@@ -530,13 +652,14 @@ func TestRefreshYesterdayDirWithTodayMtimeIsFound(t *testing.T) {
 	}
 }
 
-// A file still being appended inside a directory older than the horizon is
-// skipped without a stat once the slate is full — and its newer claim is in
-// fact missed. What the bound certifies is only that skipping cannot change
-// the mtime slate; the refresh still reports the directory as unexamined, so
-// the miss surfaces as unknown rather than a lagged observation. The test
-// pins the bound's exact failure shape so it is a reviewed choice, not an
-// accident.
+// A file still being appended inside a directory older than the append
+// horizon is the bound's accepted residual, not a detectable miss: the
+// early stop certified the directory on the premise that nothing in it
+// writes past dayEnd+30d, and this file's very-alive mtime violates that
+// premise — so its genuinely newer claim hides behind a ceiling the bound
+// cannot see. The reading lags one file, which the module comment documents
+// and the mover re-verifies around rather than treating as truth. The test
+// pins that failure shape so it is a reviewed choice, not an accident.
 func TestRefreshHorizonBoundSkipsStillAppendedOldDir(t *testing.T) {
 	home := t.TempDir()
 	now := mustTime(t, "2026-11-05T12:00:00.000Z")
@@ -547,13 +670,15 @@ func TestRefreshHorizonBoundSkipsStillAppendedOldDir(t *testing.T) {
 			claimLine("2026-11-05T10:00:00.000Z", 30.0),
 		}, now)
 	}
-	// 51 days old: end of day + 30d horizon precedes the held floor.
+	// 51 days old: end of day + 30d horizon precedes the held floor. The
+	// skipped dir's ceiling (Sep 16 + 30d + 24h) lands weeks before the
+	// found claim — yet the file inside really does hold the newest record.
 	writeRollout(t, home, "2026/09/15", rolloutName(60), []string{
 		claimLine("2026-11-05T11:45:00.000Z", 99.0),
 	}, now)
 	got := newForTest(func() time.Time { return now }).Refresh(home, Options{MaxFiles: 5})
-	if got.Status != StatusUnknown || got.Reason != "scan-bounded" {
-		t.Fatalf("got = %+v — a skipped directory's content is unexamined, so the miss must surface as unknown", got)
+	if got.Status != StatusObserved || got.Reading.Windows[0].UsedPercent != 30.0 {
+		t.Fatalf("got = %+v — the >horizon-appended file is the accepted lag-one-file residual, not scan-bounded", got)
 	}
 }
 

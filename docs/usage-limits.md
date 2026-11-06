@@ -450,9 +450,10 @@ limit_retry_interval = "30m"   # fallback cadence when a banner states no reset 
   content the cap leaves unexamined reads as unknown only while it
   could still hold a newer record than the newest found claim. The
   indexer bounds that with an assumed horizon, not a guarantee: a
-  record can postdate its file's mtime only within the still-appending
-  horizon, and a conversation resumed past it, or a record skewed beyond
-  it, falls outside the bound — so skipped content could then hide the
+  record can postdate its file's mtime only within the day of clock-skew
+  overshoot the indexer allows, and a conversation resumed past the
+  thirty-day append horizon, or a record skewed past the overshoot,
+  falls outside the bound — so skipped content could then hide the
   truly-newest claim and the reading lags one file. Exceeding the
   rollout window no longer reads as unknown once the missed content is
   irrelevant; the wall itself persists until it expires or a proof
