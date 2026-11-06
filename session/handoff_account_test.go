@@ -59,14 +59,16 @@ func TestManualAccountSwapMissionDeliveryBoundaryRetiresTheAttemptInstant(t *tes
 	missed := time.Now().Add(-time.Minute)
 	inst := noticePendingSwap(true, PromptNotDelivered, missed)
 
-	prev, err := inst.BeginPendingManualAccountSwapMissionDelivery("work", "personal")
+	prev, prevAttempt, err := inst.BeginPendingManualAccountSwapMissionDelivery("work", "personal")
 	require.NoError(t, err)
 	require.Equal(t, PromptNotDelivered, prev)
+	require.Equal(t, missed, prevAttempt,
+		"the displaced attempt instant returns with the verdict that produced it")
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus)
 	require.True(t, inst.pendingAccountSwap.MissionDeliveryAttemptAt.IsZero(),
 		"a retry's begin boundary must drop the missed attempt's instant — evidence binds only the send actually pending")
 
-	require.NoError(t, inst.RestorePendingManualAccountSwapMissionDelivery("work", "personal", prev))
+	require.NoError(t, inst.RestorePendingManualAccountSwapMissionDelivery("work", "personal", prev, prevAttempt))
 	require.Equal(t, PromptNotDelivered, inst.pendingAccountSwap.MissionDeliveryStatus)
 	require.Equal(t, missed, inst.pendingAccountSwap.MissionDeliveryAttemptAt,
 		"a failed checkpoint restores the displaced verdict AND its instant atomically")
