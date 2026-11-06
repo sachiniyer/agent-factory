@@ -518,6 +518,38 @@ func TestImplicitProgramDropsAnUnchosenAccountPreselect(t *testing.T) {
 		"an account preselected FOR the displayed program must not become an explicit account for the resolved one")
 }
 
+// TestPickedProgramDropsAnUnchosenAccountPreselect is the #6695 shape: a
+// program the user picked pins a concrete wire program, and that alone must
+// not carry the preselect out as explicit — on off-box backends the daemon
+// reads a configured default arriving as an explicit account as a user request
+// and refuses the create instead of dropping it. Only a user pick may travel.
+func TestPickedProgramDropsAnUnchosenAccountPreselect(t *testing.T) {
+	h := configFollowingHome(t)
+	defaults := twoAgentsWithAccounts()
+	defaults.Defaults = map[string]string{"claude": "work"}
+	stubAccounts(t, defaults, nil)
+	got := recordStartRequest(t)
+
+	_, cmd := h.startNewInstance()
+	naming := h.namingInstance
+	require.NoError(t, naming.SetTitle("demo"))
+	for _, msg := range drainCmd(t, cmd, time.Second) {
+		if am, ok := msg.(accountDefaultMsg); ok {
+			_, _ = h.Update(am)
+		}
+	}
+	require.Equal(t, "work", h.pendingAccount, "the preselect landed on the field")
+	require.False(t, h.pendingAccountChosen, "a preselect is not a user choice")
+
+	// Re-picking the shown program is still a choice of the PROGRAM — it pins
+	// the wire value concrete — but it never touched the account field.
+	selectProgram(t, h, tmux.ProgramClaude)
+	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, tmux.ProgramClaude, got.Program, "the picked program pins concrete")
+	assert.Empty(t, got.Account,
+		"the displayed default is not a choice — the daemon resolves it itself (#6695)")
+}
+
 // TestChosenAccountPinsTheDisplayedProgram is the other half of the pairing
 // (#4889 review): an account the USER picked is a commitment to the program on
 // screen — an identity in that agent's registry — so the program it was chosen
