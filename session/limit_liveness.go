@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 	"slices"
+	"strings"
 	"time"
 )
 
@@ -83,25 +84,91 @@ func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string,
 // one nearest the wall the provider printed, so an already-parked instance keeps
 // it. A different phrase (or one seen while not yet parked) is new evidence and
 // applies.
+//
+// The one shape the claim cannot self-describe is a parked re-read of
+// (resetAt=zero, evidence=""): a capture of the recorded banner after its reset
+// clause scrolled out of the visible pane and a banner the wall printed
+// afterward BOTH report it (#6823). applyDegradedResightLocked decides from the
+// banner anchor and the current identity what can be proven — and, when nothing
+// can, holds the wall at "unknown reset" without dirtying the durable record
+// rather than guessing.
 func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
 		return false
 	}
-	if i.liveness == LiveLimitReached && evidence == i.limitResetEvidence {
-		// Already parked on the SAME wall claim — a re-read of an unchanged
-		// banner is not a new observation, whatever shape its reset took: the
-		// stored reset stays (the first parse is nearest the real window) and
-		// no durable fact moved, so nothing below may run. The empty-evidence
-		// half is what a no-reset banner re-parks on every idle tick; letting
-		// it through is what rewrote the row and republished the session once
-		// per second for as long as it stayed parked (#6802 review).
-		return true
+	if i.liveness == LiveLimitReached {
+		if resetAt.IsZero() && evidence == "" {
+			return i.applyDegradedResightLocked(banner)
+		}
+		if evidence == i.limitResetEvidence {
+			// Already parked on the SAME wall claim — a re-read of an
+			// unchanged banner is not a new observation, whatever shape its
+			// reset took: the stored reset stays (the first parse is nearest
+			// the real window) and no durable fact moved, so nothing below may
+			// run.
+			return true
+		}
 	}
 	if !i.setLimitReachedLocked(resetAt, evidence, banner) {
 		return false
 	}
+	return true
+}
+
+// applyDegradedResightLocked classifies a (resetAt=zero, evidence="") hit over
+// an already-parked session (#6823). The claim alone is ambiguous — a clipped
+// re-read of the recorded banner and a banner the wall printed afterward
+// degrade to it identically — so the decision falls to the signals around the
+// read:
+//
+//   - CURRENT IDENTITY: the recorded wall is attributed to limitAgent/
+//     limitAccount; a banner still on the pane after the identity moved (an
+//     account swap committed, the program changed) is not that wall re-read —
+//     it is the current identity's wall, recorded and attributed as one.
+//   - BANNER POSITION: the recorded banner is still the last match when the
+//     capture ends at the same place relative to it — the two prefixes
+//     byte-identical, or either a suffix of the other (the capture window slid
+//     while the banner sat still). That proves a clipped re-read: detection
+//     already stands, so nothing else may run — the first parse's reset, its
+//     phrase, and the recorded observations all stay, and nothing is dirtied.
+//   - BANNER ORDER/COUNT: the recorded reset clause still in view in the new
+//     prefix means the match that produced this hit sits BELOW it — a banner
+//     printed after the recorded wall. More matches than the recorded sighting
+//     counted proves the same. Either is a genuinely new wall and is recorded.
+//
+// When none of that distinguishes the read — a moved position with no visible
+// clause, an unchanged count — the poll holds the wall but claims only what the
+// capture verifiably shows: a wall with NO known reset. The stored instant is
+// dropped rather than kept: keeping it could schedule a resume — or release
+// the live parked wall's account exclusion — at a deadline the wall no longer
+// verifiably owns, the exact fail-open the issue names. The recorded identity
+// stays (re-attributing on a guess could blame a healthy account), and nothing
+// durable is minted: the recorded observations keep their own bounds and no
+// never-expiring untimed row is appended on a guess.
+func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
+	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if i.limitBannerPrefix != "" && banner.Prefix != "" &&
+		(strings.HasSuffix(banner.Prefix, i.limitBannerPrefix) ||
+			strings.HasSuffix(i.limitBannerPrefix, banner.Prefix)) {
+		return true
+	}
+	if i.limitResetEvidence != "" && strings.Contains(banner.Prefix, i.limitResetEvidence) {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if i.limitBannerCount > 0 && banner.Count > i.limitBannerCount {
+		return i.setLimitReachedLocked(time.Time{}, "", banner)
+	}
+	if i.inFlightOp != OpNone {
+		return false
+	}
+	lv, op, prevReset := i.lifecycleStateLocked()
+	i.limitResetAt = time.Time{}
+	i.limitResetEvidence = ""
+	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }
 
