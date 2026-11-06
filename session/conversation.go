@@ -543,8 +543,21 @@ func (i *Instance) ExactResume() (bool, string) {
 // the recorded id or the worktree-scoped resume form the exact-only rewrite
 // keeps; otherwise the reason it starts a fresh conversation, the fact the
 // respawn could previously only log.
+//
+// A sandbox (remote-workspace) session's respawn goes through
+// relaunchOrRecoverSandbox (session/relaunch.go): an in-place relaunch when the
+// sandbox supports it (CanRelaunchInPlace), re-provisioning only when it does
+// not. The in-place relaunch runs the same resume-capable local respawn inside
+// the existing sandbox — whose store still holds the agent's transcript — so
+// the conversation carries the same way a local session's Recover carries it.
+// The refusal is the re-provision arm only: an older sandbox build, an
+// unreachable/not-provisioned sandbox, or --force-reap, where the replacement
+// sandbox genuinely starts a fresh conversation.
 func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 	if i.Capabilities().Workspace == WorkspaceRemote {
+		if !i.forceSandboxReplacement.Load() && i.CanRelaunchInPlace() {
+			return HandoffConversation{Carried: true}
+		}
 		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
 	}
 	program := resolveLaunchProgramForInstance(i).command

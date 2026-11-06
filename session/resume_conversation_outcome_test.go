@@ -1,6 +1,7 @@
 package session
 
 import (
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -61,9 +62,12 @@ func TestResumeConversationOutcomeNamesTheFreshStart(t *testing.T) {
 		inst.ResumeConversationOutcome())
 }
 
-// A sandbox session's conversation lives in the previous host's store; the
-// re-provisioned sandbox never holds it (the same reason ExactResume gives).
-func TestResumeConversationOutcomeSandboxNeverCarries(t *testing.T) {
+// A sandbox session whose respawn re-provisions (an older sandbox build, or a
+// sandbox with no live agent-server) starts a fresh conversation: the
+// replacement sandbox's store does not hold the old transcript (the same
+// reason ExactResume gives). CanRelaunchInPlace is false here — no remoteClient
+// is bound, so AgentServer() is the deadRemoteAgentServer sentinel.
+func TestResumeConversationOutcomeSandboxRefusesWhenReprovisioning(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	inst := exactResumeSession(t, tmux.ProgramClaude)
@@ -72,6 +76,66 @@ func TestResumeConversationOutcomeSandboxNeverCarries(t *testing.T) {
 		"the control: a local session resumes its recorded conversation")
 
 	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+	require.False(t, inst.CanRelaunchInPlace(),
+		"precondition: a sandbox with no live agent-server cannot relaunch in place")
+	require.Equal(t,
+		HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"},
+		inst.ResumeConversationOutcome())
+}
+
+// A sandbox session whose sandbox can relaunch its agent in place (W7.1,
+// #5571) carries: the respawn dispatches to the in-place relaunch, which runs
+// the same resume-capable local respawn inside the existing sandbox — whose
+// store still holds the agent's transcript — rather than re-provisioning. The
+// verdict must answer carried, not the re-provision refusal the blanket
+// sandbox branch previously asserted (#6768).
+func TestResumeConversationOutcomeSandboxCarriesWhenRelaunchCapable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "version": "x", "features": []string{"tab-api", RelaunchFeature}})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	rc := srv.client(t, httpSrv.URL)
+
+	inst := exactResumeSession(t, tmux.ProgramClaude)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+	inst.mu.Lock()
+	inst.remoteClient = rc
+	inst.agentSrv = nil
+	inst.mu.Unlock()
+
+	require.True(t, inst.CanRelaunchInPlace(),
+		"precondition: the sandbox advertises the relaunch feature")
+	require.Equal(t, HandoffConversation{Carried: true}, inst.ResumeConversationOutcome(),
+		"a relaunch-capable sandbox resumes the agent in place, keeping its conversation")
+}
+
+// --force-reap asks for the sandbox to be replaced even when it could relaunch
+// in place: the replacement sandbox starts a fresh conversation, so the
+// verdict must answer the re-provision refusal regardless of CanRelaunchInPlace
+// (the same gate decideRecovery applies).
+func TestResumeConversationOutcomeSandboxRefusesWhenForceReapOverridesRelaunch(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "version": "x", "features": []string{"tab-api", RelaunchFeature}})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	rc := srv.client(t, httpSrv.URL)
+
+	inst := exactResumeSession(t, tmux.ProgramClaude)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+	inst.mu.Lock()
+	inst.remoteClient = rc
+	inst.agentSrv = nil
+	inst.mu.Unlock()
+	inst.SetForceSandboxReplacement(true)
+
+	require.True(t, inst.CanRelaunchInPlace(),
+		"precondition: the sandbox advertises the relaunch feature, but --force-reap overrides it")
 	require.Equal(t,
 		HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"},
 		inst.ResumeConversationOutcome())
