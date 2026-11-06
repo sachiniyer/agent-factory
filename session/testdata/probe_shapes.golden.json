@@ -1,0 +1,379 @@
+{
+  "archived-local": {
+    "id": "inst-probe-archived-01",
+    "title": "probe-archived",
+    "path": "/repo/probe-archived/.af-archive/probe-archived",
+    "branch": "af/probe-archived",
+    "status": 6,
+    "liveness": 5,
+    "lifecycle_action": "restore",
+    "can_kill": true,
+    "current_agent": "claude",
+    "height": 0,
+    "width": 0,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "archived_at": "2026-02-03T04:05:06Z",
+    "program": "claude",
+    "tmux_name": "af_probe_arch_agent",
+    "tabs": [
+      {
+        "id": "tab-ccccccc1",
+        "name": "agent",
+        "kind": 0,
+        "tmux_name": "af_probe_arch_agent",
+        "kind_name": "agent"
+      },
+      {
+        "id": "tab-ccccccc2",
+        "name": "docs",
+        "kind": 3,
+        "url": "http://localhost:8080",
+        "web_proxied": true,
+        "kind_name": "web"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-archived",
+      "worktree_path": "/repo/probe-archived/.af-archive/probe-archived",
+      "session_name": "probe-archived",
+      "branch_name": "af/probe-archived",
+      "base_commit_sha": "fedcba9876543210fedcba9876543210fedcba98",
+      "branch_created_by_us": true
+    },
+    "backend_type": "local",
+    "tab_kinds": [
+      {
+        "kind": "docs",
+        "allowed": true
+      },
+      {
+        "kind": "shell",
+        "allowed": true
+      },
+      {
+        "kind": "vscode",
+        "allowed": true
+      },
+      {
+        "kind": "web",
+        "allowed": true
+      }
+    ],
+    "tab_roster_mutable": true,
+    "placement": {
+      "kind": "local",
+      "location": "/repo/probe-archived/.af-archive/probe-archived"
+    },
+    "tab_management": true,
+    "status_name": "archived",
+    "liveness_name": "archived"
+  },
+  "archived-local-storage": {
+    "id": "inst-probe-archived-01",
+    "title": "probe-archived",
+    "path": "/repo/probe-archived/.af-archive/probe-archived",
+    "branch": "af/probe-archived",
+    "status": 6,
+    "liveness": 5,
+    "height": 0,
+    "width": 0,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "archived_at": "2026-02-03T04:05:06Z",
+    "program": "claude",
+    "tmux_name": "af_probe_arch_agent",
+    "tabs": [
+      {
+        "id": "tab-ccccccc1",
+        "name": "agent",
+        "kind": 0,
+        "tmux_name": "af_probe_arch_agent",
+        "kind_name": "agent"
+      },
+      {
+        "id": "tab-ccccccc2",
+        "name": "docs",
+        "kind": 3,
+        "url": "http://localhost:8080",
+        "web_proxied": true,
+        "kind_name": "web"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-archived",
+      "worktree_path": "/repo/probe-archived/.af-archive/probe-archived",
+      "session_name": "probe-archived",
+      "branch_name": "af/probe-archived",
+      "base_commit_sha": "fedcba9876543210fedcba9876543210fedcba98",
+      "branch_created_by_us": true
+    },
+    "backend_type": "local",
+    "status_name": "archived",
+    "liveness_name": "archived"
+  },
+  "local-multi-tab": {
+    "id": "inst-probe-local-00001",
+    "title": "probe-local",
+    "path": "/repo/probe-local/.worktrees/probe-local",
+    "branch": "af/probe-local",
+    "status": 0,
+    "liveness": 1,
+    "lifecycle_action": "archive",
+    "can_kill": true,
+    "can_handoff": true,
+    "current_agent": "claude",
+    "height": 24,
+    "width": 80,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "program": "claude",
+    "tmux_name": "af_probe_local_agent",
+    "tabs": [
+      {
+        "id": "tab-aaaaaaa1",
+        "name": "agent",
+        "kind": 0,
+        "tmux_name": "af_probe_local_agent",
+        "kind_name": "agent"
+      },
+      {
+        "id": "tab-aaaaaaa2",
+        "name": "shell",
+        "kind": 1,
+        "tmux_name": "af_probe_local_shell",
+        "kind_name": "shell"
+      },
+      {
+        "id": "tab-aaaaaaa3",
+        "name": "dev",
+        "kind": 3,
+        "url": "http://localhost:3000",
+        "web_proxied": true,
+        "kind_name": "web"
+      },
+      {
+        "id": "tab-aaaaaaa4",
+        "name": "build",
+        "kind": 2,
+        "command": "make dev",
+        "tmux_name": "af_probe_local_proc",
+        "kind_name": "process"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-local",
+      "worktree_path": "/repo/probe-local/.worktrees/probe-local",
+      "session_name": "probe-local",
+      "branch_name": "af/probe-local",
+      "base_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "branch_created_by_us": true
+    },
+    "backend_type": "local",
+    "tab_kinds": [
+      {
+        "kind": "docs",
+        "allowed": true
+      },
+      {
+        "kind": "shell",
+        "allowed": true
+      },
+      {
+        "kind": "vscode",
+        "allowed": true
+      },
+      {
+        "kind": "web",
+        "allowed": true
+      }
+    ],
+    "tab_roster_mutable": true,
+    "placement": {
+      "kind": "local",
+      "location": "/repo/probe-local/.worktrees/probe-local"
+    },
+    "tab_management": true,
+    "status_name": "running",
+    "liveness_name": "running"
+  },
+  "local-multi-tab-storage": {
+    "id": "inst-probe-local-00001",
+    "title": "probe-local",
+    "path": "/repo/probe-local/.worktrees/probe-local",
+    "branch": "af/probe-local",
+    "status": 0,
+    "liveness": 1,
+    "height": 24,
+    "width": 80,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "program": "claude",
+    "tmux_name": "af_probe_local_agent",
+    "tabs": [
+      {
+        "id": "tab-aaaaaaa1",
+        "name": "agent",
+        "kind": 0,
+        "tmux_name": "af_probe_local_agent",
+        "kind_name": "agent"
+      },
+      {
+        "id": "tab-aaaaaaa2",
+        "name": "shell",
+        "kind": 1,
+        "tmux_name": "af_probe_local_shell",
+        "kind_name": "shell"
+      },
+      {
+        "id": "tab-aaaaaaa3",
+        "name": "dev",
+        "kind": 3,
+        "url": "http://localhost:3000",
+        "web_proxied": true,
+        "kind_name": "web"
+      },
+      {
+        "id": "tab-aaaaaaa4",
+        "name": "build",
+        "kind": 2,
+        "command": "make dev",
+        "tmux_name": "af_probe_local_proc",
+        "kind_name": "process"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-local",
+      "worktree_path": "/repo/probe-local/.worktrees/probe-local",
+      "session_name": "probe-local",
+      "branch_name": "af/probe-local",
+      "base_commit_sha": "0123456789abcdef0123456789abcdef01234567",
+      "branch_created_by_us": true
+    },
+    "backend_type": "local",
+    "status_name": "running",
+    "liveness_name": "running"
+  },
+  "sandbox-inert": {
+    "id": "inst-probe-sandbox-001",
+    "title": "probe-sandbox",
+    "path": "/repo/probe-sandbox",
+    "branch": "",
+    "status": 5,
+    "liveness": 3,
+    "lifecycle_action": "restore",
+    "can_kill": true,
+    "current_agent": "codex",
+    "idle_reason": "process-exited",
+    "height": 0,
+    "width": 0,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "program": "codex",
+    "host": "probe-docker",
+    "tabs": [
+      {
+        "id": "tab-bbbbbbb1",
+        "name": "agent",
+        "kind": 0,
+        "kind_name": "agent"
+      },
+      {
+        "id": "tab-bbbbbbb2",
+        "name": "docs",
+        "kind": 3,
+        "url": "https://docs.example.com",
+        "web_proxied": false,
+        "kind_name": "web"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-sandbox",
+      "worktree_path": "",
+      "session_name": "",
+      "branch_name": "",
+      "base_commit_sha": ""
+    },
+    "backend_type": "docker",
+    "pending_tabs": [
+      {
+        "id": "tab-bbbbbbb2",
+        "name": "docs",
+        "kind": 3,
+        "url": "https://docs.example.com",
+        "web_proxied": false,
+        "kind_name": "web"
+      }
+    ],
+    "tab_kinds": [
+      {
+        "kind": "docs",
+        "allowed": true
+      },
+      {
+        "kind": "shell",
+        "allowed": false,
+        "reason": "this session cannot open a shell or process tab: it runs a process in the session's worktree, and this session's workspace runs off-box (docker/ssh/sandbox), so there is no local worktree to spawn it in"
+      },
+      {
+        "kind": "vscode",
+        "allowed": true
+      },
+      {
+        "kind": "web",
+        "allowed": true
+      }
+    ],
+    "tab_roster_mutable": true,
+    "placement": {
+      "kind": "remote",
+      "host": "probe-docker",
+      "backend": "docker"
+    },
+    "tab_management": false,
+    "status_name": "lost",
+    "liveness_name": "lost"
+  },
+  "sandbox-inert-storage": {
+    "id": "inst-probe-sandbox-001",
+    "title": "probe-sandbox",
+    "path": "/repo/probe-sandbox",
+    "branch": "",
+    "status": 5,
+    "liveness": 3,
+    "height": 0,
+    "width": 0,
+    "created_at": "2026-02-03T04:05:06Z",
+    "updated_at": "2026-02-03T04:05:06Z",
+    "program": "codex",
+    "host": "probe-docker",
+    "tabs": [
+      {
+        "id": "tab-bbbbbbb1",
+        "name": "agent",
+        "kind": 0,
+        "kind_name": "agent"
+      }
+    ],
+    "worktree": {
+      "repo_path": "/repo/probe-sandbox",
+      "worktree_path": "",
+      "session_name": "",
+      "branch_name": "",
+      "base_commit_sha": ""
+    },
+    "backend_type": "docker",
+    "pending_tabs": [
+      {
+        "id": "tab-bbbbbbb2",
+        "name": "docs",
+        "kind": 3,
+        "url": "https://docs.example.com",
+        "web_proxied": false,
+        "kind_name": "web"
+      }
+    ],
+    "status_name": "lost",
+    "liveness_name": "lost"
+  }
+}
