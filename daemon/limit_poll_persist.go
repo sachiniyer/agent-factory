@@ -26,14 +26,22 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 		}
 		return
 	}
-	data := instance.ToInstanceData()
-	livenessChanged := data.Liveness != before
-	resetChanged := !data.LimitResetAt.Equal(beforeReset)
+	// The change gate reads the fields it diffs through their accessors rather
+	// than a whole ToInstanceData: the snapshot is the largest single allocator
+	// in the #6845 profile, and on an unchanged tick nothing here is used beyond
+	// these comparisons. The accessors carry the same liveness gating the
+	// projection applies (LimitResetAt/LimitResetEvidence report their stored
+	// values only while LiveLimitReached), so the verdicts are identical; the
+	// full projection is still re-read under the lock below whenever something
+	// actually changed — that build is both the write and the publish payload.
+	livenessChanged := instance.GetLiveness() != before
+	resetAt, _ := instance.LimitResetAt()
+	resetChanged := !resetAt.Equal(beforeReset)
 	// Evidence is durable too (#6765 post-merge): a send-path park stores a
 	// reset with NO phrase, so the first poll that adopts the banner's phrase
 	// changes nothing else — and dropping it would leave a restart re-parsing
 	// the same banner against a later clock.
-	evidenceChanged := data.LimitResetEvidence != beforeEvidence
+	evidenceChanged := instance.LimitResetEvidence() != beforeEvidence
 	// A wall observation can change — a first sighting, a fresh wall event
 	// after recovery, a tightened reset claim — while every axis above stays
 	// put. The instance flags it like an unpersisted conversation, or the
@@ -59,7 +67,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// re-check and the write, and this older snapshot would then overwrite it.
 	rowLock := m.rowWriteLockForRepo(repoID)
 	rowLock.Lock()
-	data = instance.ToInstanceData()
+	data := instance.ToInstanceData()
 	// The lock-free gate above can pass an OpNone a client op raises before the
 	// re-read lands. A handoff is the concrete case: between the gate and this
 	// lock it runs BeginHandoff (OpReplacing) and RecordHandoffSwap (rewriting

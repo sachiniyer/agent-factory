@@ -36,28 +36,74 @@ const (
 	numRuntimeActions
 )
 
+// runtimeActionRefusalKind identifies WHICH admission check refused, so a
+// predicate caller can ask "may this row do it" without materializing the
+// user-facing refusal prose it would only compare to nil (#6845).
+type runtimeActionRefusalKind int
+
+const (
+	runtimeActionRefusalNone runtimeActionRefusalKind = iota
+	runtimeActionPendingKill
+	runtimeActionStartupUnknown
+	runtimeActionPendingAccountSwap
+	runtimeActionNotArchived
+	runtimeActionNotRestoreFenced
+	runtimeActionNotLostOrDead
+	runtimeActionNotLost
+	runtimeActionNotStarted
+	runtimeActionNotLimitReached
+	runtimeActionBusy
+	runtimeActionRootHandoff
+	runtimeActionPendingHandoffMission
+	runtimeActionRebuildTeardownPending
+	runtimeActionHandoffNotRunning
+	runtimeActionHandoffArchived
+	runtimeActionHandoffLostOrDead
+	runtimeActionHandoffUnavailable
+	runtimeActionUnknownAction
+)
+
 // ValidateRuntimeAction checks whether one consistent lifecycle snapshot may
 // perform action. It returns user-facing errors because callers must explain why
 // retrying cannot work, especially when a durable kill tombstone owns the row.
 func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
+	if kind := v.refuseRuntimeAction(action); kind != runtimeActionRefusalNone {
+		return runtimeActionRefusal{view: v, action: action, kind: kind}
+	}
+	return nil
+}
+
+// AdmitsRuntimeAction is the boolean half of ValidateRuntimeAction for callers
+// that test the verdict and never read the refusal — the lost-restore loop's
+// per-tick gate, the snapshot's CanHandoff bit. Both resolve through the one
+// refuseRuntimeAction tree, so they can never answer differently, and this
+// half never formats the refusal prose the verdict-only caller would discard
+// (#6845).
+func (v LifecycleView) AdmitsRuntimeAction(action RuntimeAction) bool {
+	return v.refuseRuntimeAction(action) == runtimeActionRefusalNone
+}
+
+// refuseRuntimeAction is the shared admission tree behind ValidateRuntimeAction
+// and AdmitsRuntimeAction: the verdict as a kind, with the refusal text
+// materialized only when a caller actually returns it.
+func (v LifecycleView) refuseRuntimeAction(action RuntimeAction) runtimeActionRefusalKind {
 	if v.UserKilled {
-		return fmt.Errorf("session %q has a pending kill", v.Title)
+		return runtimeActionPendingKill
 	}
 	if v.StartupStateUnknown {
-		return fmt.Errorf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
+		return runtimeActionStartupUnknown
 	}
 	if v.PendingAccountSwap && action != RuntimeActionResumeLimit {
-		return fmt.Errorf("session %q has %s awaiting its replacement notice and task; retry it with %s before another lifecycle action",
-			v.Title, accountSwapSpan(v.PendingAccountSwapFrom, v.PendingAccountSwapTo), accountSwapRetryCommand(v.Title, v.PendingAccountSwapTo))
+		return runtimeActionPendingAccountSwap
 	}
 
 	switch action {
 	case RuntimeActionRestoreArchived:
 		if v.Liveness != LiveArchived {
-			return fmt.Errorf("session %q is not archived", v.Title)
+			return runtimeActionNotArchived
 		}
 		if v.InFlightOp != OpNone {
-			return runtimeActionBusyError(v)
+			return runtimeActionBusy
 		}
 	case RuntimeActionRestoreArchivedFenced:
 		// RuntimeActionRestoreArchived with the fence required UP rather than absent:
@@ -74,30 +120,30 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// fence this names is MarkRestoring, which moves the op axis alone — BeginRestore
 		// is still what flips the row live, and still only from OpNone.
 		if v.Liveness != LiveArchived {
-			return fmt.Errorf("session %q is not archived", v.Title)
+			return runtimeActionNotArchived
 		}
 		if v.InFlightOp != OpRestoring {
-			return fmt.Errorf("session %q is not under a restore fence (in-flight op is %s)", v.Title, opLabel(v.InFlightOp))
+			return runtimeActionNotRestoreFenced
 		}
 	case RuntimeActionRestoreLostOrDead:
 		if v.Liveness != LiveLost && v.Liveness != LiveDead {
-			return fmt.Errorf("session %q is not lost or dead", v.Title)
+			return runtimeActionNotLostOrDead
 		}
 		if !v.Started {
-			return fmt.Errorf("session %q is not started", v.Title)
+			return runtimeActionNotStarted
 		}
 		if v.InFlightOp != OpNone {
-			return runtimeActionBusyError(v)
+			return runtimeActionBusy
 		}
 	case RuntimeActionRecoverLost:
 		if v.Liveness != LiveLost {
-			return fmt.Errorf("session %q is not lost", v.Title)
+			return runtimeActionNotLost
 		}
 		if !v.Started {
-			return fmt.Errorf("session %q is not started", v.Title)
+			return runtimeActionNotStarted
 		}
 		if v.InFlightOp != OpNone {
-			return runtimeActionBusyError(v)
+			return runtimeActionBusy
 		}
 	case RuntimeActionRecoverFenced:
 		// The SAME precondition as RuntimeActionRecoverLost on every axis but one:
@@ -115,23 +161,23 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// re-entrancy #3555 closed. Naming the two states separately keeps the
 		// admission question strict and makes the continuation explicit.
 		if v.Liveness != LiveLost {
-			return fmt.Errorf("session %q is not lost", v.Title)
+			return runtimeActionNotLost
 		}
 		if !v.Started {
-			return fmt.Errorf("session %q is not started", v.Title)
+			return runtimeActionNotStarted
 		}
 		if v.InFlightOp != OpRestoring {
-			return fmt.Errorf("session %q is not under a restore fence (in-flight op is %s)", v.Title, opLabel(v.InFlightOp))
+			return runtimeActionNotRestoreFenced
 		}
 	case RuntimeActionResumeLimit:
 		if v.Liveness != LiveLimitReached {
-			return fmt.Errorf("session %q is not blocked on a usage limit", v.Title)
+			return runtimeActionNotLimitReached
 		}
 		if !v.Started {
-			return fmt.Errorf("session %q is not started", v.Title)
+			return runtimeActionNotStarted
 		}
 		if v.InFlightOp != OpNone {
-			return runtimeActionBusyError(v)
+			return runtimeActionBusy
 		}
 	case RuntimeActionHandoff:
 		// The reserved root agent is the daemon's own singleton: it is re-ensured
@@ -151,7 +197,7 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// to remember separately is one a caller will forget; this is the question
 		// they already share.
 		if IsReservedTitle(v.Title) {
-			return fmt.Errorf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
+			return runtimeActionRootHandoff
 		}
 		// An unresolved mission from the LAST handoff (#4429). Its replacement
 		// fence settles on the incoming runtime's liveness, so the op axis below
@@ -159,9 +205,7 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 		// would call SetPendingHandoffMission and overwrite the first mission and
 		// its verdict, discarding an obligation nothing else records.
 		if v.PendingHandoffMission {
-			return fmt.Errorf(
-				"session %q still owes the mission from its last handoff; resolve it first — `af sessions retry-limit %s` resends it, `--delivered` retires it",
-				v.Title, v.Title)
+			return runtimeActionPendingHandoffMission
 		}
 		if v.RebuildTeardownPending {
 			// A handoff's replacement binds a NEW runtime inside the worktree
@@ -170,30 +214,85 @@ func (v LifecycleView) ValidateRuntimeAction(action RuntimeAction) error {
 			// incoming runtime together with the genuinely stale ones (#5371
 			// review). The obligation's owner retries through recover/resume —
 			// those actions stay admitted above.
-			return fmt.Errorf(
-				"session %q still owes the teardown of the runtime it replaced; let its recovery finish before handing off",
-				v.Title)
+			return runtimeActionRebuildTeardownPending
 		}
 		if v.InFlightOp != OpNone {
-			return runtimeActionBusyError(v)
+			return runtimeActionBusy
 		}
 		switch v.Liveness {
 		case LiveRunning, LiveReady, LiveLimitReached:
 			// A live, idle, or limit-parked agent has a runtime to replace.
 			if !v.Started {
-				return fmt.Errorf("session %q is not running and cannot be handed off", v.Title)
+				return runtimeActionHandoffNotRunning
 			}
 		case LiveArchived:
-			return fmt.Errorf("session %q is archived and cannot be handed off; restore it first", v.Title)
+			return runtimeActionHandoffArchived
 		case LiveLost, LiveDead:
-			return fmt.Errorf("session %q is not running and cannot be handed off; restore it first", v.Title)
+			return runtimeActionHandoffLostOrDead
 		default:
-			return fmt.Errorf("session %q is not available to hand off", v.Title)
+			return runtimeActionHandoffUnavailable
 		}
 	default:
-		return fmt.Errorf("unknown runtime action %d", action)
+		return runtimeActionUnknownAction
 	}
-	return nil
+	return runtimeActionRefusalNone
+}
+
+// runtimeActionRefusal carries a refused admission to its error text: the same
+// lifecycle view the verdict was computed from, so the message names the row
+// and the axis that actually failed. It materializes the prose only when a
+// caller takes ValidateRuntimeAction's error form.
+type runtimeActionRefusal struct {
+	view   LifecycleView
+	action RuntimeAction
+	kind   runtimeActionRefusalKind
+}
+
+func (r runtimeActionRefusal) Error() string {
+	v := r.view
+	switch r.kind {
+	case runtimeActionPendingKill:
+		return fmt.Sprintf("session %q has a pending kill", v.Title)
+	case runtimeActionStartupUnknown:
+		return fmt.Sprintf("session %q has an unknown startup state; inspect its workspace and runtime before explicitly removing it", v.Title)
+	case runtimeActionPendingAccountSwap:
+		return fmt.Sprintf("session %q has %s awaiting its replacement notice and task; retry it with %s before another lifecycle action",
+			v.Title, accountSwapSpan(v.PendingAccountSwapFrom, v.PendingAccountSwapTo), accountSwapRetryCommand(v.Title, v.PendingAccountSwapTo))
+	case runtimeActionNotArchived:
+		return fmt.Sprintf("session %q is not archived", v.Title)
+	case runtimeActionNotRestoreFenced:
+		return fmt.Sprintf("session %q is not under a restore fence (in-flight op is %s)", v.Title, opLabel(v.InFlightOp))
+	case runtimeActionNotLostOrDead:
+		return fmt.Sprintf("session %q is not lost or dead", v.Title)
+	case runtimeActionNotLost:
+		return fmt.Sprintf("session %q is not lost", v.Title)
+	case runtimeActionNotStarted:
+		return fmt.Sprintf("session %q is not started", v.Title)
+	case runtimeActionNotLimitReached:
+		return fmt.Sprintf("session %q is not blocked on a usage limit", v.Title)
+	case runtimeActionBusy:
+		return fmt.Sprintf("session %q is busy (%v); try again in a moment", v.Title, v.Status)
+	case runtimeActionRootHandoff:
+		return fmt.Sprintf("session %q is the daemon-managed root agent and cannot be handed off", v.Title)
+	case runtimeActionPendingHandoffMission:
+		return fmt.Sprintf(
+			"session %q still owes the mission from its last handoff; resolve it first — `af sessions retry-limit %s` resends it, `--delivered` retires it",
+			v.Title, v.Title)
+	case runtimeActionRebuildTeardownPending:
+		return fmt.Sprintf(
+			"session %q still owes the teardown of the runtime it replaced; let its recovery finish before handing off",
+			v.Title)
+	case runtimeActionHandoffNotRunning:
+		return fmt.Sprintf("session %q is not running and cannot be handed off", v.Title)
+	case runtimeActionHandoffArchived:
+		return fmt.Sprintf("session %q is archived and cannot be handed off; restore it first", v.Title)
+	case runtimeActionHandoffLostOrDead:
+		return fmt.Sprintf("session %q is not running and cannot be handed off; restore it first", v.Title)
+	case runtimeActionHandoffUnavailable:
+		return fmt.Sprintf("session %q is not available to hand off", v.Title)
+	default:
+		return fmt.Sprintf("unknown runtime action %d", r.action)
+	}
 }
 
 // ValidateRuntimeAction is the locking form for live instances.
@@ -201,8 +300,9 @@ func (i *Instance) ValidateRuntimeAction(action RuntimeAction) error {
 	return i.LifecycleView().ValidateRuntimeAction(action)
 }
 
-func runtimeActionBusyError(v LifecycleView) error {
-	return fmt.Errorf("session %q is busy (%v); try again in a moment", v.Title, v.Status)
+// AdmitsRuntimeAction is the locking form for live instances.
+func (i *Instance) AdmitsRuntimeAction(action RuntimeAction) bool {
+	return i.LifecycleView().AdmitsRuntimeAction(action)
 }
 
 // accountSwapSpan describes a committed swap's endpoints for refusal copy. The

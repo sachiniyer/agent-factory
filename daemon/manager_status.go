@@ -272,6 +272,11 @@ func (m *Manager) isPollPaused(repoID, title, id string) bool {
 // title fallback written only by legacy clients. Expired entries are reclaimed
 // lazily. The caller holds pausedMu.
 func (m *Manager) pollLeaseActiveLocked(repoID, title, id string, now time.Time) bool {
+	// With no pauses outstanding — the steady state of a daemon with no TUI
+	// attached — the answer is known without minting either lookup key (#6845).
+	if len(m.pausedPolls) == 0 {
+		return false
+	}
 	keys := []string{statusPollTitleKey(repoID, title)}
 	if id != "" {
 		keys = append([]string{statusPollIDKey(id)}, keys...)

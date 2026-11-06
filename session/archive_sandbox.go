@@ -762,10 +762,12 @@ func (i *Instance) teardownAfterStartFailure() error {
 
 // isSandboxBackendType reports whether a persisted backend Type() names a
 // disposable sandbox runtime (docker/ssh/sandbox/hook) — the runtimes archive/restore
-// re-provision (#1592 Phase 4 PR6/PR7).
+// re-provision (#1592 Phase 4 PR6/PR7). The status poll asks this of every
+// session's backend on every tick, so it must answer from the lookup rather
+// than an error construction (#6845).
 func isSandboxBackendType(t string) bool {
-	_, err := backendKindForType(t)
-	return err == nil
+	_, ok := sandboxBackendKindForType(t)
+	return ok
 }
 
 // lostSandboxRecord reports whether a persisted row is a sandbox session that
@@ -832,24 +834,36 @@ func newInertSandboxBackend(t string) Backend {
 	}
 }
 
+// sandboxBackendKindForType maps a persisted backend Type() discriminator to
+// the BackendKind whose Runtime re-provisions it, reporting false for the
+// local runtime and every unknown discriminator. It is the allocation-free
+// half of backendKindForType: callers that only test the verdict — the status
+// poll's sandbox predicates — take it so the probe path never formats the
+// error text it would only compare to nil (#6845).
+func sandboxBackendKindForType(t string) (BackendKind, bool) {
+	switch t {
+	case "docker":
+		return BackendDocker, true
+	case "ssh":
+		return BackendSSH, true
+	case "sandbox":
+		return BackendSandbox, true
+	case "remote":
+		return BackendHook, true
+	}
+	return "", false
+}
+
 // backendKindForType maps a persisted backend Type() discriminator to the
 // BackendKind whose Runtime re-provisions it (#1592 Phase 4 PR6/PR7). Only the
 // off-box runtimes are re-provisionable (they push/re-clone the durable branch);
 // the local runtime never routes here (it relocates a worktree instead), so its
 // type is rejected with an actionable error.
 func backendKindForType(t string) (BackendKind, error) {
-	switch t {
-	case "docker":
-		return BackendDocker, nil
-	case "ssh":
-		return BackendSSH, nil
-	case "sandbox":
-		return BackendSandbox, nil
-	case "remote":
-		return BackendHook, nil
-	default:
-		return "", fmt.Errorf("backend %q is not a re-provisionable sandbox runtime", t)
+	if kind, ok := sandboxBackendKindForType(t); ok {
+		return kind, nil
 	}
+	return "", fmt.Errorf("backend %q is not a re-provisionable sandbox runtime", t)
 }
 
 // RestoreReprovisionsSandbox reports whether a Lost/Dead restore of this session
@@ -864,8 +878,8 @@ func (i *Instance) RestoreReprovisionsSandbox() bool {
 	if b == nil {
 		return false
 	}
-	_, err := backendKindForType(b.Type())
-	return err == nil
+	_, ok := sandboxBackendKindForType(b.Type())
+	return ok
 }
 
 // RestoreWouldDiscardUnpushedWork reports whether restoring this row re-provisions

@@ -18,14 +18,19 @@ func (m *Manager) refreshInstanceStatusPublishingOutage(repoID string, instance 
 	if instance == nil {
 		return
 	}
-	before := instance.ToInstanceData().Unreachable
+	// The before/after outage reads take the flag's own accessor, not the whole
+	// row: ToInstanceData is the largest single allocator in the profile for
+	// #6845, and building it twice per tick per session only to diff one field
+	// is exactly the churn the poll must not pay. unreachableDataLocked is the
+	// same projection the snapshot carries, so the comparison is unchanged.
+	before := instance.UnreachableSnapshot()
 	m.refreshInstanceStatus(repoID, instance)
 	// Off-box tab bookkeeping rides the same per-instance sweep: pending closes,
 	// uncertain creates and exit evidence all wait on the sandbox answering, and
 	// this is where its reachability is already being probed (#5955, #5957).
 	instance.ReconcileAgentTabID()
 	tabsChanged := instance.ReconcileOffBoxTabs()
-	after := instance.ToInstanceData().Unreachable
+	after := instance.UnreachableSnapshot()
 	if (unreachableDataEqual(before, after) && !tabsChanged) || instance.GetInFlightOp() != session.OpNone {
 		return
 	}

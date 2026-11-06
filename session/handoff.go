@@ -239,7 +239,7 @@ func (i *Instance) CurrentAgentName() string {
 // axes it was read beside.
 func (i *Instance) canHandoffLocked() bool {
 	return i.capabilitiesLocked().Handoff &&
-		i.lifecycleViewLocked().ValidateRuntimeAction(RuntimeActionHandoff) == nil
+		i.lifecycleViewLocked().AdmitsRuntimeAction(RuntimeActionHandoff)
 }
 
 // currentAgentNameLocked is CurrentAgentName's already-locked half, for callers
