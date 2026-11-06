@@ -481,7 +481,15 @@ func (i *Instance) sessionCodexCaptureBaselineFor(program string) ConversationCa
 		return ConversationCaptureSnapshot{}
 	}
 	workDir := i.GetWorktreePath()
-	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex || i.AgentProgram() != tmux.ProgramCodex {
+	// The provider is what the launch command resolves to, not the
+	// configured enum — resolvedAgentLocked is the #6811 resolver: a
+	// session whose program_overrides entry launches codex under another
+	// agent name still writes a codex home and must baseline its store
+	// (#6817 review, #6769 recording guarantee). The first conjunct already
+	// refuses every command that does not resolve to codex, so the enum
+	// conjunct only ever rejected this override case — matching
+	// SessionCodexHomeDir and the create-time capture gate above.
+	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex || i.ResolvedAgent() != tmux.ProgramCodex {
 		return ConversationCaptureSnapshot{}
 	}
 	home, err := i.codexHomeForLaunch(program, workDir)
