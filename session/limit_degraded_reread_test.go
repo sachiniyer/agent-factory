@@ -194,6 +194,25 @@ func TestDegradedResightMarkerOnlyPrefixCannotProveSame(t *testing.T) {
 	require.Len(t, i2.AccountLimitObservations(), 1, "nothing is minted on the ambiguous read")
 }
 
+// TestDegradedResightWhitespacePrefixCannotProveSame is the second-order case:
+// a blank line above the recorded banner leaves storedBody == "\n", which
+// suffix-matches every longer capture — whitespace-only context must not prove
+// position either.
+func TestDegradedResightWhitespacePrefixCannotProveSame(t *testing.T) {
+	reset := time.Date(2026, 11, 10, 18, 0, 0, 0, time.UTC)
+	const phrase = "reset at 2pm (America/New_York)"
+	i := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	parkAtLimit(t, i, reset, phrase, LimitBanner{Prefix: "\n⎿  ", Count: 1})
+
+	second := "\n⎿  Claude usage limit reached. Your limit will " + phrase + "\n" +
+		"the user pressed retry\n⎿  "
+	require.True(t, degradedResight(t, i, LimitBanner{Prefix: second, Count: 2}),
+		"a blank line of context is not positional proof — the second wall still applies")
+	obs := i.AccountLimitObservations()
+	require.Len(t, obs, 2)
+	require.True(t, obs[1].ResetAt.IsZero())
+}
+
 // TestDegradedResightMoreBannersRecordsNewWall is the count half of the order
 // proof: the capture holds MORE banner matches than the recorded sighting did,
 // so a banner exists that was not there when the wall was parked.
