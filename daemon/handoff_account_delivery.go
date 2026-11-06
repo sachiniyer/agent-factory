@@ -39,7 +39,7 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	var limitErr *task.LimitReachedError
 	if errors.As(err, &limitErr) {
 		m.accountLimitMu.Lock()
-		parkErr := instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
+		parkErr := instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
 		m.accountLimitMu.Unlock()
 		return false, false, fmt.Errorf("incoming account reached a usage limit before delivery; mission remains pending: %w", errors.Join(err, parkErr))
 	}

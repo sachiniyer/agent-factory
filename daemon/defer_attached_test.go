@@ -76,7 +76,7 @@ func TestDeliverPrompt_AttachedLimitedTargetParks(t *testing.T) {
 	rec := &promptRecorder{}
 	backend := recordingBackend{readyFakeBackend{session.NewFakeBackend()}, rec}
 	instance := registerStarted(t, manager, repoID, repoPath, "captain", backend, true, session.Running)
-	manager.setLimitReached(instance, time.Now().Add(time.Hour))
+	manager.setLimitReached(instance, time.Now().Add(time.Hour), "")
 
 	// Attached to a limit-reached target: attachment alone defers, but the
 	// usage limit is the blocker the task record owns.

@@ -90,10 +90,10 @@ var testHookAccountSwapBeforeFinalFence = func() {}
 // setLimitReached records a live limit through the manager-owned publication
 // boundary, so a final account-swap admission observes either the whole limit
 // publication or the whole durable identity commit.
-func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time) {
+func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time, evidence string) {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	instance.SetLimitReached(resetAt)
+	instance.SetLimitReachedAtEvidence(resetAt, evidence)
 }
 
 func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, epoch uint64) bool {
@@ -102,10 +102,10 @@ func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt tim
 	return instance.SetLimitReachedAtEpoch(resetAt, evidence, epoch)
 }
 
-func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time) error {
+func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string) error {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.Transition(session.ParkHandoff(resetAt))
+	return instance.Transition(session.ParkHandoff(resetAt, evidence))
 }
 
 func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetAt time.Time) error {
@@ -736,11 +736,11 @@ func (m *Manager) settleReplacementRuntime(
 		var parkErr error
 		if swap.manual {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt)
+			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
 			m.accountLimitMu.Unlock()
 		} else {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt)
+			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
 			m.accountLimitMu.Unlock()
 		}
 		return false, errors.Join(

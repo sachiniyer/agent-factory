@@ -19,10 +19,27 @@ import (
 // SetStatus to decompose onto, so
 // the daemon single-writer (#960) sets the liveness axis directly here. Skips a
 // row with any operation in flight so it never clobbers that operation's fence.
+//
+// Callers that parsed a reset PHRASE (the send-path park via
+// task.LimitReachedError) should use SetLimitReachedAtEvidence so the phrase
+// accompanies its reset — without it the daemon's first poll fails the
+// same-phrase dedupe and re-parses against a later clock (#6765).
 func (i *Instance) SetLimitReached(resetAt time.Time) {
+	i.SetLimitReachedAtEvidence(resetAt, "")
+}
+
+// SetLimitReachedAtEvidence is SetLimitReached for a park that parsed a reset
+// phrase: it stores both the reset time and the evidence (the reset phrase the
+// detector consumed) so the daemon's first poll over the still-displayed banner
+// recognizes the re-read as the same observation and keeps the first parse's
+// reset (#6765). The send-path park's parse IS the first parse of the banner,
+// so its phrase must be recorded rather than cleared — otherwise a time-only
+// phrase re-parsed after the stated clock time resolves to the next day and the
+// drift becomes durable once the poll adopts the phrase.
+func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setLimitReachedLocked(resetAt)
+	i.setLimitReachedLocked(resetAt, evidence)
 }
 
 // SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
@@ -61,28 +78,31 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ep
 		// per second for as long as it stayed parked (#6802 review).
 		return true
 	}
-	if !i.setLimitReachedLocked(resetAt) {
+	if !i.setLimitReachedLocked(resetAt, evidence) {
 		return false
 	}
-	i.limitResetEvidence = evidence
 	return true
 }
 
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
-// record its reset time, skipping a row with any operation in flight so it never
-// clobbers that operation's fence. Reports whether it applied. Caller holds i.mu.
+// record its reset time and evidence, skipping a row with any operation in flight
+// so it never clobbers that operation's fence. Reports whether it applied.
+// Caller holds i.mu.
 //
-// The written reset carries no observed reset phrase — callers that parse one
-// (the epoch path) record it themselves — so the evidence slot is cleared here
-// rather than left describing a reset it did not produce (#6765).
-func (i *Instance) setLimitReachedLocked(resetAt time.Time) bool {
+// evidence is the reset phrase the detector consumed to produce resetAt. A park
+// that parsed a phrase (the send-path park via task.LimitReachedError) records
+// it so the daemon's first poll recognizes the re-read as the same observation
+// and keeps the first parse's reset (#6765). A park that resolved a reset
+// without a phrase passes "" — the slot is cleared rather than left describing
+// a reset it did not produce.
+func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string) bool {
 	if i.inFlightOp != OpNone {
 		return false
 	}
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
-	i.limitResetEvidence = ""
+	i.limitResetEvidence = evidence
 	i.attributeLimitIdentityLocked()
 	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, lv == LiveLimitReached)
 	i.noteStateChangeLocked(lv, op, prevReset)
