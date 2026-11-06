@@ -131,14 +131,28 @@ func TestAutomationsReservesBottomMargin(t *testing.T) {
 		return strings.TrimRight(lines[len(lines)-1], " ") == ""
 	}
 
-	// Compact summary: the region is 2 rows (summary + reserved margin).
+	// Compact summary: the region is 2 rows (summary + one more row). With
+	// tasks hidden below the summary, that row carries the "▼ N more" marker
+	// — the count of hidden rows outranks the margin when they compete for
+	// one row (#6883). A taller compact strip keeps the marker AND the blank
+	// margin: the margin yields only when a hidden row would otherwise go
+	// uncounted.
 	compact := newTestAutomations(tasks)
 	compact.SetRect(layout.Rect{W: 40, H: layout.AutomationsCompactRows})
 	compact.SetCompact(true)
 	clines := plainLines(compact.View())
 	require.Len(t, clines, layout.AutomationsCompactRows)
 	assert.Contains(t, clines[0], "Automations")
-	assert.True(t, lastBlank(clines), "the compact summary reserves a blank bottom-margin row")
+	assert.Contains(t, clines[1], "▼ 8 more",
+		"the marker counts the task rows the compact summary hides")
+	tallCompact := newTestAutomations(tasks)
+	tallCompact.SetRect(layout.Rect{W: 40, H: 4})
+	tallCompact.SetCompact(true)
+	tclines := plainLines(tallCompact.View())
+	require.Len(t, tclines, 4)
+	assert.Contains(t, tclines[1], "▼ 8 more")
+	assert.True(t, lastBlank(tclines),
+		"a taller compact strip keeps the marker and the blank margin")
 
 	// Full mode, focused, with more tasks than fit: content wants every row, but
 	// the last row still stays blank.
@@ -591,11 +605,12 @@ func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
 	}
 
 	// Detail renders: the window reserves its line, so one fewer title row
-	// shows and the selected task's detail is on-screen at the fold.
+	// shows and the selected task's detail is on-screen at the fold. The "▲"
+	// row the fix adds counts the tasks the window scrolled away (#6883).
 	withDetail := stripANSI(bottom(16).View())
 	require.Contains(t, withDetail, "0 3 * * *",
 		"the selected row's detail must be visible, not pushed below the fold")
-	require.NotContains(t, withDetail, "task-2",
+	require.NotContains(t, withDetail, "task-3",
 		"the reserved detail line takes a real row's place")
 	require.Contains(t, withDetail, "task-7")
 
@@ -603,7 +618,7 @@ func TestAutomationsScrollReservesDetailOnlyWhenItRenders(t *testing.T) {
 	// extra title row a phantom reservation would have scrolled away.
 	noDetail := stripANSI(bottom(15).View())
 	require.NotContains(t, noDetail, "0 3 * * *")
-	require.Contains(t, noDetail, "task-2",
+	require.Contains(t, noDetail, "task-3",
 		"with no detail to reveal the window must not sacrifice a visible row")
 }
 
