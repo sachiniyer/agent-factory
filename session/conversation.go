@@ -516,6 +516,16 @@ func (i *Instance) ExactResume() (bool, string) {
 	if i.Capabilities().Workspace == WorkspaceRemote {
 		return false, "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"
 	}
+	return i.exactResumeVerdict()
+}
+
+// exactResumeVerdict is ExactResume's sandbox-agnostic half: whether a respawn
+// of this session would resume its own recorded conversation, and when not,
+// why. A re-provisioning sandbox never qualifies (ExactResume's own blanket
+// refusal above), but a relaunch-capable sandbox runs the same resume-capable
+// local respawn in its existing store, so ResumeConversationOutcome shares this
+// verdict instead of treating the relaunch capability alone as proof of carry.
+func (i *Instance) exactResumeVerdict() (bool, string) {
 	program := resolveLaunchProgramForInstance(i).command
 	_, ok, refusal := prepareExactResumeConversation(i, program)
 	if ok {
@@ -549,17 +559,31 @@ func (i *Instance) ExactResume() (bool, string) {
 // sandbox supports it (CanRelaunchInPlace), re-provisioning only when it does
 // not. The in-place relaunch runs the same resume-capable local respawn inside
 // the existing sandbox — whose store still holds the agent's transcript — so
-// the conversation carries the same way a local session's Recover carries it.
-// The refusal is the re-provision arm only: an older sandbox build, an
-// unreachable/not-provisioned sandbox, or --force-reap, where the replacement
-// sandbox genuinely starts a fresh conversation.
+// the conversation carries by the same proof a local session's respawn carries
+// (a recorded id the command names, or the worktree-scoped resume form the
+// exact-only rewrite keeps), not by the capability alone: a relaunch-capable
+// sandbox running Codex or Amp with no recorded conversation id still starts
+// fresh, because the respawn's exact-resume-only mode refuses an account-wide
+// latest. The refusal below is the re-provision arm only — an older sandbox
+// build, an unreachable/not-provisioned sandbox, or --force-reap — where the
+// replacement sandbox genuinely starts a fresh conversation.
 func (i *Instance) ResumeConversationOutcome() HandoffConversation {
-	if i.Capabilities().Workspace == WorkspaceRemote {
-		if !i.forceSandboxReplacement.Load() && i.CanRelaunchInPlace() {
-			return HandoffConversation{Carried: true}
-		}
+	if i.Capabilities().Workspace == WorkspaceRemote &&
+		(i.forceSandboxReplacement.Load() || !i.CanRelaunchInPlace()) {
 		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and the sandbox af restores it into does not keep its agent's conversation"}
 	}
+	return i.handoffConversationForRespawn()
+}
+
+// handoffConversationForRespawn is the determination a respawn of this
+// session's runtime makes about its conversation — the answer a local
+// session's Recover and a relaunch-capable sandbox's in-place relaunch share,
+// since the latter runs the same resume-capable local respawn in the sandbox's
+// own store. It is sandbox-agnostic: a re-provisioning sandbox's refusal is
+// ResumeConversationOutcome's business above, so ExactResume's blanket sandbox
+// refusal is not used here (a relaunch-capable sandbox genuinely resumes its
+// agent in place, and must not be answered by the re-provision refusal).
+func (i *Instance) handoffConversationForRespawn() HandoffConversation {
 	program := resolveLaunchProgramForInstance(i).command
 	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return HandoffConversation{Carried: true}
@@ -567,7 +591,7 @@ func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 	if tmux.ProgramResumesConversation(program) {
 		return HandoffConversation{Carried: true}
 	}
-	if _, why := i.ExactResume(); why != "" {
+	if ok, why := i.exactResumeVerdict(); !ok {
 		return HandoffConversation{CarryFailure: why}
 	}
 	return HandoffConversation{CarryFailure: "af cannot prove the launched program resumes this session's conversation"}

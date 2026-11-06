@@ -112,6 +112,41 @@ func TestResumeConversationOutcomeSandboxCarriesWhenRelaunchCapable(t *testing.T
 		"a relaunch-capable sandbox resumes the agent in place, keeping its conversation")
 }
 
+// Capability is not proof of carry: a relaunch-capable sandbox running an agent
+// whose respawn uses exact-resume-only mode (Codex, Amp) with no recorded
+// conversation id still starts fresh — the in-place relaunch runs the same
+// local respawn, which refuses an account-wide latest — so the verdict must
+// name the fresh start, not answer carried. CanRelaunchInPlace proves only that
+// the relaunch endpoint exists, not that the configured program can resume this
+// session's conversation.
+func TestResumeConversationOutcomeSandboxNamesFreshStartWhenRelaunchCannotResume(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true, "version": "x", "features": []string{"tab-api", RelaunchFeature}})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	rc := srv.client(t, httpSrv.URL)
+
+	for _, program := range []string{tmux.ProgramCodex, tmux.ProgramAmp} {
+		inst := exactResumeSession(t, program)
+		// No recorded conversation id: the respawn's exact-resume-only mode
+		// cannot name this session's own conversation, so it starts fresh.
+		inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: program, CapturedAt: time.Now()}}}
+		inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
+		inst.mu.Lock()
+		inst.remoteClient = rc
+		inst.agentSrv = nil
+		inst.mu.Unlock()
+
+		require.True(t, inst.CanRelaunchInPlace(),
+			"precondition: the sandbox advertises the relaunch feature")
+		require.Equal(t,
+			HandoffConversation{CarryFailure: "af recorded no conversation id for this " + program + " session"},
+			inst.ResumeConversationOutcome(), program)
+	}
+}
+
 // --force-reap asks for the sandbox to be replaced even when it could relaunch
 // in place: the replacement sandbox starts a fresh conversation, so the
 // verdict must answer the re-provision refusal regardless of CanRelaunchInPlace
