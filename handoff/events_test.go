@@ -9,6 +9,7 @@ import (
 	"encoding/json"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -210,6 +211,223 @@ func TestEdgeTrackerPruneDropsGoneSessions(t *testing.T) {
 	tr.Prune(map[string]bool{"live": true})
 	if got := tr.Filter("gone", wall, now.Add(time.Minute), time.Hour); len(got) != 1 {
 		t.Fatalf("a session that left and returned did not re-announce")
+	}
+}
+
+// TestEventSignatureExcludesVolatileParams pins the fix for the
+// percent-jitter re-emission bug: the signature is verdict IDENTITY (kind,
+// reason, from, to, stable params) and must NOT change when volatile
+// evidence (percent, the observed window name, the move count) drifts
+// between ticks for a semantically unchanged verdict (design R14).
+func TestEventSignatureExcludesVolatileParams(t *testing.T) {
+	t.Run("wall percent drift does not change signature", func(t *testing.T) {
+		base := func(pct string) []Event {
+			return []Event{{
+				Kind: EventWall, Reason: "usage-reading", From: "work",
+				Params: map[string]string{
+					"confirmed": "true", "window": "primary", "percent": pct,
+				},
+			}}
+		}
+		sig1 := eventSignature(base("98"))
+		sig2 := eventSignature(base("98.4"))
+		if sig1 != sig2 {
+			t.Fatalf("percent drift changed the signature:\n  %q\n  %q", sig1, sig2)
+		}
+		// The stable param (confirmed) still participates — a flip is a
+		// real verdict change.
+		if eventSignature([]Event{{
+			Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{"confirmed": "false", "window": "primary", "percent": "98"},
+		}}) == sig1 {
+			t.Fatalf("confirmed flip did not change the signature")
+		}
+	})
+
+	t.Run("wall window name drift does not change signature", func(t *testing.T) {
+		e1 := []Event{{Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{"confirmed": "true", "window": "primary", "percent": "98"}}}
+		e2 := []Event{{Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{"confirmed": "true", "window": "secondary", "percent": "99"}}}
+		if eventSignature(e1) != eventSignature(e2) {
+			t.Fatalf("window name drift changed the signature")
+		}
+	})
+
+	t.Run("move percent drift does not change signature", func(t *testing.T) {
+		base := func(pct string) []Event {
+			return []Event{{
+				Kind: EventMove, Reason: "wall", From: "work", To: "personal",
+				Params: map[string]string{
+					"trigger": "wall", "skipped": "backup=limited", "window": "primary", "percent": pct,
+				},
+			}}
+		}
+		if eventSignature(base("98")) != eventSignature(base("98.4")) {
+			t.Fatalf("move percent drift changed the signature")
+		}
+		// The stable params (trigger, skipped) still participate.
+		if eventSignature([]Event{{
+			Kind: EventMove, Reason: "wall", From: "work", To: "personal",
+			Params: map[string]string{"trigger": "idle", "skipped": "backup=limited", "percent": "98"},
+		}}) == eventSignature(base("98")) {
+			t.Fatalf("trigger change did not change the signature")
+		}
+	})
+
+	t.Run("switch-loop move count drift does not change signature", func(t *testing.T) {
+		base := func(moves string) []Event {
+			return []Event{{
+				Kind: EventSwitchLoop, Reason: "move-cap",
+				Params: map[string]string{"moves": moves, "window": "30m"},
+			}}
+		}
+		if eventSignature(base("3")) != eventSignature(base("4")) {
+			t.Fatalf("move count drift changed the signature")
+		}
+	})
+}
+
+// TestEventSignatureIncludesStableParams ensures the stable params that
+// define verdict identity still participate in the signature so two
+// genuinely different verdicts are not collapsed into one.
+func TestEventSignatureIncludesStableParams(t *testing.T) {
+	t.Run("no-account skipped list change is a verdict change", func(t *testing.T) {
+		e1 := []Event{{Kind: EventNoAccount, Reason: "no-eligible-candidate", From: "work",
+			Params: map[string]string{"skipped": "backup=limited", "trigger": "wall"}}}
+		e2 := []Event{{Kind: EventNoAccount, Reason: "no-eligible-candidate", From: "work",
+			Params: map[string]string{"skipped": "backup=limited;spare=walled", "trigger": "wall"}}}
+		if eventSignature(e1) == eventSignature(e2) {
+			t.Fatalf("skipped list change did not change the signature")
+		}
+	})
+
+	t.Run("halt reason change is a verdict change", func(t *testing.T) {
+		e1 := []Event{{Kind: EventHalted, Reason: "mover-halted",
+			Params: map[string]string{"halt_reason": "move-failed", "halted_at": "2026-11-03T00:00:00Z"}}}
+		e2 := []Event{{Kind: EventHalted, Reason: "mover-halted",
+			Params: map[string]string{"halt_reason": "carry-refused", "halted_at": "2026-11-03T00:00:00Z"}}}
+		if eventSignature(e1) == eventSignature(e2) {
+			t.Fatalf("halt_reason change did not change the signature")
+		}
+	})
+
+	t.Run("halted_at change is a new episode", func(t *testing.T) {
+		e1 := []Event{{Kind: EventHalted, Reason: "mover-halted",
+			Params: map[string]string{"halt_reason": "move-failed", "halted_at": "2026-11-03T00:00:00Z"}}}
+		e2 := []Event{{Kind: EventHalted, Reason: "mover-halted",
+			Params: map[string]string{"halt_reason": "move-failed", "halted_at": "2026-11-03T01:00:00Z"}}}
+		if eventSignature(e1) == eventSignature(e2) {
+			t.Fatalf("halted_at change did not change the signature")
+		}
+	})
+
+	t.Run("refusal backoff until change is a verdict change", func(t *testing.T) {
+		e1 := []Event{{Kind: EventIgnored, Reason: "refusal-backoff",
+			Params: map[string]string{"until": "2026-11-03T01:00:00Z"}}}
+		e2 := []Event{{Kind: EventIgnored, Reason: "refusal-backoff",
+			Params: map[string]string{"until": "2026-11-03T02:00:00Z"}}}
+		if eventSignature(e1) == eventSignature(e2) {
+			t.Fatalf("until change did not change the signature")
+		}
+	})
+}
+
+// TestEdgeTrackerSuppressesVolatileParamJitter is the end-to-end edge-tracker
+// proof: a standing wall verdict whose only movement is the usage percent
+// is suppressed inside the heartbeat, while a real verdict change (confirmed
+// flip) still emits — and the emitted row carries the current percent.
+func TestEdgeTrackerSuppressesVolatileParamJitter(t *testing.T) {
+	tr := NewEdgeTracker()
+	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+
+	wallAt := func(pct string) []Event {
+		return []Event{{
+			Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{"confirmed": "true", "window": "primary", "percent": pct},
+		}}
+	}
+
+	// Tick 1: initial verdict emits.
+	got := tr.Filter("s", wallAt("98"), now, ReannounceTest)
+	if len(got) != 1 || got[0].Params["percent"] != "98" {
+		t.Fatalf("tick 1: expected one row with percent=98, got %v", got)
+	}
+	// Tick 2: only the percent drifted (98 → 98.4, exactly what codex
+	// produces by completing another response). The verdict is
+	// semantically unchanged → suppressed inside the heartbeat.
+	if got := tr.Filter("s", wallAt("98.4"), now.Add(45*time.Second), ReannounceTest); got != nil {
+		t.Fatalf("percent jitter re-emitted the unchanged verdict: %v", got)
+	}
+	// Tick 3: percent unchanged — control proving the suppression is not
+	// a fluke of the value.
+	if got := tr.Filter("s", wallAt("98.4"), now.Add(90*time.Second), ReannounceTest); got != nil {
+		t.Fatalf("unchanged percent re-emitted: %v", got)
+	}
+}
+
+// TestEdgeTrackerHeartbeatReannouncesWithCurrentPercent verifies the
+// heartbeat re-announce fires past the interval and the emitted row still
+// carries the current (drifted) percent — the operator sees fresh numbers
+// on the heartbeat, not the stale ones from the first emission.
+func TestEdgeTrackerHeartbeatReannouncesWithCurrentPercent(t *testing.T) {
+	tr := NewEdgeTracker()
+	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+
+	wallAt := func(pct string) []Event {
+		return []Event{{
+			Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{"confirmed": "true", "window": "primary", "percent": pct},
+		}}
+	}
+
+	// Initial emission.
+	tr.Filter("s", wallAt("98"), now, ReannounceTest)
+	// Percent drifts but the verdict is unchanged — suppressed inside.
+	tr.Filter("s", wallAt("98.4"), now.Add(time.Minute), ReannounceTest)
+	// Past the heartbeat — re-announces with the CURRENT percent.
+	got := tr.Filter("s", wallAt("98.8"), now.Add(ReannounceTest+time.Second), ReannounceTest)
+	if len(got) != 1 {
+		t.Fatalf("heartbeat did not re-announce: got %v", got)
+	}
+	if got[0].Params["percent"] != "98.8" {
+		t.Fatalf("heartbeat row carried stale percent %q, want 98.8", got[0].Params["percent"])
+	}
+}
+
+// TestEdgeTrackerRealVerdictChangeEmitsWithVolatileParams verifies that a
+// genuine verdict change (the confirmed boolean flips) emits even when the
+// volatile percent also changed — the stable param drives the edge, not
+// the evidence.
+func TestEdgeTrackerRealVerdictChangeEmitsWithVolatileParams(t *testing.T) {
+	tr := NewEdgeTracker()
+	now := time.Date(2026, 11, 3, 0, 0, 0, 0, time.UTC)
+
+	confirmed := func(conf bool, pct string) []Event {
+		return []Event{{
+			Kind: EventWall, Reason: "usage-reading", From: "work",
+			Params: map[string]string{
+				"confirmed": strconv.FormatBool(conf), "window": "primary", "percent": pct,
+			},
+		}}
+	}
+
+	// Tick 1: unconfirmed wall emits.
+	if got := tr.Filter("s", confirmed(false, "98"), now, ReannounceTest); len(got) != 1 {
+		t.Fatalf("initial verdict suppressed: %v", got)
+	}
+	// Tick 2: percent drifted but confirmed still false — suppressed.
+	if got := tr.Filter("s", confirmed(false, "98.4"), now.Add(time.Minute), ReannounceTest); got != nil {
+		t.Fatalf("percent jitter re-emitted: %v", got)
+	}
+	// Tick 3: confirmed flips to true — a real verdict change, emits even
+	// though the percent also changed.
+	got := tr.Filter("s", confirmed(true, "98.8"), now.Add(2*time.Minute), ReannounceTest)
+	if len(got) != 1 {
+		t.Fatalf("confirmed flip did not emit: %v", got)
+	}
+	if got[0].Params["confirmed"] != "true" || got[0].Params["percent"] != "98.8" {
+		t.Fatalf("emitted row missing verdict/evidence: %v", got[0].Params)
 	}
 }
 

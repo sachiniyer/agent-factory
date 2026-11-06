@@ -944,3 +944,205 @@ func TestTickMovesInWindowCountsEverythingWhenTheWindowIsUnbounded(t *testing.T)
 		t.Fatalf("an unbounded window counted nothing — the rail never engaged: %+v", d.rows)
 	}
 }
+
+// TestTickPercentJitterDoesNotReemit is the engine-level proof of the
+// signature-jitter fix: a parked codex session with a confirmed wall whose
+// usage percent drifts between ticks (exactly what codex produces by
+// completing another response) does NOT re-emit rows or deliver new report
+// digests — the edge tracker sees a semantically unchanged verdict and
+// suppresses it inside the heartbeat (design R14). Before the fix,
+// eventSignature hashed the volatile percent into the signature, so every
+// percent change re-emitted the full event set plus a fresh digest.
+func TestTickPercentJitterDoesNotReemit(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	in := shadowSession()
+
+	var percent float64 = 98
+	deps := d.deps()
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		if dir == in.HomeDir {
+			return handoff.ReadingFacts{
+				Status:     handoff.ReadingObserved,
+				Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: percent}},
+				RecordedAt: testNow.Add(-time.Minute), Complete: true,
+			}
+		}
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	e := New(deps)
+	obs := observerSession()
+
+	// Tick 1: initial verdict emits rows and a report digest.
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 1: writes=%d, want 1", d.writes)
+	}
+	if len(d.reports) != 1 {
+		t.Fatalf("tick 1: reports=%d, want 1", len(d.reports))
+	}
+
+	// Tick 2: only the percent drifted (98 → 98.4, what codex produces by
+	// completing another response). The verdict is semantically unchanged
+	// (same kind, reason, accounts) — the edge tracker suppresses it.
+	percent = 98.4
+	d.rows = nil
+	d.reports = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 2: percent jitter re-wrote rows: writes=%d, want 1", d.writes)
+	}
+	if len(d.rows) != 0 {
+		t.Fatalf("tick 2: percent jitter emitted %d rows, want 0", len(d.rows))
+	}
+	if len(d.reports) != 0 {
+		t.Fatalf("tick 2: percent jitter delivered %d reports, want 0", len(d.reports))
+	}
+
+	// Tick 3: percent unchanged — control proving the suppression is not
+	// a fluke of the value.
+	d.rows = nil
+	d.reports = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 3: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 3: writes=%d, want 1", d.writes)
+	}
+	if len(d.rows) != 0 {
+		t.Fatalf("tick 3: unchanged percent emitted %d rows, want 0", len(d.rows))
+	}
+}
+
+// TestTickHeartbeatReannouncesWithCurrentPercent verifies the heartbeat
+// re-announce fires past the interval and the emitted row carries the
+// current (drifted) percent — the operator sees fresh numbers on the
+// heartbeat, not the stale ones from the first emission.
+func TestTickHeartbeatReannouncesWithCurrentPercent(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	in := shadowSession()
+
+	var percent float64 = 98
+	now := testNow
+	deps := d.deps()
+	deps.Now = func() time.Time { return now }
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		if dir == in.HomeDir {
+			return handoff.ReadingFacts{
+				Status:     handoff.ReadingObserved,
+				Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: percent}},
+				RecordedAt: now.Add(-time.Minute), Complete: true,
+			}
+		}
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	e := New(deps)
+	obs := observerSession()
+
+	// Tick 1: initial emission.
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 1: writes=%d, want 1", d.writes)
+	}
+
+	// Tick 2: percent drifted, time advanced 45s — suppressed.
+	percent = 98.4
+	now = now.Add(45 * time.Second)
+	d.rows = nil
+	d.reports = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 2: writes=%d, want 1 (suppressed)", d.writes)
+	}
+
+	// Tick 3: percent drifted further, time advanced past the heartbeat —
+	// re-announces with the CURRENT percent.
+	percent = 98.8
+	now = now.Add(Reannounce + time.Second)
+	d.rows = nil
+	d.reports = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 3: %v", err)
+	}
+	if d.writes != 2 {
+		t.Fatalf("tick 3: writes=%d, want 2 (heartbeat)", d.writes)
+	}
+	var wallRow *handoff.EventRow
+	for i := range d.rows {
+		if d.rows[i].Kind == handoff.EventWall {
+			wallRow = &d.rows[i]
+			break
+		}
+	}
+	if wallRow == nil {
+		t.Fatalf("heartbeat tick emitted no wall row: %+v", d.rows)
+	}
+	if wallRow.Params["percent"] != "98.8" {
+		t.Fatalf("heartbeat row carried stale percent %q, want 98.8", wallRow.Params["percent"])
+	}
+}
+
+// TestTickWallClearsEmitsNewVerdict verifies the fix does not suppress a
+// genuine verdict change: when the wall clears (percent drops below
+// wall_percent and the reading is provably fresh), the decision changes
+// from KindMove to KindNoop and the edge tracker emits the new verdict.
+func TestTickWallClearsEmitsNewVerdict(t *testing.T) {
+	d := &depCounts{mode: "shadow", reportTo: "observer"}
+	in := shadowSession()
+
+	var percent float64 = 98
+	now := testNow
+	deps := d.deps()
+	deps.Now = func() time.Time { return now }
+	deps.ReadUsage = func(dir string, c map[string]int64) handoff.ReadingFacts {
+		if dir == in.HomeDir {
+			return handoff.ReadingFacts{
+				Status:     handoff.ReadingObserved,
+				Windows:    []handoff.WindowFact{{Name: "primary", UsedPercent: percent}},
+				RecordedAt: now.Add(-time.Minute), Complete: true,
+			}
+		}
+		return handoff.ReadingFacts{Status: handoff.ReadingNone}
+	}
+	e := New(deps)
+	obs := observerSession()
+
+	// Tick 1: walled — initial emission.
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 1: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 1: writes=%d, want 1", d.writes)
+	}
+
+	// Tick 2: percent jitter within the heartbeat — suppressed.
+	percent = 98.4
+	now = now.Add(45 * time.Second)
+	d.rows = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 2: %v", err)
+	}
+	if d.writes != 1 {
+		t.Fatalf("tick 2: writes=%d, want 1 (suppressed)", d.writes)
+	}
+
+	// Tick 3: wall clears — percent drops below wall_percent and the
+	// reading is provably fresh. The decision changes to KindNoop
+	// (no-trigger), a genuine verdict change that emits.
+	percent = 10
+	now = now.Add(45 * time.Second)
+	d.rows = nil
+	if _, err := e.Tick([]SessionInput{in, obs}); err != nil {
+		t.Fatalf("tick 3: %v", err)
+	}
+	if d.writes != 2 {
+		t.Fatalf("tick 3: writes=%d, want 2 (verdict change)", d.writes)
+	}
+}
