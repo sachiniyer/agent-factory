@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5c0851cb9c61";
+var CLIENT_VERSION = "b50205194c3b";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8912,6 +8912,13 @@ var ConfigPane = class {
     this.actions = actions2;
     this.el = h("section", { class: "af-config" });
     this.el.setAttribute("aria-label", "Config");
+    this.hostActions = {
+      ...actions2.hosts,
+      add: (draft) => {
+        this.committedHostAdd = this.readHostDrafts();
+        actions2.hosts.add(draft);
+      }
+    };
   }
   el;
   entries = [];
@@ -8933,11 +8940,20 @@ var ConfigPane = class {
   quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
-  /** The key whose field is open, if any. Only one row edits at a time: a config
-   *  write is per-key (like `af config set`), so a multi-row "save all" would
-   *  imply an atomicity across keys that the writer does not offer. */
+  /** The key whose field the focus machinery is tracking — the row
+   *  `editingInput` repoints to on each rebuild and `shouldCloseSavedField`
+   *  closes. Typing into a row marks it; only that row's own successful save
+   *  unmarks it, so it names where the user most recently typed, not the only
+   *  row holding a draft. */
   editing = null;
-  draft = "";
+  /** Every row's typed-but-unsaved text, keyed by config key. A rebuild repaints
+   *  from this map rather than from `editing`/`draft`, so a refresh never eats
+   *  a draft the user did not submit: the single-slot pair it replaced kept
+   *  only the most recently typed row and silently dropped every earlier one
+   *  (#6692). A key's own successful save deletes its entry — a committed draft
+   *  is done, and replaying it would show a saved value as unsaved — while a
+   *  refused save keeps it so the rejected text stays to be corrected. */
+  drafts = /* @__PURE__ */ new Map();
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
@@ -8962,6 +8978,16 @@ var ConfigPane = class {
   lastHosts = null;
   lastQuota = null;
   lastTheme = null;
+  /** The Hosts add form exactly as it stood when its send went out — keyed by
+   *  HOST_INPUT_ATTR like readHostDrafts' map. On the success edge each field
+   *  still holding what was sent is retired; one retyped while the send was in
+   *  flight is the NEXT host's draft, not a replay of the saved one (#6861).
+   *  Null when no add has been submitted. */
+  committedHostAdd = null;
+  /** HostActions with `add` wrapped to snapshot the form at send time — the
+   *  only record of what was committed, since the returned status names no
+   *  draft. The other verbs pass straight through. */
+  hostActions;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
   update(entries, path, status, accounts, quota, theme = this.theme, hosts = this.hosts) {
@@ -8974,6 +9000,10 @@ var ConfigPane = class {
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
       if (submitted) submitted.value = "";
+    }
+    const hostAddSucceeded = hosts.status !== this.hosts.status && hosts.status !== null && hosts.status.name === "" && !hosts.status.error && hosts.status.check !== true;
+    if (hostAddSucceeded) {
+      this.retireCommittedHostAdd();
     }
     this.lastEntries = entries;
     this.lastStatus = status;
@@ -8990,7 +9020,9 @@ var ConfigPane = class {
     this.hosts = hosts;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
-      this.draft = "";
+    }
+    if (statusIsNew && status !== null && status.error === "") {
+      this.drafts.delete(status.key);
     }
     if (entriesAreNew && this.explainKey !== null) {
       this.requestExplain(this.explainKey);
@@ -9150,6 +9182,31 @@ var ConfigPane = class {
       }
     }
   }
+  /** Retires the committed add-form draft field by field (#6861): a field
+   *  still holding exactly what was sent clears, while one retyped since keeps
+   *  its new text — that text is the NEXT host's draft, and clearing it would
+   *  be the same silent loss the draft mechanism exists to prevent. Runs before
+   *  readHostDrafts so retired values are never snapshotted for a replay. */
+  retireCommittedHostAdd() {
+    const committed = this.committedHostAdd;
+    this.committedHostAdd = null;
+    if (committed === null) {
+      return;
+    }
+    for (const [key, sent] of committed) {
+      const field2 = this.hostInput(key);
+      if (field2 === null) {
+        continue;
+      }
+      if (field2 instanceof HTMLInputElement && field2.type === "checkbox") {
+        if (field2.checked === sent.checked) {
+          field2.checked = false;
+        }
+      } else if (field2.value === sent.value) {
+        field2.value = "";
+      }
+    }
+  }
   hostInput(key) {
     return this.el.querySelector(
       `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`
@@ -9213,7 +9270,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderHostsSection(this.entries, this.hosts, this.actions.hosts, this.hostDisclosure),
+      renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota)
     );
@@ -9440,7 +9497,7 @@ var ConfigPane = class {
       return h("div", { class: "af-config-control" }, select);
     }
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
-    input.value = this.editing === e.key ? this.draft : e.value;
+    input.value = this.drafts.get(e.key) ?? e.value;
     if (this.editing === e.key) {
       this.editingInput = input;
     }
@@ -9462,7 +9519,7 @@ var ConfigPane = class {
     };
     input.addEventListener("input", () => {
       this.editing = e.key;
-      this.draft = input.value;
+      this.drafts.set(e.key, input.value);
       this.editingInput = input;
       syncSave();
     });
