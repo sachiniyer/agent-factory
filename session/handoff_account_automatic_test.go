@@ -41,7 +41,7 @@ func TestParkAutomaticAccountSwapAtLimit_AttributesAndRecordsIncomingIdentity(t 
 	reset := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
 	inst := automaticAccountSwapLimitInstance("personal")
 
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
 
 	require.Equal(t, LiveLimitReached, inst.GetLiveness())
 	got, ok := inst.LimitResetAt()
@@ -80,13 +80,13 @@ func TestParkAutomaticAccountSwapAtLimit_RefusesWithoutAutomaticPendingSwap(t *t
 	t.Run("resume fence not held", func(t *testing.T) {
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.inFlightOp = OpNone
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
 	})
 
 	t.Run("no pending replacement", func(t *testing.T) {
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.pendingAccountSwap = nil
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
 	})
 
 	t.Run("manual pending replacement", func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestParkAutomaticAccountSwapAtLimit_RefusesWithoutAutomaticPendingSwap(t *t
 		// flip by parking through the automatic entry point.
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.pendingAccountSwap.Manual = true
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
 		require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus,
 			"a refused park must not mutate delivery state")
 	})
@@ -120,7 +120,7 @@ func TestParkAutomaticAccountSwapAtLimit_DoesNotFlipManualDeliveryMarker(t *test
 	inst := automaticAccountSwapLimitInstance("personal")
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus)
 
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Now().Add(time.Hour)))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Now().Add(time.Hour), ""))
 
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus,
 		"the automatic twin must NOT flip the manual-only MissionDeliveryStatus marker")

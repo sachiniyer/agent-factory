@@ -39,7 +39,7 @@ func finishCreateStart(instance *session.Instance, prompt string, startErr error
 	}
 	var limitErr *task.LimitReachedError
 	if errors.As(startErr, &limitErr) {
-		instance.SetLimitReached(limitErr.ResetAt)
+		instance.SetLimitReachedAtEvidence(limitErr.ResetAt, limitErr.Evidence)
 		instance.SetPrompt(prompt)
 		return nil
 	}

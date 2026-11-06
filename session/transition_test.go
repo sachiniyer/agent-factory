@@ -148,7 +148,7 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 		{"BeginRestoreUnderHeldFence from a held fence", stateAxes{LiveArchived, OpRestoring}, false, false, BeginRestoreUnderHeldFence(), LiveLost, OpRestoring, true},
 		{"BeginHandoff fences running agent", stateAxes{LiveRunning, OpNone}, true, false, BeginHandoff(), LiveRunning, OpReplacing, true},
 		{"CommitHandoff settles incoming agent", stateAxes{LiveReady, OpReplacing}, true, false, CommitHandoff(), LiveRunning, OpNone, true},
-		{"ParkHandoff settles incoming agent at limit", stateAxes{LiveRunning, OpReplacing}, true, false, ParkHandoff(time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)), LiveLimitReached, OpNone, true},
+		{"ParkHandoff settles incoming agent at limit", stateAxes{LiveRunning, OpReplacing}, true, false, ParkHandoff(time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC), ""), LiveLimitReached, OpNone, true},
 		{"AbortHandoff preserves outgoing liveness", stateAxes{LiveLimitReached, OpReplacing}, true, false, AbortHandoff(), LiveLimitReached, OpNone, true},
 		// ClearOp: drop any optimistic overlay to None, liveness untouched.
 		{"ClearOp from archiving", stateAxes{LiveReady, OpArchiving}, true, false, ClearOp(), LiveReady, OpNone, true},
@@ -168,7 +168,7 @@ func TestTransition_LegalEdgesApply(t *testing.T) {
 func TestTransition_ParkHandoffStoresIncomingResetTime(t *testing.T) {
 	resetAt := time.Date(2026, 7, 25, 17, 55, 0, 0, time.UTC)
 	i := &Instance{liveness: LiveRunning, inFlightOp: OpReplacing}
-	require.NoError(t, i.Transition(ParkHandoff(resetAt)))
+	require.NoError(t, i.Transition(ParkHandoff(resetAt, "")))
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)
 	require.Equal(t, resetAt, got)
@@ -180,7 +180,7 @@ func TestTransition_ParkHandoffAttributesIncomingAccountLimit(t *testing.T) {
 		Program: tmux.ProgramCodex, Account: "work",
 		liveness: LiveRunning, inFlightOp: OpReplacing,
 	}
-	require.NoError(t, i.Transition(ParkHandoff(resetAt)))
+	require.NoError(t, i.Transition(ParkHandoff(resetAt, "")))
 
 	account, ok := i.LimitAccount()
 	require.True(t, ok)

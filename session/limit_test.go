@@ -163,6 +163,31 @@ func TestSetLimitReached_NoResetTime(t *testing.T) {
 	require.False(t, ok, "a zero reset time must report as unknown")
 }
 
+// TestSetLimitReachedAtEvidence stores the reset phrase alongside its reset so
+// the daemon's first poll recognizes a re-read of an unchanged banner as the
+// same observation and keeps the first parse's reset (#6765). The send-path park
+// (limitParkError → LimitReachedError.Evidence → SetLimitReachedAtEvidence) uses
+// this to record the phrase that produced its reset; without it the evidence slot
+// is empty and the poll re-parses against a later clock, moving the stored reset.
+func TestSetLimitReachedAtEvidence(t *testing.T) {
+	i := &Instance{Program: tmux.ProgramCodex}
+	reset := time.Date(2026, 11, 4, 6, 34, 0, 0, time.UTC)
+	phrase := "try again at 6:34 AM"
+
+	i.SetLimitReachedAtEvidence(reset, phrase)
+	require.True(t, i.LimitReached())
+	got, ok := i.LimitResetAt()
+	require.True(t, ok)
+	require.True(t, got.Equal(reset))
+	require.Equal(t, phrase, i.LimitResetEvidence(), "the evidence must be stored alongside its reset")
+	require.Equal(t, phrase, i.ToInstanceData().LimitResetEvidence, "the evidence must serialize onto the durable row")
+
+	// SetLimitReached (no evidence) clears the slot — callers that resolve a
+	// reset without a phrase must not leave a stale one describing it.
+	i.SetLimitReached(reset.Add(time.Hour))
+	require.Empty(t, i.LimitResetEvidence(), "SetLimitReached must clear the evidence slot")
+}
+
 // TestSetLimitReached_SkipsTransient: a row mid create/kill teardown must not be
 // clobbered into LimitReached (mirrors SetStatusIfNotDeleting).
 func TestSetLimitReached_SkipsTransient(t *testing.T) {
