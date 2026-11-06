@@ -152,10 +152,11 @@ SESSION_DEAD=probe-noserver
 # be "probe-arrange", which contains "probe-a" and would wedge that session's row().
 SESSION_ORDER=probe-order
 # The #2347 geometry-reclaim session: DEDICATED, like SESSION_VITE. Its assertion
-# samples the emulator ~50ms after activation, so a sibling-tab roster churn on
-# shared probe-a can re-mint a shell tab's id mid-window — the forced pane rebuild
-# then re-asserts the peer's grid inside the read window (run 42244518786). Only
-# the one test may open tabs here.
+# samples the emulator ~50ms after activation, so a mid-window pane rebind can
+# re-assert the peer's grid inside the read window: on shared probe-a the peer's
+# pane sat on the agent stream until peer-fit-2347's roster row landed, then
+# re-bound on activation — a fresh attach force-sending the peer's grid
+# (run 42244518786, #6892). Only the one test may open tabs here.
 SESSION_GEOM=probe-geometry
 export AGENT_FACTORY_HOME="$HOME_DIR"
 # A container binary is built at the branch version (typically behind the latest
@@ -841,8 +842,9 @@ done
 # --- the #2347 geometry-reclaim session --------------------------------------
 # Seeded, not created mid-test: a launch dependency inside the assertion window
 # would add a second flake class to the one being removed. Nothing but the #2347
-# spec may open tabs on it — a sibling roster churn re-minting a tab id is the
-# remount that re-stranded the just-activated pane in run 42244518786.
+# spec may open tabs on it — any extra roster churn widens the window in which a
+# pane's rebind to a newly created tab re-strands the just-activated pane
+# (run 42244518786).
 echo ">>> creating geometry session $SESSION_GEOM (#2347) ..."
 "$BIN" sessions create --repo "$MOCK" --name "$SESSION_GEOM" --program claude >/dev/null
 for i in $(seq 1 30); do
