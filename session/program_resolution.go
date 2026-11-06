@@ -57,6 +57,26 @@ func builtInProgramOverride(resolved *config.ResolvedConfig, agent, command stri
 	if resolved == nil || agent == "" || config.ResolveProgram(&resolved.Config, agent) != command {
 		return false
 	}
+	return builtInOverrideCandidateMatches(resolved, agent, command)
+}
+
+// builtInOverrideCandidateMatches answers whether command is the argv af's own
+// built-in detection produced for agent, without requiring it to be today's
+// effective override. builtInProgramOverride's effective-resolution gate (Gate 1)
+// is correct for a fresh resolution — the command under proof is whatever the
+// current config resolves to — but a committed account swap retry's frozen
+// command is a matter of durable record: program_overrides may have been edited
+// between the durable commit and the restart's recovery, and the retry must
+// still re-prove the commit's own frozen base. The provenance question for a
+// frozen record is only "is this argv the one af detected", which the built-in
+// candidate comparison alone answers; the effective-resolution gate would refuse
+// a frozen built-in flagged base whenever the override moved, wedging the retry
+// forever (#6820 remainder — the same permanent-wedge class 9c8a7c1b fixed for
+// the matching-config case).
+func builtInOverrideCandidateMatches(resolved *config.ResolvedConfig, agent, command string) bool {
+	if resolved == nil || agent == "" {
+		return false
+	}
 	value, ok := resolved.ResolvedValuePath("program_overrides." + agent)
 	if !ok {
 		return false
