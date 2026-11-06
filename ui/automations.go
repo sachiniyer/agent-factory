@@ -730,13 +730,22 @@ func (a *AutomationsPane) String() string {
 		a.selected = 0
 	}
 
-	// 1-line degraded summary (RFC §2.6, <80 cols).
+	// 1-line degraded summary (RFC §2.6, <80 cols). The summary has no room
+	// for task rows, so every task it counts is hidden below the header — the
+	// strip says so with the rail's overflow vocabulary rather than leaving
+	// the header as the last visible row while its rows are clipped (#6883).
+	// The marker takes the #1560 margin's slot at the 2-row strip; at any
+	// taller compact rect the margin still pads the bottom.
 	if a.compact || a.rect.H <= 1 {
 		style := automationsTitleDimStyle
 		if a.focused {
 			style = automationsTitleStyle
 		}
-		return layout.ClampToRect(a.titleLine(a.compactRailHeader(), style), a.rect)
+		lines := []string{a.titleLine(a.compactRailHeader(), style)}
+		if n := len(tasks); n > 0 {
+			lines = append(lines, railWindowIndicator("▼", n, a.rect.W-2))
+		}
+		return layout.ClampToRect(strings.Join(lines, "\n"), a.rect)
 	}
 
 	nameStyle := automationsTitleDimStyle
@@ -770,54 +779,104 @@ func (a *AutomationsPane) String() string {
 	}
 
 	// Window the rows around the cursor so a focused selection below the fold
-	// scrolls into view instead of moving invisibly. The focused selection
-	// expands to a 2-line row (title + detail), so reserve a line for the
-	// detail when scrolling the selection to the bottom keeps it fully visible
-	// rather than clipping its detail off the fold. The reservation holds only
-	// when the row actually has detail to reveal — a task whose every field is
-	// omitted still renders one line, and reserving a phantom second would
-	// scroll a visible row away for nothing.
-	visible := contentH - 1
-	if visible < 0 {
-		visible = 0
+	// scrolls into view instead of moving invisibly, and mark the rows the
+	// window hides on either side with the rail's "▲/▼ N more" vocabulary —
+	// the same fit as the sessions rail's, so a clipped header is never the
+	// last visible row while its rows go uncounted (#6883). The focused
+	// selection expands to a 2-line row (title + detail), so its height
+	// carries the detail with it rather than reserving a phantom slot: a task
+	// whose every field is omitted still renders one line.
+	avail := contentH - 1
+	if avail < 0 {
+		avail = 0
 	}
-	effVisible := visible
-	if a.focused && effVisible > 1 && a.selected < len(tasks) && a.detailRow(tasks[a.selected]) != "" {
-		effVisible--
+	detail := ""
+	heights := make([]int, len(tasks))
+	total := 0
+	for i := range heights {
+		heights[i] = 1
+		total++
 	}
-	if a.offset > a.selected {
-		a.offset = a.selected
+	if a.focused && a.selected < len(tasks) {
+		if d := a.detailRow(tasks[a.selected]); d != "" {
+			detail = d
+			heights[a.selected] = 2
+			total++
+		}
 	}
-	if effVisible > 0 && a.selected >= a.offset+effVisible {
-		a.offset = a.selected - effVisible + 1
-	}
-	// The bottom-clamp must use the window that was actually reserved: a larger
-	// bound here undoes the reservation — the selection's row renders at the
-	// fold and its detail falls off below it, which is what the reservation
-	// exists to prevent.
-	if max := len(tasks) - effVisible; a.offset > max {
-		a.offset = max
-	}
-	if a.offset < 0 {
+
+	start, end, hiddenAbove, hiddenBelow := 0, len(tasks), 0, 0
+	if total > avail {
+		// Scroll minimally so the selected row — detail line included —
+		// lands inside the rendered window, then fill from the bottom so a
+		// tail that fits one row earlier scrolls up rather than leaving dead
+		// space below the last task (the sidebar's own scrolling policy).
+		if a.offset > a.selected {
+			a.offset = a.selected
+		}
+		if a.offset < 0 {
+			a.offset = 0
+		}
+		for a.offset < a.selected {
+			if e, _, _ := fitWindow(heights, a.offset, avail); a.selected < e {
+				break
+			}
+			a.offset++
+		}
+		for a.offset > 0 {
+			if e, _, _ := fitWindow(heights, a.offset-1, avail); e < len(tasks) {
+				break
+			}
+			a.offset--
+		}
+		start = a.offset
+		var topInd, botInd bool
+		end, topInd, botInd = fitWindow(heights, start, avail)
+		// A force-included row can push the window's lines past the rect —
+		// at the floor size an expanded selection plus both markers is one
+		// line too many, and the ▼ marker is what the clamp would cut. The
+		// detail line is expendable where a marker is not: drop it and refit
+		// so the count of hidden rows stays on screen.
+		used := 0
+		for i := start; i < end; i++ {
+			used += heights[i]
+		}
+		indLines := 0
+		if topInd {
+			indLines++
+		}
+		if botInd {
+			indLines++
+		}
+		if heights[a.selected] > 1 && 1+indLines+used > a.rect.H {
+			heights[a.selected] = 1
+			detail = ""
+			end, _, _ = fitWindow(heights, start, avail)
+		}
+		hiddenAbove = start
+		hiddenBelow = len(tasks) - end
+	} else {
 		a.offset = 0
 	}
-	for i := a.offset; i < len(tasks); i++ {
-		if len(lines) >= contentH {
-			break
-		}
+
+	if hiddenAbove > 0 {
+		lines = append(lines, railWindowIndicator("▲", hiddenAbove, a.rect.W-2))
+	}
+	for i := start; i < end; i++ {
 		expanded := a.focused && i == a.selected
 		rowStart := len(lines)
 		lines = append(lines, a.titleRow(tasks[i], expanded))
-		if expanded && len(lines) < contentH {
-			if detail := a.detailRow(tasks[i]); detail != "" {
-				lines = append(lines, detail)
-			}
+		if expanded && detail != "" && len(lines) < contentH {
+			lines = append(lines, detail)
 		}
 		if a.zones != nil {
 			a.zones.Register(zones.AutoTask(tasks[i].ID), layout.Rect{
 				X: a.rect.X, Y: a.rect.Y + rowStart, W: a.rect.W, H: len(lines) - rowStart,
 			})
 		}
+	}
+	if hiddenBelow > 0 {
+		lines = append(lines, railWindowIndicator("▼", hiddenBelow, a.rect.W-2))
 	}
 	return layout.ClampToRect(strings.Join(lines, "\n"), a.rect)
 }
