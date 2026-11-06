@@ -29,7 +29,7 @@ serves.
 
 ## Transport & socket path
 
-The API is served over a dedicated Unix socket, **not** a TCP port:
+The API is served over a dedicated Unix socket:
 
 ```
 $AGENT_FACTORY_HOME/daemon-http.sock
@@ -51,7 +51,7 @@ is not running.
 
 ## Authentication
 
-There is **no token and no TCP port**. Authentication is the filesystem:
+On this socket there is **no token**. Authentication is the filesystem:
 
 - The socket is a **Unix domain socket**, reachable only from the local host —
   never the network.
