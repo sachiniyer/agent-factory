@@ -66,8 +66,29 @@ func (t *EdgeTracker) Prune(live map[string]bool) {
 	}
 }
 
+// signatureParams are the Event.Params keys that define a verdict's IDENTITY
+// — stable codes and booleans that name WHAT the verdict is, not the volatile
+// evidence numbers that describe how bad it is right now. Only these keys
+// participate in the dedup signature; the rest (percent, the observed window
+// name, the move count) are evidence that drifts between ticks for a
+// semantically unchanged verdict and must NOT re-trigger emission (design
+// R14: one row per verdict change, one heartbeat re-announce). The full
+// values stay on the row for the operator — the signature is just cheaper
+// than the row.
+var signatureParams = map[string]bool{
+	"confirmed":   true, // wall confirmation verdict identity
+	"trigger":     true, // which trigger fired (wall vs idle)
+	"skipped":     true, // which candidates were skipped and why
+	"halt_reason": true, // the mover halt reason
+	"halted_at":   true, // the halt episode timestamp (new episode = new edge)
+	"until":       true, // the refusal-backoff deadline (new backoff = new edge)
+}
+
 // eventSignature renders the decision's event set canonically: order and
 // parameter map iteration cannot divide one verdict into two signatures.
+// Only stable params (signatureParams) participate — volatile evidence
+// (percent, window name, move count) stays on the row but is excluded so a
+// standing verdict does not re-emit on every usage-percent jitter.
 func eventSignature(events []Event) string {
 	var b strings.Builder
 	for _, e := range events {
@@ -81,7 +102,9 @@ func eventSignature(events []Event) string {
 		b.WriteByte('|')
 		keys := make([]string, 0, len(e.Params))
 		for k := range e.Params {
-			keys = append(keys, k)
+			if signatureParams[k] {
+				keys = append(keys, k)
+			}
 		}
 		sort.Strings(keys)
 		for _, k := range keys {
