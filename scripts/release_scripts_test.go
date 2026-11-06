@@ -523,14 +523,16 @@ exit 255
 		t.Fatalf("an auth failure was misreported as master advancing (#6747):\n%s", out)
 	}
 
-	// Exactly one transport attempt — the failed push. A rebase-retry would
-	// add the loop's `git fetch origin master` and further pushes.
+	// Exactly one transport attempt — the failed push. Git also runs an
+	// `ssh -G` variant probe per connection, so count only real transports
+	// (the pack commands); a rebase-retry would add the loop's
+	// `git fetch origin master` (upload-pack) and further pushes.
 	raw, err := os.ReadFile(sshCalls)
 	if err != nil {
 		t.Fatalf("read ssh calls: %v", err)
 	}
-	if calls := strings.Count(string(raw), "\n"); calls != 1 {
-		t.Fatalf("expected exactly 1 ssh invocation (the single failed push), got %d:\n%s\noutput:\n%s", calls, raw, out)
+	if calls := strings.Count(string(raw), "-pack"); calls != 1 {
+		t.Fatalf("expected exactly 1 ssh transport (the single failed push), got %d:\n%s\noutput:\n%s", calls, raw, out)
 	}
 
 	// The remote stayed pristine: master unmoved, no bump commit, no tag.
