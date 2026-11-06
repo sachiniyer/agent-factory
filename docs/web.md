@@ -11,9 +11,9 @@ With the daemon running, open **<http://127.0.0.1:8443>** on the same machine.
 The default listener needs no configuration or token. If nothing answers,
 `af daemon status` reports whether the daemon is running without starting it.
 Run `af` in a git repository to open the TUI and start the daemon. A port conflict
-can leave the daemon running without the web listener; check its logs if the
-browser still cannot connect. For automatic startup at login, use
-`af daemon install`.
+can leave the daemon running without the web listener; `af doctor` and
+`af daemon status` name the conflict and the fix if the browser still cannot
+connect. For automatic startup at login, use `af daemon install`.
 
 For another machine or a shared host, read [Beyond localhost](#beyond-localhost)
 after the tour. [Remote daemon access](remote-http-auth.md) is the full setup guide.
