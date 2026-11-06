@@ -327,7 +327,7 @@ func (m *Manager) RestoreLostSessions() {
 // lock, so a caller could see Lost on one read and Running on the next and fall
 // through every arm (#1892).
 func lostSessionWantsRestore(v session.LifecycleView) bool {
-	if v.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
+	if !v.AdmitsRuntimeAction(session.RuntimeActionRecoverLost) {
 		return false
 	}
 	return !session.IsReservedTitle(v.Title) && !v.LostRestoreGaveUp
@@ -503,7 +503,7 @@ func (m *Manager) restoreLostSession(key, repoID string, inst *session.Instance)
 	current := m.instances[key]
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
-	if killing || current != inst || inst.ValidateRuntimeAction(session.RuntimeActionRecoverLost) != nil {
+	if killing || current != inst || !inst.AdmitsRuntimeAction(session.RuntimeActionRecoverLost) {
 		return
 	}
 
