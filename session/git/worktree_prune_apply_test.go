@@ -104,17 +104,18 @@ func TestWorktreeHeadMatchesBranch(t *testing.T) {
 	require.Error(t, err, "a commit only the detached HEAD references is not on the kept branch")
 }
 
-// VerifyWorktreeHeadReflogReachableFromBranch closes the gap the
+// VerifyWorktreeHeadReflogRecoverable closes the gap the
 // WorktreeHeadMatchesBranch guard cannot see: a commit made on a detached HEAD
 // and then abandoned by a checkout back to the branch tip passes the HEAD ==
-// branch-tip equality, but its only reachability root is the leaf's logs/HEAD
-// reflog, which prune deletes. The guard must refuse such rows, while passing
-// the common case (clean worktree) and not penalizing reset --hard (whose
-// dropped commit the branch reflog keeps).
-func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
+// branch-tip equality, but its only reachability root may be the leaf's
+// logs/HEAD reflog, which prune deletes. The guard must refuse such rows,
+// while passing the common case (clean worktree), not penalizing reset --hard
+// (whose dropped commit the branch reflog keeps), and not refusing commits
+// another surviving root reaches (#6903).
+func TestVerifyWorktreeHeadReflogRecoverable(t *testing.T) {
 	t.Run("a clean worktree on the branch tip passes", func(t *testing.T) {
 		repo, wt := pruneWorktree(t)
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a commit on the branch passes", func(t *testing.T) {
@@ -122,7 +123,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0o644))
 		gitIn(t, wt, "add", "c.txt")
 		gitIn(t, wt, "commit", "-qm", "on-branch work")
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a detached-HEAD commit returned to the tip is refused", func(t *testing.T) {
@@ -139,7 +140,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, tip, head)
 		// …but the reflog guard catches the abandoned detached commit.
-		err = VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p")
+		err = VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), detached, "the refusal names the orphaned commit")
 		assert.Contains(t, err.Error(), "af/p")
@@ -151,7 +152,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		require.NoError(t, os.WriteFile(filepath.Join(wt, "e.txt"), []byte("e"), 0o644))
 		gitIn(t, wt, "add", "e.txt")
 		gitIn(t, wt, "commit", "-qm", "still detached")
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a reset --hard on the branch is not refused (the branch reflog keeps it)", func(t *testing.T) {
@@ -162,7 +163,7 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		gitIn(t, wt, "reset", "--hard", "HEAD~1")
 		// HEAD == branch tip again, and the dropped commit is in the branch
 		// reflog, which prune never deletes.
-		require.NoError(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"),
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"),
 			"reset --hard is safe: the branch reflog keeps the commit")
 	})
 
@@ -177,12 +178,97 @@ func TestVerifyWorktreeHeadReflogReachableFromBranch(t *testing.T) {
 		gitIn(t, wt, "add", "m2.txt")
 		gitIn(t, wt, "commit", "-qm", "detached 2")
 		gitIn(t, wt, "checkout", "-q", tip)
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "af/p"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
 	})
 
 	t.Run("a missing branch fails closed", func(t *testing.T) {
 		repo, wt := pruneWorktree(t)
-		require.Error(t, VerifyWorktreeHeadReflogReachableFromBranch(wt, repo, "no-such-branch"))
+		require.Error(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "no-such-branch"))
+	})
+
+	// #6903 (a): the leaf reflog records every position HEAD visited, and a
+	// detached checkout of another branch is a common agent move. The visited
+	// commit is recoverable from refs/heads/main — the leaf reflog is not its
+	// only root — so it must not block the prune.
+	t.Run("a detached checkout of another branch is not refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "m.txt"), []byte("m"), 0o644))
+		gitIn(t, repo, "add", "m.txt")
+		gitIn(t, repo, "commit", "-qm", "main advances")
+		mainTip := gitIn(t, repo, "rev-parse", "refs/heads/main")
+		gitIn(t, wt, "checkout", "--detach", "main")
+		gitIn(t, wt, "checkout", "-q", "af/p")
+
+		head, err := WorktreeHeadMatchesBranch(wt, repo, "af/p")
+		require.NoError(t, err)
+		assert.NotEqual(t, mainTip, head, "premise: af/p does not contain main's tip")
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
+	})
+
+	// #6903: a commit the leaf reflog recorded is also safe when ANY ref that
+	// survives prune reaches it — here a tag on the detached commit itself.
+	t.Run("a detached commit kept by a tag is not refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		gitIn(t, wt, "checkout", "--detach")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "k.txt"), []byte("k"), 0o644))
+		gitIn(t, wt, "add", "k.txt")
+		gitIn(t, wt, "commit", "-qm", "detached but tagged")
+		gitIn(t, wt, "tag", "af-test-keep", "HEAD")
+		gitIn(t, wt, "checkout", "-q", "af/p")
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
+	})
+
+	// #6903 (b): `git rebase main` detaches HEAD at main's tip; a conflict on
+	// the first pick followed by --abort returns to the branch having applied
+	// nothing. The only reflog addition is main's tip, which refs/heads/main
+	// keeps — the prune must not refuse it.
+	t.Run("an aborted rebase onto another branch is not refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(repo, "a.txt"), []byte("main"), 0o644))
+		gitIn(t, repo, "add", "a.txt")
+		gitIn(t, repo, "commit", "-qm", "main moves a.txt")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "a.txt"), []byte("branch"), 0o644))
+		gitIn(t, wt, "add", "a.txt")
+		gitIn(t, wt, "commit", "-qm", "branch moves a.txt")
+
+		rebase := exec.Command("git", "-C", wt,
+			"-c", "user.email=t@t", "-c", "user.name=t",
+			"rebase", "main")
+		require.Error(t, rebase.Run(), "premise: the rebase must conflict and stop")
+		gitIn(t, wt, "rebase", "--abort")
+
+		_, err := WorktreeHeadMatchesBranch(wt, repo, "af/p")
+		require.NoError(t, err)
+		require.NoError(t, VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p"))
+	})
+
+	// #6903 (c): an autosquash rebase amends the picked commit once per fixup,
+	// leaving intermediate commits that exist only in the leaf's HEAD reflog —
+	// the pre-squash chain survives in the branch reflog, but the amended-away
+	// intermediate does not. Failing closed stays the verdict (#6903 property
+	// 2): the intermediate is genuinely unrecoverable once the leaf is gone.
+	t.Run("autosquash intermediates are still refused", func(t *testing.T) {
+		repo, wt := pruneWorktree(t)
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "c.txt"), []byte("c"), 0o644))
+		gitIn(t, wt, "add", "c.txt")
+		gitIn(t, wt, "commit", "-qm", "real work")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "f1.txt"), []byte("f1"), 0o644))
+		gitIn(t, wt, "add", "f1.txt")
+		gitIn(t, wt, "commit", "-qm", "fixup! real work")
+		require.NoError(t, os.WriteFile(filepath.Join(wt, "f2.txt"), []byte("f2"), 0o644))
+		gitIn(t, wt, "add", "f2.txt")
+		gitIn(t, wt, "commit", "-qm", "fixup! real work")
+
+		rebase := exec.Command("git", "-C", wt,
+			"-c", "user.email=t@t", "-c", "user.name=t",
+			"rebase", "-i", "--autosquash", "HEAD~3")
+		rebase.Env = append(os.Environ(), "GIT_SEQUENCE_EDITOR=:", "GIT_EDITOR=:")
+		out, err := rebase.CombinedOutput()
+		require.NoError(t, err, string(out))
+
+		err = VerifyWorktreeHeadReflogRecoverable(wt, repo, "af/p")
+		require.Error(t, err, "the intermediate squash commit exists only in the leaf reflog")
+		assert.Contains(t, err.Error(), "reflog")
 	})
 }
 

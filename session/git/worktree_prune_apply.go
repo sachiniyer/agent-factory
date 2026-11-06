@@ -239,7 +239,7 @@ func gitlinkPaths(dir string) ([]string, error) {
 // the worktree has ever held is on the kept branch. A commit made on a detached
 // HEAD and then abandoned by a checkout back to the branch tip passes this
 // guard while its only remaining reachability root (the leaf's logs/HEAD
-// reflog) is what prune deletes. VerifyWorktreeHeadReflogReachableFromBranch
+// reflog) is what prune deletes. VerifyWorktreeHeadReflogRecoverable
 // closes that gap.
 func WorktreeHeadMatchesBranch(worktreePath, repoRoot, branch string) (string, error) {
 	head, err := runBoundedWorktreeGit(worktreePath, false, "--no-optional-locks", "rev-parse", "--verify", "HEAD")
@@ -262,18 +262,31 @@ func WorktreeHeadMatchesBranch(worktreePath, repoRoot, branch string) (string, e
 // SHA-256 value, so a HasPrefix check covers both.
 const zeroOID = "0000000000000000000000000000000000000000"
 
-// VerifyWorktreeHeadReflogReachableFromBranch proves the worktree's per-HEAD
-// reflog (the registration leaf's logs/HEAD) holds no commit the kept branch
-// cannot recover. A commit made on a detached HEAD and then abandoned by a
+// VerifyWorktreeHeadReflogRecoverable proves the worktree's per-HEAD
+// reflog (the registration leaf's logs/HEAD) holds no commit that exists
+// only there. A commit made on a detached HEAD and then abandoned by a
 // checkout back to the branch tip passes WorktreeHeadMatchesBranch — HEAD
-// equals the tip again — while its only remaining reachability root is this
-// reflog, which prune deletes with the leaf; a later gc destroys the commit.
-// This guard refuses such rows.
+// equals the tip again — while its only remaining reachability root may be
+// this reflog, which prune deletes with the leaf; a later gc destroys the
+// commit. This guard refuses such rows.
 //
-// A commit dropped by `reset --hard` on the branch is also recorded in the
-// branch's own reflog (<repo>/.git/logs/refs/heads/<branch>), which prune
-// never touches, so it is not refused here.
-func VerifyWorktreeHeadReflogReachableFromBranch(worktreePath, repoRoot, branch string) error {
+// Recoverability after the leaf is deleted rests on every root prune
+// preserves: all refs in the repository — branches (the kept branch's tip
+// among them), tags, remote-tracking refs and the rest of refs/, none of
+// which prune deletes — plus the main worktree's HEAD and every value the
+// kept branch's reflog has recorded, since that reflog survives with the
+// branch. The leaf's own HEAD is NOT a root: prune deletes it with the
+// leaf, so counting it (as `rev-list --all` would, for every worktree's
+// HEAD) lets a currently-detached commit vouch for itself. A commit the
+// worktree's HEAD merely visited — a detached checkout of main, the onto
+// position an aborted rebase recorded — is recoverable from its ref and
+// must not block the prune; a commit no root reaches exists only in the
+// leaf reflog and still refuses.
+//
+// A commit dropped by `reset --hard` on the branch is recorded in the
+// branch's own reflog (<repo>/.git/logs/refs/heads/<branch>), so it is not
+// refused here.
+func VerifyWorktreeHeadReflogRecoverable(worktreePath, repoRoot, branch string) error {
 	leaf, err := registrationLeaf(worktreePath)
 	if err != nil {
 		return err
@@ -285,31 +298,25 @@ func VerifyWorktreeHeadReflogReachableFromBranch(worktreePath, repoRoot, branch 
 	if len(shas) == 0 {
 		return nil
 	}
-	// Recoverability after the leaf is deleted rests on the branch tip and on
-	// every value the branch reflog has ever recorded (the branch ref survives
-	// prune; a commit reachable from any of those roots survives gc). A commit
-	// made on a detached HEAD and then abandoned is safe to prune only if it is
-	// an ancestor of one of those roots — not merely if its exact hash appears
-	// in the branch reflog, which would refuse a safe prune when an orphaned D
-	// was merged into a later branch tip M that the reflog still records.
-	//
-	// The union of every root's ancestors is computed in a single `git
-	// rev-list` traversal, so a worktree whose leaf reflog lists many SHAs is
-	// judged in one bounded Git invocation (one timeout for the whole verdict)
-	// rather than one `merge-base --is-ancestor` per SHA, whose per-call
-	// timeouts could stall pruning for hours on a slow repository.
+	// A commit made on a detached HEAD and then abandoned is safe to prune
+	// only if it is an ancestor of one of the surviving roots — not merely
+	// if its exact hash appears in the branch reflog, which would refuse a
+	// safe prune when an orphaned D was merged into a later branch tip M
+	// that the reflog still records.
+	refs, err := survivingRefRoots(repoRoot)
+	if err != nil {
+		return err
+	}
 	roots, err := branchReflogRoots(repoRoot, branch)
 	if err != nil {
 		return err
 	}
-	reachable, err := reachableFromBranchRoots(repoRoot, branch, roots)
+	lost, err := leafReflogOnlyCommits(repoRoot, shas, refs, roots)
 	if err != nil {
 		return err
 	}
-	for _, sha := range shas {
-		if !reachable[sha] {
-			return fmt.Errorf("the worktree's HEAD reflog references %s, which the kept branch %s does not contain — commit it onto a branch, or discard it deliberately, then re-run", sha, branch)
-		}
+	if len(lost) > 0 {
+		return fmt.Errorf("the worktree's HEAD reflog references %s, which no ref reaches and the %s branch's reflog does not contain — commit it onto a branch, or discard it deliberately, then re-run", lost[0], branch)
 	}
 	return nil
 }
@@ -372,25 +379,56 @@ func branchReflogRoots(repoRoot, branch string) ([]string, error) {
 	return roots, nil
 }
 
-// reachableFromBranchRoots returns the set of object ids reachable from the
-// branch tip or any branch-reflog root — the commits the kept branch can still
-// recover once the leaf (and its logs/HEAD) is gone. A single `git rev-list`
-// traversal computes the union, so the verdict costs one bounded Git invocation
-// for the whole leaf reflog rather than one `merge-base --is-ancestor` per SHA.
-func reachableFromBranchRoots(repoRoot, branch string, roots []string) (map[string]bool, error) {
-	args := append([]string{"--no-optional-locks", "rev-list", "refs/heads/" + branch}, roots...)
+// survivingRefRoots returns every ref in the repository — roots gc keeps
+// that prune never deletes. It runs in repoRoot, the main worktree, so the
+// enumeration sees shared refs and this worktree's own per-worktree refs,
+// never the leaf's: the leaf's HEAD and refs/worktree entries die with the
+// leaf and must not count. Other worktrees' HEADs are likewise not counted
+// — they can be pruned later, so a leaf must hand its commits to keepers
+// that cannot be pruned away. Names, not object ids: a ref deleted between
+// the listing and the traversal then fails to resolve, an error that
+// refuses the row — unknown is never "safe".
+func survivingRefRoots(repoRoot string) ([]string, error) {
+	out, err := runBoundedWorktreeGit(repoRoot, false, "--no-optional-locks", "for-each-ref", "--format=%(refname)")
+	if err != nil {
+		return nil, fmt.Errorf("could not enumerate the refs of %s: %w", repoRoot, err)
+	}
+	var refs []string
+	for _, line := range strings.Split(string(out), "\n") {
+		if line = strings.TrimSpace(line); line != "" {
+			refs = append(refs, line)
+		}
+	}
+	return refs, nil
+}
+
+// leafReflogOnlyCommits returns the given leaf-reflog commits that exist
+// ONLY in that reflog — the ones no surviving root reaches. `git rev-list
+// <shas> --not HEAD <refs> <reflog roots>` prints exactly those: the main
+// worktree's HEAD, every ref, and each kept-branch reflog value count as
+// roots, and a single bounded traversal judges the whole reflog at once
+// (one timeout for the verdict) rather than one `merge-base --is-ancestor`
+// per SHA. The output is proportional to the commits that are actually
+// unrecoverable — a positive `rev-list <roots>` would instead enumerate
+// the repository's whole reachable history into a set the check then
+// queries (#6903).
+func leafReflogOnlyCommits(repoRoot string, shas, refs, reflogRoots []string) ([]string, error) {
+	args := append([]string{"--no-optional-locks", "rev-list"}, shas...)
+	args = append(args, "--not", "HEAD")
+	args = append(args, refs...)
+	args = append(args, reflogRoots...)
 	out, err := runBoundedWorktreeGit(repoRoot, false, args...)
 	if err != nil {
-		return nil, fmt.Errorf("could not enumerate commits reachable from the kept branch %s in %s: %w", branch, repoRoot, err)
+		return nil, fmt.Errorf("could not judge the reachability of the worktree's HEAD-reflog commits in %s: %w", repoRoot, err)
 	}
-	set := make(map[string]bool)
+	var lost []string
 	for _, line := range strings.Split(string(out), "\n") {
 		line = strings.TrimSpace(line)
 		if len(line) == 40 || len(line) == 64 {
-			set[line] = true
+			lost = append(lost, line)
 		}
 	}
-	return set, nil
+	return lost, nil
 }
 
 // pruneNonceFile is stamped into the registration leaf just before prune records
