@@ -64,33 +64,52 @@ func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, inc
 	if reason != "" {
 		return "", true
 	}
+	cliMode, cliOK := codexProgramSandboxOverride(program)
+	// Config-effective modes, captured before the command line substitutes
+	// its own: codexRuntimeSource shape-validates the table only under a
+	// config mode of workspace-write, so the malformed-table check below
+	// must key on what the file actually configures.
+	smConfig, _ := source["sandbox_mode"].(string)
+	tmConfig, _ := target["sandbox_mode"].(string)
+	if cliMode != "" {
+		// The same launch command travels with the session to the new home,
+		// so its override applies identically under either config.
+		source["sandbox_mode"] = cliMode
+		target["sandbox_mode"] = cliMode
+	}
 	for _, k := range codexRuntimeCompareKeys {
 		// sandbox_workspace_write is only effective under workspace-write.
 		// codexRuntimeSource shape-validates the table only in that mode, and
 		// the seeder never strips an operator's leftover [sandbox_workspace_write]
 		// when the mode changes, so in another mode a stale table is inert.
-		// The compare skips the key only when both sides are explicitly in a
-		// non-workspace mode: an omitted sandbox_mode is not presumed inert,
-		// because upstream Codex may default it to workspace-write (project
-		// trust), and silently skipping a differing table there could widen
-		// the sandbox. Because codexRuntimeSource does not validate the table
-		// outside workspace-write, a malformed inactive table (e.g. a
+		// The compare skips the key only when the EFFECTIVE modes — command
+		// line when the program proves one, config otherwise — are both
+		// explicitly non-workspace. An omitted sandbox_mode is not presumed
+		// inert (upstream Codex may default it to workspace-write under
+		// project trust), and a program whose sandbox override cannot be
+		// proven — a wrapper, an unknown flag, disagreeing mode flags — is
+		// incomparable rather than allowed to declare the table inert.
+		// Because codexRuntimeSource does not validate the table outside
+		// config workspace-write, a malformed inactive table (e.g. a
 		// wrong-type value) is incomparable here, never silently equal.
 		// sandbox_mode is compared earlier in this list, so a cross-mode
 		// widening is already caught and cannot be hidden by this gate.
 		if k == "sandbox_workspace_write" {
-			sm, _ := source["sandbox_mode"].(string)
-			tm, _ := target["sandbox_mode"].(string)
-			if sm != "workspace-write" {
+			if smConfig != "workspace-write" {
 				if opts, exists := source["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
 					return k, true
 				}
 			}
-			if tm != "workspace-write" {
+			if tmConfig != "workspace-write" {
 				if opts, exists := target["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
 					return k, true
 				}
 			}
+			if !cliOK {
+				return k, true
+			}
+			sm, _ := source["sandbox_mode"].(string)
+			tm, _ := target["sandbox_mode"].(string)
 			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" {
 				continue
 			}

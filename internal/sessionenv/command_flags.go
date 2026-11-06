@@ -127,6 +127,43 @@ func literalAgentCommand(command string, envMatch func(string) bool) (agentComma
 	}, agent != ""
 }
 
+// LiteralInvocationArgv reduces command to the argv it will exec — the
+// executable word and its arguments — only when it is exactly one literal
+// invocation: a single simple call of literal words, optionally behind shell
+// assignment prefixes, a leading exec, and at most one trusted env wrapper.
+// Assignments are environment, not argv, so they never appear in the result.
+// Anything else — a compound command, a pipeline, a redirection, an expansion,
+// or an env wrapper the closed model cannot prove — is not a single
+// statically known invocation and reports ok=false, the same fail-closed
+// answer literalAgentCommand gives for the same shapes. Callers that answer
+// "what flags reach the agent" (account-handoff drift, #6902) must not guess
+// past that refusal.
+func LiteralInvocationArgv(command string) ([]string, bool) {
+	if strings.TrimSpace(command) == "" {
+		return nil, false
+	}
+	call, ok := singleSimpleCall(command)
+	if !ok || !callIsLiteral(call) {
+		return nil, false
+	}
+	words, _ := stripExecPrefix(call.Args)
+	args, ok := literalCommandArgs(words)
+	if !ok || len(args) == 0 {
+		return nil, false
+	}
+	if isTrustedEnvExecutable(args[0]) {
+		invocation, err := envcommand.Parse(args[1:], envcommand.Policy{AllowAssignments: true})
+		if err != nil || invocation.CommandIndex < 0 {
+			return nil, false
+		}
+		args = args[1+invocation.CommandIndex:]
+		if len(args) == 0 {
+			return nil, false
+		}
+	}
+	return args, true
+}
+
 // credentialAgentForCommand is the fail-closed classifier for an untrusted
 // resolved program. Unlike AgentForCommand it preserves the executable token as
 // identity-bearing data and admits only a bare supported-agent name whose
