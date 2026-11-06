@@ -307,11 +307,21 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			// seeding gate below cannot rescue this either: pending.Program is
 			// the pre-injection base while the pane records its program
 			// post-injection, so the exact-match gate never fires here.
+			// Unlike the fresh-resolution and established-evidence branches,
+			// the frozen command is a matter of durable record, not a fresh
+			// resolution: program_overrides may have been edited between the
+			// durable commit and the restart's recovery, so the provenance
+			// question is only "is this argv the one af detected" — answered
+			// by the built-in candidate comparison alone, without requiring
+			// the frozen command to still be today's effective override.
+			// builtInProgramOverride's effective-resolution gate would refuse
+			// a frozen built-in flagged base whenever the override moved,
+			// wedging the retry forever (#6820 remainder).
 			committedAgent := pending.AccountAgent
 			if committedAgent == "" {
 				committedAgent = sessionenv.AgentForCommand(pending.Program)
 			}
-			resolution.trustBase = builtInProgramOverride(
+			resolution.trustBase = builtInOverrideCandidateMatches(
 				resolveResolvedConfigForInstance(i), committedAgent, pending.Program)
 		case pending != nil && pending.To == name && pending.AccountAgent != "" &&
 			tmux.DetectAgentFromCommand(established) != pending.AccountAgent:
