@@ -405,6 +405,62 @@ func TestFindSessionReportsAmbiguousTitleAcrossRepos(t *testing.T) {
 	}
 }
 
+// TestFindInstanceDataByTitle_UnscopedMissExplainsNoScope pins the #6882
+// none-held half on the daemon's title resolution, the shared lookup every
+// routed verb (kill/archive/restore/send-prompt/tab verbs/handoff) falls
+// through to when its in-memory set misses. An unscoped search that already
+// covered every project must not collapse to a bare "not found" — the request
+// carried no repo scope, so the miss says no project holds the title and how
+// to scope the next request.
+func TestFindInstanceDataByTitle_UnscopedMissExplainsNoScope(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	// A held title exists elsewhere so the miss is a real all-projects search.
+	rows, err := json.Marshal([]session.InstanceData{{Title: "someone-else", Path: "/repos/alpha"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-alpha", rows); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	_, _, err = findInstanceDataByTitle("ghost", "")
+	if err == nil {
+		t.Fatal("a title held by no project must not resolve")
+	}
+	if !errors.Is(err, errSessionNotFound) {
+		t.Fatalf("a clean miss must still classify as errSessionNotFound, got: %v", err)
+	}
+	for _, want := range []string{"held by no project", "--repo"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the unscoped miss must contain %q, got: %v", want, err)
+		}
+	}
+}
+
+// TestFindInstanceDataByTitle_ScopedMissStaysBare pins the counterpart: a
+// repo-scoped miss keeps its bare not-found shape — the no-scope explanation
+// only applies where the request actually had no scope.
+func TestFindInstanceDataByTitle_ScopedMissStaysBare(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+
+	rows, err := json.Marshal([]session.InstanceData{{Title: "someone-else", Path: "/repos/alpha"}})
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if err := config.SaveRepoInstances("repo-alpha", rows); err != nil {
+		t.Fatalf("save: %v", err)
+	}
+
+	_, _, err = findInstanceDataByTitle("ghost", "repo-alpha")
+	if err == nil {
+		t.Fatal("a scoped miss must still error")
+	}
+	if got := err.Error(); got != `instance "ghost" not found` {
+		t.Errorf("a scoped miss must keep its bare not-found shape, got: %v", got)
+	}
+}
+
 // TestArchivedHookRenameChecksGlobalSlug covers the archived-name-reuse path:
 // when a create takes a title held only by an ARCHIVED hook session, that row is
 // renamed to "<title> (archived)" to free the name. Restoring it later

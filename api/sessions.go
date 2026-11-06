@@ -122,9 +122,14 @@ func listSessionsRequest(req daemon.SnapshotRequest) ([]session.InstanceData, er
 // getSessionByTitle returns the single session matching title across ALL repos,
 // preferring the daemon's live snapshot and falling back to the disk scan when no
 // daemon is reachable (#1029 PR 2). When a live snapshot is available the daemon
-// is authoritative: a miss returns not-found without re-reading disk — UNLESS the
-// daemon dropped a repo at startup due to a corrupted instances.json (#603), in
-// which case a miss caveats naming the dropped repos the same way
+// is authoritative for LIVE state — but a snapshot MISS is not yet "held by no
+// project": persisted rows refresh cannot restore never reach the snapshot, and
+// a startup rows-failed-to-load skip is withheld from the wire skipped set
+// entirely (daemon/snapshot.go). So a local miss asks the disk before answering
+// (#6882), resolving a persisted row or reporting the cross-project ambiguity it
+// finds; only a miss the disk confirms is reported as held by no project.
+// When the daemon dropped a repo at startup due to a corrupted instances.json
+// (#603), a miss caveats naming the dropped repos the same way
 // findInstanceByTitle does on the disk path (#730), so a session hidden behind a
 // corrupted file is not reported as a clean not-found.
 //
@@ -183,6 +188,25 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			}
 			return &matches[0], notice, nil
 		}
+		// No snapshot match. That only proves the daemon's LIVE projection
+		// lacks the row: refresh-skipped persisted rows never reach it, and a
+		// startup rows-failed-to-load skip is withheld from the wire skipped
+		// set entirely (daemon/snapshot.go), so neither `data` nor `skipped`
+		// can see them. Before claiming no project holds the title, ask the
+		// disk the same question the match branch's widening asks (#6882) — a
+		// persisted row resolves, several report the collision, and a
+		// gap-tainted miss names the files that may be hiding it. Remote has
+		// no local disk worth asking; its snapshot miss is the whole answer.
+		if !apiclient.IsRemoteTarget() {
+			got, _, derr := findInstanceByTitle(title)
+			switch {
+			case derr == nil:
+				view := got.ForClientRead()
+				return &view, "", nil
+			case !errors.Is(derr, errTitleNotFound):
+				return nil, "", derr
+			}
+		}
 		// Mirror findInstanceByTitle's miss: a clean miss (no repo was dropped)
 		// returns errTitleNotFound; a miss with a corrupted repo that may be
 		// hiding the title caveats naming the dropped repos instead, so a hidden
@@ -190,7 +214,7 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 		if len(skipped) > 0 {
 			return nil, "", fmt.Errorf("session %q not found; %s", title, skippedReposSuffix(skipped))
 		}
-		return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+		return nil, "", unscopedTitleMiss(title)
 	}
 	// Remote target: no local disk fallback; surface the error (see snapshotRead).
 	if !fallBack {
@@ -202,38 +226,6 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 	}
 	view := got.ForClientRead()
 	return &view, "", nil
-}
-
-// whoamiSession returns the session whose TmuxName matches tmuxName, preferring
-// the daemon's live snapshot and falling back to the disk scan when no daemon is
-// reachable (#1029 PR 2). When the daemon dropped a repo at startup due to a
-// corrupted instances.json (#603), a no-match caveats naming the dropped repos
-// rather than reporting a clean "not found", mirroring diskWhoami (#730).
-func whoamiSession(tmuxName string) (*session.InstanceData, error) {
-	// Lenient: the tmux name is unique and the disk record answers it on its own,
-	// so a live-but-unanswering daemon may still be bypassed here.
-	data, skipped, fallBack, err := snapshotReadScoped(daemon.SnapshotRequest{}, false)
-	if err == nil {
-		for i := range data {
-			if data[i].TmuxName == tmuxName {
-				return &data[i], nil
-			}
-		}
-		// A match short-circuits above, so nothing here weakens a found session.
-		// The absence claim caveats when the daemon dropped a repo at startup —
-		// a corrupted file may be hiding the matching session — mirroring
-		// diskWhoami's not-found-with-corruption behavior.
-		if len(skipped) > 0 {
-			return nil, fmt.Errorf("%w for tmux session %q; %s", errSelfNotFound, tmuxName, skippedReposSuffix(skipped))
-		}
-		return nil, fmt.Errorf("%w for tmux session %q", errSelfNotFound, tmuxName)
-	}
-	// Remote target: no local disk fallback; surface the daemon error (e.g. a 401
-	// from a bad token) instead of masking it with a same-machine disk scan (#1681).
-	if !fallBack {
-		return nil, err
-	}
-	return diskWhoami(tmuxName)
 }
 
 var (
@@ -251,7 +243,8 @@ var sessionsListCmd = &cobra.Command{
 		"Scope follows the shared project-context contract: --repo names a project, " +
 		"otherwise the current directory's project is used, and --all spans every " +
 		"project. Run from outside a git repository with no --repo, there is no " +
-		"project context and every project's sessions are listed. Lifecycle, age, " +
+		"project context and every project's sessions are listed — one stderr line " +
+		"says so, so an empty list cannot be misread as an empty fleet. Lifecycle, age, " +
 		"and limit filters compose and are applied by the daemon before transfer. " +
 		"With no filter flags, the complete list and its existing order are unchanged.\n\n" +
 		"Every row names its own integers. liveness_name is the one --status matches, " +
@@ -304,6 +297,16 @@ var sessionsListCmd = &cobra.Command{
 			return jsonError(err)
 		}
 
+		// With no project context the answer spans every project — honest
+		// breadth, but a silent `[]` reads as "all your sessions are gone" to
+		// a user standing in the wrong directory (#6882). One stderr line names
+		// the scope and the flags that change it; stdout's JSON is untouched.
+		// Under --json stderr carries the envelope, so the notice waits for
+		// #3511's structural channel like every other caveat.
+		if repoID == "" && !sessionsListAllFlag && !envelopeOutput {
+			fmt.Fprintln(warnWriter, unscopedListNotice())
+		}
+
 		if allData == nil {
 			allData = []session.InstanceData{}
 		}
@@ -320,7 +323,8 @@ name can exist in several repos. The title resolves inside the repo given by
 
 With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
-those projects instead of guessing between them.`,
+those projects instead of guessing between them. A title no project holds
+reports that no project holds it, with the ways to scope the lookup.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)

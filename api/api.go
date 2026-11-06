@@ -160,9 +160,12 @@ func findInstanceByTitle(title string) (*session.InstanceData, string, error) {
 	if len(gaps) > 0 {
 		return nil, "", fmt.Errorf("session %q not found; %s", title, strings.Join(gaps, "; "))
 	}
-	// Wrap the sentinel so a clean miss stays distinguishable from an
-	// under-read one (#861); the user-facing text is unchanged.
-	return nil, "", fmt.Errorf("session %q %w", title, errTitleNotFound)
+	// The none-held half of the contract (#6882): this scan already spanned
+	// every project, so the miss says no project holds the title and how to
+	// scope the next lookup rather than a bare "not found" that reads as data
+	// loss. Its Unwrap keeps the clean-miss sentinel distinguishable from an
+	// under-read one (#861).
+	return nil, "", unscopedTitleMiss(title)
 }
 
 // repoPathsOf lists the repo paths of matched sessions, for the ambiguous-title

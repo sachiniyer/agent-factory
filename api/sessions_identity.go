@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/apiclient"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -71,6 +72,38 @@ var currentTmuxName = func() (string, error) {
 // absence and from a corruption-caveated one, which retries too: the skipped
 // repo may also be the write in flight.
 var errSelfNotFound = errors.New("no Agent Factory session found")
+
+// whoamiSession returns the session whose TmuxName matches tmuxName, preferring
+// the daemon's live snapshot and falling back to the disk scan when no daemon is
+// reachable (#1029 PR 2). When the daemon dropped a repo at startup due to a
+// corrupted instances.json (#603), a no-match caveats naming the dropped repos
+// rather than reporting a clean "not found", mirroring diskWhoami (#730).
+func whoamiSession(tmuxName string) (*session.InstanceData, error) {
+	// Lenient: the tmux name is unique and the disk record answers it on its own,
+	// so a live-but-unanswering daemon may still be bypassed here.
+	data, skipped, fallBack, err := snapshotReadScoped(daemon.SnapshotRequest{}, false)
+	if err == nil {
+		for i := range data {
+			if data[i].TmuxName == tmuxName {
+				return &data[i], nil
+			}
+		}
+		// A match short-circuits above, so nothing here weakens a found session.
+		// The absence claim caveats when the daemon dropped a repo at startup —
+		// a corrupted file may be hiding the matching session — mirroring
+		// diskWhoami's not-found-with-corruption behavior.
+		if len(skipped) > 0 {
+			return nil, fmt.Errorf("%w for tmux session %q; %s", errSelfNotFound, tmuxName, skippedReposSuffix(skipped))
+		}
+		return nil, fmt.Errorf("%w for tmux session %q", errSelfNotFound, tmuxName)
+	}
+	// Remote target: no local disk fallback; surface the daemon error (e.g. a 401
+	// from a bad token) instead of masking it with a same-machine disk scan (#1681).
+	if !fallBack {
+		return nil, err
+	}
+	return diskWhoami(tmuxName)
+}
 
 // resolveSelfSession identifies the caller's own af session the same way
 // `af sessions whoami` does: match the current tmux session name against the

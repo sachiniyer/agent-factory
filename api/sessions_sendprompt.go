@@ -275,6 +275,12 @@ can inspect per-session results.`,
 			}
 		}
 		if !exists {
+			if repoID == "" {
+				// The exists check just searched every project, so say that
+				// rather than "not found" (#6882) — and keep the --create
+				// affordance, which binds to the project the new scope names.
+				return jsonError(fmt.Errorf("%w — add --create to create the session in the project you scope to", unscopedTitleMiss(title)))
+			}
 			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
 		}
 
