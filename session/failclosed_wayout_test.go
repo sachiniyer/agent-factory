@@ -219,7 +219,7 @@ func TestFailedRuntimeCleanupClearsOnBind(t *testing.T) {
 // TestFailClosedPreservedArchiveShapeNeedsNoNewFence documents the property-3
 // answer: no rollback fence is added because none is needed. The persisted
 // fail-closed shape is expressed entirely through fields the previous release
-// (v1.0.346+, which contains #6739) already honours — runtime_cleanup, the
+// (v1.0.345+, which contains #6739) already honours — runtime_cleanup, the
 // unknown flag and archived_workspace — and this change adds no new persisted
 // field, so a rolled-back binary reads the row exactly as a current one does:
 // the rebuild still fails closed and a kill still retains the record. The test
@@ -258,8 +258,8 @@ func TestFailClosedPreservedArchiveShapeNeedsNoNewFence(t *testing.T) {
 	assertFailClosedOnReload(t, stored, "handle-carrying")
 
 	// Handle-less shape: the durable unknown flag alone is the obligation —
-	// the field #6739 added and the previous release already honours. A reader
-	// without the flag arm (v1.0.345 and older, outside the fence window) is
+	// the field #6739 added and every release since v1.0.345 honours. A reader
+	// without the flag arm (v1.0.344 and older, outside the fence window) is
 	// the only unsafe one, and the issue accepts documenting that rather than
 	// inventing a fence no current field can carry.
 	handleless := InstanceData{
