@@ -153,21 +153,21 @@ func TestMigrateRootAgentsToRegisteredProjects(t *testing.T) {
 			require.NoError(t, err)
 
 			// The entry is gone from the global file, in every spelling it
-			// had. A config that held ONLY the migrated entries is removed
-			// outright: an empty stub is a load error, not a valid file.
+			// had. A config that held ONLY the migrated entries keeps its
+			// [root_agents] table empty — deleting the file would dangle a
+			// config.toml symlink and un-shadow a legacy config.json, and an
+			// empty stub is a load error, so the empty table stays.
 			globalData, statErr := os.ReadFile(configPath)
+			require.NoError(t, statErr)
+			migratedCfg, err := parseConfigTOML(globalData, configPath)
+			require.NoError(t, err)
+			assert.NotContains(t, migratedCfg.RootAgents, repoRoot,
+				"the legacy entry must be dropped once its project carries the profile")
+			assert.NotContains(t, string(globalData), repoRoot)
 			if tc.globalBody == "" {
-				assert.True(t, os.IsNotExist(statErr),
-					"nothing remained after the entry moved, so the file had to go")
-				assert.True(t, result.RemovedConfig)
-			} else {
-				require.NoError(t, statErr)
-				migratedCfg, err := parseConfigTOML(globalData, configPath)
-				require.NoError(t, err)
-				assert.NotContains(t, migratedCfg.RootAgents, repoRoot,
-					"the legacy entry must be dropped once its project carries the profile")
-				assert.NotContains(t, string(globalData), repoRoot)
-				assert.False(t, result.RemovedConfig)
+				assert.Empty(t, migratedCfg.RootAgents,
+					"only the now-empty table remains — the file still loads")
+				assert.Contains(t, string(globalData), "[root_agents]")
 			}
 
 			// The personal [root_agent] layer is exactly what the case expects —
@@ -264,7 +264,6 @@ func TestMigrateRootAgentsLeavesUnregisteredPaths(t *testing.T) {
 				"the unregistered entry stays exactly where it was")
 			assert.NotContains(t, content, "[root_agents.'"+repoRoot+"']",
 				"the registered one is gone")
-			assert.False(t, result.RemovedConfig)
 
 			// The registered project's own migration still wrote its profile —
 			// the unregistered path does not block the entries that can move.
@@ -325,12 +324,12 @@ func TestMigrateRootAgentsDropsEverySpellingForOneProject(t *testing.T) {
 	paths := []string{result.MigratedRootAgents[0].Path, result.MigratedRootAgents[1].Path}
 	assert.ElementsMatch(t, []string{repoRoot, subdir}, paths)
 
-	// Every spelling moved, and the file held nothing else — it is gone, not
-	// left as the empty stub a load would refuse, and nothing is reported left.
+	// Every spelling moved, and the file held nothing else — its now-empty
+	// table stays behind, loadable, and nothing is reported left.
 	assert.Empty(t, result.Left)
-	assert.True(t, result.RemovedConfig)
-	_, statErr := os.Stat(configPath)
-	assert.True(t, os.IsNotExist(statErr), "no spelling of the project's opt-in may survive")
+	migratedCfg, err := parseConfigTOML([]byte(readFile(t, configPath)), configPath)
+	require.NoError(t, err)
+	assert.Empty(t, migratedCfg.RootAgents, "no spelling of the project's opt-in may survive")
 
 	personal := loadedPersonalLayer(t, project.ID)
 	require.NotNil(t, personal)

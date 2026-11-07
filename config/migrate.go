@@ -102,12 +102,6 @@ type MigrationResult struct {
 	// same guarantee, since the map holds one entry per path rather than one
 	// deprecated key.
 	MigratedRootAgents []MigratedRootAgent `json:"migrated_root_agents,omitempty"`
-	// RemovedConfig reports that the rewrite emptied the file and it was
-	// removed rather than left behind: an effectively empty config.toml is a
-	// load error, not a valid stub, so a config that held only migrated
-	// root_agents entries is deleted once its content moves. Backup still
-	// names the copy it was restored from.
-	RemovedConfig bool `json:"removed_config,omitempty"`
 	// Left lists the deprecated keys that have no in-file migration and so
 	// stayed exactly where they were, each with the step that ends it.
 	Left []UnmigratedKey `json:"left,omitempty"`
@@ -354,20 +348,23 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	// root_agents entries the run removed are named as the intended changes —
 	// their successors are the personal [root_agent] writes, not in-file ones.
 	//
-	// A rewrite can also empty the file outright: a config that held only
-	// root_agents entries has nothing left once they move. An effectively
-	// empty config.toml is a load ERROR, not a valid stub (the empty-stub rule
-	// treats its mere existence as shadowing), so the migration removes the
-	// file instead — the loader's own advice for a stub — and the post-state
-	// it must match is the defaults an absent file means.
-	emptied := isEffectivelyEmptyToml([]byte(content))
-	afterCfg := DefaultConfig()
-	if !emptied {
-		var err error
-		afterCfg, err = parseConfigTOML([]byte(content), prettyPath)
-		if err != nil {
-			return nil, fmt.Errorf("internal error: the migrated config would not load (no changes written): %w", err)
+	// A rewrite can also empty the document outright: a config that held only
+	// root_agents entries has nothing left once they move. Deleting the file
+	// is NOT the answer — an effectively empty config.toml is a load error, a
+	// deletion leaves a config.toml symlink dangling (RefuseDanglingConfigLink
+	// refuses it), and it un-shadows a legacy config.json the TOML was
+	// authoritative over. The table the entries lived in stays behind, empty:
+	// a valid, loadable document that still means "no root_agents".
+	if isEffectivelyEmptyToml([]byte(content)) {
+		if trimmed := strings.TrimRight(content, "\n"); trimmed != "" {
+			content = trimmed + "\n[root_agents]\n"
+		} else {
+			content = "[root_agents]\n"
 		}
+	}
+	afterCfg, err := parseConfigTOML([]byte(content), prettyPath)
+	if err != nil {
+		return nil, fmt.Errorf("internal error: the migrated config would not load (no changes written): %w", err)
 	}
 	if diff := configRewriteDrift(beforeCfg, afterCfg, exempt...); diff != "" {
 		return nil, fmt.Errorf("internal error: migrating %s would change %s (no changes written)", prettyPath, diff)
@@ -417,18 +414,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	if migrateWriteRaceHookForTest != nil {
 		migrateWriteRaceHookForTest()
 	}
-	if emptied {
-		// The rewrite left no settings: the file itself goes (an effectively
-		// empty config.toml is a load error, not a valid stub), and the backup
-		// above is what a reader restores from.
-		if err := locked.remove(); err != nil {
-			if rmErr := locked.removeSibling(backup); rmErr != nil && !os.IsNotExist(rmErr) {
-				log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", prettyHomePath(backup), rmErr)
-			}
-			return nil, err
-		}
-		result.RemovedConfig = true
-	} else if err := locked.write([]byte(bom+content), mode); err != nil {
+	if err := locked.write([]byte(bom+content), mode); err != nil {
 		// Confirming above narrows that window; it cannot close it, and the
 		// write can fail for its own reasons besides. The rename is the only
 		// step in it that mutates anything, so an error means the config is

@@ -329,9 +329,7 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 	type groupPlan struct {
 		group        *legacyMigrateGroup
 		winner       *RootAgentConfig
-		personal     *RootAgentLayer
 		personalPath string
-		before       RootAgent
 	}
 	var plans []*groupPlan
 	leftGroup := func(g *legacyMigrateGroup, reason string) {
@@ -349,8 +347,7 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 			leftGroup(g, "no legacy entry the daemon would apply could be proven for it")
 			continue
 		}
-		personal, err := loadPersonalLayerForMigrate(g.project.ID)
-		if err != nil {
+		if _, err := loadPersonalLayerForMigrate(g.project.ID); err != nil {
 			leftGroup(g, "its personal config could not be read: "+err.Error())
 			continue
 		}
@@ -362,9 +359,7 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 		plans = append(plans, &groupPlan{
 			group:        g,
 			winner:       winner,
-			personal:     personal,
 			personalPath: personalPath,
-			before:       ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: winner, Personal: personal}).RootAgent,
 		})
 	}
 	if len(plans) == 0 {
@@ -419,17 +414,31 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 			leftGroup(p.group, "whether another spelling would still apply after the move could not be established: "+err.Error())
 			continue
 		}
-		dropped := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: p.personal}).RootAgent
-		patch := rootAgentMigratePatch(p.before, dropped)
-		personalWritten := false
-		if len(patch) > 0 {
+		// Everything that depends on the personal file's CONTENTS is decided
+		// under its lock: the layer is re-read inside it, the patch computed
+		// from that read, the write applied and the identity re-verified. A
+		// patch computed outside the lock can overwrite a preference that
+		// landed between the read and the write (Codex on #6957).
+		var before RootAgent
+		var personalWritten bool
+		writeErr := WithFileLock(p.personalPath, func() error {
+			layer, err := loadPersonalLayerForMigrate(p.group.project.ID)
+			if err != nil {
+				return err
+			}
+			before = ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: p.winner, Personal: layer}).RootAgent
+			dropped := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: layer}).RootAgent
+			patch := rootAgentMigratePatch(before, dropped)
+			if len(patch) == 0 {
+				return nil
+			}
 			raw, err := json.Marshal(patch)
 			if err != nil {
-				return "", nil, nil, nil, fmt.Errorf("internal error: could not encode the personal root_agent patch for %s: %w", p.group.project.ID, err)
+				return fmt.Errorf("internal error: could not encode the personal root_agent patch: %w", err)
 			}
-			if _, err := SetProjectConfigValue(p.group.project.ID, "root_agent", string(raw)); err != nil {
-				leftGroup(p.group, "its personal [root_agent] could not be written: "+err.Error())
-				continue
+			write := scalarWrite{key: "root_agent", structured: true, rawStructured: string(raw)}
+			if _, err := write.applyProject(p.personalPath, prettyHomePath(p.personalPath)); err != nil {
+				return err
 			}
 			personalWritten = true
 			// The write is only half the claim — the assertion is that the
@@ -439,13 +448,16 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 			// consistent either way.
 			updated, err := loadPersonalLayerForMigrate(p.group.project.ID)
 			if err != nil {
-				leftGroup(p.group, "the personal [root_agent] write could not be read back: "+err.Error())
-				continue
+				return fmt.Errorf("the personal [root_agent] write could not be read back: %w", err)
 			}
-			if after := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: updated}).RootAgent; after != p.before {
-				leftGroup(p.group, "the personal write did not reproduce its effective profile — remove its root_agents lines by hand")
-				continue
+			if after := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: updated}).RootAgent; after != before {
+				return errors.New("the personal write did not reproduce the effective profile")
 			}
+			return nil
+		})
+		if writeErr != nil {
+			leftGroup(p.group, "its personal [root_agent] could not be updated safely: "+writeErr.Error())
+			continue
 		}
 		for _, key := range p.group.keys {
 			migrated = append(migrated, MigratedRootAgent{
@@ -453,7 +465,7 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 				ProjectID:       p.group.project.ID,
 				PersonalConfig:  p.personalPath,
 				PersonalWritten: personalWritten,
-				Profile:         p.before,
+				Profile:         before,
 			})
 		}
 	}
