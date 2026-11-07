@@ -302,8 +302,15 @@ func (m *Manager) resumeLimitedSession(
 		// settle the answered claim back to ordinary classification — the
 		// tombstoned shadow stays, so a lingering banner still reads as
 		// residue — rather than parking the row on a wall it already answered
-		// forever (#6972, Codex).
+		// forever (#6972, Codex). The settle routes through the same
+		// persist-and-publish path every poll transition takes: an in-memory
+		// clear alone leaves the stored row parked and clients displaying a
+		// limit block that no longer exists (#6972, Codex).
+		before := inst.GetLiveness()
+		beforeReset, _ := inst.LimitResetAt()
+		beforeEvidence := inst.LimitResetEvidence()
 		inst.ClearLimitReached()
+		m.persistPollChangeWithIdleEvidence(repoID, inst, before, beforeReset, beforeEvidence, false, false)
 		return
 	}
 	// A TUI attached to this session holds the attach pause lease, and the resume

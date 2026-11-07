@@ -194,6 +194,13 @@ type LimitWallClaimData struct {
 	// resume prompt already landed. A re-park borrowing the claim keeps it so
 	// the scheduler never re-sends for a wall the row already answered (#6972).
 	PromptSent bool `json:"prompt_sent,omitempty"`
+	// Retired marks the claim as a wall the row genuinely moved past — a
+	// send-landed, manual, or swap-commit clear — versus the standing-claim
+	// mirror every park writes. A churned row serializes no live claim
+	// fields, so the distinction must ride on the shadow itself: after a
+	// restart, Retired is what keeps an unsent wall's mirror from reading as
+	// residue (#6972).
+	Retired bool `json:"retired,omitempty"`
 }
 
 // IsZero reports whether the claim carries no recorded wall fact — the

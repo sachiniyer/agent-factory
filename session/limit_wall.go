@@ -44,6 +44,13 @@ type limitWallClaim struct {
 	// tombstone a re-park of the same claim keeps so the scheduler knows the
 	// send for this wall already went out (#6972 item 4).
 	promptSent bool
+	// retired marks the shadow as a claim the row genuinely moved past — a
+	// send-landed, manual, or swap-commit clear — versus the standing-claim
+	// mirror every park writes. The distinction must be durable: a churned
+	// row serializes no live fields, so after restart the mirror comparison
+	// alone cannot tell the two apart and an unsent wall would read as
+	// residue (#6972, Codex).
+	retired bool
 }
 
 // limitWallClaimsLocked is the row's recorded wall knowledge: the live claim
@@ -141,7 +148,7 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 		if c.agent != agent || c.account != i.Account {
 			continue
 		}
-		if idx == 1 && i.limitWallShadowMirrorsStandingClaimLocked() {
+		if idx == 1 && !i.limitWallShadowIsRetiredLocked() {
 			// The shadow still mirrors a standing claim — its live fields were
 			// never cleared, so nothing retired the wall. Ordinary pane churn
 			// can settle liveness out of parked WITHOUT delivering the pending
@@ -192,6 +199,26 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 		}
 	}
 	return false
+}
+
+// limitWallShadowIsRetiredLocked reports whether the shadow is a claim the
+// row actually moved past. An explicit retired mark settles it outright —
+// in memory every real clear flags it, and the bit is what survives the
+// serialization boundary. When standing-claim fields still exist, a shadow
+// that no longer mirrors them is retired by construction (a shape that
+// should not occur in memory — every park re-mirrors — kept as a belt to
+// the flag). When no standing fields exist at all the flag is the only
+// record left: a row serialized mid-churn carries its mirror with
+// retired=false, and treating it as retired would strand an unsent wall's
+// pending send after restart (#6972, Codex). Caller holds i.mu.
+func (i *Instance) limitWallShadowIsRetiredLocked() bool {
+	if i.lastLimitWall.retired {
+		return true
+	}
+	if i.limitAgent == "" {
+		return false
+	}
+	return !i.limitWallShadowMirrorsStandingClaimLocked()
 }
 
 // limitWallShadowMirrorsStandingClaimLocked reports whether the retired-wall
@@ -260,7 +287,7 @@ func limitWallClaimToData(w limitWallClaim) LimitWallClaimData {
 		Evidence:     w.evidence,
 		BannerPrefix: limitWallPrefixTail(w.banner.Prefix), BannerCount: w.banner.Count,
 		RuntimePID: w.runtimePID, RuntimeStartID: w.runtimeStartID,
-		RuntimeGen: w.runtimeGen, PromptSent: w.promptSent,
+		RuntimeGen: w.runtimeGen, PromptSent: w.promptSent, Retired: w.retired,
 	}
 }
 
@@ -273,7 +300,7 @@ func limitWallClaimFromData(d *LimitWallClaimData) limitWallClaim {
 		evidence:   d.Evidence,
 		banner:     LimitBanner{Prefix: d.BannerPrefix, Count: d.BannerCount},
 		runtimePID: d.RuntimePID, runtimeStartID: d.RuntimeStartID,
-		runtimeGen: d.RuntimeGen, promptSent: d.PromptSent,
+		runtimeGen: d.RuntimeGen, promptSent: d.PromptSent, retired: d.Retired,
 	}
 }
 

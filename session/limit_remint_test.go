@@ -896,6 +896,31 @@ func TestLimitWallResidue_ChurnedClaimIsNotRetired(t *testing.T) {
 		"no send landed for this wall — the row must stay in the retry loop")
 }
 
+// TestLimitWallResidue_ChurnedClaimSurvivesSerialization is the #6972 Codex
+// restart arm of the churn case: a churned row serializes no live claim
+// fields, so the shadow's own retired bit is the only record of whether the
+// wall was moved past. A restored standing mirror must not read as retired
+// residue — the unchanged banner re-parks the row and keeps its pending
+// send in the retry loop.
+func TestLimitWallResidue_ChurnedClaimSurvivesSerialization(t *testing.T) {
+	inst := &Instance{Program: tmux.ProgramClaude}
+	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", staleBanner, inst.stateEpoch))
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveRunning).ChurnOnly()))
+
+	data := inst.ToInstanceData()
+	require.NotNil(t, data.LastLimitWall, "the standing shadow must serialize")
+	require.False(t, data.LastLimitWall.Retired,
+		"a churned row's shadow mirrors a standing claim — it was never retired")
+
+	restored := &Instance{Program: tmux.ProgramClaude}
+	restored.lastLimitWall = limitWallClaimFromData(data.LastLimitWall)
+	restored.agentRuntimeGeneration = inst.agentRuntimeGeneration
+	require.True(t, restored.SetLimitReachedAtEpoch(time.Time{}, "", staleBanner, restored.stateEpoch),
+		"the restored standing mirror is not residue — the unsent wall re-parks")
+	require.True(t, restored.LimitReached())
+	require.False(t, restored.LimitWallPromptSent())
+}
+
 // TestLimitWallResidue_FailedHandoffKeepsSentClaim is the #6972 Codex rollback
 // arm: a failed SwapAgentProgram's revert leaves the outgoing runtime running,
 // so its retired claims stay provable. Without the restore, the speculative

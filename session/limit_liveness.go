@@ -699,6 +699,10 @@ func (i *Instance) clearLimitReachedLocked(sent bool) {
 	if sent {
 		i.lastLimitWall.promptSent = true
 	}
+	// The row genuinely moved past this wall: the mirror it parked becomes a
+	// retired claim — the durable distinction a restored row needs to keep
+	// calling the unchanged banner residue (#6972).
+	i.lastLimitWall.retired = true
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
