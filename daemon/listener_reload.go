@@ -72,6 +72,21 @@ type webListeners struct {
 	// every path that leaves the refused posture: a successful bind, the opt-out
 	// teardown, or a posture the predicate no longer refuses.
 	webRefusal string
+	// foreignRefusals latches the #6858 no-takeover refusals this daemon has
+	// already made, keyed by the PROVEN conflicting endpoint — the address a
+	// foreign daemon was seen holding, or the one the default home claims —
+	// which can be narrower than the requested listen_addr: a wildcard attempt
+	// refused over a 127.0.0.1 hold must not refuse a later, genuinely
+	// distinct 127.0.0.2 request. Once a bind was refused because another AF
+	// home claims or holds the port, NO later attempt overlapping a proven
+	// endpoint binds — not on a retry tick and not on an unrelated apply —
+	// because any bind that lands in the other daemon's restart gap IS the
+	// takeover this gate exists to prevent. Unlike webRefusal (a posture
+	// verdict re-derived on every reconcile), a foreign refusal is an event,
+	// so it must be remembered to stay refused. It clears only on daemon
+	// restart — re-evaluation — or by configuring a different address, which
+	// is the remedy the refusal names.
+	foreignRefusals map[string]string
 	// webBoundAddr is the RESOLVED address that binding is accepting on — what
 	// ":0" or ":8443" actually became. It is what a save surface must report back
 	// to an operator who just moved the listener (#3722): the config value alone
@@ -405,6 +420,22 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 // rebindWebSamePortLocked: release, bind, roll back on failure.
 // Caller holds wl.mu.
 func (wl *webListeners) bindWebLocked(addr string) error {
+	// A latched #6858 foreign refusal already in force short-circuits BEFORE
+	// the refusal-clearing below: re-running the whole gate on every reconcile
+	// would re-log the refusal and re-bump the generation each time. Unlike
+	// the #5137 posture refusal it is an event the latch remembers, not a
+	// verdict re-derived from the current config. The match is by endpoint —
+	// boundListenerBlocks — so an equivalent spelling of a refused address
+	// (127.0.0.1:08443, a wildcard covering it) still reads as latched.
+	if wl.webHandle == nil && len(wl.foreignRefusals) > 0 {
+		if req, err := net.ResolveTCPAddr("tcp", addr); err == nil {
+			for latchedAddr, refusal := range wl.foreignRefusals {
+				if boundListenerBlocks(latchedAddr, req) && wl.webRefusal == refusal {
+					return nil
+				}
+			}
+		}
+	}
 	// Reaching bindWebLocked at all means the posture is not refused (#5137) —
 	// reconcile checks ListenerBindRefusal first — so any recorded refusal is
 	// stale: the opt-in landed, the token came on, or the address moved back to
@@ -462,6 +493,19 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// no longer carries. A retained socket skips this: a failed rebind keeps
 	// the PREVIOUS configured address serving, and the configured half must
 	// keep naming it.
+	// The #6858 no-takeover gate: once-latched refusals stay refused for this
+	// daemon's life, and the default home's claim refuses before any bind —
+	// checked before the lifecycle's configured half moves to the attempted
+	// address, so a refused bind reports refused, never "configured, not
+	// bound". The gate applies to a REBIND target too: a daemon serving on
+	// another port that re-applies a refused or claimed address must not
+	// take it during the other daemon's restart gap — refuseOrKeepLocked
+	// then latches the refusal and keeps the healthy listener serving.
+	if req, rerr := net.ResolveTCPAddr("tcp", addr); rerr == nil {
+		if refusal, latch := wl.foreignGateRefusalLocked(addr, req); refusal != "" {
+			return wl.refuseOrKeepLocked(addr, refusal, latch)
+		}
+	}
 	if wl.webHandle == nil && wl.manager.lifecycle != nil {
 		wl.manager.lifecycle.setTCPConfigured(addr)
 	}
@@ -493,6 +537,20 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// rather than settled here.
 		if errors.Is(err, syscall.EADDRINUSE) {
 			req := listenErrAddr(err, addr)
+			// Whose socket is the conflict? A live af daemon of ANOTHER
+			// home holding the port is a takeover in waiting: our retry
+			// loop would win the bind the moment that daemon's restart
+			// releases it (#6858). The check runs FIRST: a wildcard
+			// request can be co-blocked by the preview sibling AND a
+			// foreign socket, or by our own listener AND one — deferring
+			// for the sibling or releasing ours fixes neither, and the
+			// refusal must latch regardless. A foreign refusal is the
+			// terminal answer here; every non-foreign conflict —
+			// sibling-only, own-only, a third-party squatter, anything
+			// unprovable — falls through to the paths below unchanged.
+			if refusal, latch := foreignHolderRefusal(req); refusal != "" {
+				return wl.refuseOrKeepLocked(addr, refusal, latch)
+			}
 			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
 				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
 			}

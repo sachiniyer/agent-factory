@@ -48,6 +48,27 @@ func TestUnboundWebListenerWarns(t *testing.T) {
 	require.Contains(t, rows[0].Remediation, "network.listen_addr")
 }
 
+// #6858: a daemon that REFUSED its web listener (another AF home holds or
+// claims the port) is a louder state than a retrying bind failure — it has
+// stopped competing for the port for its whole lifetime — so the row names
+// the refusal reason verbatim and the remedy reaches past "move this daemon"
+// to freeing the port for the home that claims it.
+func TestRefusedWebListenerWarns(t *testing.T) {
+	report := webListenerReport(t, daemon.DaemonListenerStatus{
+		TCPConfigured:    true,
+		TCPListenAddr:    "127.0.0.1:8443",
+		TCPRefusalReason: "refusing to bind 127.0.0.1:8443: the address is held by a daemon of another AF home (/other/home)",
+	})
+	rows := findCheckRows(report, "web listener")
+	require.Len(t, rows, 1, "checks: %v", checkNames(report))
+	require.Equal(t, StatusWarn, rows[0].Status)
+	require.Contains(t, rows[0].Detail, "another AF home")
+	require.Contains(t, rows[0].Remediation, "network.listen_addr",
+		"the remedy must name giving this daemon its own address")
+	require.Contains(t, rows[0].Remediation, "move or disable",
+		"the remedy must also name freeing the port for the home that claims it")
+}
+
 func TestBoundOrDisabledWebListenerHasNoWarning(t *testing.T) {
 	for name, l := range map[string]daemon.DaemonListenerStatus{
 		"bound":    {TCPConfigured: true, TCPBound: true, TCPListenAddr: "127.0.0.1:8443", TCPBoundAddr: "127.0.0.1:8443"},

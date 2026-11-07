@@ -83,7 +83,18 @@ func (wl *webListeners) retryFailedBinds() {
 			_, err := wl.reconcile(wl.manager.Config())
 			wl.manager.configApplyMu.Unlock()
 			if err == nil {
-				log.InfoLog.Printf("daemon listener bind recovered after %d retr%s", attempt, map[bool]string{true: "y", false: "ies"}[attempt == 1])
+				// nil covers two endings: every listener bound, or the web
+				// listener REFUSED (#6858 — the port belongs to another AF
+				// home). The refusal is a give-up, not a recovery — say so
+				// rather than claiming the bind succeeded.
+				wl.mu.Lock()
+				refusal := wl.webRefusal
+				wl.mu.Unlock()
+				if refusal != "" {
+					log.ErrorLog.Printf("daemon web listener not retried: %s", refusal)
+				} else {
+					log.InfoLog.Printf("daemon listener bind recovered after %d retr%s", attempt, map[bool]string{true: "y", false: "ies"}[attempt == 1])
+				}
 				return
 			}
 			// State transitions and every 10th repeat, not every backoff tick of a
