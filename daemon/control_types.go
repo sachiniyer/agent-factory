@@ -287,11 +287,12 @@ type SendPromptRequest struct {
 	// limit or credits picker in that pane.
 	TaskOrigin bool `json:"-"`
 	// TaskID is daemon-internal provenance naming the task whose delivery this
-	// send carried. A send that lands sent-unverified arms the daemon's
-	// re-verification feed against this task's run status, so its positive turn
-	// evidence can later promote the recorded verdict (#6590). Like TaskOrigin
-	// it rides the gob loopback only — excluded from HTTP/JSON so a client
-	// cannot claim a task's verdict.
+	// send carried. A send that lands unproven — sent-unverified or
+	// could-not-confirm — arms the daemon's re-verification feed against this
+	// task's run status, so its positive turn evidence can later promote the
+	// recorded verdict (#6590, #6819). Like TaskOrigin it rides the gob
+	// loopback only — excluded from HTTP/JSON so a client cannot claim a
+	// task's verdict.
 	TaskID string `json:"-"`
 }
 
@@ -324,10 +325,10 @@ type DeliverPromptRequest struct {
 	TaskRepoID string `json:"-"`
 	TaskOrigin bool   `json:"-"`
 	// TaskID is daemon-internal provenance naming the task whose delivery this
-	// prompt is. DeliverPrompt copies it onto the send it builds so a
-	// sent-unverified verdict can arm the daemon's re-verification feed for
-	// that task's run status (#6590). Daemon-internal like TaskRepoID: it rides
-	// the gob loopback only.
+	// prompt is. DeliverPrompt copies it onto the send it builds so an
+	// unproven verdict — sent-unverified or sent-unconfirmed — can arm the
+	// daemon's re-verification feed for that task's run status (#6590, #6819).
+	// Daemon-internal like TaskRepoID: it rides the gob loopback only.
 	TaskID string `json:"-"`
 	// SandboxOwner is the sandbox session that created the task being delivered
 	// (task.Task.SandboxOwner, #5571 W3.5). Daemon-internal like TaskRepoID: it

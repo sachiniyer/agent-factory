@@ -790,9 +790,9 @@ func (m *Manager) refreshInstanceStatus(repoID string, instance *session.Instanc
 		// window the observation already closed.
 		settlementCheckpoint = true
 	}
-	// The same capture feeds any task send still re-verifying its unverified
-	// verdict (#6590): its watch fires only on the send-bound turn evidence,
-	// and a fire promotes the task's recorded sent-unverified to sent.
+	// The same capture feeds any task send still re-verifying its unproven
+	// verdict (#6590, #6819): its watch fires only on the send-bound turn
+	// evidence, and a fire promotes the task's recorded verdict to sent.
 	m.noteUnverifiedSendEvidence(key, instance, obs, capturedAt)
 	// The Snapshot answered, so the transport works and any loss episode is over.
 	// This is the ONLY thing the debounce tracks — see remoteloss.go: it counts
