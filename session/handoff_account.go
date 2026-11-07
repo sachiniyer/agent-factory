@@ -376,6 +376,58 @@ func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, statu
 	return nil
 }
 
+// pendingSwapIncomingWallLocked reports whether the row's recorded limit wall
+// is a fresh wall of the committed swap's INCOMING identity — the replacement
+// the swap moved this session to (#6799). Either kind can be parked there:
+// ParkManualAccountSwapAtLimit before mission submission,
+// ParkAutomaticAccountSwapAtLimit when an automatic retry's readiness wait
+// found the replacement's own quota, and ParkCommittedAccountSwapAtLimit when
+// a committed swap's pre-spawn wall re-check found the committed identity
+// limited between the commit's evidence read and the launch (#6925).
+//
+// Two tests must both hold. ATTRIBUTION: the wall matches on both axes it
+// carries — the account label (limit_account == pending.To) and the agent
+// namespace (limit_agent == pending.AccountAgent): a cross-agent manual swap
+// may reuse the outgoing label in a different provider's namespace (Claude
+// `work` → Codex `work`), where the account axis alone misattributes the
+// outgoing provider's wall to the incoming identity. An automatic swap never
+// crosses agents and carries no AccountAgent — as do records written before
+// the field — so both fall back to the account axis alone. RECENCY: the
+// wall's sighting must postdate the send being retired (#6921 review) — a
+// wall recorded BEFORE the confirmed/settled attempt is stale evidence: the
+// send demonstrably got past it, and keeping it lets the scheduler resume a
+// working agent. A pending record with no attempt instant has no send for
+// the wall to be stale against, so attribution alone decides.
+func (i *Instance) pendingSwapIncomingWallLocked(pending *AccountSwapData) bool {
+	if i.limitAccount != pending.To ||
+		(pending.AccountAgent != "" && i.limitAgent != pending.AccountAgent) {
+		return false
+	}
+	if pending.MissionDeliveryAttemptAt.IsZero() {
+		return true
+	}
+	return i.incomingLimitObservedAtLocked().After(pending.MissionDeliveryAttemptAt)
+}
+
+// incomingLimitObservedAtLocked is the recorded sighting instant of the row's
+// current limit wall — the newest ObservedAt among the durable
+// account-limit observation rows carrying the same (limitAgent, limitAccount)
+// attribution. Zero when the ledger has no matching row (ambient walls,
+// which the ledger skips, and rows written before the field existed): an
+// unprovable sighting orders before any recorded send, so the wall reads as
+// stale rather than fresh (#6921 review). Caller holds i.mu.
+func (i *Instance) incomingLimitObservedAtLocked() time.Time {
+	var observedAt time.Time
+	for idx := range i.accountLimitObservations {
+		o := &i.accountLimitObservations[idx]
+		if o.Agent == i.limitAgent && o.Account == i.limitAccount &&
+			o.ObservedAt.After(observedAt) {
+			observedAt = o.ObservedAt
+		}
+	}
+	return observedAt
+}
+
 // SettlePendingAccountSwapNoticeDelivery retires the committed swap's notice
 // obligation on POSITIVE pane evidence — a turn the replacement agent provably
 // began after this notice's send attempt (#6767) — rather than on an
@@ -420,14 +472,21 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
 	if i.liveness == LiveLimitReached {
-		// An automatic swap's row is parked at the OUTGOING identity's wall —
-		// evidence that the incoming agent took its notice is also evidence
-		// the parked disposition is stale. Settle it the way the delivered
-		// send's own success path does.
-		i.assignLivenessLocked(LiveRunning)
-		i.limitResetAt = time.Time{}
-		i.limitAgent = ""
-		i.limitAccount = ""
+		// The parked wall splits on attribution, not on the swap's kind
+		// (#6799): a wall recorded against the INCOMING identity is still the
+		// honest state — the agent really is quota-blocked, the row already
+		// publishes not-idle to fleet watch, and ResumeLimitedSessions only
+		// owns rows that still carry it. Evidence that the incoming agent
+		// took its notice does not prove its quota recovered. Any other
+		// parked wall is the OUTGOING identity's — stale the moment the
+		// notice lands — and retires the way the delivered send's own
+		// success path settles it.
+		if !i.pendingSwapIncomingWallLocked(pending) {
+			i.assignLivenessLocked(LiveRunning)
+			i.limitResetAt = time.Time{}
+			i.limitAgent = ""
+			i.limitAccount = ""
+		}
 	} else {
 		// A confirmed notice is work the agent already has (#5023): publish
 		// working and leave the settle back to Ready to the monitor's own
@@ -535,10 +594,14 @@ func (i *Instance) CanConfirmPendingAccountSwapDelivery() bool {
 // delivered prompt leaves, and only the status monitor's own idle observation
 // — real pane evidence — moves it back.
 //
-// A row parked at its usage-limit wall splits on the swap's kind AND the
-// wall's attribution. A MANUAL swap may be parked at the INCOMING identity's
-// own wall (the replacement hit its quota before its mission was even
-// submitted — ParkManualAccountSwapAtLimit): LiveLimitReached is still the
+// A row parked at its usage-limit wall splits on the wall's ATTRIBUTION, not
+// the swap's kind (#6799). Either kind may be parked at the INCOMING
+// identity's own wall — a manual swap whose replacement hit its quota before
+// mission submission (ParkManualAccountSwapAtLimit), an automatic swap whose
+// retry's readiness wait found the replacement's own quota
+// (ParkAutomaticAccountSwapAtLimit), or a committed swap whose pre-spawn wall
+// re-check found the committed identity limited before launch
+// (ParkCommittedAccountSwapAtLimit, #6925) — and LiveLimitReached is still the
 // honest state, it already publishes not-idle to fleet watch, and
 // ResumeLimitedSessions only owns rows that still carry it — flattening it
 // would strand a session whose poll is paused by an attach. The wall is the
@@ -547,15 +610,12 @@ func (i *Instance) CanConfirmPendingAccountSwapDelivery() bool {
 // (limit_agent == pending.AccountAgent): a cross-agent manual swap may reuse
 // the outgoing label in a different provider's namespace (Claude `work` →
 // Codex `work`), where the account axis alone misattributes the outgoing
-// provider's wall to the incoming identity. A MANUAL swap may instead be
-// parked at the OUTGOING/ambient identity's wall (the #6764 shape): the
-// confirm nils the PendingAccountSwap pointer that
-// AccountLimitEvidenceFromData guards against re-attributing that wall to
-// the committed replacement, so the wall retires with the transaction. An
-// AUTOMATIC swap can only ever park at the OUTGOING identity's wall, so a
-// confirmed notice means the incoming agent is already working on its own
-// quota: the parked disposition is stale and settles to LiveRunning exactly
-// the way the delivered send's own success path and the evidence settle do.
+// provider's wall to the incoming identity. Any OTHER parked wall is the
+// OUTGOING/ambient identity's (the #6764 shape): the confirm nils the
+// PendingAccountSwap pointer that AccountLimitEvidenceFromData guards
+// against re-attributing that wall to the committed replacement, so the
+// wall retires with the transaction — a confirmed notice already runs on
+// the incoming identity's own quota.
 func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -597,42 +657,16 @@ func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 	// The confirmed mission is work the incoming agent already has (#5023):
 	// publish working — the same liveness a delivered prompt produces — and
 	// leave the settle back to Ready to the monitor's own pane evidence. A
-	// limit-blocked row splits on kind and attribution (doc comment above): a
-	// manual swap parked at the incoming identity's own wall — matching on
-	// both the account label and the agent namespace — keeps it, while an
-	// automatic swap's wall — or a manual swap's outgoing/ambient wall —
-	// retires with the transaction it justified.
+	// limit-blocked row splits on the wall's attribution alone (doc comment
+	// above): either kind parked at the incoming identity's own wall keeps
+	// it, while a wall recorded against any other identity retires with the
+	// transaction it justified.
 	if !pending.Manual {
 		i.taskRunIdleEdgeHeld = false
 		i.taskRunTurnGateHeld = false
-		if i.liveness == LiveLimitReached {
-			i.assignLivenessLocked(LiveRunning)
-			i.limitResetAt = time.Time{}
-			i.limitAgent = ""
-			i.limitAccount = ""
-		} else {
-			_ = i.transitionLocked(ObserveLiveness(LiveRunning))
-		}
-	} else if i.liveness == LiveLimitReached {
-		// A MANUAL swap parked at the INCOMING identity's own wall
-		// (ParkManualAccountSwapAtLimit) keeps the wall: it is the honest
-		// state and already publishes not-idle. The wall belongs to the
-		// incoming identity only when its attribution matches on BOTH axes
-		// — the account label (pending.To) and the agent namespace
-		// (pending.AccountAgent): a cross-agent manual swap may reuse the
-		// outgoing label in a different provider's namespace (Claude
-		// `work` → Codex `work`, exercised in
-		// daemon/handoff_account_round12_test.go), where limitAccount ==
-		// pending.To yet the wall is the outgoing provider's. Any other
-		// parked wall is the OUTGOING/ambient identity's — the #6764
-		// shape — and the confirm just nilled the PendingAccountSwap
-		// pointer that AccountLimitEvidenceFromData guards against
-		// re-attributing it to the committed replacement, so retire it the
-		// way the automatic arm does. Legacy records written before
-		// AccountAgent carry "" and fall back to the account axis alone.
-		incomingWall := i.limitAccount == pending.To &&
-			(pending.AccountAgent == "" || i.limitAgent == pending.AccountAgent)
-		if !incomingWall {
+	}
+	if i.liveness == LiveLimitReached {
+		if !i.pendingSwapIncomingWallLocked(pending) {
 			i.assignLivenessLocked(LiveRunning)
 			i.limitResetAt = time.Time{}
 			i.limitAgent = ""

@@ -177,9 +177,10 @@ func TestPrepareCreateLaunchResolvesCommandSpecificCodexHome(t *testing.T) {
 			require.False(t, plan.conversationCapture.startedAt.IsZero(),
 				"the before-image must be taken during prepare, before launch")
 
-			writeCodexRolloutFileWithCwd(t, expectedCodexHome,
+			minted := writeCodexRolloutFileWithCwd(t, expectedCodexHome,
 				"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", expectedCodexWorkingDir)
-			conv, captureErr := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), time.Second)
+			conv, captureErr := CaptureAgentConversation(tmux.ProgramCodex,
+				bindRuntimeHeldFiles(plan.ConversationCapture(), map[string]struct{}{minted: {}}), time.Second)
 			require.NoError(t, captureErr)
 			require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
 				"post-launch capture must observe the store frozen by the create plan")
@@ -227,9 +228,10 @@ func TestPrepareCreateLaunchDoesNotCorrelateUnmodeledShellCwd(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, plan.conversationCapture.workingDir,
 		"an unmodeled shell cd must retain exactly-one capture instead of filtering against a guessed cwd")
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	minted := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", nested)
-	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), 0)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex,
+		bindRuntimeHeldFiles(plan.ConversationCapture(), map[string]struct{}{minted: {}}), 0)
 	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }
@@ -254,9 +256,10 @@ func TestPrepareCreateLaunchDoesNotCorrelateCodexCwdFlag(t *testing.T) {
 	require.NoError(t, err)
 	require.Empty(t, plan.conversationCapture.workingDir,
 		"Codex -C changes the rollout cwd after the pane starts, so the launch cwd is not correlation evidence")
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	minted := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", nested)
-	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), 0)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex,
+		bindRuntimeHeldFiles(plan.ConversationCapture(), map[string]struct{}{minted: {}}), 0)
 	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
 }
@@ -410,7 +413,9 @@ func TestPreparedCreateLaunchSnapshotsBeforeAgentProcessStart(t *testing.T) {
 	require.NoError(t, inst.LaunchPreparedCreate(plan))
 	t.Cleanup(func() { _ = inst.CloseAttachOnly() })
 
-	conv, err := CaptureAgentConversation(tmux.ProgramCodex, plan.ConversationCapture(), time.Second)
+	minted := filepath.Join(codexRolloutDayDir(codexHome, time.Now()), rollout)
+	conv, err := CaptureAgentConversation(tmux.ProgramCodex,
+		bindRuntimeHeldFiles(plan.ConversationCapture(), map[string]struct{}{minted: {}}), time.Second)
 	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
 		"a rollout created at process start must be newer than the frozen before-image")

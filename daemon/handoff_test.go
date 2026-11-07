@@ -859,6 +859,9 @@ func TestHandoffSession_CapturesIncomingCodexConversation(t *testing.T) {
 	base := &handoffBackend{FakeBackend: session.NewFakeBackend()}
 	backend := &rolloutHandoffBackend{handoffBackend: base, codexHome: codexHome}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "capture-codex", backend)
+	// The fixture's pane is a name-only handle; hand attribution the store
+	// the backend writes into so the incoming rollout resolves (#6847).
+	inst.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
 
 	if _, err := manager.HandoffSession(HandoffSessionRequest{
 		Title: "capture-codex", RepoID: repoID, To: tmux.ProgramCodex,
@@ -900,6 +903,9 @@ func TestConversationCapture_DropsResultAfterLaterHandoffs(t *testing.T) {
 		t.Fatalf("second later handoff: %v", err)
 	}
 	inst.SetTmuxSession(tmux.NewTmuxSession(inst.Title, tmux.ProgramCodex))
+	// The capture must still RESOLVE the rollout so the stale-token gate is
+	// what drops it — a name-only pane cannot hold it (#6847).
+	inst.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
 
 	writeDaemonCodexRolloutFile(t, codexHome, "rollout-2026-07-21T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
 	manager.captureAgentConversation(
