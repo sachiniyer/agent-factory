@@ -261,11 +261,69 @@ export function saveNotice(resp: ConfigSetResponse): string {
   return parts.join(" · ");
 }
 
-/** The web spelling of config.FormatExplainValue (#4803): an explicitly
- *  configured empty string stays visible as `""` — a bare blank would read as
- *  absent — scalars print bare, and composites print as compact JSON. Exported
- *  so config.test.ts locks the REAL renderer rather than a copy. */
-export function explainValueText(value: unknown): string {
+/** The comma-list keys — config.isCommaListKey's opt-in set (the cfgStringList
+ *  leaves), mirrored here because the web bundle cannot import Go. This is not
+ *  a second list trusted to stay current: the parity test in
+ *  config/web_explain_parity_test.go parses this literal and asserts it equals
+ *  isCommaListKey's opt-in set over SettableKeys(), so a comma-list key added
+ *  on the Go side fails that test until this line is updated. */
+const COMMA_LIST_KEYS: ReadonlySet<string> = new Set([
+  "account_handoff.exclude_sessions",
+  "limit_account_candidates",
+  "network.allowed_hosts",
+  "network.cors_allowed_origins",
+]);
+
+/** Mirrors config.commaJoinStringList's representable check: every element is
+ *  a string, none carries a comma or a control character, and re-splitting
+ *  the join through the same trim-and-drop-empty rule as splitListValue
+ *  reproduces every element exactly. Otherwise the caller keeps the JSON
+ *  spelling — the unambiguous form that signals the value cannot be typed
+ *  back through `af config set <key> a,b` as one line.
+ *
+ *  One Go-side guard is deliberately not mirrored: the per-key leaf validator
+ *  (spec.validate on the joined string) stays in config/, so a hand-edited
+ *  element its leaf would reject keeps the JSON spelling on the CLI/TUI while
+ *  the web joins it — an accepted gap rather than a second copy of the
+ *  validation rules drifting from them. Every element a validated write path
+ *  can produce joins identically on all three surfaces. */
+function commaJoinStringList(value: unknown[]): string | null {
+  if (!value.every((elem): elem is string => typeof elem === "string")) {
+    return null;
+  }
+  for (const s of value) {
+    if (s.includes(",") || /\p{Cc}/u.test(s)) {
+      return null;
+    }
+  }
+  const joined = value.join(",");
+  const roundTripped = joined
+    .split(",")
+    .map((s) => s.trim())
+    .filter((s) => s !== "");
+  if (
+    roundTripped.length !== value.length ||
+    roundTripped.some((s, i) => s !== value[i])
+  ) {
+    return null;
+  }
+  return joined;
+}
+
+/** The web spelling of config.FormatExplainValueForKey (#4803, #6950): an
+ *  explicitly configured empty string stays visible as `""` — a bare blank
+ *  would read as absent — scalars print bare, composites print as compact
+ *  JSON, and a string list under a comma-list key comma-joins into the form
+ *  `af config set` accepts, so the trace shows exactly what the CLI and TUI
+ *  show for the same key. Exported so config.test.ts locks the REAL renderer
+ *  rather than a copy. */
+export function explainValueText(key: string, value: unknown): string {
+  if (COMMA_LIST_KEYS.has(key) && Array.isArray(value)) {
+    const joined = commaJoinStringList(value);
+    if (joined !== null) {
+      return joined === "" ? '""' : joined;
+    }
+  }
   if (typeof value === "string") {
     return value === "" ? '""' : value;
   }
@@ -1146,7 +1204,7 @@ export class ConfigPane {
     }
 
     body.append(
-      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.key, v.value)}`),
       h(
         "div",
         { class: "af-config-explain-line" },
@@ -1156,7 +1214,10 @@ export class ConfigPane {
     );
     for (const cand of v.candidates) {
       const result = cand.reason !== "" ? `${cand.result} · ${cand.reason}` : cand.result;
-      const value = cand.present ? explainValueText(cand.value) : "—";
+      // Candidates format under the PARENT key — the same argument the CLI
+      // passes (commands/configexplain.go formats candidate.Value with
+      // value.Key), so a dotted leaf's candidates join like its own rows.
+      const value = cand.present ? explainValueText(v.key, cand.value) : "—";
       const location = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
       body.append(
         h("div", { class: `af-config-explain-cand af-config-explain-${cand.result}` },

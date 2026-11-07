@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "07a1c8b3e3fd";
+var CLIENT_VERSION = "04e16bd53779";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8886,7 +8886,35 @@ function saveNotice(resp) {
   }
   return parts.join(" \xB7 ");
 }
-function explainValueText(value) {
+var COMMA_LIST_KEYS = /* @__PURE__ */ new Set([
+  "account_handoff.exclude_sessions",
+  "limit_account_candidates",
+  "network.allowed_hosts",
+  "network.cors_allowed_origins"
+]);
+function commaJoinStringList(value) {
+  if (!value.every((elem) => typeof elem === "string")) {
+    return null;
+  }
+  for (const s of value) {
+    if (s.includes(",") || /\p{Cc}/u.test(s)) {
+      return null;
+    }
+  }
+  const joined = value.join(",");
+  const roundTripped = joined.split(",").map((s) => s.trim()).filter((s) => s !== "");
+  if (roundTripped.length !== value.length || roundTripped.some((s, i) => s !== value[i])) {
+    return null;
+  }
+  return joined;
+}
+function explainValueText(key, value) {
+  if (COMMA_LIST_KEYS.has(key) && Array.isArray(value)) {
+    const joined = commaJoinStringList(value);
+    if (joined !== null) {
+      return joined === "" ? '""' : joined;
+    }
+  }
   if (typeof value === "string") {
     return value === "" ? '""' : value;
   }
@@ -9451,7 +9479,7 @@ var ConfigPane = class {
       return body;
     }
     body.append(
-      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.value)}`),
+      h("div", { class: "af-config-explain-effective" }, `${v.key} = ${explainValueText(v.key, v.value)}`),
       h(
         "div",
         { class: "af-config-explain-line" },
@@ -9461,7 +9489,7 @@ var ConfigPane = class {
     );
     for (const cand of v.candidates) {
       const result = cand.reason !== "" ? `${cand.result} \xB7 ${cand.reason}` : cand.result;
-      const value = cand.present ? explainValueText(cand.value) : "\u2014";
+      const value = cand.present ? explainValueText(v.key, cand.value) : "\u2014";
       const location2 = cand.path ? `${cand.path}:${cand.key_path}` : "compiled default";
       body.append(
         h(
