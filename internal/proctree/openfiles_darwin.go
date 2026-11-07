@@ -20,7 +20,9 @@ import (
 // list call is ErrProcessExited, a refused call propagates, and an fd that
 // closed mid-walk (EBADF/ENOENT from the per-fd call) is simply skipped.
 const (
-	procInfoCallPIDFDInfo    = 3 // PROC_INFO_CALL_PIDFDINFO
+	procInfoCallPIDFDInfo = 3 // PROC_INFO_CALL_PIDFDINFO
+	// procInfoCallPIDInfo (= 2) lives in proctree_darwin.go: the descriptor
+	// LIST is a pidinfo-family flavor, the per-fd path query is pidfdinfo.
 	procPIDListFDs           = 1 // PROC_PIDLISTFDS
 	procPIDFdVnodePathInfo   = 2 // PROC_PIDFDVNODEPATHINFO
 	procFdTypeVnode          = 1 // PROX_FDTYPE_VNODE
@@ -69,7 +71,7 @@ func listProcFds(pid int) ([][]byte, error) {
 		if len(buf) > 0 {
 			p = unsafe.Pointer(&buf[0])
 		}
-		n, err := procInfoRaw(procInfoCallPIDFDInfo, pid, procPIDListFDs, 0, p, int32(len(buf)))
+		n, err := procInfoRaw(procInfoCallPIDInfo, pid, procPIDListFDs, 0, p, int32(len(buf)))
 		if err != nil {
 			if errors.Is(err, syscall.ESRCH) || errors.Is(err, syscall.ENOENT) {
 				return nil, ErrProcessExited

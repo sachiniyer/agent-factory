@@ -4,6 +4,9 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"path/filepath"
+	"sort"
+	"strings"
 	"sync"
 	"syscall"
 
@@ -25,10 +28,11 @@ import (
 // open for the process's life (codex-rs core/rollout/recorder.rs), so a file
 // open in this pane's process set is provably this runtime's thread, and a
 // file open nowhere in that set — written by a sibling that holds it in ITS
-// own session — is provably foreign. Because a candidate's owner never
-// changes after mint, each path's verdict is judged once and memoized: the
-// daemon re-asks this attribution on every armed capture attempt, and an
-// already-judged sibling must not re-walk the process table forever.
+// own session — is provably foreign. Verdicts are memoized on the INSTANCE,
+// keyed to the resolved generation, because the deferred capture loop re-binds
+// a fresh attribution object on every attempt: state carried only on the
+// snapshot's channel would re-walk the process table forever for a sibling
+// that is never adopted.
 //
 // inconclusive is reserved for "evidence exists but could not be read" — a
 // process table or descriptor set that failed mid-walk — which is the same
@@ -38,31 +42,32 @@ import (
 // nothing: every candidate stays unproven and the capture simply never adopts
 // — unknown is not foreign, but it is not attribution either.
 type codexRuntimeAttribution struct {
-	held func() (map[string]struct{}, error)
-
-	mu       sync.Mutex
-	verdicts map[string]bool
+	attribute func(candidates []string) (attributed []string, inconclusive bool)
 }
 
-// attributeCodexRollouts partitions candidates into the rollouts the bound
-// runtime positively holds open and those it provably does not, reporting
-// inconclusive when the walk could not finish — a refused or vanished
-// process set can hide a holder, so its unjudged candidates are undecided,
-// not foreign. A snapshot with no runtime channel attributes nothing and is
-// NOT inconclusive: that is the quiet never-adopt shape, retried without
-// churn by every caller that already retries absence.
+// attributeCodexRollouts asks the bound runtime to judge candidates. An
+// unbound snapshot attributes nothing and is NOT inconclusive: that is the
+// quiet never-adopt shape, retried without churn by every caller that
+// already retries absence.
 func (s *ConversationCaptureSnapshot) attributeCodexRollouts(candidates []string) (attributed []string, inconclusive bool) {
 	r := s.runtime
-	if r == nil || r.held == nil {
+	if r == nil || r.attribute == nil {
 		return nil, false
 	}
-	r.mu.Lock()
-	if r.verdicts == nil {
-		r.verdicts = make(map[string]bool)
-	}
+	return r.attribute(candidates)
+}
+
+// judgeCodexRollouts partitions candidates into rollouts the held set
+// positively contains and those it provably does not, memoizing each path's
+// verdict so an already-judged sibling is never re-walked. heldFor — the
+// expensive descriptor enumeration — runs only while unjudged candidates
+// exist; its error makes the unjudged remainder inconclusive ("could not
+// look" must never arrive as "nobody holds it").
+func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts map[string]bool, mu *sync.Mutex, candidates []string) (attributed []string, inconclusive bool) {
+	mu.Lock()
 	var pending []string
 	for _, path := range candidates {
-		if v, ok := r.verdicts[path]; ok {
+		if v, ok := verdicts[path]; ok {
 			if v {
 				attributed = append(attributed, path)
 			}
@@ -70,24 +75,59 @@ func (s *ConversationCaptureSnapshot) attributeCodexRollouts(candidates []string
 			pending = append(pending, path)
 		}
 	}
-	r.mu.Unlock()
+	mu.Unlock()
 	if len(pending) == 0 {
 		return attributed, false
 	}
-	held, err := r.held()
+	held, err := heldFor()
 	if err != nil {
 		return attributed, true
 	}
-	r.mu.Lock()
+	mu.Lock()
+	defer mu.Unlock()
 	for _, path := range pending {
-		_, ours := held[path]
-		r.verdicts[path] = ours
+		ours := codexHeldPathContains(held, path)
+		verdicts[path] = ours
 		if ours {
 			attributed = append(attributed, path)
 		}
 	}
-	r.mu.Unlock()
 	return attributed, false
+}
+
+// codexHeldPathContains answers membership with alias tolerance: a store
+// reached through a symlinked CODEX_HOME yields candidate paths under the
+// alias while /proc and vnode answers carry the resolved path (#6847 review).
+// File identity would need a stat per path; resolving the lexical alias is
+// the same answer the kernel's descriptor targets already provide.
+func codexHeldPathContains(held map[string]struct{}, path string) bool {
+	if _, ok := held[path]; ok {
+		return true
+	}
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil || resolved == path {
+		return false
+	}
+	_, ok := held[resolved]
+	return ok
+}
+
+// canonicalHeldPaths wraps a held-set source so its answers match on the
+// resolved path too: a held path recorded under an alias must find a
+// candidate that arrived under the real one.
+func canonicalHeldPaths(source func() (map[string]struct{}, error)) (map[string]struct{}, error) {
+	raw, err := source()
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]struct{}, len(raw))
+	for path := range raw {
+		held[path] = struct{}{}
+		if resolved, err := filepath.EvalSymlinks(path); err == nil {
+			held[resolved] = struct{}{}
+		}
+	}
+	return held, nil
 }
 
 // BindConversationCaptureRuntime attaches this instance's live runtime — the
@@ -102,8 +142,69 @@ func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapsh
 	if !snap.CapturesCodex() {
 		return snap
 	}
-	snap.runtime = &codexRuntimeAttribution{held: i.codexRuntimeHeldPaths}
+	snap.runtime = &codexRuntimeAttribution{attribute: i.attributeCodexRolloutPaths}
 	return snap
+}
+
+// attributeCodexRolloutPaths is the instance-side judgement behind every bound
+// snapshot. It resolves the generation first: verdicts cached under a dead
+// generation (a respawned pane reuses the session row) never leak into the
+// replacement's judgements, and a generation that changes mid-walk discards
+// the walk — its verdicts belong to no live process set.
+func (i *Instance) attributeCodexRolloutPaths(candidates []string) (attributed []string, inconclusive bool) {
+	gen, heldFor, err := i.codexRuntimeJudgement()
+	if err != nil {
+		return nil, true
+	}
+	i.codexAttrMu.Lock()
+	if i.codexAttrGen != gen {
+		i.codexAttrGen = gen
+		i.codexAttrVerdicts = make(map[string]bool)
+	}
+	i.codexAttrMu.Unlock()
+	attributed, inconclusive = judgeCodexRollouts(heldFor, i.codexAttrVerdicts, &i.codexAttrMu, candidates)
+	i.codexAttrMu.Lock()
+	stable := i.codexAttrGen == gen
+	i.codexAttrMu.Unlock()
+	if !stable {
+		return nil, true
+	}
+	return attributed, inconclusive
+}
+
+// codexRuntimeJudgement resolves this judgement's generation key and the
+// source of its held set. The test override supplies a stable generation and
+// its held answer outright — a fixture with a name-only pane has no process
+// generation to resolve — while production walks the pane's resolved roots.
+func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[string]struct{}, error), err error) {
+	i.mu.RLock()
+	override := i.codexRuntimeHeldOverride
+	i.mu.RUnlock()
+	if override != nil {
+		return "test-override", func() (map[string]struct{}, error) {
+			return canonicalHeldPaths(override)
+		}, nil
+	}
+	roots, err := i.codexRuntimeRoots()
+	if err != nil {
+		return "", nil, err
+	}
+	return codexGenerationKey(roots), func() (map[string]struct{}, error) {
+		return canonicalHeldPaths(func() (map[string]struct{}, error) {
+			return i.heldPathsForRoots(roots)
+		})
+	}, nil
+}
+
+// codexGenerationKey fingerprints a resolved root set so cached verdicts can
+// be pinned to exactly one generation.
+func codexGenerationKey(roots []proctree.Process) string {
+	parts := make([]string, 0, len(roots))
+	for _, r := range roots {
+		parts = append(parts, fmt.Sprintf("%d:%d", r.PID, r.StartID))
+	}
+	sort.Strings(parts)
+	return strings.Join(parts, ",")
 }
 
 // codexRuntimeRoots resolves the pane-root process this instance's agent
@@ -134,25 +235,15 @@ func (i *Instance) codexRuntimeRoots() ([]proctree.Process, error) {
 	return []proctree.Process{root}, nil
 }
 
-// codexRuntimeHeldPaths returns every filesystem path held open by processes
-// in this instance's runtime — the pane root's process tree plus the rest of
-// its kernel session, which covers children reparented to init — keyed for
-// membership tests. A member that vanished between the process snapshot and
-// its descriptor read is skipped: gone is an answer, and its descriptors are
-// gone with it. Any other read failure fails the whole walk, because an
-// unseeable member could be exactly the process holding the rollout being
-// judged — "I could not look" must never arrive as "nobody holds it".
-func (i *Instance) codexRuntimeHeldPaths() (map[string]struct{}, error) {
-	i.mu.RLock()
-	override := i.codexRuntimeHeldOverride
-	i.mu.RUnlock()
-	if override != nil {
-		return override()
-	}
-	roots, err := i.codexRuntimeRoots()
-	if err != nil {
-		return nil, err
-	}
+// heldPathsForRoots returns every filesystem path held open by processes in
+// the given roots' runtime — each root's process tree plus the rest of its
+// kernel session, which covers children reparented to init. A member that
+// vanished between the process snapshot and its descriptor read is skipped:
+// gone is an answer, and its descriptors are gone with it. Any other read
+// failure fails the whole walk, because an unseeable member could be exactly
+// the process holding the rollout being judged — "I could not look" must
+// never arrive as "nobody holds it".
+func (i *Instance) heldPathsForRoots(roots []proctree.Process) (map[string]struct{}, error) {
 	snapshot, err := proctree.Snapshot()
 	if err != nil {
 		return nil, err
@@ -193,7 +284,7 @@ func (i *Instance) codexRuntimeHeldPaths() (map[string]struct{}, error) {
 }
 
 // SetCodexRuntimeHeldOverrideForTest replaces the live process walk behind
-// codexRuntimeHeldPaths with a fixed answer. Daemon tests model a session's
+// rollout attribution with a fixed answer. Daemon tests model a session's
 // pane with a name-only TmuxSession — there is no real process generation to
 // walk — so adoption tests hand attribution the file set their fixture
 // produced, exactly as SetStatusForTest hands the status poll a fixed row.

@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"syscall"
 	"testing"
 	"time"
@@ -61,9 +62,12 @@ func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, 
 // attribution, so a test can grant (or withdraw) held files between polls by
 // mutating it.
 func bindRuntimeHeldFiles(snap ConversationCaptureSnapshot, held map[string]struct{}) ConversationCaptureSnapshot {
-	snap.runtime = &codexRuntimeAttribution{
-		held: func() (map[string]struct{}, error) { return held, nil },
-	}
+	verdicts := make(map[string]bool)
+	var mu sync.Mutex
+	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
+		return judgeCodexRollouts(func() (map[string]struct{}, error) { return held, nil },
+			verdicts, &mu, candidates)
+	}}
 	return snap
 }
 

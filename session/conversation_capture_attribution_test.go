@@ -1,10 +1,10 @@
 package session
 
 import (
-	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
 	"testing"
 	"time"
 
@@ -85,9 +85,9 @@ func TestCaptureAgentConversation_CodexAttributionWalkErrorIsInconclusive(t *tes
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
-	snap.runtime = &codexRuntimeAttribution{
-		held: func() (map[string]struct{}, error) { return nil, errors.New("walk failed") },
-	}
+	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
+		return nil, true
+	}}
 
 	writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-40-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
@@ -107,12 +107,14 @@ func TestCaptureAgentConversation_CodexAttributionVerdictsAreMemoized(t *testing
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	calls := 0
-	snap.runtime = &codexRuntimeAttribution{
-		held: func() (map[string]struct{}, error) {
+	verdicts := make(map[string]bool)
+	var mu sync.Mutex
+	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
+		return judgeCodexRollouts(func() (map[string]struct{}, error) {
 			calls++
 			return map[string]struct{}{}, nil
-		},
-	}
+		}, verdicts, &mu, candidates)
+	}}
 	writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-40-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
 
@@ -153,7 +155,11 @@ func TestCodexRuntimeHeldPaths(t *testing.T) {
 
 	var held map[string]struct{}
 	require.Eventually(t, func() bool {
-		paths, err := inst.codexRuntimeHeldPaths()
+		_, heldFor, err := inst.codexRuntimeJudgement()
+		if err != nil {
+			return false
+		}
+		paths, err := heldFor()
 		if err != nil {
 			return false
 		}
@@ -162,4 +168,62 @@ func TestCodexRuntimeHeldPaths(t *testing.T) {
 	}, 5*time.Second, 20*time.Millisecond, "the pane-member walk must resolve")
 	_, ok := held[heldFile]
 	require.True(t, ok, "a file open in the runtime's own process set must be found")
+}
+
+// TestCodexAttributionVerdictsSurviveRebind is the deferred-loop shape #6847's
+// review demands: captureAgentConversation re-binds a fresh attribution object
+// onto the stored snapshot on EVERY attempt, so a verdict that lived only on
+// the snapshot's channel would re-walk the process table per rearm forever.
+// The memo lives on the instance, keyed to the resolved generation — a
+// rejected sibling is walked once and never again.
+func TestCodexAttributionVerdictsSurviveRebind(t *testing.T) {
+	inst := &Instance{}
+	walks := 0
+	inst.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		walks++
+		// The runtime holds nothing: the same-cwd candidate below is a
+		// sibling's rollout, judged foreign forever.
+		return map[string]struct{}{}, nil
+	})
+
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-07-06T10-17-40-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+
+	for attempt := 0; attempt < 3; attempt++ {
+		// Each attempt binds the armed snapshot fresh, exactly as the
+		// deferred loop's captureAgentConversation does on every rearm.
+		conv, retry, err := captureCodexConversationOnce(inst.BindConversationCaptureRuntime(snap))
+		require.NoError(t, err)
+		require.True(t, retry)
+		require.False(t, conv.HasID(), "a foreign rollout must never be adopted, on any attempt")
+	}
+	require.Equal(t, 1, walks,
+		"a sibling judged foreign must not re-walk the runtime on later attempts")
+}
+
+// TestCodexAttributionResolvesStoreAliases: CODEX_HOME reached through a
+// symlink yields candidates under the alias while the kernel's descriptor
+// answers carry the resolved path — the runtime's own rollout must still
+// attribute (#6847 review).
+func TestCodexAttributionResolvesStoreAliases(t *testing.T) {
+	realHome := t.TempDir()
+	alias := filepath.Join(t.TempDir(), "codex-alias")
+	require.NoError(t, os.Symlink(realHome, alias))
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(alias, workDir)
+
+	name := "rollout-2026-07-06T10-17-40-019f386f-7206-7fc2-803b-f7045e07a242.jsonl"
+	aliasPath := writeCodexRolloutFileWithCwd(t, alias, name, workDir)
+	// What the runtime's descriptors report: the kernel-resolved path.
+	realPath := filepath.Join(codexRolloutDayDir(realHome, time.Now()), name)
+	require.NotEqual(t, aliasPath, realPath, "the fixture must actually exercise the alias")
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{realPath: {}})
+
+	conv, _, err := captureCodexConversationOnce(snap)
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
+		"the runtime's own rollout attributes through a store alias")
 }
