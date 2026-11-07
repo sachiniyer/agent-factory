@@ -279,6 +279,150 @@ func TestProgramErrorDisplaysOpencode(t *testing.T) {
 	}
 }
 
+// #6792 item 2: the check must expose the resolved shell-WRAPPER path beside
+// the detected agent's — a relative wrapper is what a worktree qualification
+// needs to qualify, not only the agent. `tools/ionice -c 3 codex` carries two
+// executable obligations, and ShellExecutable/ShellPath record the first.
+func TestCheckCommandAtRecordsShellWrapperPath(t *testing.T) {
+	workDir := t.TempDir()
+	tools := filepath.Join(workDir, "tools")
+	if err := os.MkdirAll(tools, 0o755); err != nil {
+		t.Fatalf("mkdir tools: %v", err)
+	}
+	wrapper := filepath.Join(tools, "ionice")
+	if err := os.WriteFile(wrapper, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write wrapper: %v", err)
+	}
+	binDir := t.TempDir()
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+	t.Setenv("PATH", binDir)
+
+	check, err := CheckCommandAt("tools/ionice -c 3 codex", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt: %v", err)
+	}
+	if check.Executable != "codex" || check.Path != filepath.Join(binDir, "codex") {
+		t.Fatalf("agent fields = %q / %q, want codex / %q", check.Executable, check.Path, filepath.Join(binDir, "codex"))
+	}
+	if check.ShellExecutable != "tools/ionice" || check.ShellPath != wrapper {
+		t.Fatalf("wrapper fields = %q / %q, want tools/ionice / %q", check.ShellExecutable, check.ShellPath, wrapper)
+	}
+	if !check.ShellViaWorkingDir {
+		t.Fatal("a relative wrapper token resolves via the working directory — ShellViaWorkingDir must be true")
+	}
+	if check.PathViaWorkingDir {
+		t.Fatal("the agent resolved under an absolute PATH entry — PathViaWorkingDir must be false")
+	}
+}
+
+// PathViaWorkingDir marks exactly the resolutions that answer differently from
+// a different cwd: relative tokens joined to the launch dir, and bare names
+// found under relative PATH entries. Absolute tokens and absolute PATH entries
+// resolve the same file from anywhere. The shell fields stay empty when the
+// shell's executable IS the detected agent.
+func TestCheckCommandAtPathViaWorkingDir(t *testing.T) {
+	workDir := t.TempDir()
+	binDir := filepath.Join(workDir, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir bin: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(binDir, "codex"), []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write codex: %v", err)
+	}
+
+	rel, err := CheckCommandAt("bin/codex", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(bin/codex): %v", err)
+	}
+	if !rel.PathViaWorkingDir {
+		t.Fatal("a relative token resolves via the working directory")
+	}
+	if rel.ShellExecutable != "" || rel.ShellPath != "" {
+		t.Fatalf("shell fields = %q / %q, want empty when the shell's executable is the agent", rel.ShellExecutable, rel.ShellPath)
+	}
+
+	relViaPath, err := CheckCommandAt("env PATH=bin codex", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(env PATH=bin codex): %v", err)
+	}
+	if !relViaPath.PathViaWorkingDir {
+		t.Fatal("a bare name found under a relative PATH entry resolves via the working directory")
+	}
+
+	abs, err := CheckCommandAt(filepath.Join(binDir, "codex"), workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(abs): %v", err)
+	}
+	if abs.PathViaWorkingDir {
+		t.Fatal("an absolute token resolves the same file from any directory")
+	}
+}
+
+// An ABSOLUTE env -C breaks the launch-dir dependence: `env -C <abs>
+// bin/claude` resolves the same file no matter which directory the session
+// starts in, so the resolved path is not worktree content. A RELATIVE -C
+// joins onto the launch dir and stays dependent. (PR #6923 review.)
+func TestCheckCommandAtEnvChdirAbsolute_NotViaWorkingDir(t *testing.T) {
+	workDir := t.TempDir()
+	sub := filepath.Join(workDir, "sub")
+	binDir := filepath.Join(sub, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	abs, err := CheckCommandAt("env -C "+sub+" bin/claude", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(abs -C): %v", err)
+	}
+	if abs.Path != target || abs.PathViaWorkingDir {
+		t.Fatalf("abs -C: Path=%q via=%v, want %q via=false — a -C literal resolves the same file from any launch dir",
+			abs.Path, abs.PathViaWorkingDir, target)
+	}
+
+	rel, err := CheckCommandAt("env -C sub bin/claude", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(rel -C): %v", err)
+	}
+	if rel.Path != target || !rel.PathViaWorkingDir {
+		t.Fatalf("rel -C: Path=%q via=%v, want %q via=true — a relative -C joins the launch dir",
+			rel.Path, rel.PathViaWorkingDir, target)
+	}
+}
+
+// PathCandidates records EVERY runnable PATH match in order, so a caller can
+// tell whether the search's later entries rescue the name when the selected
+// file is absent at launch. Path is always the first.
+func TestCheckCommandAtCollectsPathCandidates(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	first := filepath.Join(dir1, "codex")
+	second := filepath.Join(dir2, "codex")
+	for _, p := range []string{first, second} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	t.Setenv("PATH", dir1+string(os.PathListSeparator)+dir2)
+
+	check, err := CheckCommandAt("codex", t.TempDir())
+	if err != nil {
+		t.Fatalf("CheckCommandAt: %v", err)
+	}
+	if len(check.PathCandidates) != 2 ||
+		check.PathCandidates[0].Path != first || check.PathCandidates[1].Path != second {
+		t.Fatalf("PathCandidates = %+v, want [%s %s] in PATH order", check.PathCandidates, first, second)
+	}
+	if check.Path != first {
+		t.Fatalf("Path = %q, want the first match %q", check.Path, first)
+	}
+}
+
 // #5779: a relative program override resolves against the session's directory,
 // not the checking process's cwd.
 func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {

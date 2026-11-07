@@ -149,3 +149,43 @@ func TestHooksPaneDiscardRestoresTheStoredList(t *testing.T) {
 	assert.False(t, h.IsDirty())
 	assert.Equal(t, []string{"a", "b"}, h.GetCommands())
 }
+
+// TestHooksPaneUnchangedEditsStayClean pins the #6790 dirty property at the
+// pane level: dirty means "differs from the committed baseline", so confirming
+// an edit without changing the value — or restoring the stored value before
+// confirming — leaves the pane clean, and a clean close writes nothing.
+func TestHooksPaneUnchangedEditsStayClean(t *testing.T) {
+	t.Run("no-op confirm", func(t *testing.T) {
+		h := NewHooksPane()
+		h.SetCommands([]string{"make test"})
+		h.SetFocus(true)
+
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // open the edit
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter}) // confirm unchanged
+
+		assert.False(t, h.IsDirty(),
+			"confirming an unchanged value must not dirty the pane (#6790)")
+	})
+
+	t.Run("edit restored to the stored value", func(t *testing.T) {
+		h := NewHooksPane()
+		h.SetCommands([]string{"make test"})
+		h.SetFocus(true)
+
+		// A real edit first: drop the last character and confirm.
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyBackspace})
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+		require.Equal(t, []string{"make tes"}, h.GetCommands())
+		require.True(t, h.IsDirty(), "precondition: a real edit is dirty")
+
+		// Edit it back to the stored value.
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("t")})
+		h.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+		assert.Equal(t, []string{"make test"}, h.GetCommands())
+		assert.False(t, h.IsDirty(),
+			"an edit restored to the committed value has nothing to persist (#6790)")
+	})
+}

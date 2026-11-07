@@ -197,28 +197,44 @@ func (i *Instance) RecordPendingManualAccountSwapMissionDelivery(from, to string
 // before a delivery attempt touches the composer. A crash after this boundary
 // reloads ambiguity, never the positive non-delivery verdict that admitted the
 // attempt.
-func (i *Instance) BeginPendingManualAccountSwapMissionDelivery(from, to string) (PromptDeliveryStatus, error) {
+//
+// The displaced verdict's attempt instant retires with it (#6798), the same
+// contract the automatic notice's begin already carries: notice evidence is
+// only ever armed against the timestamp of the attempt that is actually
+// pending, and a positively-missed attempt's timestamp never counts. Without
+// the retire a crash after the boundary reloads (could-not-confirm, STALE
+// attempt instant), the re-verification watch arms against the missed
+// attempt's timestamp, and a turn begun after it — with no relation to the
+// never-submitted retry — satisfies the evidence contract and retires a
+// mission that was never sent. It returns the displaced pair so a failed
+// persistence can restore them atomically.
+func (i *Instance) BeginPendingManualAccountSwapMissionDelivery(from, to string) (PromptDeliveryStatus, time.Time, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	pending := i.pendingAccountSwap
 	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
-		return "", fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+		return "", time.Time{}, fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
 	}
 	if !pending.ReplacementPanesStarted {
-		return "", fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
+		return "", time.Time{}, fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
 	}
 	previous := pending.MissionDeliveryStatus
-	if previous != PromptCouldNotConfirm {
+	previousAttempt := pending.MissionDeliveryAttemptAt
+	if previous != PromptCouldNotConfirm || !previousAttempt.IsZero() {
 		pending.MissionDeliveryStatus = PromptCouldNotConfirm
+		pending.MissionDeliveryAttemptAt = time.Time{}
 		i.touchLocked()
 	}
-	return previous, nil
+	return previous, previousAttempt, nil
 }
 
-// RestorePendingManualAccountSwapMissionDelivery rolls back a begin boundary
-// only when persistence failed before submission began. Empty is allowed here:
-// an initial delivery with no prior attempt has no verdict to restore.
-func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus) error {
+// RestorePendingManualAccountSwapMissionDelivery rolls a begin boundary back
+// to the exact verdict/attempt pair it displaced when persistence failed
+// before submission began — status AND instant together, so the restored
+// record is exactly what evidence armed against before the boundary (#6798).
+// Empty status is allowed here: an initial delivery with no prior attempt has
+// no verdict to restore.
+func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus, attemptedAt time.Time) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	pending := i.pendingAccountSwap
@@ -228,8 +244,9 @@ func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to strin
 	if status != "" && !status.Valid() {
 		return fmt.Errorf("invalid manual account swap mission delivery status %q", status)
 	}
-	if pending.MissionDeliveryStatus != status {
+	if pending.MissionDeliveryStatus != status || !pending.MissionDeliveryAttemptAt.Equal(attemptedAt) {
 		pending.MissionDeliveryStatus = status
+		pending.MissionDeliveryAttemptAt = attemptedAt
 		i.touchLocked()
 	}
 	return nil
@@ -664,6 +681,35 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
+}
+
+// ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit
+// pair: the daemon's committed-identity re-admission found a wall on the
+// incoming account BEFORE the replacement spawned, when pane and runtime
+// evidence still run the outgoing identity and currentAgentNameLocked would
+// file the incoming account's wall under the outgoing agent — a cross-agent
+// handoff would then exclude an unrelated outgoing-namespace account and
+// incomingManualReset would not recognize the incoming reset window (#6915
+// review). The caller names the committed swap's namespace instead; every
+// other contract — the fence, the incoming account already on i.Account, the
+// manual path's not-delivered marker, the durable observation — matches the
+// pair.
+func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Time, evidence string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil {
+		return fmt.Errorf("account limit park requires the pending replacement fence")
+	}
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence)
+}
+
+// parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
+// the caller holds i.mu, has verified the pending replacement fence, and names
+// the agent namespace the wall files under — currentAgentNameLocked for a wall
+// found on the already-running replacement, the committed swap's namespace for
+// one found before it spawned.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -671,15 +717,18 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	// phrase keeps the daemon's first poll from re-parsing the unchanged banner
 	// against a later clock and moving the stored reset (#6765).
 	i.limitResetEvidence = evidence
-	i.attributeLimitIdentityLocked()
+	i.attributeLimitIdentityAsLocked(agent)
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
-	// earlier ambiguity so the scheduler may resume it after the recorded reset.
-	if i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
+	// earlier ambiguity so the scheduler may resume it after the recorded
+	// reset. The marker is consulted only on the manual path
+	// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
+	// swap is not manual), so automatic swaps never set it.
+	if i.pendingAccountSwap.Manual && i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
+	i.recordAccountLimitObservationLocked(agent, i.Account, resetAt, false)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -726,14 +775,5 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence s
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	lv, op, prevReset := i.lifecycleStateLocked()
-	i.assignLivenessLocked(LiveLimitReached)
-	i.limitResetAt = resetAt
-	// See ParkManualAccountSwapAtLimit: the reset's phrase accompanies it so the
-	// daemon's first poll recognizes the re-read as the same observation (#6765).
-	i.limitResetEvidence = evidence
-	i.attributeLimitIdentityLocked()
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
-	i.noteStateChangeLocked(lv, op, prevReset)
-	return nil
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
 }

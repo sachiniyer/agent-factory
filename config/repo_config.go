@@ -233,11 +233,11 @@ func LoadRepoConfig(repoID string) (*RepoConfig, error) {
 		if os.IsNotExist(err) {
 			return &RepoConfig{source: sourceMetadata{path: path, format: FormatJSON}}, nil
 		}
-		return nil, fmt.Errorf("failed to read repo config: %w", err)
+		return nil, fmt.Errorf("failed to read repo config %s: %w", prettyHomePath(path), err)
 	}
 	var cfg RepoConfig
 	if err := json.Unmarshal(data, &cfg); err != nil {
-		return nil, fmt.Errorf("failed to parse repo config: %w", err)
+		return nil, fmt.Errorf("failed to parse repo config %s: %w", prettyHomePath(path), err)
 	}
 	metadata, err := metadataForSource(data, path, FormatJSON)
 	if err != nil {

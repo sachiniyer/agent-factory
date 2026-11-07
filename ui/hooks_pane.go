@@ -1,6 +1,7 @@
 package ui
 
 import (
+	"slices"
 	"strings"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -17,10 +18,10 @@ type HooksPane struct {
 	adding      bool
 	width       int
 	height      int
-	dirty       bool
 	hasFocus    bool
-	// committed is the list as last loaded or saved, so Discard can put back what
-	// is actually stored instead of leaving the pane dirty forever.
+	// committed is the list as last loaded or saved. IsDirty diffs commands
+	// against it, Discard puts it back — so the pane is dirty exactly when it
+	// holds something a save would persist (#6790).
 	committed []string
 	// readOnly, when non-empty, is why this pane cannot be edited (W9.7: a remote
 	// target's hooks live in the checkout on the daemon host). The edit keys do
@@ -40,7 +41,6 @@ func (h *HooksPane) SetSize(width, height int) {
 func (h *HooksPane) SetCommands(commands []string) {
 	h.commands = commands
 	h.committed = append([]string(nil), commands...)
-	h.dirty = false
 	if len(h.commands) == 0 {
 		h.selectedIdx = 0
 	} else if h.selectedIdx >= len(h.commands) {
@@ -51,13 +51,21 @@ func (h *HooksPane) SetCommands(commands []string) {
 // Discard drops every unsaved edit and restores the last loaded or saved list.
 func (h *HooksPane) Discard() {
 	h.commands = append([]string(nil), h.committed...)
-	h.dirty = false
 	h.editing = false
 	h.adding = false
 	h.editBuffer = ""
 	if h.selectedIdx >= len(h.commands) {
 		h.selectedIdx = max(0, len(h.commands)-1)
 	}
+}
+
+// MarkSaved advances the committed baseline to the list a save just wrote, so
+// a successful save leaves the pane clean and a later close writes nothing
+// (#6790). Without it the pane stayed dirty for the session: every Esc or
+// quit re-saved the in-memory list over hooks added on disk in the meantime,
+// and the re-read on open was skipped as a dirty-pane guard.
+func (h *HooksPane) MarkSaved() {
+	h.committed = append([]string(nil), h.commands...)
 }
 
 // SetReadOnly makes the pane refuse edits and explain why; "" makes it editable.
@@ -72,8 +80,12 @@ func (h *HooksPane) GetCommands() []string {
 	return h.commands
 }
 
+// IsDirty reports whether the in-memory list differs from the committed
+// baseline — the copy last loaded (SetCommands) or saved (MarkSaved). A no-op
+// confirm, an edit restored to the stored value, and a successful save all
+// leave the pane clean, so a clean Esc or quit writes nothing (#6790).
 func (h *HooksPane) IsDirty() bool {
-	return h.dirty
+	return !slices.Equal(h.commands, h.committed)
 }
 
 // IsEditing reports whether a text field is focused and taking runes (the add
@@ -145,7 +157,6 @@ func (h *HooksPane) handleNormalMode(msg tea.KeyMsg) bool {
 	case "D":
 		if len(h.commands) > 0 {
 			h.commands = append(h.commands[:h.selectedIdx], h.commands[h.selectedIdx+1:]...)
-			h.dirty = true
 			if h.selectedIdx >= len(h.commands) && h.selectedIdx > 0 {
 				h.selectedIdx--
 			}
@@ -168,7 +179,6 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 			} else {
 				h.commands[h.selectedIdx] = h.editBuffer
 			}
-			h.dirty = true
 		}
 		h.adding = false
 		h.editing = false

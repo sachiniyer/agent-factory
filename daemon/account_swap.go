@@ -50,7 +50,14 @@ type autoAccountSwap struct {
 	// crossAgent is manual admission's one decision about whether the swap
 	// launches agent's command or keeps the recorded program. The launch
 	// preflight and the identity commit both read it.
-	crossAgent  bool
+	crossAgent bool
+	// instance is the session row this swap belongs to. The pre-spawn
+	// re-admission (committedSwapAccountWall) reads it to exclude the row's
+	// own live wall from evidence: a row parked at the incoming identity by
+	// an earlier refusal carries only that refusal's projection there, and
+	// counting it would wedge every retry behind a wall no retraction can
+	// retire (#6915 review).
+	instance    *session.Instance
 	alreadySet  bool
 	fallbackDue bool
 	fellBack    bool
@@ -198,6 +205,7 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 		fromAgent:    fromAgent,
 		agent:        agent,
 		accountAgent: accountAgent,
+		instance:     instance,
 		alreadySet:   true,
 	}
 }
@@ -326,6 +334,7 @@ func (m *Manager) accountSwapOpportunityFromFactsWithEvidence(
 		to:                   candidates[0],
 		candidates:           candidates,
 		agent:                agent,
+		instance:             instance,
 	}, nil
 }
 

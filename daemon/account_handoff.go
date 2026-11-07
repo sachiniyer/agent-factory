@@ -291,11 +291,11 @@ func (m *Manager) accountHandoffEngine() *handoffengine.Engine {
 		ReadUsage: func(dir string, carried map[string]int64) handoff.ReadingFacts {
 			return readingFactsFrom(m.refreshAccountUsage(dir, carried))
 		},
-		DriftKey: func(agent, sourceDir, targetDir string) (string, bool) {
+		DriftKey: func(agent, sourceDir, targetDir, program string) (string, bool) {
 			if agent != tmux.ProgramCodex {
 				return "", false
 			}
-			return agentaccount.CodexRuntimeDriftKey(sourceDir, targetDir)
+			return agentaccount.CodexRuntimeDriftKey(sourceDir, targetDir, program)
 		},
 		DetectWall: func(content, agent string) bool {
 			hit, _, _, _ := m.limitDetector.Load().Check(content, agent, nowFunc())
@@ -414,6 +414,10 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		if d.inst.ResolvedAgent() == tmux.ProgramCodex && d.in.Started && d.in.Live &&
 			strings.TrimSpace(d.inst.RuntimeProgram()) != "" {
 			d.in.HomeDir = d.inst.SessionCodexHomeDir()
+			// The recorded launch command is the drift compare's evidence for
+			// command-line sandbox overrides (#6902); a legacy row leaves it
+			// empty and the compare reports unverifiable — the safe direction.
+			d.in.Program = strings.TrimSpace(d.inst.RuntimeProgram())
 		}
 		inputs = append(inputs, d.in)
 	}

@@ -233,7 +233,16 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 // pair). Each field is written, and the row touched, only when it changes.
 // Caller holds i.mu.
 func (i *Instance) attributeLimitIdentityLocked() {
-	if agent := i.currentAgentNameLocked(); i.limitAgent != agent {
+	i.attributeLimitIdentityAsLocked(i.currentAgentNameLocked())
+}
+
+// attributeLimitIdentityAsLocked is attributeLimitIdentityLocked with the
+// agent namespace named by the caller rather than read off the running pane:
+// the pre-spawn park files a wall for an identity the pane does not yet run,
+// where currentAgentNameLocked would attribute it to the outgoing agent
+// (#6915 review). Caller holds i.mu.
+func (i *Instance) attributeLimitIdentityAsLocked(agent string) {
+	if i.limitAgent != agent {
 		i.limitAgent = agent
 		i.touchLocked()
 	}
