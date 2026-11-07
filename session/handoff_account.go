@@ -441,7 +441,6 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 
 // CanRetryPendingManualAccountSwapDelivery reports whether an operator can
 // inspect a known replacement pane and explicitly override ambiguous delivery.
-// Startup-unknown is inert because there is no confirmed runtime to inspect.
 //
 // The limit wall is admitted here even though it is excluded from the
 // agent-handoff twin (CanRetryPendingHandoffMissionDelivery): the daemon's
@@ -452,12 +451,46 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 // "Resume from limit — the pending mission is not resent" label, which is
 // true only for the agent-handoff arm whose daemon sends the session goal
 // (SendPromptWithEvidence) without resending.
+//
+// Startup-unknown is admitted for the same reason: the daemon's
+// committed-swap bypass (committedAccountSwap) admits the explicit
+// ResumeFromLimit RPC, and BeginManualAccountSwap skips the startup check —
+// the marker suppresses only automatic retries until the operator inspects,
+// and the explicit retry IS that inspection. Refusing it here would offer
+// the picker's no-resend label on a row the daemon resends (#6922 review).
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
-	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
+	return (knownLive || i.startupStateUnknown) && i.inFlightOp == OpNone && !i.userKilled &&
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
+}
+
+// CanRetryPendingAccountSwapNoticeDelivery is the automatic swap's half of
+// CanRetryPendingManualAccountSwapDelivery (#6800): the daemon's
+// ResumeFromLimit fork re-submits the committed notice
+// (deliverAutomaticAccountNotice → SendPromptWithEvidence), so a parked row
+// whose notice verdict is ambiguous is an honest resend — not the no-resend
+// restart the agent-handoff arm performs.
+//
+// The admission mirrors the daemon's, not the manual twin's:
+// resumeFromLimitLockedOutcome returns unperformed for a non-limited
+// automatic swap, so only the limit wall admits — a running/ready row would
+// offer a resend the daemon will not perform. Startup-unknown AT the wall is
+// still admitted: the committed-swap bypass and BeginLimitResume's
+// committed-swap exemption resend the notice there, so the explicit retry is
+// again the inspection the marker waits for. Positive non-delivery stays
+// with the scheduler and every other row keeps its owner.
+func (i *Instance) CanRetryPendingAccountSwapNoticeDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.liveness == LiveLimitReached && i.inFlightOp == OpNone && !i.userKilled &&
+		i.pendingAutomaticAccountSwapDeliveryUnconfirmedLocked()
+}
+
+func (i *Instance) pendingAutomaticAccountSwapDeliveryUnconfirmedLocked() bool {
+	return i.pendingAccountSwap != nil && !i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwapDeliveryUnconfirmedLocked()
 }
 
 // CanConfirmPendingAccountSwapDelivery reports whether an operator can
