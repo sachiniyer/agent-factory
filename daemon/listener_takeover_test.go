@@ -381,11 +381,12 @@ func TestParseProcNetTCP(t *testing.T) {
 	// 99999 = same addr ESTABLISHED → no. 77777 = 127.0.0.2:8443 → no overlap.
 	require.Equal(t, map[uint64]bool{12345: true}, inodes)
 
-	// A wildcard request matches the same socket — a 0.0.0.0:8443 bind collides.
+	// A wildcard request collides with EVERY same-port listener: 0.0.0.0:8443
+	// covers 127.0.0.1 AND 127.0.0.2, so both LISTEN inodes match.
 	wildReq := reqFor(t, "0.0.0.0:8443")
 	inodes = map[uint64]bool{}
 	parseProcNetTCP([]byte(table), wildReq, inodes)
-	require.Equal(t, map[uint64]bool{12345: true}, inodes)
+	require.Equal(t, map[uint64]bool{12345: true, 77777: true}, inodes)
 }
 
 func TestProcHexIP(t *testing.T) {
