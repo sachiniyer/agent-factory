@@ -254,3 +254,96 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.False(t, ok)
 	})
 }
+
+// TestClaudeLimitScanMemoization pins the per-file claim memo (#6975 review):
+// an unchanged transcript's verdict must replay without re-reading its tail —
+// the poll consults the scan on every idle tick while a banner shows — while a
+// file that actually changed re-scans and re-judges its freshest claim.
+func TestClaudeLimitScanMemoization(t *testing.T) {
+	now := time.Date(2026, 11, 7, 17, 0, 0, 0, time.UTC)
+	future := now.Add(2 * time.Hour)
+	recorded := now.Add(-time.Minute).UTC().Format(time.RFC3339)
+
+	inst, workDir := claudeLimitInstance(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := claudeLimitConfigDir(t, home, "")
+	path := writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+		claudeLimitRecord(t, recorded, future.Unix()))
+
+	resetAt, ok := inst.ClaudeActiveLimitReset(now)
+	require.True(t, ok)
+	require.True(t, resetAt.Equal(future))
+
+	// The fingerprint is unchanged, so the memo must serve the claim even
+	// with the file unreadable: a re-read would error and drop it.
+	require.NoError(t, os.Chmod(path, 0o000))
+	resetAt, ok = inst.ClaudeActiveLimitReset(now)
+	require.True(t, ok, "an unchanged transcript must replay its memoized claim")
+	require.True(t, resetAt.Equal(future))
+	require.NoError(t, os.Chmod(path, 0o600))
+
+	// A transcript that changed re-scans: the appended newer refusal is the
+	// wall's freshest statement and answers instead.
+	later := now.Add(4 * time.Hour)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.Write(append(claudeLimitRecord(t, now.Add(-10*time.Second).UTC().Format(time.RFC3339), later.Unix()), '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	resetAt, ok = inst.ClaudeActiveLimitReset(now)
+	require.True(t, ok)
+	require.True(t, resetAt.Equal(later), "a changed transcript must re-scan to its newest claim")
+}
+
+// TestSetLimitReachedAtEpochAuthoritative pins the correction arm (#6975
+// review): a transcript instant is not a pane re-parse, so a row already
+// parked on the same wall claim takes the record's instant as a correction —
+// never losing the wall's identity (same evidence, same banner anchor, same
+// liveness) while the stored deadline becomes real.
+func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
+	paneReset := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	transcriptReset := time.Date(2026, 7, 4, 19, 0, 0, 0, time.UTC)
+	phrase := "reset at 2pm"
+
+	t.Run("a parked pane guess is corrected to the record's instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		reset, ok := i.LimitResetAt()
+		require.True(t, ok)
+		require.True(t, reset.Equal(transcriptReset),
+			"the record's instant must correct the stored pane guess: got %v", reset)
+		require.True(t, i.LimitReached())
+		require.Equal(t, phrase, i.ToInstanceData().LimitResetEvidence,
+			"the correction is the same wall — its evidence phrase stands")
+	})
+
+	t.Run("a reset-less park acquires the record's instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		// The first authoritative sighting carries the record's instant with
+		// the pane's still-empty evidence — the same wall's claim, completed.
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, "", LimitBanner{}, i.stateEpoch))
+		reset, ok := i.LimitResetAt()
+		require.True(t, ok)
+		require.True(t, reset.Equal(transcriptReset))
+	})
+
+	t.Run("a pane re-read still cannot move the stored instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset.Add(3*time.Hour), phrase, LimitBanner{}, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(paneReset),
+			"the dedupe's first-parse rule stands for an ordinary sighting")
+	})
+
+	t.Run("an authoritative sighting matching the stored instant is a no-op", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset))
+	})
+}

@@ -60,9 +60,14 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 		// pane's evidence phrase is untouched: it is the wall's identity on
 		// both sources, which is what keeps this sighting the same wall the
 		// send-path park or a previous pane read recorded (#6959/#6960/#6972).
+		// The authoritative flag rides beside it so a row already parked on
+		// this wall takes the record's instant as a correction — the dedupe
+		// that keeps a pane re-parse from moving the stored reset must not
+		// also keep the record from fixing it.
+		authoritative := false
 		if agent == tmux.ProgramClaude {
 			if resetAt, ok := instance.ClaudeActiveLimitReset(nowFunc()); ok {
-				s.ResetAt = resetAt
+				s.ResetAt, authoritative = resetAt, true
 			}
 		}
 		// The unchanged emission of a wall this row already recorded — reset
@@ -76,7 +81,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 			// Returns false when the decision was superseded; nothing to do about
 			// it here — the next tick observes the session as it is now.
 			_ = m.setLimitReachedAtEpoch(instance, s.ResetAt, s.Evidence,
-				session.LimitBanner{Prefix: s.BannerPrefix, Count: s.BannerCount}, epoch)
+				session.LimitBanner{Prefix: s.BannerPrefix, Count: s.BannerCount}, epoch, authoritative)
 			return
 		}
 	}

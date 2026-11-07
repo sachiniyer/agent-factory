@@ -28,7 +28,9 @@ import (
 // joined only when it carries the banner row's text-column indent — the
 // renderer's hanging indent under the "  ⎿  " gutter — and every boundary
 // rejoins with a space EXCEPT the one hard-split a word-wrap renderer emits:
-// a row that was full feeding a merged token wider than the wrap width.
+// the row feeding the boundary is a single token at the full wrap width — a
+// mid-token fragment, since a complete banner word is never wider than the
+// region it wraps to.
 func TestClaudeResetWrappedBanner(t *testing.T) {
 	est, err := time.LoadLocation("America/New_York")
 	if err != nil {
@@ -132,6 +134,24 @@ func TestClaudeResetWrappedBanner(t *testing.T) {
 			content: "  ⎿  You've hit your weekly limit · resets 10am (America/New_York)",
 			want:    time.Date(2026, 1, 2, 10, 0, 0, 0, est).UTC(),
 			wantEv:  "resets 10am (America/New_York)",
+		},
+		{
+			// Codex's ten-column counterexample: every boundary here is a
+			// word-wrap at a space — a full row ending at a word whose
+			// concatenation with the next word exceeds the width is not a
+			// hard-split. "reset|Monday" must join WITH its space or the
+			// fused "resetMonday" loses the whole clause.
+			name: "ten-column word wrap keeps every word boundary",
+			content: "  ⎿  Claude\n" +
+				"     usage\n" +
+				"     limit\n" +
+				"     reached.\n" +
+				"     Your limit\n" +
+				"     will reset\n" +
+				"     Monday at\n" +
+				"     9am",
+			want:   time.Date(2026, 1, 5, 9, 0, 0, 0, now.Location()).UTC(), // Mon 9am host zone
+			wantEv: "reset Monday at 9am",
 		},
 	}
 	det := NewLimitDetector(nil)

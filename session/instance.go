@@ -468,6 +468,15 @@ type Instance struct {
 	codexAttrMu       sync.Mutex
 	codexAttrGen      string
 	codexAttrVerdicts map[string]codexRolloutVerdict
+	// claudeLimitScanMu and claudeLimitScan memoize each candidate
+	// transcript's usage-limit claim by file fingerprint (mtime+size) so an
+	// unchanged-banner poll does not re-read and re-decode every transcript
+	// tail on every tick while a wall shows (#6944 review — the status sweep
+	// is serial and a deep project history made one scan cost seconds).
+	// In-memory only: transcripts are the durable record; the memo is just
+	// the decode result for an unchanged file.
+	claudeLimitScanMu sync.Mutex
+	claudeLimitScan   map[string]claudeLimitScanEntry
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.

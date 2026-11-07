@@ -304,6 +304,23 @@ func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string,
 // can, holds the wall at "unknown reset" without dirtying the durable record
 // rather than guessing.
 func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
+	return i.setLimitReachedAtEpoch(resetAt, evidence, banner, epoch, false)
+}
+
+// SetLimitReachedAtEpochAuthoritative is SetLimitReachedAtEpoch for a sighting
+// whose reset instant came from the wall's own structural record rather than
+// the pane parse (#6944): the transcript's epoch-seconds resetsAt is not a
+// re-read against a later clock, so the "same phrase keeps the first parse"
+// dedupe must not swallow it. When the row already parks on the same wall
+// claim, the recorded instant is CORRECTED to the record's instant — the pane
+// guess it was parked on, the zero an unparseable banner left, or the value a
+// pre-fix build persisted — while evidence, banner anchor, and identity stay
+// put: it is the same wall, finally with its real deadline.
+func (i *Instance) SetLimitReachedAtEpochAuthoritative(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
+	return i.setLimitReachedAtEpoch(resetAt, evidence, banner, epoch, true)
+}
+
+func (i *Instance) setLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64, authoritative bool) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
@@ -317,8 +334,17 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			// Already parked on the SAME wall claim — a re-read of an
 			// unchanged banner is not a new observation, whatever shape its
 			// reset took: the stored reset stays (the first parse is nearest
-			// the real window) and no durable fact moved, so nothing below may
-			// run.
+			// the real window) and no durable fact moved, so nothing below
+			// may run. The one exception is an authoritative instant the
+			// stored claim does not already carry — a correction, not a
+			// re-read (#6944 review).
+			if authoritative && !resetAt.IsZero() && !i.limitResetAt.Equal(resetAt) {
+				i.limitResetAt = resetAt
+				if i.lastLimitWall.agent != "" {
+					i.lastLimitWall.resetAt = resetAt
+				}
+				i.recordAccountLimitObservationAtLocked(i.limitAgent, i.Account, resetAt, evidence, true, instanceNow().UTC())
+			}
 			return true
 		}
 	}

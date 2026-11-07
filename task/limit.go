@@ -425,10 +425,13 @@ func claudeResetClause(rowLead, content string) (evidence, tail string) {
 // own grid-level hard wraps, so the only multi-row banner shapes left in a
 // capture are the renderer's. Claude renders with a word-wrap: a row breaks at
 // a space, and only a token wider than the whole text region splits mid-token.
-// So the rejoin inserts a space at each boundary EXCEPT when the merged token
-// provably exceeds the wrap width and the row feeding it was full — the one
-// hard-split a word-wrap renderer emits (the zone token "(America/New_York)"
-// inside a very narrow pane).
+// So the rejoin inserts a space at each boundary EXCEPT the one shape that
+// proves a hard-split: the row feeding the boundary is a single token at the
+// full wrap width — a mid-token fragment, since a complete banner word is
+// never wider than the region it wraps to. A full row ending at a word whose
+// CONCATENATION with the next row's first word exceeds the width is not
+// evidence of a split — that is what every ordinary word-wrap boundary looks
+// like — and fusing those words mints tokens the clause never carried.
 func joinClaudeBannerRows(rowLead, content string) string {
 	lead := xansi.Strip(rowLead)
 	indent := utf8.RuneCountInString(lead)
@@ -468,26 +471,21 @@ func joinClaudeBannerRows(rowLead, content string) string {
 			wAbs = r.absWidth
 		}
 	}
-	wText := wAbs - indent // the text region the renderer wrapped to
 	var b strings.Builder
 	b.WriteString(rows[0].text)
-	cur := lastTokenWidth(rows[0].text)
 	for i := 1; i < len(rows); i++ {
 		text := rows[i].text
-		if cur+firstTokenWidth(text) > wText && rows[i-1].absWidth == wAbs {
-			// The merged token is wider than the text region and the row
-			// feeding it was full: the renderer's hard-split of an over-long
-			// token, rejoined without a break.
+		if rows[i-1].absWidth == wAbs &&
+			strings.IndexAny(rows[i-1].text, " \t") < 0 {
+			// The row feeding this boundary is a single token at the full
+			// wrap width — the only shape that proves the renderer's
+			// hard-split of an over-long token (the zone token
+			// "(America/New_York)" inside a very narrow pane). Anything else
+			// is a word-wrap boundary and keeps its space.
 			b.WriteString(text)
-			if idx := strings.IndexAny(text, " \t"); idx < 0 {
-				cur += utf8.RuneCountInString(text)
-			} else {
-				cur = lastTokenWidth(text)
-			}
 		} else {
 			b.WriteByte(' ')
 			b.WriteString(text)
-			cur = lastTokenWidth(text)
 		}
 	}
 	return b.String()
@@ -532,22 +530,6 @@ func cutLine(s string) (line, rest string) {
 		return s[:i], s[i+1:]
 	}
 	return s, ""
-}
-
-// firstTokenWidth / lastTokenWidth measure the rune width of the first/last
-// whitespace-bounded token — the quantities the wrap-width comparison needs.
-func firstTokenWidth(s string) int {
-	if i := strings.IndexAny(s, " \t"); i >= 0 {
-		return utf8.RuneCountInString(s[:i])
-	}
-	return utf8.RuneCountInString(s)
-}
-
-func lastTokenWidth(s string) int {
-	if i := strings.LastIndexAny(s, " \t"); i >= 0 {
-		return utf8.RuneCountInString(s[i+1:])
-	}
-	return utf8.RuneCountInString(s)
 }
 
 // parseClaudeReset scans the banner's rejoined line for Claude's "reset[s]

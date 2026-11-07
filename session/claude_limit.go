@@ -31,6 +31,11 @@ import (
 //     nothing — "unknown" — rather than a guessed instant, and a stale or
 //     reset-less freshest claim supplies nothing rather than resurrecting an
 //     older wall.
+//
+// Cost: the poll consults this on every unchanged-pane tick while a banner
+// shows, and the sweep is serial — so per-file claims are memoized on the
+// instance by file fingerprint (mtime+size), and only a transcript that
+// actually grew or changed is re-read (#6975 review).
 
 // claudeLimitTailBytes bounds the scan to the transcript's tail: a refusal
 // record current enough to describe the pane's live wall was appended
@@ -50,7 +55,7 @@ func (i *Instance) ClaudeActiveLimitReset(now time.Time) (time.Time, bool) {
 	if err != nil {
 		return time.Time{}, false
 	}
-	claim, ok := newestClaudeLimitClaim(dirs)
+	claim, ok := i.newestClaudeLimitClaim(dirs)
 	if !ok || claim.verdict != quota.ClaudeLimitParsed ||
 		claim.record.ResetsAt == nil || !claim.record.ResetsAt.After(now) {
 		return time.Time{}, false
@@ -70,9 +75,27 @@ type claudeLimitClaim struct {
 	sortAt time.Time
 }
 
+// claudeLimitScanEntry is the memoized claim for one transcript at one file
+// fingerprint — the decode result for exactly the bytes (modTime, size)
+// describes. A file that grew or changed since the memo re-scans; an
+// unchanged file replays its verdict without re-decoding its tail.
+type claudeLimitScanEntry struct {
+	modTime time.Time
+	size    int64
+	claim   claudeLimitClaim
+}
+
 // newestClaudeLimitClaim returns the freshest refusal claim across the
-// candidate transcript directories.
-func newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool) {
+// candidate transcript directories, memoizing each file's claim by
+// fingerprint so an unchanged pane tick does not re-read every tail.
+func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool) {
+	i.claudeLimitScanMu.Lock()
+	defer i.claudeLimitScanMu.Unlock()
+	cache := i.claudeLimitScan
+	if cache == nil {
+		cache = make(map[string]claudeLimitScanEntry)
+	}
+	live := make(map[string]claudeLimitScanEntry, len(cache))
 	var best claudeLimitClaim
 	found := false
 	for _, dir := range dirs {
@@ -81,18 +104,29 @@ func newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool) {
 			continue
 		}
 		for _, transcript := range transcripts {
-			claim, err := transcriptLimitClaim(filepath.Join(dir, transcript.name), transcript.modTime)
+			path := filepath.Join(dir, transcript.name)
+			entry, ok := cache[path]
+			info, err := os.Stat(path)
 			if err != nil {
 				continue
 			}
-			if claim.verdict == quota.ClaudeLimitAbsent {
+			if !ok || !entry.modTime.Equal(info.ModTime()) || entry.size != info.Size() {
+				claim, err := transcriptLimitClaim(path, info.ModTime())
+				if err != nil {
+					continue
+				}
+				entry = claudeLimitScanEntry{modTime: info.ModTime(), size: info.Size(), claim: claim}
+			}
+			live[path] = entry
+			if entry.claim.verdict == quota.ClaudeLimitAbsent {
 				continue
 			}
-			if !found || claim.sortAt.After(best.sortAt) {
-				best, found = claim, true
+			if !found || entry.claim.sortAt.After(best.sortAt) {
+				best, found = entry.claim, true
 			}
 		}
 	}
+	i.claudeLimitScan = live
 	return best, found
 }
 
