@@ -39,7 +39,10 @@ import (
 //     account's records. The durable watermark the carry writes
 //     (handoff.State.CarriedPrefixes, merged with the unrecorded-carry
 //     quarantine) bounds each file's eligible region — a claim below it is
-//     the source account's wall and is skipped (#6944 review).
+//     the source account's wall and is skipped (#6944 review). And when the
+//     carry quarantine overflows into an account-level flag
+//     (handoff.Rails.QuarantinedAccounts), no record under that home can
+//     prove a reset at all (#6975 review).
 //
 // Cost: the poll consults this on every unchanged-pane tick while a banner
 // shows, and the sweep is serial — so per-file claims are memoized on the
@@ -60,11 +63,11 @@ const claudeLimitTailBytes = 512 * 1024
 // ended, not a wall (the same compare Claude itself applies before treating
 // a recorded limit as current).
 func (i *Instance) ClaudeActiveLimitReset(now time.Time) (time.Time, bool) {
-	_, dirs, err := i.ClaudeRunTranscriptDirs()
+	configDir, dirs, err := i.ClaudeRunTranscriptDirs()
 	if err != nil {
 		return time.Time{}, false
 	}
-	claim, ok := i.newestClaudeLimitClaim(dirs)
+	claim, ok := i.newestClaudeLimitClaim(configDir, dirs)
 	if !ok || claim.verdict != quota.ClaudeLimitParsed ||
 		claim.record.ResetsAt == nil || !claim.record.ResetsAt.After(now) {
 		return time.Time{}, false
@@ -99,38 +102,48 @@ type claudeLimitScanEntry struct {
 	claim     claudeLimitClaim
 }
 
-// claudeLimitCarriedPrefixes reads the durable carried-prefix watermarks:
-// the first watermark bytes of a carried transcript are the SOURCE
-// account's records, not the current account's — an account swap carries
-// the conversation file wholesale, so directory scoping alone cannot
-// attribute the records (#6944 review). A missing store is an empty map; a
-// corrupt one fails closed — the scan cannot prove record provenance, so
-// every file reads as fully carried rather than one carried byte leaking
-// through.
-func claudeLimitCarriedPrefixes() (map[string]int64, error) {
+// claudeLimitSnapshot reads the durable carry bookkeeping: the first
+// watermark bytes of a carried transcript are the SOURCE account's records,
+// not the current account's — an account swap carries the conversation file
+// wholesale, so directory scoping alone cannot attribute the records (#6944
+// review). A missing store is an empty snapshot; a corrupt one fails
+// closed — the scan cannot prove record provenance, so every file reads as
+// fully carried rather than one carried byte leaking through.
+func claudeLimitSnapshot() (handoff.Snapshot, error) {
 	store, err := handoff.DefaultStore()
 	if err != nil {
-		return nil, err
+		return handoff.Snapshot{}, err
 	}
 	railsStore, err := handoff.DefaultRailsStore()
 	if err != nil {
-		return nil, err
+		return handoff.Snapshot{}, err
 	}
 	snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
 	if stateErr != nil {
-		return nil, stateErr
+		return handoff.Snapshot{}, stateErr
 	}
 	if railsErr != nil {
-		return nil, railsErr
+		return handoff.Snapshot{}, railsErr
 	}
-	return snap.EffectiveCarriedPrefixes(), nil
+	return snap, nil
 }
 
 // newestClaudeLimitClaim returns the freshest refusal claim across the
 // candidate transcript directories, memoizing each file's claim by
 // fingerprint so an unchanged pane tick does not re-read every tail.
-func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool) {
-	prefixes, prefixesErr := claudeLimitCarriedPrefixes()
+// configDir is the selected account's home — the key QuarantinedAccounts
+// carries: an account whose carry quarantine overflowed cannot name which
+// of its transcripts is poison, so NO record under it may prove a reset —
+// the same fail-closed rule internal/quotaobs applies (#6975 review).
+func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (claudeLimitClaim, bool) {
+	snap, snapErr := claudeLimitSnapshot()
+	if snapErr == nil && configDir != "" && snap.AccountUntrusted(configDir) {
+		return claudeLimitClaim{}, false
+	}
+	var prefixes map[string]int64
+	if snapErr == nil {
+		prefixes = snap.EffectiveCarriedPrefixes()
+	}
 	// A carry that predates Claude watermarks left no durable boundary at
 	// all — but the session row durably marks the conversation it carries
 	// (ConversationCaptureCarried). Its transcript file cannot attribute
@@ -166,7 +179,7 @@ func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool
 			// poison": the file may still hold the source account's
 			// refusal, so no byte in it can prove a reset.
 			watermark := int64(math.MaxInt64)
-			if prefixesErr == nil {
+			if snapErr == nil {
 				watermark = prefixes[filepath.Clean(path)]
 				if watermark == 0 && carriedName != "" && filepath.Base(path) == carriedName {
 					watermark = math.MaxInt64

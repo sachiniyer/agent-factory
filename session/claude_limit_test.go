@@ -292,6 +292,38 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.True(t, resetAt.Equal(other), "resetAt = %v, want %v", resetAt, other)
 	})
 
+	t.Run("a quarantined account home supplies nothing", func(t *testing.T) {
+		// #6975 review: an unrecorded carry that overflows the 256-entry
+		// quarantine flags the ACCOUNT (handoff.Rails.QuarantinedAccounts),
+		// not a per-file prefix — EffectiveCarriedPrefixes never sees it.
+		// The home then cannot name which transcript is poison, so no
+		// record under it may prove the reset (#6852 fail-closed, the
+		// same rule internal/quotaobs applies to wall retraction).
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+
+		// Flag the account home the way an overflowing unrecorded carry
+		// does; the transcript itself still holds a valid future refusal.
+		instances := filepath.Join(afHome, "instances")
+		require.NoError(t, os.MkdirAll(instances, 0o700))
+		rails, err := json.Marshal(handoff.Rails{
+			SchemaVersion: 1,
+			QuarantinedAccounts: map[string]handoff.AccountQuarantine{
+				filepath.Clean(configDir): {At: time.Now()},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(instances, handoff.RailsFileName), rails, 0o600))
+
+		_, ok := inst.ClaudeActiveLimitReset(now)
+		require.False(t, ok, "a quarantined home cannot prove any reset")
+	})
+
 	t.Run("the newest refusal across the project's transcripts answers for the wall", func(t *testing.T) {
 		inst, workDir := claudeLimitInstance(t, "")
 		home := t.TempDir()
