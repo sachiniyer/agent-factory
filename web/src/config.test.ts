@@ -282,16 +282,72 @@ test("explainConfig surfaces the daemon's own refusal on an unknown key", async 
 });
 
 test("explainValueText spells values the way the CLI's explanation does", () => {
-  // The web half of one renderer: config.FormatExplainValue prints an
+  // The web half of one renderer: config.FormatExplainValueForKey prints an
   // explicitly configured empty string as `""` (a bare blank would read as
-  // absent), scalars bare, composites as compact JSON.
-  assert.equal(explainValueText("codex"), "codex");
-  assert.equal(explainValueText(""), '""');
-  assert.equal(explainValueText(true), "true");
-  assert.equal(explainValueText(42), "42");
-  assert.equal(explainValueText(null), "null");
-  assert.equal(explainValueText({ claude: "/usr/bin/claude" }), '{"claude":"/usr/bin/claude"}');
-  assert.equal(explainValueText(["a", "b"]), '["a","b"]');
+  // absent), scalars bare, composites as compact JSON — and a string list
+  // under a comma-list key in the comma-joined form `af config set` accepts.
+  assert.equal(explainValueText("default_program", "codex"), "codex");
+  assert.equal(explainValueText("default_program", ""), '""');
+  assert.equal(explainValueText("default_program", true), "true");
+  assert.equal(explainValueText("default_program", 42), "42");
+  assert.equal(explainValueText("default_program", null), "null");
+  assert.equal(
+    explainValueText("default_program", { claude: "/usr/bin/claude" }),
+    '{"claude":"/usr/bin/claude"}',
+  );
+  // A composite under a key that is not comma-list stays compact JSON.
+  assert.equal(explainValueText("default_program", ["a", "b"]), '["a","b"]');
+});
+
+test("explainValueText comma-joins the comma-list keys like the CLI and TUI (#6950)", () => {
+  // Every comma-list key renders a string list in the comma-joined form
+  // `af config set <key> a,b` round-trips, matching
+  // config.FormatExplainValueForKey — the web trace shows exactly what the
+  // CLI and TUI show for the same key.
+  assert.equal(
+    explainValueText("network.cors_allowed_origins", ["https://a.example", "https://b.example"]),
+    "https://a.example,https://b.example",
+  );
+  assert.equal(
+    explainValueText("network.allowed_hosts", ["alpha.internal", "beta.internal"]),
+    "alpha.internal,beta.internal",
+  );
+  assert.equal(
+    explainValueText("limit_account_candidates", ["codex", "claude"]),
+    "codex,claude",
+  );
+  assert.equal(
+    explainValueText("account_handoff.exclude_sessions", ["maint", "scratch"]),
+    "maint,scratch",
+  );
+  // An explicitly empty list renders `""`, the same absent-vs-empty signal
+  // the CLI prints.
+  assert.equal(explainValueText("network.cors_allowed_origins", []), '""');
+});
+
+test("explainValueText keeps the JSON spelling when a comma-join would lose information", () => {
+  // FormatExplainValueForKey falls back to JSON for an element that would not
+  // survive a set->explain->set round trip: one carrying a comma, a control
+  // character, edge whitespace, or an empty entry, and for a list holding a
+  // non-string. The web renderer mirrors those guards so the trace is honest
+  // about what the file actually holds.
+  assert.equal(
+    explainValueText("network.cors_allowed_origins", ["a,b", "c"]),
+    '["a,b","c"]',
+  );
+  assert.equal(
+    explainValueText("network.cors_allowed_origins", ["a\x1bb", "c"]),
+    '["a\\u001bb","c"]',
+  );
+  assert.equal(
+    explainValueText("network.cors_allowed_origins", [" a", "b"]),
+    '[" a","b"]',
+  );
+  assert.equal(explainValueText("network.cors_allowed_origins", ["a", ""]), '["a",""]');
+  assert.equal(
+    explainValueText("network.cors_allowed_origins", ["a", 1]),
+    '["a",1]',
+  );
 });
 
 // The web half of the anti-drift guarantee.
