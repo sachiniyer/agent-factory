@@ -71,6 +71,11 @@ func bindRuntimeHeldFiles(snap ConversationCaptureSnapshot, held map[string]stru
 type codexHeldFixture struct {
 	mu sync.Mutex
 	m  map[string]struct{}
+	// onSnapshot, when set, runs inside each descriptor snapshot. A snapshot
+	// only happens while a classifiable candidate is being judged, so this is
+	// also the "an attribution judgement ran" signal a test can wait on. It
+	// must not call back into the fixture — the mutex is held.
+	onSnapshot func()
 }
 
 func (h *codexHeldFixture) grant(path string) {
@@ -82,6 +87,9 @@ func (h *codexHeldFixture) grant(path string) {
 func (h *codexHeldFixture) snapshot() (map[string]struct{}, error) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	if h.onSnapshot != nil {
+		h.onSnapshot()
+	}
 	cp := make(map[string]struct{}, len(h.m))
 	for path := range h.m {
 		cp[path] = struct{}{}
@@ -465,6 +473,62 @@ func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *te
 		require.Equal(t, "019ffa56-4ff5-7f81-b31f-36d3fc702b3e", r.conv.ID)
 	case <-time.After(5 * time.Second):
 		t.Fatal("capture did not resolve after the rollout header settled")
+	}
+}
+
+// TestCaptureAgentConversation_CodexHoldVisibleAfterHeaderStillAdopts is the
+// #6938 race made deterministic: the rollout's session_meta becomes
+// classifiable while the runtime's hold is not yet visible, and a capture
+// poll judges it inside that gap. A "not this session's" verdict rendered
+// before the hold exists must not be final — once the hold is visible the
+// rollout is positively this session's, and the capture must still return
+// its id. The descriptor walk only runs while a classifiable candidate
+// exists, so observing a judgement IS the poll between the header write and
+// the grant; no timing luck is involved.
+func TestCaptureAgentConversation_CodexHoldVisibleAfterHeaderStillAdopts(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	const name = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
+	held := &codexHeldFixture{m: make(map[string]struct{})}
+	judged := make(chan struct{}, 1)
+	held.onSnapshot = func() {
+		select {
+		case judged <- struct{}{}:
+		default: // a full channel would wedge snapshot under its own mutex
+		}
+	}
+	snap = bindRuntimeHeldFixture(snap, held)
+	minted := writeEmptyCodexRolloutFile(t, codexHome, name)
+
+	done := make(chan captureResult, 1)
+	go func() {
+		conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 200*time.Millisecond)
+		done <- captureResult{conv, err}
+	}()
+
+	// Let the base deadline pass with the header still unwritten — capture is
+	// inside its settle window, the same state the #6938 flake raced in.
+	time.Sleep(800 * time.Millisecond)
+	writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+
+	// A judgement ran while the runtime held nothing: the poll between the
+	// header write and the grant, forced rather than hoped for.
+	select {
+	case <-judged:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no attribution judgement ran after the header settled")
+	}
+	held.grant(minted)
+
+	select {
+	case r := <-done:
+		require.NoError(t, r.err)
+		require.Equal(t, "019ffa56-4ff5-7f81-b31f-36d3fc702b3e", r.conv.ID,
+			"a hold that becomes visible only after a foreign verdict must still attribute")
+	case <-time.After(5 * time.Second):
+		t.Fatal("capture did not resolve after the runtime's hold became visible")
 	}
 }
 
