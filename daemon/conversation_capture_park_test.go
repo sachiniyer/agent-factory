@@ -58,3 +58,28 @@ func TestArmConversationCapturesSpendsTheParkedBaselineOnTheReplacementArm(t *te
 	}, 2*time.Second, 10*time.Millisecond,
 		"a deferred arm that could not commit must leave the parked baseline for the arm that can")
 }
+
+// TestArmConversationCapturesLaunchRefusalLeavesTheParkedBaseline: the last
+// post-take decline — a launch refused while the daemon closes for shutdown —
+// must hand the consumed baseline back: the park's only consumer is an arm
+// that actually proceeds.
+func TestArmConversationCapturesLaunchRefusalLeavesTheParkedBaseline(t *testing.T) {
+	manager, inst, _, _, codexHome := codexLoopTestInstance(t)
+
+	inst.RetireConversationForFreshRuntime(
+		"019f386f-7206-7fc2-803b-f7045e07a242",
+		session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, inst.GetWorktreePath()))
+	// The replacement generation the park waits for.
+	inst.ReconcileAgentRuntimeSnapshot(session.InstanceData{
+		Program:      "codex --fresh",
+		CurrentAgent: tmux.ProgramCodex,
+	})
+
+	manager.stopAndWaitBackgroundMutationsForShutdown()
+	manager.ArmConversationCaptures()
+
+	require.True(t, inst.PendingConversationCaptureParkedForTest(),
+		"a declined launch must hand the parked baseline back")
+	_, armed := armedConversationToken(t, manager, inst)
+	require.False(t, armed, "a refused launch leaves no arm behind")
+}

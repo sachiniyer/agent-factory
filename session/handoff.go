@@ -542,6 +542,11 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	i.Tabs[0].Handoffs = i.Tabs[0].Handoffs[:n-1]
 	i.touchLocked()
 	i.Tabs[0].Conversation = swap.From
+	if swap.From.HasID() {
+		// The revert restores a recorded conversation: a parked capture
+		// baseline's purpose — getting one recorded — is already met (#6946).
+		i.pendingConversationCapture = nil
+	}
 	if i.Program != swap.previousProgram {
 		i.Program = swap.previousProgram
 		i.touchLocked()

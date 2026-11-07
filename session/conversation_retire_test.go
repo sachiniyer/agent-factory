@@ -50,18 +50,82 @@ func TestRetireConversationForFreshRuntimeParksThePreSpawnBaseline(t *testing.T)
 	inst := retireTestInstance(t)
 
 	inst.RetireConversationForFreshRuntime("019f386f-7206-7fc2-803b-f7045e07a242", ConversationCaptureSnapshot{})
-	_, ok := inst.TakePendingConversationCapture()
-	require.False(t, ok, "a snapshot that cannot see a Codex store is never parked")
+	require.False(t, inst.PendingConversationCaptureParkedForTest(),
+		"a snapshot that cannot see a Codex store is never parked")
 
 	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(t.TempDir(), inst.Path)
 	require.True(t, snap.CapturesCodex())
 	inst.RetireConversationForFreshRuntime("5299e00d-1111-4222-8333-f7045e07a242", snap)
+	require.True(t, inst.PendingConversationCaptureParkedForTest(),
+		"the pre-spawn baseline must be parked for the next deferred arm")
+}
 
-	parked, ok := inst.TakePendingConversationCapture()
-	require.True(t, ok, "the pre-spawn baseline must be parked for the next deferred arm")
-	require.True(t, parked.CapturesCodex())
-	_, ok = inst.TakePendingConversationCapture()
-	require.False(t, ok, "the parked baseline is consumed once")
+// TestPendingConversationCaptureReleasesOnlyToALaterGeneration is the #6946
+// ordering guarantee: the respawn parks the baseline BEFORE bumping the
+// runtime generation, so the arm for the generation the baseline predates
+// must not spend it — its commits would die on the generation gate and take
+// the only before-image that names the replacement's rollout with them.
+func TestPendingConversationCaptureReleasesOnlyToALaterGeneration(t *testing.T) {
+	inst := retireTestInstance(t)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(t.TempDir(), inst.Path)
+	inst.RetireConversationForFreshRuntime("019f386f-7206-7fc2-803b-f7045e07a242", snap)
+
+	park, current := inst.TakePendingConversationCaptureForRuntime(inst.AgentRuntimeToken())
+	require.True(t, current)
+	require.Nil(t, park, "the arm for the generation the baseline predates must not spend it")
+	require.True(t, inst.PendingConversationCaptureParkedForTest(),
+		"the decline leaves the park in place")
+
+	inst.noteAgentRuntimeReplaced()
+
+	park, current = inst.TakePendingConversationCaptureForRuntime(inst.AgentRuntimeToken())
+	require.True(t, current)
+	require.NotNil(t, park, "the replacement generation's arm spends the park")
+	require.True(t, park.Snapshot.CapturesCodex())
+	require.False(t, inst.PendingConversationCaptureParkedForTest(),
+		"the release consumes the park")
+}
+
+// TestPendingConversationCaptureRefusesAStaleToken: a token whose generation
+// the runtime has already left releases nothing and consumes nothing — the
+// park survives the stale arm's decline for the arm the replacement sends.
+func TestPendingConversationCaptureRefusesAStaleToken(t *testing.T) {
+	inst := retireTestInstance(t)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(t.TempDir(), inst.Path)
+	stale := inst.AgentRuntimeToken()
+	inst.RetireConversationForFreshRuntime("019f386f-7206-7fc2-803b-f7045e07a242", snap)
+
+	inst.noteAgentRuntimeReplaced()
+
+	park, current := inst.TakePendingConversationCaptureForRuntime(stale)
+	require.False(t, current, "a token from a dead generation declines")
+	require.Nil(t, park)
+	require.True(t, inst.PendingConversationCaptureParkedForTest(),
+		"a stale arm's decline cannot consume the park")
+
+	park, current = inst.TakePendingConversationCaptureForRuntime(inst.AgentRuntimeToken())
+	require.True(t, current)
+	require.NotNil(t, park, "the park survived for the live generation's arm")
+}
+
+// TestPendingConversationCaptureRestoreAndDrop: a consumed park goes back when
+// its arm is refused mid-launch, and the permanently-moot paths retire it
+// outright — the park's only consumer is an arm that actually proceeds.
+func TestPendingConversationCaptureRestoreAndDrop(t *testing.T) {
+	inst := retireTestInstance(t)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(t.TempDir(), inst.Path)
+	inst.RetireConversationForFreshRuntime("019f386f-7206-7fc2-803b-f7045e07a242", snap)
+	inst.noteAgentRuntimeReplaced()
+
+	park, _ := inst.TakePendingConversationCaptureForRuntime(inst.AgentRuntimeToken())
+	require.NotNil(t, park)
+	inst.RestorePendingConversationCapture(park)
+	require.True(t, inst.PendingConversationCaptureParkedForTest(),
+		"a refused launch hands the baseline back to the next tick")
+
+	inst.DropPendingConversationCapture()
+	require.False(t, inst.PendingConversationCaptureParkedForTest(),
+		"a permanently-moot row drops the park explicitly")
 }
 
 func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {

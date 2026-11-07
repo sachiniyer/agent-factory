@@ -108,8 +108,15 @@ func (i *Instance) SetAgentConversationForRuntime(token AgentRuntimeToken, conv 
 // runtimeTokenCurrentLocked reports whether token still names the live process
 // generation and conv belongs to its provider. Callers hold i.mu.
 func (i *Instance) runtimeTokenCurrentLocked(token AgentRuntimeToken, conv AgentConversationData) bool {
+	return i.runtimeTokenLiveLocked(token) && conv.Agent == token.agent
+}
+
+// runtimeTokenLiveLocked reports whether token still names the live process
+// generation: the instance has not been killed and its runtime has neither
+// been replaced nor re-resolved since the token was taken. Callers hold i.mu.
+func (i *Instance) runtimeTokenLiveLocked(token AgentRuntimeToken) bool {
 	return !i.userKilled && token.agent != "" && token.generation == i.agentRuntimeGeneration &&
-		conv.Agent == token.agent && i.resolvedAgentLocked() == token.agent
+		i.resolvedAgentLocked() == token.agent
 }
 
 // noteAgentRuntimeReplaced invalidates every capture bound to the prior process.
@@ -152,6 +159,12 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 		return false
 	}
 	i.Tabs[0].Conversation = conv
+	if conv.HasID() {
+		// A recorded conversation discharges the parked baseline's whole
+		// purpose: the arm it waited for no longer needs its before-image
+		// (#6946).
+		i.pendingConversationCapture = nil
+	}
 	i.touchLocked()
 	return true
 }
@@ -168,6 +181,26 @@ func (i *Instance) retireConversationsLocked() {
 	// A relaunch verdict describes a respawn under the outgoing account's
 	// provider store; it must not survive the crossing either (#6868).
 	i.respawnReport = nil
+	// A parked capture baseline binds that same store — across the boundary
+	// it could only arm a watch on a home the replacement never writes to
+	// (#6946).
+	i.pendingConversationCapture = nil
+}
+
+// PendingConversationCapture is a capture baseline parked by a respawn that
+// retired a refused conversation id (#6769): the replacement's rollout can
+// already exist by the time the daemon's deferred arm would build a fresh
+// before-image, so the pre-spawn snapshot rides on the instance until the
+// replacement's own arm takes it. generation stamps the runtime generation
+// the park was installed under — the refused resume's OUTGOING one — and the
+// park releases only once the runtime has moved past it: an arm still bound
+// to that generation belongs to the outgoing process, would commit that
+// process's discoveries, and then die on the generation gate — spending the
+// only before-image that names the replacement's already-minted rollout on a
+// recording that can never land (#6946).
+type PendingConversationCapture struct {
+	Snapshot   ConversationCaptureSnapshot
+	generation uint64
 }
 
 // RetireConversationForFreshRuntime drops the agent tab's recorded
@@ -190,22 +223,79 @@ func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap Conv
 	}
 	if snap.CapturesCodex() {
 		s := snap
-		i.pendingConversationCapture = &s
+		i.pendingConversationCapture = &PendingConversationCapture{
+			Snapshot: s,
+			// The park is installed while the runtime replacement that will
+			// consume it is still in flight — the respawn bumps
+			// agentRuntimeGeneration only at the end of its body — so the
+			// stamp is the OUTGOING generation: the arm that may spend this
+			// baseline is the next one's, never this one's (#6946).
+			generation: i.agentRuntimeGeneration,
+		}
 	}
 }
 
-// TakePendingConversationCapture hands a respawn-parked capture baseline to
-// the next deferred arming, consuming it. ok=false means the arm builds its
-// baseline the usual way.
-func (i *Instance) TakePendingConversationCapture() (ConversationCaptureSnapshot, bool) {
+// TakePendingConversationCaptureForRuntime hands a respawn-parked capture
+// baseline to the deferred arm that will spend it — and only to an arm that
+// still can. current=false means the caller's token names a runtime
+// generation the instance has already left: nothing was consumed and the
+// park stays for the arm the replacement sends. Even a live token leaves the
+// park in place while its generation has not moved past the one the baseline
+// predates (#6946): the respawn parks BEFORE bumping the runtime generation,
+// so an arm admitted inside that window still belongs to the outgoing
+// process — its commits would fail the generation gate, dropping the only
+// before-image that names the replacement's already-minted rollout.
+//
+// The token check and the take share this one lock hold, so a generation
+// bump cannot land between them and let a stale arm consume the park.
+func (i *Instance) TakePendingConversationCaptureForRuntime(token AgentRuntimeToken) (*PendingConversationCapture, bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.runtimeTokenLiveLocked(token) {
+		return nil, false
+	}
+	pending := i.pendingConversationCapture
+	if pending == nil || i.agentRuntimeGeneration <= pending.generation {
+		return nil, true
+	}
+	i.pendingConversationCapture = nil
+	return pending, true
+}
+
+// RestorePendingConversationCapture puts back a baseline an admitted arm
+// consumed but could not keep — the launch the manager refused while closing
+// down for shutdown is the only post-take decline left. A park installed by
+// a newer respawn meanwhile wins: it is fresher evidence, stamped with a
+// later generation.
+func (i *Instance) RestorePendingConversationCapture(park *PendingConversationCapture) {
+	if park == nil {
+		return
+	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.pendingConversationCapture == nil {
-		return ConversationCaptureSnapshot{}, false
+		i.pendingConversationCapture = park
 	}
-	snap := *i.pendingConversationCapture
+}
+
+// DropPendingConversationCapture clears a parked baseline that can no longer
+// serve any arm — the row recorded a conversation, was killed, or was
+// archived while it waited (#6946). These clears are explicit: the park's
+// only consumer is an arm that actually proceeds, so the paths that make
+// consumption permanently moot name themselves rather than letting a decline
+// drop it incidentally.
+func (i *Instance) DropPendingConversationCapture() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
 	i.pendingConversationCapture = nil
-	return snap, true
+}
+
+// PendingConversationCaptureParkedForTest reports whether a parked baseline
+// still waits for its deferred arm.
+func (i *Instance) PendingConversationCaptureParkedForTest() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingConversationCapture != nil
 }
 
 func prepareLaunchConversation(i *Instance, program string) string {

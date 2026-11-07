@@ -50,6 +50,12 @@ func (i *Instance) ReconcileAgentRuntimeSnapshot(data InstanceData) bool {
 	}
 	if len(i.Tabs) > 0 && i.Tabs[0].Conversation != conversation {
 		i.Tabs[0].Conversation = conversation
+		if conversation.HasID() {
+			// A conversation delivered on the projection is the row's
+			// recording: whatever capture baseline was parked is spent in
+			// purpose if not in fact (#6946).
+			i.pendingConversationCapture = nil
+		}
 		changed = true
 	}
 	if !changed {
