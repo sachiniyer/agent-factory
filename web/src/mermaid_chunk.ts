@@ -31,7 +31,7 @@
 //                           is part of why the frame exists.
 
 import mermaid from "mermaid";
-import { encodeFrameReply, MSG_READY, MSG_RENDERED, renderRequestFor } from "./mermaid_wire.js";
+import { decodeRenderRequest, encodeFrameReply, MSG_HELLO, MSG_READY, MSG_RENDERED, portGrantFor } from "./mermaid_wire.js";
 
 // A5: belt for the module itself — no caller-driven runMermaid() ever.
 mermaid.startOnLoad = false;
@@ -105,37 +105,46 @@ export function renderMermaidDiagram(source: string, theme: Record<string, strin
 }
 
 // The module executes inside md_mermaid.ts's render frame document — an
-// opaque origin (#6669) — so postMessage is the only channel in or out and
-// it carries JSON strings only (mermaid_wire.ts): a render request in (id +
-// diagram source + theme), an SVG string or the error text back out. Only
-// the parent window may drive a render — a request from any other window is
-// dropped inside renderRequestFor — and the reply goes to that same window
-// at the origin its request carried, never a wildcard, so a reply cannot
-// leak to a frame that merely shares our embedder's sandbox.
-window.addEventListener("message", (e) => {
-  const req = renderRequestFor(e, window.parent);
-  if (!req) return;
-  const target = e.origin === "null" ? "*" : e.origin;
-  void renderMermaidDiagram(req.source, req.theme).then(
-    (svg) =>
-      (e.source as Window).postMessage(
-        encodeFrameReply({ t: MSG_RENDERED, id: req.id, ok: true, svg }),
-        target,
-      ),
-    (err: unknown) =>
-      (e.source as Window).postMessage(
-        encodeFrameReply({
-          t: MSG_RENDERED,
-          id: req.id,
-          ok: false,
-          error: err instanceof Error ? err.message : String(err),
-        }),
-        target,
-      ),
-  );
-});
+// opaque origin (#6669) — so the window channel carries JSON strings only and
+// exactly twice (mermaid_wire.ts): the ready announce out, the port grant in.
+// The port then carries everything: a render request in (id + diagram source
+// + theme), an SVG string or the error text back out. Renders only ever
+// arrive on the granted port — a port lives in the DOCUMENT it was handed to
+// and dies with it, so a document that replaces this one if the frame
+// navigates itself can neither claim it nor have observed the hello nonce
+// the parent waits to hear echoed back.
+const hello = (() => {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+})();
 
-// Announce the API is up — the parent dispatches renders only after this
-// post lands. "*" because the parent origin is unreachable from an opaque
-// origin; the message carries nothing but the announce itself.
-(window.parent as Window).postMessage(encodeFrameReply({ t: MSG_READY }), "*");
+// Announce the API is up — the parent answers with the port grant, and
+// renders flow only after the hello echo proves the port landed in THIS
+// document. "*" because the parent origin is unreachable from an opaque
+// origin; the announce carries nothing but the nonce.
+(window.parent as Window).postMessage(encodeFrameReply({ t: MSG_READY, hello }), "*");
+
+window.addEventListener("message", (e) => {
+  const port = portGrantFor(e, window.parent);
+  if (!port) return;
+  port.postMessage(encodeFrameReply({ t: MSG_HELLO, hello }));
+  port.onmessage = (pe: MessageEvent) => {
+    const req = decodeRenderRequest(pe.data);
+    if (!req) return;
+    void renderMermaidDiagram(req.source, req.theme).then(
+      (svg) =>
+        port.postMessage(encodeFrameReply({ t: MSG_RENDERED, id: req.id, ok: true, svg })),
+      (err: unknown) =>
+        port.postMessage(
+          encodeFrameReply({
+            t: MSG_RENDERED,
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+    );
+  };
+  port.start();
+});

@@ -1,16 +1,18 @@
-// Unit tests for the postMessage wire codec (#6669): the only channel between
-// the Docs pane and the opaque-origin render frame is a JSON string, and each
-// end must ignore anything off-shape — the shape alone is the gate, because
-// the listener decides before it acts.
+// Unit tests for the postMessage wire codec (#6669): the channel between the
+// Docs pane and the opaque-origin render frame is a JSON string — twice on
+// the window (ready announce in, port grant out), then a MessagePort for
+// everything else — and each end must ignore anything off-shape: the shape
+// alone is the gate, because the listener decides before it acts.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   decodeFrameReply,
   decodeRenderRequest,
   encodeFrameReply,
+  encodePortGrant,
   encodeRenderRequest,
   frameReplyFor,
-  renderRequestFor,
+  portGrantFor,
 } from "./mermaid_wire.js";
 
 test("a render request round-trips as a JSON string", () => {
@@ -44,7 +46,7 @@ test("decodeRenderRequest rejects malformed and off-shape payloads", () => {
     JSON.stringify(null),
     JSON.stringify([1, 2]),
     JSON.stringify({ t: "af-mmd-rendered", id: "r" }), // replies are not requests
-    JSON.stringify({ t: "af-mmd-ready" }),
+    JSON.stringify({ t: "af-mmd-ready", hello: "h" }),
     JSON.stringify({ t: "af-mmd-render" }),
     JSON.stringify({ t: "af-mmd-render", id: 1, source: "x", theme: {} }),
     JSON.stringify({ t: "af-mmd-render", id: "r", source: {}, theme: {} }),
@@ -67,7 +69,8 @@ test("decodeRenderRequest rebuilds the theme as clean data", () => {
 
 test("frame replies round-trip", () => {
   const replies = [
-    { t: "af-mmd-ready" },
+    { t: "af-mmd-ready", hello: "abc123" },
+    { t: "af-mmd-hello", hello: "abc123" },
     { t: "af-mmd-rendered", id: "r3", ok: true, svg: "<svg/>" },
     { t: "af-mmd-rendered", id: "r3", ok: false, error: "bad diagram" },
   ] as const;
@@ -85,6 +88,11 @@ test("decodeFrameReply rejects anything off-shape", () => {
     "42",
     '"af-mmd-ready"',
     JSON.stringify({ t: "af-mmd-render", id: "r", source: "x", theme: {} }), // requests are not replies
+    JSON.stringify({ t: "af-mmd-ready" }), // the announce must carry its nonce
+    JSON.stringify({ t: "af-mmd-ready", hello: "" }), // an empty nonce binds nothing
+    JSON.stringify({ t: "af-mmd-ready", hello: 7 }),
+    JSON.stringify({ t: "af-mmd-hello" }),
+    JSON.stringify({ t: "af-mmd-hello", hello: "" }),
     JSON.stringify({ t: "af-mmd-rendered" }),
     JSON.stringify({ t: "af-mmd-rendered", id: 1, ok: true, svg: "<svg/>" }),
     JSON.stringify({ t: "af-mmd-rendered", id: "r", ok: true }), // ok without svg
@@ -92,8 +100,9 @@ test("decodeFrameReply rejects anything off-shape", () => {
     JSON.stringify({ t: "af-mmd-rendered", id: "r", ok: false }), // error without error text
     JSON.stringify({ t: "af-mmd-rendered", id: "r", ok: false, error: 3 }),
     JSON.stringify({ t: "af-mmd-rendered", id: "r", ok: "yes", svg: "<svg/>" }),
+    JSON.stringify({ t: "af-mmd-port" }), // the grant is not a frame-originated reply
     JSON.stringify({ t: "af-mmd-other" }),
-    { t: "af-mmd-ready" }, // objects never decode
+    { t: "af-mmd-ready", hello: "h" }, // objects never decode
   ];
   for (const bad of cases) assert.equal(decodeFrameReply(bad), undefined, JSON.stringify(bad));
 });
@@ -106,34 +115,12 @@ test("replies tolerate extra fields — required fields are the protocol", () =>
 });
 
 // The source gates are the protocol's other half: message SHAPE alone never
-// trusted a window (#6669). renderRequestFor is the frame's only path to a
-// render (only the parent may drive it) and frameReplyFor is the parent's
-// only path to painting (only the frame's own window may answer). Both must
-// be removed-proof — a regression where either side skips the source check
-// has to fail here, not just read wrong.
-test("renderRequestFor gates requests to the parent window alone", () => {
-  const parent = { name: "parent" };
-  const stranger = { name: "not-parent" };
-  const good = encodeRenderRequest("r1", "graph TD;A-->B", { a: "#fff" });
-  assert.equal(renderRequestFor({ source: parent, data: good }, parent)?.id, "r1");
-  assert.equal(
-    renderRequestFor({ source: stranger, data: good }, parent),
-    undefined,
-    "a well-shaped request from any other window is dropped",
-  );
-  assert.equal(
-    renderRequestFor({ source: null, data: good }, parent),
-    undefined,
-    "a null source is never the parent",
-  );
-  assert.equal(
-    renderRequestFor({ source: parent, data: "not json" }, parent),
-    undefined,
-    "the source check does not rescue a bad payload",
-  );
-});
-
-test("frameReplyFor gates replies to the render frame's window alone", () => {
+// trusted a window (#6669). frameReplyFor is the parent's only path to
+// binding a channel (only the frame's own window may announce), and
+// portGrantFor is the frame's only path to a render channel (only the parent
+// may hand over a port). Both must be removed-proof — a regression where
+// either side skips the source check has to fail here, not just read wrong.
+test("frameReplyFor gates window messages to the render frame's window alone", () => {
   const frameWin = { name: "frame" };
   const stranger = { name: "not-the-frame" };
   const good = encodeFrameReply({ t: "af-mmd-rendered", id: "r2", ok: true, svg: "<svg/>" });
@@ -145,12 +132,12 @@ test("frameReplyFor gates replies to the render frame's window alone", () => {
     "a well-shaped reply from any other window is dropped",
   );
   assert.deepEqual(
-    frameReplyFor({ source: frameWin, data: encodeFrameReply({ t: "af-mmd-ready" }) }, frameWin),
-    { t: "af-mmd-ready" },
+    frameReplyFor({ source: frameWin, data: encodeFrameReply({ t: "af-mmd-ready", hello: "n" }) }, frameWin),
+    { t: "af-mmd-ready", hello: "n" },
     "ready decodes through the same gate",
   );
   assert.equal(
-    frameReplyFor({ source: stranger, data: encodeFrameReply({ t: "af-mmd-ready" }) }, frameWin),
+    frameReplyFor({ source: stranger, data: encodeFrameReply({ t: "af-mmd-ready", hello: "n" }) }, frameWin),
     undefined,
     "even a ready only counts from the frame's own window",
   );
@@ -158,5 +145,43 @@ test("frameReplyFor gates replies to the render frame's window alone", () => {
     frameReplyFor({ source: undefined, data: good }, frameWin),
     undefined,
     "a missing source is never the frame",
+  );
+});
+
+test("portGrantFor gates the handoff to the parent window and a lone port", () => {
+  const parent = { name: "parent" };
+  const stranger = { name: "not-parent" };
+  const port = { name: "port" } as unknown as MessagePort;
+  const grant = encodePortGrant();
+  assert.equal(portGrantFor({ source: parent, data: grant, ports: [port] }, parent), port);
+  assert.equal(
+    portGrantFor({ source: stranger, data: grant, ports: [port] }, parent),
+    undefined,
+    "a grant from any other window is dropped",
+  );
+  assert.equal(
+    portGrantFor({ source: null, data: grant, ports: [port] }, parent),
+    undefined,
+    "a null source is never the parent",
+  );
+  assert.equal(
+    portGrantFor({ source: parent, data: grant, ports: [] }, parent),
+    undefined,
+    "a grant-shaped message carrying no port is not a grant",
+  );
+  assert.equal(
+    portGrantFor({ source: parent, data: grant, ports: [port, port] }, parent),
+    undefined,
+    "extra ports are not the protocol",
+  );
+  assert.equal(
+    portGrantFor({ source: parent, data: "not json", ports: [port] }, parent),
+    undefined,
+    "the source check does not rescue a bad payload",
+  );
+  assert.equal(
+    portGrantFor({ source: parent, data: encodeFrameReply({ t: "af-mmd-ready", hello: "n" }), ports: [port] }, parent),
+    undefined,
+    "other protocol messages are not the grant",
   );
 });

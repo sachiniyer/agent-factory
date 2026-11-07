@@ -26,7 +26,7 @@
 import type { EditorView } from "@codemirror/view";
 import { WidgetType } from "@codemirror/view";
 import { errorText } from "./api.js";
-import { encodeRenderRequest, frameReplyFor, MSG_READY } from "./mermaid_wire.js";
+import { decodeFrameReply, encodePortGrant, encodeRenderRequest, frameReplyFor, MSG_HELLO, MSG_READY, MSG_RENDERED } from "./mermaid_wire.js";
 
 /** The render channel the frame's chunk answers — kept identical to the old
  *  in-window API so the render path below is unchanged; the implementation is
@@ -67,25 +67,49 @@ const OPEN_RETRY_AFTER_MS = 30_000;
 let lastOpenFailedAt = 0;
 
 // ── Frame channel ────────────────────────────────────────────────────────────
-// The sandboxed frame's only channel (mermaid_wire.ts): the parent posts a
-// JSON-string render request, the chunk answers a JSON-string reply per
-// request id plus one ready announce when its module executes. Messages from
-// any other window — including a dropped render frame's late reply — are
-// ignored: event.source must be the CURRENT frame's contentWindow.
+// The sandboxed frame's channel (mermaid_wire.ts): the window postMessage
+// carries exactly two JSON-string messages — the frame's ready announce in,
+// the parent's port grant out — and a transferred MessagePort carries
+// everything after. The port is bound to the DOCUMENT, not the frame's
+// WindowProxy: if the frame navigates itself, its replacement document holds
+// no port, cannot have seen the hello nonce (it lived in the first
+// document's ready announce), and anything posted to a dead port is
+// discarded — so a navigated frame can never be sent a diagram source, no
+// matter how long its replacement takes to fire `load`.
 let frameReady = false;
 let renderSeq = 0;
+let renderPort: MessagePort | null = null;
+let frameHello = "";
 const pendingReplies = new Map<string, { resolve: (svg: string) => void; reject: (e: Error) => void }>();
 
 function onFrameMessage(e: MessageEvent): void {
-  // Replies count only from the current frame's own window (frameReplyFor
-  // owns the source check); a message from anything else — including a
-  // dropped frame's late post — is not part of the protocol.
+  // The ready announce counts only from the current frame's own window
+  // (frameReplyFor owns the source check); a message from anything else —
+  // including a dropped frame's late post — is not part of the protocol.
   const msg = frameReplyFor(e, renderFrame?.contentWindow);
+  if (!msg || msg.t !== MSG_READY) return;
+  // One channel per frame: a second ready (a replaced document announcing
+  // itself before the parent observed the first) binds nothing.
+  if (renderPort || !renderFrame) return;
+  const channel = new MessageChannel();
+  channel.port1.onmessage = onPortMessage;
+  renderPort = channel.port1;
+  frameHello = msg.hello;
+  renderFrame.contentWindow?.postMessage(encodePortGrant(), "*", [channel.port2]);
+}
+
+function onPortMessage(e: MessageEvent): void {
+  const msg = decodeFrameReply(e.data);
   if (!msg) return;
-  if (msg.t === MSG_READY) {
-    frameReady = true;
+  if (msg.t === MSG_HELLO) {
+    // The binding proof: the echo must be the nonce the ready announce
+    // carried. A port that landed anywhere else can never produce it — the
+    // nonce lived inside the first document's announce.
+    if (msg.hello === frameHello) frameReady = true;
+    else dropRenderFrame();
     return;
   }
+  if (msg.t !== MSG_RENDERED) return;
   const pending = pendingReplies.get(msg.id);
   if (!pending) return;
   pendingReplies.delete(msg.id);
@@ -93,25 +117,24 @@ function onFrameMessage(e: MessageEvent): void {
   else pending.reject(new Error(msg.error));
 }
 
-/** The in-page stub the render path calls: post a request, settle on the
- *  matching reply. Renders are already serialized by renderSerialized, so at
- *  most one is outstanding at a time — the map still keys by id so a stray or
- *  late reply can never be misattributed. `alive` is the frame's own
- *  still-first-document check: a frame that navigated itself is not ours to
- *  post to anymore. */
-function frameApi(frame: HTMLIFrameElement, alive: () => boolean): MermaidChunk {
+/** The in-page stub the render path calls: post a request down the port,
+ *  settle on the matching reply. Renders are already serialized by
+ *  renderSerialized, so at most one is outstanding at a time — the map still
+ *  keys by id so a stray or late reply can never be misattributed. `alive`
+ *  is the frame's own still-first-document check: a frame that navigated
+ *  itself is not ours to post to anymore. */
+function frameApi(frame: HTMLIFrameElement, port: MessagePort, alive: () => boolean): MermaidChunk {
   return {
     renderMermaidDiagram(source, theme) {
-      const w = frame.contentWindow;
-      if (!w || renderFrame !== frame || !alive()) {
+      if (renderFrame !== frame || renderPort !== port || !alive()) {
         return Promise.reject(new Error("the mermaid render frame was dropped"));
       }
       const id = `r${++renderSeq}`;
       return new Promise<string>((resolve, reject) => {
         pendingReplies.set(id, { resolve, reject });
-        // "*" is the only usable target — the frame's origin is opaque — and
-        // the payload is just the diagram the frame is being asked to render.
-        w.postMessage(encodeRenderRequest(id, source, theme), "*");
+        // A port post needs no target origin — the entangled end is the only
+        // possible receiver, and it dies with the document that holds it.
+        port.postMessage(encodeRenderRequest(id, source, theme));
       });
     },
   };
@@ -147,11 +170,12 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   frame.setAttribute("sandbox", "allow-scripts");
   frame.style.cssText = "position:fixed;left:-200vw;top:-200vh;width:1px;height:1px;border:0";
   // A second load event means the frame navigated itself. Its document —
-  // the window replies were trusted from — is gone, so whatever lives there
-  // now must never see another diagram source: drop the whole frame and let
-  // the next render open a fresh one. The frame's own first-document flag is
-  // what frameApi's sends consult too, so a post that would race the drop
-  // fails instead of landing in the new document.
+  // the one the port was bound to — is gone, so whatever lives there now
+  // must never see another diagram source: drop the whole frame and let the
+  // next render open a fresh one. The port itself is already safe (it died
+  // with the document that held it); this drop is the cleanup and the
+  // belt-and-braces guard frameApi's sends consult too, so a post that would
+  // race the drop fails instead of landing anywhere new.
   let navs = 0;
   frame.addEventListener("load", () => {
     navs++;
@@ -170,7 +194,7 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   // pollUntil waits for a DEFINED value, so the probe maps "not yet" to
   // undefined — polling the boolean itself would return false instantly.
   const ok = await pollUntil(() => (frameReady ? true : undefined), OPEN_FRAME_TIMEOUT_MS);
-  if (ok) return frameApi(frame, () => navs === 1);
+  if (ok && renderPort) return frameApi(frame, renderPort, () => navs === 1);
   lastOpenFailedAt = Date.now();
   dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");
@@ -196,6 +220,9 @@ function dropRenderFrame(): void {
   renderFrame = null;
   chunk = null;
   frameReady = false;
+  renderPort?.close();
+  renderPort = null;
+  frameHello = "";
   for (const pending of pendingReplies.values()) {
     pending.reject(new Error("the mermaid render frame was dropped"));
   }

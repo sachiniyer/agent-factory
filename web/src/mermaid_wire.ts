@@ -1,15 +1,30 @@
-// The postMessage wire between the Docs pane (the parent window) and the
-// mermaid render frame (#6669). The frame is sandboxed WITHOUT
-// allow-same-origin — an opaque origin — so postMessage is the only channel
-// that crosses in either direction, and every message is a JSON STRING:
+// The channel between the Docs pane (the parent window) and the mermaid
+// render frame (#6669). The frame is sandboxed WITHOUT allow-same-origin —
+// an opaque origin — so window.postMessage is the only thing that reaches it,
+// and it is used exactly twice: once by the frame to announce itself, once by
+// the parent to hand over a MessagePort. Everything else travels the port,
+// which is bound to the DOCUMENT that announced itself, not to the frame's
+// WindowProxy: a port transferred to a document cannot be claimed by whatever
+// replaces that document if the frame navigates itself, and a reply arriving
+// on a port can only have come from the port's holder. A WindowProxy survives
+// navigation, so event.source cannot tell the first document from its
+// replacement — the port is what closes that gap.
 //
-//   parent → frame   {t:"af-mmd-render", id, source, theme}   one render
-//   frame → parent   {t:"af-mmd-rendered", id, ok, svg|error} its reply
-//   frame → parent   {t:"af-mmd-ready"}                       announce at load
+//   frame → parent  window postMessage {t:"af-mmd-ready", hello}   announce
+//   parent → frame  window postMessage {t:"af-mmd-port"} + [port]  handoff
+//   frame → parent  port             {t:"af-mmd-hello", hello}     bind echo
+//   parent → frame  port             {t:"af-mmd-render", id, source, theme}
+//   frame → parent  port             {t:"af-mmd-rendered", id, ok, svg|error}
 //
-// No objects, no functions, no DOM — the only thing that ever leaves the
-// frame is text, and the only thing that ever enters it is the diagram it is
-// about to render anyway.
+// `hello` is a nonce the frame mints at module eval and echoes back over the
+// port. The parent posts renders only after the echo matches — so a message
+// that lands in a document that never saw the ready announce (a navigation
+// replacement; the nonce was inside the first document's announce, which the
+// replacement could not observe) is never followed by any diagram source.
+//
+// Every payload is a JSON STRING: no objects, no functions, no DOM — the only
+// thing that ever leaves the frame is text, and the only thing that ever
+// enters it is the diagram it is about to render anyway.
 //
 // Decoders validate the whole shape and return undefined for anything off it;
 // the listener treats that as "not for me" and ignores the message. The two
@@ -18,6 +33,8 @@
 // why the protocol lives in its own leaf module both sides import.
 
 export const MSG_READY = "af-mmd-ready" as const;
+export const MSG_PORT = "af-mmd-port" as const;
+export const MSG_HELLO = "af-mmd-hello" as const;
 export const MSG_RENDER = "af-mmd-render" as const;
 export const MSG_RENDERED = "af-mmd-rendered" as const;
 
@@ -29,7 +46,8 @@ export interface RenderRequest {
 }
 
 export type FrameReply =
-  | { t: typeof MSG_READY }
+  | { t: typeof MSG_READY; hello: string }
+  | { t: typeof MSG_HELLO; hello: string }
   | { t: typeof MSG_RENDERED; id: string; ok: true; svg: string }
   | { t: typeof MSG_RENDERED; id: string; ok: false; error: string };
 
@@ -51,14 +69,15 @@ function parse(data: unknown): Record<string, unknown> | undefined {
   return isRecord(m) ? m : undefined;
 }
 
-/** Parent → frame: the one request the protocol has. */
+/** Parent → frame: the one request the protocol has. Travels the port. */
 export function encodeRenderRequest(id: string, source: string, theme: Record<string, string>): string {
   return JSON.stringify({ t: MSG_RENDER, id, source, theme });
 }
 
 /** Frame side: decode a request, or undefined for anything off-shape. The
  *  theme is rebuilt as a fresh null-prototype string record so the rendered
- *  config is pure data whatever the source JSON carried. */
+ *  config is pure data whatever the source JSON carried. No source check —
+ *  on a port, holding the port IS the identity. */
 export function decodeRenderRequest(data: unknown): RenderRequest | undefined {
   const m = parse(data);
   if (!m || m.t !== MSG_RENDER) return undefined;
@@ -71,37 +90,57 @@ export function decodeRenderRequest(data: unknown): RenderRequest | undefined {
   return { t: MSG_RENDER, id: m.id, source: m.source, theme };
 }
 
-/** Frame side, request gate: a message counts as a render request only when
- *  it came from the EXPECTED window AND decodes — the source check lives
- *  inside the function the listener calls, so the gate cannot be dropped at
- *  a call site without the protocol tests failing. `expected` is
- *  window.parent in the frame. */
-export function renderRequestFor(e: { source: unknown; data: unknown }, expected: unknown): RenderRequest | undefined {
-  return e.source === expected ? decodeRenderRequest(e.data) : undefined;
-}
-
 export function encodeFrameReply(reply: FrameReply): string {
   return JSON.stringify(reply);
 }
 
-/** Parent side: decode a reply, or undefined for anything off-shape. Extra
- *  unknown fields are tolerated — the protocol is the required fields, and a
- *  sender that can add fields is already inside the frame. */
+/** Parent side: decode a frame-originated message — the ready announce on the
+ *  window channel, or a hello/rendered on the port. Extra unknown fields are
+ *  tolerated — the protocol is the required fields, and a sender that can add
+ *  fields is already inside the frame. */
 export function decodeFrameReply(data: unknown): FrameReply | undefined {
   const m = parse(data);
   if (!m) return undefined;
-  if (m.t === MSG_READY) return { t: MSG_READY };
+  if (m.t === MSG_READY && typeof m.hello === "string" && m.hello !== "") {
+    return { t: MSG_READY, hello: m.hello };
+  }
+  if (m.t === MSG_HELLO && typeof m.hello === "string" && m.hello !== "") {
+    return { t: MSG_HELLO, hello: m.hello };
+  }
   if (m.t !== MSG_RENDERED || typeof m.id !== "string") return undefined;
   if (m.ok === true && typeof m.svg === "string") return { t: MSG_RENDERED, id: m.id, ok: true, svg: m.svg };
   if (m.ok === false && typeof m.error === "string") return { t: MSG_RENDERED, id: m.id, ok: false, error: m.error };
   return undefined;
 }
 
-/** Parent side, reply gate: a message counts as a frame reply only when it
- *  came from the render frame's own window AND decodes — same shape as
- *  renderRequestFor, mirrored. `expected` is the frame's contentWindow (a
- *  WindowProxy: identity is per element and cannot be spoofed by a foreign
- *  sender). */
+/** Parent side, window-channel gate: the ready announce counts only when it
+ *  came from the render frame's own window AND decodes — the source check
+ *  lives inside the function the listener calls, so the gate cannot be
+ *  dropped at a call site without the protocol tests failing. `expected` is
+ *  the frame's contentWindow (a WindowProxy: identity is per element and
+ *  cannot be spoofed by a foreign sender — the DOCUMENT inside it is bound
+ *  separately, by the hello echo over the port). */
 export function frameReplyFor(e: { source: unknown; data: unknown }, expected: unknown): FrameReply | undefined {
   return e.source === expected ? decodeFrameReply(e.data) : undefined;
+}
+
+/** Parent → frame: the port handoff — the ONLY other message the window
+ *  channel carries. The transferred MessagePort rides in event.ports, not
+ *  the payload. */
+export function encodePortGrant(): string {
+  return JSON.stringify({ t: MSG_PORT });
+}
+
+/** Frame side, handoff gate: the grant counts only when it came from the
+ *  parent window, decodes as the grant, and carries exactly one port —
+ *  mirrored with frameReplyFor so the gate cannot be dropped at a call site.
+ *  `expected` is window.parent in the frame. */
+export function portGrantFor(
+  e: { source: unknown; data: unknown; ports: readonly unknown[] },
+  expected: unknown,
+): MessagePort | undefined {
+  if (e.source !== expected) return undefined;
+  const m = parse(e.data);
+  if (!m || m.t !== MSG_PORT) return undefined;
+  return e.ports.length === 1 ? (e.ports[0] as MessagePort) : undefined;
 }

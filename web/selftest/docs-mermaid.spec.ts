@@ -331,8 +331,8 @@ flowchart LR
 // frame CSP isolates what the frame may LOAD, but only sandboxing isolates its
 // PRIVILEGE. sandbox without allow-same-origin gives it an opaque origin — no
 // parent DOM, no storage or cookies, no credentials on a /v1 call — and the
-// only channel back is a postMessage carrying the SVG string, which the parent
-// validates and sanitizes before it touches the DOM. This test is the one that
+// only channel back is a bound MessagePort carrying the SVG string, which the
+// parent validates and sanitizes before it touches the DOM. This test is the one that
 // must run in WebKit too: a srcdoc frame inherits the page's CSP, and in
 // WebKit 'self' matches nothing in an opaque origin, so the old shape rendered
 // nothing at all — the frame is a real served document now, and the daemon's
@@ -354,8 +354,8 @@ test("docs mermaid: the render frame is an opaque origin — it cannot reach the
   const pane = await openDocs(page, request, "mermaid-sandbox-probe", "mermaid-sandbox-plan", {
     goals: `# Sandbox\n\n${fence(DIAGRAM)}\n\nEnd.\n`,
   });
-  // The diagram still renders — the channel becoming postMessage changes
-  // nothing the document shows. This line is the WebKit regression itself:
+  // The diagram still renders — the channel becoming a port-bound postMessage
+  // changes nothing the document shows. This line is the WebKit regression itself:
   // under srcdoc+inherited-CSP it timed out 30s and died.
   await expect(pane.locator(".cm-md-mermaid svg")).toBeVisible({ timeout: 30_000 });
 
