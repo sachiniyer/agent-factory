@@ -909,7 +909,8 @@ func TestLimitWallResidue_ChurnedClaimSurvivesSerialization(t *testing.T) {
 
 	data := inst.ToInstanceData()
 	require.NotNil(t, data.LastLimitWall, "the standing shadow must serialize")
-	require.False(t, data.LastLimitWall.Retired,
+	require.NotNil(t, data.LastLimitWall.Retired, "the retirement bit must serialize explicitly")
+	require.False(t, *data.LastLimitWall.Retired,
 		"a churned row's shadow mirrors a standing claim — it was never retired")
 
 	restored := &Instance{Program: tmux.ProgramClaude}
@@ -919,6 +920,41 @@ func TestLimitWallResidue_ChurnedClaimSurvivesSerialization(t *testing.T) {
 		"the restored standing mirror is not residue — the unsent wall re-parks")
 	require.True(t, restored.LimitReached())
 	require.False(t, restored.LimitWallPromptSent())
+}
+
+// TestLimitWallResidue_PreFlagShadowRestoresRetired is the #6972 Codex
+// upgrade arm: a v1.0.347-serialized shadow carries no retired field, and a
+// plain-bool restore would mint false — reading a genuinely retired,
+// expired wall as a standing mirror and re-parking its unchanged banner.
+// An absent bit must keep the writer's verdict: a serialized shadow on a
+// non-parked row was a retired wall.
+func TestLimitWallResidue_PreFlagShadowRestoresRetired(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(2 * time.Hour))()
+
+	// The v1.0.347 shape: full claim fields, no retired bit.
+	preFlag := LimitWallClaimData{
+		Agent: "claude", ResetAt: parked, Evidence: clockResetEvidence,
+		BannerPrefix: staleBanner.Prefix, BannerCount: staleBanner.Count,
+	}
+	require.Nil(t, preFlag.Retired, "the v1.0.347 shape has no retired field")
+
+	restored := &Instance{Program: tmux.ProgramClaude}
+	restored.lastLimitWall = limitWallClaimFromData(&preFlag)
+	require.False(t, restored.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, restored.stateEpoch),
+		"an unflagged serialized shadow keeps the writer's verdict: retired — the expired banner is residue")
+	require.False(t, restored.LimitReached())
+
+	// The new-shape counterpart: an explicit retired=false IS a standing
+	// mirror — the unchanged banner re-parks the row.
+	notRetired := false
+	preFlag.Retired = &notRetired
+	restored2 := &Instance{Program: tmux.ProgramClaude}
+	restored2.lastLimitWall = limitWallClaimFromData(&preFlag)
+	require.True(t, restored2.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, restored2.stateEpoch),
+		"an explicit retired=false is a standing mirror — the banner re-parks")
+	require.True(t, restored2.LimitReached())
 }
 
 // TestLimitWallResidue_FailedHandoffKeepsSentClaim is the #6972 Codex rollback

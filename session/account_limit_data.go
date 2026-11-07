@@ -199,8 +199,12 @@ type LimitWallClaimData struct {
 	// mirror every park writes. A churned row serializes no live claim
 	// fields, so the distinction must ride on the shadow itself: after a
 	// restart, Retired is what keeps an unsent wall's mirror from reading as
-	// residue (#6972).
-	Retired bool `json:"retired,omitempty"`
+	// residue (#6972). It is a pointer because the bit's PRESENCE is itself
+	// evidence: a shadow serialized before the field existed (v1.0.347)
+	// carries nil, and the restore verdict for an unrecorded retirement is
+	// the writer's own — retired — rather than the false a plain bool would
+	// mint (#6972, Codex upgrade path).
+	Retired *bool `json:"retired,omitempty"`
 }
 
 // IsZero reports whether the claim carries no recorded wall fact — the

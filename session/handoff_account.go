@@ -487,6 +487,7 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 			i.limitAgent = ""
 			i.limitAccount = ""
 			i.lastLimitWall.retired = true
+			i.lastLimitWall.retiredKnown = true
 		}
 	} else {
 		// A confirmed notice is work the agent already has (#5023): publish
@@ -673,6 +674,7 @@ func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 			i.limitAgent = ""
 			i.limitAccount = ""
 			i.lastLimitWall.retired = true
+			i.lastLimitWall.retiredKnown = true
 		}
 	} else {
 		_ = i.transitionLocked(ObserveLiveness(LiveRunning))

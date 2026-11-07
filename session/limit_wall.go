@@ -51,6 +51,13 @@ type limitWallClaim struct {
 	// alone cannot tell the two apart and an unsent wall would read as
 	// residue (#6972, Codex).
 	retired bool
+	// retiredKnown records that the retirement verdict was explicitly
+	// written — every in-memory park mirror and clear sets it — versus a
+	// shadow restored from a record that predates the bit. An unflagged
+	// serialized shadow keeps the verdict its writer's build held: a
+	// serialized shadow on a non-parked row was a retired wall (#6972,
+	// Codex v1.0.347 upgrade path).
+	retiredKnown bool
 }
 
 // limitWallClaimsLocked is the row's recorded wall knowledge: the live claim
@@ -212,13 +219,24 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 // retired=false, and treating it as retired would strand an unsent wall's
 // pending send after restart (#6972, Codex). Caller holds i.mu.
 func (i *Instance) limitWallShadowIsRetiredLocked() bool {
-	if i.lastLimitWall.retired {
+	w := i.lastLimitWall
+	if w.retired {
 		return true
 	}
-	if i.limitAgent == "" {
-		return false
+	if w.retiredKnown {
+		// The verdict was explicitly recorded: an unflagged-standing mirror
+		// is not retired, and with standing fields still present the mirror
+		// compare is the belt.
+		return i.limitAgent != "" && !i.limitWallShadowMirrorsStandingClaimLocked()
 	}
-	return !i.limitWallShadowMirrorsStandingClaimLocked()
+	// A shadow restored from a record that predates the retirement bit:
+	// its writer's only verdict was that a serialized shadow on a
+	// non-parked row was a retired wall — keep that verdict across the
+	// upgrade or an expired, already-answered banner re-parks and replays
+	// its prompt (#6972, Codex v1.0.347 upgrade path). Standing claim
+	// fields would only exist on a parked row, and that case reads the
+	// live claim, never this shadow.
+	return true
 }
 
 // limitWallShadowMirrorsStandingClaimLocked reports whether the retired-wall
@@ -282,13 +300,18 @@ func limitWallClaimToData(w limitWallClaim) LimitWallClaimData {
 		w.banner.Prefix == "" && w.banner.Count == 0 {
 		return LimitWallClaimData{}
 	}
-	return LimitWallClaimData{
+	d := LimitWallClaimData{
 		Agent: w.agent, Account: w.account, ResetAt: w.resetAt,
 		Evidence:     w.evidence,
 		BannerPrefix: limitWallPrefixTail(w.banner.Prefix), BannerCount: w.banner.Count,
 		RuntimePID: w.runtimePID, RuntimeStartID: w.runtimeStartID,
-		RuntimeGen: w.runtimeGen, PromptSent: w.promptSent, Retired: w.retired,
+		RuntimeGen: w.runtimeGen, PromptSent: w.promptSent,
 	}
+	if w.retiredKnown {
+		retired := w.retired
+		d.Retired = &retired
+	}
+	return d
 }
 
 func limitWallClaimFromData(d *LimitWallClaimData) limitWallClaim {
@@ -300,7 +323,8 @@ func limitWallClaimFromData(d *LimitWallClaimData) limitWallClaim {
 		evidence:   d.Evidence,
 		banner:     LimitBanner{Prefix: d.BannerPrefix, Count: d.BannerCount},
 		runtimePID: d.RuntimePID, runtimeStartID: d.RuntimeStartID,
-		runtimeGen: d.RuntimeGen, promptSent: d.PromptSent, retired: d.Retired,
+		runtimeGen: d.RuntimeGen, promptSent: d.PromptSent,
+		retired: d.Retired != nil && *d.Retired, retiredKnown: d.Retired != nil,
 	}
 }
 
@@ -375,6 +399,7 @@ func (i *Instance) hydrateLimitWallShadowOnRestore() {
 			banner:     LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
 			runtimePID: i.limitWallRuntimePID, runtimeStartID: i.limitWallRuntimeStartID,
 			runtimeGen: i.limitWallRuntimeGen, promptSent: i.limitPromptSent,
+			retiredKnown: true,
 		}
 	}
 }
@@ -396,5 +421,6 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 		banner:     banner,
 		runtimePID: i.limitWallRuntimePID, runtimeStartID: i.limitWallRuntimeStartID,
 		runtimeGen: i.limitWallRuntimeGen, promptSent: i.limitPromptSent,
+		retiredKnown: true,
 	}
 }

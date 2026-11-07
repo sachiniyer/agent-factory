@@ -703,6 +703,7 @@ func (i *Instance) clearLimitReachedLocked(sent bool) {
 	// retired claim — the durable distinction a restored row needs to keep
 	// calling the unchanged banner residue (#6972).
 	i.lastLimitWall.retired = true
+	i.lastLimitWall.retiredKnown = true
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
