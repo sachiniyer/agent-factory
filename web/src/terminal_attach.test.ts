@@ -21,6 +21,7 @@ function stage() {
     container: host, term, fit, stopped: false, initialConnectStarted: false,
     pendingViewport: null, lastRows: 0, lastCols: 0, parked: false,
     contestedEchoes: new Map<string, number>(), admittedEcho: true,
+    owedForceResize: false,
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0, resizeTimer: null,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
@@ -906,6 +907,75 @@ test("alternating foreign grids cannot bypass the yield window — contest histo
     echo(30, 90);
     assert.deepEqual([term.rows, term.cols], [30, 90], "the emulator still follows the authoritative echo");
     assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "no further reclaims leave the wire");
+  } finally {
+    win.restore();
+  }
+});
+
+// #6635 (run 42370084465 — "pointer activation must refit … rows 109"): the
+// contested record is wall-clock only, so a foreign grid sighted again inside
+// FOREIGN_ECHO_YIELD_MS counts as insistent no matter when it was first seen —
+// including sightings from BEFORE the user's activation, which are not answers
+// to the claim the activation is about to produce but the previous contest's
+// echoes arriving late. In the run the pane had yielded to the peer's repeat,
+// the user's pointer activation re-claimed, and the peer's counter ~16ms later
+// read as the same contest's next repeat (~820ms from the pre-claim sighting),
+// stranding the now-active pane on the peer's rows. A user-coupled activation
+// starts a new contest epoch: the next foreign write is that epoch's FIRST
+// sighting, contested like any fresh claim — while the concession itself still
+// holds: a SECOND answer inside the new window is insistence and still wins.
+test("a trusted activation starts a new contest epoch — the pre-activation yield record cannot stand the new claim down", async () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    const noteActivation = (terminal as unknown as {
+      noteActivation(): void;
+    }).noteActivation.bind(terminal);
+    const resizes = () => calls.filter((c) => c === "resize").length;
+
+    // The peer's claim: the pane's first contested sighting of 34x100, answered
+    // by one reclaim write once classification delivers.
+    echo(34, 100);
+    win.runAllFrames();
+    await Promise.resolve();
+    assert.deepEqual(calls, ["fit", "resize"]);
+    // The peer's repeat inside the window: the pane yields and its emulator
+    // rests on the peer's grid — the record stays stamped at the FIRST
+    // sighting.
+    echo(34, 100);
+    assert.deepEqual([term.rows, term.cols], [34, 100]);
+    assert.equal(resizes(), 1);
+
+    // The user activates: a trusted gesture — noteActivation + fitVisibleHost
+    // is exactly what onPointerEnter does for a trusted event. On any version
+    // the yielded emulator no longer fits, so the refit's claim is on the
+    // wire; only the fix also clears the stale sighting history.
+    noteActivation();
+    terminal.fitVisibleHost();
+    assert.equal(terminal.parked, false);
+    assert.equal(resizes(), 2, "the activation's own claim went out");
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+
+    // The peer's answer inside the OLD window: on master the pre-activation
+    // sighting still counts, so this is a repeat and the pane yields to the
+    // very write it was activated to take — the strand (34 rows, 2 writes).
+    // With the epoch restarted at the gesture it is the first sighting of a
+    // fresh contest: the pane re-asserts and the deferred write flushes on
+    // the next classified frame.
+    echo(34, 100);
+    win.runAllFrames();
+    await Promise.resolve();
+    assert.deepEqual([term.rows, term.cols], [40, 120],
+      "the activated pane reclaims instead of yielding to a stale repeat");
+    assert.equal(resizes(), 3,
+      "fresh contest → the reclaim write actually leaves (master: strand, 2 writes)");
+
+    // The concession still holds inside the NEW epoch: a second answer to the
+    // same grid within the window is insistence and wins unchallenged.
+    echo(34, 100);
+    assert.deepEqual([term.rows, term.cols], [34, 100],
+      "an insistent peer still wins the new epoch");
+    assert.equal(resizes(), 3, "the yield writes nothing");
   } finally {
     win.restore();
   }

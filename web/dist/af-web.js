@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "0d63991a99f8";
+var CLIENT_VERSION = "07a1c8b3e3fd";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -11618,6 +11618,18 @@ var AttachTerminal = class {
   // an authoritative echo that matches is a no-op.
   lastRows = 0;
   lastCols = 0;
+  // A force write that could not leave — dropped before the parked
+  // classification landed, or withheld by a parked/hidden page — is still owed
+  // as a CLAIM, not just as a size: the flush that eventually carries it is an
+  // ordinary deduped write, and applyEchoedSize credits lastRows/lastCols from
+  // every echo. When the subscribe replay carries the same grid the claim was
+  // about to assert (the pane's own fit already matched the authority), the
+  // credit lands first and the deferred write dedups to nothing — the claim
+  // evaporates without a frame ever reaching the broker (#6635, run
+  // 42361281090: B's subscribe claim never produced its echo). The flag rides
+  // onto the next write attempt and survives until ANY frame leaves, a yield
+  // concedes it, or a new socket starts the epoch over.
+  owedForceResize = false;
   // When this pane last re-contested each foreign authoritative grid. A repeat
   // of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an insistent
   // writer and wins unchallenged; anything else gets one reclaim. The history
@@ -11651,8 +11663,27 @@ var AttachTerminal = class {
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  onWindowFocus = () => {
+  //
+  // A user-coupled activation does two things, not one: it un-parks the page
+  // AND starts a new contest epoch. contestedEchoes timestamps are wall-clock
+  // only, so a foreign grid echoed again inside FOREIGN_ECHO_YIELD_MS reads as
+  // an insistent writer no matter when the sighting was recorded — including
+  // sightings from BEFORE this activation, which are not answers to the claim
+  // it is about to produce but the previous contest's echoes arriving late.
+  // Counting them stands the fresh activation down to the very write it was
+  // meant to take (#6635, run 42370084465: the counter-echo landed ~16ms after
+  // the activation claim, ~820ms after the pre-claim sighting, and the yield
+  // branch stranded the pane on the peer's rows). Only signals the platform
+  // ties to a user qualify — trusted input, window focus, a real visibility
+  // or phone-boundary change. Observer and layout deliveries (Intersection-
+  // Observer, ResizeObserver, the scheduled-fit pair) wake a page without
+  // user intent and must not erase a concession another client just won.
+  noteActivation() {
     this.parked = false;
+    this.contestedEchoes.clear();
+  }
+  onWindowFocus = () => {
+    this.noteActivation();
     this.scheduleVisibleFit();
   };
   onWindowBlur = () => {
@@ -11661,7 +11692,7 @@ var AttachTerminal = class {
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
-      this.parked = false;
+      this.noteActivation();
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
@@ -11670,7 +11701,7 @@ var AttachTerminal = class {
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
   onPhoneChange = () => {
-    this.parked = false;
+    this.noteActivation();
     this.applyDeviceFontSize();
   };
   // Entering a pane is the earliest reliable activation signal for side-by-side
@@ -11678,7 +11709,7 @@ var AttachTerminal = class {
   // first gesture rather than making the user scroll twice.
   onPointerEnter = (event) => {
     if (event.isTrusted) {
-      this.parked = false;
+      this.noteActivation();
     }
     this.fitVisibleHost();
   };
@@ -11690,7 +11721,7 @@ var AttachTerminal = class {
     if (!event.isTrusted) {
       return;
     }
-    this.parked = false;
+    this.noteActivation();
     this.stopCoast();
     this.handleUserScroll("wheel");
     if (!terminalMouseOverrideHeld(event, this.mouseOverride) && !this.mouseOverrideKeyHeld && this.applicationOwnsWheel()) {
@@ -11761,7 +11792,7 @@ var AttachTerminal = class {
   };
   onTouchMove = (event) => {
     if (event.isTrusted) {
-      this.parked = false;
+      this.noteActivation();
     }
     this.handleUserScroll("touch");
     const touch = event.touches[0];
@@ -11804,12 +11835,12 @@ var AttachTerminal = class {
   };
   onPointerDown = (event) => {
     this.lastPointerWasTouch = event.pointerType === "touch";
+    if (event.isTrusted) {
+      this.noteActivation();
+    }
     this.stopCoast();
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
-      if (event.isTrusted) {
-        this.parked = false;
-      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -12274,6 +12305,7 @@ var AttachTerminal = class {
     this.ws = ws;
     this.contestedEchoes.clear();
     this.admittedEcho = false;
+    this.owedForceResize = false;
     ws.onopen = () => {
       this.retry = 0;
       this.everOpened = true;
@@ -12636,28 +12668,34 @@ var AttachTerminal = class {
       return;
     }
     if (this.parked === null) {
+      this.owedForceResize ||= force;
       return;
     }
     if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
+      this.owedForceResize ||= force;
       this.retryOwedResize(rows, cols);
       return;
     }
+    force ||= this.owedForceResize;
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
     if (this.send(encode(resizeFrame(rows, cols)))) {
       this.lastRows = rows;
       this.lastCols = cols;
+      this.owedForceResize = false;
       return;
     }
   }
   /** Keeps the wake probe armed while a resize is owed — withheld by a
    *  parked/hidden page. Self-limiting: the check re-reads the divergence,
-   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  so a converged grid stops re-arming — UNLESS the owed write is a claim,
+   *  which has no wire-visible effect to converge against and must still
+   *  reach the broker (owedForceResize). Re-arms ONLY the frame probe —
    *  the channel whose delivery can change the outcome; arming the timer
    *  would just fit-and-withhold again on every tick. */
   retryOwedResize(rows, cols) {
-    if (rows !== this.lastRows || cols !== this.lastCols) {
+    if (this.owedForceResize || rows !== this.lastRows || cols !== this.lastCols) {
       this.armWakeProbe();
     }
   }
@@ -12704,6 +12742,7 @@ var AttachTerminal = class {
             this.reassertHostFit();
           } else {
             this.cancelVisibleFitFrame();
+            this.owedForceResize = false;
           }
         }
       }
