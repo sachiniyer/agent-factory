@@ -142,7 +142,9 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		// normal limit-resume path replays exactly Instance.Prompt.
 		delivery.instance.SetPrompt(delivery.mission)
 		if terr := settle(func() error {
-			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr))
+			// The wall was read off the just-spawned incoming pane — a fresh
+			// runtime's emission, not the recorded wall's re-read (#6959).
+			return m.parkHandoffAtLimit(delivery.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr), true)
 		}, true); terr != nil {
 			return fmt.Errorf(
 				"handed %q off to %s, which hit a usage limit before its mission could be delivered, and failed to park the handoff: %w",

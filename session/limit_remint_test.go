@@ -360,6 +360,21 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 			"the fresh runtime's claim must stand over the shadowed wall: got %v", obs[0].ResetAt)
 	})
 
+	t.Run("a fresh handoff runtime's identical banner is a new sighting", func(t *testing.T) {
+		// The A→B→A shape: B's delivery never parked, so the shadow still
+		// names A's old wall when the handoff back spawns a NEW incoming A
+		// runtime. The producer marks that sighting fresh — a coincidentally
+		// identical phrase at the same anchor on the new pane is the wall's
+		// current claim, not a re-parse of the retired pane's banner.
+		inst := &Instance{Program: tmux.ProgramClaude, Account: "personal", liveness: LiveRunning}
+		require.NoError(t, inst.Transition(BeginHandoff()))
+		require.NoError(t, inst.Transition(ParkHandoff(parked, clockResetEvidence, staleBanner)))
+		requireParkedReset(t, inst, parked)
+		require.NoError(t, inst.Transition(BeginHandoff()))
+		require.NoError(t, inst.Transition(ParkHandoff(later, clockResetEvidence, staleBanner).OnFreshRuntime()))
+		requireParkedReset(t, inst, later)
+	})
+
 	t.Run("a reused phrase at a different anchor is a new wall", func(t *testing.T) {
 		// The day-after shape: a NEW banner at a different pane position
 		// happens to re-use "reset at 3pm". The phrase matches the recorded

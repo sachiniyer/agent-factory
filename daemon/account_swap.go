@@ -109,10 +109,17 @@ func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt tim
 	return instance.SetLimitReachedAtEpoch(resetAt, evidence, banner, epoch)
 }
 
-func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner) error {
+// freshRuntime marks a sighting read off the just-spawned incoming pane — the
+// first delivery's wall — as opposed to a retry's re-read of the pane the row
+// already parked on or a re-park of the stored claim itself (#6959).
+func (m *Manager) parkHandoffAtLimit(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner, freshRuntime bool) error {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	return instance.Transition(session.ParkHandoff(resetAt, evidence, banner))
+	ev := session.ParkHandoff(resetAt, evidence, banner)
+	if freshRuntime {
+		ev = ev.OnFreshRuntime()
+	}
+	return instance.Transition(ev)
 }
 
 func (m *Manager) reparkLimitUnderResumeFence(instance *session.Instance, resetAt time.Time) error {

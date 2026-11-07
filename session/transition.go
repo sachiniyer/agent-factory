@@ -114,14 +114,15 @@ func (k transitionKind) String() string {
 // one with the exported constructors below; lv is meaningful only for
 // ObserveLiveness. epoch/epochScoped are set only by AtEpoch.
 type TransitionEvent struct {
-	kind        transitionKind
-	lv          Liveness
-	resetAt     time.Time
-	evidence    string
-	banner      LimitBanner
-	epoch       uint64
-	epochScoped bool
-	churnOnly   bool
+	kind         transitionKind
+	lv           Liveness
+	resetAt      time.Time
+	evidence     string
+	banner       LimitBanner
+	freshRuntime bool
+	epoch        uint64
+	epochScoped  bool
+	churnOnly    bool
 }
 
 // ChurnOnly marks a Running observation as inferred from pane churn alone, with
@@ -250,6 +251,19 @@ func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHand
 // of this banner is told apart from a wall printed after it.
 func ParkHandoff(resetAt time.Time, evidence string, banner LimitBanner) TransitionEvent {
 	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence, banner: banner}
+}
+
+// OnFreshRuntime marks the handoff park's sighting as read off a pane the row
+// had never seen before — the just-spawned incoming runtime, not the pane a
+// retry re-reads. A fresh pane's emission is new wall evidence no recorded
+// claim may veto (#6959): the parked wall's shadow still names the retired
+// runtime's banner, and a coincidentally identical phrase at the same anchor
+// on the new pane is the wall's current claim, not a stale re-parse. The
+// plain constructor stays for the same-pane retry and the stored-claim
+// re-park, whose sighting IS the recorded wall's re-read.
+func (ev TransitionEvent) OnFreshRuntime() TransitionEvent {
+	ev.freshRuntime = true
+	return ev
 }
 
 // AbortHandoff drops a replacement fence whose runtime swap did not complete.
@@ -800,10 +814,13 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// The sighting resolves against the wall the row already recorded
 		// BEFORE the live fields take it: a re-read of the banner the row
 		// parked on keeps the recorded claim's first parse instead of the
-		// rolled-forward instant its re-parse minted (#6959).
+		// rolled-forward instant its re-parse minted (#6959). The event's
+		// freshRuntime mark is the producer's knowledge that the sighting
+		// came off a pane the row had never seen — new evidence no recorded
+		// claim may veto.
 		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
 			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached,
-			false, time.Time{})
+			ev.freshRuntime, time.Time{})
 		i.limitResetAt = resetAt
 		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix
