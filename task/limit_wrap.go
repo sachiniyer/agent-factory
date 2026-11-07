@@ -108,6 +108,42 @@ func wrapSplitsResetKeyword(pre, post string) bool {
 	return strings.ToLower(head+tail) == "reset"
 }
 
+// wrapSplitsClockDigitMeridiem reports whether a wrap newline sits between a
+// clock's final digit and its [ap]m meridiem suffix — "2:30\npm" or "2\npm" —
+// so the normalizer rejoins it (drop, not space) and the clockTime regex sees
+// "2:30pm"/"2pm" (the [ap] and m must be contiguous) rather than "2:30 pm"/
+// "2 pm", which diverges the evidence from the unwrapped form and breaks the
+// #6765 re-read identity across pane resizes. The pre run must end in a clock
+// digit (lastDigit at the newline) and post must begin with a complete [ap]m
+// token whose 'm' ends the suffix — a following letter means a longer word
+// such as "amazing", a word-boundary wrap that stays a space. A wrap INSIDE
+// the suffix ("2p\nm", letter-newline-letter) is handled separately by
+// wrapSplitsClockSuffix.
+func wrapSplitsClockDigitMeridiem(pre, post string) bool {
+	if len(pre) == 0 {
+		return false
+	}
+	last := pre[len(pre)-1]
+	if last < '0' || last > '9' {
+		return false
+	}
+	if len(post) < 2 {
+		return false
+	}
+	switch post[0] {
+	case 'a', 'A', 'p', 'P':
+	default:
+		return false
+	}
+	if post[1] != 'm' && post[1] != 'M' {
+		return false
+	}
+	if len(post) >= 3 && (post[2] >= 'a' && post[2] <= 'z' || post[2] >= 'A' && post[2] <= 'Z') {
+		return false
+	}
+	return true
+}
+
 // wrapSplitsOrdinalSuffix reports whether a wrap newline between two ASCII
 // letters splits the two-letter ordinal suffix of a calendar day — "st",
 // "nd", "rd", or "th" — e.g. "Nov 12t\nh" (the wrapped "Nov 12th") — so the

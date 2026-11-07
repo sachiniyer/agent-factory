@@ -632,20 +632,7 @@ func normalizeResetWhitespace(s string) string {
 			if lastDigit && i+1 < len(s) && s[i+1] == ':' {
 				continue
 			}
-			// A wrap between the clock's final digit and its [ap]m meridiem
-			// suffix — "2:30\npm" or "2\npm" — rejoins (drop, not space) so the
-			// clockTime regex sees "2:30pm"/"2pm" (the [ap] and m must be
-			// contiguous) rather than "2:30 pm"/"2 pm", which diverges the
-			// evidence from the unwrapped form and breaks the #6765 re-read
-			// identity across pane resizes. The 'm' must END the suffix token
-			// (a following letter means a longer word such as "amazing", a
-			// word-boundary wrap that stays a space); a wrap INSIDE the suffix
-			// ("2p\nm", letter-newline-letter) is handled separately by
-			// wrapSplitsClockSuffix.
-			if lastDigit && i+2 < len(s) &&
-				(s[i+1] == 'a' || s[i+1] == 'A' || s[i+1] == 'p' || s[i+1] == 'P') &&
-				(s[i+2] == 'm' || s[i+2] == 'M') &&
-				(i+3 >= len(s) || !((s[i+3] >= 'a' && s[i+3] <= 'z') || (s[i+3] >= 'A' && s[i+3] <= 'Z'))) {
+			if lastDigit && wrapSplitsClockDigitMeridiem(b.String(), s[i+1:]) {
 				continue
 			}
 			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && (wrapSplitsMonth(b.String(), s[i+1:]) || wrapSplitsClockSuffix(b.String(), s[i+1:]) || wrapSplitsWeekday(b.String(), s[i+1:]) || wrapSplitsResetKeyword(b.String(), s[i+1:]) || wrapSplitsOrdinalSuffix(b.String(), s[i+1:])) {
