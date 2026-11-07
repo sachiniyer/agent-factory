@@ -3,8 +3,8 @@
 // purpose-built iframe to that page — SANDBOXED without allow-same-origin, an
 // opaque origin — rather than srcdoc-loading it: srcdoc inherits the page's
 // CSP, and in WebKit 'self' matches nothing in an opaque origin so every load
-// is denied. The library is INLINE in the document the daemon serves (with a
-// per-process script-src nonce, daemon/webserve.go), so the frame issues
+// is denied. The library is INLINE in the document the daemon serves (script
+// authorized by sha256, daemon/webserve.go), so the frame issues
 // zero fetches of its own: nothing for an authenticating proxy to refuse,
 // no CSP URL-source for an IPv6 or proxied origin to spell. Its CSP denies
 // every fetch the diagram could name anyway (default-src 'none') — renderers

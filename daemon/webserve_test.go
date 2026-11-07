@@ -1,6 +1,8 @@
 package daemon
 
 import (
+	"crypto/sha256"
+	"encoding/base64"
 	"encoding/json"
 	"io"
 	"io/fs"
@@ -327,12 +329,17 @@ func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
 // serving layer. The Docs renderer's sandboxed iframe navigates to
 // lazy/mermaid-frame.html — a real document, not srcdoc, because WebKit gives
 // srcdoc the page's CSP where 'self' matches nothing in an opaque origin. The
-// file must arrive with its OWN CSP (a nonce'd script-src over
-// default-src 'none', everything else denied), the nonce stamped into the
-// body so no placeholder reaches the wire, and every OTHER asset must keep
-// the shell's webCSP verbatim. Expectations are derived from the served bytes
-// and a literal path list — never the implementation's own predicates — so a
-// scope widened or narrowed in webserve.go fails here.
+// file must arrive with its OWN CSP: a sha256'd script-src over
+// default-src 'none' (the hash recomputed here from the served body, never
+// from the sidecar the implementation reads), every other load denied, and
+// the two directives that isolate the DOCUMENT itself — sandbox so it runs
+// opaque however it is loaded, frame-ancestors 'self' so only this origin
+// can frame it. The response must also carry cache validators: the file is
+// ~5 MB inline, and a re-opened frame must answer 304, not refetch the
+// library. Every OTHER asset keeps the shell's webCSP verbatim. Expectations
+// are derived from the served bytes and a literal path list — never the
+// implementation's own predicates — so a scope widened or narrowed in
+// webserve.go fails here.
 func TestServeSPA_MermaidFrameDocument(t *testing.T) {
 	spy := &apiSpy{}
 	srv := httptest.NewServer(webShellHandler(withAuth(spy, nil, nil)))
@@ -347,28 +354,53 @@ func TestServeSPA_MermaidFrameDocument(t *testing.T) {
 		return resp.Header, string(body)
 	}
 
-	// The frame document, twice: its CSP must name exactly the nonce the
-	// body's one script element carries, and the nonce must be stable within
-	// the process — the gzip cache keys by name, so a per-request nonce would
-	// serve the first stamper's bytes to everyone.
-	var nonces []string
-	for range 2 {
-		h, body := get("/" + mermaidFrameAsset)
-		csp := h.Get("Content-Security-Policy")
-		require.Contains(t, csp, "default-src 'none'", "the frame CSP must deny by default")
-		require.Contains(t, csp, "connect-src 'none'", "the frame must fetch nothing")
-		require.NotContains(t, csp, "script-src 'unsafe-inline'", "script-src is a nonce, never a blanket inline grant")
-		hdrNonce := regexp.MustCompile(`script-src 'nonce-([0-9a-f]+)'`).FindStringSubmatch(csp)
-		require.Len(t, hdrNonce, 2, "script-src must be exactly one nonce source")
-		require.Equal(t, mermaidFrameCSP(hdrNonce[1]), csp,
-			"the served CSP must be the frame policy with its stamped nonce")
-		require.Contains(t, body, `<script type="module" nonce="`+hdrNonce[1]+`">`,
-			"the body's script element must carry the header's nonce")
-		require.NotContains(t, body, mermaidFrameNoncePlaceholder, "the placeholder must never reach the wire")
-		require.Empty(t, h.Get("Access-Control-Allow-Origin"), "no CORS grant — the frame fetches nothing")
-		nonces = append(nonces, hdrNonce[1])
-	}
-	require.Equal(t, nonces[0], nonces[1], "the nonce is per-process so cached gzip bytes stay coherent")
+	h, body := get("/" + mermaidFrameAsset)
+	csp := h.Get("Content-Security-Policy")
+	require.Contains(t, csp, "default-src 'none'", "the frame CSP must deny by default")
+	require.Contains(t, csp, "connect-src 'none'", "the frame must fetch nothing")
+	require.Contains(t, csp, "sandbox allow-scripts",
+		"the doc must run in an opaque origin however it is loaded — the iframe attribute only covers af's own framing")
+	require.Contains(t, csp, "frame-ancestors 'self'",
+		"only this origin may frame the doc — foreign framing runs the library at the daemon's real origin")
+	require.NotContains(t, csp, "frame-ancestors *", "frame-ancestors must name 'self', not a wildcard")
+	require.NotContains(t, csp, "script-src 'unsafe-inline'", "script-src is a hash, never a blanket inline grant")
+	require.NotContains(t, csp, "nonce-", "script-src is a hash source — the bytes carry no stamped secret")
+	// The CSP's hash must name the served script ELEMENT's text, recomputed
+	// here from the body — not the sidecar the handler reads, so a drifted
+	// sidecar fails.
+	hdrHash := regexp.MustCompile(`script-src 'sha256-([A-Za-z0-9+/=]+)'`).FindStringSubmatch(csp)
+	require.Len(t, hdrHash, 2, "script-src must be exactly one sha256 source")
+	const openTag = `<script type="module">`
+	i := strings.Index(body, openTag)
+	j := strings.LastIndex(body, "</script>")
+	require.Greater(t, i, -1, "the document must carry its one inline module")
+	require.Greater(t, j, i, "the module element must close")
+	scriptSum := sha256.Sum256([]byte(body[i+len(openTag) : j]))
+	require.Equal(t, base64.StdEncoding.EncodeToString(scriptSum[:]), hdrHash[1],
+		"the CSP hash must be the sha256 of the script element's text")
+	require.NotContains(t, body, "nonce=", "the body's script element carries no nonce")
+	require.Empty(t, h.Get("Access-Control-Allow-Origin"), "no CORS grant — the frame fetches nothing")
+
+	// Validators: an unconditional GET serves the library, a conditional one
+	// does not. The ETag is a content hash, so it survives a daemon restart —
+	// the second GET still answers 304 instead of resending ~5 MB.
+	etag := h.Get("Etag")
+	require.NotEmpty(t, etag, "the frame document must carry a validator")
+	require.Equal(t, "no-cache", h.Get("Cache-Control"),
+		"no-cache, not a max-age: a revalidation after an upgrade must re-fetch")
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/"+mermaidFrameAsset, nil)
+	require.NoError(t, err)
+	req.Header.Set("If-None-Match", etag)
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	body304, err := io.ReadAll(resp.Body)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Equal(t, http.StatusNotModified, resp.StatusCode, "a matching validator must answer 304")
+	require.Empty(t, body304, "a 304 carries no body")
+	require.Equal(t, etag, resp.Header.Get("Etag"), "the 304 echoes its validator")
+	require.Equal(t, mermaidFrameCSP(), resp.Header.Get("Content-Security-Policy"),
+		"the 304 still carries the frame policy")
 
 	// Every other embedded asset keeps the shell CSP and emits no CORS grant.
 	// The walk skips the frame asset by its literal name — not by any
@@ -395,10 +427,10 @@ func TestServeSPA_MermaidFrameDocument(t *testing.T) {
 
 	// And the API side is the documented posture, untouched: the frame's
 	// opaque origin serializes as Origin "null", which is never echoed.
-	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/health", nil)
+	req, err = http.NewRequest(http.MethodGet, srv.URL+"/v1/health", nil)
 	require.NoError(t, err)
 	req.Header.Set("Origin", "null")
-	resp, err := http.DefaultClient.Do(req)
+	resp, err = http.DefaultClient.Do(req)
 	require.NoError(t, err)
 	_ = resp.Body.Close()
 	require.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"), "Origin null is never echoed on the API")

@@ -73,10 +73,11 @@ await build({
 // every load is denied — and the whole library plus its postMessage bootstrap
 // is INLINE, so the frame issues zero fetches of its own: no credential-less
 // request for an authenticating proxy to refuse, and no CSP URL-source an
-// IPv6 or proxied UI origin would have to spell. The daemon serves the file
-// with a per-process script-src nonce stamped over __AF_MMD_FRAME_NONCE__
-// (daemon/webserve.go); the script element is the only code in the document
-// that can run.
+// IPv6 or proxied UI origin would have to spell. The daemon authorizes the
+// one script element by HASH (script-src 'sha256-…' read from the sidecar
+// written below, daemon/webserve.go), which is why the file needs no stamped
+// nonce — its bytes are static, and the ETag they feed stays valid across
+// restarts.
 const frameBuild = await build({
   entryPoints: { "mermaid-frame": "src/mermaid_chunk.ts" },
   bundle: true,
@@ -107,7 +108,15 @@ await writeFile(
   "dist/lazy/mermaid-frame.html",
   `<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">` +
     `<meta charset="utf-8">` +
-    `<script type="module" nonce="__AF_MMD_FRAME_NONCE__">${frameInline}</script>`,
+    `<script type="module">${frameInline}</script>`,
+);
+// The CSP hash source is a digest of the script ELEMENT's text — the exact
+// bytes between <script> and </script> — so it is computed over frameInline,
+// not the file. The daemon reads the sidecar into script-src rather than
+// parsing it back out of the HTML (daemon/webserve.go).
+await writeFile(
+  "dist/lazy/mermaid-frame.sha256",
+  createHash("sha256").update(frameInline, "utf8").digest("base64"),
 );
 
 // The code-fence grammars (#6731) ship as dist/lazy/codeblocks.js, built above

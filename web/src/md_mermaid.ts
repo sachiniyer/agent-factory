@@ -50,17 +50,24 @@ let chunk: Promise<MermaidChunk> | null = null;
 // navigated document, dist/lazy/mermaid-frame.html, not srcdoc: srcdoc
 // inherits the page's CSP, and in WebKit an inherited 'self' matches nothing
 // in an opaque origin — every load is denied. The document carries the whole
-// library inline under a per-process script-src nonce the daemon stamps at
-// serve time (daemon/webserve.go), so the frame fetches nothing on its own:
+// library inline under a script-src hash the daemon names in its CSP
+// (daemon/webserve.go), so the frame fetches nothing on its own:
 // no credential-less subrequest for an authenticating proxy to refuse, and
-// no CSP URL-source an IPv6 or proxied UI origin would have to spell.
+// no CSP URL-source an IPv6 or proxied UI origin would have to spell. The
+// header also carries `sandbox` and `frame-ancestors 'self'`, so the document
+// is opaque however it is loaded — a foreign origin cannot frame it at all,
+// and a top-level load gets the opaque origin too, never af's storage.
 
 // The frame lives as long as the page does, unless a render out-waits us —
 // see renderOne, which tears it down so a hung render can't keep the
 // chunk's serialized queue busy until reload.
 let renderFrame: HTMLIFrameElement | null = null;
 
-const OPEN_FRAME_TIMEOUT_MS = 30_000;
+// The frame document is ~1.5 MB on the wire (the whole library inline — the
+// no-subresource property #6669 requires), so the open timeout is the fetch
+// itself on a slow link: ~30 s at 400 kbps. 60 s leaves headroom for the
+// parse+eval that follows; a hung open still fails and retries as before.
+const OPEN_FRAME_TIMEOUT_MS = 60_000;
 // A frame that just failed to open is not retried inside this window —
 // otherwise every repaint would poll the whole open timeout again.
 const OPEN_RETRY_AFTER_MS = 30_000;

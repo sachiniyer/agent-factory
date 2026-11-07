@@ -171,13 +171,33 @@ grant anywhere (the chunk CORS the first cut added is gone).
 
 Against master's committed dist measured with the same `.html`-inclusive
 filter: the `mermaid.js`/`mermaid-*` set (5,187,694 raw / 1,507,069 gzip) is
-replaced by the single frame document (5,256,161 / 1,495,719) — +68,467 raw /
-**−11,350 gzip**, a single-file bundle being smaller compressed than the split
-set's per-chunk framing. `lazy_*` moves to 398,411 / 129,854 (+575 / +168 of
-epoch-guarded frame loading and the wire-source gates) and the shell entries
-are byte-identical (+0 / +0 — `index.html` counts on both sides). Every entry
-stays inside its existing budget — `mermaid_gzip_bytes` lands 5% under — so no
-baseline moves. Every timing and layout-shift baseline is unchanged.
+replaced by the single frame document (5,256,397 / 1,484,809) — +68,703 raw /
+**−22,260 gzip**, a single-file bundle being smaller compressed than the split
+set's per-chunk framing. (The script is authorized by sha256 now rather than a
+stamped nonce, so the served bytes are static and the document's ETag survives
+a daemon restart; `lazy/mermaid-frame.sha256`, the sidecar the CSP names, is
+44 bytes and outside the `.js|.css|.html` filter.) `lazy_*` moves to 399,058 /
+129,835 (+651 / +149 of epoch-guarded frame loading and the wire-source
+gates) and the shell entries are byte-identical (+0 / +0 — `index.html` counts
+on both sides). Every entry stays inside its existing budget —
+`mermaid_gzip_bytes` lands 5% under — so no baseline moves. Every timing and
+layout-shift baseline is unchanged.
+
+**The wire cost the byte table does not show (#6669 re-review).** These
+entries measure embedded bytes, not fetches-per-open — and the two diverge.
+Under master's split chunks a first flowchart fetched ~29 files, 867 KB raw /
+239 KB gzip. Under this design the frame's first open fetches the whole
+document — 5.26 MB raw / 1.48 MB gzip — and on loopback first render is
+~1.1 s in Chromium and ~3.5 s in WebKit (independent review's figures,
+~0.30 s/~0.36 s on master): the price of the one-navigation property, since
+any subresource the frame fetched would arrive at an authenticating proxy
+with no credentials to answer. That is a first-open cost, paid once: the
+document now carries `ETag` + `Cache-Control: no-cache`, so every later open
+revalidates — measured on the wire as a 304 with a zero-length body in both
+engines — and a frame re-open happens only when the renderer is torn down
+(a self-navigation, a channel failure or a hung render), never on an ordinary
+render or theme flip. On a 400 kbps link the 1.48 MB download is ~30 s, which
+is why the open timeout is 60 s rather than the document's own 30 s.
 
 ### Code-fence grammar lazy chunk provenance (#6731)
 

@@ -12,6 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -88,7 +89,21 @@ test("the Mermaid renderer is its own frame document, outside the shell and the 
   assert.ok(!docs.includes("dagre"), "the Docs bundle must not bundle the Mermaid library");
   const html = readFileSync(frameDoc, "utf8");
   assert.ok(html.includes("dagre"), "the Mermaid library must live in the frame document");
-  assert.ok(html.includes("__AF_MMD_FRAME_NONCE__"), "the frame document must carry its CSP nonce placeholder");
+  assert.ok(!html.includes("nonce="), "the script element carries no nonce — the CSP authorizes it by sha256");
+  // The sidecar is what the daemon's script-src names: the sha256 of the
+  // script ELEMENT's text, recomputed here from the file — never trusted from
+  // the builder's own pipeline.
+  const openTag = `<script type="module">`;
+  const scriptText = html.slice(
+    html.indexOf(openTag) + openTag.length,
+    html.lastIndexOf("</script>"),
+  );
+  const sidecar = readFileSync(join(webRoot, "dist", "lazy", "mermaid-frame.sha256"), "utf8").trim();
+  assert.equal(
+    sidecar,
+    createHash("sha256").update(scriptText, "utf8").digest("base64"),
+    "mermaid-frame.sha256 must hash the exact script text the CSP's hash source names",
+  );
   assert.strictEqual(
     (html.match(/<\/script/g) ?? []).length,
     1,

@@ -2,7 +2,7 @@ package daemon
 
 import (
 	"bytes"
-	"crypto/rand"
+	"crypto/sha256"
 	"encoding/hex"
 	"errors"
 	"fmt"
@@ -231,42 +231,76 @@ var contentTypeByExt = map[string]string{
 
 // mermaidFrameAsset is the one embedded file that does NOT carry webCSP: the
 // document the Docs live preview's render iframe navigates to (web/src/
-// md_mermaid.ts, #6669). The frame is sandboxed without allow-same-origin —
-// an opaque origin — and the whole mermaid library is INLINE in the file, so
+// md_mermaid.ts, #6669). The whole mermaid library is INLINE in the file, so
 // the document runs on a CSP its own headers describe rather than webCSP:
-// default-src 'none' with a single script-src nonce for the one module the
-// file ships. The nonce is stamped into the bytes at serve time; the meta-CSP
-// alternative is impossible (meta-delivered CSP cannot express nonce
-// sources), and a URL source could never spell every origin this host may be
-// reached at (IPv6 literals, proxy-mounted paths).
+// default-src 'none' with a single hash source for the one module the file
+// ships. The hash is computed at build time (web/build.mjs writes the
+// sidecar) — the meta-CSP alternative is impossible (meta-delivered CSP
+// cannot express hash sources either), and a URL source could never spell
+// every origin this host may be reached at (IPv6 literals, proxy-mounted
+// paths). A hash source rather than a stamped nonce keeps the served bytes
+// static, which is what makes the validators below stable across restarts.
 const mermaidFrameAsset = "lazy/mermaid-frame.html"
 
-const mermaidFrameNoncePlaceholder = "__AF_MMD_FRAME_NONCE__"
+// mermaidFrameHashAsset is the build's sidecar: the base64 sha256 of the
+// frame document's script ELEMENT text, which is the value CSP hash sources
+// are defined over — not the file bytes.
+const mermaidFrameHashAsset = "lazy/mermaid-frame.sha256"
 
-// mermaidFrameNonce is per-process rather than per-request so the stamped
-// bytes stay constant and the gzip cache below stays honest. The nonce's job
-// here is not secrecy — the file is static and embedded — but proof to CSP
-// that this one script element is the document's own: script tags injected
-// into the frame's DOM by a hostile diagram can never carry it, so
-// 'unsafe-inline' never has to appear.
-var mermaidFrameNonce = sync.OnceValue(func() string {
-	var b [16]byte
-	if _, err := rand.Read(b[:]); err != nil {
-		panic("webserve: cannot draw a mermaid-frame CSP nonce: " + err.Error())
+// mermaidFrameCSP is the frame document's whole policy, computed once from
+// the embedded sidecar. Nothing fetches, nothing navigates, nothing embeds —
+// the inline module (hash-tagged) runs, mermaid writes inline styles, and an
+// img node may paint inline data:. Every other directive a diagram could
+// reach is 'none'.
+//
+// Two directives isolate the document itself rather than a load it names
+// (#6669 re-review): the iframe element's own sandbox attribute only applies
+// when af is the one framing it — this file is public (the static shell is
+// pre-auth), so a foreign origin could frame it UNSANDBOXED and run the
+// library at the daemon's real origin, where af's token sits in storage.
+// `sandbox allow-scripts` gives the document an opaque origin however it is
+// loaded — framed by anyone, or opened top-level — and `frame-ancestors
+// 'self'` refuses foreign framing outright, so the only page that ever sees
+// the document execute is this origin's own.
+var mermaidFrameCSP = sync.OnceValue(func() string {
+	sum, err := fs.ReadFile(web.Dist(), mermaidFrameHashAsset)
+	if err != nil {
+		panic("webserve: embedded " + mermaidFrameHashAsset + " missing (run `make web-build`): " + err.Error())
 	}
-	return hex.EncodeToString(b[:])
-})
-
-// mermaidFrameCSP is the frame document's whole policy: nothing fetches,
-// nothing navigates, nothing embeds — the inline module (nonce-tagged) runs,
-// mermaid writes inline styles, and an img node may paint inline data:. Every
-// other directive a diagram could reach is 'none'.
-func mermaidFrameCSP(nonce string) string {
-	return "default-src 'none'; script-src 'nonce-" + nonce + "'; " +
+	return "default-src 'none'; script-src 'sha256-" + strings.TrimSpace(string(sum)) + "'; " +
 		"style-src 'unsafe-inline'; img-src data:; font-src 'none'; " +
 		"connect-src 'none'; media-src 'none'; object-src 'none'; " +
 		"frame-src 'none'; worker-src 'none'; child-src 'none'; " +
-		"manifest-src 'none'; base-uri 'none'; form-action 'none'"
+		"manifest-src 'none'; base-uri 'none'; form-action 'none'; " +
+		"sandbox allow-scripts; frame-ancestors 'self'"
+})
+
+// mermaidFrameETag is the frame document's cache validator: a hash of the
+// embedded bytes, so it changes exactly when the file does and survives
+// daemon restarts — a revalidation after a restart still answers 304, and
+// only a real af upgrade refetches the document. The document is ~5 MB raw
+// (the whole mermaid library inline); without a validator every frame open
+// paid that again, which is the #6669 re-review's phone-perf finding.
+var mermaidFrameETag = sync.OnceValue(func() string {
+	data, err := fs.ReadFile(web.Dist(), mermaidFrameAsset)
+	if err != nil {
+		panic("webserve: embedded " + mermaidFrameAsset + " missing (run `make web-build`): " + err.Error())
+	}
+	sum := sha256.Sum256(data)
+	return `"` + hex.EncodeToString(sum[:]) + `"`
+})
+
+// etagMatches reports whether an If-None-Match header selects etag — the
+// header is a comma list of validators, "*" matches anything, and a weak
+// prefix still matches for GET.
+func etagMatches(ifNoneMatch, etag string) bool {
+	for _, cand := range strings.Split(ifNoneMatch, ",") {
+		cand = strings.TrimSpace(cand)
+		if cand == "*" || strings.TrimPrefix(cand, "W/") == etag {
+			return true
+		}
+	}
+	return false
 }
 
 // serveAsset writes the embedded file named `name` and returns true, or returns
@@ -295,12 +329,21 @@ func serveAsset(assets fs.FS, gz *web.GzipCache, name string, w http.ResponseWri
 	}
 	if name == mermaidFrameAsset {
 		// The frame document gets its own CSP (overriding the shell's, which
-		// serveSPA already wrote) and the nonce stamped into the bytes. The
-		// stamp lands BEFORE the gzip decision so the cache holds the stamped
-		// compressed form — the nonce is per-process, so it stays consistent.
-		nonce := mermaidFrameNonce()
-		w.Header().Set("Content-Security-Policy", mermaidFrameCSP(nonce))
-		data = bytes.ReplaceAll(data, []byte(mermaidFrameNoncePlaceholder), []byte(nonce))
+		// serveSPA already wrote) and cache validators. The bytes are static —
+		// hash-authorized script, no stamped nonce — so a revalidation answers
+		// 304 and a re-opened render frame does not fetch the library again.
+		w.Header().Set("Content-Security-Policy", mermaidFrameCSP())
+		w.Header().Set("Cache-Control", "no-cache")
+		etag := mermaidFrameETag()
+		w.Header().Set("ETag", etag)
+		if etagMatches(r.Header.Get("If-None-Match"), etag) {
+			// A 304 must carry the headers the 200 would have carried (RFC
+			// 9110 §15.4.5): the validators and the Vary the compression
+			// branch below would set — never the body.
+			w.Header().Add("Vary", "Accept-Encoding")
+			w.WriteHeader(http.StatusNotModified)
+			return true
+		}
 	}
 	// Zero modtime → ServeContent emits no Last-Modified and does no caching
 	// negotiation; it still infers Content-Type from the extension and handles
