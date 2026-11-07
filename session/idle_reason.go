@@ -570,6 +570,14 @@ func (i *Instance) ResumeInterruptedTaskRunAtEpoch(observedAt time.Time, observe
 	i.taskRunIdleEdgeHeld = true
 	i.taskRunPromptAttemptAt = time.Time{}
 	i.taskRunTurnObservedAt = time.Time{}
+	// The session-wide delivery verdict belongs to the predecessor runtime the
+	// interruption retired: the replacement pane owns neither the send it did
+	// not make nor the verdict that send produced. Left in place, a stale
+	// PromptNotDelivered pairs with the gate-gated unbound boundary and the
+	// #5219 forced checkpoint to manufacture the exact "initial delivery proven
+	// undelivered" shape the restart twin in FromInstanceData treats as a
+	// terminal failure — tearing down a live, resumed run (#6223 review).
+	i.lastPromptDeliveryStatus = ""
 	i.touchLocked()
 	return true
 }
