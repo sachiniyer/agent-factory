@@ -67,15 +67,23 @@ type ProgramCheck struct {
 	PathViaWorkingDir bool
 	// ShellViaWorkingDir is PathViaWorkingDir for ShellPath.
 	ShellViaWorkingDir bool
-	// PathCandidates lists every runnable file a bare-name PATH search
-	// matched, in PATH order — Path is always the first entry. It is empty
-	// for a path-form executable (a single-point lookup has no fallbacks) and
-	// on failure. A caller proving "would the launch resolve this name" needs
-	// the tail: when the selected file is absent at launch the search
-	// continues, exactly as the launch's lookup will.
+	// PathCandidates lists every PATH location a bare-name search tried, in
+	// PATH order — including locations whose file is missing or non-executable
+	// in this checkout, which a clean session worktree can still resolve from
+	// the committed tree. Path is the first currently-runnable entry. It is
+	// empty for a path-form executable (a single-point lookup has no
+	// fallbacks) and on failure. A caller proving "would the launch resolve
+	// this name" needs the full order: the launch's lookup continues past a
+	// missing file exactly the same way.
 	PathCandidates []ExecutableCandidate
 	// ShellCandidates is PathCandidates for ShellPath's lookup.
 	ShellCandidates []ExecutableCandidate
+	// LaunchDirKnown reports whether the modeled working dir the agent's
+	// resolution anchored at is proven — an opaque prefix (a wrapper, cd)
+	// may change the real cwd before exec, leaving WorkingDir filled with
+	// the launch dir but unverified. The shell's own lookup is always
+	// anchored at the launch dir regardless of this flag.
+	LaunchDirKnown bool
 }
 
 // CheckTmux verifies that tmux is present and can report its version.
@@ -185,13 +193,13 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	if override := launch.Override("PATH"); override.Present {
 		pathValue, pathSet = override.Value, override.Set
 	}
+	check.LaunchDirKnown = launch.LaunchDirKnown()
 	// The agent's resolution is anchored at the modeled WorkingDir, which
-	// derives from the launch dir only while every modeled env -C stayed
-	// relative — an absolute -C lands at a fixed literal dir instead. The
-	// derivation also requires the modeled dir to be proven: an unmodeled
-	// prefix may have moved the real cwd anywhere, in which case WorkingDir
-	// still carries the launch dir but does not prove it.
-	dirDerivesFromLaunch := launch.LaunchDirKnown() && launch.WorkingDirFromLaunch()
+	// derives from the launch dir unless an absolute env -C replaced it with
+	// a fixed literal dir. LaunchDirKnown tracks whether that anchor is
+	// proven at all — it does not relax the derivation: an opaque wrapper's
+	// unmodeled chdir makes the answer unverified, not launch-independent.
+	dirDerivesFromLaunch := launch.WorkingDirFromLaunch()
 	path, via, candidates, err := resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet, dirDerivesFromLaunch)
 	check.Path = path
 	check.PathViaWorkingDir = via
@@ -229,19 +237,22 @@ func resolveShellExecutableAt(words []string, executable, workingDir string) (st
 // resolveExecutableAt resolves exe against workingDir and pathValue exactly as
 // the launch will, and reports whether that answer depended on the session's
 // launch directory. dirDerivesFromLaunch says whether workingDir derives from
-// it: false when an absolute env -C made the modeled dir a fixed literal, or
-// when an unmodeled prefix left the real dir unproven — resolutions anchored
-// there are then not worktree answers. A relative path token is joined to
-// workingDir, and a bare name found under a relative or empty PATH entry is
-// resolved inside it — both answer differently from a session worktree's cwd
-// than they do here, so their flag is dirDerivesFromLaunch. An absolute token,
-// a ~ expansion, or a bare name under an absolute PATH entry resolves the same
-// file from any directory (false). On failure the flag still describes the
-// ATTEMPTED lookup — a not-found under a launch-dependent PATH entry is
-// true — so a caller can tell "could not resolve because of the directory"
-// from "could not resolve anywhere". For a bare name the returned candidates
-// are EVERY runnable match in PATH order, resolved first — the launch's
-// lookup continues past an absent file exactly the same way.
+// it: false when an absolute env -C made the modeled dir a fixed literal —
+// resolutions anchored there are then not worktree answers. A relative path
+// token is joined to workingDir, and a bare name found under a relative or
+// empty PATH entry is resolved inside it — both answer differently from a
+// session worktree's cwd than they do here, so their flag is
+// dirDerivesFromLaunch. An absolute token, a ~ expansion, or a bare name
+// under an absolute PATH entry resolves the same file from any directory
+// (false). On failure the flag still describes the ATTEMPTED lookup — a
+// not-found under a launch-dependent PATH entry is true — so a caller can
+// tell "could not resolve because of the directory" from "could not resolve
+// anywhere". For a bare name the returned candidates are EVERY PATH location
+// tried, in order — including files missing or non-executable in this
+// checkout — with resolved pointing at the first currently-runnable one.
+// The launch's lookup reaches the same locations in the same order, so a
+// caller must judge each location's launch-time answer, not only the
+// checkout's selection.
 func resolveExecutableAt(exe, workingDir, pathValue string, pathSet, dirDerivesFromLaunch bool) (string, bool, []ExecutableCandidate, error) {
 	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
 		path := config.ExpandTilde(exe)
@@ -258,6 +269,8 @@ func resolveExecutableAt(exe, workingDir, pathValue string, pathSet, dirDerivesF
 	var notExecutable string
 	var notExecutableVia bool
 	var candidates []ExecutableCandidate
+	resolved := ""
+	resolvedVia := false
 	sawVia := false
 	for _, dir := range filepath.SplitList(pathValue) {
 		via := false
@@ -270,6 +283,7 @@ func resolveExecutableAt(exe, workingDir, pathValue string, pathSet, dirDerivesF
 		}
 		sawVia = sawVia || via
 		candidate := filepath.Join(dir, exe)
+		candidates = append(candidates, ExecutableCandidate{Path: candidate, ViaWorkingDir: via})
 		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() {
 			continue
@@ -281,16 +295,18 @@ func resolveExecutableAt(exe, workingDir, pathValue string, pathSet, dirDerivesF
 			}
 			continue
 		}
-		candidates = append(candidates, ExecutableCandidate{Path: candidate, ViaWorkingDir: via})
+		if resolved == "" {
+			resolved, resolvedVia = candidate, via
+		}
 	}
-	if len(candidates) > 0 {
-		return candidates[0].Path, candidates[0].ViaWorkingDir, candidates, nil
+	if resolved != "" {
+		return resolved, resolvedVia, candidates, nil
 	}
 	if notExecutable != "" {
-		return "", notExecutableVia, nil, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
+		return "", notExecutableVia, candidates, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
 			shellsuggest.Command("chmod", "+x", notExecutable))
 	}
-	return "", sawVia, nil, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
+	return "", sawVia, candidates, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 }
 
 func resolveExecutable(exe string) (string, error) {

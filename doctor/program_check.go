@@ -209,9 +209,13 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 		via         bool
 		candidates  []preflight.ExecutableCandidate
 		wrapper     bool
+		// proven is false when an opaque prefix leaves the modeled launch
+		// dir unverified (preflight's LaunchDirKnown) — the warn then
+		// reports the resolution as unproven rather than asserting it.
+		proven bool
 	}{
-		{check.Executable, check.Path, check.PathViaWorkingDir, check.PathCandidates, false},
-		{check.ShellExecutable, check.ShellPath, check.ShellViaWorkingDir, check.ShellCandidates, true},
+		{check.Executable, check.Path, check.PathViaWorkingDir, check.PathCandidates, false, check.LaunchDirKnown},
+		{check.ShellExecutable, check.ShellPath, check.ShellViaWorkingDir, check.ShellCandidates, true, true},
 	} {
 		candidates := grp.candidates
 		if len(candidates) == 0 {
@@ -222,43 +226,83 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 			// candidates beyond the resolved file itself.
 			candidates = []preflight.ExecutableCandidate{{Path: grp.path, ViaWorkingDir: grp.via}}
 		}
-		selected := candidates[0]
-		if !selected.ViaWorkingDir {
-			continue // the same absolute file at launch — never the worktree's problem
-		}
-		verdict, _, provable := probeCandidate(selected)
-		if !provable || verdict == baseTreeRunnable {
-			continue
-		}
-		// The selected file provably does not run at launch — but a bare-name
-		// lookup does not stop at the first dir: the session's search
-		// continues through the remaining PATH entries exactly as the
-		// checkout's did, and a later candidate that IS runnable at launch
-		// resolves the name to a different file than this checkout picked.
-		r, _ := baseRef()
-		fallback := ""
-		for _, cand := range candidates[1:] {
-			v, display, provable := probeCandidate(cand)
-			if provable && v == baseTreeRunnable {
-				fallback = display
+		// selIdx is the location this checkout's lookup selected — the first
+		// runnable-now candidate, which is not necessarily the first entry:
+		// earlier locations may hold a file the checkout cannot run but a
+		// clean worktree can (committed-but-locally-deleted).
+		selIdx := -1
+		for i, cand := range candidates {
+			if cand.Path == grp.path {
+				selIdx = i
 				break
 			}
 		}
-		if fallback != "" {
-			return fallsBackDetail(check.Command, grp.token, selected.Path, fallback, grp.wrapper, verdict, r),
+		if selIdx < 0 {
+			candidates = append([]preflight.ExecutableCandidate{{Path: grp.path, ViaWorkingDir: grp.via}}, candidates...)
+			selIdx = 0
+		}
+		// Walk the lookup in order and simulate the launch: each location's
+		// launch answer is its own verdict, so the session's resolution is
+		// the FIRST provably-runnable location — which may sit before the
+		// checkout's selection (a committed file missing locally) or after
+		// it (an installed fallback past an untracked one).
+		type probe struct {
+			verdict  baseTreeEntry
+			display  string
+			provable bool
+		}
+		results := make([]probe, len(candidates))
+		launchIdx, launchDisplay := -1, ""
+		for i, cand := range candidates {
+			results[i].verdict, results[i].display, results[i].provable = probeCandidate(cand)
+			if launchIdx < 0 && results[i].provable && results[i].verdict == baseTreeRunnable {
+				launchIdx, launchDisplay = i, results[i].display
+			}
+		}
+		if launchIdx == selIdx {
+			continue // the session resolves the same file — the PASS is honest
+		}
+		r, _ := baseRef()
+		var detail, remediation string
+		sel := results[selIdx]
+		switch {
+		case launchIdx >= 0 && launchIdx < selIdx:
+			// An earlier location shadows the selection: the session
+			// resolves a different file regardless of what the selection's
+			// own verdict is.
+			detail, remediation = shadowedAtLaunchDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper),
+				shadowedAtLaunchRemediation()
+		case !sel.provable:
+			// Resolved outside the repo or no base ref exists — the
+			// worktree question does not apply, not an unproven answer.
+			continue
+		case sel.verdict == baseTreeUnknown:
+			// The probe could not answer for the selected file — fail
+			// closed: report the launch resolution as unverified rather
+			// than letting it pass on a git error.
+			detail, remediation = unverifiableInBaseDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper, r),
+				unverifiableInBaseRemediation()
+		case launchIdx > selIdx:
+			// The session skips the proven-missing selection for a rescue.
+			detail, remediation = fallsBackDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper, sel.verdict, r),
 				fallsBackRemediation(r)
+		default: // launchIdx < 0 — the selected is proven non-runnable and nothing rescues
+			switch sel.verdict {
+			case baseTreeAbsent:
+				detail, remediation = absentFromBaseDetail(check.Command, grp.token, grp.path, grp.wrapper, r),
+					absentFromBaseRemediation(r)
+			case baseTreeNotExecutable:
+				detail, remediation = notExecutableInBaseDetail(check.Command, grp.token, grp.path, grp.wrapper, r),
+					notExecutableInBaseRemediation(r)
+			default:
+				detail, remediation = notAFileInBaseDetail(check.Command, grp.token, grp.path, grp.wrapper, r),
+					notAFileInBaseRemediation()
+			}
 		}
-		switch verdict {
-		case baseTreeAbsent:
-			return absentFromBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
-				absentFromBaseRemediation(r)
-		case baseTreeNotExecutable:
-			return notExecutableInBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
-				notExecutableInBaseRemediation(r)
-		case baseTreeNotAFile:
-			return notAFileInBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
-				notAFileInBaseRemediation()
+		if !grp.proven {
+			detail = unprovenLaunchDirClause() + detail
 		}
+		return detail, remediation
 	}
 	return "", ""
 }
@@ -464,4 +508,50 @@ func fallsBackRemediation(ref string) string {
 	}
 	return "commit the file so the session runs it instead of the fallback, " +
 		"or provision it in each session via setup_commands or the setup overlay"
+}
+
+// shadowedAtLaunchDetail covers an earlier PATH location that resolves at
+// launch even though this checkout skips it — typically a committed file
+// that is deleted or non-executable locally: the worktree still contains it,
+// the session's lookup finds it first, and the file this checkout selected
+// never runs.
+func shadowedAtLaunchDetail(command, token, resolvedPath, launchDisplay string, wrapper bool) string {
+	return fmt.Sprintf("%s, but the session's lookup resolves %s first — "+
+		"the session runs that file, not the one this checkout selects",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), launchDisplay)
+}
+
+func shadowedAtLaunchRemediation() string {
+	return "ensure the intended file wins the lookup in the session's worktree — commit and push it, " +
+		"or provision it via setup_commands — or accept that sessions resolve the checked-in file"
+}
+
+// unprovenLaunchDirClause prefixes a launch-dir-dependent warning whose
+// modeled anchor is unverified — an opaque prefix (a wrapper, cd) may change
+// the real cwd before exec, so the modeled resolution cannot be proven. The
+// qualification is retained (the launch dir is the model's best answer) but
+// reported as unverified rather than asserted.
+func unprovenLaunchDirClause() string {
+	return "af cannot prove the directory this command launches in — an opaque prefix may change it — but as modeled, "
+}
+
+// unverifiableInBaseDetail reports a worktree-mapped candidate the base-tree
+// probe could not answer: the ref resolves but reading its tree failed (a
+// promised object that will not fetch under GIT_NO_LAZY_FETCH, a damaged
+// object store). The check fails closed — the launch resolution is reported
+// as unverified rather than allowed to pass unqualified, and a known rescue
+// is hedged as "if it is absent", not asserted.
+func unverifiableInBaseDetail(command, token, resolvedPath, fallback string, wrapper bool, ref string) string {
+	detail := fmt.Sprintf("%s, but af could not verify whether %s contains it — "+
+		"the base-tree probe failed, so what the session resolves is unverified",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
+	if fallback != "" {
+		detail += fmt.Sprintf("; if it is absent there, the session's lookup falls back to %s", fallback)
+	}
+	return detail
+}
+
+func unverifiableInBaseRemediation() string {
+	return "retry once git can read the tree — or commit and push the file " +
+		"so the session does not depend on the probe's answer"
 }
