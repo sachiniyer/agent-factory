@@ -517,14 +517,15 @@ func unavailableRuntimeCleanup(data InstanceData, cause error) func() error {
 // this — a refusal that names one anyway would be the dead end the issue is
 // about — so the way out is the record itself: repair the persisted handle so
 // the next daemon start rebuilds it, or remove what it names and drop the row,
-// by hand. The daemon must be stopped for the row edit: it flushes its
-// in-memory state over the file on exit.
+// by hand. The daemon must be stopped for the row edit in BOTH options: it
+// flushes its in-memory state over the file on exit, so a repair made while it
+// runs is overwritten by the same rejected handle at the next shutdown.
 func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData) string {
 	home := "the AF home (~/.agent-factory, or $AGENT_FACTORY_HOME when set)"
 	if dir, err := config.GetConfigDir(); err == nil {
 		home = dir
 	}
-	return fmt.Sprintf("To move on, either repair this session's `runtime_cleanup` entry in its repo's `instances/<repoID>/instances.json` under %s, then `af daemon restart` and `af sessions kill %q` again — or remove %s yourself, then stop the daemon (`af daemon status` names its pid; a clean exit flushes the file), delete the row whose id is %q from that file, and run `af` again",
+	return fmt.Sprintf("To move on, stop the daemon and let it exit first — send SIGTERM to the pid `af daemon status` names and wait for it; the exit flushes this row over the file — then either repair this session's `runtime_cleanup` entry in its repo's `instances/<repoID>/instances.json` under %s and start af — the rebuilt row can then be restored, or `af sessions kill %q` removes it — or remove %s yourself, delete the row whose id is %q from that file, and start af again",
 		home, title, cleanupResourceDescription(ws, handle), id)
 }
 
