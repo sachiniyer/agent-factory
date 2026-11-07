@@ -797,8 +797,14 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// against a later clock (#6765). The banner anchor rides with it for
 		// the same reason (#6823): the poll must be able to tell a clipped
 		// re-read of THIS banner from a wall the pane shows afterward.
-		i.limitResetAt = ev.resetAt
-		i.limitResetEvidence = ev.evidence
+		// The sighting resolves against the wall the row already recorded
+		// BEFORE the live fields take it: a re-read of the banner the row
+		// parked on keeps the recorded claim's first parse instead of the
+		// rolled-forward instant its re-parse minted (#6959).
+		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
+			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached)
+		i.limitResetAt = resetAt
+		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix
 		i.limitBannerCount = ev.banner.Count
 	}
@@ -808,7 +814,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
 		i.attributeLimitIdentityLocked()
-		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt, false)
+		i.noteLimitWallClaimLocked(i.currentAgentNameLocked(), i.limitResetAt, i.limitResetEvidence,
+			LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, i.limitResetAt, i.limitResetEvidence, false)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).

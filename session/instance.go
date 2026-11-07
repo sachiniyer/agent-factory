@@ -315,6 +315,16 @@ type Instance struct {
 	// poll sighting anyway.
 	limitBannerPrefix string
 	limitBannerCount  int
+	// lastLimitWall is the claim the live wall fields last recorded — kept
+	// after ClearLimitReached retires them (#6959). A retry's re-parse of the
+	// banner still on the pane resolves a clock-relative phrase against the
+	// later clock and would otherwise mint a rolled-forward reset the parked
+	// claim can no longer veto; the shadow is what proves the re-read is the
+	// wall the row already recorded (same identity, same anchor, compatible
+	// phrase) rather than a new fact. Memory-only, like the live anchor: it
+	// names a position inside a captured pane, meaningless after a restart —
+	// named identities still have the durable ledger for that boundary.
+	lastLimitWall limitWallClaim
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
 	// accountLimitObsUnpersisted marks an observation change — a fresh wall or

@@ -32,6 +32,19 @@ type LimitBanner struct {
 	Count int
 }
 
+// limitWallClaim is one recorded usage-limit wall fact: the identity it was
+// attributed to, the reset claim it advertised, and the banner anchor that
+// sighted it. It is the shape the "last wall" shadow carries past a
+// ClearLimitReached so a cleared row can still recognize a re-read of the
+// banner it parked on (#6959).
+type limitWallClaim struct {
+	agent    string
+	account  string
+	resetAt  time.Time
+	evidence string
+	banner   LimitBanner
+}
+
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
 // sets the LiveLimitReached liveness and stores the parsed reset time (zero
 // when the banner carried none) for the sidebar badge and the auto-resume
@@ -170,6 +183,8 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.limitResetAt = time.Time{}
 	i.limitResetEvidence = ""
+	i.noteLimitWallClaimLocked(i.limitAgent, time.Time{}, "",
+		LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }
@@ -228,16 +243,99 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	if i.inFlightOp != OpNone {
 		return false
 	}
+	agent := i.currentAgentNameLocked()
+	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
+		i.liveness == LiveLimitReached)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.limitResetEvidence = evidence
 	i.limitBannerPrefix = banner.Prefix
 	i.limitBannerCount = banner.Count
-	i.attributeLimitIdentityLocked()
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, lv == LiveLimitReached)
+	i.attributeLimitIdentityAsLocked(agent)
+	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, instanceNow().UTC())
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
+}
+
+// noteLimitWallClaimLocked records the claim the live wall fields just took
+// as the row's last parked wall — the shadow a cleared row's re-park consults
+// before believing a re-parse minted a new reset (#6959). It always mirrors
+// what the row actually parked on: the RESOLVED claim, never the raw
+// re-parse. Caller holds i.mu.
+func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner) {
+	i.lastLimitWall = limitWallClaim{
+		agent:    agent,
+		account:  i.Account,
+		resetAt:  resetAt,
+		evidence: evidence,
+		banner:   banner,
+	}
+}
+
+// originalLimitResetLocked resolves which reset claim a limit sighting's park
+// should record. A clock-time ("reset at 3pm") or relative ("try again in N")
+// phrase parses against the READING clock, so a retry that re-parses the
+// banner still on the pane mints a later instant on every pass — the re-read
+// rolls the wall forward forever and the session never resumes (#6959). The
+// FIRST parse is the one nearest the wall the provider printed, so a sighting
+// the row already recorded keeps the recorded claim and the re-parse adds
+// nothing:
+//
+//   - parked and the sighting's phrase IS the live claim's — the same wall
+//     re-read the #6765 dedupe names. A sighting carrying a resolved reset
+//     but NO phrase is new evidence, never a re-read: re-parsing a
+//     phrase-bearing banner always yields the phrase again, so a phraseless
+//     reset came from a different evidence path and applies.
+//   - the shadow the last park left behind — the cleared row's memory of its
+//     own wall. Identity AND anchor must match; then a repeated phrase is the
+//     recorded wall's re-parse, and a clause-free read at the recorded
+//     position is that wall clipped — either keeps the first parse. A
+//     re-worded clause, a resolved-reset-without-phrase, or a banner printed
+//     below is a different fact and falls through.
+//   - the durable observation ledger — the named identity's recorded wall —
+//     which survives the restart the memory-only shadow cannot.
+//
+// A sighting none of those recognize keeps its own parse: a genuinely new
+// limit fact parks with its own reset.
+func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked bool) (time.Time, string) {
+	if parked && i.limitAgent == agent && i.limitAccount == i.Account &&
+		evidence != "" && evidence == i.limitResetEvidence {
+		return i.limitResetAt, i.limitResetEvidence
+	}
+	if w := i.lastLimitWall; w.agent == agent && w.account == i.Account &&
+		sameLimitBannerPosition(w.banner.Prefix, banner.Prefix) &&
+		!(w.banner.Count > 0 && banner.Count > w.banner.Count) {
+		switch {
+		case resetAt.IsZero() && evidence == "":
+			// The recorded wall's re-read with its clause clipped: same
+			// position, nothing parsed. The recorded claim is still the best
+			// evidence — and keeping it is what stops the re-park from
+			// dropping to "unknown reset" when the banner merely scrolled.
+			return w.resetAt, w.evidence
+		case evidence != "" && evidence == w.evidence:
+			// The phrase the recorded wall advertised re-reads identically:
+			// this IS that banner's re-parse, and the first parse stands.
+			return w.resetAt, w.evidence
+		case evidence != "" && w.evidence == "" && !w.resetAt.IsZero():
+			// The recorded wall's clause was never captured (a mirrored or
+			// resolved park); the same-position read now shows one. The
+			// recorded instant still stands — it is nearer the wall print —
+			// and the now-visible phrase is adopted for future re-reads.
+			return w.resetAt, evidence
+		}
+	}
+	if evidence != "" {
+		for idx := range i.accountLimitObservations {
+			observation := &i.accountLimitObservations[idx]
+			if observation.Agent == agent && observation.Account == i.Account &&
+				observation.Evidence == evidence {
+				return observation.ResetAt, observation.Evidence
+			}
+		}
+	}
+	return resetAt, evidence
 }
 
 // attributeLimitIdentityLocked publishes which runtime's identity produced the
@@ -285,8 +383,8 @@ func (i *Instance) attributeLimitIdentityAsLocked(agent string) {
 // banner every tick would otherwise rewrite the row (and republish the
 // session) once per second for as long as the session stayed parked.
 // Caller holds i.mu.
-func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, wasParked bool) {
-	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, wasParked, instanceNow().UTC())
+func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool) {
+	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, evidence, wasParked, instanceNow().UTC())
 }
 
 // recordAccountLimitObservationAtLocked is recordAccountLimitObservationLocked
@@ -295,7 +393,7 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 // instant — a copy that postdates its source observation outlives every
 // retraction that was already on its way between the source's sighting and the
 // park (#6880). Caller holds i.mu.
-func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, wasParked bool, sightedAt time.Time) {
+func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool, sightedAt time.Time) {
 	if agent == "" || account == "" {
 		return
 	}
@@ -317,11 +415,24 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		if observation.Agent == agent && observation.Account == account &&
 			observation.ResetAt.IsZero() == resetAt.IsZero() {
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
+			if evidence != "" && observation.Evidence == evidence {
+				// The phrase the stored reset parsed from re-reads
+				// identically: this is that banner's re-parse, not a new
+				// claim. A clock-relative phrase mints a later instant on
+				// every pass, so the later value is never adopted — the
+				// first parse stays (#6959).
+				retained = observation.ResetAt
+			}
 			if wasParked && observation.ResetAt.Equal(retained) &&
 				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 				return
 			}
-			observation.ResetAt = retained
+			if !retained.Equal(observation.ResetAt) {
+				observation.ResetAt = retained
+				// The phrase follows the reset it produced: a claim that
+				// tightened the boundary names the phrase that carried it.
+				observation.Evidence = evidence
+			}
 			// The row's newest sighting never rewinds: the instant is when the
 			// row last saw this claim's wall, and a copy stamped with an older
 			// source instant — or a lagging detection clock — must not move it
@@ -336,7 +447,7 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		}
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
-		Agent: agent, Account: account, ResetAt: resetAt, ObservedAt: sighted,
+		Agent: agent, Account: account, ResetAt: resetAt, Evidence: evidence, ObservedAt: sighted,
 	})
 	i.accountLimitObsUnpersisted = true
 	i.touchLocked()
@@ -388,6 +499,8 @@ func (i *Instance) SetLimitResetAt(resetAt time.Time) {
 	// A mirrored reset carries no reset phrase; the slot must not keep
 	// describing a parse it did not produce (#6765).
 	i.limitResetEvidence = ""
+	i.noteLimitWallClaimLocked(i.limitAgent, resetAt, "",
+		LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
 	i.noteStateChangeLocked(lv, op, prevReset)
 }
 
@@ -431,6 +544,8 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 	// The reset is the one the owner read off this row when it began the
 	// attempt — the stored evidence still describes it, so the slot stays.
 	i.limitResetAt = resetAt
+	i.noteLimitWallClaimLocked(i.limitAgent, resetAt, i.limitResetEvidence,
+		LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }

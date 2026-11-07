@@ -79,6 +79,15 @@ type AccountLimitObservationData struct {
 	Agent   string    `json:"agent"`
 	Account string    `json:"account"`
 	ResetAt time.Time `json:"reset_at,omitempty"`
+	// Evidence is the reset phrase whose parse produced ResetAt — the wall
+	// claim's durable identity (#6959). A time-only or relative phrase
+	// resolves against the READING clock, so a stale banner re-parsed on
+	// every retry mints a later instant each time; the phrase is what proves
+	// a sighting is that same wall's re-read and not a new claim, and the
+	// first parse — the one nearest the wall the provider printed — stays.
+	// Empty on rows written before the field existed and on walls whose
+	// sighting carried no parseable phrase.
+	Evidence string `json:"evidence,omitempty"`
 	// ObservedAt is the instant af first observed THIS wall fact — or last
 	// observed it as a new wall event, after the session left its parked
 	// state. Re-seeing the unchanged banner still displayed advances nothing

@@ -797,7 +797,15 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 // the committed copy carries none. The row's live anchor is re-stamped with
 // it, matching setLimitReachedLocked, so the NEXT same-pane re-read has a
 // stored anchor to compare against.
+//
+// The sighting's reset resolves through originalLimitResetLocked before it
+// writes: a retry that re-parses the banner the row already parked on mints a
+// rolled-forward instant off a clock-relative phrase, and the recorded claim
+// — live, shadowed, or durable — vetoes it (#6959). A sighting that is
+// genuinely new keeps its own parse.
 func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked bool) error {
+	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
+		i.liveness == LiveLimitReached)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -808,6 +816,7 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	i.limitBannerPrefix = banner.Prefix
 	i.limitBannerCount = banner.Count
 	i.attributeLimitIdentityAsLocked(agent)
+	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded
@@ -822,7 +831,7 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, wasParked, sightedAt)
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, wasParked, sightedAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }

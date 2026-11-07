@@ -54,7 +54,7 @@ func requireParkedReset(t *testing.T, inst *Instance, want time.Time) {
 // a day out on every pass: the session never resumes.
 func TestLimitPark_RereadSameBannerKeepsReset_PlainResume(t *testing.T) {
 	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
-	parked := clockReset(sightedAt)  // today 15:00
+	parked := clockReset(sightedAt)         // today 15:00
 	reReadAt := parked.Add(3 * time.Minute) // past reset + the 2m grace
 	rolled := clockReset(reReadAt)          // the SAME phrase re-parsed: tomorrow 15:00
 
