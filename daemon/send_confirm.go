@@ -42,13 +42,14 @@ func sendAttemptClock(c *task.SendConfirmation, attemptedAt *time.Time) func() t
 	}
 }
 
-// sendReverifyWindow bounds the asynchronous re-verification a sent-unverified
-// task send keeps (#6590). The bounded Confirm window exists to answer "did the
-// agent take this send" within seconds; the poll-fed watch exists because the
-// common miss — a queued draft waiting out a long-running turn — answers the
-// same question minutes later. A turn beginning this far after the send can no
-// longer be attributed to it, so the pending watch retires unfired and the
-// recorded verdict stays sent-unverified. Package var so tests compress it.
+// sendReverifyWindow bounds the asynchronous re-verification an unproven task
+// send keeps — sent-unverified (#6590) or sent-unconfirmed (#6819). The bounded
+// Confirm window exists to answer "did the agent take this send" within
+// seconds; the poll-fed watch exists because the common miss — a queued draft
+// waiting out a long-running turn — answers the same question minutes later.
+// A turn beginning this far after the send can no longer be attributed to it,
+// so the pending watch retires unfired and the recorded verdict stands.
+// Package var so tests compress it.
 var sendReverifyWindow = 10 * time.Minute
 
 // unverifiedSendWatch is one task send awaiting the re-verification of its
@@ -71,21 +72,31 @@ type unverifiedSendWatch struct {
 	fired bool
 }
 
-// armUnverifiedSendAfter keeps a sent-unverified TASK send's evidence contract
-// armed past the bounded Confirm window (#6590): the status poll feeds the
+// reverifiableSendStatus is the set of send verdicts that record an UNPROVEN
+// task delivery — sent-unverified, or could-not-confirm when the pane was not
+// observable at the send at all (#6819). For either, the send's turn evidence
+// may still arrive, so the re-verification watch stays armed on the same
+// contract. A delivered, refused, or errored send has a verdict there is
+// nothing left to re-verify.
+func reverifiableSendStatus(status session.PromptDeliveryStatus) bool {
+	return status == session.PromptSentUnverified || status == session.PromptCouldNotConfirm
+}
+
+// armUnverifiedSendAfter keeps an unproven TASK send's evidence contract armed
+// past the bounded Confirm window (#6590, #6819): the status poll feeds the
 // send's bound watch, and a turn the agent demonstrably began after the send
 // promotes the task's recorded verdict. Only task provenance arms — a manual
 // send-prompt owns no task row its verdict could be promoted on — and a send
 // already delivered, refused, or errored has a verdict there is nothing left
 // to re-verify.
 func (m *Manager) armUnverifiedSendAfter(repoID string, instance *session.Instance, taskID string, status session.PromptDeliveryStatus, sendErr error, c *task.SendConfirmation, attemptedAt time.Time) {
-	if sendErr != nil || status != session.PromptSentUnverified || taskID == "" {
+	if sendErr != nil || !reverifiableSendStatus(status) || taskID == "" {
 		return
 	}
 	m.armUnverifiedSendWatch(stableSessionKey(repoID, instance), instance, taskID, attemptedAt, c.ReverifyWatch())
 }
 
-// armUnverifiedSendWatch registers a sent-unverified task send for the poll-fed
+// armUnverifiedSendWatch registers an unproven task send for the poll-fed
 // re-verification the bounded Confirm window could not finish (#6590). A task
 // whose verdict is already delivered or never attempted never arms — the send
 // either provably landed or provably did not.
@@ -153,7 +164,7 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 	for taskID, entry := range byTask {
 		if !now.Before(entry.expiresAt) {
 			// Past the window a turn can no longer be attributed to the send;
-			// the watch retires unfired and the verdict stays sent-unverified.
+			// the watch retires unfired and the recorded verdict stands.
 			delete(byTask, taskID)
 			continue
 		}
@@ -217,31 +228,44 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 // belongs to another delivery.
 var unverifiedVerdictWriteSlack = 90 * time.Second
 
+// reverifiableRunStatus is the recorded last_run_status values whose send may
+// still be proven after the fact — sent-unverified and sent-unconfirmed
+// (#6819). Any other verdict is settled and the promotion compare-and-set must
+// refuse it.
+func reverifiableRunStatus(status string) bool {
+	return status == TaskStatusSentUnverified || status == TaskStatusSentUnconfirmed
+}
+
 // promoteUnverifiedTaskSend applies a fired re-verification watch: the task's
-// recorded sent-unverified verdict becomes sent. The compare-and-set IS the
-// safety property — it re-reads the row under the store lock and promotes only
-// the verdict THIS send produced: the status still reads sent-unverified AND
-// last_run_at sits within the verdict-write slack of this send's attempt. A
-// newer outcome already on the row, a never-unverified verdict, and — when the
-// task was retargeted and a different session's delivery rewrote the record —
-// a verdict stamped outside the slack are all refused rather than clobbered
-// (#6590, #6592 review). last_run_at is passed nil: the promotion is not a new
-// occurrence, and rewriting the stamp would hide missed fires from the
-// overdue derivation.
+// recorded unproven verdict — sent-unverified or sent-unconfirmed — becomes
+// sent. The compare-and-set IS the safety property — it re-reads the row under
+// the store lock and promotes only the verdict THIS send produced: the status
+// still reads unproven AND last_run_at sits within the verdict-write slack of
+// this send's attempt. A newer outcome already on the row, a settled verdict,
+// and — when the task was retargeted and a different session's delivery
+// rewrote the record — a verdict stamped outside the slack are all refused
+// rather than clobbered (#6590, #6592 review). last_run_at is passed nil: the
+// promotion is not a new occurrence, and rewriting the stamp would hide missed
+// fires from the overdue derivation.
 func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) bool {
+	var promoted string
 	_, applied, err := task.UpdateTaskStatusIf(taskID, nil, taskSendStatus(session.PromptDelivered), func(cur task.Task) bool {
-		if cur.LastRunStatus != TaskStatusSentUnverified || cur.LastRunAt == nil {
+		if !reverifiableRunStatus(cur.LastRunStatus) || cur.LastRunAt == nil {
 			return false
 		}
-		return !cur.LastRunAt.Before(attemptedAt) &&
-			!cur.LastRunAt.After(attemptedAt.Add(unverifiedVerdictWriteSlack))
+		if cur.LastRunAt.Before(attemptedAt) ||
+			cur.LastRunAt.After(attemptedAt.Add(unverifiedVerdictWriteSlack)) {
+			return false
+		}
+		promoted = cur.LastRunStatus
+		return true
 	})
 	if err != nil {
-		m.warn().Printf("task %s: could not promote its unverified delivery to %q: %v", taskID, title, err)
+		m.warn().Printf("task %s: could not promote its unproven delivery to %q: %v", taskID, title, err)
 		return false
 	}
 	if applied {
-		m.info().Printf("task %s: sent-unverified delivery to %q promoted to sent; the agent's turn began after the send (#6590)", taskID, title)
+		m.info().Printf("task %s: %s delivery to %q promoted to sent; the agent's turn began after the send (#6590, #6819)", taskID, promoted, title)
 	}
 	return applied
 }
@@ -307,9 +331,9 @@ func (m *Manager) sweepUnverifiedSendWatches() {
 }
 
 // rearmUnverifiedSendWatches rebuilds re-verification after a restart for task
-// sends whose durable verdict still reads sent-unverified inside the evidence
-// window (#6590). The rebuilt contract can only be stricter than the lost
-// watch's, never weaker:
+// sends whose durable verdict still reads unproven — sent-unverified or
+// sent-unconfirmed — inside the evidence window (#6590, #6819). The rebuilt
+// contract can only be stricter than the lost watch's, never weaker:
 //
 //   - the boundary is the verdict's own last_run_at — the write, which lands
 //     within the verdict slack of the attempt, so it sits strictly AFTER the
@@ -341,7 +365,7 @@ func (m *Manager) rearmUnverifiedSendWatches() {
 	var rearms []pendingRearm
 	m.mu.Lock()
 	for _, t := range tasks {
-		if t.LastRunStatus != TaskStatusSentUnverified || t.LastRunAt == nil {
+		if !reverifiableRunStatus(t.LastRunStatus) || t.LastRunAt == nil {
 			continue
 		}
 		boundary := *t.LastRunAt

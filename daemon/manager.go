@@ -612,9 +612,10 @@ type Manager struct {
 	taskRunTurnWatches map[string]*taskRunTurnWatchEntry
 
 	// unverifiedSendWatches holds the poll-fed chrome watchers re-verifying
-	// task sends recorded sent-unverified (#6590): a turn the agent began
-	// after the send promotes the recorded verdict to sent. Keyed by
-	// stableSessionKey then task ID. Guarded by pausedMu.
+	// task sends recorded unproven — sent-unverified or sent-unconfirmed
+	// (#6590, #6819): a turn the agent began after the send promotes the
+	// recorded verdict to sent. Keyed by stableSessionKey then task ID.
+	// Guarded by pausedMu.
 	unverifiedSendWatches map[string]map[string]*unverifiedSendWatch
 	// pendingSwapNoticeWatches holds the poll-fed chrome watchers
 	// re-verifying ambiguous account-swap notice verdicts — one per committed

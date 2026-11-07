@@ -139,6 +139,7 @@ export class FakeElement extends FakeNode {
   readonly style: Record<string, string> = {};
   value = "";
   checked = false;
+  selected = false;
   disabled = false;
   hidden = false;
   type = "";
@@ -240,6 +241,12 @@ export class FakeElement extends FakeNode {
   }
   override set textContent(v: string) {
     this.replaceChildren(v);
+  }
+  // A real <select> reflects its value into option.selected; the modal's
+  // summary line reads select.selectedOptions[0], so tests need the same
+  // projection: the option matching the current value, or one marked selected.
+  get selectedOptions(): FakeElement[] {
+    return this.children.filter((c) => c.tagName === "OPTION" && (c.selected || c.value === this.value));
   }
 
   append(...nodes: (FakeNode | string)[]): void {

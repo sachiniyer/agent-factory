@@ -50,15 +50,32 @@ fi
 
 # Push the bump to master, tolerating a master that moved during the ~4-minute
 # build (#1927). The auto-gate squash-merges CI-green PRs continuously, so a
-# plain push races that traffic and dies non-fast-forward, throwing away four
-# good builds. On a rejection, rebase the one-line bump onto the new tip and
-# retry, bounded. A rebase drops the bump as already-applied when a prior run
-# already landed it (patch-id), so the re-run converges to a clean no-op push.
-# A genuine conflict — only a rival version bump would touch this line — fails
+# plain push races that traffic and is rejected — '(fetch first)' when the new
+# tip is a commit this checkout has not fetched, '(non-fast-forward)' when it
+# has the tip and it is not an ancestor. Both mean master advanced; rebase the
+# one-line bump onto the new tip and retry, bounded. Any other failed push
+# (auth, network, a protected-branch refusal) prints git's own error and fails
+# on its own terms: naming it "master advanced" would point a reader at the
+# #1927 race instead of the real cause (#6747, #6744), and rebasing cannot fix
+# it. A rebase drops the bump as already-applied when a prior run already
+# landed it (patch-id), so the re-run converges to a clean no-op push. A
+# genuine conflict — only a rival version bump would touch this line — fails
 # the rebase loudly here instead of force-pushing over another release.
 MAX_ATTEMPTS="${RELEASE_PUSH_MAX_ATTEMPTS:-5}"
 attempt=1
-until git push origin HEAD:master; do
+while :; do
+	if push_out=$(git push origin HEAD:master 2>&1); then
+		printf '%s\n' "$push_out"
+		break
+	fi
+	printf '%s\n' "$push_out"
+	case "$push_out" in
+	*non-fast-forward*|*"fetch first"*) ;;
+	*)
+		echo "::error::Version bump push failed and not because master moved — nothing a rebase can fix (git output above)"
+		exit 1
+		;;
+	esac
 	if [ "$attempt" -ge "$MAX_ATTEMPTS" ]; then
 		echo "::error::Version bump push rejected after ${MAX_ATTEMPTS} attempts (master kept moving)"
 		exit 1

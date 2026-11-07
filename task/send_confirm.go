@@ -138,9 +138,11 @@ func (c *SendConfirmation) Confirm(ctx context.Context) bool {
 }
 
 // ReverifyWatch exposes the bound chrome watcher for the daemon's asynchronous
-// re-verification feed (#6590): a send that stays sent-unverified past the
-// bounded Confirm window — the pane was already mid-turn at the send, or the
-// turn simply started after the budget — keeps its evidence contract alive.
+// re-verification feed (#6590): a send that stays unproven past the bounded
+// Confirm window — sent-unverified because the pane was already mid-turn at
+// the send or the turn simply started after the budget, or could-not-confirm
+// because the pane was never observable at all (#6819) — keeps its evidence
+// contract alive.
 // The daemon feeds the status poll's pane captures into this watch; it fires
 // only on the same evidence Confirm applies: for the timed agents a status row
 // ticking with its own elapsed inside the send's age, for the others scoped

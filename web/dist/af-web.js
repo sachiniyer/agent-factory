@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "73ad5c5a1882";
+var CLIENT_VERSION = "dc04dc52aecc";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -13735,7 +13735,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
       // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value
+      // The select DISPLAYS that default once the registry lands, but a
+      // preselect is not a choice: only a deliberate pick may travel as an
+      // explicit account, or off-box backends see the default as a user
+      // request and refuse the create outright (#6695).
+      account: accountSelection.picked ? accountSelect.value : AMBIENT_ACCOUNT
     });
   });
   queueMicrotask(() => titleInput.focus());

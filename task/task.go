@@ -129,10 +129,11 @@ type Task struct {
 	LastRunAt     *time.Time `json:"last_run_at,omitempty"`
 	LastRunStatus string     `json:"last_run_status,omitempty"`
 	// LastRunTarget is the session title the last-run delivery targeted (#6590):
-	// the identity a restarted daemon re-arms a sent-unverified send's
-	// re-verification against. The task's own TargetSession is config and may
-	// have been retargeted since the verdict was stamped — only the delivery's
-	// recorded target can name the session the send actually went to.
+	// the identity a restarted daemon re-arms an unproven send's
+	// re-verification — sent-unverified or sent-unconfirmed (#6819) — against.
+	// The task's own TargetSession is config and may have been retargeted since
+	// the verdict was stamped — only the delivery's recorded target can name
+	// the session the send actually went to.
 	// Daemon-owned, never patchable, stamped with a verdict timestamp.
 	LastRunTarget string `json:"last_run_target,omitempty"`
 	// LastRunID / LastRunStartedAt identify the run LastRunStatus describes

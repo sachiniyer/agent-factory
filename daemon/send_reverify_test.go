@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"testing"
 	"time"
 
@@ -62,6 +63,21 @@ func (b *unverifiedSendBackend) Preview(*session.Instance) (string, error) {
 
 func (b *unverifiedSendBackend) SendPromptCommandWithStatus(*session.Instance, string) (session.PromptDeliveryStatus, error) {
 	return session.PromptSentUnverified, nil
+}
+
+// unconfirmedSendBackend stages the #6819 send: the pane could not be observed
+// at all — the pre-send capture errors the way an unanswerable pane does — and
+// the send itself reports could-not-confirm.
+type unconfirmedSendBackend struct {
+	*session.FakeBackend
+}
+
+func (b *unconfirmedSendBackend) Preview(*session.Instance) (string, error) {
+	return "", fmt.Errorf("pane capture unavailable")
+}
+
+func (b *unconfirmedSendBackend) SendPromptCommandWithStatus(*session.Instance, string) (session.PromptDeliveryStatus, error) {
+	return session.PromptCouldNotConfirm, nil
 }
 
 // The end-to-end property: a task delivery the pane could not prove at the
@@ -131,6 +147,19 @@ func seedUnverifiedTask(t *testing.T, taskID string) {
 	}))
 	now := time.Now()
 	_, err := task.UpdateTaskStatus(taskID, &now, TaskStatusSentUnverified)
+	require.NoError(t, err)
+}
+
+// seedUnconfirmedTask is seedUnverifiedTask for a send whose pane could not be
+// observed at all: the run record carries the honest "no verdict either way".
+func seedUnconfirmedTask(t *testing.T, taskID string) {
+	t.Helper()
+	require.NoError(t, task.AddTask(task.Task{
+		ID: taskID, Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: t.TempDir(), Enabled: true,
+	}))
+	now := time.Now()
+	_, err := task.UpdateTaskStatus(taskID, &now, TaskStatusSentUnconfirmed)
 	require.NoError(t, err)
 }
 
@@ -526,4 +555,153 @@ func TestUnverifiedSendReArmSkipsUntargetedRow(t *testing.T) {
 	m.pausedMu.Lock()
 	defer m.pausedMu.Unlock()
 	require.Empty(t, m.unverifiedSendWatches, "a row with no recorded delivery target must not re-arm")
+}
+
+// #6819: a task delivery the pane could not confirm at all records
+// sent-unconfirmed and arms the SAME re-verification watch an unverified send
+// does — the ReverifyWatch the confirmation builds for an unobservable pane
+// carries the identical evidence contract, bound to the send's attempt
+// instant. A turn the agent demonstrably began after the send promotes the
+// recorded verdict to sent.
+func TestUnconfirmedSendArmsReverifyAndPromotes(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root",
+		&unconfirmedSendBackend{FakeBackend: session.NewFakeBackend()}, true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6819", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: t.TempDir(), Enabled: true,
+	}))
+
+	status, err := m.sendPromptGuarded(SendPromptRequest{
+		Title: "root", RepoID: repoID, Prompt: "nightly check", TaskOrigin: true, TaskID: "feed6819",
+	}, nil)
+	require.NoError(t, err)
+	require.Equal(t, session.PromptCouldNotConfirm, status)
+
+	// The watcher records the verdict the way taskrun maps it.
+	now := time.Now()
+	_, uerr := task.UpdateTaskStatus("feed6819", &now, TaskStatusSentUnconfirmed)
+	require.NoError(t, uerr)
+
+	key := stableSessionKey(repoID, inst)
+	m.pausedMu.Lock()
+	armed := m.unverifiedSendWatches[key]["feed6819"]
+	m.pausedMu.Unlock()
+	require.NotNil(t, armed, "a could-not-confirm task send must arm the same re-verification watch")
+	require.True(t, m.unverifiedSendWatchPending(key),
+		"a pending watch must make the paused backstop observe the attached pane")
+	attemptedAt := armed.attemptedAt
+
+	// The pane becomes observable again and the agent begins the send's turn:
+	// the verdict promotes exactly the way a sent-unverified one does.
+	captured := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
+	}
+	captured(reverifyIdleRow(), attemptedAt.Add(time.Second))
+	captured(reverifyBusyRow("1s"), attemptedAt.Add(2*time.Second))
+	captured(reverifyBusyRow("2s"), attemptedAt.Add(3*time.Second))
+	stored, err := task.GetTask("feed6819")
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"a turn beginning after an unconfirmed send must promote its verdict to sent")
+}
+
+// The pane stays unobservable or no turn ever begins: nothing weaker than the
+// send-bound turn evidence fires the watch, so the honest verdict stands and
+// the watch retires on its window — for an unconfirmed send exactly as for an
+// unverified one.
+func TestUnconfirmedSendNoTurnStaysUnconfirmed(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	attemptedAt := time.Now()
+	seedUnconfirmedTask(t, "feed6820")
+	key := stableSessionKey(repoID, inst)
+	m.armUnverifiedSendWatch(key, inst, "feed6820", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+
+	// Captures that fail — the pane still unobservable — feed nothing, and
+	// readable frames with no new turn — an idle composer, a staged draft —
+	// never fire the watch.
+	for i := 0; i < 5; i++ {
+		at := attemptedAt.Add(time.Duration(i+1) * time.Second)
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Captured: false}, at)
+		m.noteUnverifiedSendEvidence(key, inst,
+			session.Observation{Content: reverifyDraftRow("staged draft text"), Captured: true}, at)
+	}
+	stored, err := task.GetTask("feed6820")
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusSentUnconfirmed, stored.LastRunStatus,
+		"an unconfirmed send with no post-send turn must stay sent-unconfirmed")
+
+	// Past the re-verification window the watch retires: a turn beginning this
+	// late can no longer be attributed to the send. Arm at an instant already
+	// outside the window rather than racing the daemon clock.
+	expiredAttempt := attemptedAt.Add(-2 * sendReverifyWindow)
+	m.armUnverifiedSendWatch(key, inst, "feed6820", expiredAttempt, task.NewTurnWatch("claude", expiredAttempt))
+	m.noteUnverifiedSendEvidence(key, inst,
+		session.Observation{Content: reverifyIdleRow(), Captured: true}, time.Now())
+	m.pausedMu.Lock()
+	_, still := m.unverifiedSendWatches[key]
+	m.pausedMu.Unlock()
+	require.False(t, still, "an expired re-verification watch must be retired, not fed")
+}
+
+// A turn already running when the send went out — its own elapsed clock
+// outdates the send — is not this send's evidence, so it must not promote a
+// sent-unconfirmed verdict either.
+func TestUnconfirmedSendPreSendTurnDoesNotPromote(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	attemptedAt := time.Now()
+	seedUnconfirmedTask(t, "feed6821")
+	key := stableSessionKey(repoID, inst)
+	m.armUnverifiedSendWatch(key, inst, "feed6821", attemptedAt, task.NewTurnWatch("claude", attemptedAt))
+
+	captured := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
+	}
+	// The turn running at send time keeps ticking; its clock outdates the send.
+	captured(reverifyBusyRow("9m 1s"), attemptedAt.Add(time.Second))
+	captured(reverifyBusyRow("9m 2s"), attemptedAt.Add(2*time.Second))
+	stored, err := task.GetTask("feed6821")
+	require.NoError(t, err)
+	require.Equal(t, TaskStatusSentUnconfirmed, stored.LastRunStatus,
+		"a turn older than the send must not promote a sent-unconfirmed verdict")
+}
+
+// A restart drops the in-memory watch, but the verdict row is durable: a
+// sent-unconfirmed row still inside its window re-arms on the first sweep,
+// same as a sent-unverified one (#6819).
+func TestUnconfirmedSendReArmsFromVerdictRowOnBoot(t *testing.T) {
+	m, repoID, repoPath := newStatusTestManager(t)
+	inst := registerStarted(t, m, repoID, repoPath, "root", session.NewFakeBackend(), true, session.Running)
+	require.NoError(t, task.AddTask(task.Task{
+		ID: "feed6822", Name: "nightly", WatchCmd: "emit.sh",
+		TargetSession: "root", ProjectPath: repoPath, Enabled: true,
+	}))
+	lastRun := time.Now().Add(-time.Minute)
+	_, err := task.UpdateTaskStatusForTarget("feed6822", &lastRun, TaskStatusSentUnconfirmed, "root")
+	require.NoError(t, err)
+
+	m.sweepUnverifiedSendWatches() // the boot sweep re-arms in-window rows
+
+	key := stableSessionKey(repoID, inst)
+	m.pausedMu.Lock()
+	entry := m.unverifiedSendWatches[key]["feed6822"]
+	m.pausedMu.Unlock()
+	require.NotNil(t, entry, "a sent-unconfirmed row inside its window must re-arm after restart")
+	require.True(t, entry.attemptedAt.Equal(lastRun),
+		"the verdict's own write stamp is the rebuilt evidence boundary")
+
+	// The rebuilt watch promotes on the same contract: a turn demonstrably
+	// beginning after the stamp.
+	captured := func(content string, at time.Time) {
+		m.noteUnverifiedSendEvidence(key, inst, session.Observation{Content: content, Captured: true}, at)
+	}
+	captured(reverifyIdleRow(), lastRun.Add(2*time.Second))
+	captured(reverifyBusyRow("1s"), lastRun.Add(3*time.Second))
+	captured(reverifyBusyRow("2s"), lastRun.Add(4*time.Second))
+	stored, err := task.GetTask("feed6822")
+	require.NoError(t, err)
+	require.Equal(t, "sent", stored.LastRunStatus,
+		"a re-armed unconfirmed verdict must still promote on post-send turn evidence")
 }
