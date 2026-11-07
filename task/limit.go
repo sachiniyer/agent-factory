@@ -437,7 +437,12 @@ var (
 //
 // The clock token itself accepts a wrap between the [ap] and m of its
 // meridiem suffix — "2p\nm" — so a narrow pane that splits the suffix still
-// captures the clock; normalizeResetWhitespace rejoins it to "2pm". An
+// captures the clock; normalizeResetWhitespace rejoins it to "2pm". The wrap
+// also tolerates the continuation indent a real tmux wrap carries on the
+// next row (the "  ⎿  " gutter pushes a 5-space indent,
+// task/testdata/claude_working_tool.ansi:13) — "2p\n     m" — so an indented
+// continuation row still captures the clock; normalizeResetWhitespace strips
+// the indent and rejoins it to "2pm" the same way. An
 // optional trailing period that wraps onto its own row — "2pm
 // (America/New_York)\n." — is captured too (the only \n. the anchor can
 // reach is this trailing period; a period-newline in the pre-clock span is a
@@ -454,7 +459,7 @@ var (
 // still locates the clause; normalizeResetWhitespace rejoins it to "reset"
 // (gated on the joined letters forming "reset") so the evidence matches the
 // unwrapped render.
-var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n)?e(?:\r?\n)?s(?:\r?\n)?e(?:\r?\n)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
+var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n)?e(?:\r?\n)?s(?:\r?\n)?e(?:\r?\n)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n[ \t]*)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a

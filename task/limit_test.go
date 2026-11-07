@@ -907,6 +907,20 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
 		},
 		{
+			// The production layout (task/testdata/claude_working_tool.ansi):
+			// a wrapped continuation row carries a 5-space indent (the
+			// "  ⎿  " gutter). When the pane wraps INSIDE the [ap]m
+			// meridiem suffix and indents the continuation — "2p\n     m"
+			// — the anchor must still match across the indented newline
+			// and normalizeResetWhitespace must strip the indent and rejoin
+			// to "2pm"; without the indent tolerance the anchor misses the
+			// clock and the banner loses its reset time. Same EST instant as
+			// the unwrapped "2pm" form.
+			name:    "5h: meridiem wraps inside its letters with gutter indent",
+			content: "Claude usage limit reached. Your limit will reset at 2p\n     m (America/New_York).",
+			want:    want2pm,
+		},
+		{
 			// A narrow pane may wrap INSIDE an ordinal date suffix —
 			// "12th" splits as "12t\nh" — and the wrap must rejoin the
 			// letters (drop, not space) so monthDay sees "Nov 12th, 2027"
