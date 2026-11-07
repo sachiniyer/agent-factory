@@ -693,6 +693,25 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "\x1b[38;5;211mClaude usage limit reached. Your limit will reset at Nov.\n6, 2026 9am (America/New_York).\x1b[39m",
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
+		{
+			// A narrow pane may wrap INSIDE a multi-digit date token — the
+			// day "12" splits as "1\n2" — and the wrap newline must rejoin
+			// the digits (drop, not space) so monthDay sees "Nov 12" rather
+			// than "Nov 1 2" (which would parse the day as 1). Same EST
+			// instant as the unwrapped "Nov 12, 2026 9am" form.
+			name:    "weekly date: day wraps inside its digits",
+			content: "Claude usage limit reached. Your limit will reset at Nov 1\n2, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 12, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap INSIDE a multi-digit clock-hour token
+			// — "11am" splits as "1\n1am" — and the wrap newline must rejoin
+			// so parseClockTime sees "11am" (hour=11) rather than "1 1am"
+			// (hour=1). Same EST instant as the unwrapped "11am" form.
+			name:    "5h: hour wraps inside its digits",
+			content: "Claude usage limit reached. Your limit will reset at 1\n1am (America/New_York).",
+			want:    time.Date(2026, 1, 2, 11, 0, 0, 0, est).UTC(), // 11am EST -> 16:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -817,6 +836,18 @@ func TestClaudeResetUnrelatedClockRow(t *testing.T) {
 			// carry the capture across the newline into "2pm".)
 			name:    "period-terminated styled clause then unrelated clock",
 			content: "Claude usage limit reached. Your limit will reset at some point soon.\x1b[39m\nuser draft: meet Monday at 2pm",
+		},
+		{
+			// An unparseable clause that merely ends with an abbreviated
+			// month must NOT cross the row boundary into a later row's clock:
+			// the month-abbreviation branch only consumes "Nov.\n" when the
+			// next row begins with a digit (the day of a date continuation).
+			// Here "Nov.\n" is followed by "user draft: … at 2pm", so the
+			// branch fails, the period ends the clause, and the transcript's
+			// "2pm" is NOT adopted as the reset time — degrades to the
+			// documented hit=true, hasResetTime=false.
+			name:    "period-terminated month-abbrev clause then unrelated clock",
+			content: "Claude usage limit reached. Your limit will reset sometime in Nov.\nuser draft: meet at 2pm",
 		},
 		{
 			// The boundary is the period+newline, not just any newline: a
