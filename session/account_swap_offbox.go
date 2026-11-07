@@ -499,8 +499,11 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 	i.Account = name
 	i.accountAgent = agent
 	i.accountAutoSelected = automatic
-	i.agentRuntimeGeneration++
-	i.retireLimitWallShadowOnRuntimeReplaceLocked()
+	// The relaunched agent is a new runtime generation and stamps the
+	// replacement verdict atomically with the record — remote runtimes
+	// resolve no PID pin, so the generation is what tells a later sighting
+	// this pane is not the recorded wall's emitter (#6972, Codex).
+	i.markAgentRuntimeReplacedLocked(true)
 	i.agentConfigSkipped = append([]string(nil), agentConfigSkipped...)
 	if len(i.Tabs) > 0 {
 		i.setAgentConversationLocked(AgentConversationData{})
@@ -509,7 +512,6 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 	i.setRuntimeEvidenceLocked(strings.TrimSpace(program), 0, 0)
 	i.touchLocked()
 	i.mu.Unlock()
-	i.markAgentRuntimeReplaced(true)
 }
 
 // --- sandbox side ---

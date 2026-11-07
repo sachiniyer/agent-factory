@@ -127,12 +127,18 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 		if resetAt.IsZero() && evidence == "" {
 			return i.applyDegradedResightLocked(banner)
 		}
-		if evidence == i.limitResetEvidence {
+		if evidence == i.limitResetEvidence &&
+			(banner.Count == 0 || i.limitBannerCount == 0 || i.sameLiveLimitBannerLocked(banner)) {
 			// Already parked on the SAME wall claim — a re-read of an
 			// unchanged banner is not a new observation, whatever shape its
 			// reset took: the stored reset stays (the first parse is nearest
 			// the real window) and no durable fact moved, so nothing below may
-			// run.
+			// run. An ANCHORED sighting must still prove it is that emission —
+			// a banner printed below the recorded one re-using the same reset
+			// phrase is a new wall, and keeping the claim here would pin its
+			// send tombstone onto a wall whose prompt never went out (#6972,
+			// Codex). A sighting carrying no anchor cannot disprove position
+			// and keeps the phrase dedupe as before.
 			return true
 		}
 	}
@@ -353,6 +359,7 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 	if parked && i.limitAgent == agent && i.limitAccount == i.Account &&
 		evidence != "" && evidence == i.limitResetEvidence &&
 		i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) &&
+		(banner.Count == 0 || i.limitBannerCount == 0 || i.sameLiveLimitBannerLocked(banner)) &&
 		!ordSightedAt.After(i.accountLimitObservedAtLocked(agent, resetAt)) {
 		return i.limitResetAt, i.limitResetEvidence, i.limitPromptSent
 	}

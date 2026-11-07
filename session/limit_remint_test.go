@@ -778,6 +778,61 @@ func TestLimitWallResidue_ResetlessShadowIsResidue(t *testing.T) {
 		"the live zero-reset claim is the wall itself, not residue")
 }
 
+// TestLimitPark_NewEmissionDropsPromptSent is the #6972 Codex wedge: an
+// early retry lands its send and the unchanged banner re-parks the row at
+// the recorded reset with the send tombstone. A banner printed BELOW the
+// recorded one — same reset phrase, grown match count — is a NEW wall
+// whose prompt never went out: keeping the claim's tombstone there would
+// suppress the new wall's resume forever. The re-read must resolve a fresh
+// claim with a fresh tombstone.
+func TestLimitPark_NewEmissionDropsPromptSent(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(-time.Hour))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner, false)
+
+	// The retry's send lands: the clear retires the claim tombstoned.
+	inst.ClearLimitReachedSent()
+	require.False(t, inst.LimitReached())
+
+	// The unchanged banner re-parks the row at the recorded reset — and the
+	// tombstone rides with the borrowed claim.
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch))
+	require.True(t, inst.LimitWallPromptSent(),
+		"the re-park of the sent wall keeps its tombstone so the scheduler skips it")
+
+	// A second emission below it — same phrase, count grown — is a different
+	// wall: the tombstone must not follow.
+	second := LimitBanner{Prefix: staleBanner.Prefix + "Claude usage limit reached.\nmore transcript\n", Count: 2}
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, second, inst.stateEpoch),
+		"the new emission still parks the row at the wall")
+	require.False(t, inst.LimitWallPromptSent(),
+		"a provably new emission re-using the reset phrase must not inherit the sent tombstone")
+}
+
+// TestLimitWallResidue_RemoteReplaceIsNewEmission is the #6972 Codex remote
+// arm of item 1: a docker/ssh/hook session's in-place relaunch marks the
+// runtime replaced without ever resolving a concrete PID — runtimePID stays
+// 0, so only the generation advance distinguishes the new pane. The mark is
+// what wires remote replacements into that invalidation.
+func TestLimitWallResidue_RemoteReplaceIsNewEmission(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(3 * time.Minute))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner, false)
+	inst.ClearLimitReached()
+
+	// An in-place remote relaunch marks the runtime replaced — no PID pin
+	// exists either side, so the generation is the only binding.
+	inst.MarkAgentRuntimeReplacedForTest(true)
+	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence, false),
+		"a relaunched remote runtime's lookalike banner is a new emission, never residue")
+}
+
 // TestLimitWallShadow_DropsOnRuntimeReplace is the #6972 item-5 lifetime
 // bound: the shadow claim survives ClearLimitReached so a same-emission
 // re-read stays residue, but once the runtime it names is gone for good its
