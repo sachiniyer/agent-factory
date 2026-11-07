@@ -303,6 +303,13 @@ func writeAutostartUnit(t *testing.T, dir, home string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, autostartUnitName), []byte(unit), 0644))
 }
 
+// claimRefusal drops the claim's endpoint half where a test asserts only the
+// refusal text — the claimed-endpoint behaviour is pinned separately.
+func claimRefusal(req *net.TCPAddr) string {
+	r, _ := defaultHomeClaimRefusal(req)
+	return r
+}
+
 func TestDefaultHomeClaimRefusal(t *testing.T) {
 	_, defHome, _ := takeoverFixture(t)
 	req := reqFor(t, "127.0.0.1:8443")
@@ -314,43 +321,43 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 		// claims nothing — refusing here would strand the relocated user's
 		// only daemon off its own port.
 		writeDefHomeConfig(t, defHome, `"127.0.0.1:8443"`)
-		require.Empty(t, defaultHomeClaimRefusal(req))
+		require.Empty(t, claimRefusal(req))
 	})
 	t.Run("a never-configured default home claims nothing", func(t *testing.T) {
 		require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
-		require.Empty(t, defaultHomeClaimRefusal(req))
+		require.Empty(t, claimRefusal(req))
 	})
 	t.Run("a live daemon.lock claims the port — running evidence", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
-		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
-		require.Contains(t, defaultHomeClaimRefusal(req), "daemon.lock")
+		require.Contains(t, claimRefusal(req), "claims this port")
+		require.Contains(t, claimRefusal(req), "daemon.lock")
 	})
 	t.Run("a live daemon narrowed away by a moved listener claims nothing", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `"127.0.0.1:9443"`)
-		require.Empty(t, defaultHomeClaimRefusal(req),
+		require.Empty(t, claimRefusal(req),
 			"a running daemon on another port has nothing to lose on this one")
 	})
 	t.Run("a live daemon narrowed away by a disabled listener claims nothing", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `""`)
-		require.Empty(t, defaultHomeClaimRefusal(req))
+		require.Empty(t, claimRefusal(req))
 	})
 	t.Run("a live daemon on a wildcard same-port listener claims it", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `"0.0.0.0:8443"`)
-		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
+		require.Contains(t, claimRefusal(req), "claims this port")
 	})
 	t.Run("a live daemon with an unreadable config stays claimed", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		require.NoError(t, os.WriteFile(filepath.Join(defHome, "config.toml"),
 			[]byte("this is [ not toml"), 0600))
-		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port",
+		require.Contains(t, claimRefusal(req), "claims this port",
 			"unreadable intent is not disproven intent — a running daemon keeps its claim")
 	})
 	t.Run("a stale daemon.pid claims nothing", func(t *testing.T) {
@@ -362,7 +369,7 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 		defer func() { _ = f.Close() }()
 		require.NoError(t, os.WriteFile(filepath.Join(defHome, "daemon.pid"),
 			[]byte("1073741824"), 0600))
-		require.Empty(t, defaultHomeClaimRefusal(req))
+		require.Empty(t, claimRefusal(req))
 	})
 	t.Run("a live pid not attached to this home's lock claims nothing", func(t *testing.T) {
 		// daemon.pid names THIS live test process, but no fd of it is open
@@ -373,7 +380,7 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 		require.NoError(t, f.Close()) // exists, but unheld and unopened by the named pid
 		require.NoError(t, os.WriteFile(filepath.Join(defHome, "daemon.pid"),
 			[]byte(strconv.Itoa(os.Getpid())), 0600))
-		require.Empty(t, defaultHomeClaimRefusal(req))
+		require.Empty(t, claimRefusal(req))
 	})
 	t.Run("an enabled autostart unit serving it claims the port", func(t *testing.T) {
 		// No daemon running — the lock file is absent — but the OS is set to
@@ -383,21 +390,21 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 		stubIsEnabledAnswer(t, "enabled")
 		require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
 		require.NoError(t, os.Remove(filepath.Join(defHome, daemonLockFileName)))
-		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
-		require.Contains(t, defaultHomeClaimRefusal(req), "autostart")
+		require.Contains(t, claimRefusal(req), "claims this port")
+		require.Contains(t, claimRefusal(req), "autostart")
 	})
 	t.Run("a serving unit that is disabled claims nothing", func(t *testing.T) {
 		unitDir := withAutostartTestEnv(t, "linux")
 		writeAutostartUnit(t, unitDir, defHome)
 		stubIsEnabledAnswer(t, "disabled")
-		require.Empty(t, defaultHomeClaimRefusal(req),
+		require.Empty(t, claimRefusal(req),
 			"a disabled unit will not restart anything — it is not 'comes back' evidence")
 	})
 	t.Run("an enabled unit serving ANOTHER home claims nothing", func(t *testing.T) {
 		unitDir := withAutostartTestEnv(t, "linux")
 		writeAutostartUnit(t, unitDir, testguard.SocketTempDir(t))
 		stubIsEnabledAnswer(t, "enabled")
-		require.Empty(t, defaultHomeClaimRefusal(req),
+		require.Empty(t, claimRefusal(req),
 			"the unit restarts someone else's daemon, not this home's")
 	})
 }
@@ -415,7 +422,7 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 	req := reqFor(t, l.Addr().String())
 
 	t.Run("our own non-daemon process classifies non-daemon", func(t *testing.T) {
-		verdict, _ := classifyPortHolder(req)
+		verdict, _, _ := classifyPortHolder(req)
 		require.Equal(t, holderNonDaemon, verdict,
 			"a plain process holding the port is a squatter — the retry exists for it")
 	})
@@ -423,7 +430,7 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 	t.Run("a lock fd in a foreign home classifies foreign", func(t *testing.T) {
 		foreignHome := testguard.SocketTempDir(t)
 		afDaemonHomeFixture(t, foreignHome)
-		verdict, home := classifyPortHolder(req)
+		verdict, home, _ := classifyPortHolder(req)
 		require.Equal(t, holderForeign, verdict)
 		require.Equal(t, foreignHome, home)
 	})
@@ -436,7 +443,7 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 		// so argv, environ and the fd table are all the kernel's own.
 		foreignHome := testguard.SocketTempDir(t)
 		bound := spawnHelperDaemon(t, foreignHome)
-		verdict, home := classifyPortHolder(reqFor(t, bound))
+		verdict, home, _ := classifyPortHolder(reqFor(t, bound))
 		require.Equal(t, holderForeign, verdict)
 		require.True(t, sameAFHome(home, foreignHome),
 			"the helper's home resolved in its own process frame = %q, want %q", home, foreignHome)
@@ -452,21 +459,21 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
 		defer func() { _ = lock.Close() }()
-		verdict, _ := classifyPortHolder(req)
+		verdict, _, _ := classifyPortHolder(req)
 		require.Equal(t, holderNonDaemon, verdict,
 			"a stray daemon.lock fd must not turn a squatter into a foreign af daemon")
 	})
 
 	t.Run("a lock fd in OUR home classifies own — the #6386 case", func(t *testing.T) {
 		afDaemonHomeFixture(t, myHome)
-		verdict, _ := classifyPortHolder(req)
+		verdict, _, _ := classifyPortHolder(req)
 		require.Equal(t, holderOwn, verdict,
 			"our own predecessor holding the port is the recovery the retry must keep")
 	})
 
 	t.Run("an unbound port finds no socket — unproven", func(t *testing.T) {
 		require.NoError(t, l.Close())
-		verdict, _ := classifyPortHolder(req)
+		verdict, _, _ := classifyPortHolder(req)
 		require.Equal(t, holderUnproven, verdict)
 	})
 }
@@ -549,7 +556,8 @@ func TestBindProceedsWhenNoHomeClaims(t *testing.T) {
 func TestForeignHolderRefusalSkips(t *testing.T) {
 	_, _, _ = takeoverFixture(t)
 	t.Run("non-default addresses never refuse", func(t *testing.T) {
-		require.Empty(t, foreignHolderRefusal(reqFor(t, "127.0.0.1:9000")))
+		refusal, _ := foreignHolderRefusal(reqFor(t, "127.0.0.1:9000"))
+		require.Empty(t, refusal)
 	})
 }
 
@@ -696,7 +704,7 @@ func TestRefuseWebForeignLatch(t *testing.T) {
 	const addr = "127.0.0.1:8443"
 	reason := "refusing to bind " + addr + ": held by another home"
 	wl.mu.Lock()
-	wl.refuseWebForeignLocked(addr, reason)
+	wl.refuseWebForeignLocked(addr, reason, []string{addr})
 	gen := wl.webGen
 	snap := func() DaemonListenerStatus { return wl.manager.lifecycle.snapshot().listeners }
 	require.True(t, snap().TCPConfigured, "a refused listener is still the configured one")
@@ -704,7 +712,7 @@ func TestRefuseWebForeignLatch(t *testing.T) {
 	require.Equal(t, reason, snap().TCPRefusalReason)
 	// Idempotent: the same refusal again neither re-bumps the generation nor
 	// clears the latch.
-	wl.refuseWebForeignLocked(addr, reason)
+	wl.refuseWebForeignLocked(addr, reason, []string{addr})
 	require.Equal(t, gen, wl.webGen)
 	require.Equal(t, reason, wl.webRefusal)
 	// The latch remembers: a later reconcile at the same address sees it
@@ -724,15 +732,37 @@ func TestLatchedRefusalMatchesByEndpointNotSpelling(t *testing.T) {
 	wl.mu.Lock()
 	wl.foreignRefusals = map[string]string{latched: reason}
 
-	require.Equal(t, reason, wl.foreignGateRefusalLocked(
-		"127.0.0.1:041234", reqFor(t, "127.0.0.1:041234")),
-		"a leading-zero port is the same endpoint")
-	require.Equal(t, reason, wl.foreignGateRefusalLocked(
-		"0.0.0.0:41234", reqFor(t, "0.0.0.0:41234")),
-		"a wildcard spelling swallowing the refused port is still refused")
-	require.Empty(t, wl.foreignGateRefusalLocked(
-		"127.0.0.1:41235", reqFor(t, "127.0.0.1:41235")),
-		"a genuinely different endpoint is not shadowed by the latch")
+	refusal, _ := wl.foreignGateRefusalLocked("127.0.0.1:041234", reqFor(t, "127.0.0.1:041234"))
+	require.Equal(t, reason, refusal, "a leading-zero port is the same endpoint")
+	refusal, _ = wl.foreignGateRefusalLocked("0.0.0.0:41234", reqFor(t, "0.0.0.0:41234"))
+	require.Equal(t, reason, refusal, "a wildcard spelling swallowing the refused port is still refused")
+	refusal, _ = wl.foreignGateRefusalLocked("127.0.0.1:41235", reqFor(t, "127.0.0.1:41235"))
+	require.Empty(t, refusal, "a genuinely different endpoint is not shadowed by the latch")
+	wl.mu.Unlock()
+}
+
+// The latch keys on the PROVEN endpoint, not the attempted wildcard: a
+// 0.0.0.0:PORT request refused over a foreign 127.0.0.1:PORT hold must still
+// refuse anything overlapping the proven hold — and must let a genuinely
+// distinct address on the same port bind, or the remedy the refusal names
+// (move to another address) would itself be refused.
+func TestLatchedRefusalKeepsDistinctAddressesFree(t *testing.T) {
+	wl, _, _ := takeoverFixture(t)
+	const proven = "127.0.0.1:41234"
+	reason := "refusing to bind 0.0.0.0:41234: held by another AF home on " + proven
+	wl.mu.Lock()
+	wl.refuseWebForeignLocked("0.0.0.0:41234", reason, []string{proven})
+
+	// Still refused: every spelling that overlaps the proven hold.
+	for _, addr := range []string{"0.0.0.0:41234", ":41234", "127.0.0.1:41234", "127.0.0.1:041234"} {
+		refusal, _ := wl.foreignGateRefusalLocked(addr, reqFor(t, addr))
+		require.Equal(t, reason, refusal, "%s overlaps the proven hold", addr)
+	}
+	// Still free: a distinct loopback the proven hold never covered — the
+	// reconfigure-and-move remedy the refusal names.
+	refusal, _ := wl.foreignGateRefusalLocked("127.0.0.2:41234", reqFor(t, "127.0.0.2:41234"))
+	require.Empty(t, refusal,
+		"a distinct address on the contested port must not be shadowed by a wildcard attempt's latch")
 	wl.mu.Unlock()
 }
 
@@ -781,18 +811,23 @@ func TestParseProcNetTCP(t *testing.T) {
    2: 0100007F:20FB 0200007F:9C40 01 00000000:00000000 00:00000000 00000000  1000        0 99999 1 0000000000000000 100 0 0 10 0
    3: 0200007F:20FB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 77777 1 0000000000000000 100 0 0 10 0
 `
-	inodes := map[uint64]bool{}
-	parseProcNetTCP([]byte(table), req, inodes)
+	sockets := map[uint64]net.TCPAddr{}
+	parseProcNetTCP([]byte(table), req, sockets)
 	// 12345 = 127.0.0.1:8443 LISTEN → match. 22222 = port 8444 → no.
 	// 99999 = same addr ESTABLISHED → no. 77777 = 127.0.0.2:8443 → no overlap.
-	require.Equal(t, map[uint64]bool{12345: true}, inodes)
+	require.Equal(t, map[uint64]net.TCPAddr{
+		12345: {IP: net.ParseIP("127.0.0.1"), Port: 8443},
+	}, sockets)
 
 	// A wildcard request collides with EVERY same-port listener: 0.0.0.0:8443
 	// covers 127.0.0.1 AND 127.0.0.2, so both LISTEN inodes match.
 	wildReq := reqFor(t, "0.0.0.0:8443")
-	inodes = map[uint64]bool{}
-	parseProcNetTCP([]byte(table), wildReq, inodes)
-	require.Equal(t, map[uint64]bool{12345: true, 77777: true}, inodes)
+	sockets = map[uint64]net.TCPAddr{}
+	parseProcNetTCP([]byte(table), wildReq, sockets)
+	require.Equal(t, map[uint64]net.TCPAddr{
+		12345: {IP: net.ParseIP("127.0.0.1"), Port: 8443},
+		77777: {IP: net.ParseIP("127.0.0.2"), Port: 8443},
+	}, sockets)
 
 	// A dual-stack [::]:8443 socket lives in /proc/net/tcp6 yet still blocks
 	// the v4 request (it owns the v4 wildcard too); [::1]:8443 owns only v6
@@ -801,9 +836,11 @@ func TestParseProcNetTCP(t *testing.T) {
    0: 00000000000000000000000000000000:20FB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 55555 1 0000000000000000 100 0 0 10 0
    1: 00000000000000000000000001000000:20FB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 66666 1 0000000000000000 100 0 0 10 0
 `
-	inodes = map[uint64]bool{}
-	parseProcNetTCP([]byte(tcp6), req, inodes)
-	require.Equal(t, map[uint64]bool{55555: true}, inodes)
+	sockets = map[uint64]net.TCPAddr{}
+	parseProcNetTCP([]byte(tcp6), req, sockets)
+	require.Equal(t, map[uint64]net.TCPAddr{
+		55555: {IP: net.IPv6unspecified, Port: 8443},
+	}, sockets)
 }
 
 // A dual-stack [::] holder lives ONLY in /proc/net/tcp6 yet still blocks a
@@ -824,14 +861,17 @@ func TestProcListenInodesReadsBothTables(t *testing.T) {
 	procRoot = root
 	t.Cleanup(func() { procRoot = oldRoot })
 
-	inodes, complete := procListenInodes(reqFor(t, "127.0.0.1:8443"))
+	sockets, complete := procListenSockets(reqFor(t, "127.0.0.1:8443"))
 	require.True(t, complete)
-	require.Equal(t, map[uint64]bool{12345: true, 55555: true}, inodes,
+	require.Equal(t, map[uint64]net.TCPAddr{
+		12345: {IP: net.ParseIP("127.0.0.1"), Port: 8443},
+		55555: {IP: net.IPv6unspecified, Port: 8443},
+	}, sockets,
 		"both tables feed the classifier — a dual-stack holder in tcp6 cannot hide from a v4 request")
 
 	// A missing table is "could not look", not "no holder".
 	require.NoError(t, os.Remove(filepath.Join(root, "net", "tcp6")))
-	_, complete = procListenInodes(reqFor(t, "127.0.0.1:8443"))
+	_, complete = procListenSockets(reqFor(t, "127.0.0.1:8443"))
 	require.False(t, complete)
 }
 

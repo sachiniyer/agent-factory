@@ -6,6 +6,7 @@ import (
 	"net"
 	"os"
 	"path/filepath"
+	"sort"
 	"strconv"
 	"strings"
 	"syscall"
@@ -154,10 +155,15 @@ func takeoverGateApplies(req *net.TCPAddr) bool {
 // daemon that would never bind this port has nothing to lose. An absent
 // config leaves the built-in default, and a proven-but-unreadable one stays
 // claimed rather than guessed away.
-func defaultHomeClaimRefusal(req *net.TCPAddr) string {
+//
+// The second return is the CLAIMED endpoint — what the refusal latch keys
+// on. It can be narrower than the request: a wildcard attempt refused on a
+// claim of 127.0.0.1:8443 must not make a later, genuinely distinct
+// 127.0.0.2:8443 refuse too.
+func defaultHomeClaimRefusal(req *net.TCPAddr) (string, string) {
 	def, err := defaultHomeDir()
 	if err != nil {
-		return ""
+		return "", ""
 	}
 	evidence := ""
 	if pid, held := daemonLockHeld(def); held {
@@ -169,15 +175,18 @@ func defaultHomeClaimRefusal(req *net.TCPAddr) string {
 		evidence = "an enabled autostart unit is set to restart its daemon"
 	}
 	if evidence == "" {
-		return "" // a stray or never-used home claims nothing
+		return "", "" // a stray or never-used home claims nothing
 	}
-	if eff, found, cfgErr := config.ListenAddrInHome(def); cfgErr == nil && found &&
-		!boundListenerBlocks(eff, req) {
-		return "" // proven live/returning, but not for THIS port
+	claimed := defaultWebListenAddr
+	if eff, found, cfgErr := config.ListenAddrInHome(def); cfgErr == nil && found {
+		if !boundListenerBlocks(eff, req) {
+			return "", "" // proven live/returning, but not for THIS port
+		}
+		claimed = eff // the home claims the address its config names
 	}
 	return fmt.Sprintf("refusing to bind %s: the default AF home (%s) claims this port — %s; "+
 		"binding would leave that home's daemon fighting for its own address — %s",
-		req.String(), def, evidence, takeoverClaimRemedy)
+		req.String(), def, evidence, takeoverClaimRemedy), claimed
 }
 
 // daemonLockHeld reports whether the home at dir provably has a live daemon —
@@ -340,39 +349,47 @@ const (
 // foreignHolderRefusal returns the refusal reason when the port req failed
 // EADDRINUSE on is held by a live af daemon of another af home, or "" for
 // every other verdict — same-home predecessor, third-party squatter, and
-// everything unprovable all keep today's retry.
-func foreignHolderRefusal(req *net.TCPAddr) string {
+// everything unprovable all keep today's retry. With a refusal it also
+// returns the endpoints the foreign sockets are PROVEN to hold — the latch
+// keys, not the requested spelling: a wildcard attempt (0.0.0.0:8443) that
+// failed against a foreign 127.0.0.1:8443 must refuse only what overlaps the
+// proven hold, or a later move to a genuinely distinct address
+// (127.0.0.2:8443) would stay refused for the daemon's life.
+func foreignHolderRefusal(req *net.TCPAddr) (string, []string) {
 	if !takeoverGateApplies(req) {
-		return ""
+		return "", nil
 	}
-	verdict, home := classifyPortHolder(req)
+	verdict, home, endpoints := classifyPortHolder(req)
 	if verdict != holderForeign {
-		return ""
+		return "", nil
 	}
-	return fmt.Sprintf("refusing to bind %s: the address is held by a daemon of another AF home (%s); "+
+	return fmt.Sprintf("refusing to bind %s: the address is held by a daemon of another AF home (%s) on %s; "+
 		"taking it the moment that daemon's restart releases it is the #6858 takeover — %s",
-		req.String(), home, takeoverHolderRemedy)
+		req.String(), home, strings.Join(endpoints, ", "), takeoverHolderRemedy), endpoints
 }
 
 // classifyPortHolder resolves the holder of the contested port: the contested
 // LISTEN socket's inode from /proc/net/tcp{,6}, then the pid(s) holding that
 // inode, then each holder's af home from its own daemon.lock fd (with an
-// environ+argv fallback for lock-less daemons).
-func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
-	inodes, complete := procListenInodes(req)
-	if len(inodes) == 0 {
+// environ+argv fallback for lock-less daemons). The third return names the
+// contested endpoints the proven-foreign pids hold — empty on every other
+// verdict — so the refusal latch remembers the proven hold rather than the
+// attempted spelling.
+func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string, []string) {
+	sockets, complete := procListenSockets(req)
+	if len(sockets) == 0 {
 		// No matching socket in the tables we read — whether because none
 		// exists, it lives in a table we could not read, or it died between
 		// the failed bind and our lookup. Unidentified is not foreign.
-		return holderUnproven, ""
+		return holderUnproven, "", nil
 	}
-	pids := pidsHoldingSockets(inodes)
+	pids := pidsHoldingSockets(sockets)
 	if len(pids) == 0 {
-		return holderUnproven, ""
+		return holderUnproven, "", nil
 	}
 	mine, err := config.GetConfigDir()
 	if err != nil {
-		return holderUnproven, ""
+		return holderUnproven, "", nil
 	}
 	// Score every holder pid before deciding: the verdict ranking is
 	// foreign > unproven > own > non-daemon — a PROVEN foreign daemon holds
@@ -380,8 +397,9 @@ func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
 	// resolve to foreign OR to safe, an own-home holder is the recovery the
 	// retry protects, and a plain squatter is what the retry exists for.
 	var foreignHome string
+	foreignEndpoints := map[string]bool{}
 	foreign, unproven, own, nonDaemon := false, !complete, false, false
-	for pid := range pids {
+	for pid, held := range pids {
 		home, isDaemon, provable := holderDaemonHome(pid)
 		switch {
 		case !provable:
@@ -392,19 +410,35 @@ func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
 			own = true
 		default:
 			foreign, foreignHome = true, home
+			for ino := range held {
+				if la, ok := sockets[ino]; ok {
+					foreignEndpoints[la.String()] = true
+				}
+			}
 		}
 	}
 	switch {
 	case foreign:
-		return holderForeign, foreignHome
+		endpoints := make([]string, 0, len(foreignEndpoints))
+		for e := range foreignEndpoints {
+			endpoints = append(endpoints, e)
+		}
+		sort.Strings(endpoints)
+		// A proven foreign hold with no resolvable endpoint still latches:
+		// the request is the only endpoint shape we know it blocked, and an
+		// unlatched refusal would re-open the restart-gap window it closed.
+		if len(endpoints) == 0 {
+			endpoints = []string{req.String()}
+		}
+		return holderForeign, foreignHome, endpoints
 	case unproven:
-		return holderUnproven, ""
+		return holderUnproven, "", nil
 	case own:
-		return holderOwn, mine
+		return holderOwn, mine, nil
 	case nonDaemon:
-		return holderNonDaemon, ""
+		return holderNonDaemon, "", nil
 	}
-	return holderUnproven, ""
+	return holderUnproven, "", nil
 }
 
 // holderDaemonHome identifies a socket-holding process: (home, isDaemon,
@@ -452,17 +486,20 @@ func holderDaemonHome(pid int) (string, bool, bool) {
 	return home, true, true
 }
 
-// procListenInodes returns the socket inodes LISTENing on addresses that would
-// collide with a bind of req, from procRoot/net/tcp{,6} — always BOTH tables:
-// a specific v4 request still contends with a dual-stack [::] socket (the
-// common Go wildcard bind owns v4 space too), and that socket appears only in
-// tcp6; symmetrically a v4 wildcard socket blocks a dual-stack [::] request.
-// parseProcNetTCP's listenIPsOverlap already rejects the non-colliding
-// cross-family rows, so the read is unconditional. complete is false when a
-// table that could carry the request was unreadable — a zero-inode result
-// then means "could not look", not "no holder".
-func procListenInodes(req *net.TCPAddr) (inodes map[uint64]bool, complete bool) {
-	inodes = map[uint64]bool{}
+// procListenSockets returns the sockets LISTENing on addresses that would
+// collide with a bind of req, inode → bound local endpoint, from
+// procRoot/net/tcp{,6} — always BOTH tables: a specific v4 request still
+// contends with a dual-stack [::] socket (the common Go wildcard bind owns
+// v4 space too), and that socket appears only in tcp6; symmetrically a v4
+// wildcard socket blocks a dual-stack [::] request. parseProcNetTCP's
+// listenIPsOverlap already rejects the non-colliding cross-family rows, so
+// the read is unconditional. complete is false when a table that could carry
+// the request was unreadable — a zero-socket result then means "could not
+// look", not "no holder". The endpoint each inode maps to is the PROVEN
+// conflicting address — what a refusal latch must remember, since it can be
+// narrower than the wildcard the request was spelled as.
+func procListenSockets(req *net.TCPAddr) (sockets map[uint64]net.TCPAddr, complete bool) {
+	sockets = map[uint64]net.TCPAddr{}
 	complete = true
 	for _, table := range []string{"tcp", "tcp6"} {
 		data, err := os.ReadFile(filepath.Join(procRoot, "net", table))
@@ -470,18 +507,19 @@ func procListenInodes(req *net.TCPAddr) (inodes map[uint64]bool, complete bool) 
 			complete = false
 			continue
 		}
-		parseProcNetTCP(data, req, inodes)
+		parseProcNetTCP(data, req, sockets)
 	}
-	return inodes, complete
+	return sockets, complete
 }
 
-// parseProcNetTCP collects the inodes of LISTEN sockets whose local address
-// would block a bind of req: same port, overlapping IP (the
-// boundListenerBlocks half of the collision test). Line shape:
+// parseProcNetTCP collects the inodes and bound local endpoints of LISTEN
+// sockets whose local address would block a bind of req: same port,
+// overlapping IP (the boundListenerBlocks half of the collision test). Line
+// shape:
 //
 //	sl local_address rem_address st tx_queue:rx_queue tr:tm retr uid timeout inode
 //	 0 0100007F:1F90 00000000:0000 0A        ...                       12345
-func parseProcNetTCP(data []byte, req *net.TCPAddr, out map[uint64]bool) {
+func parseProcNetTCP(data []byte, req *net.TCPAddr, out map[uint64]net.TCPAddr) {
 	for i, line := range strings.Split(string(data), "\n") {
 		if i == 0 {
 			continue // header
@@ -503,7 +541,7 @@ func parseProcNetTCP(data []byte, req *net.TCPAddr, out map[uint64]bool) {
 			continue
 		}
 		if ino, err := strconv.ParseUint(f[9], 10, 64); err == nil && ino != 0 {
-			out[ino] = true
+			out[ino] = net.TCPAddr{IP: ip, Port: int(port)}
 		}
 	}
 }
@@ -529,12 +567,14 @@ func procHexIP(s string) (net.IP, bool) {
 }
 
 // pidsHoldingSockets scans procRoot/<pid>/fd for socket fds pointing at the
-// contested inodes. Pids whose fd table cannot be read are skipped: they could
-// be holding the socket, but so could anyone — an unidentified holder is
-// already unproven through the empty result, and punishing a found holder for
-// an unrelated unreadable table would misclassify the common case.
-func pidsHoldingSockets(inodes map[uint64]bool) map[int]bool {
-	pids := map[int]bool{}
+// contested inodes, returning each holding pid's set of them — which socket a
+// proven-foreign pid holds is what the refusal latch keys on. Pids whose fd
+// table cannot be read are skipped: they could be holding the socket, but so
+// could anyone — an unidentified holder is already unproven through the
+// empty result, and punishing a found holder for an unrelated unreadable
+// table would misclassify the common case.
+func pidsHoldingSockets(sockets map[uint64]net.TCPAddr) map[int]map[uint64]bool {
+	pids := map[int]map[uint64]bool{}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
 		return pids
@@ -554,9 +594,13 @@ func pidsHoldingSockets(inodes map[uint64]bool) map[int]bool {
 			if err != nil {
 				continue // the fd closed between readdir and readlink — churn, not a holder
 			}
-			if ino, ok := socketFDInode(target); ok && inodes[ino] {
-				pids[pid] = true
-				break
+			if ino, ok := socketFDInode(target); ok {
+				if _, contested := sockets[ino]; contested {
+					if pids[pid] == nil {
+						pids[pid] = map[uint64]bool{}
+					}
+					pids[pid][ino] = true
+				}
 			}
 		}
 	}
@@ -646,6 +690,12 @@ func normalizeHomePath(p string) string {
 // foreignGateRefusalLocked returns the #6858 refusal for attempting addr: a
 // latched refusal first (it never un-refuses), then the default home's claim
 // when the gate polices this address at all. req is the resolved request.
+// The second return is the latch key set — the PROVEN endpoints this refusal
+// covers, which can be narrower than the request (a wildcard attempt refused
+// over a 127.0.0.1 hold claims only that hold, not every address on the
+// port). A latched-match replay returns no new keys: the proven hold is
+// already recorded, and re-latching the attempted spelling would widen the
+// refusal to addresses nothing ever held.
 // Caller holds wl.mu.
 //
 // The latch matches by ENDPOINT, not spelling: a latched "127.0.0.1:8443" must
@@ -653,16 +703,20 @@ func normalizeHomePath(p string) string {
 // endpoints the takeover is the same for — so each stored refusal is tested
 // against the resolved request with boundListenerBlocks rather than looked up
 // by its original configuration string.
-func (wl *webListeners) foreignGateRefusalLocked(addr string, req *net.TCPAddr) string {
+func (wl *webListeners) foreignGateRefusalLocked(addr string, req *net.TCPAddr) (string, []string) {
 	for latchedAddr, refusal := range wl.foreignRefusals {
 		if boundListenerBlocks(latchedAddr, req) {
-			return refusal
+			return refusal, nil
 		}
 	}
 	if !takeoverGateApplies(req) {
-		return ""
+		return "", nil
 	}
-	return defaultHomeClaimRefusal(req)
+	refusal, claimed := defaultHomeClaimRefusal(req)
+	if refusal == "" {
+		return "", nil
+	}
+	return refusal, []string{claimed}
 }
 
 // refuseOrKeepLocked applies a #6858 refusal to the current listener state.
@@ -671,19 +725,26 @@ func (wl *webListeners) foreignGateRefusalLocked(addr string, req *net.TCPAddr) 
 // refused or foreign-held address — the refusal latches for every later
 // attempt, the bind is refused as an ordinary apply failure naming the
 // still-serving address, and the healthy listener is never released into a
-// takeover. The ERROR logs once per refusal text; a repeated reconcile error
-// is visible without spamming the log.
+// takeover. latch carries the proven endpoints the refusal covers; the ERROR
+// logs once when a new endpoint is latched, so a repeated reconcile error is
+// visible without spamming the log.
 // Caller holds wl.mu.
-func (wl *webListeners) refuseOrKeepLocked(addr, refusal string) error {
+func (wl *webListeners) refuseOrKeepLocked(addr, refusal string, latch []string) error {
 	if wl.webHandle == nil {
-		wl.refuseWebForeignLocked(addr, refusal)
+		wl.refuseWebForeignLocked(addr, refusal, latch)
 		return nil
 	}
-	if wl.foreignRefusals[addr] != refusal {
-		if wl.foreignRefusals == nil {
-			wl.foreignRefusals = map[string]string{}
+	fresh := false
+	for _, la := range latch {
+		if wl.foreignRefusals[la] != refusal {
+			if wl.foreignRefusals == nil {
+				wl.foreignRefusals = map[string]string{}
+			}
+			wl.foreignRefusals[la] = refusal
+			fresh = true
 		}
-		wl.foreignRefusals[addr] = refusal
+	}
+	if fresh {
 		log.ErrorLog.Printf("%s", refusal)
 	}
 	return fmt.Errorf("apply network.listen_addr %q: %s — daemon still serving on %s",
@@ -696,14 +757,19 @@ func (wl *webListeners) refuseOrKeepLocked(addr, refusal string) error {
 // lifecycle exactly like the #5137 posture refusal (TCPRefusalReason → `af
 // daemon status`, `af doctor`). It mirrors refuseWebLocked's bookkeeping minus
 // the parts that only exist for a serving socket (retire, tracker sever,
-// posture pin): by definition we reach here with webHandle==nil. Idempotent:
-// the same refusal recurring across reconciles neither re-logs nor re-bumps.
+// posture pin): by definition we reach here with webHandle==nil. latch
+// carries the proven endpoints the refusal covers — the keys a later
+// overlapping request is matched against — not the attempted spelling.
+// Idempotent: the same refusal recurring across reconciles neither re-logs
+// nor re-bumps.
 // Caller holds wl.mu.
-func (wl *webListeners) refuseWebForeignLocked(addr, refusal string) {
+func (wl *webListeners) refuseWebForeignLocked(addr, refusal string, latch []string) {
 	if wl.foreignRefusals == nil {
 		wl.foreignRefusals = map[string]string{}
 	}
-	wl.foreignRefusals[addr] = refusal
+	for _, la := range latch {
+		wl.foreignRefusals[la] = refusal
+	}
 	if wl.webRefusal == refusal {
 		return // already in force — do not re-log on every reconcile
 	}

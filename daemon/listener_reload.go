@@ -73,9 +73,13 @@ type webListeners struct {
 	// teardown, or a posture the predicate no longer refuses.
 	webRefusal string
 	// foreignRefusals latches the #6858 no-takeover refusals this daemon has
-	// already made, keyed by the requested listen_addr: once a bind was refused
-	// because another AF home claims or holds the port, NO later attempt at
-	// that address binds — not on a retry tick and not on an unrelated apply —
+	// already made, keyed by the PROVEN conflicting endpoint — the address a
+	// foreign daemon was seen holding, or the one the default home claims —
+	// which can be narrower than the requested listen_addr: a wildcard attempt
+	// refused over a 127.0.0.1 hold must not refuse a later, genuinely
+	// distinct 127.0.0.2 request. Once a bind was refused because another AF
+	// home claims or holds the port, NO later attempt overlapping a proven
+	// endpoint binds — not on a retry tick and not on an unrelated apply —
 	// because any bind that lands in the other daemon's restart gap IS the
 	// takeover this gate exists to prevent. Unlike webRefusal (a posture
 	// verdict re-derived on every reconcile), a foreign refusal is an event,
@@ -498,8 +502,8 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// take it during the other daemon's restart gap — refuseOrKeepLocked
 	// then latches the refusal and keeps the healthy listener serving.
 	if req, rerr := net.ResolveTCPAddr("tcp", addr); rerr == nil {
-		if refusal := wl.foreignGateRefusalLocked(addr, req); refusal != "" {
-			return wl.refuseOrKeepLocked(addr, refusal)
+		if refusal, latch := wl.foreignGateRefusalLocked(addr, req); refusal != "" {
+			return wl.refuseOrKeepLocked(addr, refusal, latch)
 		}
 	}
 	if wl.webHandle == nil && wl.manager.lifecycle != nil {
@@ -544,8 +548,8 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			// terminal answer here; every non-foreign conflict —
 			// sibling-only, own-only, a third-party squatter, anything
 			// unprovable — falls through to the paths below unchanged.
-			if refusal := foreignHolderRefusal(req); refusal != "" {
-				return wl.refuseOrKeepLocked(addr, refusal)
+			if refusal, latch := foreignHolderRefusal(req); refusal != "" {
+				return wl.refuseOrKeepLocked(addr, refusal, latch)
 			}
 			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
 				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
