@@ -664,7 +664,11 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d.ArchiveReport = nil
 	d.archiveReportSource = nil
 	d.archiveReportPending = false
-	return d
+	// The daemon-only limit-wall machinery rides on the same record: the banner
+	// anchor is raw pane text and the runtime pins/shadow/tombstone exist solely
+	// for the daemon's own matching. A daemonless `sessions list`/`get --json`
+	// must emit the same shape the live RPC path does (#6972 item 5).
+	return d.ForClients()
 }
 
 // Storage handles saving and loading instances using the state interface.

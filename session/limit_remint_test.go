@@ -922,6 +922,31 @@ func TestLimitWallResidue_ChurnedClaimSurvivesSerialization(t *testing.T) {
 	require.False(t, restored.LimitWallPromptSent())
 }
 
+// TestForClientReadStripsLimitWallFields pins the daemonless disk fallback:
+// `af sessions list/get --json` with the daemon down reads instances.json via
+// ForClientRead, which must emit the same scrubbed shape the live path emits —
+// no banner anchor (raw pane text), runtime pins, shadow, or tombstone.
+func TestForClientReadStripsLimitWallFields(t *testing.T) {
+	inst := &Instance{Program: tmux.ProgramClaude}
+	require.True(t, inst.SetLimitReachedAtEpoch(
+		time.Now().Add(30*time.Minute), "resets 3pm", staleBanner, inst.stateEpoch))
+	stored := inst.ToInstanceData()
+	require.NotEmpty(t, stored.LimitBannerPrefix)
+
+	client := stored.ForClientRead()
+	require.Equal(t, stored.ForClients(), client,
+		"the disk fallback must emit the live path's client shape")
+	require.Empty(t, client.LimitBannerPrefix)
+	require.Zero(t, client.LimitBannerCount)
+	require.Zero(t, client.LimitWallRuntimePID)
+	require.Zero(t, client.AgentRuntimeGeneration)
+	require.Nil(t, client.LastLimitWall)
+	require.False(t, client.LimitPromptSent)
+	// The badge facts stay.
+	require.Equal(t, stored.LimitResetAt, client.LimitResetAt)
+	require.Equal(t, "claude", client.LimitAgent)
+}
+
 // TestLimitWallResidue_PreFlagShadowRestoresRetired is the #6972 Codex
 // upgrade arm: a v1.0.347-serialized shadow carries no retired field, and a
 // plain-bool restore would mint false — reading a genuinely retired,
