@@ -351,6 +351,14 @@ export function isLimitReached(s: SessionData): boolean {
   );
 }
 
+/** True when the row's liveness is the limit wall — INCLUDING under a parked
+ * handoff fence, which isLimitReached deliberately excludes. The queued-
+ * transfer label needs the wall itself, not the fence-free badge shape
+ * (#6928 review MED). */
+export function hasLimitWallLiveness(s: SessionData): boolean {
+  return livenessOf(s) === Liveness.LimitReached;
+}
+
 /** True when an operator must inspect the pane before explicitly retrying a
  * manual handoff mission whose first submission may already have landed. The
  * verdict is transaction-scoped; session-wide prompt evidence may describe a
@@ -399,10 +407,12 @@ function confirmableHandoffDelivery(status: PromptDeliveryStatus | undefined): b
  * probes the pane first and restores the runtime binding only if it answers,
  * then runs readiness and the send; a pane that does not answer refuses the
  * retry. Dead liveness states still refuse: restore owns a runtime that no
- * longer exists. One startup-unknown shape stays out: a row parked at its
- * limit wall, where retryPendingHandoff's LiveLimitReached arm transfers the
- * mission into the scheduled limit retry instead of submitting — the row
- * keeps the ordinary limit retry, not the handoff resend (#6800 follow-up).
+ * longer exists. A startup-unknown row parked at its limit wall stays IN too
+ * — the admission is deliberately wide because the daemon routes on it —
+ * but its retry transfers the mission into the stored Prompt for the
+ * scheduled limit retry rather than submitting: nothing is sent and nothing
+ * is restarted, which is why the web labels that shape "Queue for limit
+ * resume" instead of "Retry handoff" (#6928 review MED).
  * Mirrors session.Instance.CanRetryPendingHandoffMissionDelivery. */
 export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
   const liveness = livenessOf(s);

@@ -66,6 +66,7 @@ Example:
 
 		title := args[0]
 		var conversation session.HandoffConversation
+		var note string
 		if sessionsRetryLimitDelivered {
 			var resp daemon.ConfirmHandoffDeliveryResponse
 			resp, err = confirmHandoffDeliveryViaDaemon(daemon.ConfirmHandoffDeliveryRequest{Title: title, RepoID: repoID})
@@ -74,6 +75,7 @@ Example:
 			var resp daemon.ResumeFromLimitResponse
 			resp, err = resumeFromLimitViaDaemon(daemon.ResumeFromLimitRequest{Title: title, RepoID: repoID})
 			conversation = resp.Conversation
+			note = resp.Reason
 		}
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
@@ -85,6 +87,13 @@ Example:
 		output := map[string]any{"ok": true, "title": title, "conversation": conversation}
 		if sessionsRetryLimitDelivered {
 			output["delivered"] = true
+		}
+		if note != "" {
+			// A committed-but-not-a-resume outcome — the daemon queued the
+			// pending mission for the scheduled limit retry and answered OK
+			// with the queue note. Surface it so the CLI does not print a bare
+			// "ok" for a verb that restarted nothing (#6928 review MED).
+			output["note"] = note
 		}
 		if warning != "" {
 			output["warning"] = warning

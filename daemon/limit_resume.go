@@ -11,6 +11,12 @@ type resumeFromLimitOutcome uint8
 const (
 	resumeNotPerformed resumeFromLimitOutcome = iota
 	resumePerformed
+	// resumeTransferred is a committed-but-not-a-resume outcome: a pending
+	// handoff mission was queued into the stored Prompt for the scheduled
+	// limit retry — no prompt was delivered and no agent restarted. It is a
+	// success (OK with a queue note), not the refusal that not-performed
+	// reports (#6928 review MED).
+	resumeTransferred
 )
 
 // The TUI and web reach this handler through apiclient/HTTP. The CLI reaches the
@@ -25,12 +31,15 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 		return err
 	}
 	outcome, conversation, err := s.manager.resumeFromLimitOutcomeConversation(req)
-	resp.OK = outcome == resumePerformed
+	resp.OK = outcome == resumePerformed || outcome == resumeTransferred
 	resp.Conversation = conversation
 	if !resp.MutationOutcome.record(err) {
 		return err
 	}
-	if !resp.OK {
+	switch {
+	case outcome == resumeTransferred:
+		resp.Reason = "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes"
+	case !resp.OK:
 		resp.Reason = "the session changed or another operation owns its retry"
 	}
 	return nil
@@ -74,16 +83,22 @@ func (m *Manager) resumeFromLimitOutcomeConversation(req ResumeFromLimitRequest)
 	// uses ResumePendingHandoffs and still requires PromptNotDelivered.
 	if mission := instance.PendingHandoffMission(); mission != "" && instance.CanRetryPendingHandoffMissionDelivery() {
 		key := daemonInstanceKey(repoID, instance.Title)
-		performed, retryErr := m.retryPendingHandoff(pendingHandoffEntry{
+		handoffOutcome, retryErr := m.retryPendingHandoff(pendingHandoffEntry{
 			repoID: repoID, key: key, instance: instance,
 		}, mission, true)
-		if performed {
+		switch handoffOutcome {
+		case handoffRetryPerformed:
 			// A pending agent-handoff mission only exists where the handoff
 			// replaced the program — the incoming agent's conversation is a
 			// fresh one, resent mission or not (#6768).
 			return resumePerformed, session.HandoffConversation{CarryFailure: crossAgentConversationReason}, retryErr
+		case handoffRetryTransferred:
+			// The mission moved into the stored Prompt for the scheduled
+			// limit retry — committed, but nothing was sent or restarted.
+			return resumeTransferred, session.HandoffConversation{}, retryErr
+		default:
+			return resumeNotPerformed, session.HandoffConversation{}, retryErr
 		}
-		return resumeNotPerformed, session.HandoffConversation{}, retryErr
 	}
 	// A committed account swap whose post-commit respawn went blind
 	// (ErrAccountSwapAgentTeardownBlind) is recoverable through the alreadySet

@@ -688,7 +688,7 @@ export interface ResumeFromLimitResult {
   code?: string;
 }
 
-export async function resumeFromLimit(id: string, title: string, token: string): Promise<void> {
+export async function resumeFromLimit(id: string, title: string, token: string): Promise<string | null> {
   const result = await af<ResumeFromLimitResult>("ResumeFromLimit", { id, title, repo_id: "" }, token);
   // A committed-but-not-performed resume (daemon/limit.go's respawn-fail-after-
   // rebuild path) returns ok:false alongside the committed warning: the rebuild
@@ -703,6 +703,11 @@ export async function resumeFromLimit(id: string, title: string, token: string):
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
+  // A committed-but-not-a-resume outcome — the daemon queued a pending
+  // handoff mission into the scheduled limit retry — answers ok:true with a
+  // reason naming it; pass it up so the caller can surface the note instead
+  // of implying the agent restarted (#6928 review MED).
+  return result.reason ?? null;
 }
 
 export interface ConfirmHandoffDeliveryResult {

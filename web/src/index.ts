@@ -3292,7 +3292,11 @@ function doRetryLimit(): void {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+  void resumeFromLimit(sel.id, sel.title, tok).then((note) => {
+    if (note) {
+      surfaceNotice(note);
+    }
+  }).catch((e) => {
     if (isMutationCommittedError(e)) {
       surfaceMutationError(e, "confirmed");
       return;
