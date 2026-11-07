@@ -22,6 +22,9 @@ const fence = (body: string): string => "```mermaid\n" + body + "\n```";
 interface Started { path: string; tab?: string; tab_error?: string }
 
 // A proposal whose docs carry the given markdown, opened to its first doc.
+// Names are suffixed with the project so the same spec can run under both the
+// chromium and webkit projects against one daemon's persistent session and
+// proposal stores without colliding on titles/slugs.
 async function openDocs(page: Page, request: APIRequestContext,
   title: string, slug: string, docs: Record<string, string>): Promise<Locator> {
   const afBin = process.env.AF_BIN;
@@ -29,6 +32,9 @@ async function openDocs(page: Page, request: APIRequestContext,
   test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
   const af = (...args: string[]): string =>
     execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+  const run = test.info().project.name;
+  title = `${title}-${run}`;
+  slug = `${slug}-${run}`;
   af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
   const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
     "--docs", Object.keys(docs).join(","))) as Started;
