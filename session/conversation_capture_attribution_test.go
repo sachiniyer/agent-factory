@@ -215,6 +215,82 @@ func TestCodexAttributionVerdictsSurviveRebind(t *testing.T) {
 		"a sibling judged foreign must not re-walk the runtime on later attempts")
 }
 
+// TestCodexAttributionDoesNotContaminateReplacementGeneration: a deferred
+// loop displaced mid-attempt may overlap its replacement (#6907's rearm
+// semantics). The old attempt's verdicts must land in ITS generation's map —
+// a stale map that is then discarded — never in the replacement's cache.
+func TestCodexAttributionDoesNotContaminateReplacementGeneration(t *testing.T) {
+	oldHolder := exec.Command("sleep", "30")
+	require.NoError(t, oldHolder.Start())
+	t.Cleanup(func() { _ = oldHolder.Process.Kill() })
+	newHolder := exec.Command("sleep", "30")
+	require.NoError(t, newHolder.Start())
+	t.Cleanup(func() { _ = newHolder.Process.Kill() })
+
+	inst := &Instance{}
+	setRoot := func(pid int) {
+		var root proctree.Process
+		require.Eventually(t, func() bool {
+			p, err := proctree.Lookup(pid)
+			if err == nil {
+				root = p
+			}
+			return err == nil
+		}, 5*time.Second, 20*time.Millisecond, "holder %d must be visible", pid)
+		inst.mu.Lock()
+		inst.runtimePID, inst.runtimeStartID = root.PID, root.StartID
+		inst.mu.Unlock()
+	}
+	setRoot(oldHolder.Process.Pid)
+
+	const oldCand = "/tmp/6847-old-generation-rollout.jsonl"
+	const newCand = "/tmp/6847-new-generation-rollout.jsonl"
+	release := make(chan struct{})
+	var callsMu sync.Mutex
+	heldCalls := 0
+	inst.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		callsMu.Lock()
+		heldCalls++
+		n := heldCalls
+		callsMu.Unlock()
+		if n == 1 {
+			<-release // the displaced attempt blocks inside its descriptor walk
+			return map[string]struct{}{oldCand: {}}, nil
+		}
+		return map[string]struct{}{newCand: {}}, nil
+	})
+
+	type result struct {
+		attributed   []string
+		inconclusive bool
+	}
+	oldDone := make(chan result, 1)
+	go func() {
+		a, inc := inst.attributeCodexRolloutPaths([]string{oldCand})
+		oldDone <- result{a, inc}
+	}()
+	require.Eventually(t, func() bool {
+		callsMu.Lock()
+		defer callsMu.Unlock()
+		return heldCalls == 1
+	}, 5*time.Second, 10*time.Millisecond, "the old attempt must be inside its walk")
+
+	// The runtime respawns: the replacement generation gets its own cache.
+	setRoot(newHolder.Process.Pid)
+	attributed, inconclusive := inst.attributeCodexRolloutPaths([]string{newCand})
+	require.False(t, inconclusive)
+	require.Equal(t, []string{newCand}, attributed)
+
+	close(release)
+	old := <-oldDone
+	require.True(t, old.inconclusive, "a displaced attempt's result must be discarded")
+
+	inst.codexAttrMu.Lock()
+	defer inst.codexAttrMu.Unlock()
+	require.Equal(t, map[string]bool{newCand: true}, inst.codexAttrVerdicts,
+		"the replacement generation's cache must hold only its own verdicts")
+}
+
 // TestCodexAttributionResolvesStoreAliases: CODEX_HOME reached through a
 // symlink yields candidates under the alias while the kernel's descriptor
 // answers carry the resolved path — the runtime's own rollout must still

@@ -187,13 +187,15 @@ func (i *Instance) attributeCodexRolloutPaths(candidates []string) (attributed [
 	if err != nil {
 		return nil, true
 	}
-	i.codexAttrMu.Lock()
-	if i.codexAttrGen != gen {
-		i.codexAttrGen = gen
-		i.codexAttrVerdicts = make(map[string]bool)
-	}
-	i.codexAttrMu.Unlock()
-	attributed, inconclusive = judgeCodexRollouts(heldFor, i.codexAttrVerdicts, &i.codexAttrMu, candidates)
+	// The verdict map must be captured under the SAME lock that selects its
+	// generation: a deferred loop displaced mid-attempt is allowed to overlap
+	// its replacement, and reading the field unlocked could hand this attempt
+	// the replacement's map — a data race, and old-generation verdicts would
+	// land in the new generation's cache. The captured map keeps working even
+	// if the field is swapped mid-walk; the stability check then discards
+	// this attempt's result and the stale map is garbage-collected.
+	verdicts := i.verdictsForGen(gen)
+	attributed, inconclusive = judgeCodexRollouts(heldFor, verdicts, &i.codexAttrMu, candidates)
 	i.codexAttrMu.Lock()
 	stable := i.codexAttrGen == gen
 	i.codexAttrMu.Unlock()
@@ -201,6 +203,20 @@ func (i *Instance) attributeCodexRolloutPaths(candidates []string) (attributed [
 		return nil, true
 	}
 	return attributed, inconclusive
+}
+
+// verdictsForGen returns the verdict cache for gen under codexAttrMu,
+// resetting it when the live generation changed — a respawned pane's
+// rollouts must be judged against the new process set, never inherit its
+// predecessor's verdicts.
+func (i *Instance) verdictsForGen(gen string) map[string]bool {
+	i.codexAttrMu.Lock()
+	defer i.codexAttrMu.Unlock()
+	if i.codexAttrGen != gen {
+		i.codexAttrGen = gen
+		i.codexAttrVerdicts = make(map[string]bool)
+	}
+	return i.codexAttrVerdicts
 }
 
 // codexRuntimeJudgement resolves this judgement's generation key and the
@@ -211,17 +227,25 @@ func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[stri
 	i.mu.RLock()
 	override := i.codexRuntimeHeldOverride
 	i.mu.RUnlock()
-	if override != nil {
-		return "test-override", func() (map[string]struct{}, error) {
-			return override()
+	roots, rerr := i.codexRuntimeRoots()
+	if override == nil {
+		if rerr != nil {
+			return "", nil, rerr
+		}
+		return codexGenerationKey(roots), func() (map[string]struct{}, error) {
+			return i.heldPathsForRoots(roots)
 		}, nil
 	}
-	roots, err := i.codexRuntimeRoots()
-	if err != nil {
-		return "", nil, err
+	// The override supplies the held answer; the generation still comes from
+	// the live roots when they resolve, so an override fixture's respawned
+	// runtime gets a fresh verdict cache exactly like production. Pane-less
+	// fixtures fall back to one synthetic generation.
+	gen = "test-override"
+	if rerr == nil {
+		gen = codexGenerationKey(roots)
 	}
-	return codexGenerationKey(roots), func() (map[string]struct{}, error) {
-		return i.heldPathsForRoots(roots)
+	return gen, func() (map[string]struct{}, error) {
+		return override()
 	}, nil
 }
 
