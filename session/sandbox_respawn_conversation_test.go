@@ -261,3 +261,99 @@ func TestSandboxFailedRelaunchLeavesTheOutcomeUnproven(t *testing.T) {
 	require.Zero(t, replaced, "a reachable-but-refused relaunch never falls back to re-provision")
 	require.Equal(t, HandoffConversation{CarryFailure: sandboxCarryFailure}, inst.ResumeConversationOutcome())
 }
+
+// --- the reporting half, inside the fix ---
+
+// RelaunchReporting is the wire call that fetches the verdict: the response's
+// conversation field rides back to the caller, and a server that answers
+// without one — an older build — yields nil.
+func TestRemoteAgentServerRelaunchReportingReadsTheWireVerdict(t *testing.T) {
+	report := map[string]any{
+		"session":      "probe",
+		"carried":      true,
+		"conversation": map[string]any{"agent": "claude", "id": "conv-1"},
+	}
+	srv := newTabWireServer(t).route("/v1/agent/relaunch", map[string]any{"ok": true, "conversation": report})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	as := &remoteAgentServer{rc: srv.client(t, httpSrv.URL)}
+
+	got, err := as.RelaunchReporting()
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "probe", got.Session)
+	assert.True(t, got.Carried)
+	assert.Equal(t, AgentConversationData{Agent: "claude", ID: "conv-1"}, got.Conversation)
+}
+
+func TestRemoteAgentServerRelaunchReportingIsNilForAnOlderBuild(t *testing.T) {
+	srv := newTabWireServer(t).route("/v1/agent/relaunch", map[string]any{"ok": true})
+	httpSrv := httptest.NewServer(srv.mux)
+	defer httpSrv.Close()
+	as := &remoteAgentServer{rc: srv.client(t, httpSrv.URL)}
+
+	got, err := as.RelaunchReporting()
+	require.NoError(t, err)
+	assert.Nil(t, got, "a server that predates the field answers without it")
+}
+
+// A request that joins a running relaunch shares its verdict — the attempt's
+// report joins its result, so every request the attempt served answers alike.
+func TestRelaunchJoinerSharesTheAttemptReport(t *testing.T) {
+	srv := &localAgentServer{}
+	release, started := make(chan struct{}), make(chan struct{})
+	report := &RelaunchConversationReport{Session: "t", Carried: true}
+	leader := make(chan *RelaunchConversationReport, 1)
+	go func() {
+		got, _ := srv.relaunchReporting(func() (*RelaunchConversationReport, error) {
+			close(started)
+			<-release
+			return report, nil
+		})
+		leader <- got
+	}()
+	<-started
+	joined := make(chan *RelaunchConversationReport, 1)
+	go func() {
+		got, _ := srv.relaunchReporting(func() (*RelaunchConversationReport, error) {
+			return nil, errors.New("a second relaunch must not run")
+		})
+		joined <- got
+	}()
+	time.Sleep(50 * time.Millisecond)
+	close(release)
+	require.Same(t, report, <-leader)
+	require.Same(t, report, <-joined, "the joiner gets the attempt's own report")
+}
+
+// respawnConversationPlan is the verdict the in-sandbox relaunch computes on
+// its own store: an exact resume names the recorded conversation it resumes,
+// a worktree-scoped resume carries without naming one, and everything else is
+// a fresh start with its reason.
+func TestRespawnConversationPlanNamesTheResumedConversation(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	const convID = "019f386f-7206-7fc2-803b-f7045e07a242"
+	inst := exactResumeSession(t, tmux.ProgramCodex)
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramCodex, ID: convID, CapturedAt: time.Now()}}}
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-10T10-17-35-"+convID+".jsonl", inst.GetWorktreePath())
+
+	outcome, resumed := inst.respawnConversationPlan()
+	require.True(t, outcome.Carried)
+	require.Equal(t, convID, resumed.ID, "an exact resume names the conversation it resumes")
+	require.Equal(t, tmux.ProgramCodex, resumed.Agent)
+
+	// The worktree-scoped forms carry too, but name no conversation.
+	inst = exactResumeSession(t, tmux.ProgramClaude)
+	outcome, resumed = inst.respawnConversationPlan()
+	require.True(t, outcome.Carried)
+	require.True(t, resumed.Empty())
+
+	// A session with nothing resumable reports the fresh-start reason.
+	inst = exactResumeSession(t, tmux.ProgramAmp)
+	outcome, resumed = inst.respawnConversationPlan()
+	require.Equal(t, "af recorded no conversation id for this amp session", outcome.CarryFailure)
+	require.True(t, resumed.Empty())
+}

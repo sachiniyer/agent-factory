@@ -165,6 +165,9 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 func (i *Instance) retireConversationsLocked() {
 	i.carriedConversation = AgentConversationData{}
 	i.reportedConversation = AgentConversationData{}
+	// A relaunch verdict describes a respawn under the outgoing account's
+	// provider store; it must not survive the crossing either (#6868).
+	i.respawnReport = nil
 }
 
 // RetireConversationForFreshRuntime drops the agent tab's recorded
@@ -556,6 +559,21 @@ func (i *Instance) exactResumeVerdict() (bool, string) {
 	return false, "af cannot resume this " + agent + " session's recorded conversation with the command it would launch"
 }
 
+// sandboxResumeUnprovenReason is the honest not-carried a sandbox session
+// answered before its relaunch could report its own outcome — and still
+// answers whenever a respawn left no report to read: a relaunch call that
+// never ran, an older agent-server build that answers without one, or a
+// report that could not be made out (#6868).
+const sandboxResumeUnprovenReason = "this session runs in a sandbox, and af cannot prove from the driving daemon that its respawn carried the conversation"
+
+// sandboxReprovisionedReport is the outcome the driving daemon records itself
+// when a respawn's branch was a re-provision: no in-sandbox relaunch ran, so
+// no relaunch report exists and the answer is a truthful not-carried (#6868).
+// noteRespawnConversationReport stamps it with the session's title.
+var sandboxReprovisionedReport = RelaunchConversationReport{
+	CarryFailure: "the respawn re-provisioned this session's sandbox — the in-place relaunch that could resume its conversation never ran",
+}
+
 // ResumeConversationOutcome reports what a re-spawn of this session's runtime
 // does to its conversation — the answer a retry-limit response owes (#6768):
 // Carried when the launch resumes this session's own conversation, whether by
@@ -566,41 +584,121 @@ func (i *Instance) exactResumeVerdict() (bool, string) {
 // A sandbox (remote-workspace) session's respawn goes through
 // relaunchOrRecoverSandbox (session/relaunch.go): an in-place relaunch when the
 // sandbox supports it (CanRelaunchInPlace), re-provisioning only when it does
-// not. The driving daemon is not in a position to prove the outcome of either
-// branch: the rollout or transcript that proves a resume lives in the sandbox's
-// own store, which the daemon cannot read off-box, and which branch the respawn
-// actually takes is decided later inside RespawnWithLiveBoundary, not by a
-// capability probe taken here. So a sandbox session never reports Carried —
-// under-reporting is the honest direction, since the reverse would tell someone
-// their context survived when it did not. The CarryFailure text is true
-// whichever branch the respawn takes and does not depend on a capability probe
-// taken before the respawn (the user-visible part of #6863). A correct
-// carried:true for a sandbox session needs the relaunch itself to report its
-// outcome back from the sandbox, which is a protocol change tracked separately.
+// not. The relaunch-vs-re-provision decision is made inside that call, so the
+// answer here is whatever the branch that ACTUALLY ran reported (#6868): an
+// in-place relaunch carries the sandbox's own resume verdict back over the
+// wire, a re-provision records its own not-carried, and a respawn that left
+// nothing to read — a relaunch that never ran, or an older sandbox build that
+// sends no report — answers exactly as it did before the report existed. The
+// caller reads it AFTER the respawn returns; asked before, a sandbox session
+// reports the no-report answer.
 func (i *Instance) ResumeConversationOutcome() HandoffConversation {
 	if i.Capabilities().Workspace == WorkspaceRemote {
-		return HandoffConversation{CarryFailure: "this session runs in a sandbox, and af cannot prove from the driving daemon that its respawn carried the conversation"}
+		return i.sandboxRespawnConversationOutcome()
 	}
 	return i.handoffConversationForRespawn()
+}
+
+// sandboxRespawnConversationOutcome translates the relaunch's own report —
+// recorded by remoteAgentServer.Relaunch or by decideRecovery when the branch
+// was a re-provision — into the carried/not-carried answer a sandbox session's
+// retry-limit response owes (#6868). Only a report that binds to this session
+// can carry it: a report for a different session or a different conversation,
+// a report that names nothing, and a report that itself answers fresh all come
+// back not-carried with the reason that is true for the respawn that ran.
+func (i *Instance) sandboxRespawnConversationOutcome() HandoffConversation {
+	report := i.respawnConversationReport()
+	if report == nil {
+		return HandoffConversation{CarryFailure: sandboxResumeUnprovenReason}
+	}
+	switch {
+	case report.Session == "":
+		return HandoffConversation{CarryFailure: "the sandbox's relaunch report did not name the session it describes"}
+	case report.Session != i.Title:
+		return HandoffConversation{CarryFailure: "the sandbox's relaunch report describes a different session"}
+	}
+	if !report.Carried {
+		if report.CarryFailure != "" {
+			return HandoffConversation{CarryFailure: report.CarryFailure}
+		}
+		return HandoffConversation{CarryFailure: sandboxResumeUnprovenReason}
+	}
+	if resumed, recorded := report.Conversation, i.resumableConversation(); resumed.HasID() && recorded.HasID() &&
+		(resumed.Agent != recorded.Agent || resumed.ID != recorded.ID) {
+		return HandoffConversation{CarryFailure: "the sandbox's relaunch resumed a different conversation than this session's recorded one"}
+	}
+	return HandoffConversation{Carried: true}
+}
+
+// noteRelaunchConversationReport records the resume verdict an in-sandbox
+// relaunch just reported over the wire, bound to the remote runtime that
+// produced it — the same staleness fence recordReportedConversationFrom uses,
+// so a retired runtime's late answer cannot be attributed to its replacement
+// (#6868). A nil report — an agent-server build that predates the field —
+// simply leaves nothing recorded.
+func (i *Instance) noteRelaunchConversationReport(rc *remoteAgentClient, report *RelaunchConversationReport) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if rc == nil || i.remoteClient != rc {
+		return
+	}
+	i.respawnReport = report
+}
+
+// noteRespawnConversationReport records a respawn outcome the driving daemon
+// settled itself — a re-provision, which has no in-sandbox relaunch to report
+// for it (#6868). The record is stamped with this session's title so the read
+// side's session binding treats it exactly like a wire report.
+func (i *Instance) noteRespawnConversationReport(report RelaunchConversationReport) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	report.Session = i.Title
+	i.respawnReport = &report
+}
+
+// clearRespawnConversationReport drops the verdict an earlier respawn left;
+// decideRecovery calls it as a new respawn picks its branch, so a stale report
+// can never describe the branch this one takes (#6868).
+func (i *Instance) clearRespawnConversationReport() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.respawnReport = nil
+}
+
+// respawnConversationReport returns the verdict the last respawn recorded.
+func (i *Instance) respawnConversationReport() *RelaunchConversationReport {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.respawnReport
 }
 
 // handoffConversationForRespawn is the determination a local (non-remote)
 // respawn of this session's runtime makes about its conversation — the answer a
 // local session's Recover owes. It is sandbox-agnostic: a remote-workspace
 // (sandbox) session never reaches it, because ResumeConversationOutcome answers
-// a sandbox respawn separately with an honest non-carry above (the driving
-// daemon cannot prove a sandbox carry), so ExactResume's blanket sandbox refusal
+// a sandbox respawn separately above, so ExactResume's blanket sandbox refusal
 // is not used here.
 func (i *Instance) handoffConversationForRespawn() HandoffConversation {
+	outcome, _ := i.respawnConversationPlan()
+	return outcome
+}
+
+// respawnConversationPlan is handoffConversationForRespawn plus the
+// conversation the respawn resumes when it resumes one by id (#6868): an
+// in-sandbox relaunch reports both back over the wire, so the driving daemon
+// can bind a carried answer to THIS session's recorded conversation. The
+// resumed id is empty for a worktree-scoped resume — the command picks its
+// conversation at launch — and for a fresh start.
+func (i *Instance) respawnConversationPlan() (HandoffConversation, AgentConversationData) {
 	program := resolveLaunchProgramForInstance(i).command
 	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
-		return HandoffConversation{Carried: true}
+		return HandoffConversation{Carried: true}, i.resumableConversation()
 	}
 	if tmux.ProgramResumesConversation(program) {
-		return HandoffConversation{Carried: true}
+		return HandoffConversation{Carried: true}, AgentConversationData{}
 	}
 	if ok, why := i.exactResumeVerdict(); !ok {
-		return HandoffConversation{CarryFailure: why}
+		return HandoffConversation{CarryFailure: why}, AgentConversationData{}
 	}
-	return HandoffConversation{CarryFailure: "af cannot prove the launched program resumes this session's conversation"}
+	return HandoffConversation{CarryFailure: "af cannot prove the launched program resumes this session's conversation"}, AgentConversationData{}
 }

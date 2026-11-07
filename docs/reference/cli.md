@@ -2982,7 +2982,11 @@ afterwards can read its previous conversation: carried=true when the retry
 resumed it (the committed account swap's carry, the recorded conversation id,
 or a worktree-scoped resume), or carried=false with carry_failure naming why
 it starts fresh — including a retry that had no recorded conversation id to
-resume and came up clean rather than guessing at the account's latest.
+resume and came up clean rather than guessing at the account's latest. For a
+sandbox session the answer is whatever the sandbox's own recovery reported:
+carried=true only when the in-place relaunch it performed resumed this
+session's own conversation, and carry_failure otherwise — a re-provision, a
+fresh start, or an older sandbox build that sent no report.
 
 Example:
   af sessions retry-limit fix-auth
