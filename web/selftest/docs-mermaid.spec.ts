@@ -301,3 +301,66 @@ flowchart LR
   }
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
+
+// The render frame's document is a separate security principal (#6669): the
+// #6644 CSP isolates what the frame may LOAD, but only sandboxing isolates its
+// PRIVILEGE. sandbox without allow-same-origin gives it an opaque origin — no
+// parent DOM, no storage or cookies, no credentials on a /v1 call — and the
+// only channel back is a postMessage carrying the SVG string, which the parent
+// validates and sanitizes before it touches the DOM.
+test("docs mermaid: the render frame is an opaque origin — it cannot reach the parent or the API", async ({ page, request }) => {
+  const pane = await openDocs(page, request, "mermaid-sandbox-probe", "mermaid-sandbox-plan", {
+    goals: `# Sandbox\n\n${fence(DIAGRAM)}\n\nEnd.\n`,
+  });
+  // The diagram still renders — the channel becoming postMessage changes
+  // nothing the document shows.
+  await expect(pane.locator(".cm-md-mermaid svg")).toBeVisible({ timeout: 30_000 });
+
+  // The render frame is the srcdoc iframe the renderer opened for the chunk.
+  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url() === "about:srcdoc");
+  expect(frame, "the render frame must exist once a diagram rendered").toBeTruthy();
+  if (!frame) return;
+
+  // Structural: sandboxed to scripts alone — never allow-same-origin — and the
+  // parent's own handle on the element sees no document through it.
+  const attrs = await page.evaluate(() => {
+    const el = [...document.querySelectorAll("iframe")].find((f) => f.srcdoc.includes("x-dns-prefetch-control"));
+    if (!el) return null;
+    return { sandbox: el.getAttribute("sandbox"), contentDoc: el.contentDocument !== null };
+  });
+  expect(attrs?.sandbox, "the frame must be sandboxed to scripts only").toBe("allow-scripts");
+  expect(attrs?.contentDoc, "the parent must not reach the frame's document").toBe(false);
+
+  // Inside the frame: an opaque origin, no reachable parent DOM, no storage.
+  const inside = await frame.evaluate(() => {
+    const out = { origin: location.origin } as Record<string, string>;
+    try {
+      out.parentDocument = parent.document === undefined ? "undefined" : typeof parent.document;
+    } catch (e) {
+      out.parentDocument = `threw ${(e as Error).name}`;
+    }
+    try {
+      void localStorage.getItem("af-token");
+      out.localStorage = "reachable";
+    } catch {
+      out.localStorage = "threw";
+    }
+    return out;
+  });
+  expect(inside.origin, "the render frame must run in an opaque origin").toBe("null");
+  expect(inside.parentDocument, "the frame must not read the parent's DOM").not.toBe("object");
+  expect(inside.localStorage, "sandboxed storage must refuse access").toBe("threw");
+
+  // A /v1 call from inside the frame can only fail: connect-src 'none' denies
+  // it before the wire, and at the wire it would be a cross-site request with
+  // Origin: null and no credentials that the daemon refuses anyway.
+  const call = await frame.evaluate(async (api) => {
+    try {
+      const r = await fetch(`${api}/v1/health`);
+      return `status ${r.status}`;
+    } catch (e) {
+      return `refused (${(e as Error).name})`;
+    }
+  }, new URL(page.url()).origin);
+  expect(call, "a /v1 fetch from inside the frame must never succeed").toContain("refused");
+});
