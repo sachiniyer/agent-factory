@@ -285,10 +285,12 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
     async ({ sessionId, staleRows, staleCols }) => {
       const w = window as unknown as {
         __echoes: number[];
+        __echoTimes: number[];
         __probe: WebSocket;
         __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
       };
       w.__echoes = [];
+      w.__echoTimes = [];
       const ws = new WebSocket(
         `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
           `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
@@ -302,6 +304,7 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
           const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
           if (msg.type === "resize" && typeof msg.rows === "number") {
             w.__echoes.push(msg.rows);
+            w.__echoTimes.push(performance.now());
           }
         } catch {
           // not a control frame
@@ -825,10 +828,12 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
     async ({ sessionId }) => {
       const w = window as unknown as {
         __echoes: number[];
+        __echoTimes: number[];
         __probe: WebSocket;
         __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
       };
       w.__echoes = [];
+      w.__echoTimes = [];
       const ws = new WebSocket(
         `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
           `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
@@ -842,6 +847,7 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
           const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
           if (msg.type === "resize" && typeof msg.rows === "number") {
             w.__echoes.push(msg.rows);
+            w.__echoTimes.push(performance.now());
           }
         } catch {
           // not a control frame
@@ -898,16 +904,16 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   const base = await echoCount();
 
   // The peer's claim: the pane's first contested sighting of 34x100 —
-  // contestedEchoes stamps it with THIS instant — answered by one reclaim
-  // echo.
+  // contestedEchoes stamps it with THIS instant. Whether the pane's own
+  // reclaim write lands before or after the repeat below does not matter:
+  // the record is seeded by the sighting, not by what the pane answered.
   await writeForeign();
   const atClaim = await waitEchoEq(34, base, "peer's foreign claim");
-  const atReclaim = await waitEchoEq(gridRows, atClaim + 1, "the pane's reclaim");
   // The peer's repeat inside the yield window: the pane must stand down.
   // The record still carries the FIRST sighting's timestamp — the repeat
   // does not refresh it — which is why the counter below must stay close.
   await writeForeign();
-  const atRepeat = await waitEchoEq(34, atReclaim + 1, "peer's repeat");
+  const atRepeat = await waitEchoEq(34, atClaim + 1, "peer's repeat");
 
   // A real activation: a pointerenter the platform marks trusted, the same
   // signal the desktop shell's pointer reclaim rides. Move off the pane
@@ -926,6 +932,18 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   // and this is the first answer, contested like any fresh foreign grid.
   await writeForeign();
   const atCounter = await waitEchoEq(34, atActivated + 1, "the peer's post-activation write");
+  // Harness invariant, not an assertion about the pane: master's yield
+  // clock runs from the FIRST sighting, so if this chain ever stretches
+  // past one window the record has expired and the spec would pass
+  // vacuously on master — fail loudly instead.
+  const sightingSpan = await page.evaluate(
+    ([first, last]) => {
+      const w = window as unknown as { __echoTimes: number[] };
+      return w.__echoTimes[last] - w.__echoTimes[first];
+    },
+    [atClaim, atCounter] as const,
+  );
+  expect(sightingSpan, "claim→counter sightings must share one yield window").toBeLessThan(1400);
   await waitEchoEq(gridRows, atCounter + 1, "post-activation reclaim");
   await expect
     .poll(rows, {
