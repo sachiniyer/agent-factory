@@ -306,19 +306,21 @@ func TestResumeLimitedSessions_ReLimitBacksOff(t *testing.T) {
 // episode — so every idle poll re-sent the stored prompt forever.
 func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing.T) {
 	advance := withFrozenClock(t)
-	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", time.Now().Add(-time.Hour))
-	_ = repoID
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(-time.Hour))
 
 	// The parked claim carries the banner's own anchor and phrase — the
 	// record a send-path or poll park writes — so the residue check can
 	// prove the re-read is the same emission. Seed it by sighting the exact
-	// content the poll will re-detect.
-	const residueBanner = "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
-	sighting := manager.limitDetector.Load().Sight(residueBanner, inst.ResolvedAgent(), nowFunc())
+	// pane content the poll will re-detect: real transcript above the banner,
+	// so the anchor is the position read a live capture produces.
+	const residuePane = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(residuePane, inst.ResolvedAgent(), nowFunc())
 	if !sighting.Hit {
 		t.Fatal("the fixture banner must hit the claude limit matcher")
 	}
-	inst.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence,
+	inst.SetLimitReachedAtEvidence(base.Add(-time.Hour), sighting.Evidence,
 		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
 
 	// Past reset+grace: the resume fires once and re-delivers the prompt.
@@ -335,7 +337,7 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 	// re-detection of it is residue — never a wall — so the row must not
 	// re-park, and no retry episode may re-arm.
 	_, epoch := inst.InFlightOpAndEpoch()
-	manager.resolveIdleLiveness(inst, residueBanner, epoch)
+	manager.resolveIdleLiveness(inst, residuePane, epoch)
 	if inst.LimitReached() {
 		t.Fatal("the row's own expired parked banner is residue, not a wall")
 	}
