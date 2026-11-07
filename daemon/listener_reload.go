@@ -530,20 +530,22 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
 				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
 			}
-			if wl.webHandle != nil && boundListenerBlocks(wl.webBoundAddr, req) {
-				return wl.rebindWebSamePortLocked(addr, policy, notice)
-			}
-			// Nothing of ours explains the conflict — so whose is it? A live
-			// af daemon of ANOTHER home holding the port is a takeover in
-			// waiting: our retry loop would win the bind the moment that
-			// daemon's restart releases it (#6858). Refuse instead; the
-			// refusal latches so no later gap can hand us the port. Every
-			// other holder — our OWN predecessor (the #6386 recovery), a
-			// third-party squatter, anything unprovable — keeps the retry.
-			// This guards a rebind target too: a held listener does not
-			// release for a foreign-held address, it keeps serving.
+			// Whose socket is the conflict? A live af daemon of ANOTHER home
+			// holding the port is a takeover in waiting: our retry loop would
+			// win the bind the moment that daemon's restart releases it
+			// (#6858). The check runs BEFORE our own listener's release path:
+			// a wildcard request can be co-blocked by our 127.0.0.2 socket AND
+			// a foreign 127.0.0.1 one — releasing ours fixes nothing there,
+			// and the refusal must latch anyway. An own-only conflict
+			// classifies own and falls through to the #5140 rebind; a
+			// third-party squatter or anything unprovable falls through to
+			// the ordinary failure. Refuse instead of retrying; the refusal
+			// latches so no later gap can hand us the port.
 			if refusal := foreignHolderRefusal(req); refusal != "" {
 				return wl.refuseOrKeepLocked(addr, refusal)
+			}
+			if wl.webHandle != nil && boundListenerBlocks(wl.webBoundAddr, req) {
+				return wl.rebindWebSamePortLocked(addr, policy, notice)
 			}
 		}
 		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
