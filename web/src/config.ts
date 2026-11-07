@@ -422,6 +422,15 @@ export class ConfigPane {
    *  is done, and replaying it would show a saved value as unsaved — while a
    *  refused save keeps it so the rejected text stays to be corrected. */
   private readonly drafts = new Map<string, string>();
+  /** What each save carried, per key, in send order — the pane's only record of
+   *  what went out, since the returned status names only the key. Saves for one
+   *  key are serialized (queueConfigSave in index.ts), so a key's status edges
+   *  land in send order and the head of its queue is the send the next edge
+   *  answers. The edge consumes that send either way, but retires the draft
+   *  only when it still holds exactly what the send carried — text typed while
+   *  the save flew is the next edit's draft (#6949), the same guard
+   *  retireCommittedHostAdd applies field by field. */
+  private readonly committedSaves = new Map<string, string[]>();
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
@@ -462,6 +471,16 @@ export class ConfigPane {
    *  only record of what was committed, since the returned status names no
    *  draft. The other verbs pass straight through. */
   private readonly hostActions: HostActions;
+  /** The names each register send carried, per agent, in send order — the
+   *  pane's only record of what went out, since the register status names only
+   *  the agent (its `name` is always ""). Registers are NOT serialized, so the
+   *  success edge's message identifies its own send; when the name cannot be
+   *  matched the oldest pending send is the best available answer. */
+  private readonly committedRegisters = new Map<string, string[]>();
+  /** AccountActions with `register` wrapped to record what was sent at submit
+   *  time — the same "what was committed" record committedSaves keeps for
+   *  config rows. The other verbs pass straight through. */
+  private readonly accountActions: AccountActions;
 
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
@@ -471,6 +490,15 @@ export class ConfigPane {
       add: (draft: HostAddDraft) => {
         this.committedHostAdds.set(draft.name, this.readHostDrafts());
         actions.hosts.add(draft);
+      },
+    };
+    this.accountActions = {
+      ...actions.accounts,
+      register: (agent: string, name: string) => {
+        const pending = this.committedRegisters.get(agent) ?? [];
+        pending.push(name);
+        this.committedRegisters.set(agent, pending);
+        actions.accounts.register(agent, name);
       },
     };
   }
@@ -499,8 +527,7 @@ export class ConfigPane {
     const registrationSucceeded = accounts.status !== this.accounts.status && accounts.status
       && accounts.status.name === "" && !accounts.status.error;
     if (registrationSucceeded) {
-      const submitted = this.accountInput(accounts.status!.agent);
-      if (submitted) submitted.value = "";
+      this.retireCommittedRegister(accounts.status!.agent, accounts.status!.message);
     }
     // The Hosts add form's equivalent edge (#6861): a successful add arrives as
     // a `name === ""` non-error status — the register form's own convention —
@@ -536,8 +563,24 @@ export class ConfigPane {
     // what the daemon now holds rather than replaying saved text as though it
     // were still unsaved. A refused save carries `error`, keeps the draft, and
     // leaves the rejected text to be corrected.
-    if (statusIsNew && status !== null && status.error === "") {
-      this.drafts.delete(status.key);
+    //
+    // Retirement is guarded by WHAT THE SEND CARRIED, not only by the key
+    // (#6949): the send's round trip is not instant, and text the user typed
+    // into the row while it flew is the next edit's draft — deleting it is the
+    // silent loss the drafts map exists to prevent. Every fresh settle edge
+    // consumes the send it answers (success and refusal alike: the send is
+    // done either way), but only a success whose draft still holds exactly
+    // what was sent may retire it. A status this pane never sent — a
+    // dotted-leaf font save, say — finds no pending send and touches nothing.
+    if (statusIsNew && status !== null) {
+      const pending = this.committedSaves.get(status.key);
+      const sent = pending?.shift();
+      if (pending !== undefined && pending.length === 0) {
+        this.committedSaves.delete(status.key);
+      }
+      if (status.error === "" && sent !== undefined && this.drafts.get(status.key) === sent) {
+        this.drafts.delete(status.key);
+      }
     }
     // An open trace describes the manifest it was fetched from. A refresh that
     // carries NEW entries — a save landing, a hand-edit, an `af config set`
@@ -938,6 +981,48 @@ export class ConfigPane {
     }
   }
 
+  /** Retires a committed register-form draft (#6949): the field clears only
+   *  while it still holds exactly what the answered send carried — a name
+   *  typed while the register was in flight is the NEXT account's draft, and
+   *  clearing it would be the same silent loss the draft capture exists to
+   *  prevent. Runs before rerenderKeepingUserState's readAccountDrafts so a
+   *  retired value is never snapshotted for a replay.
+   *
+   *  `message` names the send this success answers (`Registered <agent>
+   *  account "<name>"`), so a register landing while another is still in
+   *  flight retires its own send's draft rather than whichever send happened
+   *  to be last — registers are not serialized. When the name cannot be
+   *  matched, the oldest pending send for the agent is the best available
+   *  answer, the same fallback retireCommittedHostAdd uses. */
+  private retireCommittedRegister(agent: string, message: string): void {
+    const pending = this.committedRegisters.get(agent);
+    if (pending === undefined || pending.length === 0) {
+      return;
+    }
+    const named = /account "([^"]+)"/.exec(message)?.[1];
+    const at = named !== undefined ? pending.indexOf(named) : -1;
+    const sent = at >= 0 ? pending.splice(at, 1)[0] : pending.shift()!;
+    if (pending.length === 0) {
+      this.committedRegisters.delete(agent);
+    }
+    const submitted = this.accountInput(agent);
+    // The send went out trimmed (see the submit handler in accounts.ts), so
+    // the comparison trims too — padding the user never edited is not typing.
+    if (submitted !== null && submitted.value.trim() === sent) {
+      submitted.value = "";
+    }
+  }
+
+  /** The one path every config-row commit goes through: records what was sent
+   *  for this key (send order) before delegating to the shell's serialized
+   *  save, so the settle edge can match the answer back to its own send. */
+  private commitSave(key: string, value: string): void {
+    const pending = this.committedSaves.get(key) ?? [];
+    pending.push(value);
+    this.committedSaves.set(key, pending);
+    this.actions.save(key, value);
+  }
+
   private hostInput(key: string): HTMLInputElement | HTMLSelectElement | null {
     return this.el.querySelector<HTMLInputElement | HTMLSelectElement>(
       `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`,
@@ -1021,7 +1106,7 @@ export class ConfigPane {
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
-      renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
+      renderAccountsSection(this.accounts, this.accountActions, this.registration),
       renderQuotaSection(this.quota),
     );
   }
@@ -1262,7 +1347,7 @@ export class ConfigPane {
       box.checked = e.value === "true";
       box.setAttribute("aria-label", e.key);
       // A checkbox has no separate commit gesture: toggling IS the edit.
-      box.addEventListener("change", () => this.actions.save(e.key, box.checked ? "true" : "false"));
+      box.addEventListener("change", () => this.commitSave(e.key, box.checked ? "true" : "false"));
       return h("div", { class: "af-config-control" }, box);
     }
 
@@ -1279,7 +1364,7 @@ export class ConfigPane {
         }
         select.append(opt);
       }
-      select.addEventListener("change", () => this.actions.save(e.key, select.value));
+      select.addEventListener("change", () => this.commitSave(e.key, select.value));
       return h("div", { class: "af-config-control" }, select);
     }
 
@@ -1328,7 +1413,7 @@ export class ConfigPane {
       if (!canCommit(input.value, e.value)) {
         return;
       }
-      this.actions.save(e.key, input.value);
+      this.commitSave(e.key, input.value);
     };
 
     const syncSave = () => {

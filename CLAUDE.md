@@ -223,7 +223,7 @@ new files to dodge the limit — split them. See `docs/dev/file-length-lint.md`.
 - `task/` — task store, cron/watch validation/parsing, session-start helpers
 - `schedule/` — UI-agnostic schedule model behind the task pickers (preset shapes ↔ cron expressions)
 - `quota/` — usage-limit evidence and account selection for limited sessions
-- `handoff/` — the automatic account-handoff engine (#6776): a leaf `decide(Facts) → Decision` core plus its durable state file and the edge-triggered shadow event log
+- `handoff/` — the automatic account-handoff engine (#6776): a leaf `decide(Facts) → Decision` core plus its durable state and rails files and the edge-triggered shadow event log
 - `proposal/` — proposal store: per-project folders of markdown docs a user and agent sessions edit together, backed by a private git repo under the AF home
 - `move/` — moving a live local worktree session to a sandbox: worktree snapshot, the `move_cmd` contract, all-or-nothing orchestration
 - `daemon/` — always-on background daemon: task scheduler, watcher supervisor, session monitor, control-socket RPCs, autostart unit

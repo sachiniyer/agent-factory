@@ -47,20 +47,24 @@ func (m *Manager) captureAgentConversationAsync(repoID, key string, inst *sessio
 // and exits. Without that, a stale loop winding down could refuse the new
 // generation's arm and leave the rollout it mints between baselines forever
 // unrecorded.
-func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken) {
+//
+// Reports whether the arm actually proceeded and its loop was launched. A
+// false return is a decline: the deferred-arm caller must not have spent the
+// instance's parked baseline (#6946) and puts it back.
+func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken) bool {
 	if token.Agent() != tmux.ProgramCodex {
-		return
+		return false
 	}
 	if inst.AgentRuntimeToken() != token {
 		// The caller's token is already history; whoever replaced the runtime
 		// arms its own capture.
-		return
+		return false
 	}
 	if m.armedConversationCaptures == nil {
 		m.armedConversationCaptures = make(map[*session.Instance]session.AgentRuntimeToken)
 	}
 	if armed, ok := m.armedConversationCaptures[inst]; ok && armed == token {
-		return
+		return false
 	}
 	m.armedConversationCaptures[inst] = token
 	if m.pendingConversationCaptures == nil {
@@ -74,7 +78,7 @@ func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *sessi
 	if m.launchBackgroundMutation(func(stop <-chan struct{}) {
 		m.conversationCaptureLoop(repoID, key, inst, snap, token, timeout, rearm, stop)
 	}) {
-		return
+		return true
 	}
 	if m.armedConversationCaptures[inst] == token {
 		delete(m.armedConversationCaptures, inst)
@@ -84,6 +88,7 @@ func (m *Manager) startConversationCaptureLocked(repoID, key string, inst *sessi
 	} else {
 		m.pendingConversationCaptures[inst]--
 	}
+	return false
 }
 
 // beginConversationCapture re-arms the reap fence for the capture attempt the
@@ -228,7 +233,11 @@ func (m *Manager) ArmConversationCaptures() {
 			// would bind the wrong store.
 			continue
 		}
-		if inst.AgentConversation().HasID() || inst.UserKilled() || inst.IsArchived() {
+		if inst.DropPendingConversationCaptureIfMoot() {
+			// A recorded, killed, or archived row can never arm again, so its
+			// parked baseline is permanently moot: the check and the drop are
+			// one atomic step so a respawn parking its baseline between them
+			// is never destroyed (#6946).
 			continue
 		}
 		switch inst.GetLiveness() {
@@ -246,21 +255,56 @@ func (m *Manager) ArmConversationCaptures() {
 			continue
 		}
 		// A respawn that retired a refused conversation parks its pre-spawn
-		// baseline here (#6769 review): the replacement's rollout can already
-		// exist, and a fresh before-image would exclude the file it must find.
-		snap, parked := inst.TakePendingConversationCapture()
-		if !parked {
-			snap = inst.SessionCodexCaptureBaseline()
-		}
-		if !snap.CapturesCodex() {
-			continue
-		}
+		// baseline on the instance (#6769 review): the replacement's rollout
+		// can already exist, and a fresh before-image would exclude the file
+		// it must find. The park is spent only inside an admitted arm —
+		// every decline leaves it for the next tick — so the fallback
+		// baseline is built here unconditionally and the park wins whenever
+		// admission releases it (#6946).
+		snap := inst.SessionCodexCaptureBaseline()
 		repoID, _ := splitDaemonInstanceKey(key)
 		m.mu.Lock()
-		if m.instances[key] == inst {
-			m.startConversationCaptureLocked(repoID, key, inst, snap, token)
-		}
+		m.armDeferredConversationCaptureLocked(repoID, key, inst, snap, token)
 		m.mu.Unlock()
+	}
+}
+
+// armDeferredConversationCaptureLocked admits or declines one deferred arm
+// under m.mu. The parked baseline is taken only here — atomically with the
+// token liveness it is gated on — so every decline leaves it parked for the
+// next tick: the row leaving m.instances, an arm already in flight for this
+// generation, the caller's token going stale, or a baseline that never bound
+// a Codex store. A park released and then unused goes back the same way
+// (#6946). The declines that make the park permanently moot — a recorded,
+// killed, or archived row — drop it explicitly instead. Callers must hold
+// m.mu.
+func (m *Manager) armDeferredConversationCaptureLocked(repoID, key string, inst *session.Instance, fallback session.ConversationCaptureSnapshot, token session.AgentRuntimeToken) {
+	if m.instances[key] != inst {
+		return
+	}
+	if inst.DropPendingConversationCaptureIfMoot() {
+		return
+	}
+	if armed, ok := m.armedConversationCaptures[inst]; ok && armed == token {
+		return
+	}
+	park, current := inst.TakePendingConversationCaptureForRuntime(token)
+	if !current {
+		// The caller's token is already history: a swap or handoff arms the
+		// replacement's capture inline, and a plain respawn parks its own
+		// baseline for the generation that replaces this one.
+		return
+	}
+	snap := fallback
+	if park != nil {
+		snap = park.Snapshot
+	}
+	if !snap.CapturesCodex() {
+		inst.RestorePendingConversationCapture(park)
+		return
+	}
+	if !m.startConversationCaptureLocked(repoID, key, inst, snap, token) {
+		inst.RestorePendingConversationCapture(park)
 	}
 }
 

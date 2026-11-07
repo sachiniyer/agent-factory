@@ -20,7 +20,7 @@ import assert from "node:assert/strict";
 
 import { FakeElement, FakeEvent, installFakeDom } from "./fakedom.js";
 import { ConfigPane, type ConfigActions, type ConfigStatus } from "./config.js";
-import { emptyAccountsState, type AccountsState } from "./accounts.js";
+import { ACCOUNT_INPUT_ATTR, emptyAccountsState, type AccountsState } from "./accounts.js";
 import { emptyQuotaState, type QuotaState } from "./quota.js";
 import { emptyHostsState, type HostAddDraft, type HostsState } from "./hosts.js";
 import type { ConfigEntry } from "./types.js";
@@ -96,6 +96,27 @@ const configInput = (pane: ConfigPane, key: string): FakeElement => {
 const hostField = (pane: ConfigPane, key: string): FakeElement => {
   const found = el(pane).querySelector(`[data-host-input="${key}"]`);
   assert.ok(found !== null, `no add-form field rendered for ${key}`);
+  return found;
+};
+
+/** One config row's Save button — the commit gesture a text row gets. */
+const saveButton = (pane: ConfigPane, key: string): FakeElement => {
+  const found = el(pane).querySelector(`.af-config-row[data-key="${key}"] .af-config-save`);
+  assert.ok(found !== null, `no Save button rendered for ${key}`);
+  return found;
+};
+
+/** One config row's "Unsaved" chip. */
+const dirtyChip = (pane: ConfigPane, key: string): FakeElement => {
+  const found = el(pane).querySelector(`.af-config-row[data-key="${key}"] .af-config-dirty`);
+  assert.ok(found !== null, `no Unsaved chip rendered for ${key}`);
+  return found;
+};
+
+/** One register-form field, by the ACCOUNT_INPUT_ATTR the section marks it with. */
+const accountField = (pane: ConfigPane, agent: string): FakeElement => {
+  const found = el(pane).querySelector(`input[${ACCOUNT_INPUT_ATTR}="${agent}"]`);
+  assert.ok(found !== null, `no register field rendered for ${agent}`);
   return found;
 };
 
@@ -339,4 +360,134 @@ test("a successful check-all does not retire an add-form draft", () => {
 
   assert.equal(hostField(pane, "name").value, "box2", "a probe outcome is not a commit — the draft stays");
   assert.equal(hostField(pane, "host").value, "gpu.tailnet");
+});
+
+// #6949: a config-row save's success edge retired the row's draft
+// UNCONDITIONALLY — the send's round trip is not instant, and text typed into
+// the row while it flew was deleted along with the committed draft: the input
+// repainted the daemon's committed value under the user's caret, the "Unsaved"
+// chip vanished, and nothing was left to undo. Only a draft still holding
+// exactly what was sent may retire; anything typed since is the next edit's
+// draft — the same guard the Hosts add form got in the same commit.
+test("text typed while the save was in flight survives its success edge (#6949)", () => {
+  const sent: { key: string; value: string }[] = [];
+  const pane = new ConfigPane(actions({
+    save: (key, value) => { sent.push({ key, value }); },
+  }));
+  const accts = accounts();
+  const q = quota();
+  const hs = hosts();
+  pane.update(TWO_ROWS, "", null, accts, q, "system", hs);
+
+  type(configInput(pane, "default_program"), "codex");
+  saveButton(pane, "default_program").click();
+  assert.deepEqual(sent, [{ key: "default_program", value: "codex" }]);
+
+  // The request is still out; the user keeps typing into the same row.
+  type(configInput(pane, "default_program"), "codex-openai");
+
+  // applyConfigValueNow's own sequence: the status edge lands first (entries
+  // still old), then refreshConfig delivers the committed value.
+  const saved: ConfigStatus = { key: "default_program", value: "codex", notice: "", error: "" };
+  pane.update(TWO_ROWS, "", saved, accts, q, "system", hs);
+  const refetched = TWO_ROWS.map((e) => (e.key === "default_program" ? { ...e, value: "codex" } : { ...e }));
+  pane.update(refetched, "", saved, accts, q, "system", hs);
+
+  assert.equal(configInput(pane, "default_program").value, "codex-openai",
+    "text typed after the send is the next draft — only committed text may be retired");
+  assert.equal(dirtyChip(pane, "default_program").hidden, false,
+    "the retyped draft must still read as unsaved");
+  assert.equal(saveButton(pane, "default_program").disabled, false,
+    "a draft that differs from the committed value stays committable");
+});
+
+// The same loss one send later: saves for a key are serialized, so a second
+// commit can be queued behind the first. The FIRST send's success answers only
+// its own send — a single-slot "last sent" record would see the field holding
+// the second send's text and retire it under a success that was never its own.
+// Each send's edge must retire ITS OWN send's draft.
+test("a queued second send's draft survives the FIRST send's success edge (#6949)", () => {
+  const sent: { key: string; value: string }[] = [];
+  const pane = new ConfigPane(actions({
+    save: (key, value) => { sent.push({ key, value }); },
+  }));
+  const accts = accounts();
+  const q = quota();
+  const hs = hosts();
+  pane.update(TWO_ROWS, "", null, accts, q, "system", hs);
+
+  type(configInput(pane, "default_program"), "codex");
+  saveButton(pane, "default_program").click();
+  // The first send is still out; the user retypes and commits again — the
+  // keyed queue serializes this second write behind the first.
+  type(configInput(pane, "default_program"), "codex-openai");
+  saveButton(pane, "default_program").click();
+  assert.deepEqual(sent, [
+    { key: "default_program", value: "codex" },
+    { key: "default_program", value: "codex-openai" },
+  ]);
+
+  // The FIRST send's success lands: it answers "codex", so it must not touch
+  // the field's "codex-openai" — that draft belongs to the send still in flight.
+  const saved1: ConfigStatus = { key: "default_program", value: "codex", notice: "", error: "" };
+  pane.update(TWO_ROWS, "", saved1, accts, q, "system", hs);
+  const refetched1 = TWO_ROWS.map((e) => (e.key === "default_program" ? { ...e, value: "codex" } : { ...e }));
+  pane.update(refetched1, "", saved1, accts, q, "system", hs);
+
+  assert.equal(configInput(pane, "default_program").value, "codex-openai",
+    "the first send's success must not eat the second send's draft");
+  assert.equal(dirtyChip(pane, "default_program").hidden, false);
+
+  // The second send's own success retires its own draft: the field then paints
+  // the committed value and the row reads saved again.
+  const saved2: ConfigStatus = { key: "default_program", value: "codex-openai", notice: "", error: "" };
+  pane.update(refetched1, "", saved2, accts, q, "system", hs);
+  const refetched2 = refetched1.map((e) => (e.key === "default_program" ? { ...e, value: "codex-openai" } : { ...e }));
+  pane.update(refetched2, "", saved2, accts, q, "system", hs);
+
+  assert.equal(configInput(pane, "default_program").value, "codex-openai",
+    "the second send's own success retires its own draft — the committed value paints");
+  assert.equal(dirtyChip(pane, "default_program").hidden, true,
+    "nothing unsaved once the last draft is the committed one");
+});
+
+// The Accounts register form has the same edge and had the same bug: a
+// successful register cleared the name field unconditionally, so a name typed
+// while the register was in flight — the NEXT account's draft — was destroyed.
+test("a name typed while the register was in flight survives its success edge (#6949)", () => {
+  const sent: { agent: string; name: string }[] = [];
+  const pane = new ConfigPane(actions({
+    accounts: { register: (agent, name) => { sent.push({ agent, name }); }, login: () => {} },
+  }));
+  const q = quota();
+  const hs = hosts();
+  const roster = (status: AccountsState["status"]): AccountsState => ({
+    ...emptyAccountsState(),
+    loaded: true,
+    agents: ["claude"],
+    entries: [{ agent: "claude", name: "work", dir: "/accounts/claude/work", registration_only: false, logged_in: true }],
+    status,
+  });
+  pane.update(TWO_ROWS, "", null, roster(null), q, "system", hs);
+
+  accountField(pane, "claude").value = "alice";
+  el(pane).querySelector(".af-accounts-register .af-accounts-add")!.click();
+  assert.deepEqual(sent, [{ agent: "claude", name: "alice" }]);
+
+  // The request is still out; the user is already naming the next account.
+  accountField(pane, "claude").value = "bob";
+
+  // doRegisterAccount's own sequence: the "Registered …" status (name "" is
+  // the register form's match — the name lives in the message), then
+  // refreshAccounts delivers the grown roster.
+  const registered = roster({ agent: "claude", name: "", message: 'Registered claude account "alice"', error: false });
+  pane.update(TWO_ROWS, "", null, registered, q, "system", hs);
+  const grown = {
+    ...registered,
+    entries: [...registered.entries, { agent: "claude", name: "alice", dir: "/accounts/claude/alice", registration_only: false, logged_in: false }],
+  };
+  pane.update(TWO_ROWS, "", null, grown, q, "system", hs);
+
+  assert.equal(accountField(pane, "claude").value, "bob",
+    "retyped text is the next draft — only the sent name may be cleared");
 });
