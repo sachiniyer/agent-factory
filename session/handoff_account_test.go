@@ -46,6 +46,34 @@ func TestPendingManualAccountSwapDeliveryEvidenceIsMissionScoped(t *testing.T) {
 	require.Equal(t, PromptCouldNotConfirm, inst.ToInstanceData().PendingAccountSwap.MissionDeliveryStatus)
 }
 
+// The manual twin of the notice-delivery boundary test — #6798: the begin
+// boundary must retire the displaced verdict's ATTEMPT INSTANT together with
+// its status, the way the automatic notice's begin/restore pair already does.
+// A crash after the boundary reloads (could-not-confirm, STALE attempt
+// instant): the re-verification watch then arms against the positively-missed
+// attempt's timestamp, and a turn the pane shows beginning after it —
+// unrelated to the never-submitted retry — satisfies the evidence contract
+// and retires a mission that was never sent. Evidence may only ever be armed
+// against the attempt that is actually pending.
+func TestManualAccountSwapMissionDeliveryBoundaryRetiresTheAttemptInstant(t *testing.T) {
+	missed := time.Now().Add(-time.Minute)
+	inst := noticePendingSwap(true, PromptNotDelivered, missed)
+
+	prev, prevAttempt, err := inst.BeginPendingManualAccountSwapMissionDelivery("work", "personal")
+	require.NoError(t, err)
+	require.Equal(t, PromptNotDelivered, prev)
+	require.Equal(t, missed, prevAttempt,
+		"the displaced attempt instant returns with the verdict that produced it")
+	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus)
+	require.True(t, inst.pendingAccountSwap.MissionDeliveryAttemptAt.IsZero(),
+		"a retry's begin boundary must drop the missed attempt's instant — evidence binds only the send actually pending")
+
+	require.NoError(t, inst.RestorePendingManualAccountSwapMissionDelivery("work", "personal", prev, prevAttempt))
+	require.Equal(t, PromptNotDelivered, inst.pendingAccountSwap.MissionDeliveryStatus)
+	require.Equal(t, missed, inst.pendingAccountSwap.MissionDeliveryAttemptAt,
+		"a failed checkpoint restores the displaced verdict AND its instant atomically")
+}
+
 func TestStartupUnknownManualAccountSwapDoesNotExposeRetry(t *testing.T) {
 	inst := &Instance{
 		liveness:            LiveRunning,

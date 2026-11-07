@@ -19,15 +19,20 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	// before touching the composer: a crash during submission then reloads an
 	// ambiguous verdict and cannot authorize the same mission a second time. An
 	// explicit operator retry follows the same boundary after pane inspection.
-	previousStatus, err := instance.BeginPendingManualAccountSwapMissionDelivery(swap.from, swap.to)
+	// The displaced attempt instant retires with the verdict (#6798): a stale
+	// timestamp must never re-arm the re-verification watch against an attempt
+	// that is no longer pending.
+	previousStatus, previousAttempt, err := instance.BeginPendingManualAccountSwapMissionDelivery(swap.from, swap.to)
 	if err != nil {
 		return false, false, err
 	}
 	if err := m.persistSettlement(repoID, key, instance); err != nil {
 		// The attempt never began, so positive non-delivery remains truthful. The
 		// outer failure path checkpoints this restoration and leaves no send behind.
+		// Status and attempt instant restore as one pair so the record reads
+		// exactly as evidence armed it before the boundary (#6798).
 		_ = instance.RestorePendingManualAccountSwapMissionDelivery(
-			swap.from, swap.to, previousStatus,
+			swap.from, swap.to, previousStatus, previousAttempt,
 		)
 		return false, false, fmt.Errorf("could not record the account-handoff mission attempt before submission; mission was not submitted: %w", err)
 	}
