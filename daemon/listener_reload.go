@@ -416,6 +416,16 @@ func (wl *webListeners) retireWebBeforePostureSwap(newCfg *config.Config) {
 // rebindWebSamePortLocked: release, bind, roll back on failure.
 // Caller holds wl.mu.
 func (wl *webListeners) bindWebLocked(addr string) error {
+	// A latched #6858 foreign refusal already in force short-circuits BEFORE
+	// the refusal-clearing below: re-running the whole gate on every reconcile
+	// would re-log the refusal and re-bump the generation each time. Unlike
+	// the #5137 posture refusal it is an event the latch remembers, not a
+	// verdict re-derived from the current config.
+	if wl.webHandle == nil {
+		if refusal, latched := wl.foreignRefusals[addr]; latched && wl.webRefusal == refusal {
+			return nil
+		}
+	}
 	// Reaching bindWebLocked at all means the posture is not refused (#5137) —
 	// reconcile checks ListenerBindRefusal first — so any recorded refusal is
 	// stale: the opt-in landed, the token came on, or the address moved back to
