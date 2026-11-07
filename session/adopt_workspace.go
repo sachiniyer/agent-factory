@@ -57,6 +57,14 @@ type RecordedTransport struct {
 func (i *Instance) recordedTransport() (*RecordedTransport, error) {
 	p := i.sandboxProvisioner()
 	if p == nil || strings.TrimSpace(p.sshCmd) == "" {
+		// Reached only with the unknown-cleanup flag clear — the fail-closed
+		// shape is refused earlier, in confirmStoppedBeforeAdopt — so this row
+		// owes nothing af can still reap and `af sessions kill` does remove it.
+		// Name the preserved directory too: the kill drops the record, which is
+		// the last pointer af has to it (#6791).
+		if w := i.preservedWorkspaceOwed(); w != nil {
+			return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it, then remove the preserved workspace at %s from the host yourself", i.Title, w.Dir)
+		}
 		return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it", i.Title)
 	}
 	t := &RecordedTransport{SSHCmd: p.sshCmd}
@@ -385,6 +393,19 @@ func (i *Instance) confirmStoppedBeforeAdopt() error {
 		return nil
 	}
 	if err := i.confirmServerStopped(); err != nil {
+		if i.sandboxProvisioner() == nil {
+			// The fail-closed-reload shape (#6791): the row's recorded cleanup
+			// handle could not be rebuilt at load, so no transport was ever
+			// recorded — "retry once the host is reachable" cannot happen, and
+			// "kill the session" refuses on the same unreadable handle. Name
+			// the manual way out instead of the dead end.
+			i.mu.RLock()
+			id, title := i.ID, i.Title
+			ws, handle := i.archivedWorkspace, i.failedRuntimeCleanup
+			i.mu.RUnlock()
+			return fmt.Errorf("session %q: its recorded cleanup handle could not be rebuilt, so af cannot prove its preserved workspace's state (%v); not starting a new agent-server beside an unproven one. %s",
+				title, err, cleanupRecordManualWayOut(id, title, ws, handle))
+		}
 		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or kill the session", i.Title, err)
 	}
 	i.mu.Lock()

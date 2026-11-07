@@ -493,9 +493,64 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 	}
 }
 
-func unavailableRuntimeCleanup(title, backendType string, cause error) func() error {
+// unavailableRuntimeCleanup is the teardown a reload installs when the row's
+// persisted cleanup handle cannot be rebuilt. The workspace state is genuinely
+// unknown — the record must be retained rather than deleted — but the cause is
+// also unhealable by retrying: the same persisted handle fails every rebuild,
+// so the refusal composes ErrCleanupHandleUnusable into the unknown-state
+// class and the daemon's paced retry retires the record instead of looping the
+// same answer (#2737). And because #6791 requires every refusal on this path to
+// name a way out that actually works, the message ends with the manual steps —
+// repair the persisted handle, or remove what it names and drop the row.
+func unavailableRuntimeCleanup(data InstanceData, cause error) func() error {
+	id, title, backendType := data.ID, data.Title, data.BackendType
+	ws, handle := data.ArchivedWorkspace, data.RuntimeCleanup
 	return func() error {
-		return fmt.Errorf("%w: session %q is tombstoned for backend %q, but its durable cleanup handle is unavailable (%v); retaining the record rather than claiming its off-box workspace was reaped",
-			ErrWorkspaceStateUnknown, title, backendType, cause)
+		return &unusableCleanupRefusal{msg: fmt.Sprintf(
+			"session %q is tombstoned for backend %q, but its durable cleanup handle could not be rebuilt (%v); retaining the record rather than claiming its off-box workspace was reaped. %s",
+			title, backendType, cause, cleanupRecordManualWayOut(id, title, ws, handle))}
+	}
+}
+
+// cleanupRecordManualWayOut names the steps an operator can still take when af
+// cannot rebuild a session's off-box cleanup handle (#6791). No verb exists for
+// this — a refusal that names one anyway would be the dead end the issue is
+// about — so the way out is the record itself: repair the persisted handle so
+// the next daemon start rebuilds it, or remove what it names and drop the row,
+// by hand. The daemon must be stopped for the row edit: it flushes its
+// in-memory state over the file on exit.
+func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData) string {
+	home := "the AF home (~/.agent-factory, or $AGENT_FACTORY_HOME when set)"
+	if dir, err := config.GetConfigDir(); err == nil {
+		home = dir
+	}
+	return fmt.Sprintf("To move on, either repair this session's `runtime_cleanup` entry in its repo's `instances/<repoID>/instances.json` under %s, then `af daemon restart` and `af sessions kill %q` again — or remove %s yourself, then stop the daemon (`af daemon status` names its pid; a clean exit flushes the file), delete the row whose id is %q from that file, and run `af` again",
+		home, title, cleanupResourceDescription(ws, handle), id)
+}
+
+// cleanupResourceDescription names the off-box resource a row's cleanup
+// identity points at, so a refusal can tell the operator exactly what to remove
+// by hand when af cannot drive the reap itself. The preserved-workspace record
+// wins when present — it is the resource the row exists to protect — and the
+// rejected handle's own fields are the fallback (a tombstoned row may name a
+// resource and still be unreadable for want of an engine id or host).
+func cleanupResourceDescription(ws *ArchivedWorkspaceData, handle *RuntimeCleanupData) string {
+	switch {
+	case ws != nil && ws.Dir != "" && ws.Host != "":
+		return fmt.Sprintf("its preserved workspace at %s on host %q", ws.Dir, ws.Host)
+	case ws != nil && ws.Dir != "":
+		return fmt.Sprintf("its preserved workspace at %s on its host", ws.Dir)
+	case handle != nil && handle.SSH != nil && handle.SSH.Config.Host != "":
+		return fmt.Sprintf("session directory %s on host %q", handle.SSH.SessionDir, handle.SSH.Config.Host)
+	case handle != nil && handle.SSH != nil && handle.SSH.SessionDir != "":
+		return fmt.Sprintf("session directory %s on its host", handle.SSH.SessionDir)
+	case handle != nil && handle.Sandbox != nil && handle.Sandbox.SessionDir != "":
+		return fmt.Sprintf("session directory %s on the host its ssh command reaches", handle.Sandbox.SessionDir)
+	case handle != nil && handle.Docker != nil && handle.Docker.ContainerID != "":
+		return fmt.Sprintf("container %s", handle.Docker.ContainerID)
+	case handle != nil && handle.Hook != nil && handle.Hook.Slug != "":
+		return fmt.Sprintf("the resource its hook delete_cmd names (slug %q)", handle.Hook.Slug)
+	default:
+		return "whatever off-box resource the row's runtime_cleanup or archived_workspace fields name"
 	}
 }

@@ -566,6 +566,11 @@ func (i *Instance) bindProvisionResult(res ProvisionResult) error {
 	i.backend = res.Backend
 	i.remoteClient = rc
 	i.runtimeTeardown = res.Teardown
+	// A bound runtime supersedes the refused cleanup handle a fail-closed
+	// reload may have retained: the live backend's own cleanup identity is
+	// authoritative now, and keeping the stale one would let a later snapshot
+	// republish a refused handle over a working runtime (#6791).
+	i.failedRuntimeCleanup = nil
 	i.callbackUnavailable = res.CallbackUnavailable
 	// The skip list is provision evidence, installed verbatim like the callback
 	// reason above: a fresh runtime that placed every declared file clears a
@@ -594,6 +599,10 @@ func (i *Instance) retainProvisionResultCleanup(res ProvisionResult) {
 	i.backend = res.Backend
 	i.remoteClient = nil
 	i.runtimeTeardown = res.Teardown
+	// Same supersede as bindProvisionResult: this backend carries the cleanup
+	// identity of the runtime just provisioned, so a refused handle an earlier
+	// reload retained must not outlive it (#6791).
+	i.failedRuntimeCleanup = nil
 	i.touchLocked()
 	if !i.runtimeCleanupStateUnknown {
 		i.runtimeCleanupStateUnknown = true

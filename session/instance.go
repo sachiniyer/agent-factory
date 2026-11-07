@@ -728,7 +728,10 @@ type Instance struct {
 	// from the instance the moment the rebuild fails; one ForStorage later the
 	// on-disk row carries neither a handle nor the unknown flag, and a
 	// subsequent kill runs the no-op-success path and deletes the only record
-	// naming the preserved still-un-reaped workspace.
+	// naming the preserved still-un-reaped workspace. It is cleared the moment
+	// a new runtime is bound (bindProvisionResult, retainProvisionResultCleanup):
+	// the bound backend's own cleanup identity is authoritative then, and a
+	// stale refused handle must not be republished over it (#6791).
 	failedRuntimeCleanup *RuntimeCleanupData
 	// pendingTabCleanup holds the tmux cleanup handles of tabs already durably
 	// removed from Tabs whose teardown was never confirmed (#2669). Guarded by
