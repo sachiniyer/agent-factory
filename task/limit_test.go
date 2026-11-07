@@ -896,6 +896,21 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 11, 1, 14, 0, 0, 0, est).UTC(), // Nov 1 2pm EST -> 19:00Z
 		},
 		{
+			// A narrow pane may wrap BETWEEN a one-digit day and a clock
+			// hour that carries minutes — "Nov 1\n2:30pm" — and the wrap
+			// must NOT rejoin the digits: "Nov 12:30pm" would let monthDay
+			// consume "12" as the day and parseClockTime read "12:30pm" as
+			// the clock, scheduling the reset on Nov 12 at 12:30 instead of
+			// Nov 1 at 2:30. The colon after the post digit run prevents
+			// followedByClockSuffix (it checks [ap]m), so the same
+			// calendar-day boundary guard that handles the "Nov 1\n2pm"
+			// case above must also apply here. Same EST instant as the
+			// unwrapped "Nov 1 2:30pm" form.
+			name:    "weekly date: day wraps before a clock hour with minutes",
+			content: "Claude usage limit reached. Your limit will reset at Nov 1\n2:30pm (America/New_York).",
+			want:    time.Date(2026, 11, 1, 14, 30, 0, 0, est).UTC(), // Nov 1 2:30pm EST -> 19:30Z
+		},
+		{
 			// A narrow pane may wrap INSIDE a weekday name — "Thursday"
 			// splits as "Th\nursday" — and the wrap must rejoin the
 			// letters (drop, not space) so the weekday regex matches
@@ -905,6 +920,20 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			// at 9am" form.
 			name:    "weekly weekday: weekday wraps inside its letters",
 			content: "Claude usage limit reached. Your limit will reset Th\nursday at 9am (America/New_York).",
+			want:    time.Date(2026, 1, 8, 9, 0, 0, 0, est).UTC(), // Thu Jan 8 2026 9am EST -> 14:00Z
+		},
+		{
+			// A very narrow pane may wrap a weekday one letter per row
+			// — "Thursday" splits as "T\nh\nursday" — and the first wrap
+			// only sees "Th", which is a strict prefix of "Thursday" but
+			// not a complete weekday the set admits, so the multi-row
+			// rejoin must admit the strict prefix (mirroring
+			// wrapSplitsMonth) or the first wrap spaces to "T h" and the
+			// weekday can never be recovered (the reset degrades to
+			// time-only, scheduling it days early). Same EST instant as
+			// the unwrapped "Thursday at 9am" form.
+			name:    "weekly weekday: weekday wraps one letter per row",
+			content: "Claude usage limit reached. Your limit will reset T\nh\nursday at 9am (America/New_York).",
 			want:    time.Date(2026, 1, 8, 9, 0, 0, 0, est).UTC(), // Thu Jan 8 2026 9am EST -> 14:00Z
 		},
 		{

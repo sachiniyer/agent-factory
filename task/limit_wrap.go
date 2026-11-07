@@ -49,7 +49,28 @@ func wrapSplitsWeekday(pre, post string) bool {
 	if tail == "" {
 		return false
 	}
-	return weekdayNameSet[strings.ToLower(head+tail)]
+	joined := strings.ToLower(head + tail)
+	if weekdayNameSet[joined] {
+		return true
+	}
+	// A multi-row split of a weekday token — a very narrow pane breaking
+	// "Thursday" one letter per row ("T\nh\nursday") — presents a 2-letter
+	// fragment ("Th") at the first wrap that is not a complete weekday the
+	// set admits, so the exact check above misses it and the wrap would
+	// space to "T h ursday", which the weekday regex cannot match (degrading
+	// the reset to time-only). Rejoin when the fragment is a strict prefix
+	// of a complete weekday so the next wrap sees the full name and rejoins
+	// in turn, mirroring wrapSplitsMonth's multi-row handling. The fragment
+	// is at least 2 letters (head and tail are both non-empty), and within a
+	// reset clause the only letter-newline-letter wraps that yield a
+	// 2-letter weekday-prefix are weekday tokens being split, so this does
+	// not rejoin a word-boundary wrap.
+	for name := range weekdayNameSet {
+		if len(joined) < len(name) && strings.HasPrefix(name, joined) {
+			return true
+		}
+	}
+	return false
 }
 
 // weekdayNameSet is the set of complete weekday tokens (full names plus the

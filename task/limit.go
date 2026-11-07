@@ -660,6 +660,18 @@ func normalizeResetWhitespace(s string) string {
 						}
 						// else: day+clock boundary — stay a space
 					}
+				} else if preRunIsCalendarDay(pre, preStart) && postEnd < len(s) && s[postEnd] == ':' {
+					// A wrap between a calendar day and a clock hour that
+					// carries minutes ("Nov 1\n2:30pm") is a day+clock
+					// boundary, not a mid-token day/year split: rejoining to
+					// "Nov 12:30pm" would let monthDay consume "12" as the day
+					// and the clock read "12:30pm", scheduling the reset on
+					// the wrong day at the wrong hour. The colon prevents
+					// followedByClockSuffix (it checks [ap]m), so this guard
+					// applies the same calendar-day boundary check before the
+					// generic digit rejoin below. A mid-token clock-hour
+					// split ("1\n1:30am") is not a calendar day
+					// (preRunIsCalendarDay is false), so it still rejoins.
 				} else if preRun+postRun <= 4 {
 					rejoin = true // mid-token day/year — rejoin
 				}
