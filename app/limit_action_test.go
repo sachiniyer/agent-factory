@@ -384,7 +384,14 @@ func TestHandleLimitRetry_AutomaticSwapAtLimitOffersHonestRetrySendLabel(t *test
 	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
 }
 
-func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {
+// A committed swap parked at the wall on a startup-unknown row is still
+// resent by the daemon: the committed-transaction bypass in ResumeFromLimit
+// (committedAccountSwap) admits it, and BeginManualAccountSwap /
+// BeginLimitResume skip the startup gate for the committed swap because the
+// explicit retry IS the inspection the marker waits for. So the picker must
+// say "Retry send" here too — "the pending mission is not resent" would be
+// the same false promise as #6800's (MED, #6922 review).
+func TestHandleLimitRetry_StartupUnknownManualSwapAtLimitOffersHonestRetrySendLabel(t *testing.T) {
 	h := newTestHome(t)
 	base, err := session.NewInstance(session.InstanceOptions{
 		Title: "worker", Path: t.TempDir(), Program: "test",
@@ -392,7 +399,8 @@ func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing
 	require.NoError(t, err)
 	data := base.ToInstanceData()
 	data.Status = session.Running
-	data.Liveness = session.LiveRunning
+	data.Liveness = session.LiveLimitReached
+	data.LimitResetAt = time.Now().Add(time.Hour)
 	data.StartupStateUnknown = true
 	data.Worktree = session.GitWorktreeData{
 		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
@@ -408,18 +416,151 @@ func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing
 	h.store.AddInstance(inst)
 	h.sidebar.SetSelectedInstance(0)
 
-	called := false
-	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error {
-		called = true
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at its usage-limit wall")
+	require.True(t, inst.StartupStateUnknown(), "fixture: the replacement's startup went blind")
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
 		return nil
 	})
 	defer restore()
 
 	_, cmd := h.handleLimitRetry()
-	if cmd != nil {
-		_ = cmd()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "Row 0 is the resume/resend and Row 1 is the confirm")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, rendered, "Retry send",
+		"the daemon resends the committed manual mission through the startup gate bypass — Row 0 must not promise otherwise")
+	require.NotContains(t, rendered, "not resent")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "Row 0 dispatches the resume (the resend) against the captured identity")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
+// The automatic twin of the startup-unknown arm: a committed automatic swap
+// parked at the wall resends its notice through the same committed-swap
+// bypass (resumeFromLimitLockedOutcome → deliverAutomaticAccountNotice), so
+// startup-unknown must not demote the row to the "not resent" label.
+func TestHandleLimitRetry_StartupUnknownAutomaticSwapAtLimitOffersHonestRetrySendLabel(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveLimitReached
+	data.LimitResetAt = time.Now().Add(time.Hour)
+	data.StartupStateUnknown = true
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
 	}
-	require.False(t, called, "an unknown replacement runtime must not expose a retry submission")
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: false, From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus:    session.PromptCouldNotConfirm,
+		MissionDeliveryAttemptAt: time.Now().Add(-time.Minute),
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at its usage-limit wall")
+	require.True(t, inst.StartupStateUnknown(), "fixture: the replacement's startup went blind")
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "Row 0 is the resume/resend and Row 1 is the confirm")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, rendered, "Retry send",
+		"the daemon resends the committed automatic notice through the startup gate bypass — Row 0 must not promise otherwise")
+	require.NotContains(t, rendered, "not resent")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "Row 0 dispatches the resume (the resend) against the captured identity")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
+// An automatic swap whose row is NOT parked at the wall is a daemon no-op:
+// resumeFromLimitLockedOutcome returns unperformed for a non-limited
+// automatic swap, so the picker must not offer a resend the daemon will not
+// perform — the confirm row stands alone (LOW, #6922 review).
+func TestHandleLimitRetry_NonLimitAutomaticSwapShowsNoResendRow(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: false, From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus:    session.PromptCouldNotConfirm,
+		MissionDeliveryAttemptAt: time.Now().Add(-time.Minute),
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	require.False(t, inst.LimitReached(), "fixture: the row is not parked at a usage-limit wall")
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotConfirm daemon.ConfirmHandoffDeliveryRequest
+	restoreConfirm := SetHandoffDeliveryConfirmerForTest(func(request daemon.ConfirmHandoffDeliveryRequest) error {
+		gotConfirm = request
+		return nil
+	})
+	defer restoreConfirm()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveConfirm}, h.handoffResolve.actions,
+		"the daemon does not resend a non-limited automatic swap — the picker must not offer a resend row")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.NotContains(t, rendered, "Retry send")
+	require.NotContains(t, rendered, "Resume from limit")
+	require.Contains(t, rendered, "Mark delivered")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd)
+	done, ok := cmd().(handoffDeliveryConfirmedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ConfirmHandoffDeliveryRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotConfirm)
 }
 
 // A manual retry retains its target while the tea.Cmd waits to run. If a
