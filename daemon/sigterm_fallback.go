@@ -437,6 +437,32 @@ func classifyDaemonHome(pid int) daemonScope {
 	if !readable {
 		return daemonUnverifiable
 	}
+	got, ok := daemonHomeInProcessFrame(pid, env)
+	if !ok {
+		return daemonUnverifiable
+	}
+	if got != wantHome {
+		return daemonForeign
+	}
+	return daemonOurs
+}
+
+// daemonHomeInProcessFrame resolves a daemon's raw AGENT_FACTORY_HOME spelling
+// (the daemonHomeEnv value — relative, tilde, empty, or absolute) to a
+// canonical path in the DAEMON's own filesystem frame, or reports it
+// unresolvable. Every resolution the daemon itself applied at startup is
+// redone from ITS process state, never ours: a relative value joins the
+// daemon's cwd, an empty or tilde value derives from the daemon's own $HOME,
+// and procfs-self or cross-mount-namespace spellings stay unresolved. ok is
+// false whenever the frame cannot be established — the caller must not resolve
+// the spelling in its own frame and compare, the #4793 cross-home hazard in
+// every form below.
+//
+// It is shared by classifyDaemonHome (recorded-PID scope) and the #6858
+// port-holder classifier (listener_takeover.go), where a lock-less holder's
+// env spelling resolved in OUR frame would mislabel a same-home predecessor
+// foreign and latch a refusal over the recovery #6386 protects.
+func daemonHomeInProcessFrame(pid int, env string) (string, bool) {
 	// Resolve a DEFAULT home (no AGENT_FACTORY_HOME) and a TILDE home ("~" or
 	// "~/...") against the DAEMON's own $HOME, not ours. config.ConfigDirFor
 	// expands both the empty ("") and tilde ("~/state") forms through
@@ -465,7 +491,7 @@ func classifyDaemonHome(pid int) daemonScope {
 	if env == "" || env == "~" || strings.HasPrefix(env, "~/") {
 		daemonHome, status := proctree.LookupEnv(pid, "HOME")
 		if status != proctree.EnvFound || daemonHome == "" {
-			return daemonUnverifiable
+			return "", false
 		}
 		switch {
 		case env == "":
@@ -490,11 +516,11 @@ func classifyDaemonHome(pid int) daemonScope {
 	// relative to the daemon's own cwd by resolveHomeInDaemonFrame the way the
 	// daemon's own file ops resolved it.
 	if !derivedFromDaemonHome && strings.HasPrefix(env, "~") && env != "~" && !strings.HasPrefix(env, "~/") {
-		return daemonUnverifiable
+		return "", false
 	}
 	gotHome, ok := resolveHomeInDaemonFrame(pid, env)
 	if !ok {
-		return daemonUnverifiable
+		return "", false
 	}
 	// A process-relative procfs path such as /proc/self/cwd/state (or
 	// /proc/self/root/...) names a different directory in the DAEMON's frame
@@ -512,7 +538,7 @@ func classifyDaemonHome(pid int) daemonScope {
 	// unverifiable (the daemon's own file ops resolved it in its frame, and the
 	// caller cannot) rather than guessing ours and signalling it.
 	if isProcessRelativeProcfsHome(gotHome) {
-		return daemonUnverifiable
+		return "", false
 	}
 	// The spelling guard does not see through a symlink whose TARGET is a
 	// process-relative procfs path: AGENT_FACTORY_HOME=link where link ->
@@ -525,11 +551,11 @@ func classifyDaemonHome(pid int) daemonScope {
 	// home whose resolved chain enters a process-relative procfs path as
 	// unverifiable — see homeSymlinkEntersProcessRelativeProcfs.
 	if homeSymlinkEntersProcessRelativeProcfs(gotHome) {
-		return daemonUnverifiable
+		return "", false
 	}
 	got, err := canonicalDir(gotHome)
 	if err != nil {
-		return daemonUnverifiable
+		return "", false
 	}
 	// gotHome was resolved and canonicalDir above renders it in the CALLER's
 	// filesystem frame. An ABSOLUTE home such as AGENT_FACTORY_HOME=/state is
@@ -540,15 +566,12 @@ func classifyDaemonHome(pid int) daemonScope {
 	// classified daemonOurs, and be signalled through a stale PID file or lone
 	// pgrep result — the #4793 hazard via a path collision across namespaces.
 	// When the candidate's frame is not the caller's, or cannot be established,
-	// the textual comparison cannot be trusted, so fail closed
-	// (daemonUnverifiable) rather than guessing ours.
+	// the textual comparison cannot be trusted, so fail closed rather than
+	// guessing ours.
 	if !sameProcessRoot(pid) {
-		return daemonUnverifiable
+		return "", false
 	}
-	if got != wantHome {
-		return daemonForeign
-	}
-	return daemonOurs
+	return got, true
 }
 
 // resolveHomeInDaemonFrame absolutizes a daemon's (possibly relative) home

@@ -387,6 +387,25 @@ func TestParseProcNetTCP(t *testing.T) {
 	inodes = map[uint64]bool{}
 	parseProcNetTCP([]byte(table), wildReq, inodes)
 	require.Equal(t, map[uint64]bool{12345: true, 77777: true}, inodes)
+
+	// A dual-stack [::]:8443 socket lives in /proc/net/tcp6 yet still blocks
+	// the v4 request (it owns the v4 wildcard too); [::1]:8443 owns only v6
+	// space and cannot collide with 127.0.0.1.
+	tcp6 := `  sl  local_address                        rem_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:20FB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 55555 1 0000000000000000 100 0 0 10 0
+   1: 00000000000000000000000001000000:20FB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 66666 1 0000000000000000 100 0 0 10 0
+`
+	inodes = map[uint64]bool{}
+	parseProcNetTCP([]byte(tcp6), req, inodes)
+	require.Equal(t, map[uint64]bool{55555: true}, inodes)
+}
+
+func TestProcTablesForAlwaysBothFamilies(t *testing.T) {
+	// Even a specific v4 request contends with a dual-stack [::] socket, and
+	// that socket is visible only in tcp6 — both tables are always read.
+	for _, addr := range []string{"127.0.0.1:8443", "0.0.0.0:8443", "::1:8443", ":8443"} {
+		require.ElementsMatch(t, []string{"tcp", "tcp6"}, procTablesFor(reqFor(t, addr)))
+	}
 }
 
 func TestProcHexIP(t *testing.T) {

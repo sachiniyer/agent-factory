@@ -247,18 +247,19 @@ func holderDaemonHome(pid int) (string, bool, bool) {
 	if !isAgentFactoryDaemon(pid) {
 		return "", false, true
 	}
-	home, ok := daemonHomeEnv(pid)
+	env, ok := daemonHomeEnv(pid)
 	if !ok {
-		return "", true, false // a daemon whose home we may not read → unproven
+		return "", true, false // a daemon whose environ we may not read → unproven
 	}
-	if home == "" {
-		// AGENT_FACTORY_HOME absent in ITS environment → it resolved the
-		// default home (daemonHomeEnv's documented EnvAbsent semantics).
-		def, err := defaultHomeDir()
-		if err != nil {
-			return "", true, false
-		}
-		home = def
+	// The env spelling means what it meant in the HOLDER's frame: a relative
+	// value names a dir under ITS cwd, an absent or tilde value derives from
+	// ITS $HOME, and an absolute one lives in ITS mount namespace. Resolving
+	// it here instead would mislabel a same-home predecessor foreign (the
+	// refusal then latches for this daemon's life) — and mislabel a foreign
+	// holder ours. An unresolvable frame is unproven, never a guess in ours.
+	home, ok := daemonHomeInProcessFrame(pid, env)
+	if !ok {
+		return "", true, false
 	}
 	return home, true, true
 }
@@ -282,19 +283,14 @@ func procListenInodes(req *net.TCPAddr) (inodes map[uint64]bool, complete bool) 
 }
 
 // procTablesFor names the /proc/net tables that could carry a LISTEN socket
-// colliding with req. A requested wildcard contends in both families (the
-// kernel binds it dual-stack), a specific v4 address only tcp, a specific v6
-// address only tcp6.
-func procTablesFor(req *net.TCPAddr) []string {
-	v4, v6 := requestIPFamilies(req.IP)
-	var tables []string
-	if v4 {
-		tables = append(tables, "tcp")
-	}
-	if v6 {
-		tables = append(tables, "tcp6")
-	}
-	return tables
+// colliding with req — always both. A specific v4 request still contends with
+// a dual-stack [::] socket (the common Go wildcard bind owns v4 space too),
+// and that socket appears only in tcp6; symmetrically a v4 wildcard socket
+// blocks a dual-stack [::] request. parseProcNetTCP's listenIPsOverlap already
+// rejects the non-colliding cross-family rows, so the table read can be
+// unconditional.
+func procTablesFor(_ *net.TCPAddr) []string {
+	return []string{"tcp", "tcp6"}
 }
 
 // parseProcNetTCP collects the inodes of LISTEN sockets whose local address
