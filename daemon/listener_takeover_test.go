@@ -168,6 +168,12 @@ func flockHomeLock(t *testing.T, home string) *os.File {
 	lock, err := os.OpenFile(filepath.Join(home, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
 	require.NoError(t, err)
 	require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
+	// A real daemon also publishes its own pid next to the lock it holds —
+	// the daemon.pid channel is what carries the live-daemon evidence where
+	// /proc/locks does not exist (darwin: the named pid's fd table, read via
+	// proc_pidinfo, shows this lock open).
+	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"),
+		[]byte(strconv.Itoa(os.Getpid())), 0600))
 	return lock
 }
 
@@ -295,6 +301,28 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 			[]byte("this is [ not toml"), 0600))
 		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port",
 			"unreadable intent is not disproven intent — a running daemon keeps its claim")
+	})
+	t.Run("a stale daemon.pid claims nothing", func(t *testing.T) {
+		// daemon.lock exists but nobody holds it; the pid file names a pid
+		// that cannot exist — beyond every platform's pid_max — so the
+		// home-published channel has no live daemon to prove.
+		f, err := os.OpenFile(filepath.Join(defHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
+		require.NoError(t, err)
+		defer func() { _ = f.Close() }()
+		require.NoError(t, os.WriteFile(filepath.Join(defHome, "daemon.pid"),
+			[]byte("1073741824"), 0600))
+		require.Empty(t, defaultHomeClaimRefusal(req))
+	})
+	t.Run("a live pid not attached to this home's lock claims nothing", func(t *testing.T) {
+		// daemon.pid names THIS live test process, but no fd of it is open
+		// on def's daemon.lock and its argv is not an af daemon's — a pid
+		// file alone proves nothing about who it names.
+		f, err := os.OpenFile(filepath.Join(defHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
+		require.NoError(t, err)
+		require.NoError(t, f.Close()) // exists, but unheld and unopened by the named pid
+		require.NoError(t, os.WriteFile(filepath.Join(defHome, "daemon.pid"),
+			[]byte(strconv.Itoa(os.Getpid())), 0600))
+		require.Empty(t, defaultHomeClaimRefusal(req))
 	})
 	t.Run("an enabled autostart unit serving it claims the port", func(t *testing.T) {
 		// No daemon running — the lock file is absent — but the OS is set to

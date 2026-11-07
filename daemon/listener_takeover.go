@@ -12,6 +12,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/log"
 	"golang.org/x/sys/unix"
 )
@@ -179,13 +180,31 @@ func defaultHomeClaimRefusal(req *net.TCPAddr) string {
 		req.String(), def, evidence, takeoverClaimRemedy)
 }
 
-// daemonLockHeld reports whether a process provably holds an exclusive flock
-// on dir's daemon.lock — the live-daemon evidence that costs the probed home
-// nothing. It reads /proc/locks, never the lock itself: even a one-instant
-// LOCK_EX probe would collide with that home's own singleton acquire and fail
-// its daemon start as "already running" (the probe must never BE the
-// contention this gate exists to stop). The second return is the holder's pid
-// for the refusal message; 0 when the kernel did not name one.
+// daemonLockHeld reports whether the home at dir provably has a live daemon —
+// the running-daemon evidence that costs the probed home nothing. Every
+// channel is read-only: even a one-instant LOCK_EX probe would collide with
+// that home's own singleton acquire and fail its daemon start as "already
+// running" (the probe must never BE the contention this gate exists to stop).
+//
+// Channels, strongest first:
+//
+//   - /proc/locks (Linux): a FLOCK row on the lock file's dev:ino is kernel
+//     truth that a holder exists.
+//   - daemon.pid + the named pid's open descriptors: the home publishes its
+//     daemon's pid, and a live af daemon keeps daemon.lock open for its whole
+//     lifetime — so a live named pid holding an open fd on THIS home's lock
+//     file is the daemon itself. This is the live-daemon channel where
+//     /proc/locks does not exist: proctree.OpenFilePaths reads the fd table
+//     through proc_pidinfo on darwin (and /proc/<pid>/fd on Linux, where
+//     lockFDHome still does the stronger dev:ino match).
+//   - daemon.pid + process identity: a live pid that argv-identifies as an af
+//     daemon and resolves to THIS home in its own process frame is that home's
+//     running daemon. Weakest (an af-daemon-argv process could be named by a
+//     foreign home's stale pid file), still honest — the pid file is the
+//     home's own publication of its daemon.
+//
+// The second return is the daemon's pid for the refusal message; 0 when the
+// evidence did not name one.
 func daemonLockHeld(dir string) (int, bool) {
 	info, err := os.Stat(daemonLockPathIn(dir))
 	if err != nil {
@@ -194,23 +213,50 @@ func daemonLockHeld(dir string) (int, bool) {
 	st, ok := info.Sys().(*syscall.Stat_t)
 	if ok {
 		if data, rerr := os.ReadFile(filepath.Join(procRoot, "locks")); rerr == nil {
-			return procFlockHolderPID(data, uint64(st.Dev), st.Ino)
+			if pid, held := procFlockHolderPID(data, uint64(st.Dev), st.Ino); held {
+				return pid, true
+			}
 		}
 	}
-	// /proc/locks or the stat was unreadable — fall back to the identity the
-	// daemon publishes: a daemon.pid naming a pid whose own fd table proves
-	// it holds THIS home's lock. Weaker (misses the lock-held-before-pid-write
-	// window), but still honest evidence with no lock taken.
+	return daemonLockHeldPID(dir)
+}
+
+// daemonLockHeldPID evaluates the home-published daemon.pid channel of
+// daemonLockHeld: the pid the home names as its daemon, alive and provably
+// attached to this home. A live af daemon holds daemon.lock for its entire
+// lifetime, so "the named pid has an open fd on this home's lock file" and
+// "the named pid IS an af daemon of this home" are both running-daemon
+// evidence; either alone suffices.
+func daemonLockHeldPID(dir string) (int, bool) {
 	data, ok := readManagedFileNoFollow(filepath.Join(dir, "daemon.pid"), daemonPIDFileMaxBytes)
 	if !ok {
 		return 0, false
 	}
 	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
-	if err != nil || pid <= 0 {
+	if err != nil || pid <= 0 || !pidLooksAlive(pid) {
 		return 0, false
 	}
+	// Kernel-attached proof: the named pid holds an open descriptor on THIS
+	// home's daemon.lock. Linux matches the fd's dev:ino (/proc/<pid>/fd);
+	// proctree.OpenFilePaths is the same table on darwin (proc_pidinfo), where
+	// /proc does not exist.
 	if home, ok := lockFDHome(pid); ok && home != "" && sameAFHome(home, dir) {
 		return pid, true
+	}
+	if paths, oerr := proctree.OpenFilePaths(pid); oerr == nil {
+		for p := range paths {
+			if filepath.Base(p) == daemonLockFileName && sameAFHome(filepath.Dir(p), dir) {
+				return pid, true
+			}
+		}
+	}
+	// Identity proof: a live af daemon whose own process frame resolves to
+	// this home. Environ must be READ — an unreadable one is not evidence of
+	// any home.
+	if env, read := daemonHomeEnv(pid); read && isAgentFactoryDaemon(pid) {
+		if home, ok := daemonHomeInProcessFrame(pid, env); ok && sameAFHome(home, dir) {
+			return pid, true
+		}
 	}
 	return 0, false
 }
