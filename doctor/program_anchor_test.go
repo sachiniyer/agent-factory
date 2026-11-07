@@ -628,14 +628,21 @@ func TestCommandDependsOnCwd(t *testing.T) {
 		check *preflight.ProgramCheck
 		want  bool
 	}{
-		{"relative executable", &preflight.ProgramCheck{Executable: "bin/claude"}, true},
-		{"bare executable", &preflight.ProgramCheck{Executable: "claude"}, false},
+		{"relative executable resolved via the launch dir",
+			&preflight.ProgramCheck{Executable: "bin/claude", Path: "/repo/bin/claude", PathViaWorkingDir: true}, true},
+		{"relative executable under an absolute env -C resolves cwd-independently",
+			&preflight.ProgramCheck{Executable: "bin/claude", Path: "/abs/bin/claude"}, false},
+		{"bare executable", &preflight.ProgramCheck{Executable: "claude", Path: "/usr/bin/claude"}, false},
 		{"bare executable resolved via a relative PATH entry",
-			&preflight.ProgramCheck{Executable: "claude", PathViaWorkingDir: true}, true},
-		{"absolute executable", &preflight.ProgramCheck{Executable: "/usr/bin/claude"}, false},
-		{"relative wrapper", &preflight.ProgramCheck{Executable: "claude", ShellExecutable: "tools/ionice"}, true},
+			&preflight.ProgramCheck{Executable: "claude", Path: "/repo/tools/claude", PathViaWorkingDir: true}, true},
+		{"absolute executable", &preflight.ProgramCheck{Executable: "/usr/bin/claude", Path: "/usr/bin/claude"}, false},
+		{"relative wrapper failed before the agent resolved — tokens are all we know",
+			&preflight.ProgramCheck{Executable: "claude", ShellExecutable: "tools/ionice"}, true},
+		{"absolute wrapper failed before the agent resolved — the failure is not cwd-dependent",
+			&preflight.ProgramCheck{Executable: "claude", ShellExecutable: "/opt/ionice"}, false},
 		{"bare executable with a cwd-dependent wrapper",
-			&preflight.ProgramCheck{Executable: "claude", ShellViaWorkingDir: true}, true},
+			&preflight.ProgramCheck{Executable: "claude", Path: "/usr/bin/claude", ShellExecutable: "ionice",
+				ShellPath: "/repo/tools/ionice", ShellViaWorkingDir: true}, true},
 	} {
 		require.Equal(t, tc.want, commandDependsOnCwd(tc.check, "claude"),
 			"commandDependsOnCwd(%s) = %v, want %v", tc.name, !tc.want, tc.want)

@@ -12,6 +12,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -427,6 +428,88 @@ func TestCheckAgentBinaries_LegacyRepoConfigError_NamesTheFile(t *testing.T) {
 		"the resolution error must name the file that failed to parse")
 	require.NotZero(t, rep.UnresolvedCount())
 }
+
+// ---------------------------------------------------------------------------
+// Review follow-ups (PR #6923) — three qualification edges in the same
+// machinery: an absolute env -C breaks launch-dir derivation, a bare name's
+// search continues past an absent match, and the base-tree probe must never
+// promisor-fetch.
+// ---------------------------------------------------------------------------
+
+// An ABSOLUTE env -C replaces the modeled working dir with a fixed literal:
+// `env -C <repo> bin/claude` resolves the same file no matter which
+// directory the session starts in, so the target is not worktree content and
+// the base-tree qualification must not downgrade the PASS — even though the
+// resolved path lands inside this checkout.
+func TestCheckAgentPrograms_EnvChdirAbsolute_KeepsPass(t *testing.T) {
+	repo := prefixedOverrideRepo(t) // bin/claude exists but is untracked
+	command := "env -C " + repo + " bin/claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"an absolute env -C pins the resolution to a fixed dir — the worktree contents are irrelevant")
+	require.Contains(t, row.Detail, filepath.Join(repo, "bin", "claude"))
+}
+
+// A bare name's lookup does not stop at the absent match: with
+// `env PATH=tools:<installed> claude`, the session's search skips the
+// worktree-missing tools/claude and runs the installed fallback. The warning
+// must name that rescue — claiming the program is simply absent at launch
+// misleads about what the session actually runs.
+func TestCheckAgentPrograms_BareNameFallback_NamesTheRescue(t *testing.T) {
+	prefixedOverrideRepo(t) // tools/claude exists but is untracked
+	fallback := testguard.CanonicalTempDir(t)
+	writeExecutable(t, fallback, "claude", "#!/bin/sh\nexit 0\n")
+	command := "env PATH=tools:" + fallback + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"the override's selected file is absent at launch — but the session still resolves the name")
+	require.Contains(t, row.Detail, "falls back")
+	require.Contains(t, row.Detail, filepath.Join(fallback, "claude"),
+		"the warning must name the file the session actually runs")
+	require.False(t, row.Problem)
+}
+
+// The base-tree probe answers from the ref's TREE object — never
+// `git cat-file -e <ref>:<path>`, which dereferences the promised object and
+// lazily fetches it in a blob:none partial clone. Probes run with
+// GIT_NO_LAZY_FETCH so an unreadable object answers "unknown", not a fetch.
+func TestBaseTreeProbe_UsesLsTreeWithoutFetching(t *testing.T) {
+	var calls [][]string
+	orig := gitTreeRead
+	gitTreeRead = func(workspace string, args ...string) ([]byte, error) {
+		calls = append(calls, append([]string{}, args...))
+		return nil, errProbeStub
+	}
+	defer func() { gitTreeRead = orig }()
+
+	require.Equal(t, baseTreeUnknown, baseTreeProbe(t.TempDir(), "HEAD", "bin/claude"))
+	require.Len(t, calls, 1)
+	require.Equal(t, "ls-tree", calls[0][0],
+		"presence+mode come from the tree object alone — cat-file -e would lazily fetch promised objects")
+}
+
+func TestGitTreeCmd_DisablesLazyFetchAndBoundsTheProbe(t *testing.T) {
+	cmd := gitTreeCmd(context.Background(), t.TempDir(), "ls-tree", "-z", "HEAD")
+	require.Equal(t, "git", filepath.Base(cmd.Path))
+	require.Contains(t, cmd.Env, "GIT_NO_LAZY_FETCH=1",
+		"object access must fail rather than promisor-fetch — a lazy fetch is network access and an object-store mutation")
+}
+
+var errProbeStub = errors.New("probe stub")
 
 // stubUsableDockerBackend makes BackendUnusableReason's docker prerequisites
 // pass hermetically: a `docker` CLI on PATH, a local engine endpoint, and an

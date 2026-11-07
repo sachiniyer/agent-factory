@@ -360,6 +360,69 @@ func TestCheckCommandAtPathViaWorkingDir(t *testing.T) {
 	}
 }
 
+// An ABSOLUTE env -C breaks the launch-dir dependence: `env -C <abs>
+// bin/claude` resolves the same file no matter which directory the session
+// starts in, so the resolved path is not worktree content. A RELATIVE -C
+// joins onto the launch dir and stays dependent. (PR #6923 review.)
+func TestCheckCommandAtEnvChdirAbsolute_NotViaWorkingDir(t *testing.T) {
+	workDir := t.TempDir()
+	sub := filepath.Join(workDir, "sub")
+	binDir := filepath.Join(sub, "bin")
+	if err := os.MkdirAll(binDir, 0o755); err != nil {
+		t.Fatalf("mkdir: %v", err)
+	}
+	target := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(target, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	abs, err := CheckCommandAt("env -C "+sub+" bin/claude", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(abs -C): %v", err)
+	}
+	if abs.Path != target || abs.PathViaWorkingDir {
+		t.Fatalf("abs -C: Path=%q via=%v, want %q via=false — a -C literal resolves the same file from any launch dir",
+			abs.Path, abs.PathViaWorkingDir, target)
+	}
+
+	rel, err := CheckCommandAt("env -C sub bin/claude", workDir)
+	if err != nil {
+		t.Fatalf("CheckCommandAt(rel -C): %v", err)
+	}
+	if rel.Path != target || !rel.PathViaWorkingDir {
+		t.Fatalf("rel -C: Path=%q via=%v, want %q via=true — a relative -C joins the launch dir",
+			rel.Path, rel.PathViaWorkingDir, target)
+	}
+}
+
+// PathCandidates records EVERY runnable PATH match in order, so a caller can
+// tell whether the search's later entries rescue the name when the selected
+// file is absent at launch. Path is always the first.
+func TestCheckCommandAtCollectsPathCandidates(t *testing.T) {
+	dir1 := t.TempDir()
+	dir2 := t.TempDir()
+	first := filepath.Join(dir1, "codex")
+	second := filepath.Join(dir2, "codex")
+	for _, p := range []string{first, second} {
+		if err := os.WriteFile(p, []byte("#!/bin/sh\n"), 0o755); err != nil {
+			t.Fatalf("write %s: %v", p, err)
+		}
+	}
+	t.Setenv("PATH", dir1+string(os.PathListSeparator)+dir2)
+
+	check, err := CheckCommandAt("codex", t.TempDir())
+	if err != nil {
+		t.Fatalf("CheckCommandAt: %v", err)
+	}
+	if len(check.PathCandidates) != 2 ||
+		check.PathCandidates[0].Path != first || check.PathCandidates[1].Path != second {
+		t.Fatalf("PathCandidates = %+v, want [%s %s] in PATH order", check.PathCandidates, first, second)
+	}
+	if check.Path != first {
+		t.Fatalf("Path = %q, want the first match %q", check.Path, first)
+	}
+}
+
 // #5779: a relative program override resolves against the session's directory,
 // not the checking process's cwd.
 func TestLocalSessionPrereqsAtResolvesRelativeOverrideInWorkdir(t *testing.T) {
