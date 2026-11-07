@@ -402,7 +402,21 @@ var (
 // bound the dot-all ".+?" would cross the completed clause and the later
 // unrelated clock would yield timed evidence instead of the documented
 // hit=true, hasResetTime=false result.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:[^.]|\.(?:[^\n]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
+//
+// Two refinements cover the real capture shape (tmux `capture-pane -e` keeps
+// ANSI SGR escapes; the existing fixture shows "York).<ESC>[39m\n" at a styled
+// line ending). First, a period immediately followed by an ANSI escape byte
+// is treated as a styled line ending — i.e. a clause boundary — so an
+// unparseable styled clause "...soon.<ESC>[39m\n" does NOT cross into a later
+// row's clock: the inline-period branch excludes \x1b, so the span stops at
+// the period and the parse degrades to hit=true, hasResetTime=false. Second,
+// a period followed by a newline DOES end the clause EXCEPT when the period
+// belongs to an abbreviated month ("Nov.\n6, 2026 9am"): the explicit
+// month-abbreviation branch consumes "Nov.\n" (plus any trailing ANSI SGR
+// escapes and an optional CR before the LF) as a unit so the wrapped date
+// continues to the clock, mirroring the unwrapped "Nov. 6" form. A plain
+// period-plus-newline that is not a month abbreviation still terminates.
+var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a

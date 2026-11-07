@@ -670,6 +670,29 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at Nov. 6, 2026 9am (America/New_York).",
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
+		{
+			// A narrow pane may wrap an abbreviated date immediately after
+			// the period ("Nov.\n6, 2026 9am"). The period-plus-newline must
+			// not terminate the clause here: the abbreviated-month period is
+			// not a sentence terminator, so the capture crosses the wrap and
+			// the clock still resolves — same instant as the unwrapped form.
+			name:    "weekly date: abbreviated month wraps after its period",
+			content: "Claude usage limit reached. Your limit will reset at Nov.\n6, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// The production shape (tmux `capture-pane -e`): the whole reset
+			// clause is one ANSI-colored span — "\x1b[38;5;211m…\x1b[39m" — and
+			// a narrow pane wraps the abbreviated date after its period. The
+			// wrap newline carries no escape (the color persists across the
+			// wrap), and the SGR reset sits at the end of the styled clause
+			// right after the final period, before the pane newline. This must
+			// still parse to the same EST instant as the unwrapped form, and
+			// the evidence must be whitespace-normalized (no raw newline).
+			name:    "weekly date: styled capture wraps abbreviated month",
+			content: "\x1b[38;5;211mClaude usage limit reached. Your limit will reset at Nov.\n6, 2026 9am (America/New_York).\x1b[39m",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -781,6 +804,19 @@ func TestClaudeResetUnrelatedClockRow(t *testing.T) {
 		{
 			name:    "unrelated clock row after a period-terminated clause",
 			content: "Claude usage limit reached. Your limit will reset at some point soon.\nuser draft: meet Monday at 2pm",
+		},
+		{
+			// tmux `capture-pane -e` keeps ANSI SGR escapes, and the real
+			// fixture shows "York).<ESC>[39m\n" at a styled line ending: an
+			// unparseable colored clause ends with "soon.<ESC>[39m\n" and a
+			// later row carries its own clock. A period immediately followed
+			// by an ANSI escape byte is a styled line ending — i.e. a clause
+			// boundary — so the span must stop at that period and NOT cross
+			// into the later row's clock. (Without recognizing the escape the
+			// inline-period branch would consume ".<ESC>" and then "[^.]" would
+			// carry the capture across the newline into "2pm".)
+			name:    "period-terminated styled clause then unrelated clock",
+			content: "Claude usage limit reached. Your limit will reset at some point soon.\x1b[39m\nuser draft: meet Monday at 2pm",
 		},
 		{
 			// The boundary is the period+newline, not just any newline: a
