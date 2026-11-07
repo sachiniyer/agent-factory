@@ -539,6 +539,7 @@ func TestOverrideAbsentFromSessionBase_HelperContract(t *testing.T) {
 	check := func(executable, path string, via bool) *preflight.ProgramCheck {
 		return &preflight.ProgramCheck{
 			Command: executable, Executable: executable, Path: path, PathViaWorkingDir: via,
+			LaunchDirKnown: true, // the synthetic checks model a proven launch dir
 		}
 	}
 
@@ -566,20 +567,23 @@ func TestOverrideAbsentFromSessionBase_HelperContract(t *testing.T) {
 	detail, _ = overrideAbsentFromSessionBase(repo, check("bin/untracked", untracked, false))
 	require.Empty(t, detail, "a cwd-independent resolution is not the worktree's problem")
 
-	// Path outside the workspace -> "" (the worktree check does not apply).
+	// Path outside the workspace -> unverified: the worktree maps
+	// <worktree>/../bin/x to a path af cannot answer — unknown, not absent.
 	parent := filepath.Dir(repo)
 	detail, _ = overrideAbsentFromSessionBase(repo,
 		check(filepath.Join("..", "bin", "x"), filepath.Join(parent, "bin", "x"), true))
-	require.Empty(t, detail, "a path resolving outside the workspace is not checked")
+	require.Contains(t, detail, "could not verify",
+		"a resolution outside the repo cannot be proven for the session's tree")
 
 	// Empty workspace -> "" (no repo to check against).
 	detail, _ = overrideAbsentFromSessionBase("", check("bin/untracked", untracked, true))
 	require.Empty(t, detail, "an empty workspace means no repo to check against")
 
-	// Git probe failure (non-existent workspace) -> "" (conservative).
+	// No base ref (non-existent workspace) -> unverified, not a silent pass.
 	detail, _ = overrideAbsentFromSessionBase(filepath.Join(t.TempDir(), "no-such-repo"),
 		check("bin/untracked", untracked, true))
-	require.Empty(t, detail, "a git probe failure is conservative, not a downgrade")
+	require.Contains(t, detail, "could not verify",
+		"with no base ref the session's tree cannot be answered — fail closed")
 
 	// Nil check -> "".
 	detail, _ = overrideAbsentFromSessionBase(repo, nil)
@@ -591,6 +595,7 @@ func TestOverrideAbsentFromSessionBase_HelperContract(t *testing.T) {
 	wrapped := &preflight.ProgramCheck{
 		Command: "tools/ionice -c 3 claude", Executable: "claude", Path: "/usr/bin/claude",
 		ShellExecutable: "tools/ionice", ShellPath: untracked, ShellViaWorkingDir: true,
+		LaunchDirKnown: true,
 	}
 	detail, _ = overrideAbsentFromSessionBase(repo, wrapped)
 	require.Contains(t, detail, "tools/ionice")
