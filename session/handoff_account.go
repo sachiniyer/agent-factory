@@ -379,9 +379,11 @@ func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, statu
 // pendingSwapIncomingWallLocked reports whether the row's recorded limit wall
 // is a fresh wall of the committed swap's INCOMING identity — the replacement
 // the swap moved this session to (#6799). Either kind can be parked there:
-// ParkManualAccountSwapAtLimit before mission submission, and
+// ParkManualAccountSwapAtLimit before mission submission,
 // ParkAutomaticAccountSwapAtLimit when an automatic retry's readiness wait
-// found the replacement's own quota.
+// found the replacement's own quota, and ParkCommittedAccountSwapAtLimit when
+// a committed swap's pre-spawn wall re-check found the committed identity
+// limited between the commit's evidence read and the launch (#6925).
 //
 // Two tests must both hold. ATTRIBUTION: the wall matches on both axes it
 // carries — the account label (limit_account == pending.To) and the agent
@@ -558,9 +560,11 @@ func (i *Instance) CanConfirmPendingAccountSwapDelivery() bool {
 // A row parked at its usage-limit wall splits on the wall's ATTRIBUTION, not
 // the swap's kind (#6799). Either kind may be parked at the INCOMING
 // identity's own wall — a manual swap whose replacement hit its quota before
-// mission submission (ParkManualAccountSwapAtLimit), or an automatic swap
-// whose retry's readiness wait found the replacement's own quota
-// (ParkAutomaticAccountSwapAtLimit) — and LiveLimitReached is still the
+// mission submission (ParkManualAccountSwapAtLimit), an automatic swap whose
+// retry's readiness wait found the replacement's own quota
+// (ParkAutomaticAccountSwapAtLimit), or a committed swap whose pre-spawn wall
+// re-check found the committed identity limited before launch
+// (ParkCommittedAccountSwapAtLimit, #6925) — and LiveLimitReached is still the
 // honest state, it already publishes not-idle to fleet watch, and
 // ResumeLimitedSessions only owns rows that still carry it — flattening it
 // would strand a session whose poll is paused by an attach. The wall is the
