@@ -120,3 +120,78 @@ func TestFinishUserKill_WedgesOnHandlelessTombstoneWithoutMarker(t *testing.T) {
 		t.Fatal("legacy handle-less tombstone without the marker must NOT converge — the record must be retained (fail closed), but it was deleted")
 	}
 }
+
+// TestKillSession_UnrebuildableHandleRetiresAfterOneFollowUp pins the #6791
+// daemon half: a tombstoned row whose persisted cleanup handle cannot be
+// rebuilt refuses the explicit kill with the unusable-handle class, so the
+// committed error must describe the retry schedule that ACTUALLY exists —
+// exactly one automatic attempt on the next poll, then retirement (#2737) —
+// not "will be retried automatically" forever and not "not retried" at all.
+// The record stays on disk through all of it: nothing is orphaned either way.
+func TestKillSession_UnrebuildableHandleRetiresAfterOneFollowUp(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	// A tombstoned ssh row whose handle fails the load-time rebuild (empty
+	// Host): FromInstanceData fails closed with the unusable refusal.
+	row := session.InstanceData{
+		ID:          "unrebuildable-id",
+		Title:       "unrebuildable",
+		Path:        repoPath,
+		BackendType: "ssh",
+		UserKilled:  true,
+		Liveness:    session.LiveLost,
+		RuntimeCleanup: &session.RuntimeCleanupData{SSH: &session.SSHRuntimeCleanupData{
+			Config:     config.SSHConfig{User: "remote"},
+			SessionDir: "/home/remote/.af-sessions/unrebuildable",
+		}},
+	}
+	seeded, err := json.Marshal([]session.InstanceData{row})
+	require.NoError(t, err)
+	require.NoError(t, config.LoadState().SaveInstances(repoID, seeded))
+
+	require.NoError(t, manager.refreshLocked())
+	manager.mu.Lock()
+	inst := manager.instances[daemonInstanceKey(repoID, "unrebuildable")]
+	manager.mu.Unlock()
+	require.NotNil(t, inst, "the fail-closed tombstone must materialize")
+
+	// The explicit kill commits the tombstone, the teardown refuses unusably,
+	// and the message reports the schedule that exists.
+	_, err = manager.KillSession(KillSessionRequest{Title: "unrebuildable", RepoID: repoID})
+	require.Error(t, err, "the unrebuildable handle must refuse the teardown")
+	assert.Contains(t, err.Error(), "one more attempt",
+		"the committed error must say the daemon makes one more attempt, then stops: %v", err)
+	assert.NotContains(t, err.Error(), "will be retried automatically",
+		"a cause that cannot heal must not promise an endless retry: %v", err)
+	require.NotNil(t, recordFor(t, repoID, "unrebuildable"),
+		"the record is kept — nothing is orphaned")
+	manager.mu.Lock()
+	_, booked := manager.killRetries[daemonInstanceKey(repoID, "unrebuildable")]
+	manager.mu.Unlock()
+	assert.False(t, booked,
+		"an explicit kill never books killRetries — the one follow-up comes from the next poll")
+
+	// The one follow-up: the poll attempts the teardown once, the unusable
+	// cause retires the retry, and the record is still kept.
+	manager.RefreshStatuses()
+	manager.mu.Lock()
+	retry := manager.killRetries[daemonInstanceKey(repoID, "unrebuildable")]
+	manager.mu.Unlock()
+	require.NotNil(t, retry, "the poll's one attempt must book its failure")
+	assert.True(t, retry.Retired(),
+		"an unrebuildable handle cannot heal by retrying — it must retire after the attempt")
+	assert.Equal(t, 1, retry.Failures(),
+		"exactly one automatic follow-up attempt was booked")
+	require.NotNil(t, recordFor(t, repoID, "unrebuildable"),
+		"the record is kept after the retired attempt")
+
+	// And a later poll does NOT attempt again.
+	manager.RefreshStatuses()
+	manager.mu.Lock()
+	retry = manager.killRetries[daemonInstanceKey(repoID, "unrebuildable")]
+	manager.mu.Unlock()
+	require.NotNil(t, retry)
+	assert.Equal(t, 1, retry.Failures(),
+		"a retired retry makes no further attempt — the count must not move")
+	require.NotNil(t, recordFor(t, repoID, "unrebuildable"),
+		"the record is still kept")
+}

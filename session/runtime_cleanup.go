@@ -508,25 +508,61 @@ func unavailableRuntimeCleanup(data InstanceData, cause error) func() error {
 	return func() error {
 		return &unusableCleanupRefusal{msg: fmt.Sprintf(
 			"session %q is tombstoned for backend %q, but its durable cleanup handle could not be rebuilt (%v); retaining the record rather than claiming its off-box workspace was reaped. %s",
-			title, backendType, cause, cleanupRecordManualWayOut(id, title, ws, handle))}
+			title, backendType, cause, cleanupRecordManualWayOut(id, title, ws, handle, true))}
 	}
 }
 
 // cleanupRecordManualWayOut names the steps an operator can still take when af
-// cannot rebuild a session's off-box cleanup handle (#6791). No verb exists for
-// this — a refusal that names one anyway would be the dead end the issue is
-// about — so the way out is the record itself: repair the persisted handle so
-// the next daemon start rebuilds it, or remove what it names and drop the row,
-// by hand. The daemon must be stopped for the row edit in BOTH options: it
-// flushes its in-memory state over the file on exit, so a repair made while it
-// runs is overwritten by the same rejected handle at the next shutdown.
-func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData) string {
+// cannot rebuild a session's off-box cleanup handle (#6791). No verb covers a
+// handle that cannot be rebuilt, so the way out is the record itself, edited by
+// hand: repair the persisted handle so the next daemon start rebuilds it, or
+// remove the off-box resource it names and drop the row. The ordering is the
+// only one that works: every af surface respawns the daemon it cannot find
+// (the TUI's snapshot poll runs EnsureDaemon, and so does every `af` CLI call),
+// so the TUIs and stray `af` runs are silenced FIRST, the daemon is stopped
+// AFTER them, and `af daemon status` — which starts nothing — re-verifies the
+// stop immediately before the save. Skip either and a respawned daemon flushes
+// its in-memory copy over the file, losing the repair or resurrecting a
+// deleted row with no signal it happened (#6791 review item 1).
+//
+// committedKill selects the post-restart outcome. The kill path shows this
+// after the tombstone is already durable, so a repaired row's kill finishes on
+// the next poll — restore is impossible for it, and EVERY ending removes the
+// resource, which is why its keep-work warning leads. The restore path can
+// keep the work through adoption, so its warning sits inside the destructive
+// branches instead — and it names `remote_pid` as what a repair needs, because
+// a handle without one still cannot prove the recorded server stopped and
+// restore refuses again (#6791 review items 2-4).
+func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData, committedKill bool) string {
 	home := "the AF home (~/.agent-factory, or $AGENT_FACTORY_HOME when set)"
 	if dir, err := config.GetConfigDir(); err == nil {
 		home = dir
 	}
-	return fmt.Sprintf("To move on, stop the daemon and let it exit first — send SIGTERM to the pid `af daemon status` names and wait for it; the exit flushes this row over the file — then either repair this session's `runtime_cleanup` entry in its repo's `instances/<repoID>/instances.json` under %s and start af — the rebuilt row can then be restored, or `af sessions kill %q` removes it — or remove %s yourself, delete the row whose id is %q from that file, and start af again",
-		home, title, cleanupResourceDescription(ws, handle), id)
+	resource := cleanupResourceDescription(ws, handle)
+	keepWork := "it may hold work that was never pushed — copy what you want to keep out of it first"
+	if ws != nil && ws.Dir != "" {
+		host := "its host"
+		if ws.Host != "" {
+			host = fmt.Sprintf("host %q", ws.Host)
+		}
+		keepWork = fmt.Sprintf("it holds the session's unpushed work — copy the directory or push its branch on %s first if you want to keep it", host)
+	}
+	preamble, edit, outcome := "", "", ""
+	if committedKill {
+		preamble = fmt.Sprintf(" Every ending below removes %s: %s.", resource, keepWork)
+		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry, or remove %s yourself and delete that row", resource)
+		outcome = fmt.Sprintf("the kill you ran is already recorded, so with a repaired handle it finishes on the daemon's next poll — or run `af sessions kill %q` to retry it now; with the row deleted there is nothing left to reap", title)
+	} else {
+		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry — restore can use it only if it carries enough for af to prove the recorded server stopped, meaning the `remote_pid` of the agent-server af left running — or, to give the session up (%s), remove %s yourself and delete that row", keepWork, resource)
+		outcome = fmt.Sprintf("retry `af sessions restore %q`. If af still cannot prove the server stopped it refuses the same way; removal is then — %s — `af sessions kill %q`, which reaps %s", title, keepWork, title, resource)
+	}
+	return fmt.Sprintf("To move on, edit the row by hand — no af verb covers a handle that cannot be rebuilt.%s\n"+
+		"  1. Quit every af TUI and pause anything else that runs `af` — each one restarts the daemon.\n"+
+		"  2. Send SIGTERM to the pid `af daemon status` names and wait for it to exit; the exit flushes this row over the file, so nothing af-related may run while you edit.\n"+
+		"  3. In the `instances/*/instances.json` file under %s that contains the row whose id is %q — `grep -l %q %s/instances/*/instances.json` names it — %s.\n"+
+		"  4. Right before saving, run `af daemon status` again — if a daemon is back, repeat from step 1 or its exit overwrites your edit.\n"+
+		"  5. Start af; %s",
+		preamble, home, id, id, home, edit, outcome)
 }
 
 // cleanupResourceDescription names the off-box resource a row's cleanup

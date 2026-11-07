@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,9 +25,16 @@ import (
 // refusal names the steps that remain: repair the persisted runtime_cleanup so
 // the next rebuild works, or remove the off-box resource and the record by hand.
 //
-// These tests FAIL on the pre-fix tree: the old messages name a dead-end verb or
-// no step at all, the teardown error is not classified unhealable (so the daemon
-// retries it forever), and bindProvisionResult does not clear failedRuntimeCleanup.
+// The way-out and clears-on-bind tests were RED on the pre-fix tree. The
+// independent review of the first fix added message properties the first cut
+// missed — the respawn guard, the recheck-before-save, the work-loss warning
+// ordering, the real file location, and honest per-path outcomes — pinned here
+// by assertions that fail on the first-fix head.
+// TestBoundUnconfirmedRestoreRefusalKeepsKillAdvice,
+// TestFailClosedPreservedArchiveShapeNeedsNoNewFence and
+// TestInertAtKillMarkerRowKeepsNoopKill are BOUNDARY GUARDS: they pass on master
+// by design and exist so the fix cannot widen past the shapes it means to
+// change.
 
 // failClosedPreservedArchiveData is the #6791 fixture: a preserved unpushed ssh
 // archive whose cleanup handle a restart cannot rebuild (empty Host is rejected
@@ -90,15 +98,45 @@ func TestFailClosedKillRefusalNamesAWayOut(t *testing.T) {
 		// the off-box resource to remove by hand, and the record to drop —
 		// each identified, not gestured at.
 		for _, want := range []string{
-			"instances.json",
 			restored.ID,
 			"/home/remote/.af-sessions/wayout-kill",
 			"af sessions kill",
 		} {
 			assert.Contains(t, msg, want, "the refusal must name a way out that exists: %s", msg)
 		}
-		// And it must not read as a deadline cut (nothing was attempted) or
-		// send the user to the verb that refuses.
+		// Item 4: the file is real, not a placeholder — the actual instances
+		// path, plus how to find it among repos.
+		assert.NotContains(t, msg, "<repoID>",
+			"a literal placeholder is not a findable path: %s", msg)
+		assert.Contains(t, msg, "instances/*/instances.json",
+			"the way out names the real file shape: %s", msg)
+		assert.Contains(t, msg, "grep -l",
+			"the way out says how to find the file that holds the row: %s", msg)
+		// Item 1: the daemon is respawned by every af surface — the steps must
+		// silence those first AND re-verify the stop before the save, so the
+		// edit either works or the user sees that it did not.
+		assert.Contains(t, msg, "Quit every af TUI",
+			"an open TUI respawns the daemon inside a second; the steps must start there: %s", msg)
+		assert.Contains(t, msg, "repeat from step 1",
+			"the steps must re-verify the daemon stayed stopped before saving: %s", msg)
+		// Item 5: numbered steps, not one nested sentence.
+		assert.Contains(t, msg, "  1. ", "the way out is an ordered procedure: %s", msg)
+		assert.Contains(t, msg, "  4. ", "the way out is an ordered procedure: %s", msg)
+		// Item 2: the work-loss warning comes BEFORE every ending that removes
+		// or lets af reap the workspace — the preserved dir is the unpushed work.
+		warn := strings.Index(msg, "unpushed work")
+		remove := strings.Index(msg, "remove ")
+		require.GreaterOrEqual(t, warn, 0, "the way out must warn that the workspace is unpushed work: %s", msg)
+		require.GreaterOrEqual(t, remove, 0, "the way out names the removal step: %s", msg)
+		assert.Less(t, warn, remove,
+			"the unpushed-work warning must precede the step that removes it: %s", msg)
+		assert.Contains(t, msg, "copy the directory or push its branch",
+			"the warning must say how to keep the work: %s", msg)
+		// Item 4: this row is tombstoned — the poll finishes the kill; restore
+		// is impossible, so the way out must not offer it.
+		assert.NotContains(t, msg, "be restored",
+			"a tombstoned row cannot be restored — the poll finishes the committed kill: %s", msg)
+		// And it must not read as a deadline cut (nothing was attempted).
 		assert.NotContains(t, msg, "cut off by its deadline",
 			"a deliberate refusal is not a deadline cut: %s", msg)
 	})
@@ -127,9 +165,12 @@ func TestFailClosedKillRefusalNamesAWayOut(t *testing.T) {
 		assert.True(t, CleanupHandleUnusable(err),
 			"an unrebuildable handle cannot heal by retrying: %v", err)
 		msg := err.Error()
-		for _, want := range []string{"instances.json", "wayout-docker-id", "sha256:deadbeef"} {
+		for _, want := range []string{"instances/*/instances.json", "wayout-docker-id", "sha256:deadbeef", "Quit every af TUI"} {
 			assert.Contains(t, msg, want, "the refusal must name the resource and the record: %s", msg)
 		}
+		assert.NotContains(t, msg, "<repoID>")
+		assert.NotContains(t, msg, "be restored",
+			"a tombstoned row cannot be restored — the poll finishes the committed kill: %s", msg)
 	})
 }
 
@@ -145,16 +186,37 @@ func TestFailClosedRestoreRefusalNamesAWayOut(t *testing.T) {
 	require.Error(t, err, "a preserved workspace whose state cannot be proven must refuse to start a second server beside it")
 	msg := err.Error()
 	for _, want := range []string{
-		"instances.json",
+		"instances/*/instances.json",
 		restored.ID,
 		"/home/remote/.af-sessions/wayout-restore",
+		"Quit every af TUI",
+		"repeat from step 1",
+		// Item 4: this row is NOT tombstoned, so restore IS the way out — name it.
+		"af sessions restore",
+		// Item 3: the message says what a repair restore can use needs — the
+		// recorded agent-server's pid — instead of promising restore works for
+		// every repaired handle.
+		"remote_pid",
 	} {
-		assert.Contains(t, msg, want, "the restore refusal must name the record and the workspace: %s", msg)
+		assert.Contains(t, msg, want, "the restore refusal must name the record, the workspace, and a working way out: %s", msg)
 	}
+	assert.NotContains(t, msg, "<repoID>",
+		"a literal placeholder is not a findable path: %s", msg)
 	assert.NotContains(t, msg, "or kill the session",
 		"kill refuses this same row; naming it is the dead end #6791 is about: %s", msg)
 	assert.NotContains(t, msg, "retry once the host is reachable",
 		"no transport was ever recorded, so the host cannot become reachable: %s", msg)
+	// Item 2: the give-it-up branch and the kill fallback both end by removing
+	// the preserved workspace — each must be preceded by the unpushed-work
+	// warning and how to keep it.
+	assert.Contains(t, msg, "unpushed work",
+		"removal options must warn that the workspace is unpushed work: %s", msg)
+	assert.Contains(t, msg, "copy the directory or push its branch",
+		"the warning must say how to keep the work: %s", msg)
+	remove := strings.Index(msg, "remove its preserved workspace")
+	require.GreaterOrEqual(t, remove, 0, "the give-it-up branch names the removal: %s", msg)
+	assert.Less(t, strings.Index(msg, "unpushed work"), remove,
+		"the unpushed-work warning must precede the removal instruction: %s", msg)
 }
 
 // TestBoundUnconfirmedRestoreRefusalKeepsKillAdvice guards the boundary of the
@@ -306,23 +368,27 @@ func TestFailClosedKillRefusalSurvivesSecondRestart(t *testing.T) {
 	assert.True(t, CleanupHandleUnusable(err))
 }
 
-// Sanity: the inert-at-kill marker path must NOT pick up the way-out text — a
-// row that positively owes nothing stays a no-op, not a refusal. (Guards
-// against the new refusal type leaking into the marker's admission.)
+// Boundary guard (green on master): the inert-at-kill marker path must NOT pick
+// up the way-out text — a row that positively owes nothing stays a no-op, not a
+// refusal. Asserts the three observable parts of that admission, so the guard
+// is not vacuous: no refusal teardown is installed, no unknown-state flag is
+// armed, and the exported Kill the poll drives returns clean.
 func TestInertAtKillMarkerRowKeepsNoopKill(t *testing.T) {
 	rejected := InstanceData{
 		ID:                       "wayout-inert-id",
 		Title:                    "wayout-inert",
 		Path:                     "/repo",
-		BackendType:              "ssh",
-		Liveness:                 LiveRunning,
+		BackendType:              "docker",
+		Liveness:                 LiveLost,
 		UserKilled:               true,
 		KilledWithoutLiveRuntime: true,
 	}
 	restored, err := FromInstanceData(rejected.ForStorage())
 	require.NoError(t, err)
-	if restored.runtimeTeardown != nil {
-		assert.NoError(t, restored.runtimeTeardown(),
-			"a marker-admitted tombstone owes nothing; its teardown is not a refusal")
-	}
+	assert.Nil(t, restored.runtimeTeardown,
+		"a marker-admitted tombstone owes nothing; it must not install a fail-closed teardown")
+	assert.False(t, restored.runtimeCleanupStateUnknown,
+		"a marker-admitted tombstone carries positive evidence nothing is owed — unknown must stay clear")
+	assert.NoError(t, restored.Kill(),
+		"the marker's admission is the no-op kill: anything else leaves the tombstone unfinished")
 }

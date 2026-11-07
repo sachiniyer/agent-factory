@@ -60,10 +60,11 @@ func (i *Instance) recordedTransport() (*RecordedTransport, error) {
 		// Reached only with the unknown-cleanup flag clear — the fail-closed
 		// shape is refused earlier, in confirmStoppedBeforeAdopt — so this row
 		// owes nothing af can still reap and `af sessions kill` does remove it.
-		// Name the preserved directory too: the kill drops the record, which is
+		// Warn about the preserved directory BEFORE naming its removal: it is
+		// the session's unpushed work, and the kill drops the record, which is
 		// the last pointer af has to it (#6791).
 		if w := i.preservedWorkspaceOwed(); w != nil {
-			return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it, then remove the preserved workspace at %s from the host yourself", i.Title, w.Dir)
+			return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; its workspace at %s holds the session's unpushed work — copy it or push its branch on the host first if you want to keep it — then `af sessions kill %q` removes the row, and you remove the workspace yourself", i.Title, w.Dir, i.Title)
 		}
 		return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it", i.Title)
 	}
@@ -404,7 +405,7 @@ func (i *Instance) confirmStoppedBeforeAdopt() error {
 			ws, handle := i.archivedWorkspace, i.failedRuntimeCleanup
 			i.mu.RUnlock()
 			return fmt.Errorf("session %q: its recorded cleanup handle could not be rebuilt, so af cannot prove its preserved workspace's state (%v); not starting a new agent-server beside an unproven one. %s",
-				title, err, cleanupRecordManualWayOut(id, title, ws, handle))
+				title, err, cleanupRecordManualWayOut(id, title, ws, handle, false))
 		}
 		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or kill the session", i.Title, err)
 	}
