@@ -23,6 +23,7 @@ function stage() {
     contestedEchoes: new Map<string, number>(), admittedEcho: true,
     owedForceResize: false,
     visibleFitFrame: null, visibleFitTimer: null, visibleFitAttempts: 0, resizeTimer: null,
+    fitEpoch: 0,
     // The real sendResize runs so its dedupe and hidden-page write guard are
     // exercised; only the socket write is stubbed.
     send: () => (calls.push("resize"), true),
@@ -592,7 +593,8 @@ test("a foreign echo re-asserts the host's grid in the same task — and writes 
     // The wire write did NOT leave yet: the stale 'live' was downgraded to
     // unclassified, and the classification pair — not a live-page assumption —
     // is what flushes it.
-    assert.deepEqual(calls, ["fit"]);
+    assert.deepEqual(calls, [],
+      "the emulator never left its own grid — the contested echo is never applied");
     assert.notEqual(terminal.visibleFitFrame, null);
     assert.notEqual(terminal.visibleFitTimer, null);
     // The starved twin's delivery classifies this page parked — the write
@@ -600,13 +602,13 @@ test("a foreign echo re-asserts the host's grid in the same task — and writes 
     win.runFrame(); // drains the viewport-restore frame; eats the pair's rAF
     win.runTimer();
     assert.equal(terminal.parked, true);
-    assert.deepEqual(calls, ["fit"], "an occluded page never resizes the shared PTY");
+    assert.deepEqual(calls, [], "an occluded page never resizes the shared PTY");
     assert.notEqual(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
     // The probe's delivery — the un-occlusion — flushes the owed reclaim.
     win.runFrame();
     assert.equal(terminal.parked, false);
-    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual(calls, ["resize"]);
     assert.deepEqual([terminal.lastRows, terminal.lastCols], [40, 120]);
   } finally {
     win.restore();
@@ -622,11 +624,11 @@ test("a live page's echo reclaim writes as soon as classification delivers", asy
     const { echo, term, calls, terminal } = stageEchoed();
     echo(104, 68);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
-    assert.deepEqual(calls, ["fit"]);
+    assert.deepEqual(calls, []);
     win.runAllFrames(); // one live paint: restore frame + the pair's rAF
     await Promise.resolve();
     assert.equal(terminal.parked, false);
-    assert.deepEqual(calls, ["fit", "resize"],
+    assert.deepEqual(calls, ["resize"],
       "the classified write is the only deferred part");
   } finally {
     win.restore();
@@ -644,7 +646,7 @@ test("a known-parked page's echo refits locally and arms only the wake probe", (
     echo(104, 68);
     assert.deepEqual([term.rows, term.cols], [40, 120],
       "the local reclaim is still synchronous");
-    assert.deepEqual(calls, ["fit"], "nothing may leave the wire while parked");
+    assert.deepEqual(calls, [], "nothing may leave the wire while parked");
     assert.notEqual(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
     assert.equal(win.timers.size, 0);
@@ -669,7 +671,7 @@ test("a re-parked page rests on the peer's grid only via a second echo — the s
     const { echo, term, calls, terminal } = stageEchoed();
     echo(104, 68);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
-    assert.deepEqual(calls, ["fit"], "the echo-path reclaim wrote nothing");
+    assert.deepEqual(calls, [], "the echo-path reclaim wrote nothing");
     // The withheld write owes the classification pair; the starved twin's
     // delivery parks the page, and the emulator is STILL on the host's grid —
     // no strand exists.
@@ -684,7 +686,7 @@ test("a re-parked page rests on the peer's grid only via a second echo — the s
     echo(104, 68);
     assert.deepEqual([term.rows, term.cols], [104, 68],
       "a repeat of the same foreign grid inside the yield window stands — the 263 the old spec asserted");
-    assert.deepEqual(calls, ["fit"], "the yielded strand writes nothing either");
+    assert.deepEqual(calls, [], "the yielded strand writes nothing either");
   } finally {
     win.restore();
   }
@@ -725,12 +727,12 @@ test("the same foreign grid repeated inside the yield window is an insistent wri
     // delivers the pair's rAF and flushes it.
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual(calls, ["resize"]);
     // The foreign writer immediately re-asserts the same grid: the reclaim
     // loses to last-resize-wins rather than ping-ponging between clients.
     echo(24, 80);
     assert.deepEqual([term.rows, term.cols], [24, 80], "the emulator still follows the authoritative echo");
-    assert.deepEqual(calls, ["fit", "resize"], "no second reclaim leaves the wire");
+    assert.deepEqual(calls, ["resize"], "no second reclaim leaves the wire");
     assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
   } finally {
@@ -770,7 +772,7 @@ test("the same foreign grid after the yield window is a fresh contest — one st
     echo(24, 80);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
+    assert.deepEqual(calls, ["resize", "resize"]);
     assert.deepEqual([term.rows, term.cols], [40, 120]);
   } finally {
     Date.now = priorNow;
@@ -796,7 +798,7 @@ test("the subscribe admission echo is not a contested sighting — the activatio
     echo(24, 80);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize"], "the admission echo still earns the host's claim");
+    assert.deepEqual(calls, ["resize"], "the admission echo still earns the host's claim");
     assert.deepEqual([term.rows, term.cols], [40, 120]);
     // The peer's FIRST real answer to that claim is a brand-new contest, not a
     // repeat: the activation re-asserts instead of yielding to the replayed
@@ -805,11 +807,11 @@ test("the subscribe admission echo is not a contested sighting — the activatio
     echo(24, 80);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"]);
+    assert.deepEqual(calls, ["resize", "resize"]);
     // Only NOW is a same-grid repeat insistence: it wins unchallenged.
     echo(24, 80);
     assert.deepEqual([term.rows, term.cols], [24, 80], "the emulator still follows the authoritative echo");
-    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "an insistent peer still wins");
+    assert.deepEqual(calls, ["resize", "resize"], "an insistent peer still wins");
   } finally {
     win.restore();
   }
@@ -840,7 +842,7 @@ test("a replay that already matches the emulator still spends the admission — 
     echo(24, 80);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual(calls, ["resize"]);
     // The peer's counter inside the yield window is the insistent writer: the
     // pane yields, emulator AND wire. On master the un-seeded record made it a
     // fresh contest — a second reclaim left the wire, which the peer read as
@@ -848,7 +850,7 @@ test("a replay that already matches the emulator still spends the admission — 
     echo(24, 80);
     assert.deepEqual([term.rows, term.cols], [24, 80],
       "the emulator follows the authoritative repeat");
-    assert.deepEqual(calls, ["fit", "resize"],
+    assert.deepEqual(calls, ["resize"],
       "no second reclaim leaves the wire");
   } finally {
     win.restore();
@@ -865,9 +867,9 @@ test("a yield disarms the forfeited reclaim — no queued delivery may write the
   try {
     const { echo, term, calls, terminal } = stageEchoed();
     echo(24, 80);
-    // The contested reclaim already refit locally; its wire half is armed and
-    // has not delivered yet when the peer's repeat lands.
-    assert.deepEqual(calls, ["fit"]);
+    // The contested echo left the emulator untouched — only its wire half is
+    // armed — and has not delivered yet when the peer's repeat lands.
+    assert.deepEqual(calls, []);
     assert.notEqual(terminal.visibleFitFrame, null);
     echo(24, 80);
     assert.deepEqual([term.rows, term.cols], [24, 80], "the pane yields to the repeat");
@@ -876,11 +878,87 @@ test("a yield disarms the forfeited reclaim — no queued delivery may write the
     // a stale claim landed by the forfeiting side.
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit"], "nothing delivers after the yield");
+    assert.deepEqual(calls, [], "nothing delivers after the yield");
     assert.deepEqual([term.rows, term.cols], [24, 80],
       "the emulator rests on the yielded authority");
     assert.equal(terminal.visibleFitFrame, null);
     assert.equal(terminal.visibleFitTimer, null);
+  } finally {
+    win.restore();
+  }
+});
+
+// #6964: the instrumented reproduction of the #2347 scrollback flake showed
+// every OpResize mapping to a legitimate client send — the concession protocol
+// held end to end and no stray writer existed. Scrollback still came back
+// empty because the emulator had been resized onto the foreign grid for EVERY
+// contested echo and refit back in the same task: an invisible grow↔shrink
+// churn nobody ever paints. A grow pulls scrollback into the screen where a
+// cursor-positioning byte can leave it below the cursor, and xterm's shrink
+// then pops those lines as "blank below the cursor" — gone for good. A
+// contested echo must therefore never move the emulator: the same-task
+// reassert already refits the local grid, so only a grid the pane CONCEDES to
+// may touch the buffer.
+test("a contested echo never churns the emulator — a foreign grid applies only on concession", () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls } = stageEchoed();
+    const resizable = term as unknown as { resize(c: number, r: number): void };
+    const resizes: Array<[number, number]> = [];
+    const track = resizable.resize;
+    resizable.resize = (cols: number, rows: number) => {
+      resizes.push([cols, rows]);
+      track(cols, rows);
+    };
+    // The first sighting of the peer's grid is contested: the reassert refits
+    // the emulator to the host's own fit in the same task, so the foreign
+    // resize the echo carried would be pure churn — on master it ran anyway.
+    echo(104, 68);
+    assert.deepEqual(resizes, [],
+      "a contested echo must not reflow the buffer — the same-task reassert owns the emulator");
+    assert.deepEqual([term.rows, term.cols], [40, 120]);
+    // The insistent repeat is a concession: the foreign grid is authoritative
+    // and the emulator takes it — the only place a peer grid reaches xterm on
+    // a measurable host.
+    echo(104, 68);
+    assert.deepEqual(resizes, [[68, 104]]);
+    assert.deepEqual([term.rows, term.cols], [104, 68]);
+    assert.deepEqual(calls, [], "the concession writes nothing");
+  } finally {
+    win.restore();
+  }
+});
+
+// The real #6964 stale-write channel: the ResizeObserver debounce does not
+// ride the delivery pair. cancelVisibleFitFrame clears the pair's handles but
+// never touches resizeTimer, so a debounce armed before the yield is a live
+// timer the concession cannot recall — its delivery lands ~one frame later,
+// refits the emulator off the authoritative grid, and writes the conceded
+// size back out. The pair/wake-probe epoch stamps are belt-and-suspenders
+// (cancelAnimationFrame already stops an undelivered callback); the debounce
+// stamp is the one a browser actually needs. Arming stamps the fit epoch; the
+// concession advances it; a stale delivery does nothing at all.
+test("an RO debounce armed before the yield cannot refit after it", () => {
+  const win = stubWindow();
+  try {
+    const { echo, term, calls, terminal } = stageEchoed();
+    // The observer's debounce arms its own timer — the handle cancelVisibleFitFrame
+    // never clears. On master this delivery refit [104,68]→[40,120] and wrote.
+    terminal.scheduleFit();
+    const debounced = [...win.timers.values()].at(-1)!;
+    // The peer insists: two sightings of its grid inside the yield window and
+    // the pane concedes. The concession clears the armed pair — the debounce
+    // timer survives in `timers`, exactly as it would in a live page.
+    echo(104, 68);
+    echo(104, 68);
+    assert.deepEqual([term.rows, term.cols], [104, 68], "the pane yielded to the repeat");
+    calls.length = 0;
+    debounced();
+    assert.deepEqual(calls, [],
+      "a debounce armed before the yield writes nothing and refits nothing");
+    assert.deepEqual([term.rows, term.cols], [104, 68],
+      "the emulator rests on the conceded grid");
+    assert.equal(terminal.resizeTimer, null, "the delivery consumed itself");
   } finally {
     win.restore();
   }
@@ -900,13 +978,13 @@ test("alternating foreign grids cannot bypass the yield window — contest histo
     echo(30, 90);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "each new foreign grid gets one reclaim");
+    assert.deepEqual(calls, ["resize", "resize"], "each new foreign grid gets one reclaim");
     // A repeat of EITHER grid inside its own window is the same insistent
     // writer — it wins unchallenged, whichever order the echoes arrive in.
     echo(24, 80);
     echo(30, 90);
     assert.deepEqual([term.rows, term.cols], [30, 90], "the emulator still follows the authoritative echo");
-    assert.deepEqual(calls, ["fit", "resize", "fit", "resize"], "no further reclaims leave the wire");
+    assert.deepEqual(calls, ["resize", "resize"], "no further reclaims leave the wire");
   } finally {
     win.restore();
   }
@@ -938,7 +1016,7 @@ test("a trusted activation starts a new contest epoch — the pre-activation yie
     echo(34, 100);
     win.runAllFrames();
     await Promise.resolve();
-    assert.deepEqual(calls, ["fit", "resize"]);
+    assert.deepEqual(calls, ["resize"]);
     // The peer's repeat inside the window: the pane yields and its emulator
     // rests on the peer's grid — the record stays stamped at the FIRST
     // sighting.

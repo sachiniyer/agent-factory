@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "c6135149d746";
+var CLIENT_VERSION = "6f40d4ce7828";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -11643,6 +11643,15 @@ var AttachTerminal = class {
   visibleFitFrame = null;
   visibleFitTimer = null;
   visibleFitAttempts = 0;
+  /** Stamped into every armed fit delivery and advanced on each concession.
+   *  cancelVisibleFitFrame clears the armed handles, but a callback the browser
+   *  already dispatched — an rAF mid-flight, a debounce timer on its way to the
+   *  queue — cannot be recalled: it lands ~one frame after the yield and would
+   *  refit the emulator off the authoritative grid and write the conceded size
+   *  back out (#6964). A delivery stamped before the concession does nothing at
+   *  all: it must not even touch the pair's handles, which may already point at
+   *  newer work. */
+  fitEpoch = 0;
   /** Whether this page is currently unpaintable, detected the only way the
    *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
    *  250ms timer had to deliver instead. An occluded page keeps
@@ -12585,12 +12594,13 @@ var AttachTerminal = class {
       return;
     }
     this.diag("arm-pair", { attempts: this.visibleFitAttempts });
+    const epoch = this.fitEpoch;
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
     if (this.visibleFitTimer === null) {
-      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false, epoch), VISIBLE_FIT_TIMER_MS);
     }
   }
   /** Arms ONLY the frame probe — the wake detector for a resize this page is
@@ -12620,7 +12630,8 @@ var AttachTerminal = class {
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    const epoch = this.fitEpoch;
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
   }
   /** Whichever of the twin triggers delivers first runs the fit and drops the
    *  other. The channel the delivery arrived on is the parked detector: the
@@ -12629,7 +12640,11 @@ var AttachTerminal = class {
    *  still cannot measure the host retries within the attempt budget — a
    *  transient bail used to be FINAL, which is how one bad instant could strand
    *  the pane on a peer's grid permanently. */
-  onVisibleFit(deliveredByFrame) {
+  onVisibleFit(deliveredByFrame, epoch) {
+    if (epoch !== this.fitEpoch) {
+      this.diag("stale-fit", { epoch, fitEpoch: this.fitEpoch });
+      return;
+    }
     this.parked = !deliveredByFrame;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -12765,13 +12780,14 @@ var AttachTerminal = class {
   }
   scheduleFit() {
     this.diag("arm-ro");
+    const epoch = this.fitEpoch;
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
     }
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
       this.diag("fire-ro");
-      if (this.stopped) {
+      if (this.stopped || epoch !== this.fitEpoch) {
         return;
       }
       if (!this.fitVisibleHost()) {
@@ -12846,51 +12862,66 @@ var AttachTerminal = class {
     this.lastCols = cols;
     const admitted = this.admittedEcho;
     this.admittedEcho = true;
-    if (rows !== this.term.rows || cols !== this.term.cols) {
-      if (this.pendingViewport === null) {
-        const buffer = this.term.buffer.active;
-        const atBottom = buffer.viewportY >= buffer.baseY;
-        let marker = null;
-        if (!atBottom) {
-          try {
-            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
-          } catch {
-          }
+    if (rows === this.term.rows && cols === this.term.cols) {
+      return;
+    }
+    if (this.pendingViewport === null) {
+      const buffer = this.term.buffer.active;
+      const atBottom = buffer.viewportY >= buffer.baseY;
+      let marker = null;
+      if (!atBottom) {
+        try {
+          marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+        } catch {
         }
-        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
-        this.diag("vp-cap", { atBottom });
       }
-      this.cancelViewportRestoreFrame();
-      try {
-        this.term.resize(cols, rows);
-      } catch {
+      this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+      this.diag("vp-cap", { atBottom });
+    }
+    if (this.container.clientWidth <= 0 || this.container.clientHeight <= 0) {
+      this.diag("echo-hidden", { r: rows, c: cols });
+      this.applyForeignEchoToEmulator(rows, cols);
+      return;
+    }
+    if (!admitted) {
+      this.diag("echo-admit", { r: rows, c: cols });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
       }
-      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
-        if (!admitted) {
-          this.diag("echo-admit", { r: rows, c: cols });
-          this.reassertHostFit();
-        } else {
-          const now = Date.now();
-          const key = `${rows}x${cols}`;
-          const last = this.contestedEchoes.get(key);
-          if (last === void 0 || now - last >= FOREIGN_ECHO_YIELD_MS) {
-            for (const [k, at] of this.contestedEchoes) {
-              if (now - at >= FOREIGN_ECHO_YIELD_MS) {
-                this.contestedEchoes.delete(k);
-              }
-            }
-            this.contestedEchoes.set(key, now);
-            this.diag("echo-contest", { key, dt: last === void 0 ? -1 : Math.round(now - last) });
-            this.reassertHostFit();
-          } else {
-            this.diag("echo-yield", { key, dt: Math.round(now - last) });
-            this.cancelVisibleFitFrame();
-            this.owedForceResize = false;
-          }
+      return;
+    }
+    const now = Date.now();
+    const key = `${rows}x${cols}`;
+    const last = this.contestedEchoes.get(key);
+    if (last === void 0 || now - last >= FOREIGN_ECHO_YIELD_MS) {
+      for (const [k, at] of this.contestedEchoes) {
+        if (now - at >= FOREIGN_ECHO_YIELD_MS) {
+          this.contestedEchoes.delete(k);
         }
-      } else {
-        this.diag("echo-hidden", { r: rows, c: cols });
       }
+      this.contestedEchoes.set(key, now);
+      this.diag("echo-contest", { key, dt: last === void 0 ? -1 : Math.round(now - last) });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
+      }
+      return;
+    }
+    this.diag("echo-yield", { key, dt: Math.round(now - last) });
+    this.cancelVisibleFitFrame();
+    this.fitEpoch += 1;
+    this.owedForceResize = false;
+    this.applyForeignEchoToEmulator(rows, cols);
+  }
+  /** Applies a foreign grid the pane has accepted as authoritative — the
+   *  yielded concession, a pane too hidden to contest, or the transient
+   *  apply while an unmeasurable host's reclaim retries through the pair. A
+   *  contested echo never reaches this: reassertHostFit refits the emulator
+   *  in the same task, so resizing here would only churn the buffer. */
+  applyForeignEchoToEmulator(rows, cols) {
+    this.cancelViewportRestoreFrame();
+    try {
+      this.term.resize(cols, rows);
+    } catch {
     }
   }
   /** Re-asserts this host's fit after a foreign echo moved the emulator — in
@@ -12924,6 +12955,7 @@ var AttachTerminal = class {
     if (!settled || this.parked === null) {
       this.scheduleVisibleFit();
     }
+    return settled;
   }
   /** Appends one #6964 trace entry when the page opted in — see the module
    *  header above. Every arm, delivery, decision and write of the resize
