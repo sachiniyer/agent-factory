@@ -112,6 +112,12 @@ func (i *Instance) PendingHandoffMissionSettleable() bool {
 // that answers restores `started` (ResolveStartupState) before the readiness
 // wait and the send run. A probe that does not answer refuses the retry and
 // leaves the row as it was.
+//
+// The limit wall is the one startup-unknown shape the marker must NOT admit:
+// retryPendingHandoff's LiveLimitReached arm transfers the mission into the
+// scheduled limit retry and returns unperformed — the explicit retry never
+// submits there, so "Retry send" would lie. The row falls back to the
+// truthful no-resend resume label instead (#6800 follow-up).
 func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -121,7 +127,8 @@ func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
 	return i.pendingHandoffMission != "" && ambiguous && !i.userKilled && !dead &&
 		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing) &&
-		(i.liveness == LiveRunning || i.liveness == LiveReady || i.startupStateUnknown)
+		(i.liveness == LiveRunning || i.liveness == LiveReady ||
+			(i.startupStateUnknown && i.liveness != LiveLimitReached))
 }
 
 // CanConfirmPendingHandoffDelivery reports whether an operator can retire the
