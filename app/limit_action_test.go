@@ -667,6 +667,7 @@ func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsResumeNotResend
 	require.Equal(t, stateSelectHandoffResolve, h.state)
 	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
 		h.handoffResolve.actions, "Row 0 is the resume and Row 1 is the confirm")
+	h.selectionOverlay.SetWidth(140) // the default test width truncates the label
 	rendered := ansi.Strip(h.selectionOverlay.Render())
 	require.NotContains(t, rendered, "Retry send",
 		"the daemon's limit arm transfers the mission to scheduled retry without submitting — Row 0 must not promise a resend")

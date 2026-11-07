@@ -6723,7 +6723,7 @@ function isLimitReached(s) {
 function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
 function ambiguousHandoffDelivery(status) {
   return status === "sent-unverified" || status === "could-not-confirm";
@@ -6736,7 +6736,7 @@ function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
   const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true && liveness !== Liveness.LimitReached) && (op === InFlightOp.None || op === InFlightOp.Replacing);
 }
 function isPendingAgentHandoffDeliveryConfirmable(s) {
   const liveness = livenessOf(s);
@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "dc04dc52aecc";
+var CLIENT_VERSION = "88c110a5392c";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
