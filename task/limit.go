@@ -357,10 +357,6 @@ var (
 	// weekday matches a leading weekday name for the claude weekly variant
 	// when it names a day rather than a date.
 	weekday = regexp.MustCompile(`(?i)\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b`)
-	// whitespaceRun collapses runs of whitespace (including the newlines a
-	// wrapped banner introduces) to a single space, so the paren-timezone and
-	// clock scans in parseClaudeReset see a single-line form.
-	whitespaceRun = regexp.MustCompile(`\s+`)
 
 	monthIndex = map[string]time.Month{
 		"jan": time.January, "feb": time.February, "mar": time.March,
@@ -376,22 +372,78 @@ var (
 )
 
 // claudeResetAnchor locates Claude's reset clause and captures the tail after
-// "reset " up to the sentence-ending period (or end of string), e.g. "2pm
-// (America/New_York)" (5h) or "Monday at 9am (…)" / "Nov 6, 2026 9am (…)"
-// (weekly). The "at" is optional because the weekday variant reads "reset
-// Monday at 9am" — "reset <day>" — while the 5h variant reads "reset at 2pm".
-// Kept separate from detection so a reworded reset clause still detects
-// (hit=true) even when this yields no parse.
+// "reset " up to and including the clock time, an optional parenthesized
+// timezone, and an optional trailing period, e.g. "2pm (America/New_York)"
+// (5h) or "Monday at 9am (…)" / "Nov 6, 2026 9am (…)" (weekly). The "at" is
+// optional because the weekday variant reads "reset Monday at 9am" — "reset
+// <day>" — while the 5h variant reads "reset at 2pm". Kept separate from
+// detection so a reworded reset clause still detects (hit=true) even when this
+// yields no parse.
 //
 // The (?is) flags cross newlines in the tail capture, mirroring the codex
 // reset regexes (codexResetAt/codexResetIn): Claude Code word-wraps its banner
 // inside its TUI render, and a wrap that pushes the parenthesized timezone
 // onto the next row must not truncate it out of the capture — without the
 // paren the clock time silently resolves in the daemon host's zone instead of
-// the account's. The non-greedy tail stops at the first period (the
-// sentence-ending period in every shipped banner form) so trailing transcript
-// rows after the clause are not swallowed; \z covers a clause with no period.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?(.+?)(?:\.|\z)`)
+// the account's. The tail is bounded by the clock token (\d{1,2}(:\d{2})?[ap]m)
+// plus an optional "(tz)" rather than by the first period or end of pane: a
+// period would mis-bound a date that abbreviates its month ("Nov. 6, 2026"),
+// and end-of-pane would swallow trailing transcript rows after a clause that
+// carries no trailing period, destabilizing the #6765 re-read evidence. The
+// optional "(...)" spans newlines so a wrap inside the timezone token
+// ("(America/\nNew_York)") stays within the capture.
+var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?(.+?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
+
+// normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
+// introduces, so the paren-timezone and clock scans in parseClaudeReset see a
+// single-line form. Outside a parenthesized timezone, runs of whitespace
+// (including the wrap newline between the clock time and the tz paren) collapse
+// to a single space. Inside a parenthesized span only the wrap's newlines are
+// dropped (an IANA zone name has no internal whitespace, so a wrap that splits
+// the token — "(America/\nNew_York)" — must rejoin to "(America/New_York)",
+// not "(America/ New_York)", or time.LoadLocation rejects it and the clock
+// silently falls back to the host zone); genuine spaces inside a paren, e.g.
+// the descriptor "(5h limit)", are kept verbatim. The same normalization is
+// applied to the evidence so it stays stable for the #6765 re-read identity.
+func normalizeResetWhitespace(s string) string {
+	var b strings.Builder
+	b.Grow(len(s))
+	depth := 0
+	outsideSpace := false // whether the last char emitted outside a paren was a collapsed space
+	for i := 0; i < len(s); i++ {
+		c := s[i]
+		switch {
+		case c == '(':
+			depth++
+			b.WriteByte(c)
+			outsideSpace = false
+		case c == ')':
+			if depth > 0 {
+				depth--
+			}
+			b.WriteByte(c)
+			outsideSpace = false
+		case depth > 0:
+			// Inside a parenthesized span: drop the wrap's newlines so a split
+			// zone token rejoins; keep every other byte (including the genuine
+			// spaces of a non-zone descriptor like "5h limit") verbatim.
+			if c == '\n' || c == '\r' {
+				continue
+			}
+			b.WriteByte(c)
+		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
+			// Outside a paren: collapse runs to a single space.
+			if !outsideSpace {
+				b.WriteByte(' ')
+				outsideSpace = true
+			}
+		default:
+			b.WriteByte(c)
+			outsideSpace = false
+		}
+	}
+	return b.String()
+}
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at
 // <tail>" clause and resolves the tail, in order: an optional timezone in parens
@@ -413,8 +465,10 @@ func parseClaudeReset(content string, now time.Time) (time.Time, string, bool) {
 	// so the paren-timezone and clock scans see a single-line form. The evidence
 	// is collapsed the same way, keeping it stable for the #6765 re-read
 	// identity: the same banner always yields the same normalized phrase.
-	reset := strings.TrimSpace(whitespaceRun.ReplaceAllString(anchor[1], " "))
-	evidence := strings.TrimSpace(whitespaceRun.ReplaceAllString(anchor[0], " "))
+	// normalizeResetWhitespace (see above) rejoins a wrap inside the tz paren so
+	// time.LoadLocation still accepts the zone.
+	reset := strings.TrimSpace(normalizeResetWhitespace(anchor[1]))
+	evidence := strings.TrimSpace(normalizeResetWhitespace(anchor[0]))
 
 	loc := now.Location()
 	candidates := parenTZ.FindAllStringSubmatch(reset, -1)

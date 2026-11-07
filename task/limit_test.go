@@ -650,6 +650,26 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am\n(America/New_York).",
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // same as unwrapped
 		},
+		{
+			// Wrap INSIDE the parenthesized timezone token, not just before
+			// it: the newline must rejoin the zone name (no space inserted) so
+			// time.LoadLocation still accepts "America/New_York". A naive
+			// newline-to-space normalization would yield "America/ New_York"
+			// and silently fall back to the host zone — the bug this change
+			// fixes.
+			name:    "5h wrapped: tz split inside the paren",
+			content: "Claude usage limit reached. Your limit will reset at 2pm (America/\nNew_York).",
+			want:    want2pm,
+		},
+		{
+			// Abbreviated month that keeps its period ("Nov. 6"). The anchor
+			// must not treat that period as the sentence-ending terminator and
+			// truncate the capture to "Nov." — the clock time still has to be
+			// found further on. The unwrapped and wrapped forms both parse.
+			name:    "weekly date: abbreviated month keeps its period",
+			content: "Claude usage limit reached. Your limit will reset at Nov. 6, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -702,6 +722,18 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 		// 2pm is after both 10:00 and 11:00, so both resolve to today 2pm —
 		// they CAN be equal. Assert only that the evidence is stable, which
 		// is the #6765 contract. (A phrase past the later clock would differ.)
+	}
+
+	// Trailing transcript/prompt rows after a clause that carries no trailing
+	// period must NOT be swallowed into the capture: the evidence is the reset
+	// clause alone, so it stays stable across re-reads even as the rows below
+	// the banner change. The clause here has no terminating period (the shipped
+	// banner form), and two trailing rows follow it in the same pane capture.
+	trailing := "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/New_York)\n" +
+		"some transcript row\nanother changing row"
+	_, _, _, evT := det.Check(trailing, tmux.ProgramClaude, now)
+	if want := "reset at 2pm (America/New_York)"; evT != want {
+		t.Fatalf("trailing rows must not be swallowed into the evidence: got %q, want %q", evT, want)
 	}
 }
 
