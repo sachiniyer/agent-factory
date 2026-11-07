@@ -42,6 +42,42 @@ func TestIsLimitContent(t *testing.T) {
 			wantResetUTC: time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(), // 18:00 UTC
 		},
 		{
+			// Wrapped banner: the parenthesized timezone lands on the next row
+			// (the 81-column daily banner overflows the stock 80-column detached
+			// tmux pane). The fix's (?is) anchor crosses the newline so the paren
+			// stays in the capture and the clock resolves in the account's zone,
+			// not the daemon host's. Same reset as the unwrapped case above.
+			name:  "claude 5h window: wrapped tz paren, resets later today",
+			agent: tmux.ProgramClaude,
+			content: "Claude usage limit reached. Your limit will reset at 2pm\n" +
+				"(America/New_York).",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(), // 18:00 UTC
+		},
+		{
+			// Weekly variant, wrapped: same fix, same reset as the unwrapped
+			// weekday case below.
+			name:  "claude weekly: named weekday wrapped tz paren",
+			agent: tmux.ProgramClaude,
+			content: "Claude usage limit reached. Your limit will reset Monday at 9am\n" +
+				"(America/New_York).",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 7, 6, 9, 0, 0, 0, loc).UTC(), // Mon -> 13:00 UTC
+		},
+		{
+			// Weekly variant with explicit date, wrapped: same fix, same reset
+			// as the unwrapped dated case below.
+			name:  "claude weekly: explicit date + year + wrapped tz paren",
+			agent: tmux.ProgramClaude,
+			content: "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am\n" +
+				"(America/New_York).",
+			wantHit:      true,
+			wantReset:    true,
+			wantResetUTC: time.Date(2026, 11, 6, 9, 0, 0, 0, loc).UTC(), // EST -> 14:00 UTC
+		},
+		{
 			name:  "claude ignores earlier visible reset text before limit banner",
 			agent: tmux.ProgramClaude,
 			content: strings.Join([]string{
@@ -449,6 +485,11 @@ func TestCheckReturnsResetPhraseEvidence(t *testing.T) {
 	}{
 		{"claude time-only", "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/New_York)", tmux.ProgramClaude, "reset at 2pm (America/New_York)"},
 		{"claude weekday", "⎿  Claude usage limit reached. Your limit will reset Monday at 9am (America/New_York)", tmux.ProgramClaude, "reset Monday at 9am (America/New_York)"},
+		// Wrapped banners: the evidence is the normalized (whitespace-collapsed)
+		// reset clause, stable across re-reads (#6765). The newline from the wrap
+		// is collapsed to a space so the evidence is a clean single-line phrase.
+		{"claude time-only wrapped", "⎿  Claude usage limit reached. Your limit will reset at 2pm\n(America/New_York).", tmux.ProgramClaude, "reset at 2pm (America/New_York)."},
+		{"claude weekday wrapped", "⎿  Claude usage limit reached. Your limit will reset Monday at 9am\n(America/New_York).", tmux.ProgramClaude, "reset Monday at 9am (America/New_York)."},
 		{"codex dated", "■ You’ve hit your usage limit. Please try again at Sep 20th, 2026 9:16 AM.", tmux.ProgramCodex, "try again at Sep 20th, 2026 9:16 AM"},
 		{"codex time-only", "■ You've hit your usage limit. Please try again at 6:34 AM.", tmux.ProgramCodex, "try again at 6:34 AM"},
 		{"codex relative", "■ You've hit your usage limit, try again in 4 days 2 hours 46 minutes.", tmux.ProgramCodex, "try again in 4 days 2 hours 46 minutes."},
@@ -544,5 +585,147 @@ func TestSight(t *testing.T) {
 	s = det.Sight(two, tmux.ProgramClaude, now)
 	if s.Hit != hit || !s.ResetAt.Equal(resetAt) || s.HasResetTime != hasReset || s.Evidence != evidence {
 		t.Fatalf("Check and Sight disagree: (%v,%v,%v,%q) vs %+v", hit, resetAt, hasReset, evidence, s)
+	}
+}
+
+// TestClaudeResetWrappedBannerTimezone pins the fix for the wrapped-banner
+// timezone truncation bug: when Claude Code word-wraps its limit banner and the
+// wrap pushes the parenthesized timezone onto the next row, the claudeResetAnchor
+// regex must cross the newline so the paren stays in the capture and the clock
+// time resolves in the account's zone — not the daemon host's. The bug report's
+// reproduction clocks the daemon in UTC (the host-zone fallback) and shows the
+// wrapped 2pm (America/New_York) banner parsing as 14:00Z (2pm read in UTC) instead
+// of 19:00Z (2pm EST) — a 5-hour-too-early reset. This test reproduces that
+// exactly: a UTC now, the wrapped and unwrapped forms of the same banner, and
+// the assertion that both resolve to the same EST instant.
+func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
+	// UTC-clocked reproduction: the daemon host's zone is UTC, so the bug's
+	// fallback (now.Location()) reads 2pm in UTC. America/New_York is EST
+	// (UTC-5) in January, so 2pm EST = 19:00Z — the correct parse the wrapped
+	// form must also produce.
+	now := time.Date(2026, 1, 2, 10, 0, 0, 0, time.UTC) // 05:00 America/New_York
+	est, err := time.LoadLocation("America/New_York")
+	if err != nil {
+		t.Fatal(err)
+	}
+	want2pm := time.Date(2026, 1, 2, 14, 0, 0, 0, est).UTC() // 19:00Z
+
+	cases := []struct {
+		name    string
+		content string
+		want    time.Time
+	}{
+		{
+			name:    "5h unwrapped (control)",
+			content: "Claude usage limit reached. Your limit will reset at 2pm (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			name:    "5h wrapped: tz paren on next row",
+			content: "Claude usage limit reached. Your limit will reset at 2pm\n(America/New_York).",
+			want:    want2pm,
+		},
+		{
+			name:    "5h wrapped: break between reset and at (\\s crosses newline)",
+			content: "Claude usage limit reached. Your limit will reset\nat 2pm (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			name:    "weekly weekday unwrapped (control)",
+			content: "Claude usage limit reached. Your limit will reset Monday at 9am (America/New_York).",
+			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // Mon 9am EST = 14:00Z
+		},
+		{
+			name:    "weekly weekday wrapped: tz paren on next row",
+			content: "Claude usage limit reached. Your limit will reset Monday at 9am\n(America/New_York).",
+			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // same as unwrapped
+		},
+		{
+			name:    "weekly date unwrapped (control)",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			name:    "weekly date wrapped: tz paren on next row",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am\n(America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // same as unwrapped
+		},
+	}
+	det := NewLimitDetector(nil)
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit, resetAt, hasReset, _ := det.Check(tc.content, tmux.ProgramClaude, now)
+			if !hit || !hasReset {
+				t.Fatalf("hit=%v hasReset=%v; the wrapped banner must still detect and parse", hit, hasReset)
+			}
+			if !resetAt.Equal(tc.want) {
+				t.Fatalf("resetAt = %v, want %v (the wrapped form must resolve in the account's zone, not the daemon host's)", resetAt.UTC(), tc.want)
+			}
+			if !resetAt.After(now) {
+				t.Fatalf("resetAt = %v must be after now = %v", resetAt, now)
+			}
+		})
+	}
+}
+
+// TestClaudeResetWrappedBannerEvidenceStability pins the #6765 re-read identity
+// for wrapped banners: re-reading an unchanged wrapped banner must reproduce the
+// same evidence phrase, so the poll's same-phrase dedupe keeps the first (nearest
+// to the wall) reset rather than re-parsing against a later clock. The evidence
+// is the whitespace-normalized reset clause — deterministic for the same banner.
+func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+	det := NewLimitDetector(nil)
+
+	wrapped := "⎿  Claude usage limit reached. Your limit will reset at 2pm\n(America/New_York)."
+	// Two reads of the same banner at different clocks must produce the same
+	// evidence (the phrase is the re-read's identity) but may produce different
+	// reset times (a time-only phrase re-resolves against the later clock).
+	_, reset1, _, ev1 := det.Check(wrapped, tmux.ProgramClaude, now)
+	_, reset2, _, ev2 := det.Check(wrapped, tmux.ProgramClaude, now.Add(time.Hour))
+	if ev1 != ev2 {
+		t.Fatalf("an unchanged wrapped banner must reproduce identical evidence: %q != %q", ev1, ev2)
+	}
+	if ev1 == "" {
+		t.Fatalf("a wrapped banner with a parseable reset must carry evidence, got empty")
+	}
+	if !strings.Contains(ev1, "America/New_York") {
+		t.Fatalf("evidence must contain the parenthesized timezone (the fix's whole point): %q", ev1)
+	}
+	if strings.Contains(ev1, "\n") {
+		t.Fatalf("evidence must be whitespace-normalized (no raw newlines): %q", ev1)
+	}
+	// The reset time for a time-only phrase re-resolves against the later clock,
+	// so the two reads differ — but the evidence (identity) is unchanged.
+	if reset1.Equal(reset2) {
+		// 2pm is after both 10:00 and 11:00, so both resolve to today 2pm —
+		// they CAN be equal. Assert only that the evidence is stable, which
+		// is the #6765 contract. (A phrase past the later clock would differ.)
+	}
+}
+
+// TestClaudeResetWrappedBannerNoTimezoneFallback confirms that a wrapped banner
+// WITHOUT a parenthesized timezone still falls back to now's location — the
+// documented behavior for a banner that genuinely carries no zone. The fix must
+// not change this fallback; it only ensures the paren is not truncated out of
+// the capture when it IS present.
+func TestClaudeResetWrappedBannerNoTimezoneFallback(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+	det := NewLimitDetector(nil)
+
+	// A wrapped banner with no paren tz: the clock resolves in now's zone.
+	// The wrap is between the clock time and the period — the same wrap point
+	// that would truncate the paren in the buggy regex, but here there is no
+	// paren to truncate.
+	content := "Claude usage limit reached. Your limit will reset at 2:30pm\n."
+	hit, resetAt, hasReset, _ := det.Check(content, tmux.ProgramClaude, now)
+	if !hit || !hasReset {
+		t.Fatalf("hit=%v hasReset=%v", hit, hasReset)
+	}
+	want := time.Date(2026, 7, 4, 14, 30, 0, 0, loc).UTC() // 18:30 UTC
+	if !resetAt.Equal(want) {
+		t.Fatalf("resetAt = %v, want %v (no-paren fallback to now's zone)", resetAt.UTC(), want)
 	}
 }
