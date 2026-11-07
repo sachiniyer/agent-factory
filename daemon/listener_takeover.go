@@ -316,7 +316,7 @@ func parseProcNetTCP(data []byte, req *net.TCPAddr, out map[uint64]bool) {
 		if len(local) != 2 {
 			continue
 		}
-		port, err := strconv.ParseUint(local[1], 16, 32)
+		port, err := strconv.ParseUint(local[1], 16, 16)
 		if err != nil || int(port) != req.Port {
 			continue
 		}
