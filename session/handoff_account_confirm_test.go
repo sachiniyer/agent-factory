@@ -138,12 +138,20 @@ func TestConfirmPendingAccountSwapDeliveryAutomaticClearsTheOutgoingWall(t *test
 func TestConfirmPendingAccountSwapDeliveryAutomaticKeepsTheIncomingWall(t *testing.T) {
 	inst := confirmableManualSwap(PromptCouldNotConfirm)
 	inst.pendingAccountSwap.Manual = false
+	attemptAt := time.Now().Add(-time.Minute)
+	inst.pendingAccountSwap.MissionDeliveryAttemptAt = attemptAt
 	inst.liveness = LiveLimitReached
 	inst.limitResetAt = time.Now().Add(time.Hour)
 	// The wall is attributed to the incoming identity — the
-	// ParkAutomaticAccountSwapAtLimit shape, limit_account == pending.To.
+	// ParkAutomaticAccountSwapAtLimit shape, limit_account == pending.To —
+	// and its sighting POSTDATES the recorded send: a later retry's
+	// readiness wait hit the replacement's own quota after this attempt
+	// landed (#6921 review — only a post-send wall is fresh quota proof).
 	inst.limitAgent = "claude"
 	inst.limitAccount = "personal"
+	inst.accountLimitObservations = []AccountLimitObservationData{
+		{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: attemptAt.Add(time.Second)},
+	}
 	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
 
 	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
@@ -151,7 +159,7 @@ func TestConfirmPendingAccountSwapDeliveryAutomaticKeepsTheIncomingWall(t *testi
 	require.Nil(t, inst.pendingAccountSwap, "the confirm retires the pending swap")
 	require.Nil(t, inst.accountSwapLaunch)
 	require.Equal(t, LiveLimitReached, inst.GetLiveness(),
-		"an incoming-account limit survives the confirm — the agent really is quota-blocked")
+		"an incoming-account limit recorded after the send survives the confirm — the agent really is quota-blocked")
 	if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
 		t.Fatal("the incoming wall's reset must survive or scheduled recovery loses its schedule")
 	}
@@ -159,6 +167,38 @@ func TestConfirmPendingAccountSwapDeliveryAutomaticKeepsTheIncomingWall(t *testi
 	require.True(t, ok, "the wall's attribution survives with it")
 	require.Equal(t, "claude", agent)
 	require.Equal(t, "personal", account)
+}
+
+// The #6921-review MED fix at the confirm site: a wall attributed to the
+// incoming identity but sighted BEFORE the send being confirmed is stale —
+// the send demonstrably got past it (the automatic arm never clears the
+// limit before submitting, so the parked row outlives the retry) — and the
+// confirm must clear it the way master did rather than keep a wall the
+// scheduler would resume a working agent against.
+func TestConfirmPendingAccountSwapDeliveryAutomaticClearsAPreSendIncomingWall(t *testing.T) {
+	inst := confirmableManualSwap(PromptCouldNotConfirm)
+	inst.pendingAccountSwap.Manual = false
+	attemptAt := time.Now().Add(-time.Minute)
+	inst.pendingAccountSwap.MissionDeliveryAttemptAt = attemptAt
+	inst.liveness = LiveLimitReached
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	inst.limitAgent = "claude"
+	inst.limitAccount = "personal" // == pending.To on the label axis — but OLD
+	inst.accountLimitObservations = []AccountLimitObservationData{
+		{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: attemptAt.Add(-time.Hour)},
+	}
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery())
+
+	require.NoError(t, inst.ConfirmPendingAccountSwapDelivery("work", "personal"))
+
+	require.Nil(t, inst.pendingAccountSwap)
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"a wall recorded before the confirmed send is stale and retires with the swap")
+	if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+		t.Fatal("the pre-send wall must retire with the confirm")
+	}
+	_, _, ok := inst.LimitIdentity()
+	require.False(t, ok, "no attribution may survive the cleared pre-send wall")
 }
 
 // A MANUAL swap confirmed while parked at the OUTGOING ambient identity's wall

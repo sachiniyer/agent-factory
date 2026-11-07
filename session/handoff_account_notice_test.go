@@ -113,6 +113,11 @@ func TestSettlePendingAccountSwapNoticeDelivery(t *testing.T) {
 // to LiveRunning here leaves ResumeLimitedSessions' scan and, behind an
 // attached client's paused poll, never re-parks — stranded outside the
 // scheduled recovery the parked row was waiting for.
+//
+// The wall must ALSO postdate the send being settled (#6921 review): its
+// durable observation's ObservedAt is newer than the attempt instant the
+// evidence retires — a wall sighted before that send is stale, not fresh
+// quota proof.
 func TestSettlePendingAccountSwapNoticeDeliveryKeepsTheIncomingWall(t *testing.T) {
 	attemptAt := time.Now().Add(-time.Minute)
 	for _, manual := range []bool{false, true} {
@@ -125,15 +130,80 @@ func TestSettlePendingAccountSwapNoticeDeliveryKeepsTheIncomingWall(t *testing.T
 		inst.limitResetAt = time.Now().Add(time.Hour)
 		inst.limitAgent = "claude"
 		inst.limitAccount = "personal" // == pending.To: the incoming identity's wall
+		// The wall's sighting POSTDATES the recorded send — a later retry's
+		// readiness wait hit the replacement's own quota after this attempt
+		// landed (the Park{Manual,Automatic}AccountSwapAtLimit ledger row).
+		inst.accountLimitObservations = []AccountLimitObservationData{
+			{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: attemptAt.Add(time.Second)},
+		}
 		require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "personal", attemptAt))
 		require.Nil(t, inst.pendingAccountSwap, "the evidence retires the pending swap")
 		require.Nil(t, inst.accountSwapLaunch)
 		require.Equal(t, LiveLimitReached, inst.GetLiveness(),
-			"an incoming-account limit survives the evidence settle")
+			"an incoming-account limit recorded after the send survives the evidence settle")
 		if reset, ok := inst.LimitResetAt(); !ok || reset.IsZero() {
 			t.Fatal("the incoming wall's reset must survive the settle")
 		}
+		agent, account, ok := inst.LimitIdentity()
+		require.True(t, ok, "the wall's attribution survives with it")
+		require.Equal(t, "claude", agent)
+		require.Equal(t, "personal", account)
 	}
+}
+
+// The settle site's stale-wall arm (#6921 review MED): a wall attributed to
+// the incoming identity but sighted BEFORE the send being settled is stale —
+// the send demonstrably got past it — so the settle clears it the way master
+// did. Only a wall sighted after the pending attempt instant is fresh
+// evidence the replacement is still quota-blocked.
+func TestSettlePendingAccountSwapNoticeDeliveryClearsAPreSendIncomingWall(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	for _, manual := range []bool{false, true} {
+		inst := noticePendingSwap(manual, PromptCouldNotConfirm, attemptAt)
+		if manual {
+			inst.pendingAccountSwap.AccountAgent = "claude"
+		}
+		inst.limitResetAt = time.Now().Add(time.Hour)
+		inst.limitAgent = "claude"
+		inst.limitAccount = "personal" // == pending.To on the label axis
+		// The wall's sighting PREDATES the send — the incoming quota wall
+		// that parked the row before this attempt ever reached the composer.
+		inst.accountLimitObservations = []AccountLimitObservationData{
+			{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: attemptAt.Add(-time.Hour)},
+		}
+		require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "personal", attemptAt))
+		require.Nil(t, inst.pendingAccountSwap)
+		require.Equal(t, LiveRunning, inst.GetLiveness(),
+			"a wall recorded before the settled send is stale — the send got past it — and must clear")
+		if reset, ok := inst.LimitResetAt(); ok || !reset.IsZero() {
+			t.Fatal("the pre-send wall must retire with the settle")
+		}
+		_, _, ok := inst.LimitIdentity()
+		require.False(t, ok, "no attribution may survive the cleared pre-send wall")
+	}
+}
+
+// A manual cross-agent swap that reuses the outgoing label in a different
+// provider's namespace (Claude `work` → Codex `work`) must clear the wall at
+// the settle site too: limit_account == pending.To yet limit_agent does not
+// match pending.AccountAgent, so it is the outgoing provider's wall, not the
+// replacement's (#6921-review addendum — the two-axis check at settle).
+func TestSettlePendingAccountSwapNoticeDeliveryClearsTheCrossAgentSameLabelWall(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	inst := noticePendingSwap(true, PromptCouldNotConfirm, attemptAt)
+	inst.pendingAccountSwap.From = "work"
+	inst.pendingAccountSwap.To = "work" // same label, different provider namespace
+	inst.pendingAccountSwap.AccountAgent = "codex"
+	inst.Account = "work"
+	inst.limitResetAt = time.Now().Add(time.Hour)
+	inst.limitAgent = "claude" // outgoing provider — != pending.AccountAgent
+	inst.limitAccount = "work" // == pending.To on the label axis alone
+	inst.accountLimitObservations = []AccountLimitObservationData{
+		{Agent: "claude", Account: "work", ResetAt: inst.limitResetAt, ObservedAt: attemptAt.Add(time.Second)},
+	}
+	require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "work", attemptAt))
+	require.Equal(t, LiveRunning, inst.GetLiveness(),
+		"the outgoing provider's wall clears even though the account label matches the target")
 }
 
 func TestSettlePendingAccountSwapNoticeDeliveryRefusals(t *testing.T) {
