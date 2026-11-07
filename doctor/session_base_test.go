@@ -635,6 +635,108 @@ func TestCheckAgentPrograms_OpaqueWrapperTarget_KeepsQualification(t *testing.T)
 	require.Contains(t, row.Detail, "absent at launch")
 }
 
+// ---------------------------------------------------------------------------
+// Review follow-ups, round 3 (PR #6926) — the launch walk must judge a
+// committed symlink by its TARGET in the base tree (a dangling link stays
+// dangling in the worktree) and must not probe locations after the launch
+// winner is already found.
+// ---------------------------------------------------------------------------
+
+// A committed DANGLING symlink earlier in PATH does not shadow the
+// selection: `PATH=tools:<installed> claude` with `tools/claude -> missing`
+// resolves /installed/claude here — and resolves it in the worktree too,
+// because the materialized link is still dangling. Judging the entry by its
+// mode alone (120000) misreports a shadow.
+func TestCheckAgentPrograms_DanglingSymlinkDoesNotShadow(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	require.NoError(t, os.Symlink("missing", filepath.Join(repo, "tools", "claude")))
+	commitRepoFile(t, repo, "tools/claude") // committed as mode 120000, dangling in both checkouts
+	installed := testguard.CanonicalTempDir(t)
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	command := "env PATH=tools:" + installed + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"a dangling committed symlink stays dangling in the worktree — the session resolves the same installed file")
+}
+
+// The same shape with a VALID link does shadow: `tools/claude -> ../bin/claude`
+// committed alongside a committed executable resolves in the worktree, so the
+// session runs the linked file and the warning names it.
+func TestCheckAgentPrograms_ValidSymlinkShadow_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	require.NoError(t, os.Symlink(filepath.Join("..", "bin", "claude"), filepath.Join(repo, "tools", "claude")))
+	commitRepoFile(t, repo, "tools/claude")
+	commitRepoFile(t, repo, "bin/claude")
+	installed := testguard.CanonicalTempDir(t)
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+	// Locally deleted: the checkout selects /installed, the worktree resolves the link.
+	require.NoError(t, os.Remove(filepath.Join(repo, "tools", "claude")))
+
+	command := "env PATH=tools:" + installed + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"a valid committed symlink resolves in the worktree — it shadows the checkout's selection")
+	require.Contains(t, row.Detail, "tools/claude")
+}
+
+// Once the checkout-selected executable is proven the launch winner, no
+// further location is probed: `PATH=<installed>:bin claude` probes nothing
+// past /installed — trailing relative entries cannot change the answer and
+// each could otherwise cost a full gitProbeTimeout.
+func TestCheckAgentPrograms_NoProbesPastLaunchWinner(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude") // trailing location: committed, but never reached
+	installed := testguard.CanonicalTempDir(t)
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	var lsTreeCalls int
+	orig := gitTreeRead
+	gitTreeRead = func(workspace string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "ls-tree" {
+			lsTreeCalls++
+		}
+		return orig(workspace, args...)
+	}
+	defer func() { gitTreeRead = orig }()
+
+	command := "env PATH=" + installed + ":bin claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status)
+	require.Zero(t, lsTreeCalls,
+		"the checkout's selection is already the launch winner — probing the trailing relative entry is wasted")
+}
+
 // stubUsableDockerBackend makes BackendUnusableReason's docker prerequisites
 // pass hermetically: a `docker` CLI on PATH, a local engine endpoint, and an
 // `origin` remote — the same side-effect-free facts a create would need.

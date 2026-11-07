@@ -255,8 +255,12 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 		launchIdx, launchDisplay := -1, ""
 		for i, cand := range candidates {
 			results[i].verdict, results[i].display, results[i].provable = probeCandidate(cand)
-			if launchIdx < 0 && results[i].provable && results[i].verdict == baseTreeRunnable {
+			if results[i].provable && results[i].verdict == baseTreeRunnable {
+				// The first launch-runnable location IS the session's answer —
+				// probing trailing entries cannot change it, and each probe can
+				// cost a gitProbeTimeout when the object store stalls.
 				launchIdx, launchDisplay = i, results[i].display
+				break
 			}
 		}
 		if launchIdx == selIdx {
@@ -359,11 +363,11 @@ func sessionBaseRef(workspace string) (ref string, ok bool) {
 type baseTreeEntry int
 
 const (
-	baseTreeRunnable      baseTreeEntry = iota // an executable blob or a symlink — runnable at launch
+	baseTreeRunnable      baseTreeEntry = iota // runnable at launch — an executable blob or a symlink resolving to one
 	baseTreeAbsent                             // not in the tree — the clean worktree will not contain it
 	baseTreeNotExecutable                      // committed 100644 — materializes in the worktree but is not runnable
 	baseTreeNotAFile                           // a tree (040000) or gitlink (160000) entry — present, but not a file
-	baseTreeUnknown                            // the probe could not answer — be conservative and keep the PASS
+	baseTreeUnknown                            // the probe could not answer — inconclusive, reported as unverified
 )
 
 // baseTreeProbe reports how rel appears in ref's tree via `git ls-tree -z
@@ -371,11 +375,21 @@ const (
 // tree" answered against the tree object alone: presence is a missing entry,
 // and the entry's mode says whether the worktree materializes something
 // runnable — a file committed 100644 is found at launch but not runnable,
-// and a directory or submodule entry is not a runnable file either. ls-tree
-// never dereferences the entry's blob, so unlike `git cat-file -e
-// <ref>:<rel>` it cannot promisor-fetch a blob:none-filtered object; the
-// probe reads the base ref's tree — never the current index or working tree.
+// and a directory or submodule entry is not a runnable file either. A
+// symlink entry is answered by dereferencing its stored target — repo-
+// relative targets recurse into the tree (bounded), absolute targets name
+// the same host file at launch — since a dangling link stays dangling in
+// the worktree and must not shadow the real resolution. ls-tree never
+// dereferences the entry's blob, so unlike `git cat-file -e <ref>:<rel>` it
+// cannot promisor-fetch a blob:none-filtered object; the one blob read —
+// a symlink's tiny target blob — runs under GIT_NO_LAZY_FETCH and answers
+// "unknown" rather than fetch. The probe reads the base ref's tree — never
+// the current index or working tree.
 func baseTreeProbe(workspace, ref, rel string) baseTreeEntry {
+	return baseTreeEntryAt(workspace, ref, rel, 0)
+}
+
+func baseTreeEntryAt(workspace, ref, rel string, depth int) baseTreeEntry {
 	out, err := gitTreeRead(workspace, "ls-tree", "-z", ref, "--", rel)
 	if err != nil {
 		return baseTreeUnknown
@@ -387,8 +401,10 @@ func baseTreeProbe(workspace, ref, rel string) baseTreeEntry {
 		}
 		mode, _, _ := strings.Cut(meta, " ")
 		switch mode {
-		case "100755", "120000": // executable blob, or a symlink — runnable
+		case "100755": // executable blob — runnable
 			return baseTreeRunnable
+		case "120000":
+			return baseTreeSymlinkAt(workspace, ref, rel, depth)
 		case "100644":
 			return baseTreeNotExecutable
 		default:
@@ -396,6 +412,40 @@ func baseTreeProbe(workspace, ref, rel string) baseTreeEntry {
 		}
 	}
 	return baseTreeAbsent
+}
+
+// baseTreeSymlinkAt answers whether the symlink materialized at rel resolves
+// to a runnable file in the session's worktree: the worktree's content is the
+// base tree's, so a repo-relative target is answered by the entry IT lands
+// on (link chains recurse, bounded at depth), and an absolute target names
+// the same host file at launch. An escaping target, an unreadable blob (a
+// promised object GIT_NO_LAZY_FETCH refuses to pull), or an over-deep chain
+// is unverifiable — never "runnable" by default: a dangling committed link
+// stays dangling in the worktree and must not shadow the real resolution.
+func baseTreeSymlinkAt(workspace, ref, rel string, depth int) baseTreeEntry {
+	if depth >= 4 {
+		return baseTreeUnknown
+	}
+	out, err := gitTreeRead(workspace, "cat-file", "-p", ref+":"+rel)
+	if err != nil {
+		return baseTreeUnknown
+	}
+	target := strings.TrimSpace(string(out))
+	if target == "" {
+		return baseTreeUnknown
+	}
+	if filepath.IsAbs(target) {
+		if runnableFile(target) {
+			return baseTreeRunnable
+		}
+		return baseTreeAbsent
+	}
+	resolved := filepath.Clean(filepath.Join(filepath.Dir(rel), target))
+	if resolved == ".." || filepath.IsAbs(resolved) ||
+		strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+		return baseTreeUnknown // escapes the repo — the launch target is unverifiable
+	}
+	return baseTreeEntryAt(workspace, ref, resolved, depth+1)
 }
 
 // baseRefLabel names the tree the worktree materializes — origin's default
