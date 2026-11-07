@@ -41,6 +41,7 @@ import {
 import {
   HOST_INPUT_ATTR,
   type HostActions,
+  type HostAddDraft,
   type HostsState,
   emptyHostsState,
   renderHostsSection,
@@ -196,9 +197,10 @@ export function canCommit(shown: string, current: string): boolean {
  *
  * That window is not hypothetical: it is precisely the window this view's focus
  * restoration exists to make usable, so the edit sitting in it is the user typing
- * again in the field they just saved. Closing it clears `editing` and `draft`, and
- * the rebuild then paints the re-read value over text that was on screen a frame
- * earlier — a silent loss, with no error and nothing to undo.
+ * again in the field they just saved. Closing it clears `editing` and retires the
+ * committed draft from `drafts`, and the rebuild then paints the re-read value
+ * over text that was on screen a frame earlier — a silent loss, with no error
+ * and nothing to undo.
  *
  * The failure direction is deliberate. Requiring the edge can only ever leave an
  * edit OPEN that a re-delivery would have closed, and an edit that outlived its own
@@ -348,11 +350,20 @@ export class ConfigPane {
   private quota: QuotaState = emptyQuotaState();
   private theme: ThemeChoice = "system";
   private showAdvanced = false;
-  /** The key whose field is open, if any. Only one row edits at a time: a config
-   *  write is per-key (like `af config set`), so a multi-row "save all" would
-   *  imply an atomicity across keys that the writer does not offer. */
+  /** The key whose field the focus machinery is tracking — the row
+   *  `editingInput` repoints to on each rebuild and `shouldCloseSavedField`
+   *  closes. Typing into a row marks it; only that row's own successful save
+   *  unmarks it, so it names where the user most recently typed, not the only
+   *  row holding a draft. */
   private editing: string | null = null;
-  private draft = "";
+  /** Every row's typed-but-unsaved text, keyed by config key. A rebuild repaints
+   *  from this map rather than from `editing`/`draft`, so a refresh never eats
+   *  a draft the user did not submit: the single-slot pair it replaced kept
+   *  only the most recently typed row and silently dropped every earlier one
+   *  (#6692). A key's own successful save deletes its entry — a committed draft
+   *  is done, and replaying it would show a saved value as unsaved — while a
+   *  refused save keeps it so the rejected text stays to be corrected. */
+  private readonly drafts = new Map<string, string>();
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   private editingInput: HTMLInputElement | null = null;
@@ -380,9 +391,30 @@ export class ConfigPane {
   private lastQuota: QuotaState | null = null;
   private lastTheme: ThemeChoice | null = null;
 
+  /** The Hosts add form exactly as it stood when each send went out — keyed by
+   *  HOST_INPUT_ATTR like readHostDrafts' map, and filed under the submitted
+   *  name so a success edge retires ITS OWN send's draft. Adds are not
+   *  serialized: a second "Add host" can go out while the first is still in
+   *  flight, and the answers may land in either order — one snapshot would
+   *  retire the wrong send's values. On the success edge each field still
+   *  holding what was sent is retired; one retyped since is the NEXT host's
+   *  draft, not a replay of the saved one (#6861). */
+  private readonly committedHostAdds = new Map<string, Map<string, { value: string; checked: boolean }>>();
+  /** HostActions with `add` wrapped to snapshot the form at send time — the
+   *  only record of what was committed, since the returned status names no
+   *  draft. The other verbs pass straight through. */
+  private readonly hostActions: HostActions;
+
   constructor(private readonly actions: ConfigActions) {
     this.el = h("section", { class: "af-config" });
     this.el.setAttribute("aria-label", "Config");
+    this.hostActions = {
+      ...actions.hosts,
+      add: (draft: HostAddDraft) => {
+        this.committedHostAdds.set(draft.name, this.readHostDrafts());
+        actions.hosts.add(draft);
+      },
+    };
   }
 
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
@@ -412,6 +444,18 @@ export class ConfigPane {
       const submitted = this.accountInput(accounts.status!.agent);
       if (submitted) submitted.value = "";
     }
+    // The Hosts add form's equivalent edge (#6861): a successful add arrives as
+    // a `name === ""` non-error status — the register form's own convention —
+    // but ONLY when it is not a check outcome, which carries the same shape
+    // with `check: true` (a check-all's "no hosts saved" answer must never
+    // retire a half-typed form). Retiring happens now, before
+    // rerenderKeepingUserState's readHostDrafts, so the committed values are
+    // not snapshotted and replayed onto the fresh form.
+    const hostAddSucceeded = hosts.status !== this.hosts.status && hosts.status !== null
+      && hosts.status.name === "" && !hosts.status.error && hosts.status.check !== true;
+    if (hostAddSucceeded) {
+      this.retireCommittedHostAdd(hosts.status!.message);
+    }
     this.lastEntries = entries;
     this.lastStatus = status;
     this.lastAccounts = accounts;
@@ -428,7 +472,14 @@ export class ConfigPane {
     this.hosts = hosts;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
-      this.draft = "";
+    }
+    // A committed draft is done: the success edge retires that key's text from
+    // the map — whether or not it is still the open edit — so the rebuild shows
+    // what the daemon now holds rather than replaying saved text as though it
+    // were still unsaved. A refused save carries `error`, keeps the draft, and
+    // leaves the rejected text to be corrected.
+    if (statusIsNew && status !== null && status.error === "") {
+      this.drafts.delete(status.key);
     }
     // An open trace describes the manifest it was fetched from. A refresh that
     // carries NEW entries — a save landing, a hand-edit, an `af config set`
@@ -792,6 +843,43 @@ export class ConfigPane {
     }
   }
 
+  /** Retires the committed add-form draft field by field (#6861): a field
+   *  still holding exactly what was sent clears, while one retyped since keeps
+   *  its new text — that text is the NEXT host's draft, and clearing it would
+   *  be the same silent loss the draft mechanism exists to prevent. Runs before
+   *  readHostDrafts so retired values are never snapshotted for a replay.
+   *
+   *  `message` names the send this success answers (`saved host <name> (…)` —
+   *  host names carry no spaces or parens, config/hosts.go hostNameRE), so an
+   *  add landing while another is still in flight retires its own draft rather
+   *  than whichever send happened to be last. When the name cannot be matched
+   *  — the format drifting, or a send this pane never saw — the oldest pending
+   *  snapshot is the best available answer. */
+  private retireCommittedHostAdd(message: string): void {
+    const named = /^saved host ([a-z0-9-]+)/.exec(message)?.[1];
+    const key = named !== undefined && this.committedHostAdds.has(named)
+      ? named
+      : this.committedHostAdds.keys().next().value;
+    if (key === undefined) {
+      return;
+    }
+    const committed = this.committedHostAdds.get(key)!;
+    this.committedHostAdds.delete(key);
+    for (const [field, sent] of committed) {
+      const input = this.hostInput(field);
+      if (input === null) {
+        continue;
+      }
+      if (input instanceof HTMLInputElement && input.type === "checkbox") {
+        if (input.checked === sent.checked) {
+          input.checked = false;
+        }
+      } else if (input.value === sent.value) {
+        input.value = "";
+      }
+    }
+  }
+
   private hostInput(key: string): HTMLInputElement | HTMLSelectElement | null {
     return this.el.querySelector<HTMLInputElement | HTMLSelectElement>(
       `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`,
@@ -874,7 +962,7 @@ export class ConfigPane {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderHostsSection(this.entries, this.hosts, this.actions.hosts, this.hostDisclosure),
+      renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota),
     );
@@ -1135,7 +1223,10 @@ export class ConfigPane {
     }
 
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
-    input.value = this.editing === e.key ? this.draft : e.value;
+    // The row repaints its own draft when it has one: drafts is a per-key map,
+    // so every typed row survives the rebuild — not only the one `editing`
+    // names. A key absent from the map paints the manifest value.
+    input.value = this.drafts.get(e.key) ?? e.value;
     if (this.editing === e.key) {
       this.editingInput = input;
     }
@@ -1186,7 +1277,7 @@ export class ConfigPane {
 
     input.addEventListener("input", () => {
       this.editing = e.key;
-      this.draft = input.value;
+      this.drafts.set(e.key, input.value);
       this.editingInput = input;
       syncSave();
     });
