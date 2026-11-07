@@ -315,6 +315,31 @@ test("resumeFromLimit posts the stable id, so a duplicate title cannot misroute 
   assert.equal(cap.body.repo_id, "", "an all-repos web client scopes by id, not repo");
 });
 
+test("resumeFromLimit resolves the queue note for a committed handoff transfer", async () => {
+  // A startup-unknown handoff at its limit: the daemon transfers the mission
+  // into the stored prompt (the scheduled limit retry owns it), restarts
+  // nothing, and answers ok:true with a queue reason. The click must surface
+  // that note, not read the committed transfer as a failure (#6928 review MED).
+  (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
+    ({
+      ok: true,
+      status: 200,
+      statusText: "OK",
+      json: async () => ({
+        data: {
+          ok: true,
+          reason: "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+        },
+        error: null,
+      }),
+    }) as unknown as Response;
+
+  assert.equal(
+    await resumeFromLimit("id-repoB", "feature", "tok"),
+    "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+  );
+});
+
 test("resumeFromLimit rejects the daemon's no-op outcome", async () => {
   (globalThis as { fetch: unknown }).fetch = async (): Promise<Response> =>
     ({

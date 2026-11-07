@@ -338,6 +338,22 @@ test("Retry names an ambiguous handoff separately from a usage-limit retry", () 
     "own readiness wait re-proves the binding before the composer is touched",
   );
   assert.deepEqual(
+    retryActionForSession(sess({
+      liveness: Liveness.LimitReached,
+      in_flight_op: InFlightOp.Replacing,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "could-not-confirm",
+      startup_state_unknown: true,
+    })),
+    {
+      kind: "handoff",
+      label: "Queue for limit resume",
+      title: "Queue the pending mission — it sends when the agent resumes",
+    },
+    "a startup-unknown handoff at its limit is queued into the scheduled " +
+    "retry, not resent — the label must say so (#6928 review MED)",
+  );
+  assert.deepEqual(
     retryActionForSession(sess({ liveness: Liveness.LimitReached })),
     { kind: "limit", label: "Retry limit", title: "Retry after the usage limit" },
   );

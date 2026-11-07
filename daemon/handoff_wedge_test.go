@@ -128,8 +128,9 @@ func TestResumeFromLimit_StartupUnknownHandoffAtLimitTransfersTheMission(t *test
 	})
 	require.NoError(t, err,
 		"the limit arm transfers the mission to scheduled retry — refusing strands it")
-	require.Equal(t, resumeNotPerformed, outcome,
-		"a transfer is not a resend: the scheduled limit retry now owns the mission")
+	require.NotEqual(t, resumeNotPerformed, outcome,
+		"a committed transfer is its own outcome, not a refusal — answering "+
+			"not-performed reads as a failure to every client (#6928 review MED)")
 
 	require.Empty(t, inst.PendingHandoffMission(), "the transfer retires the durable obligation")
 	require.Equal(t, mission, inst.Prompt, "the brief moved into the stored prompt")

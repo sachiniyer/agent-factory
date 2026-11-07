@@ -39,7 +39,10 @@ func TestHandleLimitRetry_NonLimitRow_NoDispatch(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error { called = true; return nil })
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
+		called = true
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
+	})
 	defer restore()
 
 	_, _ = h.handleLimitRetry()
@@ -59,9 +62,9 @@ func TestHandleLimitRetry_LimitRow_Dispatches(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -99,9 +102,9 @@ func TestHandleLimitRetry_UnconfirmedAccountHandoffDispatches(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -141,9 +144,9 @@ func TestHandleLimitRetry_UnconfirmedAgentHandoffDispatches(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -220,9 +223,9 @@ func TestHandleLimitRetry_LimitOnlyPickerDoesNotPromiseAResend(t *testing.T) {
 	require.True(t, base.CanConfirmPendingHandoffDelivery(), "fixture: the mission is confirmable")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -286,9 +289,9 @@ func TestHandleLimitRetry_ManualSwapAtLimitOffersHonestRetrySendLabel(t *testing
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -356,9 +359,9 @@ func TestHandleLimitRetry_AutomaticSwapAtLimitOffersHonestRetrySendLabel(t *test
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -422,9 +425,9 @@ func TestHandleLimitRetry_StartupUnknownManualSwapAtLimitOffersHonestRetrySendLa
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -482,9 +485,9 @@ func TestHandleLimitRetry_StartupUnknownAutomaticSwapAtLimitOffersHonestRetrySen
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -598,9 +601,9 @@ func TestHandleLimitRetry_StartupUnknownManualSwapOffLimitOffersHonestRetrySendL
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -623,12 +626,13 @@ func TestHandleLimitRetry_StartupUnknownManualSwapOffLimitOffersHonestRetrySendL
 }
 
 // An agent handoff parked at its limit on a startup-unknown row is NOT a
-// resend: retryPendingHandoff's LiveLimitReached arm transfers the mission
-// into the scheduled limit retry (SetPrompt + clear + persist) and returns
-// unperformed without submitting. Row 0 must therefore carry the truthful
-// no-resend label — "Resume from limit — the pending mission is not
-// resent" — not "Retry send" (#6800 follow-up).
-func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsResumeNotResend(t *testing.T) {
+// resend AND NOT a resume: retryPendingHandoff's LiveLimitReached arm
+// transfers the mission into the stored Prompt — the scheduled limit retry
+// owns it from there — keeps the wall, and restarts nothing (#6928 review
+// MED). Row 0 must therefore carry the truthful queue label, and the RPC's
+// real answer — OK with a queue note, not a failure — must surface as an
+// informational notice while the badge stays parked.
+func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsQueueForLimitResume(t *testing.T) {
 	h := newTestHome(t)
 	base, err := session.NewInstance(session.InstanceOptions{
 		Title: "worker", Path: t.TempDir(), Program: "gemini",
@@ -656,9 +660,14 @@ func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsResumeNotResend
 		"fixture: the row is confirmable, so the resolve picker opens")
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		// The RPC's REAL answer for this shape: OK with a queue note — the
+		// transfer committed, nothing restarted, nothing failed.
+		return daemon.ResumeFromLimitResponse{
+			OK:     true,
+			Reason: "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+		}, nil
 	})
 	defer restore()
 
@@ -666,21 +675,31 @@ func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsResumeNotResend
 	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
 	require.Equal(t, stateSelectHandoffResolve, h.state)
 	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
-		h.handoffResolve.actions, "Row 0 is the resume and Row 1 is the confirm")
+		h.handoffResolve.actions, "Row 0 is the queued transfer and Row 1 is the confirm")
 	h.selectionOverlay.SetWidth(140) // the default test width truncates the label
 	rendered := ansi.Strip(h.selectionOverlay.Render())
 	require.NotContains(t, rendered, "Retry send",
 		"the daemon's limit arm transfers the mission to scheduled retry without submitting — Row 0 must not promise a resend")
-	require.Contains(t, rendered, "Resume from limit",
-		"the truthful label for a parked handoff whose resume transfers rather than resends")
-	require.Contains(t, rendered, "not resent")
+	require.NotContains(t, rendered, "restart the stalled agent",
+		"nothing restarts — the scheduler sends the mission when the agent resumes")
+	require.Contains(t, rendered, "Queue for limit resume",
+		"the truthful label: the mission is queued for the scheduled limit retry")
 
 	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
-	require.NotNil(t, cmd, "Row 0 dispatches the resume (the transfer) against the captured identity")
+	require.NotNil(t, cmd, "Row 0 dispatches the transfer against the captured identity")
 	done, ok := cmd().(limitRetriedMsg)
 	require.True(t, ok)
 	require.NoError(t, done.err)
 	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+
+	h.errBox.SetSize(200, 1)
+	h.handleLimitRetried(done)
+	require.Contains(t, statusNoticeText(h), "queued for the scheduled limit retry",
+		"the committed transfer surfaces its note, not a failure")
+	require.False(t, statusNoticeIsFailure(h),
+		"a queued mission is not a failure notice")
+	require.True(t, inst.LimitReached(),
+		"the wall persists — the scheduled retry owns the mission now, so the badge must stay")
 }
 
 // A manual retry retains its target while the tea.Cmd waits to run. If a
@@ -694,9 +713,9 @@ func TestHandleLimitRetry_DoesNotTargetSameTitleReplacement(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	var gotRequest daemon.ResumeFromLimitRequest
-	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		return nil
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
 	})
 	defer restore()
 
@@ -725,7 +744,10 @@ func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
 	h.sidebar.SetSelectedInstance(0)
 
 	called := false
-	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error { called = true; return nil })
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
+		called = true
+		return daemon.ResumeFromLimitResponse{OK: true}, nil
+	})
 	defer restore()
 
 	_, cmd := h.handleLimitRetry()
@@ -738,8 +760,8 @@ func TestHandleLimitRetry_TearingDownRow_NoDispatch(t *testing.T) {
 // completion message (handled into the error box, limit state left intact).
 func TestResumeFromLimitCmd_SurfacesError(t *testing.T) {
 	h := newTestHome(t)
-	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) error {
-		return errors.New("session is not blocked on a usage limit")
+	restore := SetLimitResumerForTest(func(daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
+		return daemon.ResumeFromLimitResponse{}, errors.New("session is not blocked on a usage limit")
 	})
 	defer restore()
 

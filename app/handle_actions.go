@@ -537,10 +537,13 @@ func (m *home) handleInstanceArchived(msg instanceArchivedMsg) (tea.Model, tea.C
 
 // limitRetriedMsg reports completion of an async usage-limit manual retry
 // (#1146, `c`). On success the daemon cleared the limit and re-delivered the
-// prompt; a non-nil err is surfaced in the error box.
+// prompt; a non-nil err is surfaced in the error box. A non-empty note is a
+// committed-but-not-a-resume outcome — the pending handoff mission queued
+// into the scheduled limit retry — which surfaces as its own message.
 type limitRetriedMsg struct {
 	target sessionActionTarget
 	err    error
+	note   string
 }
 
 // handleLimitRetry is the explicit retry verb (#1146, `c`). It resumes a usage-
@@ -601,13 +604,14 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 func (m *home) resumeFromLimitCmd(target sessionActionTarget) tea.Cmd {
 	resume := resumeFromLimitThroughDaemon
 	return func() tea.Msg {
-		if err := resume(target.resumeFromLimitRequest()); err != nil {
+		resp, err := resume(target.resumeFromLimitRequest())
+		if err != nil {
 			if !apiclient.IsMutationCommitted(err) {
 				log.ErrorLog.Printf("could not resume limited session %q: %v", target.title, err)
 			}
 			return limitRetriedMsg{target: target, err: err}
 		}
-		return limitRetriedMsg{target: target}
+		return limitRetriedMsg{target: target, note: resp.Reason}
 	}
 }
 

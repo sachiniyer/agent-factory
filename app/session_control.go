@@ -346,13 +346,18 @@ var rebindProjectThroughDaemon = func(projectID, expectedRoot, expectedCheckoutI
 // resumeFromLimitThroughDaemon routes the TUI's `c` (retry usage-limit session)
 // verb (#1146) through the daemon — the single writer (#960) — which re-spawns
 // the agent if it exited, re-delivers the pending prompt, and clears the limit
-// state. A package var so the app test suite can stub it without dialing a real
-// daemon.
-var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) error {
-	return withDaemonHTTPMutation(func(c *apiclient.Client) error {
-		_, err := c.ResumeFromLimit(request)
-		return err
+// state. The response rides back so a committed-but-not-a-resume outcome — a
+// pending handoff mission queued into the scheduled limit retry — can surface
+// its own note instead of reading as a failure (#6928 review). A package var
+// so the app test suite can stub it without dialing a real daemon.
+var resumeFromLimitThroughDaemon = func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
+	var response daemon.ResumeFromLimitResponse
+	err := withDaemonHTTPMutation(func(c *apiclient.Client) error {
+		resp, e := c.ResumeFromLimit(request)
+		response = resp
+		return e
 	})
+	return response, err
 }
 
 // confirmHandoffDeliveryThroughDaemon routes the "mark delivered" half of the
@@ -747,7 +752,7 @@ func SetTaskRemoverForTest(f func(id string, expect task.ProjectExpectation) err
 
 // SetLimitResumerForTest swaps the usage-limit resume seam (#1146) so a test can
 // assert the TUI routes `c` through the daemon — without dialing a real one.
-func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) error) func() {
+func SetLimitResumerForTest(f func(daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error)) func() {
 	prev := resumeFromLimitThroughDaemon
 	resumeFromLimitThroughDaemon = f
 	return func() { resumeFromLimitThroughDaemon = prev }
