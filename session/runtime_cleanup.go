@@ -560,9 +560,12 @@ func unavailableRuntimeCleanup(instance *Instance, data InstanceData, cause erro
 // what a repair needs, because a handle without one still cannot prove the
 // recorded server stopped and restore refuses again. A plain row (nothing
 // preserved to adopt) gets the outcome that is true for it: once the handle
-// rebuilds, the teardown af just refused runs and whichever operation it
-// blocked works — remote_pid is not its completeness criterion (#6791 review
-// items 2-4, re-review item 1).
+// rebuilds, the teardown af just refused runs and the restore it blocked works
+// — remote_pid is not its completeness criterion (#6791 review items 2-4,
+// re-review item 1). Restore is the only verb that reaches it there: `af
+// sessions archive` refuses this row's shape at its live-client gate before
+// and after a repair (a rebuilt handle still loads with no client), so naming
+// it would be a dead end (#6940).
 func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData, committedKill bool) string {
 	home := "the AF home (~/.agent-factory, or $AGENT_FACTORY_HOME when set)"
 	if dir, err := config.GetConfigDir(); err == nil {
@@ -588,7 +591,7 @@ func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, hand
 		outcome = fmt.Sprintf("retry `af sessions restore %q`. If af still cannot prove the server stopped it refuses again; removal is then — %s — `af sessions kill %q`, which reaps %s", title, keepWork, title, resource)
 	default:
 		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry so the handle is complete again, or — %s — remove %s yourself and delete that row", keepWork, resource)
-		outcome = fmt.Sprintf("the teardown af just refused can then run, so retry the operation that hit this refusal (`af sessions restore %q` or `af sessions archive %q`); or, to give the session up — %s — `af sessions kill %q` removes it, reaping %s", title, title, keepWork, title, resource)
+		outcome = fmt.Sprintf("the teardown af just refused can then run, so retry `af sessions restore %q`; or, to give the session up — %s — `af sessions kill %q` removes it, reaping %s", title, keepWork, title, resource)
 	}
 	// The glob stays outside the quotes so it still expands; only the home
 	// prefix is quoted, so a path containing a space still works.
