@@ -1,13 +1,20 @@
 package daemon
 
 import (
+	"bytes"
 	"context"
+	"fmt"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // createDuplicateTitleSessions builds TWO real sessions that share the SAME title
@@ -19,6 +26,15 @@ import (
 // could hit the wrong repo's session.
 func createDuplicateTitleSessions(t *testing.T, title string) (*Manager, config.RepoContext, session.InstanceData, config.RepoContext, session.InstanceData) {
 	t.Helper()
+	// #6581: these sessions must live on a tmux server no sibling test can
+	// affect. The whole package shares the one ambient server SandboxTmux
+	// installs, and tmux's exit-empty retires that server the moment its last
+	// session dies — a sibling's cleanup could take it down in the middle of a
+	// create, surfacing as "does not exist", "vanished before attach", or
+	// "read existing tmux update-environment option: exit status 1" inside
+	// setup, before the code under test ran. IsolateTmux gives each call its
+	// own server so create() failures reflect only this test's own launches.
+	testguard.IsolateTmux(t)
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 
 	cfg := config.DefaultConfig()
@@ -350,4 +366,43 @@ func TestActionWithStaleIDErrorsRatherThanRetargeting(t *testing.T) {
 		t.Fatalf("SendPrompt with a stale id must error, not fall back to a title match")
 	}
 	assertBothSurvive("send-prompt")
+}
+
+// TestCreateHelperSessionsSurvivePackageServerDeath is the deterministic form
+// of the #6581 flake. Before the fix, create() staged its sessions on the
+// package-wide tmux server TestMain installs — the server every
+// session-staging test in the package shares, which tmux's exit-empty retires
+// the moment its last session dies. A sibling test's cleanup could therefore
+// take the server down in the middle of a create. With IsolateTmux the
+// helper's sessions live on their own server, so destroying whatever sits at
+// the package socket must not touch them. Without the fix this fails
+// deterministically: both sessions live on the package server and die with it.
+func TestCreateHelperSessionsSurvivePackageServerDeath(t *testing.T) {
+	base := os.Getenv("TMUX_TMPDIR")
+	if base == "" {
+		t.Skip("package tmux sandbox is not installed")
+	}
+	packageSocket := filepath.Join(base, fmt.Sprintf("tmux-%d", os.Getuid()), "default")
+
+	createDuplicateTitleSessions(t, "feature")
+
+	// The sibling teardown: a last-session kill retires the shared server
+	// through exit-empty. Kill whatever answers at that socket directly.
+	if out, err := exec.Command("tmux", "-S", packageSocket, "kill-server").CombinedOutput(); err != nil {
+		t.Logf("package socket kill-server: %v: %s", err, bytes.TrimSpace(out))
+	}
+
+	out, err := exec.Command("tmux", "list-sessions", "-F", "#{session_name}").CombinedOutput()
+	if err != nil {
+		t.Fatalf("the helper's sessions died with the package server: %v: %s", err, bytes.TrimSpace(out))
+	}
+	var sessions []string
+	for _, name := range strings.Split(strings.TrimSpace(string(out)), "\n") {
+		if strings.HasPrefix(name, sessiontmux.TmuxPrefix) {
+			sessions = append(sessions, name)
+		}
+	}
+	if len(sessions) != 2 {
+		t.Fatalf("expected the helper's two sessions to survive the package server death, got %v", sessions)
+	}
 }
