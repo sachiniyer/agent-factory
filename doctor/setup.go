@@ -2,6 +2,7 @@ package doctor
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -154,10 +155,34 @@ func checkGit(report *Report) {
 			})
 			return
 		}
+		// An ANSWERED git failure is not necessarily a verdict about the path
+		// (#3794's twin, which fixed the daemon's equivalent site without
+		// updating the doctor). git ran and exited non-zero, but only the
+		// specific "not a git repository (or any of the parent directories...)"
+		// diagnostic — with no .git metadata present — says the path is outside
+		// git. A safe.directory / dubious-ownership rejection, an unreadable
+		// .git, an invalid .git file are all answered failures that say nothing
+		// about whether this is a repository, so they must remain visible rather
+		// than being mistaken for "outside git" (config/repo.go,
+		// ErrNotGitRepository doc). Classify through the resolver's rule, the
+		// same one the daemon uses, instead of the bare fall-through that
+		// treated every answered failure as "not a repository".
+		_, repoErr := config.RepoFromPath(cwd)
+		if errors.Is(repoErr, config.ErrNotGitRepository) {
+			report.addActionableFinding(Finding{
+				Check:       "git-repo",
+				Detail:      fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
+				Remediation: "cd into a git repository (or run `git init` in your project), then rerun `af doctor --setup`",
+			})
+			return
+		}
+		// Answered, but the answer says nothing about whether this is a
+		// repository: keep the failure visible without "git init" advice, which
+		// is misleading for a checkout that already exists.
 		report.addActionableFinding(Finding{
 			Check:       "git-repo",
-			Detail:      fmt.Sprintf("%s is not inside a git repository — run `af` from a repo root or pass --repo where supported", cwd),
-			Remediation: "cd into a git repository (or run `git init` in your project), then rerun `af doctor --setup`",
+			Detail:      fmt.Sprintf("git could not resolve a repository root at %s — check git's own error: %v", cwd, err),
+			Remediation: "address the git error above (e.g. `git config --global --add safe.directory <path>` for an ownership refusal), then rerun `af doctor --setup`",
 		})
 		return
 	}
