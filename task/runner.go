@@ -595,6 +595,14 @@ func (t instanceReadinessTarget) RecordedLimitWallExpired(prefix string, count i
 	return t.inst.RecordedLimitWallExpired(prefix, count, evidence)
 }
 
+// ClaudeActiveLimitReset forwards the session's structural reset source: the
+// refusal record in the session's own Claude transcript carries the wall's
+// instant in epoch seconds — authoritative over a pane parse that a wrapped
+// banner can derail (#6944).
+func (t instanceReadinessTarget) ClaudeActiveLimitReset(now time.Time) (time.Time, bool) {
+	return t.inst.ClaudeActiveLimitReset(now)
+}
+
 type readinessClock struct {
 	after     func(time.Duration) <-chan time.Time
 	newTicker func(time.Duration) (<-chan time.Time, func())
@@ -693,7 +701,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 		// already parked on; refusing it re-parks the row on an expired claim
 		// and the prompt replays on every idle poll. Only a banner the row
 		// never recorded is a live wall.
-		if perr := limitParkError(detector, content, agent); perr != nil &&
+		if perr := limitParkError(detector, content, agent, target); perr != nil &&
 			!expiredRecordedLimitWall(target, perr) {
 			return true, perr
 		}
@@ -761,7 +769,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			// failing even at the timeout boundary, symmetric with the ticker case —
 			// unless the sighting is the target's own expired recorded wall,
 			// which is residue and never a wall (#6959; same rule as the probe).
-			if perr := limitParkError(detector, content, agent); perr != nil &&
+			if perr := limitParkError(detector, content, agent, target); perr != nil &&
 				!expiredRecordedLimitWall(target, perr) {
 				return perr
 			}
@@ -847,14 +855,30 @@ func capturePreview(ctx context.Context, instance *session.Instance) (string, er
 // later clock (#6765). The banner anchor (prefix + count) rides along too so
 // the park records WHICH banner produced the read — the signal that lets the
 // next poll tell a clipped re-read of it from a banner printed after (#6823).
-func limitParkError(detector LimitDetector, content, agent string) error {
-	if s := detector.Sight(content, agent, waitLimitNow()); s.Hit {
-		return &LimitReachedError{
+func limitParkError(detector LimitDetector, content, agent string, target ReadinessTarget) error {
+	now := waitLimitNow()
+	if s := detector.Sight(content, agent, now); s.Hit {
+		err := &LimitReachedError{
 			ResetAt:      s.ResetAt,
 			Evidence:     s.Evidence,
 			BannerPrefix: s.BannerPrefix,
 			BannerCount:  s.BannerCount,
 		}
+		// A Claude session's own transcript is the authoritative reset source
+		// (#6944): its refusal record carries the wall's instant in epoch
+		// seconds, so a banner whose pane parse resolved the wrong zone — or
+		// could not parse at all — still parks on the wall's real instant.
+		// The pane's evidence phrase is untouched: it is the wall's identity
+		// on BOTH sources, which is what keeps a parked row the same wall
+		// across a source switch (#6959/#6960/#6972).
+		if agent == tmux.ProgramClaude {
+			if src, ok := target.(claudeLimitResetTarget); ok {
+				if resetAt, ok := src.ClaudeActiveLimitReset(now); ok {
+					err.ResetAt = resetAt
+				}
+			}
+		}
+		return err
 	}
 	return nil
 }
@@ -867,6 +891,15 @@ func limitParkError(detector LimitDetector, content, agent string) error {
 // banner remains a wall.
 type recordedLimitWallTarget interface {
 	RecordedLimitWallExpired(prefix string, count int, evidence string) bool
+}
+
+// claudeLimitResetTarget is the optional capability a ReadinessTarget exposes
+// when the session's own Claude transcript can prove the wall's reset instant
+// (#6944): the refusal record carries resetsAt in epoch seconds, which a
+// wrapped pane banner cannot derail. session.Instance implements it; bare
+// tmux targets have no transcript and simply do not — the pane parse stands.
+type claudeLimitResetTarget interface {
+	ClaudeActiveLimitReset(now time.Time) (time.Time, bool)
 }
 
 // expiredRecordedLimitWall reports whether err is a LimitReachedError whose

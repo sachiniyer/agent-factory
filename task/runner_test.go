@@ -796,6 +796,122 @@ func TestWaitForReadyParksOnUsageLimit(t *testing.T) {
 	}
 }
 
+// limitResetStubTarget is a ReadinessTarget test double carrying the
+// transcript-reset capability instanceReadinessTarget forwards (#6944): the
+// session's own Claude transcript proves the wall's instant in epoch seconds.
+type limitResetStubTarget struct {
+	agent     string
+	content   string
+	resetAt   time.Time
+	hasReset  bool
+	consulted bool
+}
+
+func (s *limitResetStubTarget) ResolvedAgent() string { return s.agent }
+
+func (s *limitResetStubTarget) PreviewContent(context.Context) (string, error) {
+	return s.content, nil
+}
+
+func (s *limitResetStubTarget) HooksDone() <-chan struct{} { return nil }
+
+func (s *limitResetStubTarget) ClaudeActiveLimitReset(time.Time) (time.Time, bool) {
+	s.consulted = true
+	return s.resetAt, s.hasReset
+}
+
+// TestWaitForReadyParksOnTranscriptReset pins #6944's structural fix: when a
+// claude session's transcript carries the refusal record, the parked
+// LimitReachedError takes its reset from the record's epoch instant — never
+// from the wrapped banner's pane parse, which is the bug's wrong-instant path.
+// The evidence phrase and banner anchor are unchanged either way: they are
+// the wall's identity on both sources, which is what keeps the park the same
+// wall across the switch (#6959/#6960/#6972).
+func TestWaitForReadyParksOnTranscriptReset(t *testing.T) {
+	fixed := time.Date(2026, 7, 4, 9, 0, 0, 0, time.UTC)
+	defer setWaitLimitForTest(NewLimitDetector(nil), func() time.Time { return fixed })()
+
+	// The pane's own parse of this banner resolves 2pm in the fixed clock's
+	// zone (UTC) — the bug's shape when the real zone was lost to a wrap.
+	banner := "Claude usage limit reached. Your limit will reset at 2pm"
+	paneReset := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	transcriptReset := time.Date(2026, 7, 4, 21, 0, 0, 0, time.UTC)
+
+	t.Run("the transcript instant supersedes the pane parse", func(t *testing.T) {
+		target := &limitResetStubTarget{
+			agent:    "claude",
+			content:  banner,
+			resetAt:  transcriptReset,
+			hasReset: true,
+		}
+		err := WaitForReadyOn(context.Background(), target)
+		var limitErr *LimitReachedError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("expected *LimitReachedError, got %v", err)
+		}
+		if !target.consulted {
+			t.Fatal("a claude wall must consult the transcript source")
+		}
+		if !limitErr.ResetAt.Equal(transcriptReset) {
+			t.Fatalf("ResetAt = %v, want the transcript's %v", limitErr.ResetAt, transcriptReset)
+		}
+	})
+
+	t.Run("the pane parse stands when the transcript proves nothing", func(t *testing.T) {
+		target := &limitResetStubTarget{
+			agent:    "claude",
+			content:  banner,
+			hasReset: false,
+		}
+		err := WaitForReadyOn(context.Background(), target)
+		var limitErr *LimitReachedError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("expected *LimitReachedError, got %v", err)
+		}
+		if !limitErr.ResetAt.Equal(paneReset) {
+			t.Fatalf("ResetAt = %v, want the pane parse's %v", limitErr.ResetAt, paneReset)
+		}
+	})
+
+	t.Run("same wall across the source switch: evidence and anchor identical", func(t *testing.T) {
+		withTranscript := &limitResetStubTarget{
+			agent: "claude", content: banner, resetAt: transcriptReset, hasReset: true,
+		}
+		var err1 *LimitReachedError
+		if !errors.As(WaitForReadyOn(context.Background(), withTranscript), &err1) {
+			t.Fatal("expected *LimitReachedError")
+		}
+		without := &limitResetStubTarget{
+			agent: "claude", content: banner, hasReset: false,
+		}
+		var err2 *LimitReachedError
+		if !errors.As(WaitForReadyOn(context.Background(), without), &err2) {
+			t.Fatal("expected *LimitReachedError")
+		}
+		if err1.Evidence != err2.Evidence || err1.BannerPrefix != err2.BannerPrefix || err1.BannerCount != err2.BannerCount {
+			t.Fatalf("the wall's identity must not move with its reset source: (%q,%d) vs (%q,%d)",
+				err1.Evidence, err1.BannerCount, err2.Evidence, err2.BannerCount)
+		}
+	})
+
+	t.Run("a non-claude agent is never consulted", func(t *testing.T) {
+		target := &limitResetStubTarget{
+			agent:    "codex",
+			content:  "You've hit your usage limit. Try again at Jul 25th, 2026 5:55 PM.",
+			resetAt:  transcriptReset,
+			hasReset: true,
+		}
+		err := WaitForReadyOn(context.Background(), target)
+		var limitErr *LimitReachedError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("expected *LimitReachedError, got %v", err)
+		}
+		if target.consulted {
+			t.Fatal("the transcript source is claude-only — a codex wall must not consult it")
+		}
+	})
+}
+
 // TestWaitForReadyDoesNotParkNonLimitAgent guards the scope boundary (#1146): a
 // A non-limit-matched agent pane must not park on a limit-looking banner —
 // WaitForReady keeps polling and times out as before. gemini's readiness glyph
