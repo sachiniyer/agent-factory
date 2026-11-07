@@ -272,13 +272,17 @@ flowchart LR
   expect(await journeySvg.locator("foreignObject").count(),
     "the foreignObject branch of every switch must still be dropped").toBe(0);
   // N1: the render frame's document must put the DNS-prefetch kill first —
-  // anchor hosts inside label HTML are prefetched before CSP applies.
-  const firstMeta = await page.evaluate(() => {
+  // anchor hosts inside label HTML are prefetched before CSP applies. The
+  // frame is an opaque origin now (#6669), so this reads the srcdoc string the
+  // element was loaded with: its first element IS the document's first.
+  const srcdoc = await page.evaluate(() => {
     const f = [...document.querySelectorAll("iframe")].find((el) => el.srcdoc.includes("x-dns-prefetch-control"));
-    return f?.contentDocument?.head?.firstElementChild?.outerHTML ?? null;
+    return f?.srcdoc ?? null;
   });
-  expect(firstMeta, "the x-dns-prefetch-control meta must be the frame's first element")
-    .toContain('http-equiv="x-dns-prefetch-control"');
+  expect(
+    srcdoc?.startsWith('<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">'),
+    "the x-dns-prefetch-control meta must be the frame's first element",
+  ).toBe(true);
   // No diagram-chosen URL may reach the wire.
   const leakedUrls = requests.filter((u) => leaked(u, page.url(), { finished, failed, cspDenied }));
   expect(leakedUrls, "zero diagram-chosen requests reached the wire, same-origin counted").toEqual([]);

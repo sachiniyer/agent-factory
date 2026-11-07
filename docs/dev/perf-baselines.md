@@ -157,6 +157,16 @@ the new `.cm-md-mermaid` CSS adds 787), `gzip_bytes` to 315,696 (master 315,607
 loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
 123,257 (120,175 +3,082). Every timing and layout-shift baseline is unchanged.
 
+#6669 re-frames the render iframe as a sandboxed opaque origin (sandbox
+without allow-same-origin) driven over a string-only postMessage protocol
+(`web/src/mermaid_wire.ts`) instead of a same-origin `contentWindow` call. The
+wire codec lands in BOTH bundles that speak it: `docs-editor.js` grows 98,792 →
+99,946 raw (`lazy_*` to 398,798 raw / 130,057 gzip, +1,170 / +423 — inside the
+existing budgets, so no entry moves) and `mermaid.js` grows 30,550 → 31,400
+raw (`mermaid_*` to 5,188,544 / 1,507,358, +850 / +7,003 — also inside). No
+split chunk changes name; the byte deltas are codec and listener code only.
+Every timing and layout-shift baseline is unchanged.
+
 ### Code-fence grammar lazy chunk provenance (#6731)
 
 A ```lang fence in a proposal doc renders as a finished code block in the Docs

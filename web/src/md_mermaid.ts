@@ -1,4 +1,4 @@
-// Rendering for ```mermaid fences in the Docs live preview (#6642).
+// Rendering for ```mermaid fences in the Docs live preview (#6642, #6669).
 //
 // previewSpecs (md_live_preview.ts) only emits the spec; everything the fence
 // turns into lives here: the block widget, the loader for the library's own
@@ -9,20 +9,26 @@
 //
 // Proposals are partly agent-authored, so the diagram source is semi-trusted
 // and it renders inside the daemon's control origin. Three layers, in render
-// order: mermaid runs inside a srcdoc iframe whose own CSP denies every load
-// the diagram names (images/fonts/connections — any origin), the chunk is
-// initialized with securityLevel 'strict' (mermaid DOMPurify-cleans label
-// HTML, ignores click statements, and `secure` keeps %%{init}%% directives
-// from undoing any of that or writing into generated CSS), and sanitizeSvg is
-// ours: it keeps only the SVG vocabulary mermaid emits, so no <a>,
-// <foreignObject>, <script>, event attribute, external reference or SMIL
-// animation survives a render. The page's CSP is the last layer under all.
+// order: mermaid runs inside a srcdoc iframe that is SANDBOXED without
+// allow-same-origin (#6669) — an opaque origin, so its CSP denying every load
+// the diagram names (images/fonts/connections — any origin) is backed by a
+// privilege boundary too: the frame cannot read the parent's DOM or storage,
+// and its requests carry no credentials. The chunk is initialized with
+// securityLevel 'strict' (mermaid DOMPurify-cleans label HTML, ignores click
+// statements, and `secure` keeps %%{init}%% directives from undoing any of
+// that or writing into generated CSS), and sanitizeSvg is ours: it keeps only
+// the SVG vocabulary mermaid emits, so no <a>, <foreignObject>, <script>,
+// event attribute, external reference or SMIL animation survives a render.
+// The page's CSP is the last layer under all.
 
 import type { EditorView } from "@codemirror/view";
 import { WidgetType } from "@codemirror/view";
 import { errorText } from "./api.js";
+import { decodeFrameReply, encodeRenderRequest, MSG_READY } from "./mermaid_wire.js";
 
-/** What dist/lazy/mermaid.js (src/mermaid_chunk.ts) puts on its frame's window. */
+/** The render channel the frame's chunk answers — kept identical to the old
+ *  in-window API so the render path below is unchanged; the implementation is
+ *  postMessage now (see the frame channel below), not a cross-window call. */
 interface MermaidChunk {
   renderMermaidDiagram(source: string, theme: Record<string, string>): Promise<string>;
 }
@@ -31,12 +37,20 @@ let chunk: Promise<MermaidChunk> | null = null;
 
 // Renderers can make the browser fetch URLs the diagram names — label <img>
 // metadata, flowchart img nodes, font/url() CSS — before the svg string ever
-// reaches sanitizeSvg. So mermaid runs inside a srcdoc iframe whose own CSP
-// (stacked on the page's) denies every fetch: nothing but same-origin scripts
-// and inline styles is allowed in, images/fonts/connections are 'none' by
-// default-src. The only thing that leaves the frame is the svg string.
-const RENDER_FRAME_CSP =
-  "default-src 'none'; script-src 'self'; style-src 'unsafe-inline'; " +
+// reaches sanitizeSvg. So mermaid runs inside an iframe whose own CSP
+// (stacked on the page's) denies every fetch: nothing but the lazy chunk
+// path's scripts and inline styles is allowed in, images/fonts/connections
+// are 'none' by default-src. The only thing that leaves the frame is the svg
+// string.
+//
+// #6669: the frame is also SANDBOXED, without allow-same-origin, so its
+// document has an opaque origin — code in the frame cannot read the parent's
+// DOM, storage or cookies, and a request it makes carries no credentials.
+// 'self' would name nothing there (the origin is opaque), so script-src is an
+// EXPLICIT source: the lazy chunk directory on this origin, the one place
+// scripts the frame runs can come from.
+const RENDER_FRAME_CSP = (scriptDir: string): string =>
+  `default-src 'none'; script-src ${scriptDir}; style-src 'unsafe-inline'; ` +
   "img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; " +
   "object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; " +
   "manifest-src 'none'; base-uri 'none'; form-action 'none'";
@@ -51,6 +65,52 @@ const OPEN_FRAME_TIMEOUT_MS = 30_000;
 // otherwise every repaint would poll the whole open timeout again.
 const OPEN_RETRY_AFTER_MS = 30_000;
 let lastOpenFailedAt = 0;
+
+// ── Frame channel ────────────────────────────────────────────────────────────
+// The sandboxed frame's only channel (mermaid_wire.ts): the parent posts a
+// JSON-string render request, the chunk answers a JSON-string reply per
+// request id plus one ready announce when its module executes. Messages from
+// any other window — including a dropped render frame's late reply — are
+// ignored: event.source must be the CURRENT frame's contentWindow.
+let frameReady = false;
+let renderSeq = 0;
+const pendingReplies = new Map<string, { resolve: (svg: string) => void; reject: (e: Error) => void }>();
+
+function onFrameMessage(e: MessageEvent): void {
+  const frame = renderFrame;
+  if (!frame || e.source !== frame.contentWindow) return;
+  const msg = decodeFrameReply(e.data);
+  if (!msg) return;
+  if (msg.t === MSG_READY) {
+    frameReady = true;
+    return;
+  }
+  const pending = pendingReplies.get(msg.id);
+  if (!pending) return;
+  pendingReplies.delete(msg.id);
+  if (msg.ok) pending.resolve(msg.svg);
+  else pending.reject(new Error(msg.error));
+}
+
+/** The in-page stub the render path calls: post a request, settle on the
+ *  matching reply. Renders are already serialized by renderSerialized, so at
+ *  most one is outstanding at a time — the map still keys by id so a stray or
+ *  late reply can never be misattributed. */
+function frameApi(frame: HTMLIFrameElement): MermaidChunk {
+  return {
+    renderMermaidDiagram(source, theme) {
+      const w = frame.contentWindow;
+      if (!w) return Promise.reject(new Error("the mermaid render frame has no window"));
+      const id = `r${++renderSeq}`;
+      return new Promise<string>((resolve, reject) => {
+        pendingReplies.set(id, { resolve, reject });
+        // "*" is the only usable target — the frame's origin is opaque — and
+        // the payload is just the diagram the frame is being asked to render.
+        w.postMessage(encodeRenderRequest(id, source, theme), "*");
+      });
+    },
+  };
+}
 
 /** Polls `probe` until it yields a value or `timeoutMs` runs out, on a wall
  *  deadline rather than an iteration count: throttled timers (a background
@@ -76,29 +136,33 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;
+  // Sandboxed to scripts and nothing else, BEFORE srcdoc, so the document is
+  // born with an opaque origin (#6669). No allow-same-origin: that token
+  // would hand the frame the parent's origin back and undo the isolation.
+  frame.setAttribute("sandbox", "allow-scripts");
   frame.style.cssText = "position:fixed;left:-200vw;top:-200vh;width:1px;height:1px;border:0";
   // The DNS-prefetch meta MUST be first: browsers prefetch anchor hosts that
-  // reach the frame inside label HTML, and CSP does not govern prefetch.
+  // reach the frame inside label HTML, and CSP does not govern prefetch. The
+  // script source is the lazy chunk's own directory on this origin — 'self'
+  // names nothing in an opaque origin.
   frame.srcdoc =
     `<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">` +
     `<meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="${RENDER_FRAME_CSP}">` +
+    `<meta http-equiv="Content-Security-Policy" content="${RENDER_FRAME_CSP(new URL("./", import.meta.url).href)}">` +
     `<script type="module" src="${url}"><\/script>`;
+  // The listener goes up before the frame does: the chunk's ready post can
+  // only arrive after this synchronous block, but an early listener makes
+  // that a fact rather than a scheduling assumption.
+  window.addEventListener("message", onFrameMessage);
+  frameReady = false;
   document.body.appendChild(frame);
   renderFrame = frame;
-  const w = frame.contentWindow;
-  if (!w) {
-    lastOpenFailedAt = Date.now();
-    dropRenderFrame();
-    throw new Error("the mermaid render frame has no window");
-  }
-  // The chunk self-registers on the frame's window when its module executes;
+  // The chunk announces itself over postMessage once its module executes;
   // a load failure only ever shows as a timeout, so a retry rebuilds it all.
-  const api = await pollUntil(
-    () => (w as unknown as { __afMermaidChunk?: MermaidChunk }).__afMermaidChunk,
-    OPEN_FRAME_TIMEOUT_MS,
-  );
-  if (api) return api;
+  // pollUntil waits for a DEFINED value, so the probe maps "not yet" to
+  // undefined — polling the boolean itself would return false instantly.
+  const ok = await pollUntil(() => (frameReady ? true : undefined), OPEN_FRAME_TIMEOUT_MS);
+  if (ok) return frameApi(frame);
   lastOpenFailedAt = Date.now();
   dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");
@@ -117,11 +181,17 @@ function loadMermaidChunk(): Promise<MermaidChunk> {
 
 /** Removes the render frame and forgets the chunk, so the next render opens a
  *  fresh frame — and a fresh mermaid, whose serialized render queue is not
- *  stuck behind whatever hung the last one. */
+ *  stuck behind whatever hung the last one. Pending renders are failed out of
+ *  the channel rather than left to wait out their own timeout. */
 function dropRenderFrame(): void {
   renderFrame?.remove();
   renderFrame = null;
   chunk = null;
+  frameReady = false;
+  for (const pending of pendingReplies.values()) {
+    pending.reject(new Error("the mermaid render frame was dropped"));
+  }
+  pendingReplies.clear();
 }
 
 /** The mode af paints in — the same rule theme.ts's currentMode() applies,

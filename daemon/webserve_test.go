@@ -3,12 +3,15 @@ package daemon
 import (
 	"encoding/json"
 	"io"
+	"io/fs"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/web"
 )
 
 // apiSpy stands in for the authed API handler webShellHandler wraps. It records
@@ -317,4 +320,89 @@ func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
 		"the served worker still carries the placeholder — web.Dist must stamp sw.js")
 	require.Regexp(t, `af-shell-\$\{VERSION\}`, string(body), "sw.js must name a versioned cache")
 	require.Regexp(t, `const VERSION = "[0-9a-f]{12}"`, string(body), "sw.js must carry a stamped content hash")
+}
+
+// TestServeSPA_MermaidChunksAreTheOnlyCORSAssets pins the #6669 CORS scope: the
+// Docs renderer's sandboxed srcdoc iframe has an opaque origin, so the lazy
+// mermaid chunk set is fetched cross-origin and is the ONE place the daemon
+// emits Access-Control-Allow-Origin. The test walks the WHOLE embedded tree
+// rather than naming files — a chunk hash can change on rebuild, and the
+// contract is the negative space: no other asset, and no /v1 route, ever
+// carries a grant. The API branch is wrapped in the real auth/CORS seam so the
+// API's own documented behavior is exercised too (an allow-listed origin is
+// echoed; "null" never is).
+func TestServeSPA_MermaidChunksAreTheOnlyCORSAssets(t *testing.T) {
+	spy := &apiSpy{}
+	allowed := "https://af.example.com"
+	srv := httptest.NewServer(webShellHandler(withAuth(spy, nil, []string{allowed})))
+	defer srv.Close()
+
+	get := func(path, origin string) http.Header {
+		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+		require.NoError(t, err)
+		if origin != "" {
+			req.Header.Set("Origin", origin)
+		}
+		resp, err := http.DefaultClient.Do(req)
+		require.NoError(t, err)
+		_, _ = io.Copy(io.Discard, resp.Body)
+		_ = resp.Body.Close()
+		return resp.Header
+	}
+
+	// Every embedded lazy/mermaid* file — the entry and the esbuild-split
+	// chunks — carries the grant, whatever Origin asks: the render frame's
+	// opaque origin serializes as "null" and an ACAO of "*" is what a
+	// CORS-mode module fetch needs.
+	var chunks []string
+	require.NoError(t, fs.WalkDir(web.Dist(), "lazy", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if !d.IsDir() && isMermaidChunkAsset(p) {
+			chunks = append(chunks, p)
+		}
+		return nil
+	}))
+	require.NotEmpty(t, chunks, "the embedded tree must carry the mermaid chunk set")
+	for _, name := range chunks {
+		for _, origin := range []string{"null", allowed} {
+			require.Equal(t, "*", get("/"+name, origin).Get("Access-Control-Allow-Origin"),
+				"%s must serve ACAO * for Origin %s", name, origin)
+		}
+	}
+
+	// Every other embedded asset — the shell, other lazy bundles, icons,
+	// everything — emits no grant, whichever Origin asks (the static branch
+	// never consults the API's allow-list).
+	require.NoError(t, fs.WalkDir(web.Dist(), ".", func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if d.IsDir() || isMermaidChunkAsset(p) {
+			return nil
+		}
+		for _, origin := range []string{"null", allowed} {
+			require.Empty(t, get("/"+p, origin).Get("Access-Control-Allow-Origin"),
+				"%s must emit no ACAO (Origin %s)", p, origin)
+		}
+		return nil
+	}))
+
+	// Lookalike paths cannot smuggle the grant: a mermaid-named asset that does
+	// not exist gets the honest 404/fallback, still with no header.
+	for _, p := range []string{"/lazy/mermaidx.js", "/lazy/mermaid", "/lazy/mermaid-.js"} {
+		require.Empty(t, get(p, "null").Get("Access-Control-Allow-Origin"), "%s must emit no ACAO", p)
+	}
+
+	// And the API side is the documented posture, untouched: an allow-listed
+	// origin is echoed on /v1, and "null" is never echoed — a sandboxed
+	// frame's Origin matches nothing.
+	spy.reached = false
+	require.Equal(t, allowed, get("/v1/Snapshot", allowed).Get("Access-Control-Allow-Origin"),
+		"an allow-listed origin is still echoed on the API")
+	require.True(t, spy.reached)
+	require.Empty(t, get("/v1/Snapshot", "null").Get("Access-Control-Allow-Origin"),
+		"Origin null is never echoed on the API")
+	require.Empty(t, get("/v1/health", "null").Get("Access-Control-Allow-Origin"))
 }
