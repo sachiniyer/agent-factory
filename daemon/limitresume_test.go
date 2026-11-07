@@ -408,6 +408,9 @@ func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
 	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
 		t.Fatalf("the wall the early retry already answered must not re-send at R+grace: prompts=%v", prompts)
 	}
+	if inst.LimitReached() {
+		t.Fatal("the answered wall must settle at due — a tombstoned row must not park forever")
+	}
 }
 
 // TestResumeLimitedSessions_NoIntervalReplayForResetlessWall is the #6972

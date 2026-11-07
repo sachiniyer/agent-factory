@@ -898,6 +898,28 @@ func TestLimitWallResidue_FailedHandoffKeepsSentClaim(t *testing.T) {
 	require.False(t, inst.LimitReached())
 }
 
+// TestLimitWallResidue_VerifiedReattachKeepsShadow is the #6972 Codex
+// reattach arm: a recovery that verified the surviving pane's (pid, start)
+// identity is NOT a replacement — the post hook's broker reset must not
+// advance the runtime generation or drop the retired wall, or the same
+// already-answered banner stops reading as residue and re-arms retries.
+func TestLimitWallResidue_VerifiedReattachKeepsShadow(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(2 * time.Hour))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch)
+	inst.ClearLimitReachedSent()
+
+	inst.markAgentRuntimeReplaced(false) // the verified verdict
+	resetAgentBrokerCaptures(inst, false)
+
+	require.False(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch),
+		"the reattached pane's own retired wall is still residue — provenance survived the hook")
+	require.False(t, inst.LimitReached())
+}
+
 // TestLimitWallResidue_RemoteReplaceIsNewEmission is the #6972 Codex remote
 // arm of item 1: a docker/ssh/hook session's in-place relaunch marks the
 // runtime replaced without ever resolving a concrete PID — runtimePID stays

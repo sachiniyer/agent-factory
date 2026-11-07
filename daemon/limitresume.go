@@ -181,14 +181,6 @@ func (m *Manager) resumeLimitedSession(
 	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
 		return
 	}
-	if inst.LimitWallPromptSent() {
-		// The parked wall's resume prompt already landed — an explicit retry
-		// sent past it before the reset, the unchanged banner re-parked the
-		// same claim, and this sweep would be the replay (#6972 item 4). The
-		// row stays parked until the poll settles it off the live pane.
-		return
-	}
-
 	// Two keys, deliberately, exactly as restoreLostSession carries them. `key`
 	// (repo/title) addresses the SLOT — killsInFlight, the per-session op lock, the
 	// m.instances re-read below. stateKey addresses this SESSION's stable identity,
@@ -300,6 +292,18 @@ func (m *Manager) resumeLimitedSession(
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
+		return
+	}
+	if inst.LimitWallPromptSent() {
+		// The parked wall's resume prompt already landed — an explicit retry
+		// sent past it before the reset, the unchanged banner re-parked the
+		// same claim, and a send here would be the replay (#6972 item 4). At
+		// due the wall's wait is over whether the banner scrolled off or not:
+		// settle the answered claim back to ordinary classification — the
+		// tombstoned shadow stays, so a lingering banner still reads as
+		// residue — rather than parking the row on a wall it already answered
+		// forever (#6972, Codex).
+		inst.ClearLimitReached()
 		return
 	}
 	// A TUI attached to this session holds the attach pause lease, and the resume

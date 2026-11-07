@@ -377,6 +377,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: failed to re-spawn session %q: %w", i.Title, err))
 	}
+	reattachedVerified := false
 	if restoreResult == tmux.RestoreRespawned {
 		// RuntimeProgram holds the clean base command that was actually launched,
 		// not the pane-fallback base an account swap's proof may have been
@@ -422,9 +423,12 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// there was no claim left to retire (legacy record, or evidence an
 		// earlier unverified reattach cleared before its recovery failed), so
 		// the verdict must not be read off whether the clear had work to do.
-		// One probe settles both so they cannot disagree about the pane.
+		// One probe settles both so they cannot disagree about the pane. The
+		// verdict also decides the post hook below: a verified pane is not a
+		// replacement, so its captures and wall claims stay bound.
 		verified, _ := i.settleReattachVerification(ts)
 		i.markAgentRuntimeReplaced(!verified)
+		reattachedVerified = verified
 	}
 	if err := b.setupTabs(i); err != nil {
 		return finishRecoverTabFailure(i.Title, rebuilt, restoreResult, ts, err)
@@ -442,7 +446,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// the live pane rather than a parked, silent readLoop (#1682). The memoized
 	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
 	// map) and skips a remote runtime's agent-server (not a localAgentServer).
-	resetAgentBrokerCaptures(i)
+	resetAgentBrokerCaptures(i, !reattachedVerified)
 	return nil
 }
 

@@ -276,7 +276,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			i.ClearIdleEvidence()
 			// This also calls noteAgentRuntimeReplaced, which touches UpdatedAt
 			// unconditionally, even when there was no idle evidence to clear.
-			resetAgentBrokerCaptures(i)
+			resetAgentBrokerCaptures(i, true)
 			i.markLoadRuntimeReplaced()
 			// The same verdict the recover path stamps (#4222): a load-time
 			// respawn is a replacement process, so a task run still in flight on
@@ -563,7 +563,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 	i.setRuntimeLaunch(plan.baseProgram, ts)
 
-	resetAgentBrokerCaptures(i)
+	resetAgentBrokerCaptures(i, true)
 	return nil
 }
 
