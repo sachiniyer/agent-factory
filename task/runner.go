@@ -588,6 +588,13 @@ func (t instanceReadinessTarget) HooksDone() <-chan struct{} {
 	return postWorktreeHooksDoneForWait(t.inst)
 }
 
+// RecordedLimitWallExpired forwards the session row's residue verdict: the
+// pane still showing the row's own recorded wall after its claimed reset
+// passed is not a wall the wait may refuse (#6959).
+func (t instanceReadinessTarget) RecordedLimitWallExpired(prefix string, count int, evidence string) bool {
+	return t.inst.RecordedLimitWallExpired(prefix, count, evidence)
+}
+
 type readinessClock struct {
 	after     func(time.Duration) <-chan time.Time
 	newTicker func(time.Duration) (<-chan time.Time, func())
@@ -679,8 +686,15 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 		// Check the usage-limit banner BEFORE readiness: a limit-blocked pane
 		// never shows the ready glyph, but checking limit first keeps the
 		// intent explicit and future-proofs against a banner that also carried
-		// one. On a hit, stop waiting and return the park sentinel (#1146).
-		if perr := limitParkError(detector, content, agent); perr != nil {
+		// one. On a hit, stop waiting and return the park sentinel (#1146) —
+		// unless the sighting is residue: the pane still showing the row's OWN
+		// recorded wall after its claimed reset passed is not a wall at all
+		// (#6959). A parked row at reset+grace must send past the banner it
+		// already parked on; refusing it re-parks the row on an expired claim
+		// and the prompt replays on every idle poll. Only a banner the row
+		// never recorded is a live wall.
+		if perr := limitParkError(detector, content, agent); perr != nil &&
+			!expiredRecordedLimitWall(target, perr) {
 			return true, perr
 		}
 		return isReadyContent(content, agent), nil
@@ -744,8 +758,11 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 				return formatWaitForReadyTimeoutError(waitForReadyTimeout, "")
 			}
 			// A limit banner may be all that ever rendered: park instead of
-			// failing even at the timeout boundary, symmetric with the ticker case.
-			if perr := limitParkError(detector, content, agent); perr != nil {
+			// failing even at the timeout boundary, symmetric with the ticker case —
+			// unless the sighting is the target's own expired recorded wall,
+			// which is residue and never a wall (#6959; same rule as the probe).
+			if perr := limitParkError(detector, content, agent); perr != nil &&
+				!expiredRecordedLimitWall(target, perr) {
 				return perr
 			}
 			// The deadline firing is not itself proof of failure — only the pane
@@ -840,6 +857,31 @@ func limitParkError(detector LimitDetector, content, agent string) error {
 		}
 	}
 	return nil
+}
+
+// recordedLimitWallTarget is the optional capability a ReadinessTarget exposes
+// to declare a sighted banner its OWN recorded usage-limit wall whose claimed
+// reset has already passed — residue left in the capture, not a live wall
+// (#6959 review). session.Instance implements it; bare tmux targets, which
+// carry no recorded wall behind them, simply do not — and for them every
+// banner remains a wall.
+type recordedLimitWallTarget interface {
+	RecordedLimitWallExpired(prefix string, count int, evidence string) bool
+}
+
+// expiredRecordedLimitWall reports whether err is a LimitReachedError whose
+// sighting the target recognizes as its own recorded wall's residue — the
+// banner it already parked on, still displayed after the reset it advertised.
+// The readiness wait treats that sighting as nothing and proceeds to readiness
+// or the send; honoring it would re-park the row onto an expired claim and the
+// retry's prompt would replay on every idle poll.
+func expiredRecordedLimitWall(target ReadinessTarget, err error) bool {
+	var limitErr *LimitReachedError
+	if !errors.As(err, &limitErr) {
+		return false
+	}
+	rw, ok := target.(recordedLimitWallTarget)
+	return ok && rw.RecordedLimitWallExpired(limitErr.BannerPrefix, limitErr.BannerCount, limitErr.Evidence)
 }
 
 // formatWaitForReadyTimeoutError builds the user-facing timeout error. When

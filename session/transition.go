@@ -114,14 +114,15 @@ func (k transitionKind) String() string {
 // one with the exported constructors below; lv is meaningful only for
 // ObserveLiveness. epoch/epochScoped are set only by AtEpoch.
 type TransitionEvent struct {
-	kind        transitionKind
-	lv          Liveness
-	resetAt     time.Time
-	evidence    string
-	banner      LimitBanner
-	epoch       uint64
-	epochScoped bool
-	churnOnly   bool
+	kind         transitionKind
+	lv           Liveness
+	resetAt      time.Time
+	evidence     string
+	banner       LimitBanner
+	freshRuntime bool
+	epoch        uint64
+	epochScoped  bool
+	churnOnly    bool
 }
 
 // ChurnOnly marks a Running observation as inferred from pane churn alone, with
@@ -250,6 +251,19 @@ func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHand
 // of this banner is told apart from a wall printed after it.
 func ParkHandoff(resetAt time.Time, evidence string, banner LimitBanner) TransitionEvent {
 	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence, banner: banner}
+}
+
+// OnFreshRuntime marks the handoff park's sighting as read off a pane the row
+// had never seen before — the just-spawned incoming runtime, not the pane a
+// retry re-reads. A fresh pane's emission is new wall evidence no recorded
+// claim may veto (#6959): the parked wall's shadow still names the retired
+// runtime's banner, and a coincidentally identical phrase at the same anchor
+// on the new pane is the wall's current claim, not a stale re-parse. The
+// plain constructor stays for the same-pane retry and the stored-claim
+// re-park, whose sighting IS the recorded wall's re-read.
+func (ev TransitionEvent) OnFreshRuntime() TransitionEvent {
+	ev.freshRuntime = true
+	return ev
 }
 
 // AbortHandoff drops a replacement fence whose runtime swap did not complete.
@@ -790,6 +804,8 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitResetEvidence = ""
 		i.limitBannerPrefix = ""
 		i.limitBannerCount = 0
+		i.limitWallRuntimePID = 0
+		i.limitWallRuntimeStartID = 0
 	case limitResetFromEvent:
 		// The event's reset arrives with the phrase that produced it (the
 		// handoff wait path resolved both), so the evidence slot records it —
@@ -797,10 +813,25 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// against a later clock (#6765). The banner anchor rides with it for
 		// the same reason (#6823): the poll must be able to tell a clipped
 		// re-read of THIS banner from a wall the pane shows afterward.
-		i.limitResetAt = ev.resetAt
-		i.limitResetEvidence = ev.evidence
+		// The sighting resolves against the wall the row already recorded
+		// BEFORE the live fields take it: a re-read of the banner the row
+		// parked on keeps the recorded claim's first parse instead of the
+		// rolled-forward instant its re-parse minted (#6959). The event's
+		// freshRuntime mark is the producer's knowledge that the sighting
+		// came off a pane the row had never seen — new evidence no recorded
+		// claim may veto.
+		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
+			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached,
+			ev.freshRuntime, time.Time{}, time.Time{})
+		i.limitResetAt = resetAt
+		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix
 		i.limitBannerCount = ev.banner.Count
+		// The wall was sighted on the runtime currently up (the incoming
+		// one for a handoff park): pin the claim to it so a sighting after
+		// a replacement cannot pass as its re-read (#6959 review).
+		i.limitWallRuntimePID = i.runtimePID
+		i.limitWallRuntimeStartID = i.runtimeStartID
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.
@@ -808,7 +839,9 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// critical section as LiveLimitReached so account-swap admission cannot
 		// observe a limit without its provider/account attribution.
 		i.attributeLimitIdentityLocked()
-		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, ev.resetAt, false)
+		i.noteLimitWallClaimLocked(i.currentAgentNameLocked(), i.limitResetAt, i.limitResetEvidence,
+			LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
+		i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, i.limitResetAt, i.limitResetEvidence, false)
 	}
 	// Every real change to the lifecycle state advances the epoch, so an observer
 	// holding an older one learns its in-flight decision is stale (#2135).

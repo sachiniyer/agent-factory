@@ -1221,3 +1221,70 @@ func TestSubmittedTurnVisible(t *testing.T) {
 		}
 	})
 }
+
+// TestWaitForReadySendsPastExpiredRecordedWall is the readiness arm of #6959:
+// a row parked at a usage-limit wall whose claimed reset has passed must send
+// PAST its own still-visible parked banner — that sighting is residue, not a
+// wall. Before the fix the wait returned the LimitReachedError at reset+grace,
+// readiness re-parked the row onto the expired claim, and the retry's prompt
+// replayed on every idle poll: the session never resumed.
+func TestWaitForReadySendsPastExpiredRecordedWall(t *testing.T) {
+	defer setWaitForReadyTimingForTest(2*time.Second, time.Millisecond)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	const banner = "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	const ready = "transcript above\n❯ "
+
+	// Park the row on this banner's own anchor with an already-past reset —
+	// the state a retry finds at reset+grace.
+	sighting := NewLimitDetector(nil).Sight(banner, "claude", time.Now())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	anchor := session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}
+
+	calls := 0
+	inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+		calls++
+		if calls == 1 {
+			return banner, nil
+		}
+		return ready, nil
+	})
+	inst.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence, anchor)
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(context.Background(), inst) }()
+	select {
+	case err := <-done:
+		var limitErr *LimitReachedError
+		if errors.As(err, &limitErr) {
+			t.Fatalf("the row's own expired parked banner is residue, not a wall: %v", err)
+		}
+		if err != nil {
+			t.Fatalf("the retry must proceed past the residue banner, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitForReady never proceeded past the residue banner")
+	}
+
+	// A banner the row never recorded remains a live wall: same sighting,
+	// different parked anchor — the wait must park on it.
+	calls = 0
+	other := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+		return banner, nil
+	})
+	other.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence,
+		session.LimitBanner{Prefix: "a different transcript entirely\n", Count: 1})
+	done2 := make(chan error, 1)
+	go func() { done2 <- WaitForReady(context.Background(), other) }()
+	select {
+	case err := <-done2:
+		var limitErr *LimitReachedError
+		if !errors.As(err, &limitErr) {
+			t.Fatalf("an unrecorded banner is still a live wall, got %v", err)
+		}
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitForReady did not park on the unrecorded banner")
+	}
+}

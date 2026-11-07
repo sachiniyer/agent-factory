@@ -79,6 +79,15 @@ type AccountLimitObservationData struct {
 	Agent   string    `json:"agent"`
 	Account string    `json:"account"`
 	ResetAt time.Time `json:"reset_at,omitempty"`
+	// Evidence is the reset phrase whose parse produced ResetAt — the wall
+	// claim's durable identity (#6959). A time-only or relative phrase
+	// resolves against the READING clock, so a stale banner re-parsed on
+	// every retry mints a later instant each time; the phrase is what proves
+	// a sighting is that same wall's re-read and not a new claim, and the
+	// first parse — the one nearest the wall the provider printed — stays.
+	// Empty on rows written before the field existed and on walls whose
+	// sighting carried no parseable phrase.
+	Evidence string `json:"evidence,omitempty"`
 	// ObservedAt is the instant af first observed THIS wall fact — or last
 	// observed it as a new wall event, after the session left its parked
 	// state. Re-seeing the unchanged banner still displayed advances nothing
@@ -145,4 +154,42 @@ func AccountLimitObservationRetracted(observation AccountLimitObservationData, r
 		return false
 	}
 	return true
+}
+
+// LimitWallClaimData is the durable shape of the "last wall" shadow — the
+// claim the row last parked on, kept past ClearLimitReached so a re-read of
+// the unchanged banner is recognized as the same observation (#6959). In
+// memory it lives only for the process's life; serializing it is what keeps
+// the stale-read and residue decisions identical across a daemon restart: a
+// restarted row must recognize the banner it parked on rather than treating
+// the missing in-memory anchor as evidence of a new one. Unlike the
+// LiveLimitReached-gated claim fields it is written in every liveness —
+// a cleared row's shadow is exactly what the residue check needs.
+type LimitWallClaimData struct {
+	Agent   string    `json:"agent,omitempty"`
+	Account string    `json:"account,omitempty"`
+	ResetAt time.Time `json:"reset_at,omitzero"`
+	// Evidence is the reset phrase whose parse produced ResetAt — the same
+	// provider free text as LimitResetEvidence, and the durable identity a
+	// record with no banner anchor still recognizes its wall by.
+	Evidence string `json:"evidence,omitempty"`
+	// BannerPrefix is the tail of the pane bytes that sat immediately above
+	// the last banner match — bounded by limitWallPrefixPersistMax, not the
+	// full capture the in-memory sighting carried.
+	BannerPrefix string `json:"banner_prefix,omitempty"`
+	BannerCount  int    `json:"banner_count,omitempty"`
+	// RuntimePID and RuntimeStartID pin the claim to the concrete pane-root
+	// process the wall was sighted on — the same launch evidence the row's
+	// RuntimePID/RuntimeStartID carry for the launch itself. A residue check
+	// judged against a claim from a replaced process must fail: the pane it
+	// describes is gone, so a matching sighting is a different emission.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
+}
+
+// IsZero reports whether the claim carries no recorded wall fact — the
+// serialize side omits the shadow pointer for one rather than writing an
+// empty object onto every row.
+func (d LimitWallClaimData) IsZero() bool {
+	return d == LimitWallClaimData{}
 }

@@ -213,7 +213,7 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		if op == session.OpReplacing {
 			resetAt, _ := entry.instance.LimitResetAt()
 			if err := m.parkHandoffAtLimit(entry.instance, resetAt, entry.instance.LimitResetEvidence(),
-				entry.instance.LimitBannerAnchor()); err != nil {
+				entry.instance.LimitBannerAnchor(), false); err != nil {
 				return handoffRetryNotPerformed, err
 			}
 		}
@@ -278,7 +278,7 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		if errors.As(err, &limitErr) {
 			entry.instance.SetPrompt(mission)
 			if op == session.OpReplacing {
-				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr)); terr != nil {
+				if terr := m.parkHandoffAtLimit(entry.instance, limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr), false); terr != nil {
 					return handoffRetryNotPerformed, errors.Join(err, terr)
 				}
 			} else {

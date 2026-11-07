@@ -296,3 +296,62 @@ func TestResumeLimitedSessions_ReLimitBacksOff(t *testing.T) {
 		t.Fatalf("after the backoff window a re-limited session resumes once more: want 2 prompts, got %d", len(prompts))
 	}
 }
+
+// TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows is the
+// #6959 review's prompt-replay wedge, exercised end to end: the resume's send
+// lands and the wall clears, the next poll re-detects the banner still on the
+// pane, and the sweep must NOT send the prompt again. Before the fix the
+// re-detection re-parked the row onto the expired claim; the scheduler's
+// state-drop on the Running row then made the re-park a fresh, already-due
+// episode — so every idle poll re-sent the stored prompt forever.
+func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	manager, _, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", base.Add(-time.Hour))
+
+	// The parked claim carries the banner's own anchor and phrase — the
+	// record a send-path or poll park writes — so the residue check can
+	// prove the re-read is the same emission. Seed it by sighting the exact
+	// pane content the poll will re-detect: real transcript above the banner,
+	// so the anchor is the position read a live capture produces.
+	const residuePane = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(residuePane, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	inst.SetLimitReachedAtEvidence(base.Add(-time.Hour), sighting.Evidence,
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+
+	// Past reset+grace: the resume fires once and re-delivers the prompt.
+	advance(limitResumeGrace + time.Second)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the resume must deliver the stored prompt once, got %v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("the landed send clears the wall")
+	}
+
+	// The unchanged banner still sits in the capture; the next poll's
+	// re-detection of it is residue — never a wall — so the row must not
+	// re-park, and no retry episode may re-arm. The residue verdict must also
+	// let the poll continue ordinary liveness classification: a cleared row
+	// stalling on its own stale banner would sit Running until the banner
+	// scrolls off instead of settling on the capture's real state.
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.resolveIdleLiveness(inst, residuePane, epoch)
+	if inst.LimitReached() {
+		t.Fatal("the row's own expired parked banner is residue, not a wall")
+	}
+	if got := inst.GetLiveness(); got != session.LiveReady {
+		t.Fatalf("a residue sighting must not block ordinary classification: liveness = %v, want ready", got)
+	}
+	for i := 0; i < 5; i++ {
+		advance(time.Minute)
+		manager.ResumeLimitedSessions()
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the prompt must be sent exactly once while the residue banner shows: got %v", prompts)
+	}
+}
