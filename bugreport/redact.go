@@ -487,10 +487,15 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 	// Agent beside it stays verbatim — it is the bounded agent enum, classified
 	// as such in verbatimInstanceFields, and it is what makes the redacted
 	// account labels legible as "two claude accounts" rather than two opaque
-	// markers.
+	// markers. Evidence is the reset clause the stored ResetAt parsed from
+	// (#6959) — the same provider free text as LimitResetEvidence above, down
+	// to the rendered timezone name, so it takes the same marker.
 	for i := range d.AccountLimitObservations {
 		if d.AccountLimitObservations[i].Account != "" {
 			d.AccountLimitObservations[i].Account = redactedMarker
+		}
+		if d.AccountLimitObservations[i].Evidence != "" {
+			d.AccountLimitObservations[i].Evidence = redactedMarker
 		}
 	}
 	if d.Prompt != "" {
