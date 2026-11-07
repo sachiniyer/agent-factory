@@ -295,6 +295,11 @@ func TestLimitPark_RereadSamePhraseKeepsReset_CodexRelative(t *testing.T) {
 	rolled := reReadAt.Add(4*24*time.Hour + 2*time.Hour + 46*time.Minute)
 
 	t.Run("plain resume re-park", func(t *testing.T) {
+		// The re-read must land INSIDE the recorded window: an expired own
+		// banner is residue and the park refuses outright, which is the other
+		// half of the property the residue subtests already pin. Freezing
+		// keeps the assertion on the drift itself as real time passes.
+		defer freezeInstanceNow(parked.Add(-time.Minute))()
 		inst := &Instance{Program: tmux.ProgramCodex}
 		inst.SetLimitReachedAtEvidence(parked, phrase, staleBanner)
 		inst.ClearLimitReached()
