@@ -80,6 +80,41 @@ import {
   terminalFontSizeFor,
 } from "./terminal-font.js";
 
+// ── #6964 stray-writer trace (opt-in diagnostics) ─────────────────────────────
+// The shared PTY is last-resize-wins, so ONE stray OpResize — from any client's
+// fit machinery, or adopted broker-side — un-writes a concession, and the echo
+// it produces names no author. A page opts in by setting window.__afTermDiag
+// (the selftest installs it with addInitScript before the bundle's first fit);
+// every arm, delivery, decision and write of this terminal's resize machinery
+// then lands on window.__afTermTrace with a performance.now() stamp and the
+// stack-trimmed call site, so a late write names the code that produced it.
+// Production never sets the flag: diag() reads one property and returns.
+interface TermDiagEntry {
+  t: number;
+  id: number;
+  ev: string;
+  d?: unknown;
+  site: string;
+}
+interface TermDiagHost {
+  __afTermDiag?: boolean;
+  __afTermTrace?: TermDiagEntry[];
+}
+let termDiagSeq = 0;
+const TERM_DIAG_LIMIT = 4000;
+
+/** Trims an Error stack to the three frames under diag(): [0] is "Error",
+ *  [1] termDiagSite, [2] diag() itself — what follows is the event's call site,
+ *  which is what names the armer behind an arm or the signal behind a fit. */
+function termDiagSite(): string {
+  const stack = new Error().stack ?? "";
+  return stack
+    .split("\n")
+    .slice(3, 6)
+    .map((line) => line.trim().replace(/^at /, "").replace(/\s*\(.*$/, ""))
+    .join("<-");
+}
+
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
 
@@ -268,6 +303,7 @@ export class AttachTerminal {
   private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
+  private readonly diagId = ++termDiagSeq;
   // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
   // appbarControls() hold the same query. It picks the halved default pitch
   // (#5492) at construction, and its "change" listener re-fits across it.
@@ -283,6 +319,15 @@ export class AttachTerminal {
   private visibleFitFrame: number | null = null;
   private visibleFitTimer: number | null = null;
   private visibleFitAttempts = 0;
+  /** Stamped into every armed fit delivery and advanced on each concession.
+   *  cancelVisibleFitFrame clears the armed handles, but a callback the browser
+   *  already dispatched — an rAF mid-flight, a debounce timer on its way to the
+   *  queue — cannot be recalled: it lands ~one frame after the yield and would
+   *  refit the emulator off the authoritative grid and write the conceded size
+   *  back out (#6964). A delivery stamped before the concession does nothing at
+   *  all: it must not even touch the pair's handles, which may already point at
+   *  newer work. */
+  private fitEpoch = 0;
   /** Whether this page is currently unpaintable, detected the only way the
    *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
    *  250ms timer had to deliver instead. An occluded page keeps
@@ -434,10 +479,12 @@ export class AttachTerminal {
   // Observer, ResizeObserver, the scheduled-fit pair) wake a page without
   // user intent and must not erase a concession another client just won.
   private noteActivation(): void {
+    this.diag("activate");
     this.parked = false;
     this.contestedEchoes.clear();
   }
   private readonly onWindowFocus = (): void => {
+    this.diag("sig-wfocus");
     this.noteActivation();
     this.scheduleVisibleFit();
   };
@@ -450,6 +497,7 @@ export class AttachTerminal {
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
+      this.diag("sig-vis");
       this.noteActivation();
       this.scheduleVisibleFit();
     } else {
@@ -459,6 +507,7 @@ export class AttachTerminal {
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
   private readonly onPhoneChange = (): void => {
+    this.diag("sig-phone");
     // A media-query change cannot evaluate without layout — the page is awake,
     // and the viewport change that triggered it is a real user resize.
     this.noteActivation();
@@ -468,6 +517,7 @@ export class AttachTerminal {
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
   private readonly onPointerEnter = (event: PointerEvent): void => {
+    this.diag("sig-enter", { trusted: event.isTrusted });
     if (event.isTrusted) {
       this.noteActivation();
     }
@@ -730,6 +780,7 @@ export class AttachTerminal {
     if (this.pendingViewport === null) {
       return;
     }
+    this.diag("sig-scroll", { src: source });
     const plan = terminalUserScrollPlan(source,
       this.visibleFitFrame !== null || this.visibleFitTimer !== null);
     if (plan.cancelScheduledVisibleFit) {
@@ -750,6 +801,7 @@ export class AttachTerminal {
     private readonly endpoint: StreamEndpoint,
     private readonly cb: TerminalCallbacks,
   ) {
+    this.diag("ctor", { cls: container.className });
     this.mouseOverride = terminalMouseOverride(navigator.platform);
     this.term = new Terminal({
       allowProposedApi: true,
@@ -786,7 +838,7 @@ export class AttachTerminal {
       // block a desktop Ctrl+V produces — and the delivery hold reads the
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
-      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
+      () => { this.diag("sig-keybar"); this.scheduleVisibleFit(); }, () => this.term.modes.applicationCursorKeysMode,
       // The keybar's A−/A+ keys step the device class's shared size (#5500) —
       // this terminal is one subscriber among the panes that pick it up.
       stepTerminalFontSize);
@@ -895,6 +947,7 @@ export class AttachTerminal {
     // An observer delivery cannot happen on a page that is not being painted —
     // both are rendering-step signals, so either one clears the parked flag.
     this.ro = new ResizeObserver(() => {
+      this.diag("sig-ro");
       this.parked = false;
       this.scheduleFit();
     });
@@ -910,6 +963,7 @@ export class AttachTerminal {
     // still cannot be read, never a hidden one — it is not a poller.
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.diag("sig-io");
         this.parked = false;
         this.scheduleVisibleFit();
       }
@@ -1433,6 +1487,7 @@ export class AttachTerminal {
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus(): void {
+    this.diag("sig-focus");
     this.fitVisibleHost();
     this.term.focus();
   }
@@ -1441,6 +1496,7 @@ export class AttachTerminal {
    *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
    *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
   refit(): void {
+    this.diag("sig-refit");
     this.scheduleVisibleFit();
   }
 
@@ -1463,6 +1519,7 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("connect");
     this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
     // Reconnects replay the gap from our cursor; the first connect omits ?since so
     // the broker starts at the live tail and sends a one-shot screen repaint. The
@@ -1492,6 +1549,7 @@ export class AttachTerminal {
       this.retry = 0;
       this.everOpened = true;
       this.exited = false;
+      this.diag("open");
       this.cb.onStatus("open");
       // Push our current size on (re)connect so a server that came up after us, or
       // a resize we did while disconnected, is reflected. The echo reconciles it.
@@ -1650,6 +1708,7 @@ export class AttachTerminal {
     if (this.term.options.fontSize === size) {
       return;
     }
+    this.diag("sig-font", { size });
     this.term.options.fontSize = size;
     this.scheduleVisibleFit();
   }
@@ -1682,12 +1741,14 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-pair", { attempts: this.visibleFitAttempts });
+    const epoch = this.fitEpoch;
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
     if (this.visibleFitTimer === null) {
-      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false, epoch), VISIBLE_FIT_TIMER_MS);
     }
   }
 
@@ -1711,13 +1772,15 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-wake");
     if (this.visibleFitAttempts <= 0) {
       this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     }
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    const epoch = this.fitEpoch;
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
   }
 
   /** Whichever of the twin triggers delivers first runs the fit and drops the
@@ -1727,7 +1790,14 @@ export class AttachTerminal {
    *  still cannot measure the host retries within the attempt budget — a
    *  transient bail used to be FINAL, which is how one bad instant could strand
    *  the pane on a peer's grid permanently. */
-  private onVisibleFit(deliveredByFrame: boolean): void {
+  private onVisibleFit(deliveredByFrame: boolean, epoch: number): void {
+    // A delivery stamped before the latest concession does NOTHING: the claim
+    // it carried was forfeited, so it may not write, refit, reclassify the
+    // page, or clear the pair's handles — which by now may hold newer work.
+    if (epoch !== this.fitEpoch) {
+      this.diag("stale-fit", { epoch, fitEpoch: this.fitEpoch });
+      return;
+    }
     this.parked = !deliveredByFrame;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -1740,7 +1810,9 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
-    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+    const settled = this.fitVisibleHost();
+    this.diag("fire", { ch: deliveredByFrame ? "raf" : "timer", ok: settled });
+    if (settled || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
       // A frame still armed is the wake probe a withheld write queued inside
       // this fit — its delivery retries a transient bail through the delivery
       // pair like any scheduled fit, so the budget it runs on is preserved
@@ -1757,6 +1829,7 @@ export class AttachTerminal {
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   private cancelVisibleFitFrame(): void {
+    this.diag("cancel");
     this.visibleFitAttempts = 0;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -1786,6 +1859,7 @@ export class AttachTerminal {
       return true;
     }
     const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    this.diag("fit", { w: host.width, h: host.height });
     if (host.width <= 0 || host.height <= 0) {
       return true;
     }
@@ -1832,6 +1906,7 @@ export class AttachTerminal {
     const scheduledUserScroll = this.userScrollRevision;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
+      this.diag("vp-fire", { r: rows, c: cols });
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
         return;
       }
@@ -1876,12 +1951,19 @@ export class AttachTerminal {
   }
 
   private scheduleFit(): void {
+    this.diag("arm-ro");
+    const epoch = this.fitEpoch;
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
     }
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
-      if (this.stopped) {
+      this.diag("fire-ro");
+      // The debounce is armed on an observer signal, not through the pair — a
+      // concession cannot recall it by handle either, so it carries the same
+      // epoch: a delivery queued before the yield must not fit the pane's
+      // former grid back over the one just conceded.
+      if (this.stopped || epoch !== this.fitEpoch) {
         return;
       }
       // A resize that lands while xterm cannot measure (renderer metrics mid-
@@ -1925,24 +2007,29 @@ export class AttachTerminal {
     // deduped flush would lose to an intervening echo credit (the field note).
     if (this.parked === null) {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "unclassified" });
       return;
     }
     if (this.parked ||
         (typeof document !== "undefined" && document.visibilityState !== "visible")) {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "withheld" });
       this.retryOwedResize(rows, cols);
       return;
     }
     force ||= this.owedForceResize;
     if (!force && rows === this.lastRows && cols === this.lastCols) {
+      this.diag("send", { r: rows, c: cols, f: force, out: "dedupe" });
       return;
     }
     if (this.send(encode(resizeFrame(rows, cols)))) {
       this.lastRows = rows;
       this.lastCols = cols;
       this.owedForceResize = false;
+      this.diag("send", { r: rows, c: cols, f: force, out: "wire" });
       return;
     }
+    this.diag("send", { r: rows, c: cols, f: force, out: "dropped" });
     // The socket could not carry the frame. It stays owed — lastSent is
     // deliberately NOT touched — and the connect path force-sends the current
     // size on open: socket-open is the only channel that can change this
@@ -1966,6 +2053,7 @@ export class AttachTerminal {
    *  as an OpResize (which would ping-pong). Records it as our last-known size so a
    *  later identical local fit doesn't re-send. */
   private applyEchoedSize(rows: number, cols: number): void {
+    this.diag("echo", { r: rows, c: cols });
     this.lastRows = rows;
     this.lastCols = cols;
     // The subscribe admission is spent by the first DELIVERED echo — the
@@ -1976,79 +2064,103 @@ export class AttachTerminal {
     // the contest record.
     const admitted = this.admittedEcho;
     this.admittedEcho = true;
-    if (rows !== this.term.rows || cols !== this.term.cols) {
-      // Capture only the FIRST peer-owned resize in a run. Further peer echoes may
-      // already have collapsed/reflowed the buffer, but the first boundary still
-      // knows where this client was reading in its own grid. The active-host fit
-      // consumes and clears this value before its own echo comes back.
-      if (this.pendingViewport === null) {
-        const buffer = this.term.buffer.active;
-        const atBottom = buffer.viewportY >= buffer.baseY;
-        let marker: IMarker | null = null;
-        if (!atBottom) {
-          try {
-            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
-          } catch {
-            // Alternate buffers cannot register markers; the absolute line below
-            // is still safer than a bottom distance that grows stale with output.
-          }
-        }
-        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
-      }
-      this.cancelViewportRestoreFrame();
-      try {
-        this.term.resize(cols, rows);
-      } catch {
-        // ignore an out-of-range size from a racing peer
-      }
-      // A foreign write just took the grid off this host's fit: a hidden
-      // sibling's reconnect force-send, the broker re-adopting the pane's
-      // tmux-measured size, an old belief replayed to a fresh subscriber. The
-      // visible host re-asserts its own fit once per foreign grid — in the
-      // same task, because the foreign grid is wire authority, never a state
-      // to paint: left even one frame the emulator renders a grid that does
-      // not fit its host, and anything sampling the grid in that window — a
-      // DOM row count, a user's eyes — reads the foreign size as this pane's
-      // own. That read is the 2026-11 #6215 reopening: the subscribe
-      // admission replayed a stale belief whose grid the taller host happened
-      // to fit, and the viewport-growth poll caught the emulator resting on
-      // it before the deferred reclaim could land. The same foreign grid
-      // echoed again inside the yield window is an insistent writer and
-      // last-resize-wins lets it prevail rather than ping-pong.
-      //
-      // Except the admission echo itself: the broker's replay of the authority
-      // the PTY already had, delivered before our claim could possibly be on
-      // the wire. It earns the same refit, but it is no sighting of a
-      // contested write: counting it makes the peer's first real answer to our
-      // claim look like a repeat, and the activation yields to the grid it was
-      // meant to take (#6635).
-      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
-        if (!admitted) {
-          this.reassertHostFit();
-        } else {
-          const now = Date.now();
-          const key = `${rows}x${cols}`;
-          const last = this.contestedEchoes.get(key);
-          if (last === undefined || now - last >= FOREIGN_ECHO_YIELD_MS) {
-            for (const [k, at] of this.contestedEchoes) {
-              if (now - at >= FOREIGN_ECHO_YIELD_MS) {
-                this.contestedEchoes.delete(k);
-              }
-            }
-            this.contestedEchoes.set(key, now);
-            this.reassertHostFit();
-          } else {
-            // The pane yielded to an insistent writer: whatever is still
-            // armed — the deferred wire half of a forfeited reclaim, a parked
-            // page's wake probe — was queued to re-assert the grid just
-            // conceded. Delivered now it would refit the emulator off the
-            // authoritative grid and write the conceded size back out — as
-            // would a force write still owed from before the concession.
-            this.cancelVisibleFitFrame();
-            this.owedForceResize = false;
-          }
+    if (rows === this.term.rows && cols === this.term.cols) {
+      return;
+    }
+    // Capture only the FIRST peer-owned resize in a run. Further peer echoes may
+    // already have collapsed/reflowed the buffer, but the first boundary still
+    // knows where this client was reading in its own grid. The active-host fit
+    // consumes and clears this value before its own echo comes back.
+    if (this.pendingViewport === null) {
+      const buffer = this.term.buffer.active;
+      const atBottom = buffer.viewportY >= buffer.baseY;
+      let marker: IMarker | null = null;
+      if (!atBottom) {
+        try {
+          marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+        } catch {
+          // Alternate buffers cannot register markers; the absolute line below
+          // is still safer than a bottom distance that grows stale with output.
         }
       }
+      this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+      this.diag("vp-cap", { atBottom });
+    }
+    if (this.container.clientWidth <= 0 || this.container.clientHeight <= 0) {
+      // A pane that cannot be measured cannot contest: the echo applies
+      // verbatim, wire authority with no live host to answer for it.
+      this.diag("echo-hidden", { r: rows, c: cols });
+      this.applyForeignEchoToEmulator(rows, cols);
+      return;
+    }
+    // A measurable visible host owns its grid, so a contested echo never
+    // resizes the emulator: the same-task reassert refits to the local grid
+    // anyway, and the foreign grid it carried is never painted (#6215) — the
+    // resize was pure churn, an invisible grow↔shrink pair that drags the
+    // buffer's scrollback into the screen and back, where a badly timed shrink
+    // can drop it for good (#6964). The foreign grid reaches the emulator only
+    // when the pane CONCEDES to it — or while the host cannot be measured at
+    // this instant, where the retry pair owns the reclaim and the echo applies
+    // verbatim until it lands. The contest bookkeeping is unchanged: the same
+    // foreign grid echoed again inside the yield window is an insistent
+    // writer and last-resize-wins lets it prevail rather than ping-pong.
+    //
+    // Except the admission echo itself: the broker's replay of the authority
+    // the PTY already had, delivered before our claim could possibly be on
+    // the wire. It earns the same refit, but it is no sighting of a
+    // contested write: counting it makes the peer's first real answer to our
+    // claim look like a repeat, and the activation yields to the grid it was
+    // meant to take (#6635).
+    if (!admitted) {
+      this.diag("echo-admit", { r: rows, c: cols });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
+      }
+      return;
+    }
+    const now = Date.now();
+    const key = `${rows}x${cols}`;
+    const last = this.contestedEchoes.get(key);
+    if (last === undefined || now - last >= FOREIGN_ECHO_YIELD_MS) {
+      for (const [k, at] of this.contestedEchoes) {
+        if (now - at >= FOREIGN_ECHO_YIELD_MS) {
+          this.contestedEchoes.delete(k);
+        }
+      }
+      this.contestedEchoes.set(key, now);
+      this.diag("echo-contest", { key, dt: last === undefined ? -1 : Math.round(now - last) });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
+      }
+      return;
+    }
+    this.diag("echo-yield", { key, dt: Math.round(now - last) });
+    // The pane yielded to an insistent writer: the foreign grid is
+    // authoritative now, and this is the only place it reaches the emulator.
+    // Whatever is still armed — the deferred wire half of a forfeited
+    // reclaim, a parked page's wake probe, an rAF or debounce callback the
+    // browser already dispatched — was queued to re-assert the grid just
+    // conceded. Delivered now it would refit the emulator off the
+    // authoritative grid and write the conceded size back out — as would a
+    // force write still owed from before the concession. The epoch advances
+    // with the concession: anything stamped before it dies on arrival.
+    this.cancelVisibleFitFrame();
+    this.fitEpoch += 1;
+    this.owedForceResize = false;
+    this.applyForeignEchoToEmulator(rows, cols);
+  }
+
+  /** Applies a foreign grid the pane has accepted as authoritative — the
+   *  yielded concession, a pane too hidden to contest, or the transient
+   *  apply while an unmeasurable host's reclaim retries through the pair. A
+   *  contested echo never reaches this: reassertHostFit refits the emulator
+   *  in the same task, so resizing here would only churn the buffer. */
+  private applyForeignEchoToEmulator(rows: number, cols: number): void {
+    this.cancelViewportRestoreFrame();
+    try {
+      this.term.resize(cols, rows);
+    } catch {
+      // ignore an out-of-range size from a racing peer
     }
   }
 
@@ -2074,7 +2186,8 @@ export class AttachTerminal {
    *  pair, whose first delivery classifies the page and flushes whatever is
    *  owed (a starved twin marks the page parked and the wake probe alone
    *  owns the flush — never a timer poll). */
-  private reassertHostFit(): void {
+  private reassertHostFit(): boolean {
+    this.diag("reassert", { parked: this.parked });
     if (this.parked === false) {
       this.parked = null;
     }
@@ -2087,6 +2200,22 @@ export class AttachTerminal {
       // page and carries the withheld grid out.
       this.scheduleVisibleFit();
     }
+    return settled;
+  }
+
+  /** Appends one #6964 trace entry when the page opted in — see the module
+   *  header above. Every arm, delivery, decision and write of the resize
+   *  machinery funnels here so a late OpResize names its producer. */
+  private diag(ev: string, d?: unknown): void {
+    const w = (globalThis as { window?: TermDiagHost }).window;
+    if (w === undefined || w.__afTermDiag !== true) {
+      return;
+    }
+    const trace = w.__afTermTrace ?? (w.__afTermTrace = []);
+    if (trace.length >= TERM_DIAG_LIMIT) {
+      return;
+    }
+    trace.push({ t: holdClockMs(), id: this.diagId, ev, d, site: termDiagSite() });
   }
 
   /** Writes a frame if the socket can carry one right now. Returns whether it

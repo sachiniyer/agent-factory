@@ -14,6 +14,7 @@ import (
 
 	xansi "github.com/charmbracelet/x/ansi"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/terminal"
 )
 
@@ -89,6 +90,9 @@ func (b *ptyBroker) adoptSnapshotSize(snap PaneSnapshot, genBefore uint64) {
 	}
 	if b.hasSize && b.rows == snap.Rows && b.cols == snap.Cols {
 		return
+	}
+	if ptyBrokerTrace {
+		log.InfoLog.Printf("pty trace: broker %p adopt snapshot %dx%d gen=%d", b, snap.Rows, snap.Cols, b.resizeGen+1)
 	}
 	b.rows, b.cols = snap.Rows, snap.Cols
 	b.hasSize = true

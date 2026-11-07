@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "39e2d505fee2";
+var CLIENT_VERSION = "6f40d4ce7828";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -11457,6 +11457,12 @@ function terminalLinkHandler(open, setTooltip) {
 }
 
 // src/terminal.ts
+var termDiagSeq = 0;
+var TERM_DIAG_LIMIT = 4e3;
+function termDiagSite() {
+  const stack = new Error().stack ?? "";
+  return stack.split("\n").slice(3, 6).map((line) => line.trim().replace(/^at /, "").replace(/\s*\(.*$/, "")).join("<-");
+}
 function holdClockMs() {
   return typeof performance !== "undefined" && typeof performance.now === "function" ? performance.now() : Date.now();
 }
@@ -11476,6 +11482,7 @@ var AttachTerminal = class {
     this.token = token2;
     this.endpoint = endpoint;
     this.cb = cb;
+    this.diag("ctor", { cls: container.className });
     this.mouseOverride = terminalMouseOverride(navigator.platform);
     this.term = new import_xterm.Terminal({
       allowProposedApi: true,
@@ -11513,7 +11520,10 @@ var AttachTerminal = class {
       // block a desktop Ctrl+V produces — and the delivery hold reads the
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
-      () => this.scheduleVisibleFit(),
+      () => {
+        this.diag("sig-keybar");
+        this.scheduleVisibleFit();
+      },
       () => this.term.modes.applicationCursorKeysMode,
       // The keybar's A−/A+ keys step the device class's shared size (#5500) —
       // this terminal is one subscriber among the panes that pick it up.
@@ -11574,12 +11584,14 @@ var AttachTerminal = class {
       return accepted;
     });
     this.ro = new ResizeObserver(() => {
+      this.diag("sig-ro");
       this.parked = false;
       this.scheduleFit();
     });
     this.ro.observe(container);
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.diag("sig-io");
         this.parked = false;
         this.scheduleVisibleFit();
       }
@@ -11616,6 +11628,7 @@ var AttachTerminal = class {
   midLineTimer = null;
   ro;
   io;
+  diagId = ++termDiagSeq;
   // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
   // appbarControls() hold the same query. It picks the halved default pitch
   // (#5492) at construction, and its "change" listener re-fits across it.
@@ -11630,6 +11643,15 @@ var AttachTerminal = class {
   visibleFitFrame = null;
   visibleFitTimer = null;
   visibleFitAttempts = 0;
+  /** Stamped into every armed fit delivery and advanced on each concession.
+   *  cancelVisibleFitFrame clears the armed handles, but a callback the browser
+   *  already dispatched — an rAF mid-flight, a debounce timer on its way to the
+   *  queue — cannot be recalled: it lands ~one frame after the yield and would
+   *  refit the emulator off the authoritative grid and write the conceded size
+   *  back out (#6964). A delivery stamped before the concession does nothing at
+   *  all: it must not even touch the pair's handles, which may already point at
+   *  newer work. */
+  fitEpoch = 0;
   /** Whether this page is currently unpaintable, detected the only way the
    *  platform exposes it: a scheduled fit whose armed rAF never ran and whose
    *  250ms timer had to deliver instead. An occluded page keeps
@@ -11779,10 +11801,12 @@ var AttachTerminal = class {
   // Observer, ResizeObserver, the scheduled-fit pair) wake a page without
   // user intent and must not erase a concession another client just won.
   noteActivation() {
+    this.diag("activate");
     this.parked = false;
     this.contestedEchoes.clear();
   }
   onWindowFocus = () => {
+    this.diag("sig-wfocus");
     this.noteActivation();
     this.scheduleVisibleFit();
   };
@@ -11792,6 +11816,7 @@ var AttachTerminal = class {
   };
   onVisibilityChange = () => {
     if (document.visibilityState === "visible") {
+      this.diag("sig-vis");
       this.noteActivation();
       this.scheduleVisibleFit();
     } else {
@@ -11801,6 +11826,7 @@ var AttachTerminal = class {
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
   onPhoneChange = () => {
+    this.diag("sig-phone");
     this.noteActivation();
     this.applyDeviceFontSize();
   };
@@ -11808,6 +11834,7 @@ var AttachTerminal = class {
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
   onPointerEnter = (event) => {
+    this.diag("sig-enter", { trusted: event.isTrusted });
     if (event.isTrusted) {
       this.noteActivation();
     }
@@ -11982,6 +12009,7 @@ var AttachTerminal = class {
     if (this.pendingViewport === null) {
       return;
     }
+    this.diag("sig-scroll", { src: source });
     const plan = terminalUserScrollPlan(
       source,
       this.visibleFitFrame !== null || this.visibleFitTimer !== null
@@ -12367,6 +12395,7 @@ var AttachTerminal = class {
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus() {
+    this.diag("sig-focus");
     this.fitVisibleHost();
     this.term.focus();
   }
@@ -12374,6 +12403,7 @@ var AttachTerminal = class {
    *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
    *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
   refit() {
+    this.diag("sig-refit");
     this.scheduleVisibleFit();
   }
   /** Takes the keyboard away from the terminal (blurs it) so document-level rail
@@ -12392,6 +12422,7 @@ var AttachTerminal = class {
     if (this.stopped) {
       return;
     }
+    this.diag("connect");
     this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
     const url = this.endpoint.url(this.token, this.seeded ? this.cursor : null);
     let ws;
@@ -12410,6 +12441,7 @@ var AttachTerminal = class {
       this.retry = 0;
       this.everOpened = true;
       this.exited = false;
+      this.diag("open");
       this.cb.onStatus("open");
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
         this.sendResize(this.term.rows, this.term.cols, true);
@@ -12530,6 +12562,7 @@ var AttachTerminal = class {
     if (this.term.options.fontSize === size) {
       return;
     }
+    this.diag("sig-font", { size });
     this.term.options.fontSize = size;
     this.scheduleVisibleFit();
   }
@@ -12560,12 +12593,14 @@ var AttachTerminal = class {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-pair", { attempts: this.visibleFitAttempts });
+    const epoch = this.fitEpoch;
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
     if (this.visibleFitTimer === null) {
-      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false), VISIBLE_FIT_TIMER_MS);
+      this.visibleFitTimer = window.setTimeout(() => this.onVisibleFit(false, epoch), VISIBLE_FIT_TIMER_MS);
     }
   }
   /** Arms ONLY the frame probe — the wake detector for a resize this page is
@@ -12588,13 +12623,15 @@ var AttachTerminal = class {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-wake");
     if (this.visibleFitAttempts <= 0) {
       this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     }
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
-    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true));
+    const epoch = this.fitEpoch;
+    this.visibleFitFrame = window.requestAnimationFrame(() => this.onVisibleFit(true, epoch));
   }
   /** Whichever of the twin triggers delivers first runs the fit and drops the
    *  other. The channel the delivery arrived on is the parked detector: the
@@ -12603,7 +12640,11 @@ var AttachTerminal = class {
    *  still cannot measure the host retries within the attempt budget — a
    *  transient bail used to be FINAL, which is how one bad instant could strand
    *  the pane on a peer's grid permanently. */
-  onVisibleFit(deliveredByFrame) {
+  onVisibleFit(deliveredByFrame, epoch) {
+    if (epoch !== this.fitEpoch) {
+      this.diag("stale-fit", { epoch, fitEpoch: this.fitEpoch });
+      return;
+    }
     this.parked = !deliveredByFrame;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -12616,7 +12657,9 @@ var AttachTerminal = class {
     if (this.stopped) {
       return;
     }
-    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+    const settled = this.fitVisibleHost();
+    this.diag("fire", { ch: deliveredByFrame ? "raf" : "timer", ok: settled });
+    if (settled || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
       if (this.visibleFitFrame === null) {
         this.visibleFitAttempts = 0;
       }
@@ -12628,6 +12671,7 @@ var AttachTerminal = class {
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   cancelVisibleFitFrame() {
+    this.diag("cancel");
     this.visibleFitAttempts = 0;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -12656,6 +12700,7 @@ var AttachTerminal = class {
       return true;
     }
     const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    this.diag("fit", { w: host.width, h: host.height });
     if (host.width <= 0 || host.height <= 0) {
       return true;
     }
@@ -12694,6 +12739,7 @@ var AttachTerminal = class {
     const scheduledUserScroll = this.userScrollRevision;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
+      this.diag("vp-fire", { r: rows, c: cols });
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
         return;
       }
@@ -12733,12 +12779,15 @@ var AttachTerminal = class {
     this.pendingViewport = null;
   }
   scheduleFit() {
+    this.diag("arm-ro");
+    const epoch = this.fitEpoch;
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
     }
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
-      if (this.stopped) {
+      this.diag("fire-ro");
+      if (this.stopped || epoch !== this.fitEpoch) {
         return;
       }
       if (!this.fitVisibleHost()) {
@@ -12769,23 +12818,28 @@ var AttachTerminal = class {
     }
     if (this.parked === null) {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "unclassified" });
       return;
     }
     if (this.parked || typeof document !== "undefined" && document.visibilityState !== "visible") {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "withheld" });
       this.retryOwedResize(rows, cols);
       return;
     }
     force ||= this.owedForceResize;
     if (!force && rows === this.lastRows && cols === this.lastCols) {
+      this.diag("send", { r: rows, c: cols, f: force, out: "dedupe" });
       return;
     }
     if (this.send(encode(resizeFrame(rows, cols)))) {
       this.lastRows = rows;
       this.lastCols = cols;
       this.owedForceResize = false;
+      this.diag("send", { r: rows, c: cols, f: force, out: "wire" });
       return;
     }
+    this.diag("send", { r: rows, c: cols, f: force, out: "dropped" });
   }
   /** Keeps the wake probe armed while a resize is owed — withheld by a
    *  parked/hidden page. Self-limiting: the check re-reads the divergence,
@@ -12803,49 +12857,71 @@ var AttachTerminal = class {
    *  as an OpResize (which would ping-pong). Records it as our last-known size so a
    *  later identical local fit doesn't re-send. */
   applyEchoedSize(rows, cols) {
+    this.diag("echo", { r: rows, c: cols });
     this.lastRows = rows;
     this.lastCols = cols;
     const admitted = this.admittedEcho;
     this.admittedEcho = true;
-    if (rows !== this.term.rows || cols !== this.term.cols) {
-      if (this.pendingViewport === null) {
-        const buffer = this.term.buffer.active;
-        const atBottom = buffer.viewportY >= buffer.baseY;
-        let marker = null;
-        if (!atBottom) {
-          try {
-            marker = this.term.registerMarker(viewportMarkerOffset(buffer));
-          } catch {
-          }
-        }
-        this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
-      }
-      this.cancelViewportRestoreFrame();
-      try {
-        this.term.resize(cols, rows);
-      } catch {
-      }
-      if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
-        if (!admitted) {
-          this.reassertHostFit();
-        } else {
-          const now = Date.now();
-          const key = `${rows}x${cols}`;
-          const last = this.contestedEchoes.get(key);
-          if (last === void 0 || now - last >= FOREIGN_ECHO_YIELD_MS) {
-            for (const [k, at] of this.contestedEchoes) {
-              if (now - at >= FOREIGN_ECHO_YIELD_MS) {
-                this.contestedEchoes.delete(k);
-              }
-            }
-            this.contestedEchoes.set(key, now);
-            this.reassertHostFit();
-          } else {
-            this.cancelVisibleFitFrame();
-            this.owedForceResize = false;
-          }
+    if (rows === this.term.rows && cols === this.term.cols) {
+      return;
+    }
+    if (this.pendingViewport === null) {
+      const buffer = this.term.buffer.active;
+      const atBottom = buffer.viewportY >= buffer.baseY;
+      let marker = null;
+      if (!atBottom) {
+        try {
+          marker = this.term.registerMarker(viewportMarkerOffset(buffer));
+        } catch {
         }
       }
+      this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+      this.diag("vp-cap", { atBottom });
+    }
+    if (this.container.clientWidth <= 0 || this.container.clientHeight <= 0) {
+      this.diag("echo-hidden", { r: rows, c: cols });
+      this.applyForeignEchoToEmulator(rows, cols);
+      return;
+    }
+    if (!admitted) {
+      this.diag("echo-admit", { r: rows, c: cols });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
+      }
+      return;
+    }
+    const now = Date.now();
+    const key = `${rows}x${cols}`;
+    const last = this.contestedEchoes.get(key);
+    if (last === void 0 || now - last >= FOREIGN_ECHO_YIELD_MS) {
+      for (const [k, at] of this.contestedEchoes) {
+        if (now - at >= FOREIGN_ECHO_YIELD_MS) {
+          this.contestedEchoes.delete(k);
+        }
+      }
+      this.contestedEchoes.set(key, now);
+      this.diag("echo-contest", { key, dt: last === void 0 ? -1 : Math.round(now - last) });
+      if (!this.reassertHostFit()) {
+        this.applyForeignEchoToEmulator(rows, cols);
+      }
+      return;
+    }
+    this.diag("echo-yield", { key, dt: Math.round(now - last) });
+    this.cancelVisibleFitFrame();
+    this.fitEpoch += 1;
+    this.owedForceResize = false;
+    this.applyForeignEchoToEmulator(rows, cols);
+  }
+  /** Applies a foreign grid the pane has accepted as authoritative — the
+   *  yielded concession, a pane too hidden to contest, or the transient
+   *  apply while an unmeasurable host's reclaim retries through the pair. A
+   *  contested echo never reaches this: reassertHostFit refits the emulator
+   *  in the same task, so resizing here would only churn the buffer. */
+  applyForeignEchoToEmulator(rows, cols) {
+    this.cancelViewportRestoreFrame();
+    try {
+      this.term.resize(cols, rows);
+    } catch {
     }
   }
   /** Re-asserts this host's fit after a foreign echo moved the emulator — in
@@ -12871,6 +12947,7 @@ var AttachTerminal = class {
    *  owed (a starved twin marks the page parked and the wake probe alone
    *  owns the flush — never a timer poll). */
   reassertHostFit() {
+    this.diag("reassert", { parked: this.parked });
     if (this.parked === false) {
       this.parked = null;
     }
@@ -12878,6 +12955,21 @@ var AttachTerminal = class {
     if (!settled || this.parked === null) {
       this.scheduleVisibleFit();
     }
+    return settled;
+  }
+  /** Appends one #6964 trace entry when the page opted in — see the module
+   *  header above. Every arm, delivery, decision and write of the resize
+   *  machinery funnels here so a late OpResize names its producer. */
+  diag(ev, d) {
+    const w = globalThis.window;
+    if (w === void 0 || w.__afTermDiag !== true) {
+      return;
+    }
+    const trace = w.__afTermTrace ?? (w.__afTermTrace = []);
+    if (trace.length >= TERM_DIAG_LIMIT) {
+      return;
+    }
+    trace.push({ t: holdClockMs(), id: this.diagId, ev, d, site: termDiagSite() });
   }
   /** Writes a frame if the socket can carry one right now. Returns whether it
    *  went out, so the ONE caller whose payload must not be lost — typed input —
