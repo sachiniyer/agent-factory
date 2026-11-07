@@ -563,6 +563,125 @@ func TestHandleLimitRetry_NonLimitAutomaticSwapShowsNoResendRow(t *testing.T) {
 	require.Equal(t, daemon.ConfirmHandoffDeliveryRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotConfirm)
 }
 
+// A startup-unknown manual swap OFF its limit wall is still an honest
+// resend: the committed-swap bypass admits the explicit retry and
+// BeginManualAccountSwap skips the startup check, so the daemon re-pastes
+// the pending mission even though the row is not parked — the "Retry send"
+// label stays truthful (#6800 follow-up).
+func TestHandleLimitRetry_StartupUnknownManualSwapOffLimitOffersHonestRetrySendLabel(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveRunning
+	data.StartupStateUnknown = true
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: true, Mission: "continue", From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus: session.PromptCouldNotConfirm,
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	require.False(t, inst.LimitReached(), "fixture: the row is not parked at a usage-limit wall")
+	require.True(t, inst.StartupStateUnknown(), "fixture: the replacement's startup went blind")
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "Row 0 is the resume/resend and Row 1 is the confirm")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, rendered, "Retry send",
+		"the daemon resends the committed manual mission past the startup gate — Row 0 must say so")
+	require.NotContains(t, rendered, "not resent")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "Row 0 dispatches the resume (the resend) against the captured identity")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
+// An agent handoff parked at its limit on a startup-unknown row is NOT a
+// resend: retryPendingHandoff's LiveLimitReached arm transfers the mission
+// into the scheduled limit retry (SetPrompt + clear + persist) and returns
+// unperformed without submitting. Row 0 must therefore carry the truthful
+// no-resend label — "Resume from limit — the pending mission is not
+// resent" — not "Retry send" (#6800 follow-up).
+func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsResumeNotResend(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "gemini",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveLimitReached
+	data.LimitResetAt = time.Now().Add(time.Hour)
+	data.StartupStateUnknown = true
+	data.PendingHandoffMission = "continue the inherited work"
+	data.HandoffDeliveryStatus = session.PromptCouldNotConfirm
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at its usage-limit wall")
+	require.True(t, inst.StartupStateUnknown(), "fixture: the replacement's startup went blind")
+	require.True(t, inst.CanConfirmPendingHandoffDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "Row 0 is the resume and Row 1 is the confirm")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.NotContains(t, rendered, "Retry send",
+		"the daemon's limit arm transfers the mission to scheduled retry without submitting — Row 0 must not promise a resend")
+	require.Contains(t, rendered, "Resume from limit",
+		"the truthful label for a parked handoff whose resume transfers rather than resends")
+	require.Contains(t, rendered, "not resent")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "Row 0 dispatches the resume (the transfer) against the captured identity")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
 // A manual retry retains its target while the tea.Cmd waits to run. If a
 // snapshot replaces the selected row with a different session that reused the
 // title in that window, the pending retry must not deliver the old prompt into

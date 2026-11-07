@@ -337,6 +337,10 @@ func TestCanRetryPendingManualAccountSwapDelivery(t *testing.T) {
 			i.startupStateUnknown = true
 		}, want: true},
 		{name: "startup-unknown on a running row — the committed swap still resends", mutate: func(i *Instance) { i.startupStateUnknown = true }, want: true},
+		{name: "startup-unknown on a dead row stays refused — restore/kill owns it", mutate: func(i *Instance) { i.liveness = LiveDead; i.startupStateUnknown = true }},
+		{name: "startup-unknown on a lost row stays refused", mutate: func(i *Instance) { i.liveness = LiveLost; i.startupStateUnknown = true }},
+		{name: "startup-unknown on an archived row stays refused", mutate: func(i *Instance) { i.liveness = LiveArchived; i.startupStateUnknown = true }},
+		{name: "startup-unknown with no proven liveness stays refused", mutate: func(i *Instance) { i.liveness = LivenessUnset; i.startupStateUnknown = true }},
 		{name: "retry in progress", mutate: func(i *Instance) { i.inFlightOp = OpRespawning }},
 		{name: "kill tombstone", mutate: func(i *Instance) { i.userKilled = true }},
 		{name: "lost", mutate: func(i *Instance) { i.liveness = LiveLost }},
