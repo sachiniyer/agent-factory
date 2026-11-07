@@ -265,6 +265,12 @@ var sensitiveJSONKeys = map[string]bool{
 	// per-observation spelling inside account_limit_observations and the
 	// live-claim spelling beside it (#6959).
 	"evidence": true, "limit_reset_evidence": true,
+	// limit_banner_prefix and banner_prefix are pane content captured above a
+	// usage-limit banner — the anchor the stale-read decision compares (#6959).
+	// last_limit_wall drops the shadow claim wholesale: on a record this path
+	// could not parse its per-field layout is not worth relying on, and the
+	// marker still tells triage a wall claim was recorded.
+	"limit_banner_prefix": true, "banner_prefix": true, "last_limit_wall": true,
 	// attention mirrors the typed path, which blanks Attention.Reason: the agent
 	// writes it as free text about the user's work. The whole object goes here
 	// because a record the typed decode rejected may hold the reason elsewhere.

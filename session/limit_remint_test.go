@@ -1,6 +1,7 @@
 package session
 
 import (
+	"encoding/json"
 	"testing"
 	"time"
 
@@ -33,6 +34,16 @@ func clockReset(sightedAt time.Time) time.Time {
 		day = day.Add(24 * time.Hour)
 	}
 	return day
+}
+
+// freezeInstanceNow pins instanceNow at the instant the test needs — the
+// residue and expiry decisions compare the recorded reset against the
+// reading clock, and the parked fixture's instant is a fixed 2026 date the
+// process clock will never reach.
+func freezeInstanceNow(at time.Time) func() {
+	prev := instanceNow
+	instanceNow = func() time.Time { return at }
+	return func() { instanceNow = prev }
 }
 
 // requireParkedReset asserts the row is parked and its stored reset is the
@@ -68,24 +79,34 @@ func TestLimitPark_RereadSameBannerKeepsReset_PlainResume(t *testing.T) {
 		{"named account", "work"},
 		{"ambient identity", ""},
 	} {
-		t.Run(tc.name+" re-park after the resume's clear", func(t *testing.T) {
+		t.Run(tc.name+" residue after the send landed is not a wall", func(t *testing.T) {
+			// The resume send has landed and the wall cleared; the recorded
+			// reset is now past, so the still-visible banner is residue — the
+			// poll must never re-park the row onto the claim that already
+			// fired. Without this the row re-parks, the sweep's retry state
+			// resets to a due episode, and the prompt replays on every poll
+			// (#6959 review).
+			defer freezeInstanceNow(reReadAt)()
 			inst := &Instance{Program: tmux.ProgramClaude, Account: tc.account}
 			inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
 			requireParkedReset(t, inst, parked)
-
-			// resumeFromLimitLockedOutcome's send lands and the retry clears
-			// the wall; the unchanged banner still on the pane is then
-			// re-detected at the later clock.
 			inst.ClearLimitReached()
-			require.True(t, inst.SetLimitReachedAtEpoch(rolled, clockResetEvidence, staleBanner, inst.stateEpoch))
 
-			requireParkedReset(t, inst, parked)
+			require.False(t, inst.SetLimitReachedAtEpoch(rolled, clockResetEvidence, staleBanner, inst.stateEpoch),
+				"the row's own expired parked banner is residue, not a wall")
+			require.False(t, inst.LimitReached(), "residue must never re-park the row")
 			if tc.account != "" {
 				observations := inst.AccountLimitObservations()
 				require.Len(t, observations, 1)
 				require.True(t, observations[0].ResetAt.Equal(parked),
 					"the durable wall claim must keep the first parse: got %v", observations[0].ResetAt)
 			}
+
+			// A genuinely new sighting — a banner printed BELOW the residue —
+			// still parks with its own parse.
+			newBanner := LimitBanner{Prefix: staleBanner.Prefix + "banner line\n", Count: 2}
+			require.True(t, inst.SetLimitReachedAtEpoch(rolled, clockResetEvidence, newBanner, inst.stateEpoch))
+			requireParkedReset(t, inst, rolled)
 		})
 
 		t.Run(tc.name+" poll re-read while parked", func(t *testing.T) {
@@ -224,8 +245,10 @@ func TestLimitPark_CommittedSwapCopyKeepsRecordedReset(t *testing.T) {
 	requireParkedReset(t, inst, parked)
 
 	// A refused retry's re-admission hands the copy the wall's own phrase —
-	// the first parse stays authoritative for the same claim.
-	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, rolled, clockResetEvidence, sightedAt.Add(3*time.Hour)))
+	// the first parse stays authoritative for the same claim. The copy's
+	// sighting stamps no newer than the row's own record — a fresher source
+	// instant would make the copy genuinely newer evidence (#6959 review).
+	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, rolled, clockResetEvidence, instanceNow().Add(-time.Minute)))
 	requireParkedReset(t, inst, parked)
 	observations := inst.AccountLimitObservations()
 	require.Len(t, observations, 1)
@@ -391,4 +414,149 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 		require.True(t, obs[0].ResetAt.Equal(later),
 			"the durable row must tighten to the new wall's own instant, not keep yesterday's")
 	})
+}
+
+// TestLimitPark_RestartKeepsRecordedWall is the restart arm of #6959: the
+// stale-read decision must survive a daemon restart. A parked swap row's
+// first same-pane re-read after the restart used to be classified fresh —
+// the banner anchor and "last wall" shadow lived only in memory — and rolled
+// the reset forward. The persisted anchor and shadow now decide exactly as
+// they did before the restart; a record too old to carry the anchor still
+// recognizes its wall by the reset phrase it consumed.
+func TestLimitPark_RestartKeepsRecordedWall(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	reReadAt := parked.Add(3 * time.Minute)
+	rolled := clockReset(reReadAt)
+
+	restore := func(t *testing.T, inst *Instance) *Instance {
+		t.Helper()
+		data := inst.ToInstanceData()
+		encoded, err := json.Marshal(data)
+		require.NoError(t, err)
+		var decoded InstanceData
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		// The restart half the test needs is the limit-claim and shadow
+		// restore; the worktree machinery is not under test, so mark the
+		// record startup-unknown to skip its strict empty-path check.
+		decoded.StartupStateUnknown = true
+		restored, err := FromInstanceData(decoded)
+		require.NoError(t, err)
+		return restored
+	}
+
+	t.Run("manual swap: persisted anchor recognizes the same pane", func(t *testing.T) {
+		inst := &Instance{
+			Program: tmux.ProgramClaude, Account: "personal", Path: initTempGitRepo(t),
+			liveness: LiveRunning, inFlightOp: OpRespawning,
+			pendingAccountSwap: &AccountSwapData{
+				Manual: true, From: "work", To: "personal",
+				ReplacementPanesStarted: true,
+				MissionDeliveryStatus:   PromptCouldNotConfirm,
+			},
+		}
+		require.NoError(t, inst.ParkManualAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, inst, parked)
+
+		restored := restore(t, inst)
+		require.True(t, restored.LimitReached(), "the parked wall itself is durable")
+		// The restart recovery re-arms the swap fence before the retry; the
+		// in-memory op is what the park guard consults, so the fixture arms it
+		// the way recovery does.
+		restored.inFlightOp = OpRespawning
+		require.NoError(t, restored.ParkManualAccountSwapAtLimit(rolled, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, restored, parked)
+		observations := restored.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(parked),
+			"a restarted same-pane re-read must keep the first parse: got %v", observations[0].ResetAt)
+	})
+
+	t.Run("automatic swap: persisted anchor recognizes the same pane", func(t *testing.T) {
+		inst := automaticAccountSwapLimitInstance("personal")
+		inst.Path = initTempGitRepo(t)
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, inst, parked)
+
+		restored := restore(t, inst)
+		restored.inFlightOp = OpRespawning
+		require.NoError(t, restored.ParkAutomaticAccountSwapAtLimit(rolled, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, restored, parked)
+	})
+
+	t.Run("pre-anchor record: the durable phrase still recognizes its wall", func(t *testing.T) {
+		// A row parked before the banner anchor became durable restores with
+		// no anchor at all — a missing anchor is not evidence of a new banner,
+		// so the reset phrase is what still proves the re-read.
+		inst := automaticAccountSwapLimitInstance("personal")
+		inst.Path = initTempGitRepo(t)
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		inst.limitBannerPrefix = "" // simulate the row an older binary wrote
+		inst.limitBannerCount = 0
+		inst.lastLimitWall = limitWallClaim{} // and no serialized shadow either
+		data := inst.ToInstanceData()
+		require.Empty(t, data.LimitBannerPrefix, "pre-anchor rows serialize no anchor")
+		var decoded InstanceData
+		encoded, err := json.Marshal(data)
+		require.NoError(t, err)
+		require.NoError(t, json.Unmarshal(encoded, &decoded))
+		decoded.StartupStateUnknown = true
+		restored, err := FromInstanceData(decoded)
+		require.NoError(t, err)
+
+		restored.inFlightOp = OpRespawning
+		require.NoError(t, restored.ParkAutomaticAccountSwapAtLimit(rolled, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, restored, parked)
+	})
+}
+
+// TestLimitPark_LiveClaimOrdering is the #6959 review's live-claim arm: a
+// committed copy whose source sighted the wall AFTER the parked row recorded
+// its claim is fresher evidence and must stand over the row's own parse — the
+// same provenance rule the durable ledger arm already applies.
+func TestLimitPark_LiveClaimOrdering(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 7, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)     // the row's own 11-07 record
+	later := parked.Add(24 * time.Hour) // the sibling's 11-08 sighting
+
+	inst := automaticAccountSwapLimitInstance("personal")
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+	requireParkedReset(t, inst, parked)
+
+	// A committed copy carrying the source's newer sighting instant: the
+	// row's live claim is the OLDER record of this wall, so the copy's own
+	// reset applies rather than the stale parked one.
+	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, later, clockResetEvidence, instanceNow().Add(2*time.Hour)))
+	requireParkedReset(t, inst, later)
+}
+
+// TestLimitPark_RecordedWallExpired is the readiness arm of #6959: at
+// reset+grace the still-visible parked banner must read as residue so the
+// retry's send proceeds past it. A banner the row never recorded — or one
+// printed below the recorded one — remains a live wall.
+func TestLimitPark_RecordedWallExpired(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	reReadAt := parked.Add(3 * time.Minute)
+	defer freezeInstanceNow(reReadAt)()
+
+	inst := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+	requireParkedReset(t, inst, parked)
+
+	require.True(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+		"the row's own parked banner past its reset is residue — readiness must send past it")
+
+	// A banner printed BELOW the recorded one is a genuinely new wall.
+	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix+"banner line\n", 2, clockResetEvidence),
+		"a newer emission is a live wall, not residue")
+	// A differently-worded claim at the same position is a new wall.
+	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, "try again in 2 hours"),
+		"a re-worded clause is a live wall, not residue")
+
+	// Before the reset passes the same banner is still the claimed wall —
+	// the #6956 wait must keep holding it.
+	defer freezeInstanceNow(parked.Add(-time.Minute))()
+	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+		"a banner whose claimed reset has not passed is still a wall")
 }

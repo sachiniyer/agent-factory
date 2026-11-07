@@ -260,6 +260,20 @@ type InstanceData struct {
 	// including the first poll after a daemon restart. Empty when the stored
 	// reset came from a path that observed no phrase.
 	LimitResetEvidence string `json:"limit_reset_evidence,omitempty"`
+	// LimitBannerPrefix and LimitBannerCount are the detector's anchor for the
+	// banner the LiveLimitReached claim parked on (#6823) — the tail of the
+	// pane bytes above the last match and the match count — durable since
+	// #6959 so a restart's first same-pane re-read still proves the banner is
+	// the recorded one. Prefix is bounded by limitWallPrefixPersistMax: the
+	// position compare only consumes the bytes immediately above the banner.
+	LimitBannerPrefix string `json:"limit_banner_prefix,omitempty"`
+	LimitBannerCount  int    `json:"limit_banner_count,omitempty"`
+	// LastLimitWall is the durable "last wall" shadow — the claim the row
+	// last parked on, kept in every liveness past ClearLimitReached (#6959).
+	// It is what makes the stale-read and residue decisions identical across
+	// a daemon restart: a restarted row recognizes the banner it parked on
+	// rather than minting a new wall from a missing in-memory anchor.
+	LastLimitWall *LimitWallClaimData `json:"last_limit_wall,omitempty"`
 	// AccountLimitObservations retain quota walls after a successful identity
 	// replacement clears the session's current limit liveness. Candidate
 	// selection uses these per agent/account observations until a known reset

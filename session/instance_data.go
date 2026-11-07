@@ -172,12 +172,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 	// limit-blocked (#1146). Gating on the liveness keeps a recovered session
 	// from carrying a stale reset time to disk or into the snapshot — the
 	// in-memory field lingers after ClearLimitReached but is never serialized.
-	if i.liveness == LiveLimitReached {
-		data.LimitResetAt = i.limitResetAt
-		data.LimitResetEvidence = i.limitResetEvidence
-		data.LimitAgent = i.limitAgent
-		data.LimitAccount = i.limitAccount
-	}
+	i.limitClaimsIntoData(&data)
 
 	// Unlike the reset time above, this is NOT gated on a liveness: whether the run
 	// is still in flight is meaningful in every state (#1892), and gating it would
@@ -534,6 +529,9 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		limitResetEvidence:       data.LimitResetEvidence,
 		limitAgent:               limitAgent,
 		limitAccount:             limitAccount,
+		limitBannerPrefix:        data.LimitBannerPrefix,
+		limitBannerCount:         data.LimitBannerCount,
+		lastLimitWall:            limitWallClaimFromData(data.LastLimitWall),
 		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
@@ -608,6 +606,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 	}
 	instance.dropAttentionIfStoppedLocked()
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
+	instance.hydrateLimitWallShadowOnRestore()
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot
 	// owe its own teardown — mirroring the serialize gate — so a marker that

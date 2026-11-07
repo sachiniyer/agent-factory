@@ -498,6 +498,25 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 			d.AccountLimitObservations[i].Evidence = redactedMarker
 		}
 	}
+	// LimitBannerPrefix and LastLimitWall.BannerPrefix are pane content
+	// captured above the wall's banner — the same class the typed path marks
+	// elsewhere. LastLimitWall's Evidence and Account take the same markers
+	// as their live-claim and ledger spellings above (#6959); its Agent stays
+	// verbatim as the bounded enum.
+	if d.LimitBannerPrefix != "" {
+		d.LimitBannerPrefix = redactedMarker
+	}
+	if d.LastLimitWall != nil {
+		if d.LastLimitWall.Account != "" {
+			d.LastLimitWall.Account = redactedMarker
+		}
+		if d.LastLimitWall.Evidence != "" {
+			d.LastLimitWall.Evidence = redactedMarker
+		}
+		if d.LastLimitWall.BannerPrefix != "" {
+			d.LastLimitWall.BannerPrefix = redactedMarker
+		}
+	}
 	if d.Prompt != "" {
 		d.Prompt = redactedMarker
 	}

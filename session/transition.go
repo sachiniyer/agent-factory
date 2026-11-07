@@ -820,7 +820,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// claim may veto.
 		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
 			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached,
-			ev.freshRuntime, time.Time{})
+			ev.freshRuntime, time.Time{}, time.Time{})
 		i.limitResetAt = resetAt
 		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix

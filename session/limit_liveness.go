@@ -45,6 +45,147 @@ type limitWallClaim struct {
 	banner   LimitBanner
 }
 
+// limitWallClaimsLocked is the row's recorded wall knowledge: the live claim
+// while it is parked, and the shadow the last park left behind once it is not.
+// Both describe walls the row ITSELF recorded — the claims a residue check
+// compares a sighting against. Caller holds i.mu.
+func (i *Instance) limitWallClaimsLocked() [2]limitWallClaim {
+	live := limitWallClaim{}
+	if i.liveness == LiveLimitReached {
+		live = limitWallClaim{
+			agent: i.limitAgent, account: i.limitAccount,
+			resetAt: i.limitResetAt, evidence: i.limitResetEvidence,
+			banner: LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+		}
+	}
+	return [2]limitWallClaim{live, i.lastLimitWall}
+}
+
+// limitWallResidueLocked reports whether a sighting is a re-read of the row's
+// OWN recorded wall — its live claim while parked, or the shadow the last
+// park left behind — whose claimed reset has already passed. Such a sighting
+// is residue: the pane merely still displays the emission that carried the
+// expired claim, and treating it as a wall re-parks the row onto a deadline
+// that already fired — the resume loop's send → clear → re-park → send cycle
+// that replays the prompt on every idle poll (#6959 review).
+//
+// Residue must be PROVEN, not inferred: the sighting must sit at the recorded
+// banner's position without a grown match count (a banner printed below is a
+// genuinely new wall), and carry no phrase contradicting the recorded claim.
+// A claim that recorded no anchor still proves residue by phrase alone — the
+// same fallback sendPathReSightingLocked uses, since a missing in-memory
+// anchor is not evidence of a new banner. A claim whose reset is unknown or
+// still pending keeps its wall: only an EXPIRED claim makes the emission
+// residue. Caller holds i.mu.
+func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, now time.Time) bool {
+	agent := i.currentAgentNameLocked()
+	for _, c := range i.limitWallClaimsLocked() {
+		if c.agent != agent || c.account != i.Account {
+			continue
+		}
+		anchored := sameLimitBannerPosition(c.banner.Prefix, banner.Prefix) &&
+			!(c.banner.Count > 0 && banner.Count > c.banner.Count)
+		if !anchored && !(c.banner.Prefix == "" && evidence != "" && evidence == c.evidence) {
+			continue
+		}
+		if evidence != "" && c.evidence != "" && evidence != c.evidence {
+			continue
+		}
+		if !c.resetAt.IsZero() && !c.resetAt.After(now) {
+			return true
+		}
+	}
+	return false
+}
+
+// limitWallPrefixPersistMax bounds the anchor tail serialized beside a wall
+// claim. The position compare consumes only the bytes immediately above the
+// banner, so a few screenfuls back is all the stale-read decision needs; the
+// full capture a sighting produced can be far larger than a record row should
+// carry.
+const limitWallPrefixPersistMax = 2048
+
+// limitWallPrefixTail bounds a serialized banner anchor to its trailing bytes
+// — the end nearest the banner, which is what the position compare reads.
+func limitWallPrefixTail(prefix string) string {
+	if len(prefix) <= limitWallPrefixPersistMax {
+		return prefix
+	}
+	return prefix[len(prefix)-limitWallPrefixPersistMax:]
+}
+
+// limitWallClaimToData and limitWallClaimFromData convert the "last wall"
+// shadow between its in-memory and durable shapes.
+func limitWallClaimToData(w limitWallClaim) LimitWallClaimData {
+	if w.agent == "" && w.resetAt.IsZero() && w.evidence == "" &&
+		w.banner.Prefix == "" && w.banner.Count == 0 {
+		return LimitWallClaimData{}
+	}
+	return LimitWallClaimData{
+		Agent: w.agent, Account: w.account, ResetAt: w.resetAt,
+		Evidence:     w.evidence,
+		BannerPrefix: limitWallPrefixTail(w.banner.Prefix), BannerCount: w.banner.Count,
+	}
+}
+
+func limitWallClaimFromData(d *LimitWallClaimData) limitWallClaim {
+	if d == nil {
+		return limitWallClaim{}
+	}
+	return limitWallClaim{
+		agent: d.Agent, account: d.Account, resetAt: d.ResetAt,
+		evidence: d.Evidence,
+		banner:   LimitBanner{Prefix: d.BannerPrefix, Count: d.BannerCount},
+	}
+}
+
+// limitClaimsIntoData writes the limit-claim fields into the serialized row:
+// the live claim and its banner anchor while LiveLimitReached (the same gate
+// as LimitResetAt/ToInstanceData), and the "last wall" shadow unconditionally
+// — a cleared row's residue knowledge is exactly what a restart must keep
+// (#6959). Caller holds i.mu.
+func (i *Instance) limitClaimsIntoData(data *InstanceData) {
+	if i.liveness == LiveLimitReached {
+		data.LimitResetAt = i.limitResetAt
+		data.LimitResetEvidence = i.limitResetEvidence
+		data.LimitAgent = i.limitAgent
+		data.LimitAccount = i.limitAccount
+		data.LimitBannerPrefix = limitWallPrefixTail(i.limitBannerPrefix)
+		data.LimitBannerCount = i.limitBannerCount
+	}
+	if wall := limitWallClaimToData(i.lastLimitWall); !wall.IsZero() {
+		data.LastLimitWall = &wall
+	}
+}
+
+// hydrateLimitWallShadowOnRestore fills the shadow from the live claim when a
+// restored row is parked but serialized no shadow — a row parked by a build
+// that predates LastLimitWall still owns exactly one wall claim, its live
+// one, and the residue and stale-read decisions must see the same wall after
+// the restart they saw before (#6959).
+func (i *Instance) hydrateLimitWallShadowOnRestore() {
+	if i.liveness == LiveLimitReached && i.lastLimitWall.agent == "" {
+		i.lastLimitWall = limitWallClaim{
+			agent: i.limitAgent, account: i.limitAccount,
+			resetAt: i.limitResetAt, evidence: i.limitResetEvidence,
+			banner: LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+		}
+	}
+}
+
+// RecordedLimitWallExpired reports whether the sighted banner is the row's own
+// recorded usage-limit wall whose claimed reset has already passed — residue
+// left in the capture, not a wall the send must refuse (#6959 review). The
+// readiness wait consults it before honoring a LimitReachedError: a parked
+// row at reset+grace sends past the banner it already parked on, and only a
+// banner the row never recorded is a live wall.
+func (i *Instance) RecordedLimitWallExpired(prefix string, count int, evidence string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.limitWallResidueLocked(
+		LimitBanner{Prefix: prefix, Count: count}, evidence, instanceNow())
+}
+
 // SetLimitReached marks the instance blocked on a usage-limit wall (#1146): it
 // sets the LiveLimitReached liveness and stores the parsed reset time (zero
 // when the banner carried none) for the sidebar badge and the auto-resume
@@ -244,8 +385,17 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 		return false
 	}
 	agent := i.currentAgentNameLocked()
+	if i.liveness != LiveLimitReached &&
+		i.limitWallResidueLocked(banner, evidence, instanceNow()) {
+		// The pane still shows the banner the row already parked on — and its
+		// claimed reset has already passed. That sighting is residue, never a
+		// wall: a park here re-arms the resume sweep's send on an expired
+		// claim, replaying the prompt on every idle poll (#6959 review). Only
+		// a banner the row never recorded parks.
+		return false
+	}
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		i.liveness == LiveLimitReached, false, time.Time{})
+		i.liveness == LiveLimitReached, false, time.Time{}, time.Time{})
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -318,16 +468,24 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 // phrase match: a copy whose source observed the wall AFTER this row's own
 // record of that claim is fresher evidence, so the source's resolved
 // deadline stands rather than the row's older one; a copy carrying nothing
-// newer than the record borrows the recorded claim.
+// newer than the record borrows the recorded claim. ordSightedAt is the same
+// source instant, but only when the sighting carries external provenance —
+// the committed twin passes its source instant, while every self-read
+// sighting passes zero, since the row's own re-read clock is not new
+// evidence to order its claim against (#6959 review). It orders the live
+// arm the same way the ledger arm orders the durable row: a parked row must
+// not let a sibling's newer same-phrase observation be vetoed by its own
+// older claim.
 //
 // A sighting none of those recognize keeps its own parse: a genuinely new
 // limit fact parks with its own reset.
-func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked, freshEvidence bool, sightedAt time.Time) (time.Time, string) {
+func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked, freshEvidence bool, sightedAt, ordSightedAt time.Time) (time.Time, string) {
 	if freshEvidence {
 		return resetAt, evidence
 	}
 	if parked && i.limitAgent == agent && i.limitAccount == i.Account &&
-		evidence != "" && evidence == i.limitResetEvidence {
+		evidence != "" && evidence == i.limitResetEvidence &&
+		!ordSightedAt.After(i.accountLimitObservedAtLocked(agent, resetAt)) {
 		return i.limitResetAt, i.limitResetEvidence
 	}
 	if w := i.lastLimitWall; w.agent == agent && w.account == i.Account &&
@@ -362,6 +520,23 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 		}
 	}
 	return resetAt, evidence
+}
+
+// accountLimitObservedAtLocked is the sighting instant the durable ledger
+// carries for this identity's same-reset-kind claim — the record a copied
+// sighting must not postdate to borrow the recorded claim: a copy whose
+// source re-observed the wall AFTER the row's own record is fresher evidence
+// and stands on its own (#6959 review). Zero when no row matches. Caller
+// holds i.mu.
+func (i *Instance) accountLimitObservedAtLocked(agent string, resetAt time.Time) time.Time {
+	for idx := range i.accountLimitObservations {
+		observation := &i.accountLimitObservations[idx]
+		if observation.Agent == agent && observation.Account == i.Account &&
+			observation.ResetAt.IsZero() == resetAt.IsZero() {
+			return observation.ObservedAt
+		}
+	}
+	return time.Time{}
 }
 
 // attributeLimitIdentityLocked publishes which runtime's identity produced the

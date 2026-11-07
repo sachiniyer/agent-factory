@@ -155,3 +155,34 @@ func AccountLimitObservationRetracted(observation AccountLimitObservationData, r
 	}
 	return true
 }
+
+// LimitWallClaimData is the durable shape of the "last wall" shadow — the
+// claim the row last parked on, kept past ClearLimitReached so a re-read of
+// the unchanged banner is recognized as the same observation (#6959). In
+// memory it lives only for the process's life; serializing it is what keeps
+// the stale-read and residue decisions identical across a daemon restart: a
+// restarted row must recognize the banner it parked on rather than treating
+// the missing in-memory anchor as evidence of a new one. Unlike the
+// LiveLimitReached-gated claim fields it is written in every liveness —
+// a cleared row's shadow is exactly what the residue check needs.
+type LimitWallClaimData struct {
+	Agent   string    `json:"agent,omitempty"`
+	Account string    `json:"account,omitempty"`
+	ResetAt time.Time `json:"reset_at,omitzero"`
+	// Evidence is the reset phrase whose parse produced ResetAt — the same
+	// provider free text as LimitResetEvidence, and the durable identity a
+	// record with no banner anchor still recognizes its wall by.
+	Evidence string `json:"evidence,omitempty"`
+	// BannerPrefix is the tail of the pane bytes that sat immediately above
+	// the last banner match — bounded by limitWallPrefixPersistMax, not the
+	// full capture the in-memory sighting carried.
+	BannerPrefix string `json:"banner_prefix,omitempty"`
+	BannerCount  int    `json:"banner_count,omitempty"`
+}
+
+// IsZero reports whether the claim carries no recorded wall fact — the
+// serialize side omits the shadow pointer for one rather than writing an
+// empty object onto every row.
+func (d LimitWallClaimData) IsZero() bool {
+	return d == LimitWallClaimData{}
+}
