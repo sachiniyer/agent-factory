@@ -239,3 +239,48 @@ func TestParkedAccountSwap_PostSendResightKeepsTheLiveWall(t *testing.T) {
 	require.Equal(t, tmux.ProgramClaude, agent)
 	require.Equal(t, "personal", account)
 }
+
+// TestParkCommittedAccountSwapAtLimit_CopyNeverRewindsTheSightingInstant is the
+// second half of the copy's event-time property: a parked copy must never
+// REWIND the row's own later sighting. When the row's own runtime reported
+// the wall at T40 and a committed copy then lands with a different reset
+// claim and a source instant of T10, the overwrite must keep T40 — the row
+// genuinely saw the wall at T40, so a usage proof dated in (T10, T40) cannot
+// retract a wall the row observed AFTER the proof (#6880). Master's
+// unconditional ObservedAt overwrite rewound the row to T10, which let the
+// T30 proof retract that wall and parked the session on its own copy.
+func TestParkCommittedAccountSwapAtLimit_CopyNeverRewindsTheSightingInstant(t *testing.T) {
+	reset := time.Date(2026, 11, 10, 12, 0, 0, 0, time.UTC)
+	laterReset := reset.Add(time.Hour)
+	sightedAt := time.Date(2026, 11, 10, 8, 40, 0, 0, time.UTC)
+	sourceSightedAt := sightedAt.Add(-30 * time.Minute)
+	provenAt := sightedAt.Add(-10 * time.Minute)
+
+	clock := sightedAt
+	previous := instanceNow
+	instanceNow = func() time.Time { return clock }
+	t.Cleanup(func() { instanceNow = previous })
+
+	inst := automaticAccountSwapLimitInstance("personal")
+
+	// The row's own runtime reports the wall at T40 — a genuine sighting the
+	// row made, stamped with the pane's own instant.
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+
+	// A committed copy arrives carrying a TIGHTER reset claim — a different
+	// fact that updates the row — but stamped with its source's earlier
+	// instant T10. The retained claim may change; the sighting instant must
+	// never move backwards below a sighting the row genuinely made.
+	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, laterReset, "", sourceSightedAt))
+
+	observations := inst.AccountLimitObservations()
+	require.Len(t, observations, 1)
+	require.True(t, observations[0].ResetAt.Equal(laterReset),
+		"the tighter reset claim is the retained fact")
+	require.True(t, observations[0].ObservedAt.Equal(sightedAt),
+		"a copy must never rewind the row's own later sighting instant: got %v, want %v",
+		observations[0].ObservedAt, sightedAt)
+	require.False(t, AccountLimitObservationRetracted(observations[0],
+		AccountLimitRetractionData{Agent: tmux.ProgramClaude, Account: "personal", ProvenAt: provenAt}),
+		"a proof in (T10, T40) must not retract a wall the row saw at T40")
+}
