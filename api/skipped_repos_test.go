@@ -173,8 +173,11 @@ func TestListSessions_DaemonUpRowsFailedSkipSaysRowsFailed(t *testing.T) {
 	if !strings.Contains(msg, "could not be loaded") || !strings.Contains(msg, "3 session") || !strings.Contains(msg, "worktree or tmux") {
 		t.Fatalf("must say rows could not be loaded, carry the count, and name the cause, got: %s", msg)
 	}
-	if !strings.Contains(msg, "af sessions restore") || !strings.Contains(msg, "af sessions delete") {
-		t.Fatalf("must carry the restore/delete remedy, got: %s", msg)
+	if !strings.Contains(msg, "af sessions restore") || !strings.Contains(msg, "af sessions kill") {
+		t.Fatalf("must carry the restore/kill remedy — `af sessions delete` is not a verb (#6791), got: %s", msg)
+	}
+	if strings.Contains(msg, "af sessions delete") {
+		t.Fatalf("must not name a verb that does not exist, got: %s", msg)
 	}
 	if strings.Contains(msg, "corrupt") || strings.Contains(msg, "could not read") || strings.Contains(msg, "fix the JSON") {
 		t.Fatalf("a rows-failed repo is not a corrupt/unreadable one; must not say so, got: %s", msg)

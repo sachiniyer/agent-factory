@@ -54,6 +54,23 @@ func workspaceStateRefusal(err error) bool {
 	return errors.As(err, &refusal)
 }
 
+// unusableCleanupRefusal is a workspaceStateUnknownRefusal whose cause can
+// never be healed by retrying it: a persisted cleanup handle that cannot be
+// rebuilt at all (#6791). It still Is() ErrWorkspaceStateUnknown — the
+// workspace state is unproven, so the record is retained — but it also Is()
+// ErrCleanupHandleUnusable, so the daemon's paced kill retry RETIRES the record
+// instead of looping the same unreadable handle forever (#2737). Like
+// workspaceStateUnknownRefusal it renders only its own message: a deliberate
+// refusal is not a deadline cut, so the sentinel's "cut off by its deadline;
+// the workspace may be partially removed" prose does not prepend.
+type unusableCleanupRefusal struct{ msg string }
+
+func (r *unusableCleanupRefusal) Error() string { return r.msg }
+
+func (r *unusableCleanupRefusal) Is(target error) bool {
+	return target == ErrWorkspaceStateUnknown || target == ErrCleanupHandleUnusable
+}
+
 // worktreeRetentionError is the line teardownTabs adds when the worktree
 // action did not settle and the session state is kept for a retry. After a
 // refusal it carries no deadline prose, for the reason above; after a genuine

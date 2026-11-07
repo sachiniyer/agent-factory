@@ -309,3 +309,20 @@ func (m *Manager) finishUserKill(repoID string, instance *session.Instance) {
 		m.publishEvent(agentproto.EventSessionKilled, session.InstanceData{ID: instance.ID, Title: instance.Title})
 	}
 }
+
+// retainedKillTeardownError renders the committed-error text for a teardown
+// whose outcome is unknown — the record is kept either way, but the retry
+// claim differs by class: a healable cause is retried automatically on every
+// poll, while a cleanup handle that cannot be rebuilt is retried exactly once
+// more — the next poll's finishUserKill attempt, after which the unusable
+// cause retires the retry (#2737) — and must not promise a retry schedule that
+// does not exist (#6791). The refusal's own text names the way out in both
+// cases.
+func (m *Manager) retainedKillTeardownError(title string, teardownErr error) *mutationCommittedError {
+	if session.CleanupHandleUnusable(teardownErr) {
+		m.warn().Printf("kill of session %q could not complete its teardown; the record is kept, the daemon tries it once more on the next poll, and its cleanup handle cannot be repaired by retrying it: %v", title, teardownErr)
+		return &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact and its record kept; the daemon makes one more attempt on its next poll and then stops — its cleanup handle cannot be repaired by retrying: %w", title, teardownErr)}
+	}
+	m.warn().Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", title, teardownErr)
+	return &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", title, teardownErr)}
+}

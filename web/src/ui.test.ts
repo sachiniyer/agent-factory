@@ -803,6 +803,8 @@ test("skippedRepoRepairHint sends the operator to the same remedy as the CLI for
     "Make the file(s) readable by the user the af daemon runs as (check ownership, permissions and the disk), then restart the daemon so it re-reads them; do not delete them, they hold the hidden sessions.");
   assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.newerSchema), /Upgrade af to a version that understands the newer state file/);
   assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.rowsFailed), /Restore or delete the sessions the daemon could not load/);
+  assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.rowsFailed), /af sessions kill/,
+    "the remedy must name the verb that exists; `af sessions delete` is not a command (#6791)");
   assert.match(skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted), /Stop the af daemon, copy the corrupt file/);
   // Unknown/empty → the corrupted remedy (the older-daemon default), never blank.
   assert.equal(skippedRepoRepairHint(undefined), skippedRepoRepairHint(SKIPPED_REPO_REASON.corrupted));

@@ -25,7 +25,7 @@ const newerSchemaRepoRepairHint = "Upgrade af to a version that understands the 
 // or tmux session a Live row points at is gone, not the file (#4876). The file is
 // fine, so the operator restores or deletes the unloadable sessions, not the
 // JSON, and the daemon re-reads the complete list on the next poll.
-const rowsFailedRepoRepairHint = "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions delete <title>`; the instances.json itself is not the problem."
+const rowsFailedRepoRepairHint = "Restore or delete the sessions the daemon could not load (their worktree or tmux is gone), then the daemon re-reads the complete list on the next poll; e.g. `af sessions restore <title>` or `af sessions kill <title>`; the instances.json itself is not the problem."
 
 // skippedRepoGroups is a Snapshot's skipped set sorted by the remedy each repo
 // needs.

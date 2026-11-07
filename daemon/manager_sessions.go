@@ -279,7 +279,10 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		// on disk with this record as its only handle, so dropping the record would
 		// orphan it and take away the only handle the user has to retry through. The
 		// tombstone is already durable, so the kill stays committed: finishUserKill
-		// retries it on every poll until it succeeds, with no daemon restart needed.
+		// retries it on every poll until it succeeds, with no daemon restart needed
+		// — unless the failure can never heal by retrying (CleanupHandleUnusable),
+		// in which case the retry is retired and the message must not promise one
+		// (#2737, #6791).
 		//
 		// A KNOWN-state error must NOT retain, or the message it prints is a lie. A
 		// remote (docker/ssh/hook) session's Kill joins the in-sandbox /v1/agent/kill
@@ -300,8 +303,7 @@ func (m *Manager) killSessionRequestedBy(req KillSessionRequest, requester strin
 		teardownErr = instance.KillTrustingOwnLifecycleLock()
 		restoreCheckpoint()
 		if session.TeardownStateUnknown(teardownErr) {
-			m.warn().Printf("kill of session %q could not complete its teardown; the record is kept and the daemon will retry it: %v", req.Title, teardownErr)
-			return resolved, &mutationCommittedError{err: fmt.Errorf("kill of session %q could not finish tearing it down safely, so its workspace was left intact; the kill is recorded and will be retried automatically: %w", req.Title, teardownErr)}
+			return resolved, m.retainedKillTeardownError(req.Title, teardownErr)
 		}
 		// Checkpoint the settled live teardown BEFORE either fallible tail step.
 		// CleanupClaimedRepoGone consumes its in-memory recovery record after the
