@@ -382,16 +382,16 @@ function wantedDraft(m: Model): Draft | null {
 
 function syncStash(m: Model, fx: Effect[]): void {
   if (!m.loaded) return;
-  const want = wantedDraft(m);
-  const key = want ? draftKey(want) : null;
-  const justRestored = m.justRestored;
+  // While the doc is gone the stored draft is the kept work itself: it leaves only on
+  // Restore or Discard, and it always holds the current buffer — an edit back to the
+  // acknowledged text updates it rather than restoring what was there before. Right
+  // after a restore the same holds: the event that explains the stored draft (this
+  // doc is gone) may not have arrived yet.
+  const keep = m.stashed !== null && (m.gone || m.justRestored);
   m.justRestored = false;
+  const want = wantedDraft(m) ?? (keep ? { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" as const } : null);
+  const key = want ? draftKey(want) : null;
   if (key === m.stashed) return;
-  // A stored draft stays while its doc is gone — it is the kept work itself and
-  // leaves only on Restore or Discard — whatever the buffer==base equality says.
-  // Right after a restore it also stays: the event that explains it (the doc is
-  // gone) may not have arrived yet.
-  if (want === null && m.stashed !== null && (m.gone || justRestored)) return;
   m.stashed = key;
   fx.push(want ? { t: "stash", draft: want } : { t: "unstash" });
 }
