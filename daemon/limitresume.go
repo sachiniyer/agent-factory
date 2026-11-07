@@ -310,7 +310,11 @@ func (m *Manager) resumeLimitedSession(
 		beforeReset, _ := inst.LimitResetAt()
 		beforeEvidence := inst.LimitResetEvidence()
 		inst.ClearLimitReached()
-		m.persistPollChangeWithIdleEvidence(repoID, inst, before, beforeReset, beforeEvidence, false, false)
+		// The settle is a one-shot settlement checkpoint: a transient write
+		// failure must enroll the obligation so FlushOwedSettlements retires
+		// the durable limit block instead of leaving the row parked on disk
+		// forever (#6972, Codex).
+		m.persistPollChangeWithIdleEvidence(repoID, inst, before, beforeReset, beforeEvidence, false, true)
 		return
 	}
 	// A TUI attached to this session holds the attach pause lease, and the resume

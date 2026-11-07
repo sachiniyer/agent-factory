@@ -704,6 +704,7 @@ func (i *Instance) clearLimitReachedLocked(sent bool) {
 	// calling the unchanged banner residue (#6972).
 	i.lastLimitWall.retired = true
 	i.lastLimitWall.retiredKnown = true
+	i.limitWallUnpersisted = true
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveRunning)
 	i.limitResetAt = time.Time{}
@@ -830,5 +831,30 @@ func (i *Instance) MarkAccountLimitObservationsPersisted(written []AccountLimitO
 	defer i.mu.Unlock()
 	if slices.Equal(written, i.accountLimitObservations) {
 		i.accountLimitObsUnpersisted = false
+	}
+}
+
+// LimitWallUnpersisted reports whether the durable wall record — the parked
+// claim's anchor and tombstone, or the retired shadow — changed in memory
+// without a whole-row write carrying it yet (#6972, Codex). The poll's change
+// gate diffs liveness/reset/evidence only, so without this flag a parked
+// row's claim mutation under an unchanged liveness stays memory-only.
+func (i *Instance) LimitWallUnpersisted() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.limitWallUnpersisted
+}
+
+// MarkLimitWallPersisted records that a whole-row write carrying written has
+// landed. It clears the pending flag only when the shadow written is the one
+// now held — a wall mutation that landed after the written snapshot stays
+// pending and is written on the next tick. Both sides compare in restored
+// form so the serialized prefix tail cannot defeat the match.
+func (i *Instance) MarkLimitWallPersisted(written *LimitWallClaimData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	current := limitWallClaimToData(i.lastLimitWall)
+	if limitWallClaimFromData(written) == limitWallClaimFromData(&current) {
+		i.limitWallUnpersisted = false
 	}
 }

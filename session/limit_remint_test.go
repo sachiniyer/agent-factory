@@ -922,6 +922,34 @@ func TestLimitWallResidue_ChurnedClaimSurvivesSerialization(t *testing.T) {
 	require.False(t, restored.LimitWallPromptSent())
 }
 
+// TestLimitWallUnpersistedFlagsClaimMutation pins the durable-dirty flag the
+// poll's change gate reads (#6972, Codex): an identical re-sight flags nothing,
+// a new emission claiming the parked row flags, and the marker clears only on
+// the shadow actually written.
+func TestLimitWallUnpersistedFlagsClaimMutation(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(-time.Hour))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch))
+	require.True(t, inst.LimitWallUnpersisted(), "the park is a durable wall fact")
+	data := inst.ToInstanceData()
+	inst.MarkLimitWallPersisted(data.LastLimitWall)
+	require.False(t, inst.LimitWallUnpersisted(), "the landed write clears the flag")
+
+	// An identical re-sight rewrites the same claim — flag nothing.
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch))
+	require.False(t, inst.LimitWallUnpersisted(), "an unchanged re-sight must flag nothing")
+
+	// A grown-count same-phrase emission is a NEW wall: the claim's tombstone
+	// drops and the anchor count moves — durable changes under an unchanged
+	// liveness that the axis diff cannot see.
+	grown := LimitBanner{Prefix: staleBanner.Prefix, Count: staleBanner.Count + 1}
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, grown, inst.stateEpoch))
+	require.True(t, inst.LimitWallUnpersisted(), "a new emission's claim rewrite is a durable fact")
+}
+
 // TestForClientReadStripsLimitWallFields pins the daemonless disk fallback:
 // `af sessions list/get --json` with the daemon down reads instances.json via
 // ForClientRead, which must emit the same scrubbed shape the live path emits —

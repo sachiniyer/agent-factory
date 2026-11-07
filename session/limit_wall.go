@@ -360,8 +360,9 @@ func (i *Instance) limitClaimsIntoData(data *InstanceData) {
 // restore the wall claim it is re-parking, so under OpRespawning the shadow
 // survives the bump and the repark re-mints it. Caller holds i.mu.
 func (i *Instance) retireLimitWallShadowOnRuntimeReplaceLocked() {
-	if i.inFlightOp != OpRespawning {
+	if i.inFlightOp != OpRespawning && i.lastLimitWall != (limitWallClaim{}) {
 		i.lastLimitWall = limitWallClaim{}
+		i.limitWallUnpersisted = true
 	}
 }
 
@@ -401,6 +402,7 @@ func (i *Instance) hydrateLimitWallShadowOnRestore() {
 			runtimeGen: i.limitWallRuntimeGen, promptSent: i.limitPromptSent,
 			retiredKnown: true,
 		}
+		i.limitWallUnpersisted = true
 	}
 }
 
@@ -413,7 +415,7 @@ func (i *Instance) hydrateLimitWallShadowOnRestore() {
 // the process the wall was sighted on, not the one up at re-mint time.
 // Caller holds i.mu.
 func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner) {
-	i.lastLimitWall = limitWallClaim{
+	claim := limitWallClaim{
 		agent:      agent,
 		account:    i.Account,
 		resetAt:    resetAt,
@@ -423,4 +425,11 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 		runtimeGen: i.limitWallRuntimeGen, promptSent: i.limitPromptSent,
 		retiredKnown: true,
 	}
+	// A durable change only when the record actually differs — an unchanged
+	// re-sight rewrites the same claim and must flag nothing, or the poll
+	// would rewrite an untouched row every tick (#6802 review's invariant).
+	if claim != i.lastLimitWall {
+		i.limitWallUnpersisted = true
+	}
+	i.lastLimitWall = claim
 }

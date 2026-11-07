@@ -590,11 +590,13 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 		i.lastLimitWall.runtimePID = i.runtimePID
 		i.lastLimitWall.runtimeStartID = i.runtimeStartID
 		i.lastLimitWall.runtimeGen = i.agentRuntimeGeneration
+		i.limitWallUnpersisted = true
 	}
 	if i.liveness == LiveLimitReached {
 		i.limitWallRuntimePID = i.runtimePID
 		i.limitWallRuntimeStartID = i.runtimeStartID
 		i.limitWallRuntimeGen = i.agentRuntimeGeneration
+		i.limitWallUnpersisted = true
 	}
 	return nil
 }

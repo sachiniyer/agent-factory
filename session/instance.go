@@ -348,6 +348,14 @@ type Instance struct {
 	// show that emission again — except across the respawn fence, where
 	// ReparkLimitUnderResumeFence still reads it to restore the wall (#6972).
 	lastLimitWall limitWallClaim
+	// limitWallUnpersisted marks a durable wall-record change — a new emission
+	// claiming the parked row (new anchor, count, or tombstone), a retire, a
+	// runtime-replace drop — that no whole-row write has carried yet. The
+	// poll's durableChanged gate diffs only liveness/reset/evidence, so a
+	// parked row whose claim mutated under an unchanged liveness would stay
+	// memory-only: a tombstone cleared by a new emission, for instance, would
+	// leave the stored row answering a wall it never sent to (#6972, Codex).
+	limitWallUnpersisted bool
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
 	// accountLimitObsUnpersisted marks an observation change — a fresh wall or
