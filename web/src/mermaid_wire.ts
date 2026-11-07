@@ -14,8 +14,8 @@
 // Decoders validate the whole shape and return undefined for anything off it;
 // the listener treats that as "not for me" and ignores the message. The two
 // ends are bundled into separate builds (md_mermaid.ts lands in
-// docs-editor.js, mermaid_chunk.ts in mermaid.js), which is why the protocol
-// lives in its own leaf module both sides import.
+// docs-editor.js, mermaid_chunk.ts inline in mermaid-frame.html), which is
+// why the protocol lives in its own leaf module both sides import.
 
 export const MSG_READY = "af-mmd-ready" as const;
 export const MSG_RENDER = "af-mmd-render" as const;
@@ -71,6 +71,15 @@ export function decodeRenderRequest(data: unknown): RenderRequest | undefined {
   return { t: MSG_RENDER, id: m.id, source: m.source, theme };
 }
 
+/** Frame side, request gate: a message counts as a render request only when
+ *  it came from the EXPECTED window AND decodes — the source check lives
+ *  inside the function the listener calls, so the gate cannot be dropped at
+ *  a call site without the protocol tests failing. `expected` is
+ *  window.parent in the frame. */
+export function renderRequestFor(e: { source: unknown; data: unknown }, expected: unknown): RenderRequest | undefined {
+  return e.source === expected ? decodeRenderRequest(e.data) : undefined;
+}
+
 export function encodeFrameReply(reply: FrameReply): string {
   return JSON.stringify(reply);
 }
@@ -86,4 +95,13 @@ export function decodeFrameReply(data: unknown): FrameReply | undefined {
   if (m.ok === true && typeof m.svg === "string") return { t: MSG_RENDERED, id: m.id, ok: true, svg: m.svg };
   if (m.ok === false && typeof m.error === "string") return { t: MSG_RENDERED, id: m.id, ok: false, error: m.error };
   return undefined;
+}
+
+/** Parent side, reply gate: a message counts as a frame reply only when it
+ *  came from the render frame's own window AND decodes — same shape as
+ *  renderRequestFor, mirrored. `expected` is the frame's contentWindow (a
+ *  WindowProxy: identity is per element and cannot be spoofed by a foreign
+ *  sender). */
+export function frameReplyFor(e: { source: unknown; data: unknown }, expected: unknown): FrameReply | undefined {
+  return e.source === expected ? decodeFrameReply(e.data) : undefined;
 }

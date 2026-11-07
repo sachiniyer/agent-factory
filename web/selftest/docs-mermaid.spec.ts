@@ -1,10 +1,11 @@
 // Mermaid in the Docs view (#6642): a ```mermaid fence renders as an SVG in the
-// live preview, the mermaid library arrives in its own lazy chunk that only a
-// document containing a block fetches, an invalid diagram reports inline next
-// to its source, and a hostile diagram — click callbacks, javascript: links,
-// HTML in labels, CSS and metadata that name URLs — renders inert inside the
-// daemon's control origin and can never make the browser ask for what it names
-// (the render happens inside a srcdoc iframe whose CSP denies every fetch).
+// live preview, the mermaid library arrives inside its own lazy document that
+// only a document containing a block fetches, an invalid diagram reports
+// inline next to its source, and a hostile diagram — click callbacks,
+// javascript: links, HTML in labels, CSS and metadata that name URLs —
+// renders inert inside the daemon's control origin and can never make the
+// browser ask for what it names (the render happens inside a sandboxed frame
+// document whose CSP denies every fetch).
 import { execFileSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import { writeFile } from "node:fs/promises";
@@ -54,10 +55,10 @@ async function still(pane: Locator, info: TestInfo, name: string): Promise<void>
 test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, in both themes", async ({ page, request }, info) => {
   const mermaidLoads: string[] = [];
   page.on("request", (r) => {
-    if (r.url().includes("/lazy/mermaid.js")) mermaidLoads.push(r.url());
+    if (r.url().includes("/lazy/mermaid-frame.html")) mermaidLoads.push(r.url());
   });
   // The strip orders non-template docs alphabetically, so a-plain opens first
-  // and the mermaid chunk must stay unfetched until the b-diagram tab is chosen.
+  // and the mermaid frame must stay unfetched until the b-diagram tab is chosen.
   const pane = await openDocs(page, request, "mermaid-probe", "mermaid-plan", {
     "a-plain": "# Plain\n\nNo diagrams here — the mermaid chunk must stay unloaded.\n",
     "b-diagram": `# Diagram\n\nThe shape of the change:\n\n${fence(DIAGRAM)}\n\nShip it.\n`,
@@ -69,7 +70,7 @@ test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, i
   await pane.locator(".af-docs-tab", { hasText: "diagram" }).click();
   const mermaid = pane.locator(".cm-md-mermaid");
   await expect(mermaid.locator("svg")).toBeVisible({ timeout: 30_000 });
-  expect(mermaidLoads, "the mermaid chunk loads once, on demand").toHaveLength(1);
+  expect(mermaidLoads, "the mermaid frame document loads once, on demand").toHaveLength(1);
   await expect(mermaid.locator("svg text").filter({ hasText: "af daemon" })).toHaveCount(1);
   await expect(pane.locator(".cm-md-mermaid-errtext:visible")).toHaveCount(0);
 
@@ -81,11 +82,20 @@ test("docs mermaid: a mermaid fence renders an SVG, only when a doc holds one, i
   await pane.locator(".cm-line", { hasText: "Ship it." }).click();
   await expect(mermaid.locator("svg")).toBeVisible({ timeout: 30_000 });
 
-  await still(pane, info, "docs-mermaid.png");
-  await page.emulateMedia({ colorScheme: "dark" });
-  // The diagram is re-rendered against the dark tokens before the still.
-  await expect(mermaid).toHaveAttribute("data-mmd-theme", "dark");
-  await still(pane, info, "docs-mermaid-dark.png");
+  // Goldens are pixel-calibrated to Chromium's rasterizer — the WebKit
+  // project exercises the same render and theme path but skips the bitmap
+  // compare (its pixels legitimately differ).
+  if (info.project.name === "chromium") {
+    await still(pane, info, "docs-mermaid.png");
+    await page.emulateMedia({ colorScheme: "dark" });
+    // The diagram is re-rendered against the dark tokens before the still.
+    await expect(mermaid).toHaveAttribute("data-mmd-theme", "dark");
+    await still(pane, info, "docs-mermaid-dark.png");
+  } else {
+    await page.emulateMedia({ colorScheme: "dark" });
+    await expect(mermaid).toHaveAttribute("data-mmd-theme", "dark");
+    await expect(mermaid.locator("svg"), "the dark-theme re-render must still paint").toBeVisible({ timeout: 30_000 });
+  }
 });
 
 test("docs mermaid: an invalid diagram reports inline and keeps the document", async ({ page, request }) => {
@@ -189,7 +199,7 @@ flowchart LR
   await expect(pane.locator(".cm-content")).toContainText("End.");
 });
 
-test("docs mermaid: a render cannot make the browser ask for anything the diagram names", async ({ page, request }) => {
+test("docs mermaid: a render cannot make the browser ask for anything the diagram names", async ({ page, request, browserName }) => {
   const requests: string[] = [];
   page.on("request", (r) => requests.push(r.url()));
   const { finished, failed, cspDenied } = watchRequests(page);
@@ -273,26 +283,28 @@ flowchart LR
     "the foreignObject branch of every switch must still be dropped").toBe(0);
   // N1: the render frame's document must put the DNS-prefetch kill first —
   // anchor hosts inside label HTML are prefetched before CSP applies. The
-  // frame is an opaque origin now (#6669), so this reads the srcdoc string the
-  // element was loaded with: its first element IS the document's first.
-  const srcdoc = await page.evaluate(() => {
-    const f = [...document.querySelectorAll("iframe")].find((el) => el.srcdoc.includes("x-dns-prefetch-control"));
-    return f?.srcdoc ?? null;
-  });
+  // frame is a served document now (#6669), so this reads it off the wire.
+  const frameDoc = await (await request.get("/lazy/mermaid-frame.html")).text();
   expect(
-    srcdoc?.startsWith('<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">'),
+    frameDoc.startsWith('<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">'),
     "the x-dns-prefetch-control meta must be the frame's first element",
   ).toBe(true);
   // No diagram-chosen URL may reach the wire.
   const leakedUrls = requests.filter((u) => leaked(u, page.url(), { finished, failed, cspDenied }));
   expect(leakedUrls, "zero diagram-chosen requests reached the wire, same-origin counted").toEqual([]);
   // And the img-node probe must show its fetch attempted and denied — proof
-  // the frame's CSP engaged, not that the code path never ran.
+  // the frame's CSP engaged, not that the code path never ran. The attempt is
+  // observable only in Chromium: WebKit refuses a CSP-denied load before its
+  // network stack reports it, so nothing surfaces to watch there — a stronger
+  // denial, and the engine-level invariant (never completed) is what matters.
   const imgProbe = new URL("/af-mmd-probe/img-node.png", page.url()).href;
-  expect(
-    requests.includes(imgProbe) && (failed.has(imgProbe) || cspDenied.has(imgProbe)) && !finished.has(imgProbe),
-    "the img-node load must be attempted and denied by the render frame's CSP",
-  ).toBe(true);
+  if (browserName === "chromium") {
+    expect(
+      requests.includes(imgProbe) && (failed.has(imgProbe) || cspDenied.has(imgProbe)) && !finished.has(imgProbe),
+      "the img-node load must be attempted and denied by the render frame's CSP",
+    ).toBe(true);
+  }
+  expect(finished.has(imgProbe), "the img-node load must never complete").toBe(false);
   // Same for the state-style probe: the frame may attempt it while the svg
   // sits in the frame's scratch, but it must be denied there and never
   // complete — the page copy carries no trace of it at all (checked above).
@@ -307,28 +319,62 @@ flowchart LR
 });
 
 // The render frame's document is a separate security principal (#6669): the
-// #6644 CSP isolates what the frame may LOAD, but only sandboxing isolates its
+// frame CSP isolates what the frame may LOAD, but only sandboxing isolates its
 // PRIVILEGE. sandbox without allow-same-origin gives it an opaque origin — no
 // parent DOM, no storage or cookies, no credentials on a /v1 call — and the
 // only channel back is a postMessage carrying the SVG string, which the parent
-// validates and sanitizes before it touches the DOM.
+// validates and sanitizes before it touches the DOM. This test is the one that
+// must run in WebKit too: a srcdoc frame inherits the page's CSP, and in
+// WebKit 'self' matches nothing in an opaque origin, so the old shape rendered
+// nothing at all — the frame is a real served document now, and the daemon's
+// REAL headers (the CSP response header, not a meta) are what authorize it.
 test("docs mermaid: the render frame is an opaque origin — it cannot reach the parent or the API", async ({ page, request }) => {
+  // Every request attributed to a non-main frame, and every request carrying
+  // the opaque origin's serialized Origin — the render frame must issue none
+  // of either: its whole library is inline, and a request from it is exactly
+  // what an authenticating proxy would have to answer without credentials.
+  const frameSubresource: string[] = [];
+  const nullOrigin: string[] = [];
+  page.on("request", (r) => {
+    const f = r.frame();
+    if (f && f !== page.mainFrame() && !r.isNavigationRequest()) {
+      frameSubresource.push(`${r.method()} ${r.url()}`);
+    }
+    if (r.headers()["origin"] === "null") nullOrigin.push(r.url());
+  });
   const pane = await openDocs(page, request, "mermaid-sandbox-probe", "mermaid-sandbox-plan", {
     goals: `# Sandbox\n\n${fence(DIAGRAM)}\n\nEnd.\n`,
   });
   // The diagram still renders — the channel becoming postMessage changes
-  // nothing the document shows.
+  // nothing the document shows. This line is the WebKit regression itself:
+  // under srcdoc+inherited-CSP it timed out 30s and died.
   await expect(pane.locator(".cm-md-mermaid svg")).toBeVisible({ timeout: 30_000 });
 
-  // The render frame is the srcdoc iframe the renderer opened for the chunk.
-  const frame = page.frames().find((f) => f !== page.mainFrame() && f.url() === "about:srcdoc");
+  // The render frame is the iframe navigated to the served frame document.
+  const frame = page.frames().find((f) => f.url().endsWith("/lazy/mermaid-frame.html"));
   expect(frame, "the render frame must exist once a diagram rendered").toBeTruthy();
   if (!frame) return;
+
+  // The REAL response headers are the policy: the served document must carry
+  // its own CSP — default-src 'none' with exactly a nonce'd script-src — and
+  // the body's one script must carry that same nonce. A static-server stand-in
+  // could never check this; the daemon's header is what WebKit enforces.
+  const resp = await request.get("/lazy/mermaid-frame.html");
+  const csp = resp.headers()["content-security-policy"] ?? "";
+  expect(csp, "the frame document must arrive with its own CSP").toContain("default-src 'none'");
+  expect(csp, "the frame document must not fetch").toContain("connect-src 'none'");
+  expect(csp, "script-src is a nonce, not a blanket inline grant").not.toMatch(/script-src 'unsafe-inline'/);
+  const nonce = /script-src 'nonce-([0-9a-f]+)'/.exec(csp)?.[1];
+  expect(nonce, "script-src must be exactly one nonce source").toBeTruthy();
+  const body = await resp.text();
+  expect(body, "the body's script carries the header's nonce").toContain(`<script type="module" nonce="${nonce}">`);
+  expect(resp.headers()["access-control-allow-origin"], "no CORS grant is needed — the frame fetches nothing").toBeFalsy();
 
   // Structural: sandboxed to scripts alone — never allow-same-origin — and the
   // parent's own handle on the element sees no document through it.
   const attrs = await page.evaluate(() => {
-    const el = [...document.querySelectorAll("iframe")].find((f) => f.srcdoc.includes("x-dns-prefetch-control"));
+    const el = [...document.querySelectorAll("iframe")].find((f) =>
+      f.src.endsWith("/lazy/mermaid-frame.html"));
     if (!el) return null;
     return { sandbox: el.getAttribute("sandbox"), contentDoc: el.contentDocument !== null };
   });
@@ -336,8 +382,11 @@ test("docs mermaid: the render frame is an opaque origin — it cannot reach the
   expect(attrs?.contentDoc, "the parent must not reach the frame's document").toBe(false);
 
   // Inside the frame: an opaque origin, no reachable parent DOM, no storage.
+  // The origin probe is self.origin — the WINDOW's principal — not
+  // location.origin: on a sandboxed src document, location keeps reporting
+  // the URL's origin (both engines) while the document is genuinely opaque.
   const inside = await frame.evaluate(() => {
-    const out = { origin: location.origin } as Record<string, string>;
+    const out = { origin: self.origin } as Record<string, string>;
     try {
       out.parentDocument = parent.document === undefined ? "undefined" : typeof parent.document;
     } catch (e) {
@@ -367,4 +416,39 @@ test("docs mermaid: the render frame is an opaque origin — it cannot reach the
     }
   }, new URL(page.url()).origin);
   expect(call, "a /v1 fetch from inside the frame must never succeed").toContain("refused");
+
+  // The frame fetches NOTHING on its own — no lazy chunk, no font, nothing.
+  // That is the proxy-compatibility contract: nothing ever arrives at an
+  // authenticating reverse proxy from the opaque origin asking a question it
+  // has no credentials to answer, so a deployment that renders behind SSO
+  // keeps rendering.
+  expect(frameSubresource, "the render frame must issue zero subresource fetches").toEqual([]);
+  expect(nullOrigin, "no request may carry the opaque origin's Origin: null").toEqual([]);
+
+  // If the frame's document navigates itself, the parent must drop the whole
+  // frame — whatever lives in it next is not the renderer, and it must never
+  // see a diagram source or have a reply painted. Force the navigation from
+  // the parent (the element handle can: src is not a privileged write) and
+  // the next render must come up through a FRESH frame instead.
+  await page.evaluate(() => {
+    const el = [...document.querySelectorAll("iframe")].find((f) =>
+      f.src.endsWith("/lazy/mermaid-frame.html")) as HTMLIFrameElement | undefined;
+    if (el) el.src = "about:blank";
+  });
+  await expect
+    .poll(async () => page.evaluate(() =>
+      [...document.querySelectorAll("iframe")].some((f) =>
+        f.src.endsWith("/lazy/mermaid-frame.html") || f.src === "about:blank")),
+      { timeout: 5_000 })
+    .toBe(false);
+  await expect(pane.locator(".cm-md-mermaid svg"), "the last render stays painted — its svg is already sanitized DOM").toBeVisible();
+
+  // And the NEXT render must come up through a FRESH frame: a theme flip
+  // re-renders every mounted diagram, so this doubles as the rebuild check —
+  // the replacement window the drop refused is not the one that answers.
+  await page.emulateMedia({ colorScheme: "dark" });
+  await expect(pane.locator(".cm-md-mermaid")).toHaveAttribute("data-mmd-theme", "dark", { timeout: 30_000 });
+  const fresh = page.frames().find((f) => f.url().endsWith("/lazy/mermaid-frame.html"));
+  expect(fresh, "a fresh render frame must open for the next render").toBeTruthy();
+  expect(await fresh?.evaluate(() => self.origin), "the fresh frame is opaque too").toBe("null");
 });

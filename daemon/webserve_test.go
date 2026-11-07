@@ -6,6 +6,7 @@ import (
 	"io/fs"
 	"net/http"
 	"net/http/httptest"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -322,87 +323,83 @@ func TestServeSPA_ServiceWorkerIsStamped(t *testing.T) {
 	require.Regexp(t, `const VERSION = "[0-9a-f]{12}"`, string(body), "sw.js must carry a stamped content hash")
 }
 
-// TestServeSPA_MermaidChunksAreTheOnlyCORSAssets pins the #6669 CORS scope: the
-// Docs renderer's sandboxed srcdoc iframe has an opaque origin, so the lazy
-// mermaid chunk set is fetched cross-origin and is the ONE place the daemon
-// emits Access-Control-Allow-Origin. The test walks the WHOLE embedded tree
-// rather than naming files — a chunk hash can change on rebuild, and the
-// contract is the negative space: no other asset, and no /v1 route, ever
-// carries a grant. The API branch is wrapped in the real auth/CORS seam so the
-// API's own documented behavior is exercised too (an allow-listed origin is
-// echoed; "null" never is).
-func TestServeSPA_MermaidChunksAreTheOnlyCORSAssets(t *testing.T) {
+// TestServeSPA_MermaidFrameDocument pins the #6669 frame contract at the
+// serving layer. The Docs renderer's sandboxed iframe navigates to
+// lazy/mermaid-frame.html — a real document, not srcdoc, because WebKit gives
+// srcdoc the page's CSP where 'self' matches nothing in an opaque origin. The
+// file must arrive with its OWN CSP (a nonce'd script-src over
+// default-src 'none', everything else denied), the nonce stamped into the
+// body so no placeholder reaches the wire, and every OTHER asset must keep
+// the shell's webCSP verbatim. Expectations are derived from the served bytes
+// and a literal path list — never the implementation's own predicates — so a
+// scope widened or narrowed in webserve.go fails here.
+func TestServeSPA_MermaidFrameDocument(t *testing.T) {
 	spy := &apiSpy{}
-	allowed := "https://af.example.com"
-	srv := httptest.NewServer(webShellHandler(withAuth(spy, nil, []string{allowed})))
+	srv := httptest.NewServer(webShellHandler(withAuth(spy, nil, nil)))
 	defer srv.Close()
 
-	get := func(path, origin string) http.Header {
-		req, err := http.NewRequest(http.MethodGet, srv.URL+path, nil)
+	get := func(p string) (http.Header, string) {
+		resp, err := http.Get(srv.URL + p)
 		require.NoError(t, err)
-		if origin != "" {
-			req.Header.Set("Origin", origin)
-		}
-		resp, err := http.DefaultClient.Do(req)
+		body, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
-		_, _ = io.Copy(io.Discard, resp.Body)
 		_ = resp.Body.Close()
-		return resp.Header
+		return resp.Header, string(body)
 	}
 
-	// Every embedded lazy/mermaid* file — the entry and the esbuild-split
-	// chunks — carries the grant, whatever Origin asks: the render frame's
-	// opaque origin serializes as "null" and an ACAO of "*" is what a
-	// CORS-mode module fetch needs.
-	var chunks []string
-	require.NoError(t, fs.WalkDir(web.Dist(), "lazy", func(p string, d fs.DirEntry, err error) error {
-		if err != nil {
-			return err
-		}
-		if !d.IsDir() && isMermaidChunkAsset(p) {
-			chunks = append(chunks, p)
-		}
-		return nil
-	}))
-	require.NotEmpty(t, chunks, "the embedded tree must carry the mermaid chunk set")
-	for _, name := range chunks {
-		for _, origin := range []string{"null", allowed} {
-			require.Equal(t, "*", get("/"+name, origin).Get("Access-Control-Allow-Origin"),
-				"%s must serve ACAO * for Origin %s", name, origin)
-		}
+	// The frame document, twice: its CSP must name exactly the nonce the
+	// body's one script element carries, and the nonce must be stable within
+	// the process — the gzip cache keys by name, so a per-request nonce would
+	// serve the first stamper's bytes to everyone.
+	var nonces []string
+	for range 2 {
+		h, body := get("/" + mermaidFrameAsset)
+		csp := h.Get("Content-Security-Policy")
+		require.Contains(t, csp, "default-src 'none'", "the frame CSP must deny by default")
+		require.Contains(t, csp, "connect-src 'none'", "the frame must fetch nothing")
+		require.NotContains(t, csp, "script-src 'unsafe-inline'", "script-src is a nonce, never a blanket inline grant")
+		hdrNonce := regexp.MustCompile(`script-src 'nonce-([0-9a-f]+)'`).FindStringSubmatch(csp)
+		require.Len(t, hdrNonce, 2, "script-src must be exactly one nonce source")
+		require.Equal(t, mermaidFrameCSP(hdrNonce[1]), csp,
+			"the served CSP must be the frame policy with its stamped nonce")
+		require.Contains(t, body, `<script type="module" nonce="`+hdrNonce[1]+`">`,
+			"the body's script element must carry the header's nonce")
+		require.NotContains(t, body, mermaidFrameNoncePlaceholder, "the placeholder must never reach the wire")
+		require.Empty(t, h.Get("Access-Control-Allow-Origin"), "no CORS grant — the frame fetches nothing")
+		nonces = append(nonces, hdrNonce[1])
 	}
+	require.Equal(t, nonces[0], nonces[1], "the nonce is per-process so cached gzip bytes stay coherent")
 
-	// Every other embedded asset — the shell, other lazy bundles, icons,
-	// everything — emits no grant, whichever Origin asks (the static branch
-	// never consults the API's allow-list).
+	// Every other embedded asset keeps the shell CSP and emits no CORS grant.
+	// The walk skips the frame asset by its literal name — not by any
+	// predicate the implementation could widen — so a widened scope fails.
 	require.NoError(t, fs.WalkDir(web.Dist(), ".", func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
-		if d.IsDir() || isMermaidChunkAsset(p) {
+		if d.IsDir() || p == mermaidFrameAsset {
 			return nil
 		}
-		for _, origin := range []string{"null", allowed} {
-			require.Empty(t, get("/"+p, origin).Get("Access-Control-Allow-Origin"),
-				"%s must emit no ACAO (Origin %s)", p, origin)
-		}
+		h, _ := get("/" + p)
+		require.Equal(t, webCSP, h.Get("Content-Security-Policy"), "%s must keep the shell CSP", p)
+		require.Empty(t, h.Get("Access-Control-Allow-Origin"), "%s must emit no ACAO", p)
 		return nil
 	}))
 
-	// Lookalike paths cannot smuggle the grant: a mermaid-named asset that does
-	// not exist gets the honest 404/fallback, still with no header.
-	for _, p := range []string{"/lazy/mermaidx.js", "/lazy/mermaid", "/lazy/mermaid-.js"} {
-		require.Empty(t, get(p, "null").Get("Access-Control-Allow-Origin"), "%s must emit no ACAO", p)
+	// Lookalike names cannot inherit the frame's policy: a near-miss path is
+	// the shell or a 404, never the frame CSP.
+	for _, p := range []string{"/lazy/mermaid-frame.htm", "/lazy/mermaid-frame", "/lazy/mermaid-frame.htmlx"} {
+		h, _ := get(p)
+		require.Equal(t, webCSP, h.Get("Content-Security-Policy"), "%s must keep webCSP", p)
 	}
 
-	// And the API side is the documented posture, untouched: an allow-listed
-	// origin is echoed on /v1, and "null" is never echoed — a sandboxed
-	// frame's Origin matches nothing.
-	spy.reached = false
-	require.Equal(t, allowed, get("/v1/Snapshot", allowed).Get("Access-Control-Allow-Origin"),
-		"an allow-listed origin is still echoed on the API")
-	require.True(t, spy.reached)
-	require.Empty(t, get("/v1/Snapshot", "null").Get("Access-Control-Allow-Origin"),
-		"Origin null is never echoed on the API")
-	require.Empty(t, get("/v1/health", "null").Get("Access-Control-Allow-Origin"))
+	// And the API side is the documented posture, untouched: the frame's
+	// opaque origin serializes as Origin "null", which is never echoed.
+	req, err := http.NewRequest(http.MethodGet, srv.URL+"/v1/health", nil)
+	require.NoError(t, err)
+	req.Header.Set("Origin", "null")
+	resp, err := http.DefaultClient.Do(req)
+	require.NoError(t, err)
+	_ = resp.Body.Close()
+	require.Empty(t, resp.Header.Get("Access-Control-Allow-Origin"), "Origin null is never echoed on the API")
 }

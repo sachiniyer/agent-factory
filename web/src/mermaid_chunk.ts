@@ -1,13 +1,16 @@
-// The Mermaid library as its own lazy chunk, dist/lazy/mermaid.js (#6642).
-// md_mermaid.ts loads it inside a purpose-built srcdoc iframe that is
-// SANDBOXED without allow-same-origin (#6669) — an opaque origin — whose own
-// CSP denies every fetch (default-src 'none' bar the lazy chunk path's
-// scripts and inline styles), because renderers can make the browser ask for
-// URLs the diagram names — <img> label HTML, flowchart img metadata,
-// font/url() CSS — long before the svg string reaches sanitizeSvg. Inside the
-// frame nothing the diagram names can be fetched, on any origin; the svg
-// comes out as a string, over postMessage, and is sanitized before it touches
-// the real document.
+// The Mermaid library bundled into the render frame's own document,
+// dist/lazy/mermaid-frame.html (#6642, #6669). md_mermaid.ts navigates a
+// purpose-built iframe to that page — SANDBOXED without allow-same-origin, an
+// opaque origin — rather than srcdoc-loading it: srcdoc inherits the page's
+// CSP, and in WebKit 'self' matches nothing in an opaque origin so every load
+// is denied. The library is INLINE in the document the daemon serves (with a
+// per-process script-src nonce, daemon/webserve.go), so the frame issues
+// zero fetches of its own: nothing for an authenticating proxy to refuse,
+// no CSP URL-source for an IPv6 or proxied origin to spell. Its CSP denies
+// every fetch the diagram could name anyway (default-src 'none') — renderers
+// can make the browser ask for URLs the diagram names long before the svg
+// string reaches sanitizeSvg — and the svg comes out as a string, over
+// postMessage, and is sanitized before it touches the real document.
 //
 // The config is still locked down too — defense in depth, not a substitute:
 //
@@ -28,7 +31,7 @@
 //                           is part of why the frame exists.
 
 import mermaid from "mermaid";
-import { decodeRenderRequest, encodeFrameReply, MSG_READY, MSG_RENDERED } from "./mermaid_wire.js";
+import { encodeFrameReply, MSG_READY, MSG_RENDERED, renderRequestFor } from "./mermaid_wire.js";
 
 // A5: belt for the module itself — no caller-driven runMermaid() ever.
 mermaid.startOnLoad = false;
@@ -101,16 +104,16 @@ export function renderMermaidDiagram(source: string, theme: Record<string, strin
   return job;
 }
 
-// The chunk executes inside md_mermaid.ts's render iframe — an opaque origin
-// (#6669), so postMessage is the only channel in or out and it carries JSON
-// strings only (mermaid_wire.ts): a render request in (id + diagram source +
-// theme), an SVG string or the error text back out. Only the parent window
-// may drive a render, and the reply goes to that same window at the origin
-// its request carried — never a wildcard, so a reply cannot leak to a frame
-// that merely shares our embedder's sandbox.
+// The module executes inside md_mermaid.ts's render frame document — an
+// opaque origin (#6669) — so postMessage is the only channel in or out and
+// it carries JSON strings only (mermaid_wire.ts): a render request in (id +
+// diagram source + theme), an SVG string or the error text back out. Only
+// the parent window may drive a render — a request from any other window is
+// dropped inside renderRequestFor — and the reply goes to that same window
+// at the origin its request carried, never a wildcard, so a reply cannot
+// leak to a frame that merely shares our embedder's sandbox.
 window.addEventListener("message", (e) => {
-  if (e.source !== window.parent) return;
-  const req = decodeRenderRequest(e.data);
+  const req = renderRequestFor(e, window.parent);
   if (!req) return;
   const target = e.origin === "null" ? "*" : e.origin;
   void renderMermaidDiagram(req.source, req.theme).then(

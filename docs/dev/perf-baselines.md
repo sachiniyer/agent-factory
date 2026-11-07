@@ -134,21 +134,22 @@ reason to move a budget.
 
 A ```mermaid fence in a proposal doc renders as a diagram in the Docs view's
 live preview. The renderer is mermaid 12.2.0, shipped as `web/dist/lazy/`
-mermaid.js plus its `mermaid-*` split chunks — entry and shared core, plus one
-lazy file per diagram type, so a doc pays for what it draws rather than for the
-whole library. The Docs bundle fetches the entry only when a doc holds a
-```mermaid block; af-web.js carries none of it.
+mermaid-frame.html — the render frame's own DOCUMENT, the whole library and
+its postMessage bootstrap inlined into the page a sandboxed iframe navigates
+to (#6669; originally `mermaid.js` plus `mermaid-*` split chunks, one lazy
+file per diagram type). The Docs bundle navigates the frame to it only when a
+doc holds a ```mermaid block; af-web.js carries none of it, and the frame
+itself fetches nothing — the library is inline.
 
 The `mermaid_*` entries measure the whole committed `lazy/mermaid*` set —
 the payload the binary embeds — over `web/dist` with `bundleBytes` from
 `scripts/perf/check.mjs`, the function `report.mjs` calls; `lazy_*` keeps
-measuring only docs-editor.js. First render of a flowchart fetches the entry
-plus core plus the flowchart and dagre chunks (~1.1MB raw of the 5.19MB set),
-inside a srcdoc iframe whose own CSP denies every fetch the diagram names
-(the security review's frame isolation, #6642 re-review); the rest stays
-unfetched. Committed values are deterministic, three identical samples, margin
-baseline x 0.05, same as the other byte budgets. Not recorded with
-`make perf-container`; the figures are byte-exact.
+measuring only docs-editor.js and its shared chunk. `report.mjs`'s file
+filter gained `.html` when the payload became a document (#6669), which also
+brings `index.html` into the shell sums on every side of a comparison — the
+methodology, not the bytes, moved. Committed values are deterministic, three
+identical samples, margin baseline x 0.05, same as the other byte budgets.
+Not recorded with `make perf-container`; the figures are byte-exact.
 
 The same refresh moves `raw_bytes` to 1,377,536 (master's committed dist at
 `ea1b463514` was already 1,376,749 — the recorded 1,364,595 predated it — and
@@ -159,13 +160,24 @@ loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
 
 #6669 re-frames the render iframe as a sandboxed opaque origin (sandbox
 without allow-same-origin) driven over a string-only postMessage protocol
-(`web/src/mermaid_wire.ts`) instead of a same-origin `contentWindow` call. The
-wire codec lands in BOTH bundles that speak it: `docs-editor.js` grows 98,792 →
-99,946 raw (`lazy_*` to 398,798 raw / 130,057 gzip, +1,170 / +423 — inside the
-existing budgets, so no entry moves) and `mermaid.js` grows 30,550 → 31,400
-raw (`mermaid_*` to 5,188,544 / 1,507,358, +850 / +7,003 — also inside). No
-split chunk changes name; the byte deltas are codec and listener code only.
-Every timing and layout-shift baseline is unchanged.
+(`web/src/mermaid_wire.ts`) instead of a same-origin `contentWindow` call —
+and, after the security review, as a real navigated document rather than
+srcdoc: WebKit gives srcdoc the page's CSP, where 'self' matches nothing in
+an opaque origin. The whole library therefore ships INLINE in the frame's own
+`lazy/mermaid-frame.html` and the frame fetches nothing: no credential-less
+subrequest an authenticating proxy could refuse, no CSP URL-source an IPv6 or
+proxied origin would have to spell, and no `Access-Control-Allow-Origin`
+grant anywhere (the chunk CORS the first cut added is gone).
+
+Against master's committed dist measured with the same `.html`-inclusive
+filter: the `mermaid.js`/`mermaid-*` set (5,187,694 raw / 1,507,069 gzip) is
+replaced by the single frame document (5,256,161 / 1,495,719) — +68,467 raw /
+**−11,350 gzip**, a single-file bundle being smaller compressed than the split
+set's per-chunk framing. `lazy_*` moves to 398,411 / 129,854 (+575 / +168 of
+epoch-guarded frame loading and the wire-source gates) and the shell entries
+are byte-identical (+0 / +0 — `index.html` counts on both sides). Every entry
+stays inside its existing budget — `mermaid_gzip_bytes` lands 5% under — so no
+baseline moves. Every timing and layout-shift baseline is unchanged.
 
 ### Code-fence grammar lazy chunk provenance (#6731)
 

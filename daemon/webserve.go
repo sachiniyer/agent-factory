@@ -2,6 +2,8 @@ package daemon
 
 import (
 	"bytes"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -10,6 +12,7 @@ import (
 	"path"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/web"
@@ -226,19 +229,44 @@ var contentTypeByExt = map[string]string{
 	".webmanifest": "application/manifest+json",
 }
 
-// isMermaidChunkAsset reports whether an embedded name is part of the lazy
-// mermaid chunk set (dist/lazy/mermaid.js plus its esbuild-split
-// dist/lazy/mermaid-*.js siblings). Those — and ONLY those — are fetched
-// cross-origin: the Docs live preview renders diagrams inside a sandboxed
-// srcdoc iframe whose document has an opaque origin, so even this host is
-// foreign to it, and module scripts are CORS-mode fetches (web/src/
-// md_mermaid.ts, #6669). Everything else the daemon serves — every other
-// static asset and every /v1 route — keeps emitting no
-// Access-Control-Allow-Origin, so the documented CORS posture
-// (docs/remote-http-auth.md) is unchanged: no API route ever widens.
-func isMermaidChunkAsset(name string) bool {
-	return name == "lazy/mermaid.js" ||
-		(strings.HasPrefix(name, "lazy/mermaid-") && strings.HasSuffix(name, ".js"))
+// mermaidFrameAsset is the one embedded file that does NOT carry webCSP: the
+// document the Docs live preview's render iframe navigates to (web/src/
+// md_mermaid.ts, #6669). The frame is sandboxed without allow-same-origin —
+// an opaque origin — and the whole mermaid library is INLINE in the file, so
+// the document runs on a CSP its own headers describe rather than webCSP:
+// default-src 'none' with a single script-src nonce for the one module the
+// file ships. The nonce is stamped into the bytes at serve time; the meta-CSP
+// alternative is impossible (meta-delivered CSP cannot express nonce
+// sources), and a URL source could never spell every origin this host may be
+// reached at (IPv6 literals, proxy-mounted paths).
+const mermaidFrameAsset = "lazy/mermaid-frame.html"
+
+const mermaidFrameNoncePlaceholder = "__AF_MMD_FRAME_NONCE__"
+
+// mermaidFrameNonce is per-process rather than per-request so the stamped
+// bytes stay constant and the gzip cache below stays honest. The nonce's job
+// here is not secrecy — the file is static and embedded — but proof to CSP
+// that this one script element is the document's own: script tags injected
+// into the frame's DOM by a hostile diagram can never carry it, so
+// 'unsafe-inline' never has to appear.
+var mermaidFrameNonce = sync.OnceValue(func() string {
+	var b [16]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		panic("webserve: cannot draw a mermaid-frame CSP nonce: " + err.Error())
+	}
+	return hex.EncodeToString(b[:])
+})
+
+// mermaidFrameCSP is the frame document's whole policy: nothing fetches,
+// nothing navigates, nothing embeds — the inline module (nonce-tagged) runs,
+// mermaid writes inline styles, and an img node may paint inline data:. Every
+// other directive a diagram could reach is 'none'.
+func mermaidFrameCSP(nonce string) string {
+	return "default-src 'none'; script-src 'nonce-" + nonce + "'; " +
+		"style-src 'unsafe-inline'; img-src data:; font-src 'none'; " +
+		"connect-src 'none'; media-src 'none'; object-src 'none'; " +
+		"frame-src 'none'; worker-src 'none'; child-src 'none'; " +
+		"manifest-src 'none'; base-uri 'none'; form-action 'none'"
 }
 
 // serveAsset writes the embedded file named `name` and returns true, or returns
@@ -265,11 +293,14 @@ func serveAsset(assets fs.FS, gz *web.GzipCache, name string, w http.ResponseWri
 	if ct, ok := contentTypeByExt[path.Ext(name)]; ok {
 		w.Header().Set("Content-Type", ct)
 	}
-	if isMermaidChunkAsset(name) {
-		// The render frame's opaque origin makes even this host cross-origin,
-		// and module-script fetches are CORS-mode. The wildcard grants a READ
-		// of files that are already served unauthenticated — nothing more.
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+	if name == mermaidFrameAsset {
+		// The frame document gets its own CSP (overriding the shell's, which
+		// serveSPA already wrote) and the nonce stamped into the bytes. The
+		// stamp lands BEFORE the gzip decision so the cache holds the stamped
+		// compressed form — the nonce is per-process, so it stays consistent.
+		nonce := mermaidFrameNonce()
+		w.Header().Set("Content-Security-Policy", mermaidFrameCSP(nonce))
+		data = bytes.ReplaceAll(data, []byte(mermaidFrameNoncePlaceholder), []byte(nonce))
 	}
 	// Zero modtime → ServeContent emits no Last-Modified and does no caching
 	// negotiation; it still infers Content-Type from the extension and handles

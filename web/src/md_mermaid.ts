@@ -2,18 +2,20 @@
 //
 // previewSpecs (md_live_preview.ts) only emits the spec; everything the fence
 // turns into lives here: the block widget, the loader for the library's own
-// lazy chunk (dist/lazy/mermaid.js — never the eager bundle, never a CDN,
-// because af serves the web from embedded dist), the sanitizer the output
-// passes through before it touches the DOM, and the theme wiring that
-// re-renders mounted diagrams on a light/dark flip.
+// lazy document (dist/lazy/mermaid-frame.html — never the eager bundle,
+// never a CDN, because af serves the web from embedded dist), the sanitizer
+// the output passes through before it touches the DOM, and the theme wiring
+// that re-renders mounted diagrams on a light/dark flip.
 //
 // Proposals are partly agent-authored, so the diagram source is semi-trusted
 // and it renders inside the daemon's control origin. Three layers, in render
-// order: mermaid runs inside a srcdoc iframe that is SANDBOXED without
-// allow-same-origin (#6669) — an opaque origin, so its CSP denying every load
-// the diagram names (images/fonts/connections — any origin) is backed by a
-// privilege boundary too: the frame cannot read the parent's DOM or storage,
-// and its requests carry no credentials. The chunk is initialized with
+// order: mermaid runs inside an iframe navigated to that document, SANDBOXED
+// without allow-same-origin (#6669) — an opaque origin, so its CSP denying
+// every load the diagram names (images/fonts/connections — any origin) is
+// backed by a privilege boundary too: the frame cannot read the parent's DOM
+// or storage, and its requests carry no credentials. The library is inline
+// in the document, so the frame fetches nothing at all on its own. It is
+// initialized with
 // securityLevel 'strict' (mermaid DOMPurify-cleans label HTML, ignores click
 // statements, and `secure` keeps %%{init}%% directives from undoing any of
 // that or writing into generated CSS), and sanitizeSvg is ours: it keeps only
@@ -24,7 +26,7 @@
 import type { EditorView } from "@codemirror/view";
 import { WidgetType } from "@codemirror/view";
 import { errorText } from "./api.js";
-import { decodeFrameReply, encodeRenderRequest, MSG_READY } from "./mermaid_wire.js";
+import { encodeRenderRequest, frameReplyFor, MSG_READY } from "./mermaid_wire.js";
 
 /** The render channel the frame's chunk answers — kept identical to the old
  *  in-window API so the render path below is unchanged; the implementation is
@@ -37,23 +39,21 @@ let chunk: Promise<MermaidChunk> | null = null;
 
 // Renderers can make the browser fetch URLs the diagram names — label <img>
 // metadata, flowchart img nodes, font/url() CSS — before the svg string ever
-// reaches sanitizeSvg. So mermaid runs inside an iframe whose own CSP
-// (stacked on the page's) denies every fetch: nothing but the lazy chunk
-// path's scripts and inline styles is allowed in, images/fonts/connections
-// are 'none' by default-src. The only thing that leaves the frame is the svg
-// string.
+// reaches sanitizeSvg. So mermaid runs inside an iframe whose own CSP denies
+// every fetch (default-src 'none' bar its one inline module and inline
+// styles): nothing the diagram names can be fetched, on any origin, and the
+// only thing that leaves the frame is the svg string.
 //
-// #6669: the frame is also SANDBOXED, without allow-same-origin, so its
-// document has an opaque origin — code in the frame cannot read the parent's
-// DOM, storage or cookies, and a request it makes carries no credentials.
-// 'self' would name nothing there (the origin is opaque), so script-src is an
-// EXPLICIT source: the lazy chunk directory on this origin, the one place
-// scripts the frame runs can come from.
-const RENDER_FRAME_CSP = (scriptDir: string): string =>
-  `default-src 'none'; script-src ${scriptDir}; style-src 'unsafe-inline'; ` +
-  "img-src data:; font-src 'none'; connect-src 'none'; media-src 'none'; " +
-  "object-src 'none'; frame-src 'none'; worker-src 'none'; child-src 'none'; " +
-  "manifest-src 'none'; base-uri 'none'; form-action 'none'";
+// #6669: the frame is SANDBOXED without allow-same-origin, so its document
+// has an opaque origin — code in it cannot read the parent's DOM, storage or
+// cookies, and a request it would make carries no credentials. It is a REAL
+// navigated document, dist/lazy/mermaid-frame.html, not srcdoc: srcdoc
+// inherits the page's CSP, and in WebKit an inherited 'self' matches nothing
+// in an opaque origin — every load is denied. The document carries the whole
+// library inline under a per-process script-src nonce the daemon stamps at
+// serve time (daemon/webserve.go), so the frame fetches nothing on its own:
+// no credential-less subrequest for an authenticating proxy to refuse, and
+// no CSP URL-source an IPv6 or proxied UI origin would have to spell.
 
 // The frame lives as long as the page does, unless a render out-waits us —
 // see renderOne, which tears it down so a hung render can't keep the
@@ -77,9 +77,10 @@ let renderSeq = 0;
 const pendingReplies = new Map<string, { resolve: (svg: string) => void; reject: (e: Error) => void }>();
 
 function onFrameMessage(e: MessageEvent): void {
-  const frame = renderFrame;
-  if (!frame || e.source !== frame.contentWindow) return;
-  const msg = decodeFrameReply(e.data);
+  // Replies count only from the current frame's own window (frameReplyFor
+  // owns the source check); a message from anything else — including a
+  // dropped frame's late post — is not part of the protocol.
+  const msg = frameReplyFor(e, renderFrame?.contentWindow);
   if (!msg) return;
   if (msg.t === MSG_READY) {
     frameReady = true;
@@ -95,12 +96,16 @@ function onFrameMessage(e: MessageEvent): void {
 /** The in-page stub the render path calls: post a request, settle on the
  *  matching reply. Renders are already serialized by renderSerialized, so at
  *  most one is outstanding at a time — the map still keys by id so a stray or
- *  late reply can never be misattributed. */
-function frameApi(frame: HTMLIFrameElement): MermaidChunk {
+ *  late reply can never be misattributed. `alive` is the frame's own
+ *  still-first-document check: a frame that navigated itself is not ours to
+ *  post to anymore. */
+function frameApi(frame: HTMLIFrameElement, alive: () => boolean): MermaidChunk {
   return {
     renderMermaidDiagram(source, theme) {
       const w = frame.contentWindow;
-      if (!w) return Promise.reject(new Error("the mermaid render frame has no window"));
+      if (!w || renderFrame !== frame || !alive()) {
+        return Promise.reject(new Error("the mermaid render frame was dropped"));
+      }
       const id = `r${++renderSeq}`;
       return new Promise<string>((resolve, reject) => {
         pendingReplies.set(id, { resolve, reject });
@@ -132,24 +137,27 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   if (Date.now() - lastOpenFailedAt < OPEN_RETRY_AFTER_MS) {
     throw new Error("the mermaid render frame failed to open recently");
   }
-  const url = new URL("./mermaid.js", import.meta.url).href;
+  const url = new URL("./mermaid-frame.html", import.meta.url).href;
   const frame = document.createElement("iframe");
   frame.setAttribute("aria-hidden", "true");
   frame.tabIndex = -1;
-  // Sandboxed to scripts and nothing else, BEFORE srcdoc, so the document is
+  // Sandboxed to scripts and nothing else, BEFORE src, so the document is
   // born with an opaque origin (#6669). No allow-same-origin: that token
   // would hand the frame the parent's origin back and undo the isolation.
   frame.setAttribute("sandbox", "allow-scripts");
   frame.style.cssText = "position:fixed;left:-200vw;top:-200vh;width:1px;height:1px;border:0";
-  // The DNS-prefetch meta MUST be first: browsers prefetch anchor hosts that
-  // reach the frame inside label HTML, and CSP does not govern prefetch. The
-  // script source is the lazy chunk's own directory on this origin — 'self'
-  // names nothing in an opaque origin.
-  frame.srcdoc =
-    `<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">` +
-    `<meta charset="utf-8">` +
-    `<meta http-equiv="Content-Security-Policy" content="${RENDER_FRAME_CSP(new URL("./", import.meta.url).href)}">` +
-    `<script type="module" src="${url}"><\/script>`;
+  // A second load event means the frame navigated itself. Its document —
+  // the window replies were trusted from — is gone, so whatever lives there
+  // now must never see another diagram source: drop the whole frame and let
+  // the next render open a fresh one. The frame's own first-document flag is
+  // what frameApi's sends consult too, so a post that would race the drop
+  // fails instead of landing in the new document.
+  let navs = 0;
+  frame.addEventListener("load", () => {
+    navs++;
+    if (navs > 1 && renderFrame === frame) dropRenderFrame();
+  });
+  frame.src = url;
   // The listener goes up before the frame does: the chunk's ready post can
   // only arrive after this synchronous block, but an early listener makes
   // that a fact rather than a scheduling assumption.
@@ -162,7 +170,7 @@ async function openRenderFrame(): Promise<MermaidChunk> {
   // pollUntil waits for a DEFINED value, so the probe maps "not yet" to
   // undefined — polling the boolean itself would return false instantly.
   const ok = await pollUntil(() => (frameReady ? true : undefined), OPEN_FRAME_TIMEOUT_MS);
-  if (ok) return frameApi(frame);
+  if (ok) return frameApi(frame, () => navs === 1);
   lastOpenFailedAt = Date.now();
   dropRenderFrame();
   throw new Error("the mermaid chunk did not load in its render frame");

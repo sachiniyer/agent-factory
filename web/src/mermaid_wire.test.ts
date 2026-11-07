@@ -9,6 +9,8 @@ import {
   decodeRenderRequest,
   encodeFrameReply,
   encodeRenderRequest,
+  frameReplyFor,
+  renderRequestFor,
 } from "./mermaid_wire.js";
 
 test("a render request round-trips as a JSON string", () => {
@@ -101,4 +103,60 @@ test("replies tolerate extra fields — required fields are the protocol", () =>
     JSON.stringify({ t: "af-mmd-rendered", id: "r", ok: true, svg: "<svg/>", extra: 1 }),
   );
   assert.deepEqual(reply, { t: "af-mmd-rendered", id: "r", ok: true, svg: "<svg/>" });
+});
+
+// The source gates are the protocol's other half: message SHAPE alone never
+// trusted a window (#6669). renderRequestFor is the frame's only path to a
+// render (only the parent may drive it) and frameReplyFor is the parent's
+// only path to painting (only the frame's own window may answer). Both must
+// be removed-proof — a regression where either side skips the source check
+// has to fail here, not just read wrong.
+test("renderRequestFor gates requests to the parent window alone", () => {
+  const parent = { name: "parent" };
+  const stranger = { name: "not-parent" };
+  const good = encodeRenderRequest("r1", "graph TD;A-->B", { a: "#fff" });
+  assert.equal(renderRequestFor({ source: parent, data: good }, parent)?.id, "r1");
+  assert.equal(
+    renderRequestFor({ source: stranger, data: good }, parent),
+    undefined,
+    "a well-shaped request from any other window is dropped",
+  );
+  assert.equal(
+    renderRequestFor({ source: null, data: good }, parent),
+    undefined,
+    "a null source is never the parent",
+  );
+  assert.equal(
+    renderRequestFor({ source: parent, data: "not json" }, parent),
+    undefined,
+    "the source check does not rescue a bad payload",
+  );
+});
+
+test("frameReplyFor gates replies to the render frame's window alone", () => {
+  const frameWin = { name: "frame" };
+  const stranger = { name: "not-the-frame" };
+  const good = encodeFrameReply({ t: "af-mmd-rendered", id: "r2", ok: true, svg: "<svg/>" });
+  const reply = frameReplyFor({ source: frameWin, data: good }, frameWin);
+  assert.deepEqual(reply, { t: "af-mmd-rendered", id: "r2", ok: true, svg: "<svg/>" });
+  assert.equal(
+    frameReplyFor({ source: stranger, data: good }, frameWin),
+    undefined,
+    "a well-shaped reply from any other window is dropped",
+  );
+  assert.deepEqual(
+    frameReplyFor({ source: frameWin, data: encodeFrameReply({ t: "af-mmd-ready" }) }, frameWin),
+    { t: "af-mmd-ready" },
+    "ready decodes through the same gate",
+  );
+  assert.equal(
+    frameReplyFor({ source: stranger, data: encodeFrameReply({ t: "af-mmd-ready" }) }, frameWin),
+    undefined,
+    "even a ready only counts from the frame's own window",
+  );
+  assert.equal(
+    frameReplyFor({ source: undefined, data: good }, frameWin),
+    undefined,
+    "a missing source is never the frame",
+  );
 });
