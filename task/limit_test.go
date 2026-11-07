@@ -839,6 +839,61 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at 2:3\n0pm (America/New_York).",
 			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
 		},
+		{
+			// A narrow pane may wrap BETWEEN a one-digit day and a
+			// one-digit clock hour whose concatenation is a valid hour
+			// — "Nov 1\n2pm" (joined "12" ≤ 12) — and the wrap must NOT
+			// rejoin the digits: "Nov 12pm" would let monthDay consume
+			// "12" as the day and parseClockTime read "12pm" as the
+			// clock, scheduling the reset on Nov 12 at noon instead of
+			// Nov 1 at 2pm. The wrap stays a space so monthDay sees
+			// "Nov 1" (day 1) and parseClockTime sees "2pm" (hour 2).
+			// Run length alone cannot identify this split (day+clock is
+			// 1+1 = 2 digits, byte-identical to a mid-token clock hour
+			// "1\n1am"); the month name preceding the day is what marks
+			// the day+clock boundary. Same EST instant as the unwrapped
+			// "Nov 1 2pm" form.
+			name:    "weekly date: day wraps before a low clock hour (no comma)",
+			content: "Claude usage limit reached. Your limit will reset at Nov 1\n2pm (America/New_York).",
+			want:    time.Date(2026, 11, 1, 14, 0, 0, 0, est).UTC(), // Nov 1 2pm EST -> 19:00Z
+		},
+		{
+			// A narrow pane may wrap INSIDE a weekday name — "Thursday"
+			// splits as "Th\nursday" — and the wrap must rejoin the
+			// letters (drop, not space) so the weekday regex matches
+			// "Thursday" rather than "Th ursday" (which misses the
+			// weekday and falls back to time-only, scheduling the reset
+			// days early). Same EST instant as the unwrapped "Thursday
+			// at 9am" form.
+			name:    "weekly weekday: weekday wraps inside its letters",
+			content: "Claude usage limit reached. Your limit will reset Th\nursday at 9am (America/New_York).",
+			want:    time.Date(2026, 1, 8, 9, 0, 0, 0, est).UTC(), // Thu Jan 8 2026 9am EST -> 14:00Z
+		},
+		{
+			// A sufficiently narrow pane may wrap BOTH before the
+			// timezone and before the trailing period — "2pm
+			// (America/New_York)\n." with the paren itself on the next
+			// row — and the anchor must still capture the paren (the
+			// account zone) and the period (so the evidence matches the
+			// unwrapped render). The next-row paren alternative accepts a
+			// wrapped trailing period (")\n.") in addition to a same-row
+			// period (")."). Same EST instant as the unwrapped "2pm
+			// (America/New_York)." form.
+			name:    "5h wrapped: tz paren and trailing period each on their own row",
+			content: "Claude usage limit reached. Your limit will reset at 2pm\n(America/New_York)\n.",
+			want:    want2pm,
+		},
+		{
+			// A sufficiently narrow pane may hard-wrap inside the "reset"
+			// keyword itself — "re\nset at 2pm (America/New_York)." —
+			// and the anchor must still locate the clause (tolerating a
+			// wrap inside the leading keyword) and the normalizer must
+			// rejoin it so the evidence matches the unwrapped "reset at
+			// 2pm (…)." form. Same EST instant as the unwrapped form.
+			name:    "5h wrapped: keyword wraps inside its letters",
+			content: "Claude usage limit reached. Your limit will re\nset at 2pm (America/New_York).",
+			want:    want2pm,
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -957,6 +1012,52 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	_, _, _, evWrappedComma := det.Check(wrappedComma, tmux.ProgramClaude, now)
 	if evUnwrappedComma != evWrappedComma {
 		t.Fatalf("a wrap before the date comma must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedComma, evWrappedComma)
+	}
+
+	// A wrap that pushes BOTH the timezone and the trailing period onto
+	// their own rows — "2pm\n(America/New_York)\n." — must produce the
+	// SAME evidence as the unwrapped "2pm (America/New_York)." form: the
+	// paren and the period are both sentence punctuation, not new words,
+	// so the wrap newlines are dropped (not spaced to "(…) ."). A
+	// divergent evidence would bypass the same-wall dedupe in
+	// SetLimitReachedAtEpoch after a pane resize.
+	unwrappedTzPeriod := "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)."
+	wrappedTzPeriod := "Claude usage limit reached. Your limit will reset at 2pm\n(America/New_York)\n."
+	_, _, _, evUnwrappedTzPeriod := det.Check(unwrappedTzPeriod, tmux.ProgramClaude, now)
+	_, _, _, evWrappedTzPeriod := det.Check(wrappedTzPeriod, tmux.ProgramClaude, now)
+	if evUnwrappedTzPeriod != evWrappedTzPeriod {
+		t.Fatalf("a wrapped tz+period must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedTzPeriod, evWrappedTzPeriod)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedTzPeriod != want {
+		t.Fatalf("wrapped tz+period evidence = %q, want %q", evWrappedTzPeriod, want)
+	}
+
+	// A wrap inside the "reset" keyword itself — "re\nset at 2pm (…)." —
+	// must produce the SAME evidence as the unwrapped "reset at 2pm (…)."
+	// form: the keyword letters rejoin (not space to "re set"), keeping
+	// the identity stable across pane resizes.
+	wrappedKeyword := "Claude usage limit reached. Your limit will re\nset at 2pm (America/New_York)."
+	_, _, _, evWrappedKeyword := det.Check(wrappedKeyword, tmux.ProgramClaude, now)
+	if evWrappedKeyword != evUnwrappedTzPeriod {
+		t.Fatalf("a wrapped keyword must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedTzPeriod, evWrappedKeyword)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedKeyword != want {
+		t.Fatalf("wrapped keyword evidence = %q, want %q", evWrappedKeyword, want)
+	}
+
+	// A wrap inside a weekday name — "Th\nursday at 9am (…)." — must
+	// produce the SAME evidence as the unwrapped "Thursday at 9am (…)."
+	// form: the weekday letters rejoin (not space to "Th ursday"),
+	// keeping the identity stable across pane resizes.
+	unwrappedWeekday := "Claude usage limit reached. Your limit will reset Thursday at 9am (America/New_York)."
+	wrappedWeekday := "Claude usage limit reached. Your limit will reset Th\nursday at 9am (America/New_York)."
+	_, _, _, evUnwrappedWeekday := det.Check(unwrappedWeekday, tmux.ProgramClaude, now)
+	_, _, _, evWrappedWeekday := det.Check(wrappedWeekday, tmux.ProgramClaude, now)
+	if evUnwrappedWeekday != evWrappedWeekday {
+		t.Fatalf("a wrapped weekday must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedWeekday, evWrappedWeekday)
+	}
+	if want := "reset Thursday at 9am (America/New_York)."; evWrappedWeekday != want {
+		t.Fatalf("wrapped weekday evidence = %q, want %q", evWrappedWeekday, want)
 	}
 }
 

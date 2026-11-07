@@ -443,8 +443,18 @@ var (
 // reach is this trailing period; a period-newline in the pre-clock span is a
 // clause boundary the anchor stops at), so the evidence matches the
 // unwrapped "(…)." render and the #6765 re-read identity holds across pane
-// resizes.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)\.)?(?:\r?\n[ \t]*\.)?)`)
+// resizes. A next-row parenthesized timezone may carry its trailing period
+// on either the paren's row ("(…)." ) or its own row ("(…)\n.") — both are
+// the shipped wrapped-banner shape, so either is captured; a next-row paren
+// with NO trailing period is treated as unrelated transcript text and is
+// NOT captured (the clock resolves in the injected clock's zone).
+//
+// The leading "reset" keyword itself accepts a wrap between any of its
+// letters — "re\nset" — so a narrow pane that hard-wraps inside the keyword
+// still locates the clause; normalizeResetWhitespace rejoins it to "reset"
+// (gated on the joined letters forming "reset") so the evidence matches the
+// unwrapped render.
+var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n)?e(?:\r?\n)?s(?:\r?\n)?e(?:\r?\n)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a
@@ -537,8 +547,13 @@ func normalizeResetWhitespace(s string) string {
 			// complete words ("reset\nat") is byte-identical to a mid-token
 			// wrap at the newline, so only a month-shaped join rejoins; a
 			// word-boundary wrap takes a space, preserving the unwrapped
-			// evidence ("reset at") for the #6765 re-read identity. A wrap
-			// immediately before or after the clock's colon also rejoins —
+			// evidence ("reset at") for the #6765 re-read identity. The same
+			// month-gated rejoin extends to a weekday-name token
+			// (wrapSplitsWeekday, "Th\nursday" → "Thursday") and to the
+			// leading "reset" keyword itself (wrapSplitsResetKeyword,
+			// "re\nset" → "reset"), so a narrow pane that splits either
+			// still resolves the reset day and keeps the keyword locatable.
+			// A wrap immediately before or after the clock's colon also rejoins —
 			// "2\n:30pm" and "2:\n30pm" both collapse to "2:30pm" rather than
 			// spacing to "2 :30pm"/"2: 30pm", which parseClockTime rejects —
 			// so a narrow pane that wraps at the colon keeps its reset time.
@@ -593,7 +608,17 @@ func normalizeResetWhitespace(s string) string {
 						continue // mid-token minutes split — rejoin
 					}
 					joinedVal, _ := strconv.Atoi(pre[preStart:] + s[i+1:i+1+postRun])
-					if joinedVal >= 1 && joinedVal <= 12 {
+					// A mid-token clock-hour split ("1\n1am" → "11am") rejoins,
+					// but a wrap BETWEEN a calendar day and the clock hour
+					// ("Nov 1\n2pm") must stay a space: rejoining to "Nov 12pm"
+					// would let monthDay consume "12" as the day and
+					// parseClockTime read "12pm" as the clock, scheduling the
+					// reset on the wrong day at the wrong hour. The day is
+					// always preceded by a month name in the weekly-date
+					// banner grammar ("Nov 6"), so a pre-run that is a calendar
+					// day (precededByMonth) marks a day+clock boundary even when
+					// the joined digits fall in 1–12.
+					if joinedVal >= 1 && joinedVal <= 12 && !preRunIsCalendarDay(pre, preStart) {
 						continue // mid-token clock hour — rejoin
 					}
 					// else: day+clock boundary — stay a space
@@ -607,7 +632,7 @@ func normalizeResetWhitespace(s string) string {
 			if lastDigit && i+1 < len(s) && s[i+1] == ':' {
 				continue
 			}
-			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && (wrapSplitsMonth(b.String(), s[i+1:]) || wrapSplitsClockSuffix(b.String(), s[i+1:])) {
+			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && (wrapSplitsMonth(b.String(), s[i+1:]) || wrapSplitsClockSuffix(b.String(), s[i+1:]) || wrapSplitsWeekday(b.String(), s[i+1:]) || wrapSplitsResetKeyword(b.String(), s[i+1:])) {
 				continue
 			}
 			// A wrap right before the date's comma ("Nov 6\n, 2027") drops
