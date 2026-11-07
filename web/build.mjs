@@ -78,6 +78,38 @@ await build({
 // written below, daemon/webserve.go), which is why the file needs no stamped
 // nonce — its bytes are static, and the ETag they feed stays valid across
 // restarts.
+// Two vendored features are resolved out of the frame bundle before it is
+// written (#6943): bytes inside this document are parsed on EVERY page load,
+// not paid once at fetch.
+//
+//   ELK    the elk layout loader import (./elk-*.mjs) is mermaid's only path
+//          to the 96KB adapter + the 1.6MB elkjs engine — about a third of
+//          the document. af never selects elk: layout is pinned to dagre.
+//          Redirecting the import to the dagre chunk keeps every registered
+//          elk name ("elk", "elk.layered", …) resolving to a WORKING
+//          renderer, so a doc that asks for elk — a flowchart-elk fence or
+//          an %%{init:{"layout":"elk"}}%% directive — renders with dagre
+//          instead of erroring.
+//   KaTeX  import("katex") fires only for $$…$$ label text; the stub below
+//          answers renderToString with the TeX source, so such a label
+//          renders its source instead of typeset math. Every diagram still
+//          renders.
+const shrunkVendoredPlugin = {
+  name: "af-mermaid-shrunk-vendored",
+  setup(b) {
+    b.onResolve({ filter: /(^|[\\/])elk-[A-Z0-9]+\.mjs$/ }, async (args) => {
+      const dir = await readdir(args.resolveDir);
+      const dagre = dir.find((f) => /^dagre-[A-Z0-9]+\.mjs$/.test(f));
+      if (!dagre) {
+        throw new Error(`build: no dagre chunk beside ${args.path} in ${args.resolveDir}`);
+      }
+      return { path: join(args.resolveDir, dagre) };
+    });
+    b.onResolve({ filter: /^katex$/ }, () => ({
+      path: join(import.meta.dirname, "src/katex_stub.ts"),
+    }));
+  },
+};
 const frameBuild = await build({
   entryPoints: { "mermaid-frame": "src/mermaid_chunk.ts" },
   bundle: true,
@@ -90,6 +122,7 @@ const frameBuild = await build({
   sourcemap: false,
   logLevel: "info",
   write: false,
+  plugins: [shrunkVendoredPlugin],
 });
 const frameJs = frameBuild.outputFiles.filter((f) => f.path.endsWith(".js"));
 if (frameJs.length !== 1) {

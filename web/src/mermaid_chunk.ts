@@ -48,8 +48,11 @@ async function renderNow(source: string, theme: Record<string, string>): Promise
     suppressErrorRendering: true,
     theme: "base",
     themeVariables: theme,
-    // dagre, not the v12 elk default: the elk layout chunk alone is ~1.5MB and
-    // dagre is the classic look every mermaid doc on the web has.
+    // dagre — the classic look every mermaid doc on the web has. The elk
+    // layout engine is not in this bundle at all (#6943): the build resolves
+    // the elk loader's chunk import to dagre's, so a doc that still asks for
+    // elk (a flowchart-elk fence or an %%{init}%% directive) renders with
+    // dagre instead of erroring.
     layout: "dagre",
     // Labels as SVG <text>, never <foreignObject>: in v12 htmlLabels is a
     // global key (the flowchart-scoped one is deprecated and the v2 renderer
