@@ -482,10 +482,11 @@ func normalizeResetWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	depth := 0
-	outsideSpace := false // whether the last char emitted outside a paren was a collapsed space
-	lastDigit := false    // whether the last char emitted outside a paren was an ASCII digit
-	lastLetter := false   // whether the last char emitted outside a paren was an ASCII letter
-	lastColon := false    // whether the last char emitted outside a paren was a clock colon
+	outsideSpace := false  // whether the last char emitted outside a paren was a collapsed space
+	lastDigit := false     // whether the last char emitted outside a paren was an ASCII digit
+	lastLetter := false    // whether the last char emitted outside a paren was an ASCII letter
+	lastColon := false     // whether the last char emitted outside a paren was a clock colon
+	parenPostWrap := false // whether the last byte inside a paren was a dropped wrap newline (skip the continuation indent that follows)
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -508,10 +509,21 @@ func normalizeResetWhitespace(s string) string {
 		case depth > 0:
 			// Inside a parenthesized span: drop the wrap's newlines so a split
 			// zone token rejoins; keep every other byte (including the genuine
-			// spaces of a non-zone descriptor like "5h limit") verbatim.
+			// spaces of a non-zone descriptor like "5h limit") verbatim. A real
+			// tmux wrap also indents the continuation row (the "  ⎿  " gutter
+			// pushes a 5-space indent), so the leading spaces/tabs after a wrap
+			// newline are the indent, not part of the zone name — strip them so
+			// "(America/\n     New_York)" rejoins to "(America/New_York)" (which
+			// time.LoadLocation accepts) rather than "(America/     New_York)"
+			// (which it rejects, silently falling back to the host zone).
 			if c == '\n' || c == '\r' {
+				parenPostWrap = true
 				continue
 			}
+			if parenPostWrap && (c == ' ' || c == '\t') {
+				continue
+			}
+			parenPostWrap = false
 			b.WriteByte(c)
 			outsideSpace = false
 			lastDigit = false
@@ -527,39 +539,37 @@ func normalizeResetWhitespace(s string) string {
 			lastLetter = false
 			lastColon = false
 		case c == '\n' || c == '\r':
-			// A wrap newline outside a paren. When it splits a multi-digit
-			// token (a calendar day, a clock hour, or a four-digit year)
-			// the newline is dropped so the digits rejoin — "Nov 1\n2" →
-			// "Nov 12", "1\n1am" → "11am", "Nov 6, 20\n27" → "Nov 6, 2027"
-			// — otherwise the day/hour/year resolves to the wrong instant
-			// (or monthDay misses the explicit year and the evidence
-			// diverges from the unwrapped form). The rejoin is gated on
-			// the joined digits forming a single day/hour/year token
-			// (≤ 4 digits): a wrap BETWEEN separate numeric tokens — e.g.
-			// "Nov 6\n2026" (the day followed by the year, 5 digits), or
-			// "2026\n9am" (the year followed by the clock hour, 5 digits)
-			// — must stay a space, or monthDay would consume "62" as the
-			// day and time.Date would normalize it into a much later When it splits a
-			// month-name token the newline is likewise dropped so the
-			// letters rejoin — "No\nv" → "Nov" — otherwise monthDay misses the
-			// explicit date. The mid-token rejoin is gated on the joined
-			// letters forming a month name (wrapSplitsMonth): a wrap between
-			// complete words ("reset\nat") is byte-identical to a mid-token
-			// wrap at the newline, so only a month-shaped join rejoins; a
-			// word-boundary wrap takes a space, preserving the unwrapped
-			// evidence ("reset at") for the #6765 re-read identity. The same
-			// month-gated rejoin extends to a weekday-name token
-			// (wrapSplitsWeekday, "Th\nursday" → "Thursday") and to the
-			// leading "reset" keyword itself (wrapSplitsResetKeyword,
-			// "re\nset" → "reset"), so a narrow pane that splits either
-			// still resolves the reset day and keeps the keyword locatable.
-			// A wrap immediately before or after the clock's colon also rejoins —
-			// "2\n:30pm" and "2:\n30pm" both collapse to "2:30pm" rather than
-			// spacing to "2 :30pm"/"2: 30pm", which parseClockTime rejects —
-			// so a narrow pane that wraps at the colon keeps its reset time.
-			// Otherwise collapse to a single space (the wrap between the
-			// clock and the tz paren, or between complete words).
-			if lastDigit && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+			// A wrap newline outside a paren. Real tmux wraps sit under a
+			// "  ⎿  " gutter and carry a 5-space indent on continuation rows
+			// (task/testdata/claude_working_tool.ansi), so the byte after the
+			// newline is the indent, not the continuation token. Skip the
+			// indent before deciding whether to rejoin, then consume the
+			// newline+indent so the rejoin/space decision sees the
+			// continuation token directly. A wrap with no indent keeps the
+			// prior behavior: j == i+1 and the checks are unchanged.
+			j := i + 1
+			for j < len(s) && (s[j] == ' ' || s[j] == '\t') {
+				j++
+			}
+			rejoin := false
+			// A wrap that splits a multi-digit token (a calendar day, a clock
+			// hour, or a four-digit year) drops the newline so the digits
+			// rejoin — "Nov 1\n2" → "Nov 12", "1\n1am" → "11am",
+			// "Nov 6, 20\n27" → "Nov 6, 2027" — otherwise the day/hour/year
+			// resolves to the wrong instant (or monthDay misses the explicit
+			// year and the evidence diverges from the unwrapped form). The
+			// rejoin is gated on the joined digits forming a single
+			// day/hour/year token (≤ 4 digits): a wrap BETWEEN separate
+			// numeric tokens ("Nov 6\n2026" → 5 digits, "2026\n9am" → 5)
+			// stays a space, or monthDay would consume "62" as the day and
+			// time.Date would normalize it into a much later month. When the
+			// post-run is immediately followed by a clock suffix ([ap]m), a
+			// mid-token HOUR split ("1\n1am" → "11am") rejoins, but a wrap
+			// BETWEEN a calendar day and the clock hour ("Nov 6\n9am") stays
+			// a space — rejoining to "Nov 69am" makes parseClockTime reject
+			// hour 69. A mid-token MINUTES split ("2:3\n0pm" → "2:30pm") is
+			// preceded by a colon and rejoins regardless of the hour bound.
+			if lastDigit && j < len(s) && s[j] >= '0' && s[j] <= '9' {
 				pre := b.String()
 				preRun := 0
 				for preRun < len(pre) {
@@ -570,94 +580,106 @@ func normalizeResetWhitespace(s string) string {
 					preRun++
 				}
 				postRun := 0
-				for i+1+postRun < len(s) {
-					ch := s[i+1+postRun]
+				for j+postRun < len(s) {
+					ch := s[j+postRun]
 					if ch < '0' || ch > '9' {
 						break
 					}
 					postRun++
 				}
-				// Rejoin when the joined digit run is a single token: a
-				// calendar day or clock hour (≤ 2 digits) OR a four-digit
-				// year (≤ 4 digits) — a wrap INSIDE the year ("20\n27" →
-				// "2027") would otherwise space to "20 27" and monthDay would
-				// miss the explicit year, degrading the parse and shifting
-				// the evidence away from the unwrapped form. A wrap BETWEEN
-				// separate numeric tokens has a longer joined run (a day
-				// followed by a year is 5 digits, "Nov 6\n2026"; a year
-				// followed by a clock hour is 5, "2026\n9am") and stays a
-				// space, or monthDay would consume "62" as the day and
-				// time.Date would normalize it into a much later month.
-				// When the post-run is immediately followed by a clock
-				// suffix ([ap]m), the digits run up against a clock hour:
-				// a mid-token split of the HOUR ("1\n1am" → "11am") rejoins,
-				// but a wrap BETWEEN the day and the clock hour ("Nov 6\n9am")
-				// must stay a space — rejoining to "Nov 69am" makes
-				// parseClockTime reject hour 69 and the banner loses its
-				// reset time. A mid-token split of the MINUTES ("2:3\n0pm"
-				// → "2:30pm") is preceded by a colon and rejoins regardless
-				// of the hour bound (minutes run 0-59, not 1-12).
 				preStart := len(pre) - preRun
 				prevIsColon := preStart > 0 && pre[preStart-1] == ':'
-				postEnd := i + 1 + postRun
+				postEnd := j + postRun
 				followedByClockSuffix := postEnd+1 < len(s) &&
 					(s[postEnd] == 'a' || s[postEnd] == 'A' || s[postEnd] == 'p' || s[postEnd] == 'P') &&
 					(s[postEnd+1] == 'm' || s[postEnd+1] == 'M')
 				if followedByClockSuffix {
 					if prevIsColon {
-						continue // mid-token minutes split — rejoin
+						rejoin = true // mid-token minutes split — rejoin
+					} else {
+						joinedVal, _ := strconv.Atoi(pre[preStart:] + s[j:j+postRun])
+						// A mid-token clock-hour split ("1\n1am" → "11am")
+						// rejoins, but a wrap BETWEEN a calendar day and the
+						// clock hour ("Nov 1\n2pm") must stay a space:
+						// rejoining to "Nov 12pm" would let monthDay consume
+						// "12" as the day and parseClockTime read "12pm" as
+						// the clock. The day is always preceded by a month
+						// name in the weekly-date grammar ("Nov 6"), so a
+						// pre-run that is a calendar day
+						// (preRunIsCalendarDay) marks a day+clock boundary
+						// even when the joined digits fall in 1–12.
+						if joinedVal >= 1 && joinedVal <= 12 && !preRunIsCalendarDay(pre, preStart) {
+							rejoin = true // mid-token clock hour — rejoin
+						}
+						// else: day+clock boundary — stay a space
 					}
-					joinedVal, _ := strconv.Atoi(pre[preStart:] + s[i+1:i+1+postRun])
-					// A mid-token clock-hour split ("1\n1am" → "11am") rejoins,
-					// but a wrap BETWEEN a calendar day and the clock hour
-					// ("Nov 1\n2pm") must stay a space: rejoining to "Nov 12pm"
-					// would let monthDay consume "12" as the day and
-					// parseClockTime read "12pm" as the clock, scheduling the
-					// reset on the wrong day at the wrong hour. The day is
-					// always preceded by a month name in the weekly-date
-					// banner grammar ("Nov 6"), so a pre-run that is a calendar
-					// day (precededByMonth) marks a day+clock boundary even when
-					// the joined digits fall in 1–12.
-					if joinedVal >= 1 && joinedVal <= 12 && !preRunIsCalendarDay(pre, preStart) {
-						continue // mid-token clock hour — rejoin
-					}
-					// else: day+clock boundary — stay a space
 				} else if preRun+postRun <= 4 {
-					continue // mid-token day/year — rejoin
+					rejoin = true // mid-token day/year — rejoin
 				}
 			}
-			if lastColon && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
-				continue
+			if lastColon && j < len(s) && s[j] >= '0' && s[j] <= '9' {
+				rejoin = true
 			}
-			if lastDigit && i+1 < len(s) && s[i+1] == ':' {
-				continue
+			if lastDigit && j < len(s) && s[j] == ':' {
+				rejoin = true
 			}
-			if lastDigit && wrapSplitsClockDigitMeridiem(b.String(), s[i+1:]) {
-				continue
+			if lastDigit && wrapSplitsClockDigitMeridiem(b.String(), s[j:]) {
+				rejoin = true
 			}
-			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && (wrapSplitsMonth(b.String(), s[i+1:]) || wrapSplitsClockSuffix(b.String(), s[i+1:]) || wrapSplitsWeekday(b.String(), s[i+1:]) || wrapSplitsResetKeyword(b.String(), s[i+1:]) || wrapSplitsOrdinalSuffix(b.String(), s[i+1:])) {
-				continue
+			// A wrap that splits a multi-letter token the normalizer must
+			// rejoin — a month name ("No\nv" → "Nov"), a weekday
+			// ("Th\nursday" → "Thursday"), the leading "reset" keyword
+			// ("re\nset" → "reset"), the "at" preposition ("a\nt" → "at"),
+			// the clock's [ap]m suffix ("2p\nm" → "2pm"), or an ordinal date
+			// suffix ("12t\nh" → "12th") — drops the newline so the letters
+			// rejoin; a word-boundary wrap between complete words
+			// ("reset\nat") is byte-identical to a mid-token wrap at the
+			// newline, so the distinction is semantic (the joined letters
+			// forming the token) and anything else takes a space, preserving
+			// the unwrapped evidence for the #6765 re-read identity.
+			if lastLetter && j < len(s) && (s[j] >= 'a' && s[j] <= 'z' || s[j] >= 'A' && s[j] <= 'Z') && (wrapSplitsMonth(b.String(), s[j:]) || wrapSplitsClockSuffix(b.String(), s[j:]) || wrapSplitsWeekday(b.String(), s[j:]) || wrapSplitsResetKeyword(b.String(), s[j:]) || wrapSplitsOrdinalSuffix(b.String(), s[j:]) || wrapSplitsAtPreposition(b.String(), s[j:])) {
+				rejoin = true
+			}
+			// A wrap between a day digit and its ordinal suffix
+			// ("Nov 12\nth" → "Nov 12th") drops the newline so monthDay
+			// keeps the explicit year rather than matching only "Nov 12" and
+			// silently discarding it (scheduling the reset a year early).
+			if lastDigit && j < len(s) && (s[j] >= 'a' && s[j] <= 'z' || s[j] >= 'A' && s[j] <= 'Z') && wrapSplitsDigitOrdinalSuffix(b.String(), s[j:]) {
+				rejoin = true
 			}
 			// A wrap right before the date's comma ("Nov 6\n, 2027") drops
 			// the newline rather than spacing to "Nov 6 , 2027": monthDay's
-			// optional year requires the comma to immediately follow the day,
-			// and the spaced form diverges the evidence from the unwrapped
-			// "Nov 6, 2027" render (the #6765 re-read identity). The comma
-			// only appears in the pre-clock date span, so the drop is safe.
-			if lastDigit && i+1 < len(s) && s[i+1] == ',' {
-				continue
+			// optional year requires the comma to immediately follow the day
+			// (or its ordinal suffix), and the spaced form diverges the
+			// evidence from the unwrapped "Nov 6, 2027" render (#6765). The
+			// comma only appears in the pre-clock date span, so the drop is
+			// safe. A wrap after a complete ordinal suffix ("Nov 12th\n,
+			// 2027") rejoins for the same reason via preEndsOrdinalSuffix.
+			if lastDigit && j < len(s) && s[j] == ',' {
+				rejoin = true
+			}
+			if lastLetter && j < len(s) && s[j] == ',' && preEndsOrdinalSuffix(b.String()) {
+				rejoin = true
 			}
 			// A wrap that pushes the trailing period onto its own row ("2pm
 			// (America/New_York)\n.") drops the newline rather than spacing
-			// to "(…) .": the period is sentence punctuation, not a new
-			// word, and the spaced form diverges the evidence from the
-			// unwrapped "(…)." render (the #6765 re-read identity). The
-			// only \n. the anchor captures is this trailing wrapped period
-			// — a period-newline in the pre-clock span is a clause boundary
-			// the anchor already stops at — so the drop is unconditional.
-			if i+1 < len(s) && s[i+1] == '.' {
+			// to "(…) .": the period is sentence punctuation, not a new word,
+			// and the only \n. the anchor captures is this trailing wrapped
+			// period (a period-newline in the pre-clock span is a clause
+			// boundary the anchor already stops at), so the drop is
+			// unconditional.
+			if j < len(s) && s[j] == '.' {
+				rejoin = true
+			}
+			// Consume the newline and any continuation indent; the next loop
+			// iteration processes s[j] (the continuation token).
+			i = j - 1
+			if rejoin {
 				continue
 			}
+			// Otherwise collapse the wrap (and its indent) to a single space
+			// (the wrap between the clock and the tz paren, or between
+			// complete words).
 			if !outsideSpace {
 				b.WriteByte(' ')
 				outsideSpace = true
@@ -674,104 +696,6 @@ func normalizeResetWhitespace(s string) string {
 		}
 	}
 	return b.String()
-}
-
-// wrapSplitsMonth reports whether a wrap newline between two ASCII letters
-// splits a month-name token (a mid-token wrap) rather than falling between two
-// complete words (a word-boundary wrap). The two shapes are byte-identical at
-// the newline — "No\nv" (mid-token, the wrapped month "Nov") and "reset\nat"
-// (word boundary) both present as letter-newline-letter with no surrounding
-// spaces — so the distinction is semantic: the trailing letters already
-// emitted (the run at the end of pre) and the leading letters still ahead (the
-// run at the start of post) are rejoined and checked against the month
-// abbreviations monthDay accepts. A month-shaped join rejoins so monthDay
-// still sees the date; anything else takes a space so the unwrapped evidence
-// ("reset at") is preserved for the #6765 re-read identity.
-func wrapSplitsMonth(pre, post string) bool {
-	j := len(pre)
-	for j > 0 {
-		c := pre[j-1]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			break
-		}
-		j--
-	}
-	head := pre[j:]
-	if head == "" {
-		return false
-	}
-	k := 0
-	for k < len(post) {
-		c := post[k]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			break
-		}
-		k++
-	}
-	tail := post[:k]
-	if tail == "" {
-		return false
-	}
-	joined := strings.ToLower(head + tail)
-	for m := range monthIndex {
-		if strings.HasPrefix(joined, m) {
-			return true
-		}
-	}
-	return false
-}
-
-// wrapSplitsClockSuffix reports whether a wrap newline between two ASCII
-// letters splits the two-letter [ap]m meridiem suffix of a clock token —
-// e.g. "2p\nm" (the wrapped "2pm") or "11a\nm" (the wrapped "11am") — so the
-// normalizer rejoins it rather than spacing to "2p m", which the clockTime
-// regex rejects (the [ap] and m must be contiguous). The shape is
-// letter-newline-letter, byte-identical to a month mid-token wrap and to a
-// word-boundary wrap, so the distinction is semantic: the trailing letter
-// run of pre is exactly one [ap] letter that immediately follows a clock-hour
-// digit, and the leading letter run of post is exactly one 'm'. Anything
-// wider (a word-boundary wrap like "tap\nm", or a multi-letter head/tail) is
-// not a clock-suffix split and takes a space, preserving the unwrapped
-// evidence for the #6765 re-read identity.
-func wrapSplitsClockSuffix(pre, post string) bool {
-	j := len(pre)
-	for j > 0 {
-		c := pre[j-1]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			break
-		}
-		j--
-	}
-	head := pre[j:]
-	if len(head) != 1 {
-		return false
-	}
-	switch head[0] {
-	case 'a', 'A', 'p', 'P':
-	default:
-		return false
-	}
-	// The [ap] must immediately follow a clock-hour digit.
-	if j == 0 {
-		return false
-	}
-	prev := pre[j-1]
-	if prev < '0' || prev > '9' {
-		return false
-	}
-	k := 0
-	for k < len(post) {
-		c := post[k]
-		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
-			break
-		}
-		k++
-	}
-	tail := post[:k]
-	if len(tail) != 1 {
-		return false
-	}
-	return tail[0] == 'm' || tail[0] == 'M'
 }
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at

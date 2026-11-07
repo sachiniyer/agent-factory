@@ -241,3 +241,235 @@ func preRunIsCalendarDay(pre string, preStart int) bool {
 	_, ok := monthIndex[word[:3]]
 	return ok
 }
+
+// wrapSplitsMonth reports whether a wrap newline between two ASCII letters
+// splits a month-name token (a mid-token wrap) rather than falling between two
+// complete words (a word-boundary wrap). The two shapes are byte-identical at
+// the newline — "No\nv" (mid-token, the wrapped month "Nov") and "reset\nat"
+// (word boundary) both present as letter-newline-letter with no surrounding
+// spaces — so the distinction is semantic: the trailing letters already
+// emitted (the run at the end of pre) and the leading letters still ahead (the
+// run at the start of post) are rejoined and checked against the month
+// abbreviations monthDay accepts. A month-shaped join rejoins so monthDay
+// still sees the date; anything else takes a space so the unwrapped evidence
+// ("reset at") is preserved for the #6765 re-read identity.
+func wrapSplitsMonth(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if head == "" {
+		return false
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if tail == "" {
+		return false
+	}
+	joined := strings.ToLower(head + tail)
+	for m := range monthIndex {
+		if strings.HasPrefix(joined, m) {
+			return true
+		}
+	}
+	return false
+}
+
+// wrapSplitsClockSuffix reports whether a wrap newline between two ASCII
+// letters splits the two-letter [ap]m meridiem suffix of a clock token —
+// e.g. "2p\nm" (the wrapped "2pm") or "11a\nm" (the wrapped "11am") — so the
+// normalizer rejoins it rather than spacing to "2p m", which the clockTime
+// regex rejects (the [ap] and m must be contiguous). The shape is
+// letter-newline-letter, byte-identical to a month mid-token wrap and to a
+// word-boundary wrap, so the distinction is semantic: the trailing letter
+// run of pre is exactly one [ap] letter that immediately follows a clock-hour
+// digit, and the leading letter run of post is exactly one 'm'. Anything
+// wider (a word-boundary wrap like "tap\nm", or a multi-letter head/tail) is
+// not a clock-suffix split and takes a space, preserving the unwrapped
+// evidence for the #6765 re-read identity.
+func wrapSplitsClockSuffix(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if len(head) != 1 {
+		return false
+	}
+	switch head[0] {
+	case 'a', 'A', 'p', 'P':
+	default:
+		return false
+	}
+	// The [ap] must immediately follow a clock-hour digit.
+	if j == 0 {
+		return false
+	}
+	prev := pre[j-1]
+	if prev < '0' || prev > '9' {
+		return false
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if len(tail) != 1 {
+		return false
+	}
+	return tail[0] == 'm' || tail[0] == 'M'
+}
+
+// wrapSplitsAtPreposition reports whether a wrap newline between two ASCII
+// letters splits the leading "at" preposition of a reset clause —
+// e.g. "reset a\nt 2pm" (the wrapped "reset at 2pm") — so the normalizer
+// rejoins it rather than spacing to "reset a t 2pm". The anchor's optional
+// "at" branch does not cross a newline, so a wrapped "at" lands inside the
+// capture; the rejoin keeps the evidence byte-identical to the unwrapped
+// "reset at …" render (the #6765 re-read identity) across pane resizes. The
+// shape is letter-newline-letter, byte-identical to a month/weekday mid-token
+// wrap and to a word-boundary wrap, so the distinction is semantic: the
+// trailing letter run of pre is exactly the single-letter word "a" (not a
+// longer word ending in "a") and the leading letter run of post is exactly
+// "t" (not a longer word starting with "t"). Only the preposition "at"
+// matches; a longer head ("data") or tail ("thing") takes a space.
+func wrapSplitsAtPreposition(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if len(head) != 1 {
+		return false
+	}
+	if head[0] != 'a' && head[0] != 'A' {
+		return false
+	}
+	// "a" must be a standalone single-letter word, not the tail of a longer
+	// word ("data"). At the very start of the capture (j == 0) it is the
+	// preposition following "reset ".
+	if j > 0 {
+		prev := pre[j-1]
+		if (prev >= 'a' && prev <= 'z') || (prev >= 'A' && prev <= 'Z') {
+			return false
+		}
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if len(tail) != 1 {
+		return false
+	}
+	return tail[0] == 't' || tail[0] == 'T'
+}
+
+// wrapSplitsDigitOrdinalSuffix reports whether a wrap newline between a digit
+// and an ASCII letter splits a calendar day from its ordinal suffix —
+// e.g. "Nov 12\nth, 2027" (the wrapped "Nov 12th") — so the normalizer
+// rejoins it rather than spacing to "Nov 12 th", which monthDay matches only
+// as the day "12" and silently discards the explicit year. This is the
+// digit-newline-letter counterpart to wrapSplitsOrdinalSuffix (which handles
+// the letter-newline-letter shape "12t\nh"). The pre digit run must be a
+// calendar day (1-2 digits), and post must begin with a complete two-letter
+// ordinal suffix ("st"/"nd"/"rd"/"th") immediately followed by a non-letter
+// (the comma or space of the date), so a longer word starting with those
+// letters ("the") does not rejoin.
+func wrapSplitsDigitOrdinalSuffix(pre, post string) bool {
+	if len(pre) == 0 {
+		return false
+	}
+	last := pre[len(pre)-1]
+	if last < '0' || last > '9' {
+		return false
+	}
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if c < '0' || c > '9' {
+			break
+		}
+		j--
+	}
+	run := len(pre) - j
+	if run < 1 || run > 2 {
+		return false
+	}
+	if len(post) < 2 {
+		return false
+	}
+	switch strings.ToLower(post[:2]) {
+	case "st", "nd", "rd", "th":
+	default:
+		return false
+	}
+	if len(post) >= 3 {
+		c := post[2]
+		if (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') {
+			return false
+		}
+	}
+	return true
+}
+
+// preEndsOrdinalSuffix reports whether the buffer already emitted ends with a
+// complete two-letter ordinal suffix ("st"/"nd"/"rd"/"th") immediately
+// following a day digit — e.g. "Nov 12th" — so a wrap newline before the
+// date's comma ("Nov 12th\n, 2027") rejoins the same way the digit-before-
+// comma branch ("Nov 6\n, 2027") does. monthDay's optional year requires the
+// comma to immediately follow the day (or its ordinal suffix); the spaced
+// form "Nov 12th , 2027" matches only "Nov 12th" and silently discards the
+// explicit year, scheduling the reset a year early.
+func preEndsOrdinalSuffix(pre string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if len(head) != 2 {
+		return false
+	}
+	switch strings.ToLower(head) {
+	case "st", "nd", "rd", "th":
+	default:
+		return false
+	}
+	if j == 0 {
+		return false
+	}
+	prev := pre[j-1]
+	return prev >= '0' && prev <= '9'
+}

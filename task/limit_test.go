@@ -930,6 +930,79 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset Monday\nat 9am (America/New_York).",
 			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // Mon 9am EST -> 14:00Z
 		},
+		{
+			// The production layout (task/testdata/claude_working_tool.ansi):
+			// the reset clause sits under tmux's "  ⎿  " gutter and a wrapped
+			// continuation row carries a 5-space indent. When the pane wraps
+			// the timezone INSIDE the paren — "(America/\n     New_York)" —
+			// the indent must be stripped on rejoin so time.LoadLocation still
+			// accepts "America/New_York"; without the strip the zone rejects
+			// and the clock falls back to the daemon host zone (UTC here),
+			// landing the reset at 14:00Z instead of 19:00Z (the bug report's
+			// exact symptom). Same EST instant as the unwrapped form.
+			name:    "5h wrapped: tz split inside the paren with gutter indent",
+			content: "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/\n     New_York).",
+			want:    want2pm,
+		},
+		{
+			// Same production gutter+indent, but the paren opens on the next
+			// row — "2pm\n     (America/New_York)." — the shipped wrapped-
+			// banner shape with the continuation indent. The indent before
+			// the paren is consumed by the anchor's next-row-paren alternative
+			// ([ \t]* after \r?\n); the indent INSIDE the paren is stripped on
+			// rejoin. Same EST instant as the unwrapped form.
+			name:    "5h wrapped: tz paren on next row with gutter indent",
+			content: "⎿  Claude usage limit reached. Your limit will reset at 2pm\n     (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			// A narrow pane may wrap inside the "at" preposition — "at" splits
+			// as "a\nt" — and the wrap must rejoin (drop, not space) so the
+			// evidence matches the unwrapped "reset at 2pm (…)." form rather
+			// than the divergent "reset a t 2pm (…)." (which would bypass the
+			// same-wall dedupe after a pane resize). The anchor's optional
+			// "at" branch does not cross a newline, so the wrapped "at" lands
+			// inside the capture and the normalizer rejoins it. Same EST
+			// instant as the unwrapped form.
+			name:    "5h wrapped: at preposition wraps inside its letters",
+			content: "Claude usage limit reached. Your limit will reset a\nt 2pm (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			// A narrow pane may wrap BETWEEN a day digit and its ordinal
+			// suffix — "Nov 12\nth, 2027 9am" — and the wrap must rejoin
+			// (drop, not space) so monthDay sees "Nov 12th, 2027" (the
+			// suffix immediately follows the day, so the explicit year
+			// matches) rather than "Nov 12 th, 2027", which matches only
+			// "Nov 12" and silently discards the year (scheduling the reset
+			// a year early). Same EST instant as the unwrapped "Nov 12th,
+			// 2027 9am" form.
+			name:    "weekly date: ordinal suffix wraps after the day digits",
+			content: "Claude usage limit reached. Your limit will reset at Nov 12\nth, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 12, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap AFTER a complete ordinal suffix and
+			// before the date's comma — "Nov 12th\n, 2027 9am" — and the
+			// wrap must rejoin (drop, not space) so monthDay sees "Nov 12th,
+			// 2027" (the comma immediately follows the suffix, so the
+			// explicit year matches) rather than "Nov 12th , 2027", which
+			// matches only "Nov 12th" and silently discards the year. Same
+			// EST instant as the unwrapped "Nov 12th, 2027 9am" form.
+			name:    "weekly date: comma wraps after a complete ordinal suffix",
+			content: "Claude usage limit reached. Your limit will reset at Nov 12th\n, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 12, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// The production gutter+indent layout applied to a wrapped
+			// weekday reset — "reset Mon\n     day at 9am" — confirms the
+			// outside-paren wrap rejoins (the weekday letters rejoin to
+			// "Monday") even with the 5-space continuation indent. Same EST
+			// instant as the unwrapped "Monday at 9am" form.
+			name:    "weekly weekday: weekday wraps inside its letters with gutter indent",
+			content: "⎿  Claude usage limit reached. Your limit will reset Mon\n     day at 9am (America/New_York).",
+			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // Mon 9am EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -1140,6 +1213,62 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	}
 	if want := "reset Monday at 9am (America/New_York)."; evWrappedWeekdayAt != want {
 		t.Fatalf("wrapped weekday+word evidence = %q, want %q", evWrappedWeekdayAt, want)
+	}
+
+	// The production gutter+indent layout: a wrap inside the tz paren that
+	// carries the 5-space continuation indent — "(America/\n     New_York)"
+	// — must produce the SAME evidence as the unwrapped "(America/New_York)"
+	// form: the indent is stripped on rejoin (not spaced to
+	// "(America/      New_York)"), keeping the identity stable and the zone
+	// acceptable to time.LoadLocation across pane resizes.
+	unwrappedIndent := "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)."
+	wrappedIndent := "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/\n     New_York)."
+	_, _, _, evUnwrappedIndent := det.Check(unwrappedIndent, tmux.ProgramClaude, now)
+	_, _, _, evWrappedIndent := det.Check(wrappedIndent, tmux.ProgramClaude, now)
+	if evUnwrappedIndent != evWrappedIndent {
+		t.Fatalf("a wrapped tz paren with gutter indent must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedIndent, evWrappedIndent)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedIndent != want {
+		t.Fatalf("wrapped tz-paren-indent evidence = %q, want %q", evWrappedIndent, want)
+	}
+
+	// A wrap inside the "at" preposition — "a\nt" — must produce the SAME
+	// evidence as the unwrapped "reset at 2pm (…)." form: the preposition
+	// letters rejoin (not space to "reset a t 2pm"), keeping the identity
+	// stable across pane resizes.
+	wrappedAtPrep := "Claude usage limit reached. Your limit will reset a\nt 2pm (America/New_York)."
+	_, _, _, evWrappedAtPrep := det.Check(wrappedAtPrep, tmux.ProgramClaude, now)
+	if evWrappedAtPrep != evUnwrappedIndent {
+		t.Fatalf("a wrapped at preposition must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedIndent, evWrappedAtPrep)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedAtPrep != want {
+		t.Fatalf("wrapped at-preposition evidence = %q, want %q", evWrappedAtPrep, want)
+	}
+
+	// A wrap between a day digit and its ordinal suffix — "Nov 12\nth" —
+	// must produce the SAME evidence as the unwrapped "Nov 12th, 2027 9am"
+	// form: the suffix rejoins the day (not space to "Nov 12 th") so
+	// monthDay keeps the explicit year and the identity stays stable.
+	wrappedDigitOrdinal := "Claude usage limit reached. Your limit will reset at Nov 12\nth, 2027 9am (America/New_York)."
+	_, _, _, evWrappedDigitOrdinal := det.Check(wrappedDigitOrdinal, tmux.ProgramClaude, now)
+	if evWrappedDigitOrdinal != evUnwrappedOrdinal {
+		t.Fatalf("a wrapped digit+ordinal suffix must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedOrdinal, evWrappedDigitOrdinal)
+	}
+	if want := "reset at Nov 12th, 2027 9am (America/New_York)."; evWrappedDigitOrdinal != want {
+		t.Fatalf("wrapped digit-ordinal evidence = %q, want %q", evWrappedDigitOrdinal, want)
+	}
+
+	// A wrap after a complete ordinal suffix and before the comma —
+	// "Nov 12th\n, 2027" — must produce the SAME evidence as the unwrapped
+	// "Nov 12th, 2027 9am" form: the comma rejoins the suffix (not space to
+	// "Nov 12th , 2027") so monthDay keeps the explicit year.
+	wrappedOrdinalComma := "Claude usage limit reached. Your limit will reset at Nov 12th\n, 2027 9am (America/New_York)."
+	_, _, _, evWrappedOrdinalComma := det.Check(wrappedOrdinalComma, tmux.ProgramClaude, now)
+	if evWrappedOrdinalComma != evUnwrappedOrdinal {
+		t.Fatalf("a wrapped ordinal-suffix+comma must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedOrdinal, evWrappedOrdinalComma)
+	}
+	if want := "reset at Nov 12th, 2027 9am (America/New_York)."; evWrappedOrdinalComma != want {
+		t.Fatalf("wrapped ordinal-suffix-comma evidence = %q, want %q", evWrappedOrdinalComma, want)
 	}
 }
 
