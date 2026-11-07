@@ -527,22 +527,22 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 		// rather than settled here.
 		if errors.Is(err, syscall.EADDRINUSE) {
 			req := listenErrAddr(err, addr)
-			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
-				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
-			}
-			// Whose socket is the conflict? A live af daemon of ANOTHER home
-			// holding the port is a takeover in waiting: our retry loop would
-			// win the bind the moment that daemon's restart releases it
-			// (#6858). The check runs BEFORE our own listener's release path:
-			// a wildcard request can be co-blocked by our 127.0.0.2 socket AND
-			// a foreign 127.0.0.1 one — releasing ours fixes nothing there,
-			// and the refusal must latch anyway. An own-only conflict
-			// classifies own and falls through to the #5140 rebind; a
-			// third-party squatter or anything unprovable falls through to
-			// the ordinary failure. Refuse instead of retrying; the refusal
-			// latches so no later gap can hand us the port.
+			// Whose socket is the conflict? A live af daemon of ANOTHER
+			// home holding the port is a takeover in waiting: our retry
+			// loop would win the bind the moment that daemon's restart
+			// releases it (#6858). The check runs FIRST: a wildcard
+			// request can be co-blocked by the preview sibling AND a
+			// foreign socket, or by our own listener AND one — deferring
+			// for the sibling or releasing ours fixes neither, and the
+			// refusal must latch regardless. A foreign refusal is the
+			// terminal answer here; every non-foreign conflict —
+			// sibling-only, own-only, a third-party squatter, anything
+			// unprovable — falls through to the paths below unchanged.
 			if refusal := foreignHolderRefusal(req); refusal != "" {
 				return wl.refuseOrKeepLocked(addr, refusal)
+			}
+			if wl.previewBoundAddr != "" && boundListenerBlocks(wl.previewBoundAddr, req) {
+				return siblingBlockedError{fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))}
 			}
 			if wl.webHandle != nil && boundListenerBlocks(wl.webBoundAddr, req) {
 				return wl.rebindWebSamePortLocked(addr, policy, notice)

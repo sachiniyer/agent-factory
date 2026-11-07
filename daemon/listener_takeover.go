@@ -429,10 +429,13 @@ func lockFDHome(pid int) (home string, ok bool) {
 // daemonPIDFileNames reports whether dir's daemon.pid names pid — the
 // liveness identity af publishes for its daemon in the same home dir as the
 // lock. A daemon serving a contested socket published its pid long ago; a
-// missing or mismatched file just means the lock fd proves nothing.
+// missing or mismatched file just means the lock fd proves nothing. The read
+// is the same no-follow/nonblocking one every daemon.pid reader uses: this
+// runs on a path learned from an unverified process's fd while wl.mu is held,
+// so a FIFO or device swapped in for the file must not hang reconciliation.
 func daemonPIDFileNames(dir string, pid int) bool {
-	data, err := os.ReadFile(filepath.Join(dir, "daemon.pid"))
-	if err != nil {
+	data, ok := readManagedFileNoFollow(filepath.Join(dir, "daemon.pid"), daemonPIDFileMaxBytes)
+	if !ok {
 		return false
 	}
 	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
