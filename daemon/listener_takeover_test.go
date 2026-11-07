@@ -807,17 +807,27 @@ func TestWildcardRefusalLatchesProvenEndpointEndToEnd(t *testing.T) {
 
 	// The wildcard request meets the foreign hold: EADDRINUSE → classified
 	// foreign → refused. The request spelled the wildcard; the latch must
-	// name the proven 127.0.0.1:P endpoint and nothing else.
+	// name the proven 127.0.0.1:P endpoint and nothing else. The
+	// unauthenticated-network opt-in is needed to REACH the bind at all —
+	// without it a non-loopback request is refused by the #5137 posture
+	// check before net.Listen ever runs.
 	port := strconv.Itoa(reqFor(t, contested).Port)
 	cfg := wl.manager.Config()
 	cfg.ListenAddr = "0.0.0.0:" + port
+	cfg.AllowUnauthenticatedNetwork = true
 	_, err = wl.reconcile(cfg)
 	require.NoError(t, err, "a refusal is a decision, not a bind error")
+	// Snapshot under the lock, assert after releasing it: a failed require
+	// FailNow's through Goexit, which runs defers but skips the statements
+	// still ahead — a bare Unlock here would wedge wl.close() in cleanup.
 	wl.mu.Lock()
-	require.Len(t, wl.foreignRefusals, 1)
-	require.Equal(t, wl.webRefusal, wl.foreignRefusals[contested],
-		"the latch keys on the proven foreign endpoint, not the attempted wildcard")
+	latchLen := len(wl.foreignRefusals)
+	latched := wl.foreignRefusals[contested]
+	refusalText := wl.webRefusal
 	wl.mu.Unlock()
+	require.Equal(t, 1, latchLen)
+	require.Equal(t, refusalText, latched,
+		"the latch keys on the proven foreign endpoint, not the attempted wildcard")
 
 	// The remedy the refusal names — moving this listener to a distinct
 	// address on the same port — must actually work: 127.0.0.2 overlaps
