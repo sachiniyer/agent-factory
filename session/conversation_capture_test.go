@@ -55,13 +55,26 @@ func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, 
 	return path
 }
 
+// bindRuntimeHeldFiles returns snap with its runtime channel bound to a fake
+// whose open-file set is the given map — the test-side analogue of
+// Instance.BindConversationCaptureRuntime. The map is read on every
+// attribution, so a test can grant (or withdraw) held files between polls by
+// mutating it.
+func bindRuntimeHeldFiles(snap ConversationCaptureSnapshot, held map[string]struct{}) ConversationCaptureSnapshot {
+	snap.runtime = &codexRuntimeAttribution{
+		held: func() (map[string]struct{}, error) { return held, nil },
+	}
+	return snap
+}
+
 func TestCaptureAgentConversation_CodexRolloutFile(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-33-aaaaaaaa-aaaa-4aaa-aaaa-aaaaaaaaaaaa.jsonl")
 
 	snap := BeginConversationCapture()
-	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	minted := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{minted: {}})
 
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, time.Second)
 	require.NoError(t, err)
@@ -90,8 +103,9 @@ func TestCaptureAgentConversation_CodexAmbiguousConcurrentRollouts(t *testing.T)
 	t.Setenv("CODEX_HOME", codexHome)
 	snap := BeginConversationCapture()
 
-	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
-	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl")
+	first := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl")
+	second := writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl")
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{first: {}, second: {}})
 
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, time.Second)
 	require.Error(t, err)
@@ -105,10 +119,12 @@ func TestCaptureAgentConversation_CodexConcurrentRolloutsCorrelateByCwd(t *testi
 	snapA := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirA)
 	snapB := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirB)
 
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	mintedA := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDirA)
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	mintedB := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDirB)
+	snapA = bindRuntimeHeldFiles(snapA, map[string]struct{}{mintedA: {}})
+	snapB = bindRuntimeHeldFiles(snapB, map[string]struct{}{mintedB: {}})
 
 	convA, err := CaptureAgentConversation(tmux.ProgramCodex, snapA, 0)
 	require.NoError(t, err)
@@ -124,14 +140,15 @@ func TestCaptureAgentConversation_CodexSameCwdRemainsAmbiguous(t *testing.T) {
 	workDir := t.TempDir()
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	first := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	second := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{first: {}, second: {}})
 
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
-	require.ErrorContains(t, err, "2 new rollout files matched launch working directory")
-	require.False(t, conv.HasID(), "same-cwd rollouts cannot be distinguished safely")
+	require.ErrorContains(t, err, "2 new rollout files are held open by the session's runtime")
+	require.False(t, conv.HasID(), "same-cwd rollouts held by one runtime cannot be distinguished safely")
 }
 
 func TestCaptureAgentConversation_CodexUncorrelatableMetadataDoesNotGuess(t *testing.T) {
@@ -155,8 +172,9 @@ func TestCaptureAgentConversation_CodexRetriesIncompleteConcurrentMetadata(t *te
 	workDirB := filepath.Join(t.TempDir(), "session-b")
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDirA)
 
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	mintedA := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDirA)
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{mintedA: {}})
 	incomplete := writeCodexRolloutFile(t, codexHome,
 		"rollout-2026-07-06T10-17-36-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl")
 	require.NoError(t, os.WriteFile(incomplete, []byte(`{"type":"session_meta","payload":`), 0644))
@@ -200,8 +218,9 @@ func TestCaptureAgentConversation_CodexSubagentDoesNotForceAmbiguity(t *testing.
 	workDir := t.TempDir()
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	minted := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-07-06T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{minted: {}})
 	writeCodexRolloutFileWithSource(t, codexHome,
 		"rollout-2026-07-06T10-17-40-049f386f-7206-7fc2-803b-f7045e07a245.jsonl", workDir,
 		map[string]any{"subagent": "review"})
@@ -390,7 +409,9 @@ func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *te
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	const name = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
-	writeEmptyCodexRolloutFile(t, codexHome, name)
+	held := make(map[string]struct{})
+	snap = bindRuntimeHeldFiles(snap, held)
+	minted := writeEmptyCodexRolloutFile(t, codexHome, name)
 
 	done := make(chan captureResult, 1)
 	go func() {
@@ -406,6 +427,7 @@ func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *te
 	}
 
 	writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
+	held[minted] = struct{}{}
 	select {
 	case r := <-done:
 		require.NoError(t, r.err)
@@ -445,6 +467,8 @@ func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *test
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	const first = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
+	held := make(map[string]struct{})
+	snap = bindRuntimeHeldFiles(snap, held)
 	writeEmptyCodexRolloutFile(t, codexHome, first)
 
 	done := make(chan captureResult, 1)
@@ -456,7 +480,7 @@ func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *test
 	time.Sleep(400 * time.Millisecond)
 	// A same-cwd sibling settles first; the poll must stay undecided while the
 	// first header is still unclassifiable rather than capture the sibling.
-	writeCodexRolloutFileWithCwd(t, codexHome,
+	second := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-08-13T01-56-29-019ffa5a-ddb3-7941-8cad-7c688ceb97d4.jsonl", workDir)
 	time.Sleep(200 * time.Millisecond)
 	select {
@@ -464,12 +488,16 @@ func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *test
 		t.Fatalf("capture must not decide while a candidate header is still settling: conv=%+v err=%v", r.conv, r.err)
 	default:
 	}
+	// Both settled rollouts held by the same runtime: ambiguity, as inside the
+	// base window.
 	writeCodexRolloutFileWithCwd(t, codexHome, first, workDir)
+	held[filepath.Join(codexRolloutDayDir(codexHome, time.Now()), first)] = struct{}{}
+	held[second] = struct{}{}
 
 	select {
 	case r := <-done:
-		require.ErrorContains(t, r.err, "matched launch working directory")
-		require.False(t, r.conv.HasID(), "same-cwd rollouts cannot be distinguished safely")
+		require.ErrorContains(t, r.err, "held open by the session's runtime")
+		require.False(t, r.conv.HasID(), "same-cwd rollouts held by one runtime cannot be distinguished safely")
 	case <-time.After(5 * time.Second):
 		t.Fatal("capture did not resolve after both headers settled")
 	}
@@ -1362,7 +1390,8 @@ func TestCaptureAgentConversation_CodexUnderEnvChdirCorrelatesByEffectiveDir(t *
 	// Keyed on the effective directory it is captured.
 	codexHome2 := t.TempDir()
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome2, LaunchCaptureWorkingDir(program, worktree))
-	writeCodexRolloutFileWithCwd(t, codexHome2, rollout, elsewhere)
+	minted := writeCodexRolloutFileWithCwd(t, codexHome2, rollout, elsewhere)
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{minted: {}})
 	conv, err = CaptureAgentConversation(tmux.ProgramCodex, snap, time.Second)
 	require.NoError(t, err)
 	assert.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)

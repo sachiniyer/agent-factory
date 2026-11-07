@@ -674,6 +674,9 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	if token.Agent() != tmux.ProgramCodex {
 		return false, nil
 	}
+	// Rollout adoption needs the replacement's own runtime as evidence, not
+	// just the store and directory its launch was composed against (#6847).
+	snap = instance.BindConversationCaptureRuntime(snap)
 	type captureResult struct {
 		conversation session.AgentConversationData
 		err          error

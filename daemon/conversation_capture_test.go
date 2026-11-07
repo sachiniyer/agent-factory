@@ -38,6 +38,25 @@ func writeDaemonCodexRolloutFileWithCwd(t *testing.T, codexHome, name, cwd strin
 	require.NoError(t, os.WriteFile(path, append(data, '\n'), 0644))
 }
 
+// heldAllCodexRollouts answers capture attribution's question — "does the
+// runtime hold this rollout open" — with a live view of the fixture store:
+// every rollout the test wrote is the session's own, exactly as a real pane's
+// Codex would hold every file it minted. It re-globs on each judgement, so a
+// rollout written after the arm is held the moment it exists (#6847).
+func heldAllCodexRollouts(codexHome string) func() (map[string]struct{}, error) {
+	return func() (map[string]struct{}, error) {
+		paths, err := filepath.Glob(filepath.Join(codexHome, "sessions", "*", "*", "*", "rollout-*.jsonl"))
+		if err != nil {
+			return nil, err
+		}
+		held := make(map[string]struct{}, len(paths))
+		for _, path := range paths {
+			held[path] = struct{}{}
+		}
+		return held, nil
+	}
+}
+
 func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	codexHome := t.TempDir()
@@ -55,6 +74,9 @@ func TestCaptureAgentConversationPersistsCodexRolloutID(t *testing.T) {
 	})
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSession("codex-worker", tmux.ProgramCodex))
+	// Attribution needs a runtime holding the rollout open; the fixture's
+	// pane is a name-only handle, so the test hands the walk its store.
+	inst.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
 	inst.SetStatusForTest(session.Running)
 	key := daemonInstanceKey(repo.ID, inst.Title)
 	manager.mu.Lock()

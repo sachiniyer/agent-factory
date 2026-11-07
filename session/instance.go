@@ -438,6 +438,9 @@ type Instance struct {
 	// before this evidence existed and everywhere runtimeProgram is cleared.
 	runtimePID     int
 	runtimeStartID uint64
+	// codexRuntimeHeldOverride, when set by a test, replaces the live
+	// descriptor walk capture attribution performs against this runtime.
+	codexRuntimeHeldOverride func() (map[string]struct{}, error)
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.
