@@ -206,7 +206,12 @@ func TestTakeoverHelperDaemon(t *testing.T) {
 func spawnHelperDaemon(t *testing.T, home string) string {
 	t.Helper()
 	cmd := exec.Command(os.Args[0])
-	cmd.Args = []string{"af", "--daemon", "-test.run=^TestTakeoverHelperDaemon$"}
+	// argv[0] "af" plus a discrete "--daemon" token is the real daemon's argv
+	// shape the classifier tests. The token goes AFTER "--": the test
+	// binary's flag parser stops there, so the child reaches the helper at
+	// all — a bare "--daemon" is not a registered test flag and exits the
+	// child before it binds anything.
+	cmd.Args = []string{"af", "-test.run=^TestTakeoverHelperDaemon$", "--", "--daemon"}
 	cmd.Env = append(os.Environ(),
 		"AF_TAKEOVER_TEST_HELPER=1",
 		"AGENT_FACTORY_HOME="+home,
