@@ -439,4 +439,19 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 			"the ledger must hold the record's instant, not the disproved pane bound: got %v",
 			observations[0].ResetAt)
 	})
+
+	t.Run("an untimed park's observation is replaced, not duplicated", func(t *testing.T) {
+		// #6975 review: the park filed a never-expires claim because the
+		// banner would not parse; the record proving a deadline corrects
+		// THAT row — an appended timed row beside it would leave the
+		// unknown-reset claim excluding the account forever.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, "", LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1,
+			"the corrected wall's unknown-reset row must be replaced, not duplicated")
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the row must take the record's instant: got %v", observations[0].ResetAt)
+	})
 }

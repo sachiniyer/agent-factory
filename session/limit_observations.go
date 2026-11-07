@@ -60,52 +60,73 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		// all — the same wedge the explicit instant exists to close (#6880).
 		sighted = instanceNow().UTC()
 	}
+	// One row per reset claim KIND, not per identity: merging a
+	// known-reset wall into an unknown one — or the reverse — would
+	// either drop the never-expires property or lower the instant a
+	// retraction must postdate. Distinct claims are distinct facts and
+	// keep their own rows; the strictest one still excludes (#6802
+	// review). An authoritative sighting carrying the provider's instant
+	// is the one crossing allowed: when no same-kind row exists, the
+	// identity's single unknown-reset row IS the corrected wall's claim —
+	// a park that could not read its banner filed it, and the record
+	// proves the deadline that claim lacked (#6944 review). A timed row
+	// existing alongside means the unknown one is a DIFFERENT wall's
+	// claim and stands.
+	target := -1
+	zeroIdx := -1
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
-		// One row per reset claim KIND, not per identity: merging a
-		// known-reset wall into an unknown one — or the reverse — would
-		// either drop the never-expires property or lower the instant a
-		// retraction must postdate. Distinct claims are distinct facts and
-		// keep their own rows; the strictest one still excludes (#6802
-		// review).
-		if observation.Agent == agent && observation.Account == account &&
-			observation.ResetAt.IsZero() == resetAt.IsZero() {
-			// resetAt arrives already resolved: the caller's
-			// originalLimitResetLocked has judged whether the sighting is the
-			// recorded wall's re-read or a genuinely new fact, so the merge
-			// keeps only the safer bound — a repeated phrase that resolved
-			// to the recorded instant merges in place, and a new wall that
-			// re-uses a phrase (the next day's identical "reset at 3pm")
-			// still tightens the row to its own instant (#6959).
-			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if authoritative {
-				// The record's instant is the wall's truth — it
-				// corrects a pane-derived bound in both directions
-				// rather than only tightening.
-				retained = resetAt
-			}
-			if wasParked && observation.ResetAt.Equal(retained) &&
-				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
-				return
-			}
-			if !retained.Equal(observation.ResetAt) {
-				observation.ResetAt = retained
-				// The phrase follows the reset it produced: a claim that
-				// tightened the boundary names the phrase that carried it.
-				observation.Evidence = evidence
-			}
-			// The row's newest sighting never rewinds: the instant is when the
-			// row last saw this claim's wall, and a copy stamped with an older
-			// source instant — or a lagging detection clock — must not move it
-			// back below a sighting the row genuinely made, or a proof dated in
-			// the gap would retract a wall S saw AFTER the proof (#6880 review).
-			if sighted.After(observation.ObservedAt) {
-				observation.ObservedAt = sighted
-			}
-			i.accountLimitObsUnpersisted = true
-			i.touchLocked()
+		if observation.Agent != agent || observation.Account != account {
+			continue
+		}
+		if observation.ResetAt.IsZero() == resetAt.IsZero() {
+			target = idx
+			break
+		}
+		if observation.ResetAt.IsZero() {
+			zeroIdx = idx
+		}
+	}
+	if target < 0 && authoritative && !resetAt.IsZero() {
+		target = zeroIdx
+	}
+	if target >= 0 {
+		observation := &i.accountLimitObservations[target]
+		// resetAt arrives already resolved: the caller's
+		// originalLimitResetLocked has judged whether the sighting is the
+		// recorded wall's re-read or a genuinely new fact, so the merge
+		// keeps only the safer bound — a repeated phrase that resolved
+		// to the recorded instant merges in place, and a new wall that
+		// re-uses a phrase (the next day's identical "reset at 3pm")
+		// still tightens the row to its own instant (#6959).
+		retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
+		if authoritative {
+			// The record's instant is the wall's truth — it
+			// corrects a pane-derived bound in both directions
+			// rather than only tightening.
+			retained = resetAt
+		}
+		if wasParked && observation.ResetAt.Equal(retained) &&
+			!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 			return
 		}
+		if !retained.Equal(observation.ResetAt) {
+			observation.ResetAt = retained
+			// The phrase follows the reset it produced: a claim that
+			// tightened the boundary names the phrase that carried it.
+			observation.Evidence = evidence
+		}
+		// The row's newest sighting never rewinds: the instant is when the
+		// row last saw this claim's wall, and a copy stamped with an older
+		// source instant — or a lagging detection clock — must not move it
+		// back below a sighting the row genuinely made, or a proof dated in
+		// the gap would retract a wall S saw AFTER the proof (#6880 review).
+		if sighted.After(observation.ObservedAt) {
+			observation.ObservedAt = sighted
+		}
+		i.accountLimitObsUnpersisted = true
+		i.touchLocked()
+		return
 	}
 	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
 		Agent: agent, Account: account, ResetAt: resetAt, Evidence: evidence, ObservedAt: sighted,
