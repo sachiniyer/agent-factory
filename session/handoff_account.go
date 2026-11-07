@@ -718,7 +718,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
 }
 
 // ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit
@@ -732,21 +732,44 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 // other contract — the fence, the incoming account already on i.Account, the
 // manual path's not-delivered marker, the durable observation — matches the
 // pair.
-func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Time, evidence string) error {
+//
+// sightedAt is the re-admission's freshest evidence instant for this wall:
+// the copy this park writes is a copy of the wall's FACT, so its event time
+// is the source's own sighting, never the park's — a copy stamped later would
+// outlive every retraction that was already on its way between the source's
+// sighting and the park (#6880).
+func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Time, evidence string, sightedAt time.Time) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil {
 		return fmt.Errorf("account limit park requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence)
+	// The copy is a parked re-sight when the row still sits on the wall that
+	// refused it — the refused retry must not advance the sighting instant of
+	// the same unchanged claim (#6880). A row parked at some OTHER wall is
+	// parked-at-a-different-fact, and the record's same-kind match scopes the
+	// no-op to the same claim kind in either case.
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, i.liveness == LiveLimitReached)
 }
 
 // parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
 // the caller holds i.mu, has verified the pending replacement fence, and names
 // the agent namespace the wall files under — currentAgentNameLocked for a wall
 // found on the already-running replacement, the committed swap's namespace for
-// one found before it spawned.
-func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string) error {
+// one found before it spawned. sightedAt is the wall's sighting instant — the
+// pane's own observation time for the pair, the re-admission's freshest
+// matched-source instant for the committed twin.
+//
+// wasParked is the caller's own classification, not derived here: the send-path
+// pair passes false because a LimitReachedError out of the fresh runtime is
+// always a new sighting — the row it lands on may still be parked under the
+// resume fence by owner bookkeeping (ReparkLimitUnderResumeFence restores the
+// window the attempt entered with), and treating that bookkeeping marker as a
+// re-sight would let a stale proof retract a wall the NEW runtime just
+// reported (#6927 review). Only the committed twin passes lv ==
+// LiveLimitReached: its copy carries no new pane observation at all, so the
+// row's own parked marker is exactly the "same wall still standing" signal.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, wasParked bool) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -758,14 +781,18 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
 	// earlier ambiguity so the scheduler may resume it after the recorded
-	// reset. The marker is consulted only on the manual path
-	// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
-	// swap is not manual), so automatic swaps never set it.
+	// reset. The verdict gates scheduled retries for swaps of either kind —
+	// accountSwapScheduledResumeEligible reads it through
+	// PendingAccountSwapDeliveryUnconfirmed (#6767) — while the flip stays
+	// manual-scoped: an automatic swap's ambiguous verdict belongs to its
+	// notice send's own evidence contract (the Begin/Record pair and its
+	// re-verification watch), and a wall found before this attempt's send
+	// cannot settle a notice an earlier send may already have delivered.
 	if i.pendingAccountSwap.Manual && i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(agent, i.Account, resetAt, false)
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, wasParked, sightedAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -801,16 +828,19 @@ func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
 // ledger never gains the incoming entry, so a sibling session may re-admit the
 // still-exhausted incoming account and waste a swap cycle.
 //
-// Deliberately does NOT flip pendingAccountSwap.MissionDeliveryStatus: that
-// non-delivery marker is consulted only on the manual path
-// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
-// swap is not manual), and the automatic resume path retries after the recorded
-// reset unconditionally, with no operator-delivery step.
+// Deliberately does NOT flip pendingAccountSwap.MissionDeliveryStatus: the
+// marker gates scheduled retries for swaps of either kind since #6767 —
+// accountSwapScheduledResumeEligible reads it through
+// PendingAccountSwapDeliveryUnconfirmed — so an automatic swap's ambiguous
+// verdict belongs to its notice send's own evidence contract (the Begin/Record
+// pair and its re-verification watch). A wall found before this attempt's
+// send cannot settle a notice an earlier send may already have delivered, so
+// the positive-non-delivery flip stays scoped to the manual mission.
 func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence string) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
 }

@@ -656,13 +656,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		// mission durable while limitedAccountsForSwap keeps that identity
 		// excluded for the wall's whole window (#6880).
 		if accountSwap != nil {
-			wallReset, wallEvidence, walled, wallErr := m.committedSwapAccountWall(accountSwap, loadAccountLimitEvidenceForSwap)
+			wallReset, wallSighted, wallEvidence, walled, wallErr := m.committedSwapAccountWall(accountSwap, loadAccountLimitEvidenceForSwap)
 			if wallErr != nil {
 				return resumeNotPerformed, conversation, wallErr
 			}
 			if walled {
 				releaseAdmission()
-				return resumeNotPerformed, conversation, m.parkCommittedSwapAtIncomingWall(repoID, key, requestedTitle, instance, accountSwap, wallReset, wallEvidence)
+				return resumeNotPerformed, conversation, m.parkCommittedSwapAtIncomingWall(repoID, key, requestedTitle, instance, accountSwap, wallReset, wallSighted, wallEvidence)
 			}
 		}
 		var rerr error

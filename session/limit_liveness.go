@@ -273,10 +273,26 @@ func (i *Instance) attributeLimitIdentityAsLocked(agent string) {
 // session) once per second for as long as the session stayed parked.
 // Caller holds i.mu.
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, wasParked bool) {
+	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, wasParked, instanceNow().UTC())
+}
+
+// recordAccountLimitObservationAtLocked is recordAccountLimitObservationLocked
+// with the sighting instant supplied by the caller: a park that copies a wall
+// it did not itself observe stamps the SOURCE's event time, never a later
+// instant — a copy that postdates its source observation outlives every
+// retraction that was already on its way between the source's sighting and the
+// park (#6880). Caller holds i.mu.
+func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, wasParked bool, sightedAt time.Time) {
 	if agent == "" || account == "" {
 		return
 	}
-	sighted := instanceNow().UTC()
+	sighted := sightedAt.UTC()
+	if sighted.IsZero() {
+		// A caller with no instant is observing the wall right now; stamping
+		// zero would write an observation that orders against no retraction at
+		// all — the same wedge the explicit instant exists to close (#6880).
+		sighted = instanceNow().UTC()
+	}
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		// One row per reset claim KIND, not per identity: merging a
@@ -288,7 +304,8 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 		if observation.Agent == agent && observation.Account == account &&
 			observation.ResetAt.IsZero() == resetAt.IsZero() {
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if wasParked && observation.ResetAt.Equal(retained) {
+			if wasParked && observation.ResetAt.Equal(retained) &&
+				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 				return
 			}
 			observation.ResetAt = retained
@@ -303,6 +320,22 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 	})
 	i.accountLimitObsUnpersisted = true
 	i.touchLocked()
+}
+
+// reSightCrossesSendAttemptLocked reports whether a parked re-sight of an
+// unchanged claim still earns its stamp: the pending swap's notice send is the
+// recency boundary pendingSwapIncomingWallLocked orders wall freshness against
+// (#6921), so the FIRST sighting landing after the attempt instant is a new
+// fact — the wall genuinely re-observed after the send — while later re-sights
+// of the unchanged claim add nothing and stay the no-op #6802 keeps. A row
+// with no pending send attempt has no boundary to cross. Caller holds i.mu.
+func (i *Instance) reSightCrossesSendAttemptLocked(stored, sighted time.Time) bool {
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.MissionDeliveryAttemptAt.IsZero() ||
+		!sighted.After(pending.MissionDeliveryAttemptAt) {
+		return false
+	}
+	return !stored.After(pending.MissionDeliveryAttemptAt)
 }
 
 // RetainedAccountLimitReset merges two negative quota observations without

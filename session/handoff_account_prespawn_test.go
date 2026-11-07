@@ -47,7 +47,7 @@ func TestParkCommittedAccountSwapAtLimit_FilesWallUnderCommittedNamespace(t *tes
 
 	// The fixture's pane still runs the outgoing agent: pane-derived
 	// attribution would name claude. The committed namespace is codex.
-	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, ""))
+	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, "", time.Now().UTC()))
 
 	require.Equal(t, LiveLimitReached, inst.GetLiveness())
 	agent, account, ok := inst.LimitIdentity()
@@ -78,13 +78,13 @@ func TestParkCommittedAccountSwapAtLimit_RefusesWithoutFence(t *testing.T) {
 	t.Run("resume fence not held", func(t *testing.T) {
 		inst := preSpawnCommittedSwapInstance("work", false)
 		inst.inFlightOp = OpNone
-		require.Error(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, ""))
+		require.Error(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, "", time.Now().UTC()))
 	})
 
 	t.Run("no pending replacement", func(t *testing.T) {
 		inst := preSpawnCommittedSwapInstance("work", false)
 		inst.pendingAccountSwap = nil
-		require.Error(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, ""))
+		require.Error(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramCodex, reset, "", time.Now().UTC()))
 	})
 }
 
@@ -95,7 +95,7 @@ func TestParkCommittedAccountSwapAtLimit_AutomaticKeepsDeliveryMarker(t *testing
 	inst := preSpawnCommittedSwapInstance("work", false)
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus)
 
-	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, time.Now().Add(time.Hour), ""))
+	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, time.Now().Add(time.Hour), "", time.Now().UTC()))
 
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus,
 		"an automatic swap parked pre-spawn must not set the manual-only delivery marker")
