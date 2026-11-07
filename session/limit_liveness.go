@@ -338,11 +338,16 @@ func (i *Instance) setLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			// stored claim does not already carry — a correction, not a
 			// re-read (#6944 review).
 			if authoritative && !resetAt.IsZero() && !i.limitResetAt.Equal(resetAt) {
+				lv, op, prevReset := i.lifecycleStateLocked()
 				i.limitResetAt = resetAt
 				if i.lastLimitWall.agent != "" {
 					i.lastLimitWall.resetAt = resetAt
 				}
 				i.recordAccountLimitObservationAtLocked(i.limitAgent, i.Account, resetAt, evidence, true, authoritative, instanceNow().UTC())
+				// The reset moved — the epoch tracks it like every other
+				// writer, or a stale AtEpoch observation stays eligible
+				// to clear the corrected park (#6944 review).
+				i.noteStateChangeLocked(lv, op, prevReset)
 			}
 			return true
 		}

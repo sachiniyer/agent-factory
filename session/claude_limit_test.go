@@ -440,6 +440,19 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 			observations[0].ResetAt)
 	})
 
+	t.Run("a correction advances the lifecycle epoch", func(t *testing.T) {
+		// #6975 review: the reset time is epoch-tracked state — a
+		// correction that moves it must bump the epoch or a stale
+		// AtEpoch observation stays eligible to clear the parked row.
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		_, epoch := i.InFlightOpAndEpoch()
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, epoch))
+		_, after := i.InFlightOpAndEpoch()
+		require.NotEqual(t, epoch, after,
+			"a moved reset is a tracked-state change — the epoch must advance")
+	})
+
 	t.Run("an untimed park's observation is replaced, not duplicated", func(t *testing.T) {
 		// #6975 review: the park filed a never-expires claim because the
 		// banner would not parse; the record proving a deadline corrects
