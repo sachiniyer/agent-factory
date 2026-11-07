@@ -27,10 +27,10 @@ import (
 // TestClaudeResetWrappedBanner pins the layout rule: a continuation row is
 // joined only when it carries the banner row's text-column indent — the
 // renderer's hanging indent under the "  ⎿  " gutter — and every boundary
-// rejoins with a space EXCEPT the one hard-split a word-wrap renderer emits:
-// the row feeding the boundary is a single token at the full wrap width — a
-// mid-token fragment, since a complete banner word is never wider than the
-// region it wraps to.
+// rejoins with a space. No row shape proves the renderer's mid-token
+// hard-split: a complete word can fill its row exactly, so a full-width
+// single-token row looks identical to a fragment, and fusing on the guess
+// mints tokens the clause never carried ("resets9:40am").
 func TestClaudeResetWrappedBanner(t *testing.T) {
 	est, err := time.LoadLocation("America/New_York")
 	if err != nil {
@@ -70,12 +70,13 @@ func TestClaudeResetWrappedBanner(t *testing.T) {
 			wantEv:  "reset Mon day at 9am (America/New_York).",
 		},
 		{
-			// A self-consistent very narrow render: every row fits the
-			// wrap width (13 text columns), and the parenthesized zone —
-			// the one token in the clause that exceeds it — splits hard
-			// mid-token after filling its row. The split row is full and
-			// the rejoined token is wider than the row, so the join drops
-			// the break rather than spacing it.
+			// A genuine hard-split: the zone token exceeds the 13-column
+			// region and fills its row mid-token. Nothing in the geometry
+			// proves the split (a complete word can fill its row exactly),
+			// so the boundary keeps its space, the fused candidate
+			// "(America/New_ York)" fails to load, and the clock resolves in
+			// the injected clock's zone — the same bounded answer a
+			// paren-less banner produces, never a minted token.
 			name: "tz token hard-splits inside the paren on a very narrow pane",
 			content: "  ⎿  Claude usage\n" +
 				"     limit\n" +
@@ -84,8 +85,8 @@ func TestClaudeResetWrappedBanner(t *testing.T) {
 				"     reset at 2pm\n" +
 				"     (America/New_\n" +
 				"     York).",
-			want:   want2pm,
-			wantEv: "reset at 2pm (America/New_York).",
+			want:   time.Date(2026, 1, 2, 14, 0, 0, 0, now.Location()).UTC(), // 2pm host zone
+			wantEv: "reset at 2pm (America/New_ York).",
 		},
 		{
 			// The banner's own name split across continuation rows: detection
@@ -134,6 +135,23 @@ func TestClaudeResetWrappedBanner(t *testing.T) {
 			content: "  ⎿  You've hit your weekly limit · resets 10am (America/New_York)",
 			want:    time.Date(2026, 1, 2, 10, 0, 0, 0, est).UTC(),
 			wantEv:  "resets 10am (America/New_York)",
+		},
+		{
+			// Codex's six-column counterexample: "resets" is a COMPLETE word
+			// that happens to fill its row — indistinguishable from a
+			// mid-token fragment. The boundary must keep its space or the
+			// fused "resets9:40am" loses the clock the unwrapped banner
+			// carried.
+			name: "six-column word wrap keeps a full-width word boundary",
+			content: "  ⎿  You've\n" +
+				"     hit\n" +
+				"     your\n" +
+				"     weekly\n" +
+				"     limit ·\n" +
+				"     resets\n" +
+				"     9:40am",
+			want:   time.Date(2026, 1, 3, 9, 40, 0, 0, now.Location()).UTC(), // next 9:40am host zone
+			wantEv: "resets 9:40am",
 		},
 		{
 			// Codex's ten-column counterexample: every boundary here is a

@@ -425,13 +425,16 @@ func claudeResetClause(rowLead, content string) (evidence, tail string) {
 // own grid-level hard wraps, so the only multi-row banner shapes left in a
 // capture are the renderer's. Claude renders with a word-wrap: a row breaks at
 // a space, and only a token wider than the whole text region splits mid-token.
-// So the rejoin inserts a space at each boundary EXCEPT the one shape that
-// proves a hard-split: the row feeding the boundary is a single token at the
-// full wrap width — a mid-token fragment, since a complete banner word is
-// never wider than the region it wraps to. A full row ending at a word whose
-// CONCATENATION with the next row's first word exceeds the width is not
-// evidence of a split — that is what every ordinary word-wrap boundary looks
-// like — and fusing those words mints tokens the clause never carried.
+// No row shape proves that split, though — a complete word can fill its row
+// exactly, so a full-width single-token row feeding the boundary renders
+// identically to a mid-token fragment: "resets|9:40am" at a six-column wrap
+// is indistinguishable from "(America/New_|York)". Fusing on that guess mints
+// tokens the clause never carried — "resets9:40am" loses the reset outright.
+// Every boundary therefore keeps its space. The cost is the genuine
+// hard-split — the paren zone is the only banner token ever wider than a
+// narrow region — which rejoins spaced; its candidate then fails to load and
+// the clause resolves in the injected clock's zone, the same bounded answer
+// every paren-less banner already produces. Never a fabrication.
 func joinClaudeBannerRows(rowLead, content string) string {
 	lead := xansi.Strip(rowLead)
 	indent := utf8.RuneCountInString(lead)
@@ -442,12 +445,8 @@ func joinClaudeBannerRows(rowLead, content string) string {
 		// the clause cannot leave its row.
 		return row0
 	}
-	type row struct {
-		text     string
-		absWidth int
-	}
 	pad := strings.Repeat(" ", indent)
-	rows := []row{{text: row0, absWidth: indent + utf8.RuneCountInString(row0)}}
+	rows := []string{row0}
 	for rest != "" {
 		var raw string
 		raw, rest = cutLine(rest)
@@ -460,35 +459,9 @@ func joinClaudeBannerRows(rowLead, content string) string {
 		if text == "" {
 			break
 		}
-		rows = append(rows, row{text: text, absWidth: utf8.RuneCountInString(stripped)})
+		rows = append(rows, text)
 	}
-	if len(rows) == 1 {
-		return rows[0].text
-	}
-	wAbs := 0
-	for _, r := range rows {
-		if r.absWidth > wAbs {
-			wAbs = r.absWidth
-		}
-	}
-	var b strings.Builder
-	b.WriteString(rows[0].text)
-	for i := 1; i < len(rows); i++ {
-		text := rows[i].text
-		if rows[i-1].absWidth == wAbs &&
-			strings.IndexAny(rows[i-1].text, " \t") < 0 {
-			// The row feeding this boundary is a single token at the full
-			// wrap width — the only shape that proves the renderer's
-			// hard-split of an over-long token (the zone token
-			// "(America/New_York)" inside a very narrow pane). Anything else
-			// is a word-wrap boundary and keeps its space.
-			b.WriteString(text)
-		} else {
-			b.WriteByte(' ')
-			b.WriteString(text)
-		}
-	}
-	return b.String()
+	return strings.Join(rows, " ")
 }
 
 // claudeClauseEnd returns the reset clause's length inside tail: the clause
