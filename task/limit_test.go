@@ -894,6 +894,42 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will re\nset at 2pm (America/New_York).",
 			want:    want2pm,
 		},
+		{
+			// A narrow pane may wrap BETWEEN the clock's final digit and
+			// its [ap]m meridiem suffix — "2:30pm" splits as "2:30\npm" —
+			// and the wrap must rejoin (drop, not space) so the clockTime
+			// regex sees "2:30pm" (the [ap] and m must be contiguous)
+			// rather than "2:30 pm", which diverges the evidence from the
+			// unwrapped form. Same EST instant as the unwrapped "2:30pm"
+			// form.
+			name:    "5h: meridiem wraps after the clock digits",
+			content: "Claude usage limit reached. Your limit will reset at 2:30\npm (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
+		{
+			// A narrow pane may wrap INSIDE an ordinal date suffix —
+			// "12th" splits as "12t\nh" — and the wrap must rejoin the
+			// letters (drop, not space) so monthDay sees "Nov 12th, 2027"
+			// (the suffix immediately follows the day, so the explicit
+			// year matches) rather than "Nov 12t h, 2027", which matches
+			// only "Nov 12" and discards the year. Same EST instant as the
+			// unwrapped "Nov 12th, 2027 9am" form.
+			name:    "weekly date: ordinal suffix wraps inside its letters",
+			content: "Claude usage limit reached. Your limit will reset at Nov 12t\nh, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 12, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap BETWEEN a complete weekday name and
+			// the following word — "Monday at" splits as "Monday\nat" —
+			// and the wrap must NOT rejoin to "Mondayat": the joined token
+			// is a weekday-shaped prefix but not a complete weekday name,
+			// so the wrap stays a space and the evidence matches the
+			// unwrapped "Monday at" render. The reset still parses to the
+			// same EST instant as the unwrapped "Monday at 9am" form.
+			name:    "weekly weekday: weekday wraps before the following word",
+			content: "Claude usage limit reached. Your limit will reset Monday\nat 9am (America/New_York).",
+			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // Mon 9am EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -1058,6 +1094,52 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	}
 	if want := "reset Thursday at 9am (America/New_York)."; evWrappedWeekday != want {
 		t.Fatalf("wrapped weekday evidence = %q, want %q", evWrappedWeekday, want)
+	}
+
+	// A wrap between the clock's final digit and its [ap]m meridiem suffix —
+	// "2:30\npm" — must produce the SAME evidence as the unwrapped "2:30pm"
+	// form: the suffix rejoining the digits (not spacing to "2:30 pm")
+	// keeps the identity stable across pane resizes.
+	unwrappedMeridiemDigits := "Claude usage limit reached. Your limit will reset at 2:30pm (America/New_York)."
+	wrappedMeridiemDigits := "Claude usage limit reached. Your limit will reset at 2:30\npm (America/New_York)."
+	_, _, _, evUnwrappedMeridiemDigits := det.Check(unwrappedMeridiemDigits, tmux.ProgramClaude, now)
+	_, _, _, evWrappedMeridiemDigits := det.Check(wrappedMeridiemDigits, tmux.ProgramClaude, now)
+	if evUnwrappedMeridiemDigits != evWrappedMeridiemDigits {
+		t.Fatalf("a wrapped meridiem-after-digits must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedMeridiemDigits, evWrappedMeridiemDigits)
+	}
+	if want := "reset at 2:30pm (America/New_York)."; evWrappedMeridiemDigits != want {
+		t.Fatalf("wrapped meridiem-after-digits evidence = %q, want %q", evWrappedMeridiemDigits, want)
+	}
+
+	// A wrap inside an ordinal date suffix — "Nov 12t\nh, 2027 9am" — must
+	// produce the SAME evidence as the unwrapped "Nov 12th, 2027 9am" form:
+	// the suffix letters rejoin (not space to "12t h") so monthDay keeps the
+	// explicit year and the identity stays stable across pane resizes.
+	unwrappedOrdinal := "Claude usage limit reached. Your limit will reset at Nov 12th, 2027 9am (America/New_York)."
+	wrappedOrdinal := "Claude usage limit reached. Your limit will reset at Nov 12t\nh, 2027 9am (America/New_York)."
+	_, _, _, evUnwrappedOrdinal := det.Check(unwrappedOrdinal, tmux.ProgramClaude, now)
+	_, _, _, evWrappedOrdinal := det.Check(wrappedOrdinal, tmux.ProgramClaude, now)
+	if evUnwrappedOrdinal != evWrappedOrdinal {
+		t.Fatalf("a wrapped ordinal suffix must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedOrdinal, evWrappedOrdinal)
+	}
+	if want := "reset at Nov 12th, 2027 9am (America/New_York)."; evWrappedOrdinal != want {
+		t.Fatalf("wrapped ordinal-suffix evidence = %q, want %q", evWrappedOrdinal, want)
+	}
+
+	// A wrap between a complete weekday name and the following word —
+	// "Monday\nat" — must NOT rejoin to "Mondayat": the joined token is a
+	// weekday-shaped prefix but not a complete weekday name, so the wrap
+	// stays a space and the evidence matches the unwrapped "Monday at"
+	// render, keeping the identity stable across pane resizes.
+	unwrappedWeekdayAt := "Claude usage limit reached. Your limit will reset Monday at 9am (America/New_York)."
+	wrappedWeekdayAt := "Claude usage limit reached. Your limit will reset Monday\nat 9am (America/New_York)."
+	_, _, _, evUnwrappedWeekdayAt := det.Check(unwrappedWeekdayAt, tmux.ProgramClaude, now)
+	_, _, _, evWrappedWeekdayAt := det.Check(wrappedWeekdayAt, tmux.ProgramClaude, now)
+	if evUnwrappedWeekdayAt != evWrappedWeekdayAt {
+		t.Fatalf("a wrap after a complete weekday must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedWeekdayAt, evWrappedWeekdayAt)
+	}
+	if want := "reset Monday at 9am (America/New_York)."; evWrappedWeekdayAt != want {
+		t.Fatalf("wrapped weekday+word evidence = %q, want %q", evWrappedWeekdayAt, want)
 	}
 }
 

@@ -18,10 +18,12 @@ import "strings"
 // "Th ursday", which misses the weekday and falls back to time-only,
 // scheduling the reset days early. The trailing letters already emitted (the
 // run at the end of pre) and the leading letters still ahead (the run at the
-// start of post) are rejoined and checked against the weekday abbreviations
-// the weekday regex accepts. A weekday-shaped join rejoins; anything else
-// takes a space, preserving the unwrapped evidence for the #6765 re-read
-// identity.
+// start of post) are rejoined and checked against the complete weekday names
+// (full names plus the standard abbreviations the weekday regex accepts). A
+// COMPLETE weekday name rejoins; a weekday-shaped prefix that is not a
+// complete name ("Monday\nat" → "mondayat", which starts with "mon" but is
+// not a weekday) takes a space, preserving the unwrapped evidence ("Monday
+// at") for the #6765 re-read identity.
 func wrapSplitsWeekday(pre, post string) bool {
 	j := len(pre)
 	for j > 0 {
@@ -47,13 +49,22 @@ func wrapSplitsWeekday(pre, post string) bool {
 	if tail == "" {
 		return false
 	}
-	joined := strings.ToLower(head + tail)
-	for w := range weekdayIndex {
-		if strings.HasPrefix(joined, w) {
-			return true
-		}
-	}
-	return false
+	return weekdayNameSet[strings.ToLower(head+tail)]
+}
+
+// weekdayNameSet is the set of complete weekday tokens (full names plus the
+// standard abbreviations the weekday regex accepts) that wrapSplitsWeekday
+// rejoins a mid-token wrap to. Membership is exact so a weekday-shaped prefix
+// that is not itself a weekday ("mondayat", the word-boundary wrap
+// "Monday\nat") does not rejoin and the unwrapped evidence is preserved.
+var weekdayNameSet = map[string]bool{
+	"sun": true, "sunday": true,
+	"mon": true, "monday": true,
+	"tue": true, "tues": true, "tuesday": true,
+	"wed": true, "wednesday": true,
+	"thu": true, "thur": true, "thurs": true, "thursday": true,
+	"fri": true, "friday": true,
+	"sat": true, "saturday": true,
 }
 
 // wrapSplitsResetKeyword reports whether a wrap newline between two ASCII
@@ -95,6 +106,66 @@ func wrapSplitsResetKeyword(pre, post string) bool {
 		return false
 	}
 	return strings.ToLower(head+tail) == "reset"
+}
+
+// wrapSplitsOrdinalSuffix reports whether a wrap newline between two ASCII
+// letters splits the two-letter ordinal suffix of a calendar day — "st",
+// "nd", "rd", or "th" — e.g. "Nov 12t\nh" (the wrapped "Nov 12th") — so the
+// normalizer rejoins it rather than spacing to "12t h", which monthDay
+// matches only as the day "12" and silently drops the explicit year (the
+// optional suffix must immediately follow the day digits). The shape is
+// letter-newline-letter, byte-identical to a month/weekday mid-token wrap and
+// to a word-boundary wrap, so the distinction is semantic: the trailing
+// letter run of pre is exactly the first letter of an ordinal suffix
+// ({s,n,r,t}) that immediately follows a day digit, and the leading letter
+// run of post completes the two-letter suffix. The digit-before-head marks
+// an ordinal context uniquely inside a reset clause (a clock-suffix wrap
+// "2p\nm" is letter-newline-letter too, but its head is [ap] not in
+// {s,n,r,t}); anything else takes a space, preserving the unwrapped evidence
+// for the #6765 re-read identity.
+func wrapSplitsOrdinalSuffix(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if len(head) != 1 {
+		return false
+	}
+	switch head[0] {
+	case 's', 'S', 'n', 'N', 'r', 'R', 't', 'T':
+	default:
+		return false
+	}
+	// The suffix's first letter must immediately follow a day digit.
+	if j == 0 {
+		return false
+	}
+	prev := pre[j-1]
+	if prev < '0' || prev > '9' {
+		return false
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if len(tail) != 1 {
+		return false
+	}
+	switch strings.ToLower(head + tail) {
+	case "st", "nd", "rd", "th":
+		return true
+	}
+	return false
 }
 
 // preRunIsCalendarDay reports whether the digit run ending at a wrap newline
