@@ -185,6 +185,15 @@ type LimitWallClaimData struct {
 	// describes is gone, so a matching sighting is a different emission.
 	RuntimePID     int    `json:"runtime_pid,omitempty"`
 	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
+	// RuntimeGen pins the claim to the agent runtime generation that sighted
+	// it — the binding that still holds when no concrete process resolves
+	// (RuntimePID 0). A residue or stale-read check judged across a
+	// replacement must fail (#6972).
+	RuntimeGen uint64 `json:"runtime_gen,omitempty"`
+	// PromptSent is the tombstone ClearLimitReachedSent writes: this wall's
+	// resume prompt already landed. A re-park borrowing the claim keeps it so
+	// the scheduler never re-sends for a wall the row already answered (#6972).
+	PromptSent bool `json:"prompt_sent,omitempty"`
 }
 
 // IsZero reports whether the claim carries no recorded wall fact — the

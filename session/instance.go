@@ -324,6 +324,17 @@ type Instance struct {
 	// happens to resemble it, never that emission's re-read.
 	limitWallRuntimePID     int
 	limitWallRuntimeStartID uint64
+	// limitWallRuntimeGen is the agent runtime generation the wall was
+	// sighted on — the pin that still binds when no concrete process can be
+	// resolved (a remote or adopted runtime leaves limitWallRuntimePID 0,
+	// which the PID pin reads as "admissible"). A generation mismatch is a
+	// different emission, never residue (#6972).
+	limitWallRuntimeGen uint64
+	// limitPromptSent is the live claim's send tombstone: the parked wall's
+	// resume prompt already landed. A re-park that borrows the claim keeps
+	// it so the scheduler never re-sends for a wall the row already answered
+	// (#6972 item 4).
+	limitPromptSent bool
 	// lastLimitWall is the claim the live wall fields last recorded — kept
 	// after ClearLimitReached retires them (#6959). A retry's re-parse of the
 	// banner still on the pane resolves a clock-relative phrase against the
@@ -332,7 +343,10 @@ type Instance struct {
 	// wall the row already recorded (same identity, same anchor, compatible
 	// phrase) rather than a new fact. Persisted as LastLimitWall: a daemon
 	// restart must not turn the recorded wall's own re-parse into fresh
-	// evidence and roll the reset the first fix pinned.
+	// evidence and roll the reset the first fix pinned. The shadow dies with
+	// the runtime that produced it — a replaced runtime's pane can never
+	// show that emission again — except across the respawn fence, where
+	// ReparkLimitUnderResumeFence still reads it to restore the wall (#6972).
 	lastLimitWall limitWallClaim
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData
@@ -434,7 +448,10 @@ type Instance struct {
 	// owning the Agent tab. Async conversation capture binds to this generation,
 	// so a result from a replaced process cannot write through a later handoff or
 	// recovery merely because the Instance pointer (or even agent name) matches.
-	// In-memory only: no capture goroutine survives a daemon restart.
+	// Persisted: wall claims pin the generation that sighted them, so the
+	// counter must survive the restart that would otherwise read every recorded
+	// claim as a foreign-runtime emission (#6972). No capture goroutine survives
+	// a restart, but the counter itself is evidence.
 	agentRuntimeGeneration uint64
 	// runtimeEvidenceGeneration is the lock-free invalidation token for an
 	// asynchronous consumer that snapshots runtimeProgram and later commits a

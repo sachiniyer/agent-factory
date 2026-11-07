@@ -39,7 +39,10 @@ func (m *Manager) deliverManualAccountMission(repoID, key string, instance *sess
 	// An outgoing wall is not evidence about the replacement identity. Its ledger
 	// observation remains durable, while the replacement is independently probed.
 	instance.ClearLimitReached()
-	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, mission)
+	// The wait runs on the established replacement pane — the swap committed
+	// before this attempt — so a residue verdict is judged normally, matching
+	// the false the incoming-wall park below passes (#6972).
+	status, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, mission, false)
 	err = handoffDeliveryResultError(status, err)
 	var limitErr *task.LimitReachedError
 	if errors.As(err, &limitErr) {

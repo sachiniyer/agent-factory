@@ -70,7 +70,11 @@ func describeTargetTasks(tasks []task.Task) string {
 // instead of depending on a second Snapshot request (#2680). Its stable id still
 // prevents cross-repo title misrouting (#1592 Phase 5).
 func (m *Manager) ArchiveSession(req ArchiveSessionRequest) (string, session.InstanceData, error) {
-	return m.archiveSessionGuarded(req, nil)
+	path, data, err := m.archiveSessionGuarded(req, nil)
+	// The returned row is a client projection: the daemon-side wall machinery
+	// the record carries (raw pane anchors, runtime pins, the retired shadow)
+	// is not client data (#6972).
+	return path, data.ForClients(), err
 }
 
 // archiveSessionGuarded is ArchiveSession with a sessionTeardownGuard evaluated

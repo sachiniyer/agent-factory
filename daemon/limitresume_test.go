@@ -321,7 +321,7 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 		t.Fatal("the fixture banner must hit the claude limit matcher")
 	}
 	inst.SetLimitReachedAtEvidence(base.Add(-time.Hour), sighting.Evidence,
-		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
 
 	// Past reset+grace: the resume fires once and re-delivers the prompt.
 	advance(limitResumeGrace + time.Second)
@@ -376,7 +376,7 @@ func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
 		t.Fatal("the fixture banner must hit the claude limit matcher")
 	}
 	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence,
-		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
 
 	// The explicit retry before R: the send lands and clears the wall.
 	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
@@ -424,7 +424,7 @@ func TestResumeLimitedSessions_NoIntervalReplayForResetlessWall(t *testing.T) {
 		t.Fatal("the fixture banner must parse no reset")
 	}
 	inst.SetLimitReachedAtEvidence(time.Time{}, "",
-		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
 
 	// First pass anchors parkedAt; a full interval later the retry fires.
 	manager.ResumeLimitedSessions()

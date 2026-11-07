@@ -505,6 +505,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 	// already waiting on a rollout must not refill the live slot after this record
 	// has been rewritten for the incoming agent.
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 
 	return swap, nil
 }
@@ -570,6 +571,7 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	// make a token from the abandoned target indistinguishable from the restored
 	// outgoing runtime.
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	return nil
 }
 

@@ -36,7 +36,7 @@ func TestRefreshStatuses_SendPathParkedRow_TimeOnlyPhraseCanDriftResetByOneDay(t
 	// phrase. The real send path (limitParkError) now carries the evidence
 	// through LimitReachedError.Evidence into SetLimitReachedAtEvidence.
 	todayReset := time.Date(2026, 11, 4, 6, 34, 0, 0, time.Local).UTC()
-	inst.SetLimitReachedAtEvidence(todayReset, "try again at 6:34 AM", session.LimitBanner{})
+	inst.SetLimitReachedAtEvidence(todayReset, "try again at 6:34 AM", session.LimitBanner{}, false)
 	manager.persistInstance(repoID, inst)
 
 	beforeReset, beforeOK := inst.LimitResetAt()

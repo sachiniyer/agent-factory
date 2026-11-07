@@ -80,11 +80,16 @@ func (m *Manager) beginHandoffMissionDelivery(delivery handoffDelivery) error {
 // the attempt marker between them. beginErr is non-nil only when the marker
 // could not be made durable: nothing was submitted, the admitting verdict was
 // put back, and the caller must not record the returned status over it.
-func (m *Manager) waitAndSubmitHandoffMission(delivery handoffDelivery) (status session.PromptDeliveryStatus, err, beginErr error) {
+func (m *Manager) waitAndSubmitHandoffMission(delivery handoffDelivery, freshRuntime bool) (status session.PromptDeliveryStatus, err, beginErr error) {
+	// freshRuntime mirrors the park signal the caller passes to
+	// ParkHandoff().OnFreshRuntime: the initial delivery waits against the
+	// just-spawned incoming pane — whose lookalike limit banner is a new wall,
+	// never the outgoing row's residue (#6972) — while the recovery retry
+	// re-reads the established pane.
 	status, err = task.WaitForReadyAndSubmitPrompt(context.Background(), delivery.instance, delivery.mission, func() error {
 		beginErr = m.beginHandoffMissionDelivery(delivery)
 		return beginErr
-	})
+	}, freshRuntime)
 	return status, err, beginErr
 }
 
@@ -116,7 +121,7 @@ func (m *Manager) deliverHandoffMission(delivery handoffDelivery) error {
 		return perr
 	}
 
-	status, serr, beginErr := m.waitAndSubmitHandoffMission(delivery)
+	status, serr, beginErr := m.waitAndSubmitHandoffMission(delivery, true)
 	if beginErr != nil {
 		return beginErr
 	}

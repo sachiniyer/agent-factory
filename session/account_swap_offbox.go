@@ -500,6 +500,7 @@ func (i *Instance) recordOffBoxAccount(name, agent string, automatic bool, progr
 	i.accountAgent = agent
 	i.accountAutoSelected = automatic
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	i.agentConfigSkipped = append([]string(nil), agentConfigSkipped...)
 	if len(i.Tabs) > 0 {
 		i.setAgentConversationLocked(AgentConversationData{})

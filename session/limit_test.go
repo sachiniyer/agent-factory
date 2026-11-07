@@ -174,7 +174,7 @@ func TestSetLimitReachedAtEvidence(t *testing.T) {
 	reset := time.Date(2026, 11, 4, 6, 34, 0, 0, time.UTC)
 	phrase := "try again at 6:34 AM"
 
-	i.SetLimitReachedAtEvidence(reset, phrase, LimitBanner{})
+	i.SetLimitReachedAtEvidence(reset, phrase, LimitBanner{}, false)
 	require.True(t, i.LimitReached())
 	got, ok := i.LimitResetAt()
 	require.True(t, ok)
