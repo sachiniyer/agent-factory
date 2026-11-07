@@ -32,7 +32,10 @@ func finishCreateStart(instance *session.Instance, prompt string, startErr error
 	}
 	var limitErr *task.LimitReachedError
 	if errors.As(startErr, &limitErr) {
-		instance.SetLimitReachedAtEvidence(limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr))
+		// The create path always sights the wall on a pane it just spawned —
+		// freshRuntime keeps the sighting from ever proving the residue of a
+		// wall a prior runtime recorded (#6972).
+		instance.SetLimitReachedAtEvidence(limitErr.ResetAt, limitErr.Evidence, limitBannerOf(limitErr), true)
 		instance.SetPrompt(prompt)
 		return nil
 	}

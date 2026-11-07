@@ -590,9 +590,11 @@ func (t instanceReadinessTarget) HooksDone() <-chan struct{} {
 
 // RecordedLimitWallExpired forwards the session row's residue verdict: the
 // pane still showing the row's own recorded wall after its claimed reset
-// passed is not a wall the wait may refuse (#6959).
-func (t instanceReadinessTarget) RecordedLimitWallExpired(prefix string, count int, evidence string) bool {
-	return t.inst.RecordedLimitWallExpired(prefix, count, evidence)
+// passed is not a wall the wait may refuse (#6959). freshRuntime is the
+// caller's "this pane was just launched" signal — a just-launched pane can
+// never prove residue (#6972).
+func (t instanceReadinessTarget) RecordedLimitWallExpired(prefix string, count int, evidence string, freshRuntime bool) bool {
+	return t.inst.RecordedLimitWallExpired(prefix, count, evidence, freshRuntime)
 }
 
 // ClaudeActiveLimitReset forwards the session's structural reset source: the
@@ -619,10 +621,18 @@ var wallReadinessClock = readinessClock{
 // WaitForReadyOn is WaitForReady against any ReadinessTarget — the seam a bare
 // tmux session uses. See WaitForReady for the cancellation contract.
 func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
-	return waitForReadyOn(ctx, target, wallReadinessClock)
+	return waitForReadyOn(ctx, target, wallReadinessClock, false)
 }
 
-func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readinessClock) error {
+// WaitForReadyOnFreshRuntime is WaitForReadyOn for a wait running against a
+// pane the caller just launched: that pane can never carry the row's recorded
+// limit emission, so a lookalike banner there is a new wall, never residue —
+// the residue verdict is refused before the pins are even consulted (#6972).
+func WaitForReadyOnFreshRuntime(ctx context.Context, target ReadinessTarget) error {
+	return waitForReadyOn(ctx, target, wallReadinessClock, true)
+}
+
+func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readinessClock, freshRuntime bool) error {
 	if ctx == nil {
 		ctx = context.Background()
 	}
@@ -702,7 +712,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 		// and the prompt replays on every idle poll. Only a banner the row
 		// never recorded is a live wall.
 		if perr := limitParkError(detector, content, agent, target); perr != nil &&
-			!expiredRecordedLimitWall(target, perr) {
+			!expiredRecordedLimitWall(target, perr, freshRuntime) {
 			return true, perr
 		}
 		return isReadyContent(content, agent), nil
@@ -770,7 +780,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			// unless the sighting is the target's own expired recorded wall,
 			// which is residue and never a wall (#6959; same rule as the probe).
 			if perr := limitParkError(detector, content, agent, target); perr != nil &&
-				!expiredRecordedLimitWall(target, perr) {
+				!expiredRecordedLimitWall(target, perr, freshRuntime) {
 				return perr
 			}
 			// The deadline firing is not itself proof of failure — only the pane
@@ -890,7 +900,7 @@ func limitParkError(detector LimitDetector, content, agent string, target Readin
 // carry no recorded wall behind them, simply do not — and for them every
 // banner remains a wall.
 type recordedLimitWallTarget interface {
-	RecordedLimitWallExpired(prefix string, count int, evidence string) bool
+	RecordedLimitWallExpired(prefix string, count int, evidence string, freshRuntime bool) bool
 }
 
 // claudeLimitResetTarget is the optional capability a ReadinessTarget exposes
@@ -907,14 +917,16 @@ type claudeLimitResetTarget interface {
 // banner it already parked on, still displayed after the reset it advertised.
 // The readiness wait treats that sighting as nothing and proceeds to readiness
 // or the send; honoring it would re-park the row onto an expired claim and the
-// retry's prompt would replay on every idle poll.
-func expiredRecordedLimitWall(target ReadinessTarget, err error) bool {
+// retry's prompt would replay on every idle poll. freshRuntime is the caller's
+// "this pane was just launched" signal: a just-launched pane can never prove
+// residue, so a lookalike banner there stays a wall (#6972).
+func expiredRecordedLimitWall(target ReadinessTarget, err error, freshRuntime bool) bool {
 	var limitErr *LimitReachedError
 	if !errors.As(err, &limitErr) {
 		return false
 	}
 	rw, ok := target.(recordedLimitWallTarget)
-	return ok && rw.RecordedLimitWallExpired(limitErr.BannerPrefix, limitErr.BannerCount, limitErr.Evidence)
+	return ok && rw.RecordedLimitWallExpired(limitErr.BannerPrefix, limitErr.BannerCount, limitErr.Evidence, freshRuntime)
 }
 
 // formatWaitForReadyTimeoutError builds the user-facing timeout error. When

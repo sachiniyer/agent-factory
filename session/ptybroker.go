@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"os"
 	"sync"
 	"time"
 
@@ -39,6 +40,13 @@ import (
 // truly-dead subscriber rather than letting it grow the buffer unbounded. var,
 // not const, so tests can shrink it.
 var ptyRingMaxBytes = 256 * 1024
+
+// ptyBrokerTrace gates the #6964 stray-writer log lines on the broker: a resize
+// echo names no author, so an echoed grid with no matching client frame at the
+// WS boundary can only be told apart from a broker-side adoption by logging
+// BOTH. With AF_PTY_TRACE set the broker logs every resize's generation and
+// every new subscriber; unset in production, nothing logs.
+var ptyBrokerTrace = os.Getenv("AF_PTY_TRACE") != ""
 
 // clientlessChannel is the local runtime's clientless tmux binding (#1592 PR5):
 // output capture and input/size WITHOUT a tmux client. The real implementation
@@ -304,6 +312,9 @@ func (b *ptyBroker) subscribe(since Seq) (*ptySub, error) {
 		sub.resizeSeen = b.resizeGen - 1
 	}
 	b.subs[sub.id] = sub
+	if ptyBrokerTrace {
+		log.InfoLog.Printf("pty trace: broker %p subscribe sub=%d since=%d needRepaint=%v gen=%d", b, sub.id, since, needRepaint, b.resizeGen)
+	}
 	b.mu.Unlock()
 
 	// Bring up the clientless capture through the serialized reconcile — NOT inline
@@ -666,6 +677,9 @@ func (b *ptyBroker) resize(rows, cols uint16) error {
 	b.rows, b.cols = rows, cols
 	b.hasSize = true
 	b.resizeGen++
+	if ptyBrokerTrace {
+		log.InfoLog.Printf("pty trace: broker %p resize %dx%d gen=%d", b, rows, cols, b.resizeGen)
+	}
 	b.wakeAllLocked()
 	b.mu.Unlock()
 

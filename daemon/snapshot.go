@@ -389,7 +389,11 @@ func (m *Manager) SnapshotWithSkipped(repoID string) ([]session.InstanceData, []
 	for _, entry := range entries {
 		projected := entry.pending
 		if entry.instance != nil {
-			projected = entry.instance.ToInstanceData()
+			// The client payload is a PROJECTION: InstanceData doubles as the
+			// instances.json record, so it carries the daemon-side limit-wall
+			// machinery (raw pane anchors, runtime pins, the retired shadow)
+			// no client reads (#6972).
+			projected = entry.instance.ToInstanceData().ForClients()
 		}
 		data = append(data, projected)
 	}

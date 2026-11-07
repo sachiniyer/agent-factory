@@ -179,7 +179,10 @@ func StartAndSendPromptWithConversationCapture(
 // pane-poll instead of spinning to the timeout (see WaitForReady). A nil ctx is
 // treated as context.Background().
 func WaitForReadyAndSendPrompt(ctx context.Context, instance *session.Instance, prompt string) error {
-	_, err := WaitForReadyAndSendPromptWithStatus(ctx, instance, prompt)
+	// The launch path always waits against a pane it just spawned: a
+	// lookalike limit banner there is the fresh runtime's own wall, never
+	// the residue of a wall a prior runtime recorded (#6972).
+	_, err := WaitForReadyAndSendPromptWithStatus(ctx, instance, prompt, true)
 	return err
 }
 
@@ -191,8 +194,9 @@ func WaitForReadyAndSendPromptWithStatus(
 	ctx context.Context,
 	instance *session.Instance,
 	prompt string,
+	freshRuntime bool,
 ) (session.PromptDeliveryStatus, error) {
-	return WaitForReadyAndSubmitPrompt(ctx, instance, prompt, nil)
+	return WaitForReadyAndSubmitPrompt(ctx, instance, prompt, nil, freshRuntime)
 }
 
 // WaitForReadyAndSubmitPrompt is WaitForReadyAndSendPromptWithStatus with a
@@ -206,11 +210,17 @@ func WaitForReadyAndSendPromptWithStatus(
 // If beforeSubmit fails, nothing is sent: the result is PromptNotDelivered with
 // beforeSubmit's own error, wrapped by neither ErrAgentReadiness nor
 // ErrPromptDelivery. A nil beforeSubmit, or an empty prompt, skips it.
+//
+// freshRuntime is the caller's knowledge that the wait is running against a
+// pane it just launched: a just-launched pane can never prove limit residue,
+// so a lookalike banner there stays a wall rather than being sent past
+// (#6972).
 func WaitForReadyAndSubmitPrompt(
 	ctx context.Context,
 	instance *session.Instance,
 	prompt string,
 	beforeSubmit func() error,
+	freshRuntime bool,
 ) (session.PromptDeliveryStatus, error) {
 	if ctx == nil {
 		ctx = context.Background()
@@ -232,7 +242,7 @@ func WaitForReadyAndSubmitPrompt(
 		return session.PromptDelivered, nil
 	}
 
-	if err := WaitForReady(ctx, instance); err != nil {
+	if err := waitForReadyOn(ctx, instanceReadinessTarget{inst: instance}, wallReadinessClock, freshRuntime); err != nil {
 		return session.PromptCouldNotConfirm, fmt.Errorf("%w: %w", ErrAgentReadiness, err)
 	}
 

@@ -49,7 +49,12 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 	// against (#6802 review). Re-seeing an UNCHANGED wall flags nothing and
 	// writes nothing — see recordAccountLimitObservationLocked.
 	obsChanged := instance.AccountLimitObservationsUnpersisted()
-	durableChanged := livenessChanged || resetChanged || evidenceChanged || settlementCheckpoint || conversationNeedsWrite(instance) || obsChanged
+	// The durable wall record can mutate under an unchanged liveness: a new
+	// emission re-parking the row rewrites its anchor and drops the send
+	// tombstone — a fact no axis above sees, and one a restart must not lose
+	// or the scheduler settles a wall it never answered (#6972, Codex).
+	wallChanged := instance.LimitWallUnpersisted()
+	durableChanged := livenessChanged || resetChanged || evidenceChanged || settlementCheckpoint || conversationNeedsWrite(instance) || obsChanged || wallChanged
 	publishChanged := durableChanged || projectionChanged
 	if !publishChanged {
 		return
@@ -98,6 +103,7 @@ func (m *Manager) persistPollChangeWithIdleEvidence(
 		noteConversationWritten(instance, data, err)
 		if err == nil {
 			instance.MarkAccountLimitObservationsPersisted(data.AccountLimitObservations)
+			instance.MarkLimitWallPersisted(data.LastLimitWall)
 		}
 	} else {
 		rowLock.Unlock()

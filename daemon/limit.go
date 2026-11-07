@@ -77,7 +77,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 		// capture. A still-parked row keeps the early return — the scheduler's
 		// resume owns that transition.
 		if instance.LimitReached() ||
-			!instance.RecordedLimitWallExpired(s.BannerPrefix, s.BannerCount, s.Evidence) {
+			!instance.RecordedLimitWallExpired(s.BannerPrefix, s.BannerCount, s.Evidence, false) {
 			// Returns false when the decision was superseded; nothing to do about
 			// it here — the next tick observes the session as it is now.
 			_ = m.setLimitReachedAtEpoch(instance, s.ResetAt, s.Evidence,
@@ -928,8 +928,11 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		return resumeNotPerformed, conversation, fmt.Errorf("account swap for %q changed while its notice was being delivered", requestedTitle)
 	}
 	// The prompt landed: this is the resume's single completion point, and the only
-	// place the limit block is lifted on either arm.
-	instance.ClearLimitReached()
+	// place the limit block is lifted on either arm. The sent variant stamps the
+	// retired claim's tombstone so a re-park of the same emission — the unchanged
+	// banner still on the pane — keeps the fact that this wall's send already
+	// went out: the scheduler must never replay it at reset+grace (#6972).
+	instance.ClearLimitReachedSent()
 	if manual {
 		// Successful delivery starts work even if the outgoing agent was idle.
 		// Keep original liveness only on the failure paths above.

@@ -17,6 +17,33 @@ import { test, expect, type Page } from "@playwright/test";
 
 const session = process.env.AF_WEB_SESSION_ORDER ?? "probe-order";
 
+// #6964 stray-writer diagnostics: install the opt-in flag before the bundle's
+// first fit so every terminal appends its resize-machinery events to
+// window.__afTermTrace (see terminal.ts). A late OpResize then names its
+// producer — arm, delivery, decision, or connect — in the run log. The flag is
+// off in production; the trace stays inert.
+const DIAG_INIT = "window.__afTermDiag = true; window.__afTermTrace = [];";
+const dumpTermTrace = async (p: Page, label: string): Promise<void> => {
+  try {
+    const trace = await p.evaluate(
+      () => (window as unknown as { __afTermTrace?: unknown[] }).__afTermTrace ?? [],
+    );
+    if (trace.length > 0) {
+      console.log(`[6964-diag] ${label}: ${JSON.stringify(trace)}`);
+    }
+  } catch {
+    // The page/context is already gone — nothing to dump.
+  }
+};
+
+// The `page` fixture still exists when afterEach hooks run (fixtures tear down
+// after hooks), so a spec that drove the shared page gets its whole trace even
+// when it ends red. Specs that own their contexts dump their pages inside their
+// own finally blocks instead.
+test.afterEach(async ({ page }) => {
+  await dumpTermTrace(page, "page");
+});
+
 // Park the page the way a REAL hidden tab behaves, which is also how the
 // production detector sees it: rAF callbacks are deferred, not dropped —
 // they queue while the page is unpainted and all fire on the first frame
@@ -104,6 +131,7 @@ const unpark = (page: Page): Promise<void> =>
   });
 
 test("#6215 a stale authoritative resize cannot strand the active terminal's grid", async ({ page, request }) => {
+  await page.addInitScript(DIAG_INIT);
   const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
   const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
   expect(selected?.id).toBeTruthy();
@@ -252,6 +280,7 @@ test("#6635 an activation answers a peer's first real write — the subscribe re
   page,
   request,
 }) => {
+  await page.addInitScript(DIAG_INIT);
   const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
   const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
   expect(selected?.id).toBeTruthy();
@@ -438,6 +467,8 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
 
   const ctxA = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
   const ctxB = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  await ctxA.addInitScript(DIAG_INIT);
+  await ctxB.addInitScript(DIAG_INIT);
   try {
     const settleFonts = (p: Page) =>
       p.evaluate(
@@ -592,6 +623,8 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
       })
       .toBe(staleRows);
   } finally {
+    for (const p of ctxA.pages()) await dumpTermTrace(p, "A");
+    for (const p of ctxB.pages()) await dumpTermTrace(p, "B");
     await ctxA.close();
     await ctxB.close();
   }
@@ -626,6 +659,8 @@ test("#6635 (run 42361281090): a claim withheld while parked still reaches the w
 
   const ctxA = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
   const ctxB = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  await ctxA.addInitScript(DIAG_INIT);
+  await ctxB.addInitScript(DIAG_INIT);
   try {
     const settleFonts = (p: Page) =>
       p.evaluate(
@@ -763,6 +798,8 @@ test("#6635 (run 42361281090): a claim withheld while parked still reaches the w
     await unpark(pageB);
     await waitEchoEq(gridRows, base, "B's unparked claim flush");
   } finally {
+    for (const p of ctxA.pages()) await dumpTermTrace(p, "A");
+    for (const p of ctxB.pages()) await dumpTermTrace(p, "B");
     await ctxA.close();
     await ctxB.close();
   }
@@ -806,6 +843,7 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   page,
   request,
 }) => {
+  await page.addInitScript(DIAG_INIT);
   const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
   const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
   expect(selected?.id).toBeTruthy();
@@ -927,7 +965,8 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
         const rel = w.__echoTimes.map((t) => Math.round(t - w.__echoTimes[0]));
         return `${l}: echoes=${JSON.stringify(w.__echoes)} relMs=${JSON.stringify(rel)} status=${JSON.stringify(w.__statusLog.map(([t, s]) => [Math.round(t), s]))}`;
       }, label)
-      .then((line) => console.log(`[6635-diag] ${line}`));
+      .then((line) => console.log(`[6635-diag] ${line}`))
+      .then(() => dumpTermTrace(page, label));
 
   // Let the probe's subscribe replay and the attach's settle land, then
   // anchor every read past them — leftover authority from an earlier spec

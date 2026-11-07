@@ -22,10 +22,11 @@
 # an agent whose command it cannot prove is a direct invocation of that agent.
 # That is turned into the end-to-end evidence rather than worked around, exactly as
 # scripts/tui-3844-scenario.sh does it: the refusal comes from the DAEMON and NAMES
-# THE ACCOUNT, which is only possible if a value nobody typed was resolved from the
-# project's config, applied to the create, and carried across the wire. A session
-# that actually RUNS as the account needs a real agent binary; that is the manual
-# leg in docs/dev/tui-manual-testing.md.
+# THE ACCOUNT, and for a default nobody typed it also carries the provenance clause
+# the daemon appends only to a default it resolved itself — the clause that
+# distinguishes daemon resolution from an account the TUI sent explicitly, which
+# #6695 stopped doing. A session that actually RUNS as the account needs a real
+# agent binary; that is the manual leg in docs/dev/tui-manual-testing.md.
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -125,14 +126,23 @@ drive_project_default() {
         'returning to claude restores its project default' || return 1
     _af_log 'assert OK: the default follows the program, per agent'
 
-    # The create carries it. The stand-in agent makes the account boundary refuse,
-    # and the refusal NAMES THE ACCOUNT — which is only possible if a value nobody
-    # typed came from the project config and rode CreateSessionRequest.Account.
+    # The daemon resolves it. The stand-in agent makes the account boundary refuse,
+    # and the refusal NAMES THE ACCOUNT — but naming the account alone would not
+    # distinguish a default the daemon resolved from one the TUI sent explicitly
+    # (the #6695 regression): applyDefaultAccount short-circuits a nonempty account,
+    # so the refusal would name it just the same. The distinguishing evidence is the
+    # provenance clause the daemon appends ONLY to a default it resolved itself
+    # (defaultAccountProvenance, joined by accountRefusalWithSource): "this
+    # session's account was not requested — it comes from default_accounts…". An
+    # explicit wire account has no such clause, so asserting it is what proves the
+    # wire account was empty and the daemon filled it.
     af_send_literal 'defaulted-create'
     af_send Enter
     af_wait_for "account \"$PROJECT_ACCOUNT\"" "$AF_DRIVER_TIMEOUT" \
         'the daemon answered about the account the project configured' || return 1
-    _af_log 'assert OK: the project default reached the daemon on the create'
+    af_wait_for 'was not requested' "$AF_DRIVER_TIMEOUT" \
+        'the refusal carries the daemon-default provenance an explicit account lacks' || return 1
+    _af_log 'assert OK: the wire account was empty; the daemon resolved the default'
 
     echo "PASS: #3386 project default preselected at 140x30"
 }

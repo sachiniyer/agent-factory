@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -8,6 +9,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -321,7 +323,7 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 		t.Fatal("the fixture banner must hit the claude limit matcher")
 	}
 	inst.SetLimitReachedAtEvidence(base.Add(-time.Hour), sighting.Evidence,
-		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
 
 	// Past reset+grace: the resume fires once and re-delivers the prompt.
 	advance(limitResumeGrace + time.Second)
@@ -353,5 +355,226 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 	}
 	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
 		t.Fatalf("the prompt must be sent exactly once while the residue banner shows: got %v", prompts)
+	}
+}
+
+// TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark is the #6972 item-4
+// wedge: an explicit retry BEFORE the claimed reset lands its send and clears
+// the wall; the unchanged banner still reads on the pane, so the poll re-parks
+// the row at the same R. At R+grace the scheduler must NOT re-deliver the
+// prompt — the wall it would be answering was already sent past. Without a
+// "the send landed" tombstone on the claim the re-park looks like a fresh
+// scheduling decision and replays it.
+func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
+	advance := withFrozenClock(t)
+	// Anchor the reset to the wall clock, not the frozen scheduler clock: the
+	// residue gate reads the session package's instanceNow (real time), so a
+	// reset anchored to the frozen 2023 base reads as already expired and the
+	// re-park below would be refused as residue. The early retry is manual —
+	// it fires regardless of the reset's due-ness on either clock.
+	resetAt := time.Now().Add(30 * time.Minute) // the wall lifts in half an hour
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+
+	const banner = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence,
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
+
+	// The explicit retry before R: the send lands and clears the wall.
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("the early retry must land its send: %v", err)
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the early retry sends the prompt exactly once, got %v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("a landed send clears the wall")
+	}
+
+	// The unchanged banner still sits in the capture; the poll re-reads it
+	// and re-parks at the same R — the claim the send already answered.
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.resolveIdleLiveness(inst, banner, epoch)
+	if !inst.LimitReached() {
+		t.Fatal("the unchanged banner before R re-parks the row at its recorded reset")
+	}
+
+	// At R + grace the scheduler must not replay the prompt. nowFunc is still
+	// the frozen base, so advance the delta that puts it just past reset+grace.
+	advance(resetAt.Sub(nowFunc()) + limitResumeGrace + time.Second)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the wall the early retry already answered must not re-send at R+grace: prompts=%v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("the answered wall must settle at due — a tombstoned row must not park forever")
+	}
+}
+
+// TestResumeLimitedSessions_NoIntervalReplayForResetlessWall is the #6972
+// item-3 wedge: a wall the detector could not parse a reset from retries on
+// the fixed limit_retry_interval. After the send lands, the unchanged
+// reset-less emission is residue — never a new wall — so the next interval
+// must not fire the retry loop again.
+func TestResumeLimitedSessions_NoIntervalReplayForResetlessWall(t *testing.T) {
+	advance := withFrozenClock(t)
+	manager, _, inst, backend := newAutoResumeManager(t, "30m", true, "no reset work", time.Time{})
+
+	const banner = "agent output before the wall\n" +
+		"Claude usage limit reached. Try again later."
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("a time-free claude banner must still hit the limit matcher")
+	}
+	if !sighting.ResetAt.IsZero() {
+		t.Fatal("the fixture banner must parse no reset")
+	}
+	inst.SetLimitReachedAtEvidence(time.Time{}, "",
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}, false)
+
+	// First pass anchors parkedAt; a full interval later the retry fires.
+	manager.ResumeLimitedSessions()
+	advance(31 * time.Minute)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the interval retry delivers the prompt once, got %v", prompts)
+	}
+
+	// The unchanged reset-less emission is residue: the poll must not
+	// re-park it, and no later interval may send again.
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.resolveIdleLiveness(inst, banner, epoch)
+	if inst.LimitReached() {
+		t.Fatal("a cleared reset-less wall's unchanged emission is residue, not a new wall")
+	}
+	for i := 0; i < 4; i++ {
+		advance(31 * time.Minute)
+		manager.ResumeLimitedSessions()
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the reset-less wall's retired emission must not replay on the interval: prompts=%v", prompts)
+	}
+}
+
+// TestResumeLimitedSessions_SettleSurvivesTransientPersistFailure is the #6972
+// Codex retry arm: the answered-wall settle at due is a one-shot checkpoint —
+// if its whole-row write fails the durable row must not stay parked forever.
+// The settle enrolls the write in the settlement ledger so the poll's
+// FlushOwedSettlements retires the stored limit block once storage heals.
+func TestResumeLimitedSessions_SettleSurvivesTransientPersistFailure(t *testing.T) {
+	advance := withFrozenClock(t)
+	resetAt := time.Now().Add(30 * time.Minute)
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+
+	const banner = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	anchor := session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence, anchor, false)
+	inst.ClearLimitReachedSent()
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence, anchor, false)
+	if !inst.LimitWallPromptSent() {
+		t.Fatal("the re-park must carry the send tombstone")
+	}
+	if err := persistInstanceData(repoID, inst.ToInstanceData()); err != nil {
+		t.Fatalf("baseline persist: %v", err)
+	}
+	baseline, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+
+	// Storage fails exactly when the due settle writes.
+	path, err := config.RepoInstancesPath(repoID)
+	if err != nil {
+		t.Fatalf("RepoInstancesPath: %v", err)
+	}
+	if err := os.WriteFile(path, []byte("{ not json"), 0o600); err != nil {
+		t.Fatalf("corrupting the instances file: %v", err)
+	}
+	advance(resetAt.Sub(nowFunc()) + limitResumeGrace + time.Second)
+	manager.ResumeLimitedSessions()
+	if inst.LimitReached() {
+		t.Fatal("the due settle still clears the in-memory wall")
+	}
+
+	// Storage heals: the owed checkpoint must retire the durable limit block.
+	if err := os.WriteFile(path, baseline, 0o600); err != nil {
+		t.Fatalf("healing the instances file: %v", err)
+	}
+	manager.FlushOwedSettlements()
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances after heal: %v", err)
+	}
+	var rows []session.InstanceData
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("unmarshal healed rows: %v", err)
+	}
+	if len(rows) != 1 || rows[0].Liveness == session.LiveLimitReached {
+		t.Fatalf("the settle must retire the durable limit block: %+v", rows)
+	}
+}
+
+// TestPollPersistsNewEmissionTombstoneDrop is the #6972 Codex durable-change
+// arm: a parked tombstoned wall that emits a new same-phrase banner (grown
+// count) drops its send tombstone and rewrites its anchor — under an unchanged
+// liveness. The poll's persist gate must treat the wall-record mutation as a
+// durable change, or a restart restores the stale tombstone and the scheduler
+// settles the unanswered wall instead of retrying it.
+func TestPollPersistsNewEmissionTombstoneDrop(t *testing.T) {
+	resetAt := time.Now().Add(30 * time.Minute)
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+
+	const banner = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	anchor := session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence, anchor, false)
+	inst.ClearLimitReachedSent()
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence, anchor, false)
+	if !inst.LimitWallPromptSent() {
+		t.Fatal("the re-park must carry the send tombstone")
+	}
+	manager.persistPollChangeWithIdleEvidence(repoID, inst,
+		session.LiveReady, time.Time{}, "", false, false)
+
+	// The same wall emits again — same phrase, same reset, higher count.
+	// Liveness/reset/evidence all hold; only the wall record changed.
+	grown := session.LimitBanner{Prefix: anchor.Prefix, Count: anchor.Count + 1}
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence, grown, false)
+	if inst.LimitWallPromptSent() {
+		t.Fatal("a new emission drops the tombstone")
+	}
+	manager.persistPollChangeWithIdleEvidence(repoID, inst,
+		session.LiveLimitReached, resetAt, sighting.Evidence, false, false)
+
+	raw, err := config.LoadRepoInstances(repoID)
+	if err != nil {
+		t.Fatalf("LoadRepoInstances: %v", err)
+	}
+	var rows []session.InstanceData
+	if err := json.Unmarshal(raw, &rows); err != nil {
+		t.Fatalf("unmarshal rows: %v", err)
+	}
+	if len(rows) != 1 {
+		t.Fatalf("stored rows = %d, want 1", len(rows))
+	}
+	if rows[0].LimitPromptSent {
+		t.Fatal("the tombstone drop must reach disk — a stale tombstone settles an unanswered wall")
+	}
+	if rows[0].LimitBannerCount != grown.Count {
+		t.Fatalf("the grown anchor count must reach disk: got %d, want %d",
+			rows[0].LimitBannerCount, grown.Count)
 	}
 }

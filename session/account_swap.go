@@ -666,6 +666,7 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 	// Invalidate asynchronous discovery attached to the stopped process before it
 	// can put that process's account-local conversation back into the live slot.
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	i.clearAgentModelChangeLocked()
 	// The namespace the account was selected in is the agent of the frozen
 	// launch command — the same resolution the registry's Selected answered.

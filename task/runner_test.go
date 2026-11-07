@@ -377,7 +377,7 @@ func TestWaitForReadyNonAgentBecomesReadyOnAnyOutput(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
+		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock(), false)
 	}()
 
 	timer := receiveReadinessEvent(t, clock.timers, "initial readiness timer")
@@ -498,7 +498,7 @@ func TestWaitForReadySlowHookDoesNotTimeOutHealthyAgent(t *testing.T) {
 
 	done := make(chan error, 1)
 	go func() {
-		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
+		done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock(), false)
 	}()
 
 	graceTimer := receiveReadinessEvent(t, clock.timers, "hook grace timer")
@@ -1367,7 +1367,7 @@ func TestWaitForReadySendsPastExpiredRecordedWall(t *testing.T) {
 		}
 		return ready, nil
 	})
-	inst.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence, anchor)
+	inst.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence, anchor, false)
 
 	done := make(chan error, 1)
 	go func() { done <- WaitForReady(context.Background(), inst) }()
@@ -1391,7 +1391,7 @@ func TestWaitForReadySendsPastExpiredRecordedWall(t *testing.T) {
 		return banner, nil
 	})
 	other.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence,
-		session.LimitBanner{Prefix: "a different transcript entirely\n", Count: 1})
+		session.LimitBanner{Prefix: "a different transcript entirely\n", Count: 1}, false)
 	done2 := make(chan error, 1)
 	go func() { done2 <- WaitForReady(context.Background(), other) }()
 	select {
@@ -1402,5 +1402,49 @@ func TestWaitForReadySendsPastExpiredRecordedWall(t *testing.T) {
 		}
 	case <-time.After(3 * time.Second):
 		t.Fatal("WaitForReady did not park on the unrecorded banner")
+	}
+}
+
+// TestWaitForReadyResiduePaneWithoutComposerTimesOut pins the #6972 item-2
+// verdict: a pane still showing the row's own expired wall — residue, so the
+// wait must not park on it — but with NO composer in view is not ready, and
+// the residue verdict does not manufacture readiness. The wait holds to its
+// deadline and reports a timeout: the prompt is never typed into a pane
+// whose composer is not visible, and the row never re-parks on the expired
+// claim either.
+func TestWaitForReadyResiduePaneWithoutComposerTimesOut(t *testing.T) {
+	defer setWaitForReadyTimingForTest(time.Second, time.Millisecond)()
+	defer setWaitLimitForTest(NewLimitDetector(nil), time.Now)()
+
+	const banner = "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+
+	sighting := NewLimitDetector(nil).Sight(banner, "claude", time.Now())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	anchor := session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount}
+
+	// The pane shows ONLY the residue banner — no composer glyph, nothing a
+	// ready match could take: isReadyContent misses under a limit banner.
+	inst := newPreviewInstanceWithProgram(t, "claude", func() (string, error) {
+		return banner, nil
+	})
+	inst.SetLimitReachedAtEvidence(time.Now().Add(-time.Hour), sighting.Evidence, anchor, false)
+
+	done := make(chan error, 1)
+	go func() { done <- WaitForReady(context.Background(), inst) }()
+	select {
+	case err := <-done:
+		var limitErr *LimitReachedError
+		if errors.As(err, &limitErr) {
+			t.Fatalf("the row's own expired banner is residue, not a wall: %v", err)
+		}
+		if err == nil {
+			t.Fatal("a composer-less residue pane is not ready — the wait must not send past it")
+		}
+		// The readiness timeout is the honest answer: the wait declined the
+		// park and declined to call the pane ready.
+	case <-time.After(3 * time.Second):
+		t.Fatal("WaitForReady hung on a residue pane with no composer")
 	}
 }

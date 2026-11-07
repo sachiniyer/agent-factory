@@ -477,7 +477,7 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 	if !resp.record(err) {
 		return err
 	}
-	resp.Instance = data
+	resp.Instance = data.ForClients()
 	return nil
 }
 

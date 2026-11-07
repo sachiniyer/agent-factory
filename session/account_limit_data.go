@@ -185,6 +185,26 @@ type LimitWallClaimData struct {
 	// describes is gone, so a matching sighting is a different emission.
 	RuntimePID     int    `json:"runtime_pid,omitempty"`
 	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
+	// RuntimeGen pins the claim to the agent runtime generation that sighted
+	// it — the binding that still holds when no concrete process resolves
+	// (RuntimePID 0). A residue or stale-read check judged across a
+	// replacement must fail (#6972).
+	RuntimeGen uint64 `json:"runtime_gen,omitempty"`
+	// PromptSent is the tombstone ClearLimitReachedSent writes: this wall's
+	// resume prompt already landed. A re-park borrowing the claim keeps it so
+	// the scheduler never re-sends for a wall the row already answered (#6972).
+	PromptSent bool `json:"prompt_sent,omitempty"`
+	// Retired marks the claim as a wall the row genuinely moved past — a
+	// send-landed, manual, or swap-commit clear — versus the standing-claim
+	// mirror every park writes. A churned row serializes no live claim
+	// fields, so the distinction must ride on the shadow itself: after a
+	// restart, Retired is what keeps an unsent wall's mirror from reading as
+	// residue (#6972). It is a pointer because the bit's PRESENCE is itself
+	// evidence: a shadow serialized before the field existed (v1.0.347)
+	// carries nil, and the restore verdict for an unrecorded retirement is
+	// the writer's own — retired — rather than the false a plain bool would
+	// mint (#6972, Codex upgrade path).
+	Retired *bool `json:"retired,omitempty"`
 }
 
 // IsZero reports whether the claim carries no recorded wall fact — the

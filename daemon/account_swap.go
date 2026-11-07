@@ -100,7 +100,10 @@ var testHookAccountSwapBeforeFinalFence = func() {}
 func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner) {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
-	instance.SetLimitReachedAtEvidence(resetAt, evidence, banner)
+	// Its only caller is the recovery retry's send-path re-detection on the
+	// established replacement pane — not a just-launched runtime — so the
+	// sighting is judged against the row's recorded claims normally (#6972).
+	instance.SetLimitReachedAtEvidence(resetAt, evidence, banner, false)
 }
 
 func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner, epoch uint64, authoritative bool) bool {
@@ -768,7 +771,11 @@ func (m *Manager) settleReplacementRuntime(
 	launched bool,
 	snap session.ConversationCaptureSnapshot,
 ) (bool, error) {
-	_, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, "")
+	// launched is the same signal the caller passes to ParkAutomatic*AtLimit:
+	// a replacement pane that actually spawned cannot prove residue — its
+	// lookalike banner is a new wall (#6972) — while a refused respawn still
+	// reads the established pane.
+	_, err := task.WaitForReadyAndSendPromptWithStatus(context.Background(), instance, "", launched)
 	var limitErr *task.LimitReachedError
 	switch {
 	case err == nil:

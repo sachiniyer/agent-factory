@@ -78,6 +78,11 @@ type HandoffSwap struct {
 	previousAccount      string
 	previousAccountAgent string
 	previousAuto         bool
+	// previousLimitWall is the rollback-only copy of the retired wall shadow
+	// the speculative record mutation drops with the generation bump: when the
+	// runtime swap never completes, the outgoing runtime still runs and its
+	// wall claims remain provable, so the shadow comes back on revert (#6972).
+	previousLimitWall limitWallClaim
 	// crossAgent is admission's verdict on whether this swap changed the agent,
 	// threaded to the mission brief so Render honors it instead of re-deriving
 	// sameness from From == To. A program_overrides redirect can make the two
@@ -458,6 +463,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 		previousAccount:      i.Account,
 		previousAccountAgent: i.accountAgent,
 		previousAuto:         i.accountAutoSelected,
+		previousLimitWall:    i.lastLimitWall,
 		crossAgent:           crossAgent,
 		effectiveTo:          effectiveAgent,
 	}
@@ -505,6 +511,7 @@ func (i *Instance) recordHandoffSwapLocked(target, effectiveAgent string, crossA
 	// already waiting on a rollout must not refill the live slot after this record
 	// has been rewritten for the incoming agent.
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 
 	return swap, nil
 }
@@ -570,6 +577,27 @@ func (i *Instance) RevertHandoff(swap HandoffSwap) error {
 	// make a token from the abandoned target indistinguishable from the restored
 	// outgoing runtime.
 	i.agentRuntimeGeneration++
+	// But the runtime itself never changed: the outgoing pane still runs, so
+	// its wall claims remain provable where a real replacement's would not.
+	// Restore the shadow the speculative bump dropped, and re-pin both claims
+	// to the advanced generation — the emitting process is unchanged, only the
+	// capture token moved. Without the re-pin the row's own unchanged banner
+	// reads as a new emission and re-mints/replays its claim (#6972, Codex).
+	if i.lastLimitWall == (limitWallClaim{}) {
+		i.lastLimitWall = swap.previousLimitWall
+	}
+	if i.lastLimitWall.agent != "" {
+		i.lastLimitWall.runtimePID = i.runtimePID
+		i.lastLimitWall.runtimeStartID = i.runtimeStartID
+		i.lastLimitWall.runtimeGen = i.agentRuntimeGeneration
+		i.limitWallUnpersisted = true
+	}
+	if i.liveness == LiveLimitReached {
+		i.limitWallRuntimePID = i.runtimePID
+		i.limitWallRuntimeStartID = i.runtimeStartID
+		i.limitWallRuntimeGen = i.agentRuntimeGeneration
+		i.limitWallUnpersisted = true
+	}
 	return nil
 }
 

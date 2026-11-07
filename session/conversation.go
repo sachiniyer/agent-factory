@@ -126,6 +126,7 @@ func (i *Instance) noteAgentRuntimeReplaced() {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.agentRuntimeGeneration++
+	i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	i.touchLocked()
 	i.clearAgentModelChangeLocked()
 }

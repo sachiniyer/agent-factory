@@ -8,6 +8,7 @@ import (
 
 	"github.com/coder/websocket"
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The daemon's events plane (#1592 Phase 2 PR5, §4.3): a WebSocket/JSON fan-out
@@ -101,6 +102,19 @@ func (h *eventsHub) publish(ev agentproto.Event) {
 func (m *Manager) publishEvent(t agentproto.EventType, payload any) {
 	if m == nil || m.events == nil {
 		return
+	}
+	// A session row crossing the events plane is a client projection: the
+	// wall machinery the record carries for the daemon's own residue/stale-read
+	// matching — raw pane anchors, process pins, the retired shadow — is not
+	// client data (#6972). Scrub at the single fan-out point so every publisher
+	// inherits it.
+	switch p := payload.(type) {
+	case session.InstanceData:
+		payload = p.ForClients()
+	case *session.InstanceData:
+		if p != nil {
+			payload = p.ForClients()
+		}
 	}
 	ev, err := agentproto.NewEvent(t, payload)
 	if err != nil {

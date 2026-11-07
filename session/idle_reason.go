@@ -461,11 +461,23 @@ func (i *Instance) ConsumeLoadRuntimeReplacement() bool {
 func (i *Instance) markAgentRuntimeReplaced(replaced bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.markAgentRuntimeReplacedLocked(replaced)
+}
+
+// markAgentRuntimeReplacedLocked is the caller-holds-i.mu half. A positive
+// verdict is also a runtime GENERATION advance: every replacement path —
+// respawn, remote in-place relaunch, unverified reattach — retires the pane
+// the recorded wall claims describe, and remote/adopted runtimes resolve no
+// concrete PID pin at all, so the generation is the only check that still
+// proves a claim's emission can be what a sighting shows (#6972, Codex).
+func (i *Instance) markAgentRuntimeReplacedLocked(replaced bool) {
 	i.agentRuntimeReplaced = replaced
 	// Remember WHEN, so an interruption's boundary is the launch, not the later
 	// settle edge: an agent already mid-turn at ConfirmLive started after this (#6231).
 	if replaced {
 		i.agentReplacedAt = time.Now()
+		i.agentRuntimeGeneration++
+		i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	} else {
 		i.agentReplacedAt = time.Time{}
 	}
