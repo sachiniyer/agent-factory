@@ -434,7 +434,17 @@ var (
 // transcript text and the banner genuinely carries no zone) does NOT adopt
 // that unrelated location: the clock still resolves in the injected clock's
 // zone (the documented no-paren fallback) rather than the transcript's.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)\.)?)`)
+//
+// The clock token itself accepts a wrap between the [ap] and m of its
+// meridiem suffix — "2p\nm" — so a narrow pane that splits the suffix still
+// captures the clock; normalizeResetWhitespace rejoins it to "2pm". An
+// optional trailing period that wraps onto its own row — "2pm
+// (America/New_York)\n." — is captured too (the only \n. the anchor can
+// reach is this trailing period; a period-newline in the pre-clock span is a
+// clause boundary the anchor stops at), so the evidence matches the
+// unwrapped "(…)." render and the #6765 re-read identity holds across pane
+// resizes.
+var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)\.)?(?:\r?\n[ \t]*\.)?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a
@@ -563,8 +573,32 @@ func normalizeResetWhitespace(s string) string {
 				// followed by a clock hour is 5, "2026\n9am") and stays a
 				// space, or monthDay would consume "62" as the day and
 				// time.Date would normalize it into a much later month.
-				if preRun+postRun <= 4 {
-					continue
+				// When the post-run is immediately followed by a clock
+				// suffix ([ap]m), the digits run up against a clock hour:
+				// a mid-token split of the HOUR ("1\n1am" → "11am") rejoins,
+				// but a wrap BETWEEN the day and the clock hour ("Nov 6\n9am")
+				// must stay a space — rejoining to "Nov 69am" makes
+				// parseClockTime reject hour 69 and the banner loses its
+				// reset time. A mid-token split of the MINUTES ("2:3\n0pm"
+				// → "2:30pm") is preceded by a colon and rejoins regardless
+				// of the hour bound (minutes run 0-59, not 1-12).
+				preStart := len(pre) - preRun
+				prevIsColon := preStart > 0 && pre[preStart-1] == ':'
+				postEnd := i + 1 + postRun
+				followedByClockSuffix := postEnd+1 < len(s) &&
+					(s[postEnd] == 'a' || s[postEnd] == 'A' || s[postEnd] == 'p' || s[postEnd] == 'P') &&
+					(s[postEnd+1] == 'm' || s[postEnd+1] == 'M')
+				if followedByClockSuffix {
+					if prevIsColon {
+						continue // mid-token minutes split — rejoin
+					}
+					joinedVal, _ := strconv.Atoi(pre[preStart:] + s[i+1:i+1+postRun])
+					if joinedVal >= 1 && joinedVal <= 12 {
+						continue // mid-token clock hour — rejoin
+					}
+					// else: day+clock boundary — stay a space
+				} else if preRun+postRun <= 4 {
+					continue // mid-token day/year — rejoin
 				}
 			}
 			if lastColon && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
@@ -573,7 +607,27 @@ func normalizeResetWhitespace(s string) string {
 			if lastDigit && i+1 < len(s) && s[i+1] == ':' {
 				continue
 			}
-			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && wrapSplitsMonth(b.String(), s[i+1:]) {
+			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && (wrapSplitsMonth(b.String(), s[i+1:]) || wrapSplitsClockSuffix(b.String(), s[i+1:])) {
+				continue
+			}
+			// A wrap right before the date's comma ("Nov 6\n, 2027") drops
+			// the newline rather than spacing to "Nov 6 , 2027": monthDay's
+			// optional year requires the comma to immediately follow the day,
+			// and the spaced form diverges the evidence from the unwrapped
+			// "Nov 6, 2027" render (the #6765 re-read identity). The comma
+			// only appears in the pre-clock date span, so the drop is safe.
+			if lastDigit && i+1 < len(s) && s[i+1] == ',' {
+				continue
+			}
+			// A wrap that pushes the trailing period onto its own row ("2pm
+			// (America/New_York)\n.") drops the newline rather than spacing
+			// to "(…) .": the period is sentence punctuation, not a new
+			// word, and the spaced form diverges the evidence from the
+			// unwrapped "(…)." render (the #6765 re-read identity). The
+			// only \n. the anchor captures is this trailing wrapped period
+			// — a period-newline in the pre-clock span is a clause boundary
+			// the anchor already stops at — so the drop is unconditional.
+			if i+1 < len(s) && s[i+1] == '.' {
 				continue
 			}
 			if !outsideSpace {
@@ -637,6 +691,59 @@ func wrapSplitsMonth(pre, post string) bool {
 		}
 	}
 	return false
+}
+
+// wrapSplitsClockSuffix reports whether a wrap newline between two ASCII
+// letters splits the two-letter [ap]m meridiem suffix of a clock token —
+// e.g. "2p\nm" (the wrapped "2pm") or "11a\nm" (the wrapped "11am") — so the
+// normalizer rejoins it rather than spacing to "2p m", which the clockTime
+// regex rejects (the [ap] and m must be contiguous). The shape is
+// letter-newline-letter, byte-identical to a month mid-token wrap and to a
+// word-boundary wrap, so the distinction is semantic: the trailing letter
+// run of pre is exactly one [ap] letter that immediately follows a clock-hour
+// digit, and the leading letter run of post is exactly one 'm'. Anything
+// wider (a word-boundary wrap like "tap\nm", or a multi-letter head/tail) is
+// not a clock-suffix split and takes a space, preserving the unwrapped
+// evidence for the #6765 re-read identity.
+func wrapSplitsClockSuffix(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if len(head) != 1 {
+		return false
+	}
+	switch head[0] {
+	case 'a', 'A', 'p', 'P':
+	default:
+		return false
+	}
+	// The [ap] must immediately follow a clock-hour digit.
+	if j == 0 {
+		return false
+	}
+	prev := pre[j-1]
+	if prev < '0' || prev > '9' {
+		return false
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if len(tail) != 1 {
+		return false
+	}
+	return tail[0] == 'm' || tail[0] == 'M'
 }
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at

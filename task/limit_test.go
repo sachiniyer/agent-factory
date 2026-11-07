@@ -778,6 +778,67 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at 2pm\n(America/Los_Angeles)",
 			want:    time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC).UTC(), // 2pm UTC, NOT 2pm LA
 		},
+		{
+			// A narrow pane may wrap BETWEEN the day and the clock hour of a
+			// comma-less date — "Nov 6\n9am" — and the wrap must NOT rejoin
+			// the digits: "Nov 69am" makes parseClockTime reject hour 69 and
+			// the banner loses its reset time. The wrap stays a space so
+			// monthDay sees "Nov 6" (day 6) and parseClockTime sees "9am"
+			// (hour 9). Same EST instant as the unwrapped "Nov 6 9am" form.
+			// (Run length alone cannot identify this split: day+clock is
+			// 1+1 = 2 digits, byte-identical to a mid-token day "Nov 1\n2";
+			// the [ap]m following the post-run is what marks it a clock
+			// boundary, and the joined "69" > 12 is what keeps it a space.)
+			name:    "weekly date: day wraps before the clock (no comma)",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6\n9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap INSIDE the two-letter [ap]m meridiem
+			// suffix — "2pm" splits as "2p\nm" — and the wrap must rejoin
+			// (drop, not space) so the clockTime regex sees "2pm" (the [ap]
+			// and m must be contiguous) rather than "2p m", which it rejects.
+			// Same EST instant as the unwrapped "2pm" form.
+			name:    "5h: meridiem wraps inside its suffix",
+			content: "Claude usage limit reached. Your limit will reset at 2p\nm (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			// A narrow pane may push the trailing period onto its own row —
+			// "2pm (America/New_York)\n." — and the wrap must rejoin (drop,
+			// not space) so the evidence carries the period as the unwrapped
+			// "(…)." form rather than the divergent "(…) ." (which would
+			// break the #6765 re-read identity across pane resizes). Same
+			// EST instant as the unwrapped "2pm (…)." form.
+			name:    "5h wrapped: trailing period wraps to its own row",
+			content: "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)\n.",
+			want:    want2pm,
+		},
+		{
+			// A narrow pane may wrap BETWEEN the day and its comma — "Nov 6\n,
+			// 2027 9am" — and the wrap must rejoin (drop, not space) so
+			// monthDay sees "Nov 6, 2027" (the comma immediately follows the
+			// day, so the explicit year matches) rather than "Nov 6 , 2027",
+			// which matches only "Nov 6" and discards the year. Same EST
+			// instant as the unwrapped "Nov 6, 2027 9am" form.
+			name:    "weekly date: comma wraps after the day",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6\n, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap INSIDE the two-digit clock minutes —
+			// "2:30pm" splits as "2:3\n0pm" — and the wrap must rejoin (drop,
+			// not space) so parseClockTime sees "2:30pm" rather than "2:3
+			// 0pm", which it rejects (minutes need 2 contiguous digits and
+			// the disjoint "0pm" reads hour 0 < 1). The rejoin is gated on
+			// the pre-run being preceded by a colon (the minutes context),
+			// so a day+clock boundary ("Nov 6\n9am", no colon) still stays a
+			// space even though the post-run is followed by [ap]m. Same EST
+			// instant as the unwrapped "2:30pm" form.
+			name:    "5h: minutes wrap inside their digits",
+			content: "Claude usage limit reached. Your limit will reset at 2:3\n0pm (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -858,6 +919,44 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	}
 	if want := "reset at 2pm (America/New_York)."; evWrappedAt != want {
 		t.Fatalf("wrapped word-boundary evidence = %q, want %q", evWrappedAt, want)
+	}
+
+	// A wrap that pushes the trailing period onto its own row — "2pm
+	// (America/New_York)\n." — must produce the SAME evidence as the
+	// unwrapped "2pm (America/New_York)." form: the period is sentence
+	// punctuation, not a new word, so the wrap newline is dropped (not
+	// spaced to "(…) ."). A divergent evidence would bypass the same-wall
+	// dedupe in SetLimitReachedAtEpoch after a pane resize.
+	unwrappedPeriod := "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)."
+	wrappedPeriod := "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)\n."
+	_, _, _, evUnwrappedPeriod := det.Check(unwrappedPeriod, tmux.ProgramClaude, now)
+	_, _, _, evWrappedPeriod := det.Check(wrappedPeriod, tmux.ProgramClaude, now)
+	if evUnwrappedPeriod != evWrappedPeriod {
+		t.Fatalf("a wrapped trailing period must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedPeriod, evWrappedPeriod)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedPeriod != want {
+		t.Fatalf("wrapped trailing-period evidence = %q, want %q", evWrappedPeriod, want)
+	}
+
+	// A wrap inside the [ap]m meridiem suffix — "2p\nm" — must produce the
+	// SAME evidence as the unwrapped "2pm" form: the suffix letters rejoin
+	// (not space to "2p m"), keeping the identity stable across resizes.
+	wrappedMeridiem := "Claude usage limit reached. Your limit will reset at 2p\nm (America/New_York)."
+	_, _, _, evWrappedMeridiem := det.Check(wrappedMeridiem, tmux.ProgramClaude, now)
+	if evWrappedMeridiem != evUnwrappedPeriod {
+		t.Fatalf("a wrapped meridiem suffix must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedPeriod, evWrappedMeridiem)
+	}
+
+	// A wrap before the date comma — "Nov 6\n, 2027 9am" — must produce the
+	// SAME evidence as the unwrapped "Nov 6, 2027 9am" form: the comma
+	// immediately follows the day (not "Nov 6 ,"), keeping the identity
+	// stable and the explicit year matched.
+	unwrappedComma := "Claude usage limit reached. Your limit will reset at Nov 6, 2027 9am (America/New_York)."
+	wrappedComma := "Claude usage limit reached. Your limit will reset at Nov 6\n, 2027 9am (America/New_York)."
+	_, _, _, evUnwrappedComma := det.Check(unwrappedComma, tmux.ProgramClaude, now)
+	_, _, _, evWrappedComma := det.Check(wrappedComma, tmux.ProgramClaude, now)
+	if evUnwrappedComma != evWrappedComma {
+		t.Fatalf("a wrap before the date comma must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedComma, evWrappedComma)
 	}
 }
 
