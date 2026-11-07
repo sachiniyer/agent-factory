@@ -295,10 +295,12 @@ func wrapSplitsMonth(pre, post string) bool {
 // letter-newline-letter, byte-identical to a month mid-token wrap and to a
 // word-boundary wrap, so the distinction is semantic: the trailing letter
 // run of pre is exactly one [ap] letter that immediately follows a clock-hour
-// digit, and the leading letter run of post is exactly one 'm'. Anything
-// wider (a word-boundary wrap like "tap\nm", or a multi-letter head/tail) is
-// not a clock-suffix split and takes a space, preserving the unwrapped
-// evidence for the #6765 re-read identity.
+// digit, or — for the explicitly supported spaced meridiem form "2:30 PM" /
+// "2 PM" — a space that itself follows a clock digit, and the leading letter
+// run of post is exactly one 'm'. Anything wider (a word-boundary wrap like
+// "tap\nm", or a multi-letter head/tail) is not a clock-suffix split and
+// takes a space, preserving the unwrapped evidence for the #6765 re-read
+// identity.
 func wrapSplitsClockSuffix(pre, post string) bool {
 	j := len(pre)
 	for j > 0 {
@@ -317,12 +319,23 @@ func wrapSplitsClockSuffix(pre, post string) bool {
 	default:
 		return false
 	}
-	// The [ap] must immediately follow a clock-hour digit.
+	// The [ap] must immediately follow a clock-hour digit, or — for the
+	// explicitly supported spaced meridiem form "2:30 PM" / "2 PM" — a
+	// space that itself follows a clock digit; otherwise a word-boundary
+	// split like "tap M" would rejoin.
 	if j == 0 {
 		return false
 	}
 	prev := pre[j-1]
-	if prev < '0' || prev > '9' {
+	if prev == ' ' || prev == '\t' {
+		if j < 2 {
+			return false
+		}
+		pp := pre[j-2]
+		if pp < '0' || pp > '9' {
+			return false
+		}
+	} else if prev < '0' || prev > '9' {
 		return false
 	}
 	k := 0

@@ -641,9 +641,32 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // same as unwrapped
 		},
 		{
-			name:    "weekly date unwrapped (control)",
-			content: "Claude usage limit reached. Your limit will reset at Nov 6, 2026 9am (America/New_York).",
-			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+			name:    "5h: meridiem wraps after the clock digits",
+			content: "Claude usage limit reached. Your limit will reset at 2:30\npm (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
+		{
+			// The explicitly supported spaced meridiem form "2:30 PM"
+			// (clockTime's \s* between the time and [ap]m admits it) may
+			// wrap inside its suffix — "2:30 P\nM" — and the wrap must
+			// rejoin (drop, not space) so parseClockTime sees "2:30 PM"
+			// (the [ap] and m must be contiguous) rather than "2:30 P M",
+			// which it rejects. Same EST instant as the unwrapped "2:30
+			// PM" form.
+			name:    "5h: spaced meridiem wraps inside its suffix",
+			content: "Claude usage limit reached. Your limit will reset at 2:30 P\nM (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
+		{
+			// A four-letter month abbreviation that wraps after its period
+			// — "Sept.\n6" — must still continue the date: the month-
+			// abbreviation branch admits the same longer spellings monthDay
+			// accepts (e.g. "Sept."), so the wrapped date parses to the
+			// clock rather than degrading to hasResetTime=false. Same EST
+			// instant as the unwrapped "Sept. 6, 2027 9am" form.
+			name:    "weekly date: four-letter month wraps after its period",
+			content: "Claude usage limit reached. Your limit will reset at Sept.\n6, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 9, 6, 9, 0, 0, 0, est).UTC(), // Sep 6 2027 9am EST -> 14:00Z
 		},
 		{
 			name:    "weekly date wrapped: tz paren on next row",
@@ -1364,6 +1387,16 @@ func TestClaudeResetUnrelatedClockRow(t *testing.T) {
 		{
 			name:    "unrelated clock row after a period-terminated clause",
 			content: "Claude usage limit reached. Your limit will reset at some point soon.\nuser draft: meet Monday at 2pm",
+		},
+		{
+			// The period-terminated clause boundary holds over CRLF the
+			// same way it holds over a lone LF: the inline-period branch
+			// excludes \r as well as \n, so "soon.\r\n" stops the pre-clock
+			// span at the period and the transcript's "2pm" is NOT adopted
+			// as the reset time. (Without excluding \r the branch would
+			// consume "soon.\r" and the span would cross into the next row.)
+			name:    "period-terminated clause then unrelated clock over CRLF",
+			content: "Claude usage limit reached. Your limit will reset at some point soon.\r\nuser draft: meet Monday at 2pm",
 		},
 		{
 			// tmux `capture-pane -e` keeps ANSI SGR escapes, and the real

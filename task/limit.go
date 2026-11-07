@@ -416,12 +416,18 @@ var (
 // escapes and an optional CR before the LF) AND requires the next row to begin
 // with a digit (the day of a date continuation) as a unit, so the wrapped
 // date continues to the clock, mirroring the unwrapped "Nov. 6" form. The
-// digit guard stops an unparseable clause that merely ends with an abbreviated
-// month — "reset sometime in Nov.\nuser draft: meet at 2pm" — from crossing
-// into the transcript's clock: without it the month branch would consume
-// "Nov.\n" and the span would adopt the unrelated "2pm". A plain
-// period-plus-newline that is not a month abbreviation (or whose next row is
-// not a date continuation) still terminates.
+// branch admits the same longer spellings monthDay accepts (e.g. "Sept.\n6"),
+// so a four-letter abbreviation that wraps after its period still continues.
+// The digit guard stops an unparseable clause that merely ends with an
+// abbreviated month — "reset sometime in Nov.\nuser draft: meet at 2pm" —
+// from crossing into the transcript's clock: without it the month branch
+// would consume "Nov.\n" and the span would adopt the unrelated "2pm". A
+// period followed by a CR (the first half of a CRLF line ending) is treated
+// the same as a period followed by a lone LF: the inline-period branch
+// excludes \r as well as \n, so "reset at some point soon.\r\nuser draft:
+// meet at 2pm" stops at the period and does not cross into the next row's
+// clock. A plain period-plus-newline that is not a month abbreviation (or
+// whose next row is not a date continuation) still terminates.
 //
 // The optional parenthesized timezone after the clock is bounded by row: a
 // paren on the SAME row as the clock (or wrapping INSIDE the paren, e.g.
@@ -459,7 +465,7 @@ var (
 // still locates the clause; normalizeResetWhitespace rejoins it to "reset"
 // (gated on the joined letters forming "reset") so the evidence matches the
 // unwrapped render.
-var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?s(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n[ \t]*\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n[ \t]*)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
+var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?s(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*\.(?:\x1b\[[0-9;]*m)*\r?\n[ \t]*\d|[^.]|\.(?:[^\r\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n[ \t]*)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a
