@@ -829,6 +829,7 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
       const w = window as unknown as {
         __echoes: number[];
         __echoTimes: number[];
+        __statusLog: [number, string][];
         __probe: WebSocket;
         __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
       };
@@ -874,6 +875,16 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
         ws.onopen = () => resolve();
         ws.onerror = () => reject(new Error("probe stream failed to open"));
       });
+      // The pane's socket epoch is the state this spec cannot see on the
+      // wire: a mid-sequence reconnect clears contestedEchoes and replays
+      // the admission, which would read as a fresh contest on master and
+      // pass the spec without exercising the defect. Record every status
+      // transition so a blip surfaces in the run log instead.
+      const main = document.querySelector(".af-main")!;
+      w.__statusLog = [[performance.now(), main.getAttribute("data-term-status") ?? ""]];
+      new MutationObserver(() => {
+        w.__statusLog.push([performance.now(), main.getAttribute("data-term-status") ?? ""]);
+      }).observe(main, { attributes: true, attributeFilter: ["data-term-status"] });
     },
     { sessionId: selected.id },
   );
@@ -896,6 +907,18 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
     });
   const echoCount = () =>
     page.evaluate(() => (window as unknown as { __echoes: number[] }).__echoes.length);
+  const dumpState = (label: string) =>
+    page
+      .evaluate((l) => {
+        const w = window as unknown as {
+          __echoes: number[];
+          __echoTimes: number[];
+          __statusLog: [number, string][];
+        };
+        const rel = w.__echoTimes.map((t) => Math.round(t - w.__echoTimes[0]));
+        return `${l}: echoes=${JSON.stringify(w.__echoes)} relMs=${JSON.stringify(rel)} status=${JSON.stringify(w.__statusLog.map(([t, s]) => [Math.round(t), s]))}`;
+      }, label)
+      .then((line) => console.log(`[6635-diag] ${line}`));
 
   // Let the probe's subscribe replay and the attach's settle land, then
   // anchor every read past them — leftover authority from an earlier spec
@@ -944,6 +967,7 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
     [atClaim, atCounter] as const,
   );
   expect(sightingSpan, "claim→counter sightings must share one yield window").toBeLessThan(1400);
+  await dumpState("post-counter");
   await waitEchoEq(gridRows, atCounter + 1, "post-activation reclaim");
   await expect
     .poll(rows, {
