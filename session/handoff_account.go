@@ -727,7 +727,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime))
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime), freshRuntime)
 }
 
 // sendPathReSightingLocked classifies a send-path park's sighting as a parked
@@ -771,7 +771,7 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 	// the same unchanged claim (#6880). A row parked at some OTHER wall is
 	// parked-at-a-different-fact, and the record's same-kind match scopes the
 	// no-op to the same claim kind in either case.
-	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, LimitBanner{}, i.liveness == LiveLimitReached)
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, LimitBanner{}, i.liveness == LiveLimitReached, false)
 }
 
 // parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
@@ -806,11 +806,15 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 // classification IS that judgment: a parked row the caller did NOT classify
 // as a parked re-sight (a fresh replacement runtime's emission, a different
 // banner on the unchanged pane) carries new wall evidence no recorded claim
-// may veto (#6880).
-func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked bool) error {
+// may veto (#6880). freshRuntime is the caller's explicit "this pane is a
+// replacement runtime" signal and stands alone: a healthy handoff back onto
+// an identity that still shadows its old wall reads an UNPARKED row, so
+// parked && !wasParked alone would let a coincidentally identical banner on
+// the fresh pane borrow the expired claim.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked, freshRuntime bool) error {
 	parked := i.liveness == LiveLimitReached
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		parked, parked && !wasParked, sightedAt)
+		parked, freshRuntime || (parked && !wasParked), sightedAt)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -891,5 +895,5 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence s
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime))
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime), freshRuntime)
 }

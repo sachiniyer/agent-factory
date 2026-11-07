@@ -335,6 +335,31 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 			"the fresh runtime's claim tightens the durable wall: got %v", obs[0].ResetAt)
 	})
 
+	t.Run("a fresh runtime on a cleared row is a new sighting", func(t *testing.T) {
+		// The healthy-handoff shape: the row cleared its wall and sits
+		// UNPARKED when a replacement runtime arrives — only the shadow
+		// remembers the old banner, and a coincidentally identical emission
+		// on the fresh pane is new wall evidence, not a re-read.
+		inst := &Instance{
+			Program:    tmux.ProgramClaude,
+			Account:    "personal",
+			liveness:   LiveRunning,
+			inFlightOp: OpRespawning,
+			pendingAccountSwap: &AccountSwapData{
+				Manual: true, From: "work", To: "personal",
+				ReplacementPanesStarted: true,
+				MissionDeliveryStatus:   PromptCouldNotConfirm,
+			},
+		}
+		require.NoError(t, inst.ParkManualAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		inst.ClearLimitReached()
+		require.NoError(t, inst.ParkManualAccountSwapAtLimit(later, clockResetEvidence, staleBanner, true))
+		requireParkedReset(t, inst, later)
+		obs := inst.AccountLimitObservations()
+		require.True(t, obs[0].ResetAt.Equal(later),
+			"the fresh runtime's claim must stand over the shadowed wall: got %v", obs[0].ResetAt)
+	})
+
 	t.Run("a reused phrase at a different anchor is a new wall", func(t *testing.T) {
 		// The day-after shape: a NEW banner at a different pane position
 		// happens to re-use "reset at 3pm". The phrase matches the recorded
