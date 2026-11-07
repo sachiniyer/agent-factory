@@ -116,5 +116,8 @@ listener that hosts web-tab previews only. A daemon under a non-default
 home's daemon: when the port is held by (or claimed for) another home's
 daemon the web listener is refused — logged, and named by `af doctor` and
 `af daemon status` — rather than silently retried until a restart gap hands
-it over (#6858). See the
+it over (#6858). The refusal names the remedy: give this daemon its own
+`network.listen_addr`, or free the port for the claiming home — move or
+disable its listener, or remove a stray `~/.agent-factory` — then restart
+this daemon. See the
 [HTTP API guide](http-api.md) for the transport and auth details.

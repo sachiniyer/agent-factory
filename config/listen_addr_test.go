@@ -70,14 +70,24 @@ func TestListenAddrInHome(t *testing.T) {
 		require.True(t, found)
 	})
 
-	t.Run("a symlinked config.toml is not followed", func(t *testing.T) {
+	t.Run("a symlinked config.toml resolves like the loader does", func(t *testing.T) {
 		require.NoError(t, os.Remove(path))
 		target := filepath.Join(home, "planted.toml")
 		require.NoError(t, os.WriteFile(target, []byte(
 			"[network]\nlisten_addr = \"127.0.0.1:3333\"\n"), 0600))
 		require.NoError(t, os.Symlink(target, path))
+		addr, found, err := ListenAddrInHome(home)
+		require.NoError(t, err, "dotfiles links are a supported config arrangement (docs/configuration.md)")
+		require.True(t, found)
+		require.Equal(t, "127.0.0.1:3333", addr)
+		require.NoError(t, os.Remove(path))
+	})
+
+	t.Run("a dangling config.toml link is unreadable, not absent", func(t *testing.T) {
+		require.NoError(t, os.Symlink(filepath.Join(home, "gone.toml"), path))
 		_, found, err := ListenAddrInHome(home)
-		require.Error(t, err, "a symlink is not the home's config — O_NOFOLLOW")
+		require.Error(t, err,
+			"a link that exists but does not resolve is a loud error for the loader — not 'no config'")
 		require.False(t, found)
 		require.NoError(t, os.Remove(path))
 	})

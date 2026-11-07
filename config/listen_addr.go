@@ -101,12 +101,12 @@ const listenAddrInHomeMaxBytes = 64 << 10
 // Used by the daemon's #6858 no-takeover gate to ask whether a claimed-home
 // daemon would bind the contested port.
 func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
-	data, err := readFileNoFollowBounded(filepath.Join(homeDir, TomlConfigFileName), listenAddrInHomeMaxBytes)
+	data, err := readHomeConfigFile(filepath.Join(homeDir, TomlConfigFileName))
 	switch {
 	case err == nil:
 		addr, err = listenAddrFromTOML(data)
 	case errors.Is(err, fs.ErrNotExist):
-		data, err = readFileNoFollowBounded(filepath.Join(homeDir, ConfigFileName), listenAddrInHomeMaxBytes)
+		data, err = readHomeConfigFile(filepath.Join(homeDir, ConfigFileName))
 		switch {
 		case err == nil:
 			addr, err = listenAddrFromJSON(data)
@@ -122,6 +122,32 @@ func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
 		return "", true, err
 	}
 	return addr, true, nil
+}
+
+// readHomeConfigFile reads a config file inside another home the way the
+// loader reaches it: a symlinked config.toml is SUPPORTED for a real config —
+// docs/configuration.md documents the dotfiles arrangement — so the path is
+// resolved first and only the RESOLVED file is held to the bounded read's
+// rules (no further link, regular file, size cap, nonblocking). fs.ErrNotExist
+// means the file is genuinely absent; a link that exists but does not resolve
+// (dangling, loop) is an unreadable file, not a missing one — the loader
+// refuses those loudly rather than loading nothing, and this probe errs the
+// same way.
+func readHomeConfigFile(path string) ([]byte, error) {
+	resolved, err := filepath.EvalSymlinks(path)
+	if err != nil {
+		if _, lerr := os.Lstat(path); errors.Is(lerr, fs.ErrNotExist) {
+			return nil, fs.ErrNotExist
+		}
+		// The path itself exists — a dangling link, a loop, an unreadable
+		// parent — but nothing it names is readable. Report that as an error
+		// (%v: the resolver's ENOENT is the missing TARGET's, not this
+		// file's), never as "absent" — the loader refuses a dangling config
+		// link loudly rather than loading nothing, and the claim errs the
+		// same way.
+		return nil, fmt.Errorf("config file %s does not resolve: %v", path, err)
+	}
+	return readFileNoFollowBounded(resolved, listenAddrInHomeMaxBytes)
 }
 
 // listenAddrFromTOML resolves the effective network.listen_addr a config.toml

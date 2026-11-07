@@ -1,12 +1,16 @@
 package daemon
 
 import (
+	"bufio"
 	"errors"
+	"fmt"
 	"net"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -175,6 +179,48 @@ func flockHomeLock(t *testing.T, home string) *os.File {
 	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"),
 		[]byte(strconv.Itoa(os.Getpid())), 0600))
 	return lock
+}
+
+// TestTakeoverHelperDaemon is not a test — it is the subprocess
+// spawnHelperDaemon launches: argv and environ shaped exactly like a real af
+// daemon's ("af --daemon" + AGENT_FACTORY_HOME), it binds a free port, prints
+// the bound address for its parent, then holds it until killed. A real child
+// process is the only honest way to give the lock-less classifier a kernel
+// argv/environ it did not make up.
+func TestTakeoverHelperDaemon(t *testing.T) {
+	if os.Getenv("AF_TAKEOVER_TEST_HELPER") != "1" {
+		t.Skip("helper process — run only via spawnHelperDaemon")
+	}
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		os.Exit(2)
+	}
+	fmt.Println(l.Addr().String())
+	select {} // hold the port until the parent kills us
+}
+
+// spawnHelperDaemon launches TestTakeoverHelperDaemon as a child whose argv
+// is "af --daemon" and whose AGENT_FACTORY_HOME is home — the lock-less af
+// holder shape. It returns the address the helper is bound on; the child is
+// killed on test cleanup.
+func spawnHelperDaemon(t *testing.T, home string) string {
+	t.Helper()
+	cmd := exec.Command(os.Args[0])
+	cmd.Args = []string{"af", "--daemon", "-test.run=^TestTakeoverHelperDaemon$"}
+	cmd.Env = append(os.Environ(),
+		"AF_TAKEOVER_TEST_HELPER=1",
+		"AGENT_FACTORY_HOME="+home,
+	)
+	stdout, err := cmd.StdoutPipe()
+	require.NoError(t, err)
+	require.NoError(t, cmd.Start())
+	t.Cleanup(func() {
+		_ = cmd.Process.Kill()
+		_ = cmd.Wait()
+	})
+	addr, err := bufio.NewReader(stdout).ReadString('\n')
+	require.NoError(t, err, "helper must report its bound address")
+	return strings.TrimSpace(addr)
 }
 
 // reqFor resolves a listen_addr the way the gate sees it.
@@ -377,6 +423,20 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 		require.Equal(t, foreignHome, home)
 	})
 
+	t.Run("a lock-less af daemon holder classifies foreign by argv and environ", func(t *testing.T) {
+		// The holder proof's third channel: a pid holding the port that has
+		// NO daemon.lock fd still identifies as another home's daemon from
+		// its own argv + AGENT_FACTORY_HOME — the fallback a pre-flock-era
+		// or stripped-down daemon leaves. The helper is a real subprocess
+		// so argv, environ and the fd table are all the kernel's own.
+		foreignHome := testguard.SocketTempDir(t)
+		bound := spawnHelperDaemon(t, foreignHome)
+		verdict, home := classifyPortHolder(reqFor(t, bound))
+		require.Equal(t, holderForeign, verdict)
+		require.True(t, sameAFHome(home, foreignHome),
+			"the helper's home resolved in its own process frame = %q, want %q", home, foreignHome)
+	})
+
 	t.Run("a bare daemon.lock basename proves nothing without a naming daemon.pid", func(t *testing.T) {
 		// A non-af process can hold a file named daemon.lock; the fd is only
 		// af identity when the sibling daemon.pid names the holder. Ours does
@@ -498,8 +558,13 @@ func TestDaemonLockProbeIsNonConflicting(t *testing.T) {
 	}
 	home := testguard.SocketTempDir(t)
 
-	// Unheld: provably not held — and still acquirable afterwards. If the
-	// probe had taken the lock to learn its state this flock would fail.
+	// Unheld: a daemon.lock that exists but nobody holds — the probe reads
+	// the locks table, finds no holder, and reports free. And still
+	// acquirable afterwards: if the probe had taken the lock to learn its
+	// state, this flock would fail.
+	f, err := os.OpenFile(filepath.Join(home, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
 	pid, held := daemonLockHeld(home)
 	require.False(t, held)
 	require.Zero(t, pid)
