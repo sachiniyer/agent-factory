@@ -95,6 +95,49 @@ func TestResumeFromLimit_ExplicitRetryClearsStartupUnknownWedge(t *testing.T) {
 	require.Equal(t, []string{mission}, prompts, "exactly one resend of the exact mission")
 }
 
+// #6928-review: a startup-unknown agent handoff parked AT its usage-limit wall
+// must still reach retryPendingHandoff — its LiveLimitReached arm transfers
+// the mission into the scheduled limit retry and returns unperformed (no
+// resend). When CanRetryPendingHandoffMissionDelivery was narrowed to refuse
+// this shape for the picker label's sake, the SAME bit also gated the routing
+// in resumeFromLimitOutcomeConversation: the call fell through to
+// accountSwapResumeEligible — which refuses startup-unknown — and the operator
+// got "not blocked on a usage limit" with the mission still pending and no
+// recovery door left. Admission and presentation must split, not narrow.
+func TestResumeFromLimit_StartupUnknownHandoffAtLimitTransfersTheMission(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptSentUnverified,
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "wedged-limit-handoff", backend)
+	mission := "continue the inherited work"
+	stageHandoffWedge(t, inst, mission, session.PromptSentUnverified)
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	manager.persistInstance(repoID, inst)
+
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"fixture: startup-unknown at the wall must still ADMIT the explicit retry — "+
+			"the daemon routes on this bit")
+
+	outcome, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.NoError(t, err,
+		"the limit arm transfers the mission to scheduled retry — refusing strands it")
+	require.Equal(t, resumeNotPerformed, outcome,
+		"a transfer is not a resend: the scheduled limit retry now owns the mission")
+
+	require.Empty(t, inst.PendingHandoffMission(), "the transfer retires the durable obligation")
+	require.Equal(t, mission, inst.Prompt, "the brief moved into the stored prompt")
+	require.True(t, inst.LimitReached(), "the wall stays — scheduled recovery still owns it")
+	require.False(t, inst.StartupStateUnknown(), "the answering probe resolves the flag")
+	require.True(t, inst.Started(), "and restores the binding the flag lowered")
+
+	_, prompts := backend.snapshot()
+	require.Empty(t, prompts, "no resend happened — the honesty the TUI label mirrors")
+}
+
 // absentPaneHandoffBackend answers the liveness probe with a definite "no such
 // pane" — the local backend's answer once the tmux session is gone.
 type absentPaneHandoffBackend struct {

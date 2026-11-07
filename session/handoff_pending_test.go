@@ -170,10 +170,12 @@ func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *test
 		// The daemon's explicit retry at the limit wall transfers the mission
 		// into the scheduled limit retry — it never submits (the
 		// LiveLimitReached arm of retryPendingHandoff returns unperformed after
-		// the transfer). "Retry send" would lie, so the verb refuses and the
-		// row keeps the truthful no-resend label (#6800 follow-up).
+		// the transfer). "Retry send" would lie — but the presentation split
+		// lives in the picker's label choice, not in this admission predicate:
+		// the daemon routes on it (#6928 review — narrowing it stranded the
+		// mission behind a "not blocked on a usage limit" refusal).
 		{name: "the limit wall is a transfer, not a resend", status: PromptCouldNotConfirm, atLimit: true},
-		{name: "startup unknown at the limit wall is still a transfer, not a resend", status: PromptCouldNotConfirm, startupUnknown: true, atLimit: true},
+		{name: "startup unknown at the limit wall still admits the transfer", status: PromptCouldNotConfirm, startupUnknown: true, atLimit: true, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst, err := NewInstance(InstanceOptions{Title: "ambiguous-handoff", Path: t.TempDir(), Program: "claude"})

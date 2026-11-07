@@ -582,8 +582,8 @@ test("pending agent handoff retry admits startup-unknown rows but not dead ones"
       pending_handoff_mission: "continue the inherited work",
       pending_handoff_delivery_status: "sent-unverified",
     })),
-    false,
-    "at the wall the daemon transfers the mission to scheduled retry — never a resend",
+    true,
+    "at the wall the daemon still ADMITS the retry — its limit arm transfers the mission to scheduled retry; the resend-vs-resume split is presentation",
   );
   assert.equal(
     isPendingAgentHandoffDeliveryUnconfirmed(sess({
