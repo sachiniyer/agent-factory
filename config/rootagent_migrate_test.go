@@ -159,6 +159,7 @@ func TestMigrateRootAgentsToRegisteredProjects(t *testing.T) {
 			if tc.globalBody == "" {
 				assert.True(t, os.IsNotExist(statErr),
 					"nothing remained after the entry moved, so the file had to go")
+				assert.True(t, result.RemovedConfig)
 			} else {
 				require.NoError(t, statErr)
 				migratedCfg, err := parseConfigTOML(globalData, configPath)
@@ -166,6 +167,7 @@ func TestMigrateRootAgentsToRegisteredProjects(t *testing.T) {
 				assert.NotContains(t, migratedCfg.RootAgents, repoRoot,
 					"the legacy entry must be dropped once its project carries the profile")
 				assert.NotContains(t, string(globalData), repoRoot)
+				assert.False(t, result.RemovedConfig)
 			}
 
 			// The personal [root_agent] layer is exactly what the case expects —
@@ -197,8 +199,12 @@ func TestMigrateRootAgentsToRegisteredProjects(t *testing.T) {
 				effectiveRootAgent(loadedGlobalLayer(t, configPath), loadedPersonalLayer(t, project.ID), nil),
 				"the project's effective root-agent profile must not change")
 
-			// And the report shows nothing left behind: the registered entry
-			// moved, so the left-in-place bucket is empty.
+			// And the report names it: one migrated root_agents entry, nothing left.
+			require.Len(t, result.MigratedRootAgents, 1)
+			assert.Equal(t, repoRoot, result.MigratedRootAgents[0].Path)
+			assert.Equal(t, project.ID, result.MigratedRootAgents[0].ProjectID)
+			assert.Equal(t, tc.want.written, result.MigratedRootAgents[0].PersonalWritten)
+			assert.Equal(t, wantEffective, result.MigratedRootAgents[0].Profile)
 			assert.Empty(t, result.Left)
 		})
 	}
@@ -246,6 +252,8 @@ func TestMigrateRootAgentsLeavesUnregisteredPaths(t *testing.T) {
 
 			// The registered project's entry moved; the unregistered path is
 			// reported under the manual step and left untouched.
+			require.Len(t, result.MigratedRootAgents, 1)
+			assert.Equal(t, repoRoot, result.MigratedRootAgents[0].Path)
 			require.Len(t, result.Left, 1)
 			assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
 			assert.Equal(t, legacyRootAgentsManualStep, result.Left[0].Step)
@@ -256,6 +264,7 @@ func TestMigrateRootAgentsLeavesUnregisteredPaths(t *testing.T) {
 				"the unregistered entry stays exactly where it was")
 			assert.NotContains(t, content, "[root_agents.'"+repoRoot+"']",
 				"the registered one is gone")
+			assert.False(t, result.RemovedConfig)
 
 			// The registered project's own migration still wrote its profile —
 			// the unregistered path does not block the entries that can move.
@@ -275,12 +284,14 @@ func TestMigrateRootAgentsIsIdempotent(t *testing.T) {
 
 	first, err := MigrateGlobalConfig()
 	require.NoError(t, err)
+	require.Len(t, first.MigratedRootAgents, 1)
 	assert.Empty(t, first.Left, "the first run migrated the only entry, so nothing is reported left")
 	migratedGlobal := readFile(t, configPath)
 	migratedPersonal := readFile(t, mustProjectConfigPath(t, project.ID))
 
 	second, err := MigrateGlobalConfig()
 	require.NoError(t, err)
+	assert.Empty(t, second.MigratedRootAgents)
 	assert.Empty(t, second.Migrated)
 	assert.Empty(t, second.Left)
 	assert.Empty(t, second.Backup, "a run that changed nothing writes no backup")
@@ -310,9 +321,14 @@ func TestMigrateRootAgentsDropsEverySpellingForOneProject(t *testing.T) {
 	result, err := MigrateGlobalConfig()
 	require.NoError(t, err)
 
+	require.Len(t, result.MigratedRootAgents, 2, "every spelling that names the project moves with it")
+	paths := []string{result.MigratedRootAgents[0].Path, result.MigratedRootAgents[1].Path}
+	assert.ElementsMatch(t, []string{repoRoot, subdir}, paths)
+
 	// Every spelling moved, and the file held nothing else — it is gone, not
 	// left as the empty stub a load would refuse, and nothing is reported left.
 	assert.Empty(t, result.Left)
+	assert.True(t, result.RemovedConfig)
 	_, statErr := os.Stat(configPath)
 	assert.True(t, os.IsNotExist(statErr), "no spelling of the project's opt-in may survive")
 

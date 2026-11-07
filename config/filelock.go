@@ -400,6 +400,20 @@ func (t lockedTarget) removeSibling(path string) error {
 	return nil
 }
 
+// remove deletes the locked file itself, through the pinned directory for the
+// same reason write goes through it: a name-based os.Remove would re-resolve
+// the home link at call time and could unlink a file in a directory the lock
+// does not cover. af config migrate uses it when the rewrite empties the file
+// — an effectively empty config.toml is a load error, not a valid stub, so a
+// migration that removes the last entry must remove the file rather than leave
+// a stub every load trips on (#6957).
+func (t lockedTarget) remove() error {
+	if err := unix.Unlinkat(t.dirFD, t.name, 0); err != nil {
+		return &os.PathError{Op: "remove", Path: t.file, Err: err}
+	}
+	return nil
+}
+
 // renameSibling renames a sibling of the locked file — the conversion's
 // config.json → config.json.bak move — inside the pinned directory. A
 // path-based os.Rename resolves both ends of the move through the home link at

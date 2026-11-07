@@ -64,6 +64,12 @@ var writerConventionExemptions = map[string]writerExemption{
 	// resolve the path afresh and, after a retarget, take out an unrelated
 	// backup in a directory this operation never locked (#3697 review).
 	"filelock.go:removeSibling:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "undoes the pinned handle's own backup, inside the directory it was written in; a path-based remove could delete a different directory's file"},
+	// The same DELETE, aimed at the locked config itself rather than a sibling:
+	// af config migrate removes config.toml outright when its rewrite empties
+	// the file, because an effectively empty config.toml is a load error, not
+	// a valid stub. It must unlink the file the lock pinned, so a path-based
+	// remove could delete a different directory's config after a retarget.
+	"filelock.go:remove:golang.org/x/sys/unix.Unlinkat": {calls: 1, reason: "deletes the pinned config file itself when a migration emptied it; a path-based remove could unlink a different directory's file after a retarget"},
 	// The conversion's config.json → config.json.bak move. It renames a sibling
 	// of the locked config.toml, so os.Rename (the path-based spelling the
 	// conversion was first written with) resolved both ends through the home

@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -28,11 +29,15 @@ import (
 //   - It refuses rather than choose. A key written in BOTH spellings with
 //     DIFFERENT values has no migration that does not pick a value for the
 //     reader, so the whole run refuses, names the key, and writes nothing.
-//   - It leaves what it cannot rewrite, and says so. root_agents' successor is
-//     a registered project's personal [root_agent], so migrating it would mean
-//     inventing project registrations — durable state outside this file. It is
-//     reported with the manual step and left exactly where it is, and the keys
-//     that CAN move still move: one un-rewritable key must not block the
+//   - It leaves what it cannot rewrite, and says so. A root_agents entry whose
+//     path is ALREADY a registered project moves to that project's personal
+//     [root_agent] (#6957), writing only the leaves the effective profile
+//     needs and dropping the entry — the resolved profile is compared before
+//     and after, so it is identical either way. Entries for unregistered
+//     paths are reported with the manual step and left exactly where they
+//     are (registering a project is durable state this file's migration does
+//     not get to invent), and entries that cannot be proven safe are left
+//     with the cause named: one un-rewritable key must not block the
 //     migration that is available.
 //   - The readers of the old spellings stay, so an older config keeps loading and
 //     the running configuration is untouched. The reverse is narrower and worth
@@ -92,6 +97,17 @@ type MigrationResult struct {
 	Backup string `json:"backup,omitempty"`
 	// Migrated lists the keys that moved to their current spelling.
 	Migrated []MigratedKey `json:"migrated"`
+	// MigratedRootAgents lists the legacy root_agents entries moved into a
+	// registered project's personal [root_agent] — the per-entry form of the
+	// same guarantee, since the map holds one entry per path rather than one
+	// deprecated key.
+	MigratedRootAgents []MigratedRootAgent `json:"migrated_root_agents,omitempty"`
+	// RemovedConfig reports that the rewrite emptied the file and it was
+	// removed rather than left behind: an effectively empty config.toml is a
+	// load error, not a valid stub, so a config that held only migrated
+	// root_agents entries is deleted once its content moves. Backup still
+	// names the copy it was restored from.
+	RemovedConfig bool `json:"removed_config,omitempty"`
 	// Left lists the deprecated keys that have no in-file migration and so
 	// stayed exactly where they were, each with the step that ends it.
 	Left []UnmigratedKey `json:"left,omitempty"`
@@ -109,7 +125,24 @@ type MigrationResult struct {
 }
 
 // Changed reports whether the run rewrote the file.
-func (r *MigrationResult) Changed() bool { return r != nil && len(r.Migrated) > 0 }
+func (r *MigrationResult) Changed() bool {
+	return r != nil && (len(r.Migrated) > 0 || len(r.MigratedRootAgents) > 0)
+}
+
+// MigratedRootAgent is one root_agents entry `af config migrate` moved into a
+// registered project's personal [root_agent] (#6957). Path is the map key
+// exactly as the file spelled it; PersonalWritten reports whether the
+// project's [root_agent] needed new leaves — false when the project's own
+// profile already produced the identical effective result, so only the legacy
+// entry was dropped. Profile is the effective root-agent profile the daemon
+// resolves for the project, identical on both sides of the write.
+type MigratedRootAgent struct {
+	Path            string    `json:"path"`
+	ProjectID       string    `json:"project"`
+	PersonalConfig  string    `json:"personal_config"`
+	PersonalWritten bool      `json:"personal_written"`
+	Profile         RootAgent `json:"profile"`
+}
 
 // MigratedKey is one deprecated key rewritten to its current spelling.
 type MigratedKey struct {
@@ -131,6 +164,11 @@ type MigratedKey struct {
 type UnmigratedKey struct {
 	Key  string `json:"key"`
 	Step string `json:"step"`
+	// Why heads the report entry when "has no in-file migration" is not the
+	// reason — a root_agents entry CAN move when it names a registered project,
+	// so one held back for a cause names that instead (#6957). Empty falls back
+	// to the no-migration phrasing.
+	Why string `json:"why,omitempty"`
 	// Detail names the specific instances the step applies to (the root_agents
 	// map's paths), so the reader does not have to open the file to find them.
 	Detail []string `json:"detail,omitempty"`
@@ -191,18 +229,42 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	if err != nil {
 		return nil, tomlParseError("config file "+prettyPath, err)
 	}
-	beforeCfg, err := parseConfigTOML([]byte(before), prettyPath)
+	beforeCfg, err := parseLoadedConfigTOML([]byte(before), prettyPath, locked.link)
 	if err != nil {
 		return nil, fmt.Errorf("refusing to migrate: the current config does not load: %w", err)
 	}
 
 	result := &MigrationResult{Path: locked.link, Migrated: []MigratedKey{}}
 	content := before
+	var exempt []string
 	for _, deprecation := range configDeprecations() {
 		if !deprecation.migratable() {
-			if left, ok := unmigratedKey(deprecation, metadata.shape); ok {
-				result.Left = append(result.Left, left)
+			if deprecation.key != LegacyRootAgentsKey {
+				if left, ok := unmigratedKey(deprecation, metadata.shape); ok {
+					result.Left = append(result.Left, left)
+				}
+				continue
 			}
+			// root_agents is migrated entry by entry rather than as one key:
+			// every entry whose path already names a registered project moves
+			// into that project's personal [root_agent] (#6957). The probes
+			// and personal writes this makes run under the same lock
+			// discipline the daemon's cleanup uses (deregisterRootAgentsLocked
+			// resolves and writes under it), and the personal writes land
+			// before the global file is committed so no failure leaves a
+			// project whose root agent silently changed.
+			ctx, cancel := context.WithTimeout(context.Background(), migrateRootAgentsProbeBudget)
+			var migrated []MigratedRootAgent
+			var left []UnmigratedKey
+			var removedExempt []string
+			content, migrated, left, removedExempt, err = migrateLegacyRootAgents(ctx, content, beforeCfg, metadata.shape)
+			cancel()
+			if err != nil {
+				return nil, err
+			}
+			result.MigratedRootAgents = append(result.MigratedRootAgents, migrated...)
+			result.Left = append(result.Left, left...)
+			exempt = append(exempt, removedExempt...)
 			continue
 		}
 		alias := *deprecation.alias
@@ -276,7 +338,7 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 		effective, _ := CurrentValue(beforeCfg, alias.canonical)
 		result.Migrated = append(result.Migrated, MigratedKey{From: alias.legacy, To: alias.canonical, Value: effective})
 	}
-	if len(result.Migrated) == 0 {
+	if !result.Changed() {
 		// "Nothing to migrate" is a claim about a file, so it has to be about
 		// the right one. Only the write confirms otherwise, and this path never
 		// reaches it (#3696 review).
@@ -288,12 +350,26 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 
 	// The rewritten file must load, and must load to the SAME configuration.
 	// This is the whole safety claim of a spelling migration, so it is asserted
-	// against the parsed result rather than argued from the edit.
-	afterCfg, err := parseConfigTOML([]byte(content), prettyPath)
-	if err != nil {
-		return nil, fmt.Errorf("internal error: the migrated config would not load (no changes written): %w", err)
+	// against the parsed result rather than argued from the edit. The
+	// root_agents entries the run removed are named as the intended changes —
+	// their successors are the personal [root_agent] writes, not in-file ones.
+	//
+	// A rewrite can also empty the file outright: a config that held only
+	// root_agents entries has nothing left once they move. An effectively
+	// empty config.toml is a load ERROR, not a valid stub (the empty-stub rule
+	// treats its mere existence as shadowing), so the migration removes the
+	// file instead — the loader's own advice for a stub — and the post-state
+	// it must match is the defaults an absent file means.
+	emptied := isEffectivelyEmptyToml([]byte(content))
+	afterCfg := DefaultConfig()
+	if !emptied {
+		var err error
+		afterCfg, err = parseConfigTOML([]byte(content), prettyPath)
+		if err != nil {
+			return nil, fmt.Errorf("internal error: the migrated config would not load (no changes written): %w", err)
+		}
 	}
-	if diff := configValueDrift(beforeCfg, afterCfg); diff != "" {
+	if diff := configRewriteDrift(beforeCfg, afterCfg, exempt...); diff != "" {
 		return nil, fmt.Errorf("internal error: migrating %s would change %s (no changes written)", prettyPath, diff)
 	}
 
@@ -341,7 +417,18 @@ func migrateConfigFile(locked lockedTarget) (*MigrationResult, error) {
 	if migrateWriteRaceHookForTest != nil {
 		migrateWriteRaceHookForTest()
 	}
-	if err := locked.write([]byte(bom+content), mode); err != nil {
+	if emptied {
+		// The rewrite left no settings: the file itself goes (an effectively
+		// empty config.toml is a load error, not a valid stub), and the backup
+		// above is what a reader restores from.
+		if err := locked.remove(); err != nil {
+			if rmErr := locked.removeSibling(backup); rmErr != nil && !os.IsNotExist(rmErr) {
+				log.WarningLog.Printf("migrate: could not remove the backup %s after the migration write failed: %v", prettyHomePath(backup), rmErr)
+			}
+			return nil, err
+		}
+		result.RemovedConfig = true
+	} else if err := locked.write([]byte(bom+content), mode); err != nil {
 		// Confirming above narrows that window; it cannot close it, and the
 		// write can fail for its own reasons besides. The rename is the only
 		// step in it that mutates anything, so an error means the config is

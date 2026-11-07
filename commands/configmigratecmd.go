@@ -53,16 +53,23 @@ converted to config.toml on the way in, exactly as any af start would convert it
 
 Running it twice is safe: the second run finds nothing to migrate.
 
-Two things it will not do:
+root_agents is migrated entry by entry, not as one key. Every entry whose
+path is already a registered project moves into that project's personal
+[root_agent]: the leaves the effective profile needs (an empty entry means
+enabled, plus an optional program) are written when the project's own profile
+does not already produce the identical result, and the legacy entry is
+dropped. The resolved profile is compared before and after, so a project that
+was enabled stays enabled and one that was disabled stays disabled. Entries
+for paths that are not registered projects are reported and left exactly
+where they are — registering a project is durable state this file's migration
+does not get to invent — and so is any entry that cannot be proven safe to
+move, with the cause named beside it.
+
+One thing it will not do:
 
   A key written in BOTH spellings with different values is refused, naming the
   key. af has a documented winner at load time — the grouped value — but no
   migration should make that tie-break permanent on your behalf.
-
-  root_agents is reported and left exactly where it is. Its successor is a
-  registered project's personal [root_agent], so migrating it would mean
-  registering projects for you: durable state outside this file. The keys that
-  can move still move.
 
 Local-only: it rewrites the file on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon
@@ -99,14 +106,33 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 	if !result.Changed() {
 		fmt.Fprintf(w, "nothing to migrate in %s\n", path)
 	} else {
-		fmt.Fprintf(w, "migrated %s in %s · backup %s\n\n",
-			pluralKeys(len(result.Migrated)), path, prettyPath(result.Backup))
+		moved := pluralKeys(len(result.Migrated))
+		if len(result.MigratedRootAgents) > 0 {
+			moved += " and " + pluralRootAgents(len(result.MigratedRootAgents))
+		}
+		fmt.Fprintf(w, "migrated %s in %s · backup %s\n\n", moved, path, prettyPath(result.Backup))
 		for _, migrated := range result.Migrated {
 			if migrated.Redundant {
 				fmt.Fprintf(w, "  %s → dropped · %s already carried the same value\n", migrated.From, migrated.To)
 				continue
 			}
 			fmt.Fprintf(w, "  %s → %s\n", migrated.From, migrated.To)
+		}
+		for _, migrated := range result.MigratedRootAgents {
+			if migrated.PersonalWritten {
+				fmt.Fprintf(w, "  root_agents['%s'] → %s · wrote its personal [root_agent] at %s\n",
+					migrated.Path, migrated.ProjectID, prettyPath(migrated.PersonalConfig))
+				continue
+			}
+			fmt.Fprintf(w, "  root_agents['%s'] → %s · its personal [root_agent] already carried the profile — dropped\n",
+				migrated.Path, migrated.ProjectID)
+		}
+		if len(result.MigratedRootAgents) > 0 {
+			// The resolved profile is compared before and after, so the daemon's
+			// frozen-at-start root-agent configuration already matches: this is
+			// the one migration that changes behavior for nothing, running or
+			// not (#6957).
+			fmt.Fprintf(w, "\nthe effective root-agent profile of each migrated project is identical — a running daemon already ensures the same roots, so no restart is needed\n")
 		}
 		// The summary goes ABOVE the diff, not below it. A moved key renders as a
 		// removed line and an added one, and the surrounding lines can shift with
@@ -124,7 +150,11 @@ func writeMigrationReport(w io.Writer, result *config.MigrationResult) {
 		fmt.Fprintf(w, "\ncaution — %s\n", caution)
 	}
 	for _, left := range result.Left {
-		fmt.Fprintf(w, "\nleft in place — %s has no in-file migration · %s\n", left.Key, left.Step)
+		why := left.Why
+		if why == "" {
+			why = left.Key + " has no in-file migration"
+		}
+		fmt.Fprintf(w, "\nleft in place — %s · %s\n", why, left.Step)
 		for _, detail := range left.Detail {
 			fmt.Fprintf(w, "  %s\n", detail)
 		}
@@ -136,6 +166,15 @@ func pluralKeys(n int) string {
 		return "1 key"
 	}
 	return fmt.Sprintf("%d keys", n)
+}
+
+// pluralRootAgents is pluralKeys for the root_agents map: a count of entries,
+// one per path, rather than of top-level keys.
+func pluralRootAgents(n int) string {
+	if n == 1 {
+		return "1 root_agents entry"
+	}
+	return fmt.Sprintf("%d root_agents entries", n)
 }
 
 func init() {

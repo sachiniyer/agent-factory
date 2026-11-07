@@ -59,19 +59,21 @@ type configDeprecation struct {
 	present func(shape map[string]any) (detail []string, ok bool)
 }
 
-// legacyRootAgentsManualStep is why root_agents has no mechanical migration.
-// Its successor is a REGISTERED project's personal [root_agent] file, so the
-// rewrite would have to invent project registrations — durable state outside
-// the config file, and visible in the TUI's project list. A config migration
-// does not get to make that decision on the reader's behalf, so migrate names
-// the step and stops.
+// legacyRootAgentsManualStep is the recipe for the root_agents entries a
+// migration CANNOT carry: paths that do not name a registered project. An
+// entry whose path already resolves to a registered project moves on its own
+// (#6957) — the successor is that project's personal [root_agent], and migrate
+// writes it. But for any other path the move would have to invent project
+// registrations — durable state outside the config file, and visible in the
+// TUI's project list — a decision this migration does not get to make on the
+// reader's behalf. So it names the step and stops.
 //
-// The step ends with removing the legacy entry on purpose. Registering the
-// project and writing its [root_agent] reproduces the behavior, but the
-// root_agents key is what the loader warns about — a remedy that stops before
-// the removal leaves the reader having done the work and still seeing the
-// warning that sent them (#3624 review).
-const legacyRootAgentsManualStep = "register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry"
+// The step still ends with removing the legacy entry. Registering the project
+// and re-running migrate (or writing [root_agent] by hand) reproduces the
+// behavior, but the root_agents key is what the loader warns about — a remedy
+// that stops before the removal leaves the reader having done the work and
+// still seeing the warning that sent them (#3624 review).
+const legacyRootAgentsManualStep = "register the path as a project, then run `af config migrate` again — or set enabled = true plus the optional program in its personal [root_agent] and remove its root_agents entry by hand"
 
 // configDeprecations returns every deprecated global-config key in one list.
 // The flat aliases are derived from configKeyAliases rather than restated, so a
@@ -100,7 +102,7 @@ func (d configDeprecation) migratable() bool { return d.alias != nil }
 // generated here so it can never promise something the migration does not do.
 func (d configDeprecation) tomlRemedy(bothPresent bool) string {
 	if !d.migratable() {
-		return "`af config migrate` rewrites the other deprecated keys but leaves this one in place, since it cannot register a project for you"
+		return "run `af config migrate` — it moves every entry whose path already names a registered project into that project's personal [root_agent], and leaves entries for unregistered paths in place, since it cannot register a project for you"
 	}
 	if bothPresent {
 		return "run `af config migrate` to drop the flat spelling once the two agree"
