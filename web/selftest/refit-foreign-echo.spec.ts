@@ -779,16 +779,18 @@ test("#6635 (run 42361281090): a claim withheld while parked still reaches the w
 // foreign echo 16ms after that read as the same contest's repeat, so the
 // reclaim stood itself down and the emulator rested at the peer's 109.
 //
-// Driven deterministically: the probe plays the peer — one foreign write,
-// answered by the pane's one-shot reclaim — then a real pointerenter
-// activates the pane (its claim crosses the wire on any version), and the
-// peer's counter lands while the pre-activation sighting still sits inside
+// Driven deterministically: the probe plays the insistent peer verbatim —
+// a foreign claim answered by the pane's one-shot reclaim, then the repeat
+// inside the window that stands the pane down on the peer's grid. A real
+// pointerenter then activates it — the yielded emulator no longer fits its
+// host, so the activation's refit writes a claim on any version — and the
+// peer's counter lands while the pre-activation sightings still sit inside
 // the SAME yield window: the contested record keeps the FIRST sighting's
 // timestamp, so master's test is "was this grid first seen less than
-// 1500ms ago". On master the counter is that wall-clock contest's repeat
-// and the pane yields to the very write it was activated to take; on the
-// fix the gesture cleared the sighting history, the counter is the FIRST
-// answer of a new epoch, and the pane re-asserts its host fit.
+// 1500ms ago". On master the counter is that wall-clock contest's next
+// repeat and the pane yields to the very write it was activated to take;
+// on the fix the gesture cleared the sighting history, the counter is the
+// FIRST answer of a new epoch, and the pane re-asserts its host fit.
 //
 // Two hazards the sequence is built around. A pair armed by the
 // activation's own fit can deliver AFTER the yield's cancelVisibleFitFrame
@@ -939,6 +941,13 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   await writeForeign();
   const atClaim = await waitEchoEq(34, base, "peer's foreign claim");
   const atReclaim = await waitEchoEq(gridRows, atClaim + 1, "the pane's reclaim");
+  // The peer's repeat inside the window: the pane yields and its emulator
+  // rests on the peer's grid. This concession is what makes the activation
+  // below produce a claim at all — an emulator already on its host fit
+  // writes nothing when the user arrives (probe run: no activation claim
+  // echo without the yielded state).
+  await writeForeign();
+  const atRepeat = await waitEchoEq(34, atReclaim + 1, "peer's repeat");
 
   // A real activation: a pointerenter the platform marks trusted, the same
   // signal the desktop shell's pointer reclaim rides. Move off the pane
@@ -948,7 +957,7 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   // The activation's own claim is on the wire now — on master and the fix
   // alike — and confirming it here is what keeps the counter's echo ordered
   // after the claim, which is the question the spec asks.
-  const atActivated = await waitEchoEq(gridRows, atReclaim + 1, "the activation claim");
+  const atActivated = await waitEchoEq(gridRows, atRepeat + 1, "the activation claim");
 
   // The quiet beat: every fit pair the activation armed must deliver before
   // the counter's yield runs its cancel, or a late delivery refits the
