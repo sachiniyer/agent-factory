@@ -1206,8 +1206,13 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
 
   /** A save is in flight, the user undoes back to the acknowledged text, and the doc is
    *  deleted before the reply: the deleted doc's tab keeps the undone buffer in storage,
-   *  because the daemon may hold the text that was sent. */
-  async function undoThenGone(): Promise<void> {
+   *  because the daemon may hold the text that was sent. `conflictReply` answers the
+   *  save with a conflict first — the agent edited the same line while it was out, so
+   *  the conflict draft it leaves equals its base. `closeReopen` chains a page close
+   *  and reopen on the still-deleted doc: whatever its stored draft is, it must come
+   *  back with a Restore doc offer and the buffer it was keeping, whatever the
+   *  buffer == base equality says. */
+  async function undoThenGone(conflictReply = false, closeReopen = false): Promise<void> {
     const doc = attached;
     const s = syncs.get(doc);
     const d = daemons.get(doc)!;
@@ -1218,6 +1223,14 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     await tick();
     if (!net.some((x) => x.stage === "sent" && x.owner === "a")) return;
     userUndo(line);
+    if (conflictReply) {
+      // The save's reply comes first as a conflict: the agent touched the same line
+      // while the save was out, so the draft the conflict leaves equals its base.
+      d.setLine(line, `a${++seq}`);
+      for (const p of net.filter((x) => x.stage === "sent" && x.owner === "a")) runPending(p);
+      for (const p of net.filter((x) => x.stage === "processed" && !x.hang && x.owner === "a")) deliver(p);
+      await tick();
+    }
     d.deleted = true;
     s.remoteDeleted?.();
     await tick();
@@ -1226,6 +1239,23 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
       const stored = [...kvMap.keys()].some((k) => k.startsWith(`af.docs.draft\ns\nplan\n${doc}\n`) && k.endsWith(`\n${owner}`));
       // I17: what stays with a deleted doc stays in storage, an undo back to the old text included.
       if (!stored) fail("gone-doc-work-not-stored", `${doc}: the tab keeps work for a deleted doc but nothing is stored for it`);
+    }
+    if (closeReopen) {
+      // The page closes and reopens on the still-deleted doc. The stored draft is the
+      // only copy of the kept work: the reopened tab must offer Restore doc with it.
+      const hadDraft = storageA.peek(doc) !== null;
+      await pageClose();
+      if (hadDraft) {
+        const back = syncs.get(doc);
+        const kept = storageA.peek(doc);
+        if (!back || back.ended || back.currentStatus !== "gone")
+          fail("gone-doc-restore-offer-lost", `${doc}: a draft was stored for the deleted doc but the reopened tab is ${back ? `${back.currentStatus}, ended ${String(back.ended)}` : "missing"}`);
+        else if (kept === null) fail("gone-doc-draft-cleared", `${doc}: the reopened tab cleared the draft stored for the deleted doc`);
+        else {
+          const shown = back.attach?.().text;
+          if (shown !== kept.buffer) fail("gone-doc-kept-text-lost", `${doc}: the reopened tab shows ${JSON.stringify(shown)}, not the kept ${JSON.stringify(kept.buffer)}`);
+        }
+      }
     }
     d.readd(initialText(doc));
     await reviveGone();
@@ -1450,6 +1480,9 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     }
     // The heartbeat stalls past the staleness window, another window adopts the draft, and it resumes.
     if (o.chaos && (o.faults ?? 0) > 0 && (step === 50 || step === 90 || step === 130)) bfcacheReturn(false, true);
+    // A deleted doc whose stored draft equals its base is closed and reopened on purpose:
+    // the Restore doc offer is what the draft is for.
+    if (o.chaos && (o.faults ?? 0) > 0 && (step === 45 || step === 95 || step === 135)) await undoThenGone(rand() < 0.5, rand() < 0.5);
     const r = rand();
     trace.push(`step ${step} r=${r.toFixed(3)} attached=${attached} status=${syncs.get(attached)?.currentStatus} text=${JSON.stringify(syncs.get(attached)?.text)}`);
     if (r < 0.28) userEdit();
@@ -1535,7 +1568,7 @@ export async function runScenario(o: ScenarioOptions): Promise<Violation | null>
     else if (o.chaos && r >= 0.9615 && r < 0.9625) await lateNotFound();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9625 && r < 0.9645) await deleteThenClose();
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9645 && r < 0.9655) await lateLanding();
-    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone();
+    else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9655 && r < 0.966) await undoThenGone(rand() < 0.5, rand() < 0.5);
     else if (o.chaos && (o.faults ?? 0) > 0 && r >= 0.9660 && r < 0.9665) await closeWhileLoading();
     else if (o.chaos && r >= 0.9690 && r < 0.9693) await listReorder();
     else if (o.chaos && r >= 0.9693 && r < 0.9697) await listAfterRestore();

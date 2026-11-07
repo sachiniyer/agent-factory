@@ -297,3 +297,36 @@ test("the latest save the head holds is the one that landed, whatever size an ol
   const picked = findLanded([{ text: older, from: base0 }, { text: newer, from: older }], head);
   assert.equal(picked?.text, newer);
 });
+
+test("a deleted doc reopened on a stored draft equal to its base still offers restore", () => {
+  // A conflict draft whose user undid back to the base: buffer == base, so an equality
+  // shortcut would clear it — but the doc is gone and the draft is the only kept copy.
+  const draft = { buffer: "v1", base: "v1", theirs: "agent text", head: "c9", kind: "conflict" as const };
+  let r = open({ text: "v1", commit: "" }, draft);
+  assert.equal(r.fx.some((f) => f.t === "unstash"), false, "the stored draft is not cleared on reopen");
+  r = run(r.m, { t: "gone" });
+  assert.equal(statusOf(r.m).status, "gone", "the reopened tab offers Restore doc");
+  assert.ok(r.m.stashed !== null, "the draft stays stored until Restore or Discard");
+});
+
+test("a deleted doc's stored draft holds the buffer the user sees, not the one stored at the delete", () => {
+  // The user edits, the doc is deleted, and the edit is undone: the stored draft
+  // tracks the buffer the user last saw rather than the superseded one.
+  let r = run(loaded(), { t: "edit", text: "v1 edited" });
+  assert.ok(r.fx.some((f) => f.t === "stash"), "the edit is stored");
+  r = run(r.m, { t: "gone" });
+  r = run(r.m, { t: "edit", text: "v1" });
+  const stored = r.fx.filter((f) => f.t === "stash").map((f) => (f as { draft: Draft }).draft);
+  assert.equal(stored.at(-1)?.buffer, "v1", "the draft keeps the buffer the user sees now");
+  assert.ok(r.m.stashed !== null, "it still leaves only on Restore or Discard");
+  assert.equal(statusOf(r.m).status, "gone");
+});
+
+test("a stored draft that equals the head is still cleared on a live doc", () => {
+  // The keep is a grace for the settle right after a restore — the notice that the
+  // doc is gone may not have arrived — not a lifetime for redundant drafts.
+  const draft = { buffer: "v1", base: "v1", theirs: "", head: "", kind: "unsent" as const };
+  let r = open({ text: "v1", commit: "c1" }, draft);
+  r = run(r.m, { t: "timer" });
+  assert.ok(r.fx.some((f) => f.t === "unstash"), "a redundant stored draft on a live doc is cleared");
+});

@@ -142,6 +142,10 @@ export interface Model {
   note: { kind: "merged" | "error" | "recovered"; detail: string } | null;
   /** What per-window storage currently holds for this doc (a JSON key), or null. */
   stashed: string | null;
+  /** A stored draft was just read by `restoreDraft`: the event that explains why it
+   *  was stored (this doc is gone) may not have arrived yet, so the next settle keeps
+   *  it even when nothing recomputes it. Cleared by the first syncStash pass. */
+  justRestored: boolean;
   loadFailed: string | null;
 }
 
@@ -245,6 +249,7 @@ export function initialModel(): Model {
     timer: null,
     note: null,
     stashed: null,
+    justRestored: false,
     loadFailed: null,
   };
 }
@@ -301,6 +306,10 @@ function canSave(m: Model): boolean {
  *  settle can start a reload that would otherwise let the storage mirror drop it. */
 function restoreDraft(m: Model, fx: Effect[], draft: Draft): void {
   m.stashed = draftKey(draft);
+  // Whatever the restore concludes, the draft was stored for a reason the events so
+  // far may not have shown (this doc can be gone): keep it through the settle that
+  // follows even when the buffer==base equality makes it look redundant.
+  m.justRestored = true;
   if (draft.buffer === m.saved) {
     // Nothing differs from the head, but a save of the closed pane that stored this draft
     // may still be out (the request outlives its pane): its text stays in doubt, here, until
@@ -373,7 +382,14 @@ function wantedDraft(m: Model): Draft | null {
 
 function syncStash(m: Model, fx: Effect[]): void {
   if (!m.loaded) return;
-  const want = wantedDraft(m);
+  // While the doc is gone the stored draft is the kept work itself: it leaves only on
+  // Restore or Discard, and it always holds the current buffer — an edit back to the
+  // acknowledged text updates it rather than restoring what was there before. Right
+  // after a restore the same holds: the event that explains the stored draft (this
+  // doc is gone) may not have arrived yet.
+  const keep = m.stashed !== null && (m.gone || m.justRestored);
+  m.justRestored = false;
+  const want = wantedDraft(m) ?? (keep ? { buffer: m.buffer, base: m.saved, theirs: "", head: "", kind: "unsent" as const } : null);
   const key = want ? draftKey(want) : null;
   if (key === m.stashed) return;
   m.stashed = key;
@@ -423,7 +439,8 @@ function goneEvent(m: Model, fx: Effect[]): void {
     m.dead = true;
     return;
   }
-  const hasWork = isDirty(m) || m.phase === "conflict" || m.inDoubt.length > 0 || m.flight !== null;
+  // A stored draft is itself unsaved work: the doc is gone and it is the only copy.
+  const hasWork = isDirty(m) || m.phase === "conflict" || m.inDoubt.length > 0 || m.flight !== null || m.stashed !== null;
   if (!hasWork) {
     m.dead = true;
     m.closed = true;
