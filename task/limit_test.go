@@ -712,6 +712,27 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at 1\n1am (America/New_York).",
 			want:    time.Date(2026, 1, 2, 11, 0, 0, 0, est).UTC(), // 11am EST -> 16:00Z
 		},
+		{
+			// A narrow pane may wrap INSIDE an alphabetic month token —
+			// "Nov" splits as "No\nv" — and the wrap newline must rejoin the
+			// letters (drop, not space) so monthDay sees "Nov 6" rather than
+			// "No v 6" (which misses the explicit date). Same EST instant as
+			// the unwrapped "Nov 6, 2026 9am" form.
+			name:    "weekly date: month wraps inside its letters",
+			content: "Claude usage limit reached. Your limit will reset at No\nv 6, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A wrapped-to-next-row parenthesized timezone must carry a
+			// trailing period (the shipped wrapped-banner shape): without one,
+			// the paren on the next row is treated as unrelated transcript text
+			// rather than the banner's zone, so the clock resolves in the
+			// injected clock's zone (UTC here) — NOT in the paren's location.
+			// "2pm\n(America/Los_Angeles)" with no period must NOT adopt LA.
+			name:    "5h wrapped: next-row paren without period falls back to now's zone",
+			content: "Claude usage limit reached. Your limit will reset at 2pm\n(America/Los_Angeles)",
+			want:    time.Date(2026, 1, 2, 14, 0, 0, 0, time.UTC).UTC(), // 2pm UTC, NOT 2pm LA
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
