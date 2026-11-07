@@ -2755,7 +2755,14 @@ export class AppShell {
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
-        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
+        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i),
+        (id) => {
+          const at = this.currentTabIds.indexOf(id);
+          if (at > 0) {
+            this.closeTab(at);
+          }
+        },
+        selected.id ?? ""),
     );
     const chrome = this.terminalChrome;
     if (chrome) {
@@ -3566,6 +3573,14 @@ function tabButton(
    *  it: it is called when a GESTURE fires, so the identity is the one the roster the
    *  user is looking at carries, not the one `tab` happened to be stamped with. */
   liveIdentity: () => string,
+  /** Closes a tab by IDENTITY, resolving it against the CURRENT roster — the
+   *  press-capture guard's path. Its gesture can span a roster rebuild (another
+   *  client closes or reorders tabs between down and up), where this button's
+   *  bound ordinal would name whichever tab has since moved into the slot —
+   *  the same reason closeSessionTab re-resolves its target while the modal is
+   *  open. A resolution that comes up empty means the pressed tab is already
+   *  gone, and the close refuses rather than guessing at a neighbour. */
+  closeTabByIdentity: (id: string) => void,
   /** The selected session's id as of THIS render — a value, not a getter, precisely
    *  because it must be the session the edit OPENS on: the bar is rebuilt whenever the
    *  selection changes (a new tab set, a new signature), so a button only ever belongs
@@ -3613,6 +3628,66 @@ function tabButton(
   if (index > 0 && canClose) {
     const close = h("span", { class: "af-tab-close", title: `Delete tab “${tabDisplayLabel(tab)}”` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
+    // #6937: pressing the × of a tab clipped in the scrolled strip must open the
+    // close flow, never activate the tab. On WebKit the press takes DOM focus —
+    // the button is the ×'s nearest focusable ancestor — and a focus reveal can
+    // then slide the strip between down and up, moving the release onto the
+    // label so its click activates instead. Keeping the press unfocused removes
+    // the reveal's reason to scroll: a touch tap reaches this same path through
+    // the compat mousedown, and keyboard is unaffected since the × is an
+    // aria-hidden span that never held focus to begin with.
+    close.addEventListener("mousedown", (e) => e.preventDefault());
+    // Residual guard for anything that still shifts the strip mid-press (a
+    // reveal armed before the gesture, a rebuild swapping the buttons out):
+    // whatever such a gesture's click lands on inside the strip is a victim,
+    // not a choice — the press began on the ×, so resolve its click back to
+    // the close instead of letting it activate. The close resolves by the
+    // pressed tab's IDENTITY, never this button's bound ordinal, since the
+    // gesture can span a roster change. A fresh press anywhere, a cancel, or
+    // a blur disarms the guard before it could capture an unrelated click;
+    // the same listener also self-clears on the first click it sees, whether
+    // or not it acts on it.
+    close.addEventListener("pointerdown", (e) => {
+      if (!e.isPrimary || e.button !== 0) {
+        return;
+      }
+      const strip = btn.closest<HTMLElement>(".af-tabbar");
+      if (!strip) {
+        return;
+      }
+      // The pressed TAB's identity, captured at gesture start: the gesture can
+      // outlive this button (a roster rebuild swaps the bar's children
+      // mid-press), and only an identity still names the tab the user pressed
+      // on the roster the release lands in.
+      const pressedId = liveIdentity();
+      const disarm = () => {
+        window.removeEventListener("click", onClick, true);
+        window.removeEventListener("pointerdown", disarm, true);
+        window.removeEventListener("pointercancel", disarm, true);
+        window.removeEventListener("blur", disarm);
+      };
+      const onClick = (ev: MouseEvent) => {
+        disarm();
+        const target = ev.target;
+        // detail === 0 is a synthesized click (Enter/Space, .click()): it never
+        // rode a pointer release, so it is no hijack victim — leave it alone.
+        // Resolving the strip off the CLICK's target (not the stale reference
+        // captured at pointerdown) keeps the guard correct even when a roster
+        // rebuild swapped the bar's children mid-gesture.
+        if (ev.detail === 0) {
+          return;
+        }
+        if (target instanceof Element && target !== close && target.closest<HTMLElement>(".af-tabbar") !== null) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeTabByIdentity(pressedId);
+        }
+      };
+      window.addEventListener("click", onClick, true);
+      window.addEventListener("pointerdown", disarm, true);
+      window.addEventListener("pointercancel", disarm, true);
+      window.addEventListener("blur", disarm);
+    });
     close.addEventListener("click", (e) => {
       e.stopPropagation();
       closeTab();
