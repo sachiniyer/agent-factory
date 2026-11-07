@@ -111,5 +111,10 @@ listeners: the web listener on
 `network.listen_addr` (default `127.0.0.1:8443`) serves the bundled web client
 and the same HTTP API — set the key to `""` to turn it off — and, when
 `network.preview_listen_addr` is set (empty by default), a per-tab preview
-listener that hosts web-tab previews only. See the
+listener that hosts web-tab previews only. A daemon under a non-default
+`AGENT_FACTORY_HOME` never takes the default web port away from another AF
+home's daemon: when the port is held by (or claimed for) another home's
+daemon the web listener is refused — logged, and named by `af doctor` and
+`af daemon status` — rather than silently retried until a restart gap hands
+it over (#6858). See the
 [HTTP API guide](http-api.md) for the transport and auth details.

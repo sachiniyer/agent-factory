@@ -8,10 +8,12 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"syscall"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/log"
+	"golang.org/x/sys/unix"
 )
 
 // listener_takeover.go is the #6858 no-takeover gate for the restartable web
@@ -25,13 +27,19 @@ import (
 // The gate has two independent triggers, both evaluated only while this daemon
 // holds no web listener:
 //
-//  1. CLAIM — before any bind attempt: if the DEFAULT af home claims the port
-//     (a live daemon holds its daemon.lock, or its config.toml resolves to a
-//     listen_addr overlapping the request), a non-default-home daemon refuses
-//     without ever calling net.Listen. This is what closes the window where a
-//     second-home daemon starts while the default daemon is down or mid-
-//     restart and binds the port cleanly — there is no EADDRINUSE to react to,
-//     so the claim itself must be enough.
+//  1. CLAIM — before any bind attempt: if the DEFAULT af home claims the port,
+//     a non-default-home daemon refuses without ever calling net.Listen. A
+//     claim needs evidence the home's daemon is RUNNING or will COME BACK —
+//     a live daemon.lock, or an enabled autostart unit serving that home —
+//     never a config.toml merely existing: first-run materialization writes
+//     listen_addr into every home's file, so a stray ~/.agent-factory would
+//     otherwise strand a user whose real home is relocated (their own daemon
+//     refused the port, with only a quiet TUI to say why). Even then the home
+//     claims only THIS port: a config.toml resolving elsewhere narrows a
+//     proven claim away. This is what closes the window where a second-home
+//     daemon starts while the default daemon is down or mid-restart and
+//     binds the port cleanly — there is no EADDRINUSE to react to, so the
+//     claim itself must be enough.
 //  2. HOLDER — after a failed EADDRINUSE bind: identify the process holding
 //     the contested socket and refuse when it is a daemon of ANOTHER af home.
 //     "Held by an af daemon" alone is not enough — our OWN home's previous
@@ -85,6 +93,23 @@ var procRoot = "/proc"
 const takeoverRemedy = "set [network] listen_addr to another port for this daemon " +
 	"(af config set network.listen_addr 127.0.0.1:<port>)"
 
+// takeoverHolderRemedy adds the other half a HOLDER refusal can fix: a live
+// daemon of the other home keeps its port, so besides moving this daemon the
+// user can move that home's listener instead — then restart this daemon,
+// which is what re-evaluates the refusal.
+const takeoverHolderRemedy = takeoverRemedy + ", or move the other home's " +
+	"listener to another port — then restart this daemon"
+
+// takeoverClaimRemedy is the fuller fix a CLAIM refusal names: the default
+// home is not currently serving the port but is provably alive or set to
+// return, so freeing the port for it (moving or disabling its listener, or
+// removing a stray default home outright) is a remedy alongside moving this
+// daemon — then restart this daemon to re-evaluate.
+const takeoverClaimRemedy = takeoverRemedy + ", or free the port for it: " +
+	"move or disable the default home's listener (set its network.listen_addr " +
+	"to another port or \"\"), or remove a stray default home — then restart " +
+	"this daemon"
+
 // takeoverGateApplies reports whether a bind of req is one the no-takeover
 // gate polices: it would collide with a listener on the built-in default
 // address (same port, overlapping IPs — the boundListenerBlocks test), and our
@@ -107,39 +132,149 @@ func takeoverGateApplies(req *net.TCPAddr) bool {
 }
 
 // defaultHomeClaimRefusal returns the refusal reason when the DEFAULT af home
-// claims the port req wants — either a live daemon holds its daemon.lock, or
-// its config.toml resolves to a listen_addr that would block this bind — or ""
-// when the home claims nothing (never configured, listener disabled, or moved
-// to a non-colliding address). The config is authoritative when it parses; the
-// lock covers what config cannot see — a live daemon in the gap before its
-// first-run materialization, or one whose config was deleted under it.
+// claims the port req wants, or "" when it claims nothing. A claim needs
+// evidence the home's daemon is RUNNING or will COME BACK — a config.toml
+// merely existing is not evidence: first-run materialization writes
+// listen_addr into every home's file, so a leftover ~/.agent-factory would
+// otherwise strand a user whose real home is relocated — their relocated
+// daemon would refuse the default port on every reconcile, over a home that
+// is never coming back (#6858 review: no regression on the default home's
+// users). The evidence that counts:
+//
+//   - a live flock on the default home's daemon.lock, read from /proc/locks —
+//     kernel ground truth that never takes the lock itself (a flock probe,
+//     even a microsecond LOCK_EX hold, would make that home's own singleton
+//     acquire fail "already running" in its start window), or
+//   - an installed AND enabled autostart unit whose baked AGENT_FACTORY_HOME
+//     serves the default home — the OS-level "it will be back" contract.
+//
+// Even a proven home claims only THIS port: its config.toml resolving to a
+// non-colliding listen_addr — or to "" — narrows the claim away, because a
+// daemon that would never bind this port has nothing to lose. An absent
+// config leaves the built-in default, and a proven-but-unreadable one stays
+// claimed rather than guessed away.
 func defaultHomeClaimRefusal(req *net.TCPAddr) string {
 	def, err := defaultHomeDir()
 	if err != nil {
 		return ""
 	}
-	if eff, found, cfgErr := config.ListenAddrInHome(def); cfgErr == nil && found {
-		if boundListenerBlocks(eff, req) {
-			return fmt.Sprintf("refusing to bind %s: the default AF home (%s) claims this port — "+
-				"its config.toml sets a listen_addr that overlaps it; "+
-				"binding would leave that home's daemon fighting for its own address — %s",
-				req.String(), def, takeoverRemedy)
+	evidence := ""
+	if pid, held := daemonLockHeld(def); held {
+		evidence = "its daemon is running"
+		if pid > 0 {
+			evidence = fmt.Sprintf("its daemon is running (daemon.lock held by pid %d)", pid)
 		}
-		return ""
+	} else if autostartWillReturnHome(def) {
+		evidence = "an enabled autostart unit is set to restart its daemon"
 	}
-	lockHeld := false
-	ProbeHomeLock(def).Match(
-		func() { lockHeld = true },
-		func() {},
-		func() {},
-		func(error) {},
-	)
-	if lockHeld {
-		return fmt.Sprintf("refusing to bind %s: the default AF home (%s) claims this port — "+
-			"its daemon is running (daemon.lock held) and the default address belongs to it — %s",
-			req.String(), def, takeoverRemedy)
+	if evidence == "" {
+		return "" // a stray or never-used home claims nothing
 	}
-	return ""
+	if eff, found, cfgErr := config.ListenAddrInHome(def); cfgErr == nil && found &&
+		!boundListenerBlocks(eff, req) {
+		return "" // proven live/returning, but not for THIS port
+	}
+	return fmt.Sprintf("refusing to bind %s: the default AF home (%s) claims this port — %s; "+
+		"binding would leave that home's daemon fighting for its own address — %s",
+		req.String(), def, evidence, takeoverClaimRemedy)
+}
+
+// daemonLockHeld reports whether a process provably holds an exclusive flock
+// on dir's daemon.lock — the live-daemon evidence that costs the probed home
+// nothing. It reads /proc/locks, never the lock itself: even a one-instant
+// LOCK_EX probe would collide with that home's own singleton acquire and fail
+// its daemon start as "already running" (the probe must never BE the
+// contention this gate exists to stop). The second return is the holder's pid
+// for the refusal message; 0 when the kernel did not name one.
+func daemonLockHeld(dir string) (int, bool) {
+	info, err := os.Stat(daemonLockPathIn(dir))
+	if err != nil {
+		return 0, false // no lock file exists for anyone to hold
+	}
+	st, ok := info.Sys().(*syscall.Stat_t)
+	if ok {
+		if data, rerr := os.ReadFile(filepath.Join(procRoot, "locks")); rerr == nil {
+			return procFlockHolderPID(data, uint64(st.Dev), st.Ino)
+		}
+	}
+	// /proc/locks or the stat was unreadable — fall back to the identity the
+	// daemon publishes: a daemon.pid naming a pid whose own fd table proves
+	// it holds THIS home's lock. Weaker (misses the lock-held-before-pid-write
+	// window), but still honest evidence with no lock taken.
+	data, ok := readManagedFileNoFollow(filepath.Join(dir, "daemon.pid"), daemonPIDFileMaxBytes)
+	if !ok {
+		return 0, false
+	}
+	pid, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	if err != nil || pid <= 0 {
+		return 0, false
+	}
+	if home, ok := lockFDHome(pid); ok && home != "" && sameAFHome(home, dir) {
+		return pid, true
+	}
+	return 0, false
+}
+
+// procFlockHolderPID parses /proc/locks for an exclusive FLOCK on dev:ino and
+// returns its holder's pid. Line shape:
+//
+//	1: FLOCK  ADVISORY  WRITE 2435 08:01:44042672 0 EOF
+//
+// Only FLOCK rows count — af's singleton lock is flock(2), and POSIX/OFD
+// fcntl locks live in a different namespace on Linux: they would not block
+// the daemon's own acquire, so they are not evidence. The dev field is
+// major:minor in hex and the inode decimal; both are parsed numerically so
+// zero-padding never decides the match. held is true whenever a matching row
+// exists; pid is 0 when the kernel showed a holder we cannot name.
+func procFlockHolderPID(data []byte, dev uint64, ino uint64) (pid int, held bool) {
+	for _, line := range strings.Split(string(data), "\n") {
+		f := strings.Fields(line)
+		if len(f) < 6 || f[1] != "FLOCK" || f[3] != "WRITE" {
+			continue
+		}
+		devIno := strings.Split(f[5], ":")
+		if len(devIno) != 3 {
+			continue
+		}
+		maj, e1 := strconv.ParseUint(devIno[0], 16, 32)
+		mn, e2 := strconv.ParseUint(devIno[1], 16, 32)
+		inode, e3 := strconv.ParseUint(devIno[2], 10, 64)
+		if e1 != nil || e2 != nil || e3 != nil {
+			continue
+		}
+		if maj != uint64(unix.Major(dev)) || mn != uint64(unix.Minor(dev)) || inode != ino {
+			continue
+		}
+		if n, err := strconv.Atoi(f[4]); err == nil && n > 0 {
+			return n, true
+		}
+		return 0, true
+	}
+	return 0, false
+}
+
+// autostartWillReturnHome reports whether the installed autostart unit both
+// SERVES dir and is ENABLED by the service manager — the only "will be back"
+// evidence a down-or-mid-restart daemon can offer. An installed unit that is
+// disabled, or one serving another home, claims nothing: the first will not
+// restart anything, the second restarts someone else.
+func autostartWillReturnHome(dir string) bool {
+	serves, installed, err := AutostartUnitServesHome(dir)
+	if err != nil || !installed || !serves {
+		return false
+	}
+	enabled := false
+	yes := func() { enabled = true }
+	noop := func() {}
+	unknown := func(error) {}
+	switch autostartGOOS {
+	case "linux":
+		ans, _ := systemdAsk(systemdIsEnabled)
+		ans.Match(yes, noop, noop, unknown)
+	case "darwin":
+		launchdEnabled().Match(yes, noop, noop, unknown)
+	}
+	return enabled
 }
 
 // portHolderVerdict is who holds the contested port, for the give-up decision.
@@ -170,7 +305,7 @@ func foreignHolderRefusal(req *net.TCPAddr) string {
 	}
 	return fmt.Sprintf("refusing to bind %s: the address is held by a daemon of another AF home (%s); "+
 		"taking it the moment that daemon's restart releases it is the #6858 takeover — %s",
-		req.String(), home, takeoverRemedy)
+		req.String(), home, takeoverHolderRemedy)
 }
 
 // classifyPortHolder resolves the holder of the contested port: the contested
@@ -272,13 +407,18 @@ func holderDaemonHome(pid int) (string, bool, bool) {
 }
 
 // procListenInodes returns the socket inodes LISTENing on addresses that would
-// collide with a bind of req, from procRoot/net/tcp{,6}. complete is false
-// when a table that could carry the request was unreadable — a zero-inode
-// result then means "could not look", not "no holder".
+// collide with a bind of req, from procRoot/net/tcp{,6} — always BOTH tables:
+// a specific v4 request still contends with a dual-stack [::] socket (the
+// common Go wildcard bind owns v4 space too), and that socket appears only in
+// tcp6; symmetrically a v4 wildcard socket blocks a dual-stack [::] request.
+// parseProcNetTCP's listenIPsOverlap already rejects the non-colliding
+// cross-family rows, so the read is unconditional. complete is false when a
+// table that could carry the request was unreadable — a zero-inode result
+// then means "could not look", not "no holder".
 func procListenInodes(req *net.TCPAddr) (inodes map[uint64]bool, complete bool) {
 	inodes = map[uint64]bool{}
 	complete = true
-	for _, table := range procTablesFor(req) {
+	for _, table := range []string{"tcp", "tcp6"} {
 		data, err := os.ReadFile(filepath.Join(procRoot, "net", table))
 		if err != nil {
 			complete = false
@@ -287,17 +427,6 @@ func procListenInodes(req *net.TCPAddr) (inodes map[uint64]bool, complete bool) 
 		parseProcNetTCP(data, req, inodes)
 	}
 	return inodes, complete
-}
-
-// procTablesFor names the /proc/net tables that could carry a LISTEN socket
-// colliding with req — always both. A specific v4 request still contends with
-// a dual-stack [::] socket (the common Go wildcard bind owns v4 space too),
-// and that socket appears only in tcp6; symmetrically a v4 wildcard socket
-// blocks a dual-stack [::] request. parseProcNetTCP's listenIPsOverlap already
-// rejects the non-colliding cross-family rows, so the table read can be
-// unconditional.
-func procTablesFor(_ *net.TCPAddr) []string {
-	return []string{"tcp", "tcp6"}
 }
 
 // parseProcNetTCP collects the inodes of LISTEN sockets whose local address

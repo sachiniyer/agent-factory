@@ -114,13 +114,12 @@ func TestSecondHomeDaemonNeverTakesDefaultPortFromForeignDaemon(t *testing.T) {
 // takeoverFixture pins the three knobs the gate reads — our home
 // (AGENT_FACTORY_HOME), the contested "default" address, and the default home
 // directory — plus a *webListeners on a real Manager so bind/refusal state has
-// somewhere to live. It returns the webListeners and the default-home dir a
-// test may fill with a config.toml or a flock'd daemon.lock.
-func takeoverFixture(t *testing.T) (*webListeners, string) {
+// somewhere to live. It returns the webListeners and both home dirs.
+func takeoverFixture(t *testing.T) (wl *webListeners, defHome, myHome string) {
 	t.Helper()
-	myHome := testguard.SocketTempDir(t)
+	myHome = testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", myHome)
-	defHome := testguard.SocketTempDir(t)
+	defHome = testguard.SocketTempDir(t)
 	oldDefaultHome := defaultHomeDir
 	defaultHomeDir = func() (string, error) { return defHome, nil }
 	t.Cleanup(func() { defaultHomeDir = oldDefaultHome })
@@ -128,10 +127,25 @@ func takeoverFixture(t *testing.T) (*webListeners, string) {
 	cfg.PreviewListenAddr = ""
 	m, err := NewManager(cfg)
 	require.NoError(t, err)
-	wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
+	wl = newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
 	m.webListeners = wl
 	t.Cleanup(func() { _ = wl.close() })
-	return wl, defHome
+	return wl, defHome, myHome
+}
+
+// contestPort re-points the "default" web address at a free loopback port and
+// returns its listen_addr — the seam that keeps every reconcile in a test off
+// the shipped 127.0.0.1:8443 (#6625).
+func contestPort(t *testing.T) string {
+	t.Helper()
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	addr := l.Addr().String()
+	require.NoError(t, l.Close())
+	oldDefault := defaultWebListenAddr
+	defaultWebListenAddr = addr
+	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
+	return addr
 }
 
 // afDaemonHomeFixture marks home as owned by THIS process the way a live af
@@ -142,10 +156,19 @@ func afDaemonHomeFixture(t *testing.T, home string) {
 	t.Helper()
 	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"),
 		[]byte(strconv.Itoa(os.Getpid())), 0600))
+	lock := flockHomeLock(t, home)
+	t.Cleanup(func() { _ = lock.Close() })
+}
+
+// flockHomeLock holds a real exclusive flock on home's daemon.lock in THIS
+// process — the kernel evidence daemonLockHeld proves a live daemon on. The
+// caller closes the returned file to release it.
+func flockHomeLock(t *testing.T, home string) *os.File {
+	t.Helper()
 	lock, err := os.OpenFile(filepath.Join(home, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
 	require.NoError(t, err)
 	require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-	t.Cleanup(func() { _ = lock.Close() })
+	return lock
 }
 
 // reqFor resolves a listen_addr the way the gate sees it.
@@ -203,52 +226,100 @@ func writeDefHomeConfig(t *testing.T, defHome, listenAddrLine string) {
 	require.NoError(t, os.WriteFile(filepath.Join(defHome, "config.toml"), []byte(content), 0600))
 }
 
+// stubIsEnabledAnswer makes the service-manager probe's is-enabled query
+// answer word, restoring the real runner on cleanup.
+func stubIsEnabledAnswer(t *testing.T, word string) {
+	t.Helper()
+	prev := autostartProbeCommand
+	t.Cleanup(func() { autostartProbeCommand = prev })
+	autostartProbeCommand = func(name string, args ...string) probeResult {
+		return probeResult{completed: true, output: word + "\n", exitCode: 0}
+	}
+}
+
+// writeAutostartUnit drops a unit serving home into dir the way
+// InstallAutostart renders it; home == "" means the unit baked no
+// AGENT_FACTORY_HOME and serves the default home.
+func writeAutostartUnit(t *testing.T, dir, home string) {
+	t.Helper()
+	unit := systemdAutostartUnit("/usr/bin/af", "/usr/bin:/bin", "/bin/sh", home)
+	require.NoError(t, os.WriteFile(filepath.Join(dir, autostartUnitName), []byte(unit), 0644))
+}
+
 func TestDefaultHomeClaimRefusal(t *testing.T) {
-	_, defHome := takeoverFixture(t)
+	_, defHome, _ := takeoverFixture(t)
 	req := reqFor(t, "127.0.0.1:8443")
 
-	t.Run("never-configured default home claims nothing", func(t *testing.T) {
+	t.Run("a stray materialized config alone claims nothing", func(t *testing.T) {
+		// THE relocated-home regression a config-based claim caused: a
+		// leftover ~/.agent-factory still carries the materialized
+		// listen_addr, but with no daemon and nothing set to restart one it
+		// claims nothing — refusing here would strand the relocated user's
+		// only daemon off its own port.
+		writeDefHomeConfig(t, defHome, `"127.0.0.1:8443"`)
 		require.Empty(t, defaultHomeClaimRefusal(req))
 	})
-	t.Run("a materialized default config claims the port", func(t *testing.T) {
-		// What every real default home looks like: first-run materialization
-		// writes the default listen_addr into config.toml — the claim does not
-		// need a live daemon.
-		writeDefHomeConfig(t, defHome, `"127.0.0.1:8443"`)
-		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
+	t.Run("a never-configured default home claims nothing", func(t *testing.T) {
+		require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
+		require.Empty(t, defaultHomeClaimRefusal(req))
 	})
-	t.Run("an absent key defaults to the claim", func(t *testing.T) {
-		writeDefHomeConfig(t, defHome, "")
+	t.Run("a live daemon.lock claims the port — running evidence", func(t *testing.T) {
+		lock := flockHomeLock(t, defHome)
+		defer func() { _ = lock.Close() }()
 		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
+		require.Contains(t, defaultHomeClaimRefusal(req), "daemon.lock")
 	})
-	t.Run("an explicitly disabled listener claims nothing", func(t *testing.T) {
+	t.Run("a live daemon narrowed away by a moved listener claims nothing", func(t *testing.T) {
+		lock := flockHomeLock(t, defHome)
+		defer func() { _ = lock.Close() }()
+		writeDefHomeConfig(t, defHome, `"127.0.0.1:9443"`)
+		require.Empty(t, defaultHomeClaimRefusal(req),
+			"a running daemon on another port has nothing to lose on this one")
+	})
+	t.Run("a live daemon narrowed away by a disabled listener claims nothing", func(t *testing.T) {
+		lock := flockHomeLock(t, defHome)
+		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `""`)
 		require.Empty(t, defaultHomeClaimRefusal(req))
 	})
-	t.Run("a moved listener on another port claims nothing", func(t *testing.T) {
-		writeDefHomeConfig(t, defHome, `"127.0.0.1:9443"`)
-		require.Empty(t, defaultHomeClaimRefusal(req))
-	})
-	t.Run("a wildcard listener on the same port claims it", func(t *testing.T) {
+	t.Run("a live daemon on a wildcard same-port listener claims it", func(t *testing.T) {
+		lock := flockHomeLock(t, defHome)
+		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `"0.0.0.0:8443"`)
 		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
 	})
-	t.Run("a live daemon claims it with no config at all", func(t *testing.T) {
-		require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
-		lock, err := os.OpenFile(filepath.Join(defHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
-		require.NoError(t, err)
-		require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
+	t.Run("a live daemon with an unreadable config stays claimed", func(t *testing.T) {
+		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
-		require.Contains(t, defaultHomeClaimRefusal(req), "daemon.lock")
+		require.NoError(t, os.WriteFile(filepath.Join(defHome, "config.toml"),
+			[]byte("this is [ not toml"), 0600))
+		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port",
+			"unreadable intent is not disproven intent — a running daemon keeps its claim")
 	})
-	t.Run("an unparseable config falls back to the lock", func(t *testing.T) {
-		require.NoError(t, os.WriteFile(filepath.Join(defHome, "config.toml"), []byte("this is [ not toml"), 0600))
-		require.Empty(t, defaultHomeClaimRefusal(req), "no lock held and an unreadable config → no positive claim")
-		lock, err := os.OpenFile(filepath.Join(defHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
-		require.NoError(t, err)
-		require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-		defer func() { _ = lock.Close() }()
-		require.Contains(t, defaultHomeClaimRefusal(req), "daemon.lock")
+	t.Run("an enabled autostart unit serving it claims the port", func(t *testing.T) {
+		// No daemon running — the lock file is absent — but the OS is set to
+		// bring one back: installed unit serving this home + is-enabled.
+		unitDir := withAutostartTestEnv(t, "linux")
+		writeAutostartUnit(t, unitDir, defHome)
+		stubIsEnabledAnswer(t, "enabled")
+		require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
+		require.NoError(t, os.Remove(filepath.Join(defHome, daemonLockFileName)))
+		require.Contains(t, defaultHomeClaimRefusal(req), "claims this port")
+		require.Contains(t, defaultHomeClaimRefusal(req), "autostart")
+	})
+	t.Run("a serving unit that is disabled claims nothing", func(t *testing.T) {
+		unitDir := withAutostartTestEnv(t, "linux")
+		writeAutostartUnit(t, unitDir, defHome)
+		stubIsEnabledAnswer(t, "disabled")
+		require.Empty(t, defaultHomeClaimRefusal(req),
+			"a disabled unit will not restart anything — it is not 'comes back' evidence")
+	})
+	t.Run("an enabled unit serving ANOTHER home claims nothing", func(t *testing.T) {
+		unitDir := withAutostartTestEnv(t, "linux")
+		writeAutostartUnit(t, unitDir, testguard.SocketTempDir(t))
+		stubIsEnabledAnswer(t, "enabled")
+		require.Empty(t, defaultHomeClaimRefusal(req),
+			"the unit restarts someone else's daemon, not this home's")
 	})
 }
 
@@ -308,24 +379,33 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 }
 
 // TestBindRefusesOnDefaultHomeClaim is the end-to-end half of the claim path:
-// with the default home's config.toml claiming the default address, a
-// non-default-home daemon's reconcile REFUSES — no bind is attempted, the
-// refusal lands on the lifecycle status, and it latches so a later reconcile
-// cannot sneak the bind through after the claim disappears.
+// with the default home's daemon provably running and still wanting this
+// port, a non-default-home daemon's reconcile REFUSES — no bind is attempted,
+// the refusal lands on the lifecycle status, and it latches so a later
+// reconcile cannot sneak the bind through after the claim disappears. The
+// contested port is a fixture throughout — a broken claim must never be able
+// to bind the shipped 8443 as its failure mode (#6625).
 func TestBindRefusesOnDefaultHomeClaim(t *testing.T) {
-	wl, defHome := takeoverFixture(t)
-	writeDefHomeConfig(t, defHome, `"127.0.0.1:8443"`)
+	wl, defHome, _ := takeoverFixture(t)
+	contested := contestPort(t)
 
-	_, err := wl.reconcile(wl.manager.Config())
+	// The claim: a live daemon.lock in the default home — its daemon is
+	// running — with a config.toml still wanting this very port.
+	lock := flockHomeLock(t, defHome)
+	writeDefHomeConfig(t, defHome, `"`+contested+`"`)
+
+	cfg := wl.manager.Config()
+	cfg.ListenAddr = contested
+	_, err := wl.reconcile(cfg)
 	require.NoError(t, err, "a refusal is a decision, not a bind error")
 	snap := wl.manager.lifecycle.snapshot().listeners
 	require.False(t, snap.TCPBound)
 	require.NotEmpty(t, snap.TCPRefusalReason)
 	require.Contains(t, snap.TCPRefusalReason, "network.listen_addr")
 
-	// The claim vanishes (default home abandoned) — a reconcile on an
-	// unrelated apply still must not bind: the latch owns this address for
-	// the daemon's lifetime.
+	// The claim vanishes (daemon stopped, home cleared) — a later reconcile
+	// still must not bind: the latch owns this address for our lifetime.
+	require.NoError(t, lock.Close())
 	require.NoError(t, os.Remove(filepath.Join(defHome, "config.toml")))
 	_, err = wl.reconcile(wl.manager.Config())
 	require.NoError(t, err)
@@ -334,24 +414,39 @@ func TestBindRefusesOnDefaultHomeClaim(t *testing.T) {
 	require.NotEmpty(t, wl.manager.lifecycle.snapshot().listeners.TCPRefusalReason)
 }
 
+// TestRelocatedHomeKeepsDefaultPort is the review's regression case: the
+// user's real AGENT_FACTORY_HOME was relocated and a STRAY default home is
+// left behind — a materialized config.toml still naming the contested port,
+// but no daemon, no lock, no unit to bring one back. A config file alone is
+// not a claim: the relocated daemon must bind, or the port — and the user's
+// whole web UI — is silently lost behind a refusal the TUI only whispered.
+func TestRelocatedHomeKeepsDefaultPort(t *testing.T) {
+	wl, defHome, _ := takeoverFixture(t)
+	contested := contestPort(t)
+
+	// The stray home: exactly what first-run materialization leaves behind.
+	writeDefHomeConfig(t, defHome, `"`+contested+`"`)
+
+	cfg := wl.manager.Config()
+	cfg.ListenAddr = contested
+	_, err := wl.reconcile(cfg)
+	require.NoError(t, err)
+	snap := wl.manager.lifecycle.snapshot().listeners
+	require.True(t, snap.TCPBound,
+		"a stray default home's materialized config must not take the relocated user's port")
+	require.Empty(t, snap.TCPRefusalReason)
+}
+
 // TestBindProceedsWhenNoHomeClaims is the second-profile-alone half: with no
 // default-home claim and the port free, a non-default-home daemon on the
-// default address binds normally. The bind uses :0 — never the shipped port —
-// because defaultWebListenAddr only gates the COMPARISON.
+// default address binds normally.
 func TestBindProceedsWhenNoHomeClaims(t *testing.T) {
-	wl, _ := takeoverFixture(t)
-	l, err := net.Listen("tcp", "127.0.0.1:0")
-	require.NoError(t, err)
-	free := l.Addr().String()
-	require.NoError(t, l.Close())
-
-	oldDefault := defaultWebListenAddr
-	defaultWebListenAddr = free
-	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
+	wl, _, _ := takeoverFixture(t)
+	free := contestPort(t)
 
 	cfg := wl.manager.Config()
 	cfg.ListenAddr = free
-	_, err = wl.reconcile(cfg)
+	_, err := wl.reconcile(cfg)
 	require.NoError(t, err)
 	snap := wl.manager.lifecycle.snapshot().listeners
 	require.True(t, snap.TCPBound, "with no AF home claiming it, the second profile's default-addr daemon must still work")
@@ -359,14 +454,147 @@ func TestBindProceedsWhenNoHomeClaims(t *testing.T) {
 }
 
 func TestForeignHolderRefusalSkips(t *testing.T) {
-	_, _ = takeoverFixture(t)
+	_, _, _ = takeoverFixture(t)
 	t.Run("non-default addresses never refuse", func(t *testing.T) {
 		require.Empty(t, foreignHolderRefusal(reqFor(t, "127.0.0.1:9000")))
 	})
 }
 
+// daemonLockHeld must never BE the contention: its answer comes from
+// /proc/locks, so probing a home leaves that home's own singleton acquire
+// free to succeed — a flock probe (even a microsecond LOCK_EX hold) would
+// make the probed daemon's start fail "already running" in its window.
+func TestDaemonLockProbeIsNonConflicting(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("the locks table is /proc/locks")
+	}
+	home := testguard.SocketTempDir(t)
+
+	// Unheld: provably not held — and still acquirable afterwards. If the
+	// probe had taken the lock to learn its state this flock would fail.
+	pid, held := daemonLockHeld(home)
+	require.False(t, held)
+	require.Zero(t, pid)
+	lock := flockHomeLock(t, home)
+	defer func() { _ = lock.Close() }()
+
+	// Held: the probe names the holder without ever holding it itself.
+	pid, held = daemonLockHeld(home)
+	require.True(t, held)
+	require.Equal(t, os.Getpid(), pid)
+}
+
+// The #6386 recovery end to end: the contested port is held by OUR OWN home's
+// previous daemon — the late-release-across-restart case. Classified own, the
+// bind retries (never refuses), and when the predecessor lets go the retry
+// binds it — the exact loop the foreign verdict must not break.
+func TestOwnHomePredecessorReleaseThenBinds(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port-holder identification reads /proc on linux")
+	}
+	wl, _, myHome := takeoverFixture(t)
+
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	contested := holder.Addr().String()
+	oldDefault := defaultWebListenAddr
+	defaultWebListenAddr = contested
+	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
+
+	// The predecessor: OUR home's daemon owns the port — its lock fd is in
+	// MY home, so the holder classifies own, not foreign.
+	afDaemonHomeFixture(t, myHome)
+
+	oldInit, oldMax := listenRetryInitial, listenRetryMax
+	listenRetryInitial, listenRetryMax = 5*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { listenRetryInitial, listenRetryMax = oldInit, oldMax })
+
+	cfg := wl.manager.Config()
+	cfg.ListenAddr = contested
+	_, _ = wl.reconcile(cfg)
+	require.False(t, wl.manager.lifecycle.snapshot().listeners.TCPBound)
+	require.Empty(t, wl.manager.lifecycle.snapshot().listeners.TCPRefusalReason,
+		"our own predecessor is never a refusal — it is the recovery")
+	wl.retryFailedBinds()
+
+	// The predecessor releases on shutdown — the retry must pick the port up.
+	require.NoError(t, holder.Close())
+	require.Eventually(t, func() bool {
+		return wl.manager.lifecycle.snapshot().listeners.TCPBound
+	}, 3*time.Second, 10*time.Millisecond,
+		"#6386: a port held only by our own home's predecessor must come back to us")
+}
+
+// The default-home exemption end to end: OUR home IS the default home, so the
+// gate never applies — a foreign daemon holding the port is just another
+// EADDRINUSE the #6386 retry out-waits. This is the behaviour the property
+// must leave byte-for-byte intact.
+func TestDefaultHomeDaemonKeepsRetry(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port-holder identification reads /proc on linux")
+	}
+	defHome := testguard.SocketTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", defHome)
+	oldDefaultHome := defaultHomeDir
+	defaultHomeDir = func() (string, error) { return defHome, nil }
+	t.Cleanup(func() { defaultHomeDir = oldDefaultHome })
+
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	contested := holder.Addr().String()
+	oldDefault := defaultWebListenAddr
+	defaultWebListenAddr = contested
+	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
+
+	// A FOREIGN home's daemon holds the contested port.
+	foreignHome := testguard.SocketTempDir(t)
+	afDaemonHomeFixture(t, foreignHome)
+
+	cfg := config.DefaultConfig()
+	cfg.ListenAddr = contested
+	cfg.PreviewListenAddr = ""
+	m, err := NewManager(cfg)
+	require.NoError(t, err)
+	wl := newWebListeners(m, newHTTPMux(&controlServer{manager: m}), newPreviewMux(&controlServer{manager: m}))
+	m.webListeners = wl
+	t.Cleanup(func() { _ = wl.close() })
+
+	oldInit, oldMax := listenRetryInitial, listenRetryMax
+	listenRetryInitial, listenRetryMax = 5*time.Millisecond, 10*time.Millisecond
+	t.Cleanup(func() { listenRetryInitial, listenRetryMax = oldInit, oldMax })
+
+	_, _ = wl.reconcile(m.Config())
+	require.False(t, m.lifecycle.snapshot().listeners.TCPBound)
+	require.Empty(t, m.lifecycle.snapshot().listeners.TCPRefusalReason,
+		"the default home's own daemon is exempt — no refusal, just the retry")
+	wl.retryFailedBinds()
+
+	require.NoError(t, holder.Close())
+	require.Eventually(t, func() bool {
+		return m.lifecycle.snapshot().listeners.TCPBound
+	}, 3*time.Second, 10*time.Millisecond,
+		"the default home's daemon must win its port back — the retry is its documented behaviour")
+}
+
+// holderDaemonHome with a readable fd table but NO daemon.lock fd falls
+// through to argv+environ — the lock-less (pre-flock or foreign-binary)
+// daemon path. Our own pid is the honest fixture: its fd table reads clean,
+// holds no lock, and its argv is the test binary — provably not an af daemon.
+// A lock-less AF daemon's env cannot be faked for a real pid;
+// daemonHomeInProcessFrame's own tests cover what that path does with one.
+func TestHolderDaemonHomeFallsBackWithoutLockFD(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("fd tables read /proc on linux")
+	}
+	home, isDaemon, provable := holderDaemonHome(os.Getpid())
+	require.True(t, provable)
+	require.False(t, isDaemon,
+		"no lock fd + non-af argv = provably not a daemon — never foreign")
+	require.Empty(t, home)
+}
+
 func TestRefuseWebForeignLatch(t *testing.T) {
-	wl, _ := takeoverFixture(t)
+	wl, _, _ := takeoverFixture(t)
 	const addr = "127.0.0.1:8443"
 	reason := "refusing to bind " + addr + ": held by another home"
 	wl.mu.Lock()
@@ -389,7 +617,7 @@ func TestRefuseWebForeignLatch(t *testing.T) {
 }
 
 func TestLatchedRefusalHoldsOnRebind(t *testing.T) {
-	wl, _ := takeoverFixture(t)
+	wl, _, _ := takeoverFixture(t)
 
 	// Serve a real free port first — the "daemon bound a different port
 	// after refusing" state.
@@ -458,12 +686,33 @@ func TestParseProcNetTCP(t *testing.T) {
 	require.Equal(t, map[uint64]bool{55555: true}, inodes)
 }
 
-func TestProcTablesForAlwaysBothFamilies(t *testing.T) {
-	// Even a specific v4 request contends with a dual-stack [::] socket, and
-	// that socket is visible only in tcp6 — both tables are always read.
-	for _, addr := range []string{"127.0.0.1:8443", "0.0.0.0:8443", "[::1]:8443", ":8443"} {
-		require.ElementsMatch(t, []string{"tcp", "tcp6"}, procTablesFor(reqFor(t, addr)))
-	}
+// A dual-stack [::] holder lives ONLY in /proc/net/tcp6 yet still blocks a
+// v4 bind — the read must cover both tables, which a fixture /proc proves by
+// carrying each family's row in its own file.
+func TestProcListenInodesReadsBothTables(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "net"), 0755))
+	tcp := `  sl  local_address rem_address   st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 0100007F:20FB 00000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 12345 1 0000000000000000 100 0 0 10 0
+`
+	tcp6 := `  sl  local_address                        rem_address                        st tx_queue rx_queue tr tm->when retrnsmt   uid  timeout inode
+   0: 00000000000000000000000000000000:20FB 00000000000000000000000000000000:0000 0A 00000000:00000000 00:00000000 00000000  1000        0 55555 1 0000000000000000 100 0 0 10 0
+`
+	require.NoError(t, os.WriteFile(filepath.Join(root, "net", "tcp"), []byte(tcp), 0644))
+	require.NoError(t, os.WriteFile(filepath.Join(root, "net", "tcp6"), []byte(tcp6), 0644))
+	oldRoot := procRoot
+	procRoot = root
+	t.Cleanup(func() { procRoot = oldRoot })
+
+	inodes, complete := procListenInodes(reqFor(t, "127.0.0.1:8443"))
+	require.True(t, complete)
+	require.Equal(t, map[uint64]bool{12345: true, 55555: true}, inodes,
+		"both tables feed the classifier — a dual-stack holder in tcp6 cannot hide from a v4 request")
+
+	// A missing table is "could not look", not "no holder".
+	require.NoError(t, os.Remove(filepath.Join(root, "net", "tcp6")))
+	_, complete = procListenInodes(reqFor(t, "127.0.0.1:8443"))
+	require.False(t, complete)
 }
 
 func TestProcHexIP(t *testing.T) {

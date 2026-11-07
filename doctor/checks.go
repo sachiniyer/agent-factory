@@ -217,8 +217,9 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		if reason := h.Listeners.TCPRefusalReason; reason != "" &&
 			(cfg == nil || config.ListenerBindRefusal(cfg) == "") {
 			report.Warn(sectionDaemon, "web listener", "web UI not served: "+reason,
-				"give this daemon its own address: af config set network.listen_addr 127.0.0.1:<port> "+
-					"(af daemon restart re-evaluates a claim or posture that no longer holds)", true)
+				"give this daemon its own address (af config set network.listen_addr 127.0.0.1:<port>), "+
+					"or free the port for the home that claims it — move or disable that home's "+
+					"listener, or remove a stray AF home — then af daemon restart to re-evaluate", true)
 		}
 	}
 	if h.PingErr == nil && daemonConfig != nil {

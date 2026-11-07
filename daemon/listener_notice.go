@@ -33,6 +33,18 @@ func (s DaemonListenerStatus) WebListenerNotice() string {
 	return note
 }
 
+// WebListenerStandingNotice is the single standing notice a surface with room
+// for exactly one (the TUI bottom bar) should show: a REFUSED bind is the
+// louder and more actionable state — the daemon has stopped competing for the
+// port for its whole lifetime — so it wins over the retrying-unbound notice.
+// `af doctor` gives each state its own row instead and does not use this.
+func (s DaemonListenerStatus) WebListenerStandingNotice() string {
+	if s.TCPRefusalReason != "" {
+		return "web UI not served: " + s.TCPRefusalReason
+	}
+	return s.WebListenerNotice()
+}
+
 // bindReason is the part of a bind error a reader acts on. The daemon wraps the
 // kernel's message in several layers of context, which would push the cause off
 // a one-line surface; `af daemon status` still prints the full error.

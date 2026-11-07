@@ -3,11 +3,15 @@ package config
 import (
 	"errors"
 	"fmt"
+	"io"
 	"io/fs"
 	"net"
 	"os"
 	"path/filepath"
 	"strings"
+	"syscall"
+
+	"github.com/pelletier/go-toml/v2"
 )
 
 // validateListenAddrValue reports whether value is an acceptable listen_addr.
@@ -68,30 +72,109 @@ func validateListenAddrValue(value string) error {
 // writes the key into every config.toml (#6858).
 func DefaultListenAddr() string { return defaultListenAddr }
 
+// listenAddrInHomeMaxBytes bounds the config.toml bytes ListenAddrInHome will
+// read. A daemon's own full parse has no bound, but this read happens inside
+// the daemon's listener reconcile lock, on a file that lives in ANOTHER home
+// and can be anything — including a special file. 64KiB is ~50x a real
+// config.toml; past it the answer stops being worth the wait.
+const listenAddrInHomeMaxBytes = 64 << 10
+
 // ListenAddrInHome reports the network.listen_addr a daemon running in homeDir
-// (an AF home OTHER than the caller's own) would take: the value its
-// config.toml parses to on top of DefaultConfig, so an absent key reads as the
-// built-in default — exactly what the daemon there would bind. found is false
+// (an AF home OTHER than the caller's own) would take: the grouped
+// [network] listen_addr leaf when present — it wins over the flat spelling,
+// matching applyGroupedConfigAliases — else the flat listen_addr, else the
+// built-in default, exactly what the daemon there would bind. found is false
 // when the home has no config.toml at all: a never-configured home claims no
-// port by itself. A file that exists but fails to parse reports found=true
-// with the error, so the caller can tell "no claim" apart from "claim we could
-// not read". Read-only: no materialization, no writes, no provenance. Used by
-// the daemon's #6858 no-takeover gate to ask whether the DEFAULT home claims
-// the default web port.
+// port by itself. A file that exists but fails to read or parse reports
+// found=true with the error, so the caller can tell "no claim" apart from
+// "claim we could not read". Read-only: no materialization, no writes, no
+// provenance.
+//
+// This deliberately does NOT call parseConfigTOML. The probe runs while the
+// daemon holds its listener lock, so it must be bounded (a symlinked or
+// special config.toml cannot block it — O_NOFOLLOW|O_NONBLOCK, regular-file
+// check, size cap) and quiet (the file is another home's, so its unknown-key
+// and schema warnings are not ours to re-log on every reconcile). Used by the
+// daemon's #6858 no-takeover gate to ask whether a claimed-home daemon would
+// bind the contested port.
 func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
 	path := filepath.Join(homeDir, TomlConfigFileName)
-	data, err := os.ReadFile(path)
+	data, err := readFileNoFollowBounded(path, listenAddrInHomeMaxBytes)
 	if errors.Is(err, fs.ErrNotExist) {
 		return "", false, nil
 	}
 	if err != nil {
 		return "", false, err
 	}
-	cfg, err := parseConfigTOML(data, path)
+	addr, err = listenAddrFromTOML(data)
 	if err != nil {
 		return "", true, err
 	}
-	return cfg.ListenAddr, true, nil
+	return addr, true, nil
+}
+
+// listenAddrFromTOML resolves the effective network.listen_addr a config.toml
+// would give a daemon: the grouped [network] leaf when present (it wins over
+// the flat spelling, matching applyGroupedConfigAliases), else the flat
+// listen_addr, else the built-in default. Nothing else in the file is
+// relevant — an unreadable value anywhere else is not this read's business,
+// and none of the loader's warnings apply to a file we do not own.
+func listenAddrFromTOML(data []byte) (string, error) {
+	var shape map[string]any
+	if err := toml.Unmarshal(data, &shape); err != nil {
+		return "", err
+	}
+	if table, ok := shape["network"].(map[string]any); ok {
+		if v, present := table["listen_addr"]; present {
+			return listenAddrLeaf(v, "network.listen_addr")
+		}
+	}
+	if v, present := shape["listen_addr"]; present {
+		return listenAddrLeaf(v, "listen_addr")
+	}
+	return DefaultListenAddr(), nil
+}
+
+func listenAddrLeaf(v any, key string) (string, error) {
+	s, ok := v.(string)
+	if !ok {
+		return "", fmt.Errorf("%s is not a string", key)
+	}
+	return s, nil
+}
+
+// readFileNoFollowBounded reads path without following a final symlink and
+// without ever blocking on a special file: O_NOFOLLOW|O_NONBLOCK at open,
+// a regular-file fstat check, and a byte cap on the read. The path here can
+// name anything — a config.toml inside another AF home is a file this daemon
+// did not create — so the managed-file rules readManagedFileNoFollow encodes
+// for daemon-owned files apply here too: never block the listener lock on a
+// FIFO, never chase a link swapped in between stat and open, never trust a
+// file bigger than the config this function exists to answer for.
+func readFileNoFollowBounded(path string, maxBytes int64) ([]byte, error) {
+	f, err := os.OpenFile(path, os.O_RDONLY|syscall.O_NOFOLLOW|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = f.Close() }()
+	info, err := f.Stat()
+	if err != nil {
+		return nil, err
+	}
+	if !info.Mode().IsRegular() {
+		return nil, fmt.Errorf("%s is not a regular file", path)
+	}
+	if info.Size() > maxBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxBytes)
+	}
+	data, err := io.ReadAll(io.LimitReader(f, maxBytes+1))
+	if err != nil {
+		return nil, err
+	}
+	if int64(len(data)) > maxBytes {
+		return nil, fmt.Errorf("%s is larger than %d bytes", path, maxBytes)
+	}
+	return data, nil
 }
 
 // IsLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback

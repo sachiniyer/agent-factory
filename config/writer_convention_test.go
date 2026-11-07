@@ -72,6 +72,11 @@ var writerConventionExemptions = map[string]writerExemption{
 	// asks the directory the lock holds open, mirroring writeSibling and
 	// removeSibling (#3688, #3697).
 	"filelock.go:renameSibling:golang.org/x/sys/unix.Renameat": {calls: 1, reason: "moves the LEGACY config.json to its .bak slot inside the pinned directory after conversion; a path-based os.Rename could rename another home's active config.json after a mid-conversion retarget"},
+	// A READ, not a write — O_RDONLY|O_NOFOLLOW|O_NONBLOCK on another AF
+	// home's config.toml for the #6858 port-claim probe. It puts no bytes on
+	// disk; the flags exist so a symlinked or special file cannot hang or be
+	// followed by a read that runs inside the daemon's listener lock.
+	"listen_addr.go:readFileNoFollowBounded:os.OpenFile": {calls: 1, reason: "a read-only open (O_RDONLY|O_NOFOLLOW|O_NONBLOCK) — the flag set is link/blocking safety for a file in a home this process does not own, not content on disk"},
 }
 
 // writerExemption records how many calls of that kind the function is allowed
