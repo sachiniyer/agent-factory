@@ -392,7 +392,17 @@ var (
 // carries no trailing period, destabilizing the #6765 re-read evidence. The
 // optional "(...)" spans newlines so a wrap inside the timezone token
 // ("(America/\nNew_York)") stays within the capture.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?(.+?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
+//
+// The pre-clock span (the "*?" before the clock token) crosses a wrap newline
+// (mid-token) but not a clause boundary: a period immediately followed by a
+// newline ends the reset clause, so a later pane row's clock — e.g.
+// "reset at some point soon.\nuser draft: meet Monday at 2pm" — is NOT treated
+// as the reset time. A period followed by a non-newline (the abbreviated month
+// "Nov. 6") still extends the span, preserving wrapped dates. Without this
+// bound the dot-all ".+?" would cross the completed clause and the later
+// unrelated clock would yield timed evidence instead of the documented
+// hit=true, hasResetTime=false result.
+var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:[^.]|\.(?:[^\n]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a

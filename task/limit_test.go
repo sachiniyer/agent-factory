@@ -761,3 +761,53 @@ func TestClaudeResetWrappedBannerNoTimezoneFallback(t *testing.T) {
 		t.Fatalf("resetAt = %v, want %v (no-paren fallback to now's zone)", resetAt.UTC(), want)
 	}
 }
+
+// TestClaudeResetUnrelatedClockRow pins the clause boundary of claudeResetAnchor:
+// when an unparseable reset clause ends with a period-newline and a later pane
+// row carries its own clock — e.g. "reset at some point soon.\nuser draft: meet
+// Monday at 2pm" — the dot-all pre-clock span must not cross the completed
+// clause and adopt the unrelated clock as the reset time. The detector still
+// hits (the banner is present) but degrades to the documented hasResetTime=false
+// so the daemon does not schedule auto-resume against transcript/prompt text.
+func TestClaudeResetUnrelatedClockRow(t *testing.T) {
+	loc := nyLoc(t)
+	now := time.Date(2026, 7, 4, 10, 0, 0, 0, loc)
+	det := NewLimitDetector(nil)
+
+	cases := []struct {
+		name    string
+		content string
+	}{
+		{
+			name:    "unrelated clock row after a period-terminated clause",
+			content: "Claude usage limit reached. Your limit will reset at some point soon.\nuser draft: meet Monday at 2pm",
+		},
+		{
+			// The boundary is the period+newline, not just any newline: a
+			// wrap inside the reset clause (no period before the newline)
+			// still crosses so the clock on the next row is captured.
+			name:    "wrap before the clock is not a clause boundary",
+			content: "Claude usage limit reached. Your limit will reset\nat 2pm (America/New_York).",
+		},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			hit, _, hasReset, evidence := det.Check(tc.content, tmux.ProgramClaude, now)
+			if !hit {
+				t.Fatalf("must detect the banner: hit=%v", hit)
+			}
+			if strings.Contains(tc.name, "period-terminated") {
+				if hasReset {
+					t.Fatalf("an unrelated clock row must not yield a reset time: hasReset=%v evidence=%q", hasReset, evidence)
+				}
+				if evidence != "" {
+					t.Fatalf("an unparseable clause must carry no evidence: %q", evidence)
+				}
+			} else {
+				if !hasReset {
+					t.Fatalf("a wrap inside the clause must still parse the clock: hasReset=%v", hasReset)
+				}
+			}
+		})
+	}
+}
