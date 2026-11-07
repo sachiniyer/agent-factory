@@ -420,10 +420,16 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// the refusal-clearing below: re-running the whole gate on every reconcile
 	// would re-log the refusal and re-bump the generation each time. Unlike
 	// the #5137 posture refusal it is an event the latch remembers, not a
-	// verdict re-derived from the current config.
-	if wl.webHandle == nil {
-		if refusal, latched := wl.foreignRefusals[addr]; latched && wl.webRefusal == refusal {
-			return nil
+	// verdict re-derived from the current config. The match is by endpoint —
+	// boundListenerBlocks — so an equivalent spelling of a refused address
+	// (127.0.0.1:08443, a wildcard covering it) still reads as latched.
+	if wl.webHandle == nil && len(wl.foreignRefusals) > 0 {
+		if req, err := net.ResolveTCPAddr("tcp", addr); err == nil {
+			for latchedAddr, refusal := range wl.foreignRefusals {
+				if boundListenerBlocks(latchedAddr, req) && wl.webRefusal == refusal {
+					return nil
+				}
+			}
 		}
 	}
 	// Reaching bindWebLocked at all means the posture is not refused (#5137) —

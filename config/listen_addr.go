@@ -1,6 +1,8 @@
 package config
 
 import (
+	"bytes"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -80,33 +82,42 @@ func DefaultListenAddr() string { return defaultListenAddr }
 const listenAddrInHomeMaxBytes = 64 << 10
 
 // ListenAddrInHome reports the network.listen_addr a daemon running in homeDir
-// (an AF home OTHER than the caller's own) would take: the grouped
-// [network] listen_addr leaf when present — it wins over the flat spelling,
-// matching applyGroupedConfigAliases — else the flat listen_addr, else the
-// built-in default, exactly what the daemon there would bind. found is false
-// when the home has no config.toml at all: a never-configured home claims no
-// port by itself. A file that exists but fails to read or parse reports
-// found=true with the error, so the caller can tell "no claim" apart from
+// (an AF home OTHER than the caller's own) would take: config.toml when
+// present is authoritative — the grouped [network] listen_addr leaf when it
+// exists (it wins over the flat spelling, matching applyGroupedConfigAliases),
+// else the flat listen_addr, else the built-in default. With no config.toml
+// the legacy config.json answers the same question the loader's conversion
+// path would: flat listen_addr, else the default. found is false only when
+// the home has no config file at all. A file that exists but fails to read or
+// parse reports an error, so the caller can tell "no claim" apart from
 // "claim we could not read". Read-only: no materialization, no writes, no
 // provenance.
 //
-// This deliberately does NOT call parseConfigTOML. The probe runs while the
-// daemon holds its listener lock, so it must be bounded (a symlinked or
-// special config.toml cannot block it — O_NOFOLLOW|O_NONBLOCK, regular-file
-// check, size cap) and quiet (the file is another home's, so its unknown-key
-// and schema warnings are not ours to re-log on every reconcile). Used by the
-// daemon's #6858 no-takeover gate to ask whether a claimed-home daemon would
-// bind the contested port.
+// This deliberately does NOT call parseConfigTOML or parseConfigJSON. The
+// probe runs while the daemon holds its listener lock, so it must be bounded
+// (a symlinked or special config cannot block it — O_NOFOLLOW|O_NONBLOCK,
+// regular-file check, size cap) and quiet (the file is another home's, so its
+// unknown-key and schema warnings are not ours to re-log on every reconcile).
+// Used by the daemon's #6858 no-takeover gate to ask whether a claimed-home
+// daemon would bind the contested port.
 func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
-	path := filepath.Join(homeDir, TomlConfigFileName)
-	data, err := readFileNoFollowBounded(path, listenAddrInHomeMaxBytes)
-	if errors.Is(err, fs.ErrNotExist) {
-		return "", false, nil
-	}
-	if err != nil {
+	data, err := readFileNoFollowBounded(filepath.Join(homeDir, TomlConfigFileName), listenAddrInHomeMaxBytes)
+	switch {
+	case err == nil:
+		addr, err = listenAddrFromTOML(data)
+	case errors.Is(err, fs.ErrNotExist):
+		data, err = readFileNoFollowBounded(filepath.Join(homeDir, ConfigFileName), listenAddrInHomeMaxBytes)
+		switch {
+		case err == nil:
+			addr, err = listenAddrFromJSON(data)
+		case errors.Is(err, fs.ErrNotExist):
+			return "", false, nil
+		default:
+			return "", false, err
+		}
+	default:
 		return "", false, err
 	}
-	addr, err = listenAddrFromTOML(data)
 	if err != nil {
 		return "", true, err
 	}
@@ -118,10 +129,12 @@ func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
 // the flat spelling, matching applyGroupedConfigAliases), else the flat
 // listen_addr, else the built-in default. Nothing else in the file is
 // relevant — an unreadable value anywhere else is not this read's business,
-// and none of the loader's warnings apply to a file we do not own.
+// and none of the loader's warnings apply to a file we do not own. The BOM
+// strip matches the production loader — go-toml/v2 does not skip it on its
+// own, and a BOM-prefixed file must parse the same here as it does there.
 func listenAddrFromTOML(data []byte) (string, error) {
 	var shape map[string]any
-	if err := toml.Unmarshal(data, &shape); err != nil {
+	if err := toml.Unmarshal(stripUTF8BOM(data), &shape); err != nil {
 		return "", err
 	}
 	if table, ok := shape["network"].(map[string]any); ok {
@@ -133,6 +146,34 @@ func listenAddrFromTOML(data []byte) (string, error) {
 		return listenAddrLeaf(v, "listen_addr")
 	}
 	return DefaultListenAddr(), nil
+}
+
+// listenAddrFromJSON resolves the effective listen_addr a legacy config.json
+// would give a daemon: the flat listen_addr key — the grouped [network]
+// spelling is TOML-only — else the built-in default. A zero-byte file is the
+// empty-stub shape the loader answers with all defaults. An explicit null is
+// the JSON no-op: production unmarshals onto a defaults-filled Config, where
+// null leaves the prefilled default standing.
+func listenAddrFromJSON(data []byte) (string, error) {
+	if len(bytes.TrimSpace(data)) == 0 {
+		return DefaultListenAddr(), nil
+	}
+	var shape map[string]json.RawMessage
+	if err := json.Unmarshal(data, &shape); err != nil {
+		return "", err
+	}
+	raw, present := shape["listen_addr"]
+	if !present {
+		return DefaultListenAddr(), nil
+	}
+	var s *string
+	if err := json.Unmarshal(raw, &s); err != nil {
+		return "", fmt.Errorf("listen_addr is not a string")
+	}
+	if s == nil {
+		return DefaultListenAddr(), nil
+	}
+	return *s, nil
 }
 
 func listenAddrLeaf(v any, key string) (string, error) {

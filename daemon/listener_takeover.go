@@ -647,9 +647,17 @@ func normalizeHomePath(p string) string {
 // latched refusal first (it never un-refuses), then the default home's claim
 // when the gate polices this address at all. req is the resolved request.
 // Caller holds wl.mu.
+//
+// The latch matches by ENDPOINT, not spelling: a latched "127.0.0.1:8443" must
+// still refuse a later "127.0.0.1:08443" or "0.0.0.0:8443" — equivalent
+// endpoints the takeover is the same for — so each stored refusal is tested
+// against the resolved request with boundListenerBlocks rather than looked up
+// by its original configuration string.
 func (wl *webListeners) foreignGateRefusalLocked(addr string, req *net.TCPAddr) string {
-	if refusal, latched := wl.foreignRefusals[addr]; latched {
-		return refusal
+	for latchedAddr, refusal := range wl.foreignRefusals {
+		if boundListenerBlocks(latchedAddr, req) {
+			return refusal
+		}
 	}
 	if !takeoverGateApplies(req) {
 		return ""

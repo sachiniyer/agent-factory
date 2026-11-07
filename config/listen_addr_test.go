@@ -90,6 +90,57 @@ func TestListenAddrInHome(t *testing.T) {
 		require.False(t, found)
 		require.NoError(t, os.Remove(path))
 	})
+
+	t.Run("a UTF-8 BOM parses like the production loader", func(t *testing.T) {
+		require.NoError(t, os.WriteFile(path, []byte(
+			"\xef\xbb\xbf[network]\nlisten_addr = \"\"\n"), 0600))
+		addr, found, err := ListenAddrInHome(home)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, "", addr, "a BOM must not turn a disabled listener into a parse error")
+		require.NoError(t, os.Remove(path))
+	})
+
+	t.Run("a legacy config.json answers when TOML is absent", func(t *testing.T) {
+		jsonPath := filepath.Join(home, ConfigFileName)
+		require.NoError(t, os.WriteFile(jsonPath, []byte(
+			`{"listen_addr": "127.0.0.1:9443"}`), 0600))
+		addr, found, err := ListenAddrInHome(home)
+		require.NoError(t, err)
+		require.True(t, found)
+		require.Equal(t, "127.0.0.1:9443", addr)
+
+		t.Run("an empty JSON listen_addr disables the listener", func(t *testing.T) {
+			require.NoError(t, os.WriteFile(jsonPath, []byte(`{"listen_addr": ""}`), 0600))
+			addr, found, err := ListenAddrInHome(home)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "", addr)
+		})
+		t.Run("a JSON null keeps the prefilled default", func(t *testing.T) {
+			require.NoError(t, os.WriteFile(jsonPath, []byte(`{"listen_addr": null}`), 0600))
+			addr, found, err := ListenAddrInHome(home)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, DefaultListenAddr(), addr)
+		})
+		t.Run("config.toml wins over config.json", func(t *testing.T) {
+			require.NoError(t, os.WriteFile(path, []byte(
+				"[network]\nlisten_addr = \"127.0.0.1:7777\"\n"), 0600))
+			addr, found, err := ListenAddrInHome(home)
+			require.NoError(t, err)
+			require.True(t, found)
+			require.Equal(t, "127.0.0.1:7777", addr, "TOML is authoritative when both exist")
+			require.NoError(t, os.Remove(path))
+		})
+		t.Run("a malformed config.json is found-but-errored", func(t *testing.T) {
+			require.NoError(t, os.WriteFile(jsonPath, []byte(`{"listen_addr":`), 0600))
+			_, found, err := ListenAddrInHome(home)
+			require.Error(t, err)
+			require.True(t, found)
+			require.NoError(t, os.Remove(jsonPath))
+		})
+	})
 }
 
 // A FIFO standing in for config.toml must not block the read — the daemon's

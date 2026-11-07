@@ -644,6 +644,28 @@ func TestRefuseWebForeignLatch(t *testing.T) {
 	require.Equal(t, reason, snap().TCPRefusalReason)
 }
 
+// A refusal latches the ENDPOINT, not its configuration spelling — a later
+// reconcile for an equivalent spelling of the refused address must still be
+// refused, or a "127.0.0.1:08443" would walk the port right past the latch.
+func TestLatchedRefusalMatchesByEndpointNotSpelling(t *testing.T) {
+	wl, _, _ := takeoverFixture(t)
+	const latched = "127.0.0.1:41234"
+	const reason = "refusing to bind " + latched + ": held by another AF home"
+	wl.mu.Lock()
+	wl.foreignRefusals = map[string]string{latched: reason}
+
+	require.Equal(t, reason, wl.foreignGateRefusalLocked(
+		"127.0.0.1:041234", reqFor(t, "127.0.0.1:041234")),
+		"a leading-zero port is the same endpoint")
+	require.Equal(t, reason, wl.foreignGateRefusalLocked(
+		"0.0.0.0:41234", reqFor(t, "0.0.0.0:41234")),
+		"a wildcard spelling swallowing the refused port is still refused")
+	require.Empty(t, wl.foreignGateRefusalLocked(
+		"127.0.0.1:41235", reqFor(t, "127.0.0.1:41235")),
+		"a genuinely different endpoint is not shadowed by the latch")
+	wl.mu.Unlock()
+}
+
 func TestLatchedRefusalHoldsOnRebind(t *testing.T) {
 	wl, _, _ := takeoverFixture(t)
 
