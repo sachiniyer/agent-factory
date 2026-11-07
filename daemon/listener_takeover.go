@@ -185,7 +185,7 @@ func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
 		// the failed bind and our lookup. Unidentified is not foreign.
 		return holderUnproven, ""
 	}
-	pids, fdTableUnreadable := pidsHoldingSockets(inodes)
+	pids := pidsHoldingSockets(inodes)
 	if len(pids) == 0 {
 		return holderUnproven, ""
 	}
@@ -199,7 +199,7 @@ func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
 	// resolve to foreign OR to safe, an own-home holder is the recovery the
 	// retry protects, and a plain squatter is what the retry exists for.
 	var foreignHome string
-	foreign, unproven, own, nonDaemon := false, fdTableUnreadable || !complete, false, false
+	foreign, unproven, own, nonDaemon := false, !complete, false, false
 	for pid := range pids {
 		home, isDaemon, provable := holderDaemonHome(pid)
 		switch {
@@ -351,15 +351,15 @@ func procHexIP(s string) (net.IP, bool) {
 }
 
 // pidsHoldingSockets scans procRoot/<pid>/fd for socket fds pointing at the
-// contested inodes. An fd DIRECTORY that cannot be read is a holder we cannot
-// vet, so unreadable=true tells the caller at least one process went
-// uninspected — which is why "no matching pid" still resolves unproven, never
-// "safely held by a non-daemon".
-func pidsHoldingSockets(inodes map[uint64]bool) (pids map[int]bool, unreadable bool) {
-	pids = map[int]bool{}
+// contested inodes. Pids whose fd table cannot be read are skipped: they could
+// be holding the socket, but so could anyone — an unidentified holder is
+// already unproven through the empty result, and punishing a found holder for
+// an unrelated unreadable table would misclassify the common case.
+func pidsHoldingSockets(inodes map[uint64]bool) map[int]bool {
+	pids := map[int]bool{}
 	entries, err := os.ReadDir(procRoot)
 	if err != nil {
-		return pids, true
+		return pids
 	}
 	for _, e := range entries {
 		pid, err := strconv.Atoi(e.Name())
@@ -369,7 +369,6 @@ func pidsHoldingSockets(inodes map[uint64]bool) (pids map[int]bool, unreadable b
 		fdDir := filepath.Join(procRoot, e.Name(), "fd")
 		fds, err := os.ReadDir(fdDir)
 		if err != nil {
-			unreadable = true
 			continue
 		}
 		for _, fd := range fds {
@@ -383,7 +382,7 @@ func pidsHoldingSockets(inodes map[uint64]bool) (pids map[int]bool, unreadable b
 			}
 		}
 	}
-	return pids, unreadable
+	return pids
 }
 
 // socketFDInode parses an /proc/<pid>/fd link target of the form
