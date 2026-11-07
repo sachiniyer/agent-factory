@@ -164,14 +164,11 @@ func TestKillSession_UnrebuildableHandleRetiresAfterOneFollowUp(t *testing.T) {
 		"a cause that cannot heal must not promise an endless retry: %v", err)
 	require.NotNil(t, recordFor(t, repoID, "unrebuildable"),
 		"the record is kept — nothing is orphaned")
-	manager.mu.Lock()
-	_, booked := manager.killRetries[daemonInstanceKey(repoID, "unrebuildable")]
-	manager.mu.Unlock()
-	assert.False(t, booked,
-		"an explicit kill never books killRetries — the one follow-up comes from the next poll")
 
 	// The one follow-up: the poll attempts the teardown once, the unusable
-	// cause retires the retry, and the record is still kept.
+	// cause retires the retry, and the record is still kept. Failures()==1 is
+	// what proves the count: KillSession's defer clears any entry it made, so
+	// a booked failure here was booked BY the poll's attempt and nothing else.
 	manager.RefreshStatuses()
 	manager.mu.Lock()
 	retry := manager.killRetries[daemonInstanceKey(repoID, "unrebuildable")]

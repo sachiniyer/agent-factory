@@ -407,7 +407,16 @@ func (i *Instance) confirmStoppedBeforeAdopt() error {
 			return fmt.Errorf("session %q: its recorded cleanup handle could not be rebuilt, so af cannot prove its preserved workspace's state (%v); not starting a new agent-server beside an unproven one. %s",
 				title, err, cleanupRecordManualWayOut(id, title, ws, handle, false))
 		}
-		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or kill the session", i.Title, err)
+		// Kill on this shape runs the real teardown, which reaps the preserved
+		// workspace — the session's unpushed work — so the warning precedes the
+		// verb, same as every other refusal on this path (#6791).
+		i.mu.RLock()
+		wsDir := ""
+		if i.archivedWorkspace != nil {
+			wsDir = i.archivedWorkspace.Dir
+		}
+		i.mu.RUnlock()
+		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or — since its workspace at %s holds the session's unpushed work (copy it or push its branch on the host first if you want to keep it) — `af sessions kill %q` removes the row", i.Title, err, wsDir, i.Title)
 	}
 	i.mu.Lock()
 	i.runtimeCleanupStateUnknown = false

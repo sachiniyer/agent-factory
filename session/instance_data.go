@@ -702,7 +702,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 					// instead of laundering a missing handle into no-op success. The
 					// refusal names the record's own way out — repair the persisted
 					// handle, or remove what it names and drop the row by hand (#6791).
-					instance.runtimeTeardown = unavailableRuntimeCleanup(data, cleanupErr)
+					instance.runtimeTeardown = unavailableRuntimeCleanup(instance, data, cleanupErr)
 					// The inert backend carries no cleanup identity, so the next
 					// checkpoint would otherwise publish no RuntimeCleanup AND clear the
 					// unknown flag (an ordinary row reloads with both gone). A subsequent

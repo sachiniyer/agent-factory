@@ -502,13 +502,39 @@ func restoreRuntimeCleanupWithAccount(title, backendType string, data *RuntimeCl
 // same answer (#2737). And because #6791 requires every refusal on this path to
 // name a way out that actually works, the message ends with the manual steps —
 // repair the persisted handle, or remove what it names and drop the row.
-func unavailableRuntimeCleanup(data InstanceData, cause error) func() error {
+//
+// The SAME closure answers every caller that reaches this teardown, not just
+// kill: restore and recover reach it through reapRemoteRuntimeForReplacement,
+// archive through as.Kill. So the way out cannot be chosen by which path
+// happened to invoke it — it is chosen by the row's live state instead: the
+// kill outcome is named only once the tombstone is durable (MarkUserKilled
+// runs before Instance.Kill reaches teardown), and a row whose kill is not
+// recorded gets the outcome that is true for it (#6791 re-review).
+func unavailableRuntimeCleanup(instance *Instance, data InstanceData, cause error) func() error {
 	id, title, backendType := data.ID, data.Title, data.BackendType
-	ws, handle := data.ArchivedWorkspace, data.RuntimeCleanup
 	return func() error {
-		return &unusableCleanupRefusal{msg: fmt.Sprintf(
-			"session %q is tombstoned for backend %q, but its durable cleanup handle could not be rebuilt (%v); retaining the record rather than claiming its off-box workspace was reaped. %s",
-			title, backendType, cause, cleanupRecordManualWayOut(id, title, ws, handle, true))}
+		// Live state, not the load-time snapshot: the tombstone may have been
+		// committed after load (an explicit kill persists it before teardown),
+		// and the workspace/handle may have been updated since.
+		instance.mu.RLock()
+		committed := instance.userKilled
+		ws, handle := instance.archivedWorkspace, instance.failedRuntimeCleanup
+		instance.mu.RUnlock()
+		if handle == nil {
+			handle = data.RuntimeCleanup
+		}
+		if ws == nil {
+			ws = data.ArchivedWorkspace
+		}
+		var lead string
+		if committed {
+			lead = fmt.Sprintf("session %q is tombstoned for backend %q, but its durable cleanup handle could not be rebuilt (%v); retaining the record rather than claiming its off-box workspace was reaped. ",
+				title, backendType, cause)
+		} else {
+			lead = fmt.Sprintf("session %q's recorded cleanup handle for backend %q could not be rebuilt (%v), so af cannot prove its runtime's state; not proceeding on a guess. ",
+				title, backendType, cause)
+		}
+		return &unusableCleanupRefusal{msg: lead + cleanupRecordManualWayOut(id, title, ws, handle, committed)}
 	}
 }
 
@@ -528,11 +554,15 @@ func unavailableRuntimeCleanup(data InstanceData, cause error) func() error {
 // committedKill selects the post-restart outcome. The kill path shows this
 // after the tombstone is already durable, so a repaired row's kill finishes on
 // the next poll — restore is impossible for it, and EVERY ending removes the
-// resource, which is why its keep-work warning leads. The restore path can
-// keep the work through adoption, so its warning sits inside the destructive
-// branches instead — and it names `remote_pid` as what a repair needs, because
-// a handle without one still cannot prove the recorded server stopped and
-// restore refuses again (#6791 review items 2-4).
+// resource, which is why its keep-work warning leads. A preserved row still
+// holding its workspace can keep the work through adoption, so its warning
+// sits inside the destructive branches instead — and it names `remote_pid` as
+// what a repair needs, because a handle without one still cannot prove the
+// recorded server stopped and restore refuses again. A plain row (nothing
+// preserved to adopt) gets the outcome that is true for it: once the handle
+// rebuilds, the teardown af just refused runs and whichever operation it
+// blocked works — remote_pid is not its completeness criterion (#6791 review
+// items 2-4, re-review item 1).
 func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, handle *RuntimeCleanupData, committedKill bool) string {
 	home := "the AF home (~/.agent-factory, or $AGENT_FACTORY_HOME when set)"
 	if dir, err := config.GetConfigDir(); err == nil {
@@ -548,21 +578,28 @@ func cleanupRecordManualWayOut(id, title string, ws *ArchivedWorkspaceData, hand
 		keepWork = fmt.Sprintf("it holds the session's unpushed work — copy the directory or push its branch on %s first if you want to keep it", host)
 	}
 	preamble, edit, outcome := "", "", ""
-	if committedKill {
+	switch {
+	case committedKill:
 		preamble = fmt.Sprintf(" Every ending below removes %s: %s.", resource, keepWork)
 		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry, or remove %s yourself and delete that row", resource)
 		outcome = fmt.Sprintf("the kill you ran is already recorded, so with a repaired handle it finishes on the daemon's next poll — or run `af sessions kill %q` to retry it now; with the row deleted there is nothing left to reap", title)
-	} else {
+	case ws != nil:
 		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry — restore can use it only if it carries enough for af to prove the recorded server stopped, meaning the `remote_pid` of the agent-server af left running — or, to give the session up (%s), remove %s yourself and delete that row", keepWork, resource)
-		outcome = fmt.Sprintf("retry `af sessions restore %q`. If af still cannot prove the server stopped it refuses the same way; removal is then — %s — `af sessions kill %q`, which reaps %s", title, keepWork, title, resource)
+		outcome = fmt.Sprintf("retry `af sessions restore %q`. If af still cannot prove the server stopped it refuses again; removal is then — %s — `af sessions kill %q`, which reaps %s", title, keepWork, title, resource)
+	default:
+		edit = fmt.Sprintf("either repair this session's `runtime_cleanup` entry so the handle is complete again, or — %s — remove %s yourself and delete that row", keepWork, resource)
+		outcome = fmt.Sprintf("the teardown af just refused can then run, so retry the operation that hit this refusal (`af sessions restore %q` or `af sessions archive %q`); or, to give the session up — %s — `af sessions kill %q` removes it, reaping %s", title, title, keepWork, title, resource)
 	}
+	// The glob stays outside the quotes so it still expands; only the home
+	// prefix is quoted, so a path containing a space still works.
+	glob := strconv.Quote(home) + "/instances/*/instances.json"
 	return fmt.Sprintf("To move on, edit the row by hand — no af verb covers a handle that cannot be rebuilt.%s\n"+
 		"  1. Quit every af TUI and pause anything else that runs `af` — each one restarts the daemon.\n"+
 		"  2. Send SIGTERM to the pid `af daemon status` names and wait for it to exit; the exit flushes this row over the file, so nothing af-related may run while you edit.\n"+
-		"  3. In the `instances/*/instances.json` file under %s that contains the row whose id is %q — `grep -l %q %s/instances/*/instances.json` names it — %s.\n"+
+		"  3. In the `instances/*/instances.json` file under %s that contains the row whose id is %q — `grep -l %q %s` names it — %s.\n"+
 		"  4. Right before saving, run `af daemon status` again — if a daemon is back, repeat from step 1 or its exit overwrites your edit.\n"+
 		"  5. Start af; %s",
-		preamble, home, id, id, home, edit, outcome)
+		preamble, home, id, id, glob, edit, outcome)
 }
 
 // cleanupResourceDescription names the off-box resource a row's cleanup

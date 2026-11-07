@@ -219,6 +219,71 @@ func TestFailClosedRestoreRefusalNamesAWayOut(t *testing.T) {
 		"the unpushed-work warning must precede the removal instruction: %s", msg)
 }
 
+// TestUnrebuildableHandleRefusalOnNonKilledRow pins the re-review's MED item:
+// the SAME teardown closure answers restore/recover/archive callers, not just
+// kill. On a row whose kill was never recorded, the refusal must describe what
+// is true of THAT row — the teardown af just refused can run once the handle is
+// repaired — not the tombstoned outcome ("the kill you ran"), which would steer
+// someone who wanted the session back into destroying it.
+// Fails on the previous head: it hardcoded the kill outcome for every caller.
+func TestUnrebuildableHandleRefusalOnNonKilledRow(t *testing.T) {
+	// A non-killed Lost legacy docker row whose handle cannot be rebuilt (no
+	// engine id): the same fixture the reviewer probed — restore reaches the
+	// closure through reapRemoteRuntimeForReplacement.
+	row := InstanceData{
+		ID:          "wayout-lost-id",
+		Title:       "wayout-lost",
+		Path:        "/repo",
+		BackendType: "docker",
+		Liveness:    LiveLost,
+		UserKilled:  false,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: "sha256:deadbeef",
+		}},
+	}
+	restored, err := FromInstanceData(row.ForStorage())
+	require.NoError(t, err)
+	require.False(t, restored.UserKilled(), "premise: the row's kill is NOT recorded")
+
+	_, err = restored.provisionForRestore()
+	require.Error(t, err, "an unrebuildable handle must refuse the re-provision's reap")
+	msg := err.Error()
+
+	// The row is not tombstoned: neither the leading claim nor the kill outcome
+	// may assert otherwise.
+	assert.NotContains(t, msg, "is tombstoned",
+		"the row's kill was never recorded — the refusal must not claim a tombstone: %s", msg)
+	assert.NotContains(t, msg, "kill you ran",
+		"no kill was recorded — the outcome must not address one: %s", msg)
+	assert.NotContains(t, msg, "already recorded",
+		"no kill was recorded — the outcome must not address one: %s", msg)
+	// The outcome names what repair actually buys THIS row: the refused
+	// teardown runs, so the operation the user ran works — and the removal
+	// route is still named for giving the session up.
+	assert.Contains(t, msg, "af sessions restore",
+		"a non-killed row CAN be restored once repaired; the refusal must say so: %s", msg)
+	assert.Contains(t, msg, "af sessions kill",
+		"the give-up route stays named — with its warning: %s", msg)
+	for _, want := range []string{
+		"Quit every af TUI",
+		"repeat from step 1",
+		"instances/*/instances.json",
+		"wayout-lost-id",
+		"sha256:deadbeef",
+	} {
+		assert.Contains(t, msg, want, "the manual way out must still be complete: %s", msg)
+	}
+	assert.NotContains(t, msg, "<repoID>")
+
+	// And once the row's kill IS recorded — the same refusal — the kill
+	// outcome becomes the true one.
+	restored.MarkUserKilled()
+	killErr := restored.runtimeTeardown()
+	require.Error(t, killErr)
+	assert.Contains(t, killErr.Error(), "kill you ran",
+		"with the tombstone durable, the poll-finishes-the-kill outcome is the true one: %v", killErr)
+}
+
 // TestBoundUnconfirmedRestoreRefusalKeepsKillAdvice guards the boundary of the
 // fix: a row whose flag was armed by an unconfirmed adoption stop — provisioner
 // bound, transport recorded — keeps the "kill the session" advice, because for
@@ -234,8 +299,12 @@ func TestBoundUnconfirmedRestoreRefusalKeepsKillAdvice(t *testing.T) {
 	_, err := row.provisionForRestore()
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "not confirmed stopped")
-	assert.Contains(t, err.Error(), "or kill the session",
+	assert.Contains(t, err.Error(), "af sessions kill",
 		"a bound row's kill runs the real teardown, so the advice stays: %s", err.Error())
+	// But kill reaps the preserved workspace — the same unpushed-work warning
+	// every refusal on this path owes must precede it (re-review item 2).
+	assert.Contains(t, err.Error(), "unpushed work",
+		"the bound row's kill reaps the workspace, so it warns first: %s", err.Error())
 }
 
 // TestFailedRuntimeCleanupClearsOnBind is property 2: once a new runtime is
