@@ -511,6 +511,130 @@ func TestGitTreeCmd_DisablesLazyFetchAndBoundsTheProbe(t *testing.T) {
 
 var errProbeStub = errors.New("probe stub")
 
+// ---------------------------------------------------------------------------
+// Review follow-ups, round 2 (PR #6923) — three more edges in the same walk:
+// PATH locations unrunnable only in THIS checkout still count as launch
+// candidates, an unknown probe result never downgrades the PASS, and an
+// opaque wrapper's unproven launch dir retains the qualification.
+// ---------------------------------------------------------------------------
+
+// A PATH location whose file is committed but deleted in this checkout is
+// still where the session's lookup lands: `PATH=tools:basebin claude` with
+// tools/claude untracked and basebin/claude committed-then-removed resolves
+// tools/claude here but basebin/claude in the clean worktree. The candidate
+// list must carry locations the checkout cannot run so the warning names the
+// real launch answer.
+func TestCheckAgentPrograms_BaseOnlyFallback_NamesTheRescue(t *testing.T) {
+	repo := prefixedOverrideRepo(t) // tools/claude exists but is untracked
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "basebin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "basebin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "basebin/claude")
+	require.NoError(t, os.Remove(filepath.Join(repo, "basebin", "claude"))) // deleted locally, still committed
+
+	command := "PATH=tools:basebin claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"the checkout's selection is absent at launch — but the session resolves the committed file")
+	require.Contains(t, row.Detail, "falls back")
+	require.Contains(t, row.Detail, "basebin/claude",
+		"the warning must name the committed file the session actually runs — even though this checkout cannot run it")
+}
+
+// The same file EARLIER in PATH order shadows the selection entirely:
+// `PATH=basebin:tools claude` resolves tools/claude in this checkout because
+// the committed basebin/claude is deleted locally — but the worktree
+// contains it, so the session never reaches tools/claude at all.
+func TestCheckAgentPrograms_BaseOnlyShadow_WarnsNotPasses(t *testing.T) {
+	repo := prefixedOverrideRepo(t) // tools/claude exists but is untracked
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "basebin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "basebin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "basebin/claude")
+	require.NoError(t, os.Remove(filepath.Join(repo, "basebin", "claude"))) // deleted locally, still committed
+
+	command := "PATH=basebin:tools claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"the session resolves the committed file first — the checkout's selection never runs")
+	require.Contains(t, row.Detail, "basebin/claude")
+}
+
+// An UNKNOWN probe result is inconclusive, not absence: when the tree read
+// fails (a promised object that will not fetch, a corrupt tree) the check
+// fails closed — it reports the launch resolution as unverified rather than
+// asserting the file is absent, claiming a fallback will run, or letting the
+// override pass unqualified.
+func TestCheckAgentPrograms_UnknownProbe_ReportsUnverified(t *testing.T) {
+	prefixedOverrideRepo(t) // tools/claude exists but is untracked
+	fallback := testguard.CanonicalTempDir(t)
+	writeExecutable(t, fallback, "claude", "#!/bin/sh\nexit 0\n")
+	orig := gitTreeRead
+	gitTreeRead = func(workspace string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return orig(workspace, args...) // the ref resolves; only the tree read fails
+		}
+		return nil, errProbeStub
+	}
+	defer func() { gitTreeRead = orig }()
+
+	command := "env PATH=tools:" + fallback + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"an unproven probe must not pass silently — the check fails closed and says it cannot verify")
+	require.Contains(t, row.Detail, "could not verify")
+	require.Contains(t, row.Detail, filepath.Join(fallback, "claude"),
+		"a known rescue is hedged as 'if it is absent', not asserted")
+	require.False(t, row.Problem)
+}
+
+// An opaque wrapper leaves the modeled launch dir UNPROVEN, not independent:
+// `tools/wrapper bin/claude` with a committed `exec "$@"` wrapper and an
+// untracked target resolved in the workspace fails in the clean worktree —
+// the qualification is retained, reported as unverified rather than asserted.
+func TestCheckAgentPrograms_OpaqueWrapperTarget_KeepsQualification(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "tools"), "wrapper", "#!/bin/sh\nexec \"$@\"\n")
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "tools/wrapper") // the wrapper itself is in the tree; bin/claude is not
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "tools/wrapper bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"an opaque wrapper's launch dir is unproven — the relative target's qualification must be retained")
+	require.Contains(t, row.Detail, "cannot prove",
+		"the resolution is unverified — the warning must say so rather than asserting it")
+	require.Contains(t, row.Detail, "absent at launch")
+}
+
 // stubUsableDockerBackend makes BackendUnusableReason's docker prerequisites
 // pass hermetically: a `docker` CLI on PATH, a local engine endpoint, and an
 // `origin` remote — the same side-effect-free facts a create would need.
