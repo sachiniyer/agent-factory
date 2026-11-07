@@ -163,7 +163,7 @@ func (cs *controlServer) streamHandler(w http.ResponseWriter, r *http.Request) {
 		binding = attentionClearingBinding{ptyTabBinding: binding, instance: instance, submit: &submitDetector{},
 			clear: func(setAt time.Time) { cs.manager.queueAttentionClear(instance, setAt) }}
 	}
-	servePTYStream(binding, sub, conn)
+	servePTYStream(ptyTracedBinding{ptyTabBinding: binding, who: r.RemoteAddr + " " + r.URL.RawQuery}, sub, conn)
 }
 
 // ptyTabBinding is how ONE connection addresses its tab for the whole of its
@@ -175,6 +175,30 @@ type ptyTabBinding interface {
 	subscribe(since session.Seq) (session.PTYSubscription, error)
 	input(b []byte) error
 	resize(rows, cols uint16) error
+}
+
+// ptyStreamTrace gates the #6964 stray-writer log line at this boundary: the
+// shared PTY is last-resize-wins, so one stray OpResize un-writes a concession —
+// and the authoritative echo a client sees names no author. With AF_PTY_TRACE
+// set, every client resize frame is logged with the connection's identity
+// (remote address + bind query), which is what tells the pane's own ?tab_id=
+// socket apart from a probe's ?tab= one. Unset in production: nothing logs.
+var ptyStreamTrace = os.Getenv("AF_PTY_TRACE") != ""
+
+// ptyTracedBinding wraps a connection's tab binding so each resize frame it
+// applies is logged with WHO wrote it — the socket-level half of naming the
+// stray writer. An echoed grid with no OpResize line here was adopted
+// broker-side, not written by a client.
+type ptyTracedBinding struct {
+	ptyTabBinding
+	who string
+}
+
+func (b ptyTracedBinding) resize(rows, cols uint16) error {
+	if ptyStreamTrace {
+		log.InfoLog.Printf("pty trace: OpResize %dx%d <- %s", rows, cols, b.who)
+	}
+	return b.ptyTabBinding.resize(rows, cols)
 }
 
 // idTabBinding addresses the tab by its STABLE id through the agent-server's

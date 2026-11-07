@@ -8776,6 +8776,25 @@ async function terminalGeometry(host: Locator, includeHost = false): Promise<Ter
   );
 }
 
+// #6964 stray-writer diagnostics: install the opt-in flag before the bundle's
+// first fit so every terminal appends its resize-machinery events to
+// window.__afTermTrace (see terminal.ts). A late OpResize then names its
+// producer — arm, delivery, decision, or connect — in the run log. The flag is
+// off in production; the trace stays inert.
+const TERM_DIAG_INIT = "window.__afTermDiag = true; window.__afTermTrace = [];";
+const dumpTermTrace = async (p: Page, label: string): Promise<void> => {
+  try {
+    const trace = await p.evaluate(
+      () => (window as unknown as { __afTermTrace?: unknown[] }).__afTermTrace ?? [],
+    );
+    if (trace.length > 0) {
+      console.log(`[6964-diag] ${label}: ${JSON.stringify(trace)}`);
+    }
+  } catch {
+    // The page/context is already gone — nothing to dump.
+  }
+};
+
 /** Proves the #2347 failure boundary and the user-visible repair against two real
  *  browser subscribers to one PTY. The tall peer deliberately owns a grid larger
  *  than all emitted output, collapsing the first client's scroll range to zero. */
@@ -8976,6 +8995,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
   const shellName = "peer-fit-2347";
 
   const firstCtx = await browser.newContext({ viewport: { width: 1280, height: 720 } });
+  await firstCtx.addInitScript(TERM_DIAG_INIT);
   let secondCtx: BrowserContext | null = null;
   let created = false;
   try {
@@ -9014,6 +9034,7 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
     await first.mouse.move(0, 0);
 
     secondCtx = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+    await secondCtx.addInitScript(TERM_DIAG_INIT);
     const second = await secondCtx.newPage();
     await openTokenless(second);
     await row(second, SESSION_GEOM).click();
@@ -9077,6 +9098,8 @@ test("#2347: activating a terminal repairs peer-owned geometry before scrolling"
       ).toHaveText(secondReadingLine);
     });
   } finally {
+    for (const p of firstCtx.pages()) await dumpTermTrace(p, "2347-first");
+    for (const p of secondCtx?.pages() ?? []) await dumpTermTrace(p, "2347-second");
     await secondCtx?.close();
     await firstCtx.close();
     if (created) {
@@ -9101,6 +9124,7 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
   af("sessions", "create", "--name", sessionName, "--program", "claude");
 
   const firstCtx = await browser.newContext({ viewport: { width: 375, height: 667 } });
+  await firstCtx.addInitScript(TERM_DIAG_INIT);
   let secondCtx: BrowserContext | null = null;
   try {
     const first = await firstCtx.newPage();
@@ -9155,6 +9179,7 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
     await first.mouse.move(0, 0);
 
     const peerContext = await browser.newContext({ viewport: { width: 375, height: 2000 } });
+    await peerContext.addInitScript(TERM_DIAG_INIT);
     secondCtx = peerContext;
     const openTallPeer = async (label: string): Promise<Page> => {
       const peer = await peerContext.newPage();
@@ -9246,6 +9271,8 @@ test("#2347: the mobile agent terminal also reclaims peer-owned geometry", REAL_
       true,
     );
   } finally {
+    for (const p of firstCtx.pages()) await dumpTermTrace(p, "2347m-first");
+    for (const p of secondCtx?.pages() ?? []) await dumpTermTrace(p, "2347m-peer");
     await secondCtx?.close();
     await firstCtx.close();
     try {

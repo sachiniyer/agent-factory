@@ -80,6 +80,41 @@ import {
   terminalFontSizeFor,
 } from "./terminal-font.js";
 
+// ── #6964 stray-writer trace (opt-in diagnostics) ─────────────────────────────
+// The shared PTY is last-resize-wins, so ONE stray OpResize — from any client's
+// fit machinery, or adopted broker-side — un-writes a concession, and the echo
+// it produces names no author. A page opts in by setting window.__afTermDiag
+// (the selftest installs it with addInitScript before the bundle's first fit);
+// every arm, delivery, decision and write of this terminal's resize machinery
+// then lands on window.__afTermTrace with a performance.now() stamp and the
+// stack-trimmed call site, so a late write names the code that produced it.
+// Production never sets the flag: diag() reads one property and returns.
+interface TermDiagEntry {
+  t: number;
+  id: number;
+  ev: string;
+  d?: unknown;
+  site: string;
+}
+interface TermDiagHost {
+  __afTermDiag?: boolean;
+  __afTermTrace?: TermDiagEntry[];
+}
+let termDiagSeq = 0;
+const TERM_DIAG_LIMIT = 4000;
+
+/** Trims an Error stack to the three frames under diag(): [0] is "Error",
+ *  [1] termDiagSite, [2] diag() itself — what follows is the event's call site,
+ *  which is what names the armer behind an arm or the signal behind a fit. */
+function termDiagSite(): string {
+  const stack = new Error().stack ?? "";
+  return stack
+    .split("\n")
+    .slice(3, 6)
+    .map((line) => line.trim().replace(/^at /, "").replace(/\s*\(.*$/, ""))
+    .join("<-");
+}
+
 /** The attach terminal's connection state, surfaced for a small status line. */
 export type TerminalStatus = "connecting" | "open" | "reconnecting" | "exited";
 
@@ -268,6 +303,7 @@ export class AttachTerminal {
   private midLineTimer: number | null = null;
   private readonly ro: ResizeObserver;
   private readonly io: IntersectionObserver;
+  private readonly diagId = ++termDiagSeq;
   // The app's one phone breakpoint — ui.ts, terminal-keybar.ts, and
   // appbarControls() hold the same query. It picks the halved default pitch
   // (#5492) at construction, and its "change" listener re-fits across it.
@@ -434,10 +470,12 @@ export class AttachTerminal {
   // Observer, ResizeObserver, the scheduled-fit pair) wake a page without
   // user intent and must not erase a concession another client just won.
   private noteActivation(): void {
+    this.diag("activate");
     this.parked = false;
     this.contestedEchoes.clear();
   }
   private readonly onWindowFocus = (): void => {
+    this.diag("sig-wfocus");
     this.noteActivation();
     this.scheduleVisibleFit();
   };
@@ -450,6 +488,7 @@ export class AttachTerminal {
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
+      this.diag("sig-vis");
       this.noteActivation();
       this.scheduleVisibleFit();
     } else {
@@ -459,6 +498,7 @@ export class AttachTerminal {
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
   private readonly onPhoneChange = (): void => {
+    this.diag("sig-phone");
     // A media-query change cannot evaluate without layout — the page is awake,
     // and the viewport change that triggered it is a real user resize.
     this.noteActivation();
@@ -468,6 +508,7 @@ export class AttachTerminal {
   // clients: reconcile before the wheel gesture arrives so xterm can consume that
   // first gesture rather than making the user scroll twice.
   private readonly onPointerEnter = (event: PointerEvent): void => {
+    this.diag("sig-enter", { trusted: event.isTrusted });
     if (event.isTrusted) {
       this.noteActivation();
     }
@@ -730,6 +771,7 @@ export class AttachTerminal {
     if (this.pendingViewport === null) {
       return;
     }
+    this.diag("sig-scroll", { src: source });
     const plan = terminalUserScrollPlan(source,
       this.visibleFitFrame !== null || this.visibleFitTimer !== null);
     if (plan.cancelScheduledVisibleFit) {
@@ -750,6 +792,7 @@ export class AttachTerminal {
     private readonly endpoint: StreamEndpoint,
     private readonly cb: TerminalCallbacks,
   ) {
+    this.diag("ctor", { cls: container.className });
     this.mouseOverride = terminalMouseOverride(navigator.platform);
     this.term = new Terminal({
       allowProposedApi: true,
@@ -786,7 +829,7 @@ export class AttachTerminal {
       // block a desktop Ctrl+V produces — and the delivery hold reads the
       // PASTE_START wrapper as a draft (web/src/delivery_hold.ts).
       (data) => (this.stopCoast(), this.term.paste(data)),
-      () => this.scheduleVisibleFit(), () => this.term.modes.applicationCursorKeysMode,
+      () => { this.diag("sig-keybar"); this.scheduleVisibleFit(); }, () => this.term.modes.applicationCursorKeysMode,
       // The keybar's A−/A+ keys step the device class's shared size (#5500) —
       // this terminal is one subscriber among the panes that pick it up.
       stepTerminalFontSize);
@@ -895,6 +938,7 @@ export class AttachTerminal {
     // An observer delivery cannot happen on a page that is not being painted —
     // both are rendering-step signals, so either one clears the parked flag.
     this.ro = new ResizeObserver(() => {
+      this.diag("sig-ro");
       this.parked = false;
       this.scheduleFit();
     });
@@ -910,6 +954,7 @@ export class AttachTerminal {
     // still cannot be read, never a hidden one — it is not a poller.
     this.io = new IntersectionObserver((entries) => {
       if (entries.some((entry) => entry.target === container && entry.isIntersecting)) {
+        this.diag("sig-io");
         this.parked = false;
         this.scheduleVisibleFit();
       }
@@ -1433,6 +1478,7 @@ export class AttachTerminal {
   /** Gives the terminal the keyboard (focuses xterm's helper textarea) so typed
    *  keys reach the agent — the attach half of the #1693 nav/attach model. */
   focus(): void {
+    this.diag("sig-focus");
     this.fitVisibleHost();
     this.term.focus();
   }
@@ -1441,6 +1487,7 @@ export class AttachTerminal {
    *  Coalesced onto the next painted frame so CSS has settled; the measurable-host
    *  gate in fitVisibleHost keeps hidden or zero-sized panes inert. */
   refit(): void {
+    this.diag("sig-refit");
     this.scheduleVisibleFit();
   }
 
@@ -1463,6 +1510,7 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("connect");
     this.cb.onStatus(this.everOpened ? "reconnecting" : "connecting");
     // Reconnects replay the gap from our cursor; the first connect omits ?since so
     // the broker starts at the live tail and sends a one-shot screen repaint. The
@@ -1492,6 +1540,7 @@ export class AttachTerminal {
       this.retry = 0;
       this.everOpened = true;
       this.exited = false;
+      this.diag("open");
       this.cb.onStatus("open");
       // Push our current size on (re)connect so a server that came up after us, or
       // a resize we did while disconnected, is reflected. The echo reconciles it.
@@ -1650,6 +1699,7 @@ export class AttachTerminal {
     if (this.term.options.fontSize === size) {
       return;
     }
+    this.diag("sig-font", { size });
     this.term.options.fontSize = size;
     this.scheduleVisibleFit();
   }
@@ -1682,6 +1732,7 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-pair", { attempts: this.visibleFitAttempts });
     if (this.visibleFitFrame !== null) {
       window.cancelAnimationFrame(this.visibleFitFrame);
     }
@@ -1711,6 +1762,7 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
+    this.diag("arm-wake");
     if (this.visibleFitAttempts <= 0) {
       this.visibleFitAttempts = VISIBLE_FIT_MAX_ATTEMPTS;
     }
@@ -1740,7 +1792,9 @@ export class AttachTerminal {
     if (this.stopped) {
       return;
     }
-    if (this.fitVisibleHost() || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
+    const settled = this.fitVisibleHost();
+    this.diag("fire", { ch: deliveredByFrame ? "raf" : "timer", ok: settled });
+    if (settled || --this.visibleFitAttempts <= 0 || this.container.isConnected === false) {
       // A frame still armed is the wake probe a withheld write queued inside
       // this fit — its delivery retries a transient bail through the delivery
       // pair like any scheduled fit, so the budget it runs on is preserved
@@ -1757,6 +1811,7 @@ export class AttachTerminal {
    * alive lets it run after the input fit and rebase the restore onto the new user
    * revision, which makes the first gesture appear inert. */
   private cancelVisibleFitFrame(): void {
+    this.diag("cancel");
     this.visibleFitAttempts = 0;
     if (this.visibleFitTimer !== null) {
       window.clearTimeout(this.visibleFitTimer);
@@ -1786,6 +1841,7 @@ export class AttachTerminal {
       return true;
     }
     const host = { width: this.container.clientWidth, height: this.container.clientHeight };
+    this.diag("fit", { w: host.width, h: host.height });
     if (host.width <= 0 || host.height <= 0) {
       return true;
     }
@@ -1832,6 +1888,7 @@ export class AttachTerminal {
     const scheduledUserScroll = this.userScrollRevision;
     this.viewportRestoreFrame = window.requestAnimationFrame(() => {
       this.viewportRestoreFrame = null;
+      this.diag("vp-fire", { r: rows, c: cols });
       if (this.stopped || this.term.rows !== rows || this.term.cols !== cols) {
         return;
       }
@@ -1876,11 +1933,13 @@ export class AttachTerminal {
   }
 
   private scheduleFit(): void {
+    this.diag("arm-ro");
     if (this.resizeTimer !== null) {
       window.clearTimeout(this.resizeTimer);
     }
     this.resizeTimer = window.setTimeout(() => {
       this.resizeTimer = null;
+      this.diag("fire-ro");
       if (this.stopped) {
         return;
       }
@@ -1925,24 +1984,29 @@ export class AttachTerminal {
     // deduped flush would lose to an intervening echo credit (the field note).
     if (this.parked === null) {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "unclassified" });
       return;
     }
     if (this.parked ||
         (typeof document !== "undefined" && document.visibilityState !== "visible")) {
       this.owedForceResize ||= force;
+      this.diag("send", { r: rows, c: cols, f: force, out: "withheld" });
       this.retryOwedResize(rows, cols);
       return;
     }
     force ||= this.owedForceResize;
     if (!force && rows === this.lastRows && cols === this.lastCols) {
+      this.diag("send", { r: rows, c: cols, f: force, out: "dedupe" });
       return;
     }
     if (this.send(encode(resizeFrame(rows, cols)))) {
       this.lastRows = rows;
       this.lastCols = cols;
       this.owedForceResize = false;
+      this.diag("send", { r: rows, c: cols, f: force, out: "wire" });
       return;
     }
+    this.diag("send", { r: rows, c: cols, f: force, out: "dropped" });
     // The socket could not carry the frame. It stays owed — lastSent is
     // deliberately NOT touched — and the connect path force-sends the current
     // size on open: socket-open is the only channel that can change this
@@ -1966,6 +2030,7 @@ export class AttachTerminal {
    *  as an OpResize (which would ping-pong). Records it as our last-known size so a
    *  later identical local fit doesn't re-send. */
   private applyEchoedSize(rows: number, cols: number): void {
+    this.diag("echo", { r: rows, c: cols });
     this.lastRows = rows;
     this.lastCols = cols;
     // The subscribe admission is spent by the first DELIVERED echo — the
@@ -1994,6 +2059,7 @@ export class AttachTerminal {
           }
         }
         this.pendingViewport = { marker, line: buffer.viewportY, atBottom };
+        this.diag("vp-cap", { atBottom });
       }
       this.cancelViewportRestoreFrame();
       try {
@@ -2024,6 +2090,7 @@ export class AttachTerminal {
       // meant to take (#6635).
       if (this.container.clientWidth > 0 && this.container.clientHeight > 0) {
         if (!admitted) {
+          this.diag("echo-admit", { r: rows, c: cols });
           this.reassertHostFit();
         } else {
           const now = Date.now();
@@ -2036,8 +2103,10 @@ export class AttachTerminal {
               }
             }
             this.contestedEchoes.set(key, now);
+            this.diag("echo-contest", { key, dt: last === undefined ? -1 : Math.round(now - last) });
             this.reassertHostFit();
           } else {
+            this.diag("echo-yield", { key, dt: Math.round(now - last) });
             // The pane yielded to an insistent writer: whatever is still
             // armed — the deferred wire half of a forfeited reclaim, a parked
             // page's wake probe — was queued to re-assert the grid just
@@ -2048,6 +2117,8 @@ export class AttachTerminal {
             this.owedForceResize = false;
           }
         }
+      } else {
+        this.diag("echo-hidden", { r: rows, c: cols });
       }
     }
   }
@@ -2075,6 +2146,7 @@ export class AttachTerminal {
    *  owed (a starved twin marks the page parked and the wake probe alone
    *  owns the flush — never a timer poll). */
   private reassertHostFit(): void {
+    this.diag("reassert", { parked: this.parked });
     if (this.parked === false) {
       this.parked = null;
     }
@@ -2087,6 +2159,21 @@ export class AttachTerminal {
       // page and carries the withheld grid out.
       this.scheduleVisibleFit();
     }
+  }
+
+  /** Appends one #6964 trace entry when the page opted in — see the module
+   *  header above. Every arm, delivery, decision and write of the resize
+   *  machinery funnels here so a late OpResize names its producer. */
+  private diag(ev: string, d?: unknown): void {
+    const w = (globalThis as { window?: TermDiagHost }).window;
+    if (w === undefined || w.__afTermDiag !== true) {
+      return;
+    }
+    const trace = w.__afTermTrace ?? (w.__afTermTrace = []);
+    if (trace.length >= TERM_DIAG_LIMIT) {
+      return;
+    }
+    trace.push({ t: holdClockMs(), id: this.diagId, ev, d, site: termDiagSite() });
   }
 
   /** Writes a frame if the socket can carry one right now. Returns whether it

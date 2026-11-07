@@ -318,7 +318,7 @@ LOG="\$DIR/agent-server.log"
 ARGS="agent-server --listen 127.0.0.1:0 --repo \$DIR/workspace --title \$TITLE"
 [ -n "\$PROGRAM" ] && ARGS="\$ARGS --program \$PROGRAM"
 [ -n "\$PROGRAM_RESOLVED" ] && ARGS="\$ARGS \$PROGRAM_RESOLVED"
-AGENT_FACTORY_HOME="\$DIR/home" TERM=xterm nohup "\$AF_BIN" \$ARGS >"\$BANNER" 2>"\$LOG" &
+AGENT_FACTORY_HOME="\$DIR/home" AF_PTY_TRACE=1 TERM=xterm nohup "\$AF_BIN" \$ARGS >"\$BANNER" 2>"\$LOG" &
 echo \$! > "\$DIR/pid"
 i=0
 while [ \$i -lt 200 ]; do
@@ -370,7 +370,11 @@ chmod +x "/usr/local/bin/coder-delete.sh"
 # no API can mint (see the URL-less web tab below); the restart must reuse this exact
 # readiness poll rather than a second, drifting copy of it.
 start_daemon() {
-    "$BIN" --daemon >>/work/daemon.log 2>&1 &
+    # AF_PTY_TRACE arms the #6964 stray-writer logs at the daemon's WS boundary
+    # and inside each agent-server's PTY broker (the env reaches agent-servers
+    # through the launch hook). Throwaway harness only — the var is unset in
+    # production, where none of it logs.
+    AF_PTY_TRACE=1 "$BIN" --daemon >>/work/daemon.log 2>&1 &
     DAEMON_PID=$!
 }
 
@@ -463,6 +467,12 @@ cleanup() {
         if [ -d "$WEB_RESULTS" ]; then
             cp /work/daemon.log "$WEB_RESULTS/daemon-stdout.log" 2>/dev/null || true
             cp "$HOME_DIR/agent-factory.log" "$WEB_RESULTS/agent-factory.log" 2>/dev/null || true
+            # The PTY broker runs INSIDE each agent-server, so the #6964 broker
+            # trace lives in their logs, not the daemon's — ship them too.
+            for f in "$HOOK_STATE"/*/agent-server.log; do
+                [ -f "$f" ] || continue
+                cp "$f" "$WEB_RESULTS/agent-server-$(basename "$(dirname "$f")").log" 2>/dev/null || true
+            done
         fi
     fi
     # Hand the rescued artifacts back to whoever owns the source mount. This
