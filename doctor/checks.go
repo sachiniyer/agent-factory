@@ -209,6 +209,18 @@ func checkDaemonHealth(ctx *scanContext, report *Report, h daemon.HealthStatus, 
 		if notice := h.Listeners.WebListenerNotice(); notice != "" {
 			report.Warn(sectionDaemon, "web listener", notice, daemon.WebListenerRemedy, true)
 		}
+		// A live refusal the DISK posture row cannot explain — the #6858
+		// no-takeover refusal (another AF home claims or holds the port), or a
+		// #5137 posture refusal the file has since fixed — gets its own row.
+		// The reason the daemon recorded already names the remedy; report it
+		// verbatim rather than paraphrasing.
+		if reason := h.Listeners.TCPRefusalReason; reason != "" &&
+			(cfg == nil || config.ListenerBindRefusal(cfg) == "") {
+			report.Warn(sectionDaemon, "web listener", "web UI not served: "+reason,
+				"give this daemon its own address (af config set network.listen_addr 127.0.0.1:<port>), "+
+					"or free the port for the home that claims it — move or disable that home's "+
+					"listener, or remove a stray AF home — then af daemon restart to re-evaluate", true)
+		}
 	}
 	if h.PingErr == nil && daemonConfig != nil {
 		checkRunningDaemonConfig(report, h, daemonConfig)

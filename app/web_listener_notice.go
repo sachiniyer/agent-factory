@@ -42,7 +42,7 @@ func fetchWebListenerNotice() string {
 		if err != nil {
 			return err
 		}
-		notice = resp.Listeners.WebListenerNotice()
+		notice = resp.Listeners.WebListenerStandingNotice()
 		return nil
 	})
 	return notice
