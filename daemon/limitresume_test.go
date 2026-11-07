@@ -355,3 +355,97 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 		t.Fatalf("the prompt must be sent exactly once while the residue banner shows: got %v", prompts)
 	}
 }
+
+// TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark is the #6972 item-4
+// wedge: an explicit retry BEFORE the claimed reset lands its send and clears
+// the wall; the unchanged banner still reads on the pane, so the poll re-parks
+// the row at the same R. At R+grace the scheduler must NOT re-deliver the
+// prompt — the wall it would be answering was already sent past. Without a
+// "the send landed" tombstone on the claim the re-park looks like a fresh
+// scheduling decision and replays it.
+func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	resetAt := base.Add(30 * time.Minute) // the wall lifts in half an hour
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
+
+	const banner = "some earlier agent output\n$ af sessions list\n" +
+		"Claude usage limit reached. Your limit will reset at 2pm (America/New_York)"
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("the fixture banner must hit the claude limit matcher")
+	}
+	inst.SetLimitReachedAtEvidence(resetAt, sighting.Evidence,
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+
+	// The explicit retry before R: the send lands and clears the wall.
+	if _, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repoID}); err != nil {
+		t.Fatalf("the early retry must land its send: %v", err)
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the early retry sends the prompt exactly once, got %v", prompts)
+	}
+	if inst.LimitReached() {
+		t.Fatal("a landed send clears the wall")
+	}
+
+	// The unchanged banner still sits in the capture; the poll re-reads it
+	// and re-parks at the same R — the claim the send already answered.
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.resolveIdleLiveness(inst, banner, epoch)
+	if !inst.LimitReached() {
+		t.Fatal("the unchanged banner before R re-parks the row at its recorded reset")
+	}
+
+	// At R + grace the scheduler must not replay the prompt.
+	advance(30*time.Minute + limitResumeGrace + time.Second)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the wall the early retry already answered must not re-send at R+grace: prompts=%v", prompts)
+	}
+}
+
+// TestResumeLimitedSessions_NoIntervalReplayForResetlessWall is the #6972
+// item-3 wedge: a wall the detector could not parse a reset from retries on
+// the fixed limit_retry_interval. After the send lands, the unchanged
+// reset-less emission is residue — never a new wall — so the next interval
+// must not fire the retry loop again.
+func TestResumeLimitedSessions_NoIntervalReplayForResetlessWall(t *testing.T) {
+	advance := withFrozenClock(t)
+	manager, _, inst, backend := newAutoResumeManager(t, "30m", true, "no reset work", time.Time{})
+
+	const banner = "agent output before the wall\n" +
+		"Claude usage limit reached. Try again later."
+	sighting := manager.limitDetector.Load().Sight(banner, inst.ResolvedAgent(), nowFunc())
+	if !sighting.Hit {
+		t.Fatal("a time-free claude banner must still hit the limit matcher")
+	}
+	if !sighting.ResetAt.IsZero() {
+		t.Fatal("the fixture banner must parse no reset")
+	}
+	inst.SetLimitReachedAtEvidence(time.Time{}, "",
+		session.LimitBanner{Prefix: sighting.BannerPrefix, Count: sighting.BannerCount})
+
+	// First pass anchors parkedAt; a full interval later the retry fires.
+	manager.ResumeLimitedSessions()
+	advance(31 * time.Minute)
+	manager.ResumeLimitedSessions()
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the interval retry delivers the prompt once, got %v", prompts)
+	}
+
+	// The unchanged reset-less emission is residue: the poll must not
+	// re-park it, and no later interval may send again.
+	_, epoch := inst.InFlightOpAndEpoch()
+	manager.resolveIdleLiveness(inst, banner, epoch)
+	if inst.LimitReached() {
+		t.Fatal("a cleared reset-less wall's unchanged emission is residue, not a new wall")
+	}
+	for i := 0; i < 4; i++ {
+		advance(31 * time.Minute)
+		manager.ResumeLimitedSessions()
+	}
+	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
+		t.Fatalf("the reset-less wall's retired emission must not replay on the interval: prompts=%v", prompts)
+	}
+}

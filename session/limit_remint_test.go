@@ -715,3 +715,81 @@ func TestLimitWallPrefixTail_PreservesUTF8Boundary(t *testing.T) {
 	require.True(t, sameLimitBannerPosition(restored, prefix),
 		"the restored anchor must still prove the unchanged pane's position")
 }
+
+// TestLimitWallResidue_ReplacedGenerationIsNewEmission is the #6972 item-1
+// wedge: on an unpinned runtime (a remote session can only read the backend —
+// runtimePID is 0) an identical banner on a REPLACED runtime has nothing
+// distinguishing it from the retired emission, and the residue rule used to
+// take the lookalike as proof. The runtime generation binds the claim to the
+// pane that sighted it: a just-launched pane must never prove residue.
+func TestLimitWallResidue_ReplacedGenerationIsNewEmission(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	reReadAt := parked.Add(3 * time.Minute)
+	defer freezeInstanceNow(reReadAt)()
+
+	// An unpinned runtime (remote/adopted — neither side can resolve a
+	// concrete pid) parks on the wall, then the clear retires the claim.
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+	inst.ClearLimitReached()
+
+	// Same generation, same pane: the unchanged expired emission is residue.
+	require.True(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+		"the same runtime's unchanged expired emission is residue")
+
+	// The runtime was replaced (remote rebind, respawn, handoff): with no PID
+	// pin available the claim's runtime generation is the only proof — a
+	// lookalike banner on the new pane is a different emission.
+	inst.noteAgentRuntimeReplaced()
+	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+		"a just-launched pane must never prove residue: PID pin 0 cannot stand in for 'same runtime'")
+	require.True(t, inst.SetLimitReachedAtEpoch(clockReset(reReadAt), clockResetEvidence, staleBanner, inst.stateEpoch),
+		"the fresh runtime's identical banner is a new wall with its own parse")
+	requireParkedReset(t, inst, clockReset(reReadAt))
+}
+
+// TestLimitWallResidue_ResetlessShadowIsResidue is #6972 item 3: a wall the
+// detector could not parse a reset from parks with resetAt=0. After the
+// interval retry's send lands and clears it, the unchanged emission is
+// residue — a re-park there only re-arms limit_retry_interval, which is
+// exactly the replay this issue retires.
+func TestLimitWallResidue_ResetlessShadowIsResidue(t *testing.T) {
+	defer freezeInstanceNow(time.Date(2026, 11, 10, 15, 0, 0, 0, time.UTC))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(time.Time{}, "", staleBanner)
+	requireParkedReset(t, inst, time.Time{})
+	inst.ClearLimitReached()
+
+	require.True(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, ""),
+		"a cleared reset-less wall's unchanged emission is residue — the row already moved past it")
+	require.False(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", staleBanner, inst.stateEpoch),
+		"residue must not re-park: each re-park is one more interval replay (#6972)")
+	require.False(t, inst.LimitReached())
+
+	// A PARKED reset-less wall is still a live wall — only a retired
+	// emission is residue.
+	parked := &Instance{Program: tmux.ProgramClaude}
+	parked.SetLimitReachedAtEvidence(time.Time{}, "", staleBanner)
+	require.False(t, parked.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, ""),
+		"the live zero-reset claim is the wall itself, not residue")
+}
+
+// TestLimitWallShadow_DropsOnRuntimeReplace is the #6972 item-5 lifetime
+// bound: the shadow claim survives ClearLimitReached so a same-emission
+// re-read stays residue, but once the runtime it names is gone for good its
+// pane can never show that emission again — the shadow is dead weight in
+// instances.json and must drop. (The respawn fence is the one consumer that
+// still reads it; ReparkLimitUnderResumeFence re-mints it afterward.)
+func TestLimitWallShadow_DropsOnRuntimeReplace(t *testing.T) {
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(clockReset(time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)),
+		clockResetEvidence, staleBanner)
+	inst.ClearLimitReached()
+	require.NotNil(t, inst.ToInstanceData().LastLimitWall, "the shadow outlives the clear for residue")
+
+	inst.noteAgentRuntimeReplaced()
+	require.Nil(t, inst.ToInstanceData().LastLimitWall,
+		"a replaced runtime's pane can never show the recorded emission again — drop the shadow (#6972)")
+}
