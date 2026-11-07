@@ -100,7 +100,7 @@ func (d *depCounts) deps() Deps {
 			d.reads++
 			return handoff.ReadingFacts{Status: handoff.ReadingNone}
 		},
-		DriftKey: func(agent, src, tgt string) (string, bool) { return "", false },
+		DriftKey: func(agent, src, tgt, program string) (string, bool) { return "", false },
 		DetectWall: func(content, agent string) bool {
 			return strings.Contains(content, "You've hit your usage limit")
 		},

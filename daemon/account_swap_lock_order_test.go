@@ -75,6 +75,16 @@ func (p *fenceStartLockProbe) require(t *testing.T) {
 			"the fence <-> start-lock ABBA that deadlocks against CreateSession (#6197 inversion class)")
 }
 
+// underFenceCount is the probe's other half: writes that ran under a global
+// fence at all. Asserting it separately is what proves the swap actually
+// reached its fenced commit — without it a pass whose commit never ran would
+// satisfy the violation check for no reason.
+func (p *fenceStartLockProbe) underFenceCount() int {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	return p.underFence
+}
+
 // TestAccountSwapResume_SettlementPersistDoesNotSpanFencesAndStartLock is the
 // probe oracle: an automatic account-swap resume must never reach a durable
 // row write with both a global fence and the per-repo start lock held. Before
@@ -82,12 +92,19 @@ func (p *fenceStartLockProbe) require(t *testing.T) {
 // the start lock) while the caller held configApplyMu and accountLimitMu, so
 // every settlement write on the swap's success path spanned both hierarchies.
 func TestAccountSwapResume_SettlementPersistDoesNotSpanFencesAndStartLock(t *testing.T) {
-	manager, repoID, _, _ := newAutoResumeManager(t, "", true, "finish the migration", time.Now().Add(time.Hour))
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "finish the migration", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
 
 	probe := installFenceStartLockProbe(t, manager, repoID)
 	manager.ResumeLimitedSessions()
+	account, auto := inst.AccountSelection()
+	require.Equal(t, "work", account,
+		"precondition: the swap must actually commit for the probe assertions to mean anything")
+	require.True(t, auto)
+	require.False(t, inst.LimitReached(), "precondition: the scheduled swap completed")
 	probe.require(t)
+	require.Zero(t, probe.underFenceCount(),
+		"no durable row write may run under the config/account fences — the swap's settles all run after release (#6874)")
 }
 
 // TestAccountSwapResume_ReleasesFencesBeforeSettlementPersist is the overlap
@@ -110,7 +127,7 @@ func TestAccountSwapResume_SettlementPersistDoesNotSpanFencesAndStartLock(t *tes
 // lock is still held. Without the fix the persist runs inside the fences and
 // blocks on the start lock, so accountLimitMu stays unobtainable — the ABBA.
 func TestAccountSwapResume_ReleasesFencesBeforeSettlementPersist(t *testing.T) {
-	manager, repoID, _, _ := newAutoResumeManager(t, "", true, "finish the migration", time.Now().Add(time.Hour))
+	manager, repoID, inst, _ := newAutoResumeManager(t, "", true, "finish the migration", time.Now().Add(time.Hour))
 	configureLimitAccountCandidate(t, manager, "work")
 
 	startLock := manager.startLockForRepo(repoID)
@@ -176,6 +193,15 @@ func TestAccountSwapResume_ReleasesFencesBeforeSettlementPersist(t *testing.T) {
 		// Good: the fences were released before the persist blocked on the
 		// start lock.
 	case <-time.After(10 * time.Second):
+		// On failure the swap goroutine is still parked on the start lock this
+		// test holds: release it and drain done before reporting, so a red run
+		// does not strand the pass mid-operation.
+		startLock.Unlock()
+		startHeld = false
+		select {
+		case <-done:
+		case <-time.After(10 * time.Second):
+		}
 		t.Fatal("accountLimitMu was not obtainable while the start lock was held: the swap commit holds the fences across the settlement persist, which deadlocks against a create (#6197 fence <-> start-lock ABBA)")
 	}
 
@@ -187,4 +213,10 @@ func TestAccountSwapResume_ReleasesFencesBeforeSettlementPersist(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("the swap commit did not complete within 10s of the start lock being released")
 	}
+	// The exercise only means anything if the fenced admission and commit ran
+	// to completion — pin the swap's landed identity so a pass that skipped the
+	// commit cannot read as a success.
+	account, auto := inst.AccountSelection()
+	require.Equal(t, "work", account, "the swap commit must have landed for this overlap to prove the ordering")
+	require.True(t, auto)
 }

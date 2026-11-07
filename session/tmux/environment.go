@@ -40,6 +40,12 @@ type CommandEnvironment struct {
 	// can change cwd through shell syntax or wrapper behavior af does not model.
 	WorkingDir      string
 	workingDirKnown bool
+	// workingDirFromLaunch reports whether WorkingDir still derives from the
+	// launch directory: every modeled env -C was relative, so the directory
+	// is the launch dir or a join onto it. An absolute -C replaces it with a
+	// fixed literal — the same directory no matter where the session starts,
+	// so paths resolved under it do not move with the session's worktree.
+	workingDirFromLaunch bool
 	// preExecDirKnown is the narrower fact config-root resolution needs: the
 	// directory the launch STARTS the process in is established. It stays true
 	// under Codex's own -C/--cd, which only moves the working root after Codex
@@ -71,6 +77,17 @@ func (e CommandEnvironment) WorkingDirKnown() bool {
 	return e.workingDirKnown
 }
 
+// WorkingDirFromLaunch reports whether WorkingDir derives from the launch
+// directory. An absolute env -C replaces the modeled cwd with a fixed
+// literal, so a relative executable resolved under it lands at a fixed
+// absolute path — not at a worktree-relative one. Callers that ask "does
+// this resolution move when the launch directory moves" need this in
+// addition to WorkingDirKnown: the -C chain is modeled (the dir is proven),
+// it just is not the launch dir.
+func (e CommandEnvironment) WorkingDirFromLaunch() bool {
+	return e.workingDirFromLaunch
+}
+
 // LaunchDirKnown reports whether the directory the agent process starts in is
 // established. Relative environment paths (a config root) resolve against it,
 // and Codex's -C/--cd does not disturb it: the flag is applied after Codex
@@ -97,10 +114,11 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 	tokens, _ := SplitShellTokens(command)
 	targetIdx, agent, findErr := findAgentTokenStrict(tokens)
 	result := CommandEnvironment{
-		WorkingDir:      filepath.Clean(workingDir),
-		workingDirKnown: true,
-		preExecDirKnown: true,
-		overrides:       make(map[string]CommandEnvOverride),
+		WorkingDir:           filepath.Clean(workingDir),
+		workingDirKnown:      true,
+		workingDirFromLaunch: true,
+		preExecDirKnown:      true,
+		overrides:            make(map[string]CommandEnvOverride),
 	}
 	if !filepath.IsAbs(workingDir) {
 		return result, fmt.Errorf("launch directory %q is not absolute; cannot resolve relative receipt paths", workingDir)
@@ -155,6 +173,7 @@ func CommandEnvironmentFromCommand(command, workingDir string) (CommandEnvironme
 					return result, err
 				}
 				result.WorkingDir = resolved
+				result.workingDirFromLaunch = result.workingDirFromLaunch && !filepath.IsAbs(invocation.Chdir)
 			}
 			idx = commandIdx
 			atShellPrefix = false

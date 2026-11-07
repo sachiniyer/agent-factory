@@ -124,11 +124,14 @@ func (m *Manager) resumeFromLimitOutcomeConversation(req ResumeFromLimitRequest)
 		return resumeNotPerformed, session.HandoffConversation{}, nil
 	}
 	defer opLock.Unlock()
-	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, title, "resume", instance)
-	if err != nil {
-		return resumeNotPerformed, session.HandoffConversation{}, err
-	}
-	defer unlockWorktreeAdmission(worktreeAdmission)
+	// No worktree admission here. The shared body takes it only around the
+	// respawn — the one span that can rebuild a missing local worktree —
+	// because every other phase persists through the repository start lock,
+	// which sits LEFT of admission in the documented order (startLockForRepo).
+	// Holding it across the whole request inverted that order against
+	// CreateSession's start -> admission sequence (#6197 class, #6880), and on
+	// this arm an admission timeout inside the body is still an untouched
+	// refusal: nothing below can commit before the respawn runs.
 
 	m.mu.Lock()
 	current := m.instances[key]

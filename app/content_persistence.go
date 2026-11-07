@@ -145,6 +145,12 @@ func (m *home) saveContentPaneState() error {
 			// the recovery note above) so the in-memory edit survives for retry.
 			saveErr = errors.Join(saveErr, fmt.Errorf("failed to save hooks: %w", err))
 		} else {
+			// The write committed what the pane holds: advance its baseline
+			// so the pane is clean (#6790). Without this it stayed dirty for
+			// the session — every later Esc or quit re-saved the in-memory
+			// list over hooks added on disk in the meantime, and the re-read
+			// on open was skipped as a dirty-pane guard.
+			hp.MarkSaved()
 			m.store.SetHookCount(len(hp.GetCommands()))
 		}
 	}

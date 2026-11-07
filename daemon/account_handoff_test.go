@@ -229,7 +229,7 @@ func TestAccountHandoffTickNeverReactivatesAfterApplyConfig(t *testing.T) {
 		ReadUsage: func(string, map[string]int64) handoff.ReadingFacts {
 			return handoff.ReadingFacts{Status: handoff.ReadingNone}
 		},
-		DriftKey:   func(string, string, string) (string, bool) { return "", false },
+		DriftKey:   func(string, string, string, string) (string, bool) { return "", false },
 		DetectWall: func(string, string) bool { return false },
 		WriteRows:  func([]handoff.EventRow) error { return nil },
 		LogWarn:    func(string, ...any) {},

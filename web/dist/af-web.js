@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5c0851cb9c61";
+var CLIENT_VERSION = "dc04dc52aecc";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8912,6 +8912,13 @@ var ConfigPane = class {
     this.actions = actions2;
     this.el = h("section", { class: "af-config" });
     this.el.setAttribute("aria-label", "Config");
+    this.hostActions = {
+      ...actions2.hosts,
+      add: (draft) => {
+        this.committedHostAdds.set(draft.name, this.readHostDrafts());
+        actions2.hosts.add(draft);
+      }
+    };
   }
   el;
   entries = [];
@@ -8933,11 +8940,20 @@ var ConfigPane = class {
   quota = emptyQuotaState();
   theme = "system";
   showAdvanced = false;
-  /** The key whose field is open, if any. Only one row edits at a time: a config
-   *  write is per-key (like `af config set`), so a multi-row "save all" would
-   *  imply an atomicity across keys that the writer does not offer. */
+  /** The key whose field the focus machinery is tracking — the row
+   *  `editingInput` repoints to on each rebuild and `shouldCloseSavedField`
+   *  closes. Typing into a row marks it; only that row's own successful save
+   *  unmarks it, so it names where the user most recently typed, not the only
+   *  row holding a draft. */
   editing = null;
-  draft = "";
+  /** Every row's typed-but-unsaved text, keyed by config key. A rebuild repaints
+   *  from this map rather than from `editing`/`draft`, so a refresh never eats
+   *  a draft the user did not submit: the single-slot pair it replaced kept
+   *  only the most recently typed row and silently dropped every earlier one
+   *  (#6692). A key's own successful save deletes its entry — a committed draft
+   *  is done, and replaying it would show a saved value as unsaved — while a
+   *  refused save keeps it so the rejected text stays to be corrected. */
+  drafts = /* @__PURE__ */ new Map();
   // The live controls a rebuild replaces, so focus can be handed back to whichever of
   // them had it (#2933). Null whenever that control is not currently rendered.
   editingInput = null;
@@ -8962,6 +8978,19 @@ var ConfigPane = class {
   lastHosts = null;
   lastQuota = null;
   lastTheme = null;
+  /** The Hosts add form exactly as it stood when each send went out — keyed by
+   *  HOST_INPUT_ATTR like readHostDrafts' map, and filed under the submitted
+   *  name so a success edge retires ITS OWN send's draft. Adds are not
+   *  serialized: a second "Add host" can go out while the first is still in
+   *  flight, and the answers may land in either order — one snapshot would
+   *  retire the wrong send's values. On the success edge each field still
+   *  holding what was sent is retired; one retyped since is the NEXT host's
+   *  draft, not a replay of the saved one (#6861). */
+  committedHostAdds = /* @__PURE__ */ new Map();
+  /** HostActions with `add` wrapped to snapshot the form at send time — the
+   *  only record of what was committed, since the returned status names no
+   *  draft. The other verbs pass straight through. */
+  hostActions;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
   update(entries, path, status, accounts, quota, theme = this.theme, hosts = this.hosts) {
@@ -8974,6 +9003,10 @@ var ConfigPane = class {
     if (registrationSucceeded) {
       const submitted = this.accountInput(accounts.status.agent);
       if (submitted) submitted.value = "";
+    }
+    const hostAddSucceeded = hosts.status !== this.hosts.status && hosts.status !== null && hosts.status.name === "" && !hosts.status.error && hosts.status.check !== true;
+    if (hostAddSucceeded) {
+      this.retireCommittedHostAdd(hosts.status.message);
     }
     this.lastEntries = entries;
     this.lastStatus = status;
@@ -8990,7 +9023,9 @@ var ConfigPane = class {
     this.hosts = hosts;
     if (shouldCloseSavedField(status, this.editing, statusIsNew)) {
       this.editing = null;
-      this.draft = "";
+    }
+    if (statusIsNew && status !== null && status.error === "") {
+      this.drafts.delete(status.key);
     }
     if (entriesAreNew && this.explainKey !== null) {
       this.requestExplain(this.explainKey);
@@ -9150,6 +9185,40 @@ var ConfigPane = class {
       }
     }
   }
+  /** Retires the committed add-form draft field by field (#6861): a field
+   *  still holding exactly what was sent clears, while one retyped since keeps
+   *  its new text — that text is the NEXT host's draft, and clearing it would
+   *  be the same silent loss the draft mechanism exists to prevent. Runs before
+   *  readHostDrafts so retired values are never snapshotted for a replay.
+   *
+   *  `message` names the send this success answers (`saved host <name> (…)` —
+   *  host names carry no spaces or parens, config/hosts.go hostNameRE), so an
+   *  add landing while another is still in flight retires its own draft rather
+   *  than whichever send happened to be last. When the name cannot be matched
+   *  — the format drifting, or a send this pane never saw — the oldest pending
+   *  snapshot is the best available answer. */
+  retireCommittedHostAdd(message) {
+    const named = /^saved host ([a-z0-9-]+)/.exec(message)?.[1];
+    const key = named !== void 0 && this.committedHostAdds.has(named) ? named : this.committedHostAdds.keys().next().value;
+    if (key === void 0) {
+      return;
+    }
+    const committed = this.committedHostAdds.get(key);
+    this.committedHostAdds.delete(key);
+    for (const [field2, sent] of committed) {
+      const input = this.hostInput(field2);
+      if (input === null) {
+        continue;
+      }
+      if (input instanceof HTMLInputElement && input.type === "checkbox") {
+        if (input.checked === sent.checked) {
+          input.checked = false;
+        }
+      } else if (input.value === sent.value) {
+        input.value = "";
+      }
+    }
+  }
   hostInput(key) {
     return this.el.querySelector(
       `[${HOST_INPUT_ATTR}="${CSS.escape(key)}"]`
@@ -9213,7 +9282,7 @@ var ConfigPane = class {
     this.el.replaceChildren(
       head,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
-      renderHostsSection(this.entries, this.hosts, this.actions.hosts, this.hostDisclosure),
+      renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.actions.accounts, this.registration),
       renderQuotaSection(this.quota)
     );
@@ -9440,7 +9509,7 @@ var ConfigPane = class {
       return h("div", { class: "af-config-control" }, select);
     }
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
-    input.value = this.editing === e.key ? this.draft : e.value;
+    input.value = this.drafts.get(e.key) ?? e.value;
     if (this.editing === e.key) {
       this.editingInput = input;
     }
@@ -9462,7 +9531,7 @@ var ConfigPane = class {
     };
     input.addEventListener("input", () => {
       this.editing = e.key;
-      this.draft = input.value;
+      this.drafts.set(e.key, input.value);
       this.editingInput = input;
       syncSave();
     });
@@ -13666,7 +13735,11 @@ function newSessionModal(projects, defaultProject2, callbacks) {
       backend: backendSelect.value,
       // AMBIENT_ACCOUNT ("") when the user did not choose — createSession then omits
       // `account` entirely and the daemon applies its default, if any (#3844).
-      account: accountSelect.value
+      // The select DISPLAYS that default once the registry lands, but a
+      // preselect is not a choice: only a deliberate pick may travel as an
+      // explicit account, or off-box backends see the default as a user
+      // request and refuse the create outright (#6695).
+      account: accountSelection.picked ? accountSelect.value : AMBIENT_ACCOUNT
     });
   });
   queueMicrotask(() => titleInput.focus());

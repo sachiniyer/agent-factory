@@ -1,11 +1,14 @@
 package doctor
 
 import (
+	"context"
 	"errors"
 	"fmt"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 	"unicode"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -37,39 +40,59 @@ func checkProgramCommand(repoWorkspace string, repoErr error, command string) (*
 		return check, err, false
 	}
 	check, err := preflight.CheckCommand(command)
-	if errors.Is(repoErr, config.ErrNotGitRepository) && commandDependsOnCwd(command) {
+	if errors.Is(repoErr, config.ErrNotGitRepository) && commandDependsOnCwd(check, command) {
 		return check, err, true
 	}
 	return check, err, false
 }
 
 // commandDependsOnCwd reports whether command's resolution depends on the
-// working directory the doctor happened to be run from. Only a relative
+// working directory the doctor happened to be run from. It gates on the
+// executables preflight actually resolved — check.Executable and
+// check.ShellExecutable, plus their resolution's working-dir dependence —
+// rather than re-parsing the command, so env -i/-u/-C forms, relative PATH=
+// entries, opaque wrappers, and quoted paths all land on the right answer
+// (#6792 item 3); commandToken's coarse split is the fallback only for
+// commands that failed before any executable resolved. Only a relative
 // executable — a path containing a separator that is not absolute, e.g.
-// "bin/claude" or "./venv/bin/claude" — is cwd-dependent: a bare name like
-// "claude" resolves through PATH and an absolute path like "/usr/bin/codex"
-// resolves the same way regardless of cwd. Leading VAR=value assignments and
-// an `env` wrapper do not change the launched executable — preflight.CheckCommand
-// resolves the agent past both — so commandToken skips them before the test,
-// otherwise `FOO=x bin/claude` or `env bin/claude` would read only the first
-// token and report cwd-independence while the resolved target is still relative
-// (#6499). Outside a repo the doctor can only misresolve the cwd-dependent
-// case, so the honest no-anchor message is reserved for it (#6487).
-func commandDependsOnCwd(command string) bool {
-	first := commandToken(command)
-	if first == "" || filepath.IsAbs(first) {
-		return false
+// "bin/claude" — or a lookup that walked a relative PATH entry is
+// cwd-dependent: a bare name resolved through absolute PATH entries and an
+// absolute path resolve the same way regardless of cwd. Outside a repo the
+// doctor can only misresolve the cwd-dependent case, so the honest no-anchor
+// message is reserved for it (#6487).
+func commandDependsOnCwd(check *preflight.ProgramCheck, command string) bool {
+	if check != nil {
+		if check.ShellExecutable != "" && check.ShellPath == "" {
+			// The wrapper's own resolution failed before the agent's ran, so
+			// the agent's via flag was never produced — token relativity is
+			// all that is known about either executable.
+			return isRelativeExecutable(check.ShellExecutable) || isRelativeExecutable(check.Executable)
+		}
+		if check.Executable != "" || check.ShellExecutable != "" {
+			// The resolution ran: the via flags already say whether its (and
+			// the wrapper's) lookup depended on the directory. They are the
+			// answer even when the token itself is relative — under an
+			// absolute env -C the token joins a fixed literal dir, not the
+			// launch dir.
+			return check.PathViaWorkingDir || check.ShellViaWorkingDir
+		}
 	}
-	return strings.ContainsAny(first, `/\`)
+	return isRelativeExecutable(commandToken(command))
+}
+
+// isRelativeExecutable reports whether token is a cwd-dependent executable:
+// a path containing a separator that is not absolute.
+func isRelativeExecutable(token string) bool {
+	return token != "" && !filepath.IsAbs(token) && strings.ContainsAny(token, `/\`)
 }
 
 // commandToken returns the executable token command launches — the first shell
 // word after any leading VAR=value assignments and an optional `env` wrapper,
 // which may itself be followed by further assignments. It is a deliberately
-// coarse split on whitespace, matching the resolution model the doctor already
-// assumes for program_overrides; the untracked-relative check is advisory, not
-// a correctness-critical gate, so quoted values with interior spaces are out
-// of scope. Mirrors preflight.shellExecutable's leading-assignment skip.
+// coarse split on whitespace, used only when preflight could not report a
+// resolved executable at all (commandDependsOnCwd's fallback): the real gate
+// reads check.Executable and check.ShellExecutable, which the full
+// env-aware model fills in (#6792 item 3).
 func commandToken(command string) string {
 	fields := strings.Fields(command)
 	i := 0
@@ -123,50 +146,322 @@ func noAnchorMessage(command string) string {
 		"the session's repo to verify it against the directory the session will launch in.", command)
 }
 
-// relativeOverrideUntracked reports whether command is a relative path whose
-// resolved executable is present in the main checkout but untracked — and so
-// absent from the clean-checkout linked worktree a session launches in. Only
-// cwd-dependent commands (relative paths with a separator) are affected: a
-// bare name resolves through PATH and an absolute path resolves the same way
-// in any worktree, so neither is sensitive to the clean-checkout difference.
-// Returns false when the command is not cwd-dependent, the resolved path is
-// not inside the workspace, or the tracked-status probe cannot answer — so a
-// git failure never downgrades a PASS on its own. The repo-root anchor
-// genuinely predicts the worktree for tracked relative paths, so the current
-// PASS is kept only for those.
-func relativeOverrideUntracked(workspace, command, resolvedPath string) bool {
-	if workspace == "" || !commandDependsOnCwd(command) {
-		return false
+// overrideAbsentFromSessionBase reports (detail, remediation) for a resolved
+// executable a fresh session worktree would not provide as a runnable file,
+// or ("","") when the command's resolved executables are all unaffected. A
+// session launches in a worktree created from the tree it branches from —
+// origin's default branch when the repo has one, else HEAD
+// (session/git/worktree_ops.go) — so a resolution that depended on the launch
+// directory and landed inside this workspace is honest only when that base
+// tree holds a runnable file at the same repo-relative path (#6792 items
+// 1–3). The candidates are what preflight actually resolved — the detected
+// program plus the shell wrapper it launches through — gated on each
+// resolution's working-dir dependence rather than a re-parse of the command,
+// so env -i/-u/-C forms, relative PATH= entries, opaque wrappers, and quoted
+// paths are covered the same way. An absolute token or an absolute PATH entry
+// resolves the same file from any directory and is not the worktree's
+// problem. Probe failures are conservative: a git error never downgrades a
+// PASS on its own.
+func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramCheck) (string, string) {
+	if workspace == "" || check == nil {
+		return "", ""
 	}
-	rel, err := filepath.Rel(workspace, resolvedPath)
-	if err != nil || rel == "" || rel == "." || filepath.IsAbs(rel) {
-		return false
+	var ref string
+	refOK, refResolved := false, false
+	baseRef := func() (string, bool) {
+		if !refResolved {
+			ref, refOK = sessionBaseRef(workspace)
+			refResolved = true
+		}
+		return ref, refOK
 	}
-	if rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
-		return false // resolved outside the repo; the worktree check does not apply
+	// probeCandidate answers "would the session resolve a runnable file at
+	// this candidate": launch-dir-independent answers (an absolute token or
+	// PATH entry, an absolute env -C's dir) name the same file at launch, so
+	// a runnable stat now is the launch answer; launch-dir answers must map
+	// inside this workspace to a runnable entry in the base tree — they are
+	// the worktree's contents, not this checkout's. provable=false means the
+	// probe cannot answer (path outside the repo, no base ref) and the
+	// candidate proves nothing either way.
+	probeCandidate := func(cand preflight.ExecutableCandidate) (verdict baseTreeEntry, display string, provable bool) {
+		if !cand.ViaWorkingDir {
+			if runnableFile(cand.Path) {
+				return baseTreeRunnable, cand.Path, true
+			}
+			return baseTreeAbsent, cand.Path, true
+		}
+		rel, err := filepath.Rel(workspace, cand.Path)
+		if err != nil || rel == "" || rel == "." || filepath.IsAbs(rel) ||
+			rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return baseTreeUnknown, "", false // resolved outside the repo; cannot map to the base tree
+		}
+		r, ok := baseRef()
+		if !ok {
+			return baseTreeUnknown, "", false
+		}
+		// The display for a worktree-bound candidate is its repo-relative
+		// path — that IS the path the session resolves, under a different
+		// root.
+		return baseTreeProbe(workspace, r, rel), rel, true
 	}
-	out, err := exec.Command("git", "-C", workspace, "ls-files", "--", rel).Output()
+	for _, grp := range []struct {
+		token, path string
+		via         bool
+		candidates  []preflight.ExecutableCandidate
+		wrapper     bool
+	}{
+		{check.Executable, check.Path, check.PathViaWorkingDir, check.PathCandidates, false},
+		{check.ShellExecutable, check.ShellPath, check.ShellViaWorkingDir, check.ShellCandidates, true},
+	} {
+		candidates := grp.candidates
+		if len(candidates) == 0 {
+			if grp.path == "" {
+				continue
+			}
+			// A path-form executable is a single-point lookup — no fallback
+			// candidates beyond the resolved file itself.
+			candidates = []preflight.ExecutableCandidate{{Path: grp.path, ViaWorkingDir: grp.via}}
+		}
+		selected := candidates[0]
+		if !selected.ViaWorkingDir {
+			continue // the same absolute file at launch — never the worktree's problem
+		}
+		verdict, _, provable := probeCandidate(selected)
+		if !provable || verdict == baseTreeRunnable {
+			continue
+		}
+		// The selected file provably does not run at launch — but a bare-name
+		// lookup does not stop at the first dir: the session's search
+		// continues through the remaining PATH entries exactly as the
+		// checkout's did, and a later candidate that IS runnable at launch
+		// resolves the name to a different file than this checkout picked.
+		r, _ := baseRef()
+		fallback := ""
+		for _, cand := range candidates[1:] {
+			v, display, provable := probeCandidate(cand)
+			if provable && v == baseTreeRunnable {
+				fallback = display
+				break
+			}
+		}
+		if fallback != "" {
+			return fallsBackDetail(check.Command, grp.token, selected.Path, fallback, grp.wrapper, verdict, r),
+				fallsBackRemediation(r)
+		}
+		switch verdict {
+		case baseTreeAbsent:
+			return absentFromBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
+				absentFromBaseRemediation(r)
+		case baseTreeNotExecutable:
+			return notExecutableInBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
+				notExecutableInBaseRemediation(r)
+		case baseTreeNotAFile:
+			return notAFileInBaseDetail(check.Command, grp.token, selected.Path, grp.wrapper, r),
+				notAFileInBaseRemediation()
+		}
+	}
+	return "", ""
+}
+
+// runnableFile reports whether path is a runnable file — the same bar
+// resolveExecutable applies (exists, not a directory, an execute bit set).
+func runnableFile(path string) bool {
+	info, err := os.Stat(path)
+	return err == nil && !info.IsDir() && info.Mode().Perm()&0o111 != 0
+}
+
+// gitProbeTimeout bounds each read-only git invocation: a wedged object
+// store or a lazy-fetch attempt must never hang af doctor.
+const gitProbeTimeout = 10 * time.Second
+
+// gitTreeRead runs a read-only git probe against workspace.
+// GIT_NO_LAZY_FETCH makes object access fail instead of promisor-fetching in
+// a partial clone — the no-network/no-mutation contract covers the object
+// store too, and an unreadable promised object answers "unknown", never
+// "absent". (On a full clone, or a git old enough to ignore the variable,
+// nothing fetches: ls-tree reads only tree objects, which blob:none filters
+// keep local.) Tests stub this to observe the commands each probe issues.
+var gitTreeRead = func(workspace string, args ...string) ([]byte, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), gitProbeTimeout)
+	defer cancel()
+	return gitTreeCmd(ctx, workspace, args...).Output()
+}
+
+func gitTreeCmd(ctx context.Context, workspace string, args ...string) *exec.Cmd {
+	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", workspace}, args...)...)
+	cmd.Env = append(os.Environ(), "GIT_NO_LAZY_FETCH=1")
+	return cmd
+}
+
+// sessionBaseRef returns the git ref whose tree a new session's worktree
+// checks out, mirroring session/git/worktree_ops.go resolveOriginHead —
+// origin/HEAD, then origin/main, then origin/master — with HEAD as the
+// fallback setupNewWorktree uses when no origin ref resolves. af doctor MUST
+// NOT fetch: session creation fetches first, but the question here is "would
+// a session created NOW find this program", which the locally cached refs
+// answer without network access, ref writes, or any repository mutation. ok
+// is false when no ref resolves (unborn HEAD with no usable origin) — there
+// is then no base tree to check against, so callers stay conservative.
+func sessionBaseRef(workspace string) (ref string, ok bool) {
+	for _, candidate := range []string{"origin/HEAD", "origin/main", "origin/master", "HEAD"} {
+		if _, err := gitTreeRead(workspace, "rev-parse", "--verify", "--quiet", candidate); err == nil {
+			return candidate, true
+		}
+	}
+	return "", false
+}
+
+// baseTreeEntry is how a repo-relative path appears in the base ref's tree.
+type baseTreeEntry int
+
+const (
+	baseTreeRunnable      baseTreeEntry = iota // an executable blob or a symlink — runnable at launch
+	baseTreeAbsent                             // not in the tree — the clean worktree will not contain it
+	baseTreeNotExecutable                      // committed 100644 — materializes in the worktree but is not runnable
+	baseTreeNotAFile                           // a tree (040000) or gitlink (160000) entry — present, but not a file
+	baseTreeUnknown                            // the probe could not answer — be conservative and keep the PASS
+)
+
+// baseTreeProbe reports how rel appears in ref's tree via `git ls-tree -z
+// <ref> -- <rel>` — the issue's prescribed "is the path in the base commit's
+// tree" answered against the tree object alone: presence is a missing entry,
+// and the entry's mode says whether the worktree materializes something
+// runnable — a file committed 100644 is found at launch but not runnable,
+// and a directory or submodule entry is not a runnable file either. ls-tree
+// never dereferences the entry's blob, so unlike `git cat-file -e
+// <ref>:<rel>` it cannot promisor-fetch a blob:none-filtered object; the
+// probe reads the base ref's tree — never the current index or working tree.
+func baseTreeProbe(workspace, ref, rel string) baseTreeEntry {
+	out, err := gitTreeRead(workspace, "ls-tree", "-z", ref, "--", rel)
 	if err != nil {
-		return false // probe failed; be conservative and keep the PASS
+		return baseTreeUnknown
 	}
-	return strings.TrimSpace(string(out)) == ""
+	for _, entry := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
+		meta, path, found := strings.Cut(entry, "\t")
+		if !found || path != rel {
+			continue
+		}
+		mode, _, _ := strings.Cut(meta, " ")
+		switch mode {
+		case "100755", "120000": // executable blob, or a symlink — runnable
+			return baseTreeRunnable
+		case "100644":
+			return baseTreeNotExecutable
+		default:
+			return baseTreeNotAFile
+		}
+	}
+	return baseTreeAbsent
 }
 
-// untrackedOverrideMessage is the advisory warning for a relative
-// program_overrides path that resolves in the main checkout but is untracked:
-// session worktrees are clean checkouts of the committed tree, so the override
-// is absent at launch unless it is provisioned into each session (via
-// setup_commands / the setup overlay, which applies after `git worktree add`).
-// It names the two supported remedies (commit the file, or provision it in
-// each session) rather than claiming the command is broken — the file does run
-// in this checkout, it just will not be in the worktree the session launches in
-// unless one of those remedies provides it.
-func untrackedOverrideMessage(command, resolvedPath string) string {
-	return fmt.Sprintf("%q resolves to %s in this checkout, but that path is untracked — "+
-		"session worktrees are clean checkouts of the committed tree and will not contain it "+
+// baseRefLabel names the tree the worktree materializes — origin's default
+// branch when the repo has a usable origin ref, else the HEAD fallback
+// setupNewWorktree uses.
+func baseRefLabel(ref string) string {
+	if strings.HasPrefix(ref, "origin/") {
+		return "origin's default branch (" + ref + ")"
+	}
+	return "HEAD (the repo has no usable origin ref, so sessions branch from HEAD)"
+}
+
+// baseAbsenceSubject phrases which resolved executable the warning is about:
+// the command's own program, or the relative wrapper it launches through.
+func baseAbsenceSubject(command, token, resolvedPath string, wrapper bool) string {
+	if wrapper {
+		return fmt.Sprintf("%q launches the wrapper %q, which resolves to %s in this checkout",
+			command, token, resolvedPath)
+	}
+	return fmt.Sprintf("%q resolves to %s in this checkout", command, resolvedPath)
+}
+
+// absentFromBaseDetail is the advisory warning for a resolved executable
+// absent from the base tree: session worktrees are clean checkouts of that
+// tree, so the override is absent at launch unless it is provisioned into
+// each session (via setup_commands / the setup overlay, which applies after
+// `git worktree add`). It names the two supported remedies rather than
+// claiming the command is broken — the file does run in this checkout, it
+// just will not be in the worktree the session launches in unless one of
+// those remedies provides it.
+func absentFromBaseDetail(command, token, resolvedPath string, wrapper bool, ref string) string {
+	return fmt.Sprintf("%s, but that path is not in %s — "+
+		"session worktrees are clean checkouts of that tree and will not contain it "+
 		"unless setup_commands provisions it there, so the override will be absent at launch "+
-		"without that provisioning", command, resolvedPath)
+		"without that provisioning", baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
 }
 
-const untrackedOverrideRemediation = "commit the file so it is part of the tree the session checks out, " +
-	"or provision it in each session via setup_commands or the setup overlay"
+func absentFromBaseRemediation(ref string) string {
+	if strings.HasPrefix(ref, "origin/") {
+		return "commit the file and push it to origin's default branch so it is part of the tree the session checks out, " +
+			"or provision it in each session via setup_commands or the setup overlay"
+	}
+	return "commit the file so it is part of the tree the session checks out, " +
+		"or provision it in each session via setup_commands or the setup overlay"
+}
+
+// notExecutableInBaseDetail covers the file committed WITHOUT the executable
+// bit: the worktree materializes it, but non-executable — the session finds
+// the path and still cannot run it.
+func notExecutableInBaseDetail(command, token, resolvedPath string, wrapper bool, ref string) string {
+	return fmt.Sprintf("%s, but that file is committed without the executable bit in %s — "+
+		"a clean checkout materializes it non-executable, so the override will not run at launch",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
+}
+
+func notExecutableInBaseRemediation(ref string) string {
+	remediation := "mark the file executable in git (chmod +x and commit, or git update-index --chmod=+x)"
+	if strings.HasPrefix(ref, "origin/") {
+		remediation += " and push it to origin's default branch"
+	}
+	return remediation + ", or provision it in each session via setup_commands or the setup overlay"
+}
+
+// notAFileInBaseDetail covers a path that exists in the base tree as a
+// directory or submodule — present in the worktree, but never a runnable
+// program.
+func notAFileInBaseDetail(command, token, resolvedPath string, wrapper bool, ref string) string {
+	return fmt.Sprintf("%s, but that path is not a regular file in %s — "+
+		"session worktrees are clean checkouts of that tree and will not contain a runnable program there, "+
+		"so the override will not run at launch",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
+}
+
+func notAFileInBaseRemediation() string {
+	return "point the override at a runnable file that is part of the tree the session checks out, " +
+		"or provision the program in each session via setup_commands or the setup overlay"
+}
+
+// baseCausePhrase renders why the selected file does not run at launch, for
+// the fallback detail: "is not in <ref>", "is committed without the
+// executable bit in <ref>", or "is not a regular file in <ref>".
+func baseCausePhrase(verdict baseTreeEntry, ref string) string {
+	switch verdict {
+	case baseTreeAbsent:
+		return fmt.Sprintf("is not in %s", baseRefLabel(ref))
+	case baseTreeNotExecutable:
+		return fmt.Sprintf("is committed without the executable bit in %s", baseRefLabel(ref))
+	default:
+		return fmt.Sprintf("is not a regular file in %s", baseRefLabel(ref))
+	}
+}
+
+// fallsBackDetail covers a bare-name lookup whose checkout-selected file does
+// not run at launch BUT whose later PATH entries rescue the name: the session
+// still runs a program — just a different file than the checkout picks. The
+// warning is honest about both halves: the override's file is absent, and
+// the session falls back to the displayed candidate (a repo-relative path
+// for a worktree-bound rescue, an absolute path for an installed one).
+func fallsBackDetail(command, token, resolvedPath, fallback string, wrapper bool, verdict baseTreeEntry, ref string) string {
+	return fmt.Sprintf("%s, but that %s — "+
+		"the session's lookup continues past it and falls back to %s, so the session runs that file "+
+		"instead of the one this checkout selects",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseCausePhrase(verdict, ref), fallback)
+}
+
+func fallsBackRemediation(ref string) string {
+	if strings.HasPrefix(ref, "origin/") {
+		return "commit the file and push it to origin's default branch so the session runs it instead of the fallback, " +
+			"or provision it in each session via setup_commands or the setup overlay"
+	}
+	return "commit the file so the session runs it instead of the fallback, " +
+		"or provision it in each session via setup_commands or the setup overlay"
+}

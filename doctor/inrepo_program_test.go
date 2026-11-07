@@ -328,7 +328,7 @@ func TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal(t *testin
 	require.Equal(t, StatusFail, row.Status,
 		"an unresolvable in-repo config must FAIL, not silently fall back to global")
 	require.True(t, row.Problem, "the unresolved in-repo config must be actionable")
-	require.Contains(t, row.Detail, "could not resolve the in-repo config")
+	require.Contains(t, row.Detail, "could not resolve config for the repo")
 	// No per-agent binary rows ran: the session would refuse to launch, so the
 	// doctor must not pretend to have checked a command.
 	for _, c := range rep.Checks {
@@ -342,13 +342,15 @@ func TestCheckAgentBinaries_MalformedInRepoConfig_FailsNotSilentGlobal(t *testin
 // whose in-repo config selects a non-local backend (docker) does not check the
 // daemon host for the agent binary: the session runs in a container, so the
 // host's binary is not a prerequisite. Mirrors daemon.createNeedsDaemonHostPrereqs.
-// The in-repo config supplies a valid docker.image so the backend's
-// session-creation precondition (BackendConfigError) is satisfied and the skip
-// path is the one exercised — a misconfigured remote backend is covered by
-// TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips.
+// The in-repo config supplies a valid docker.image and the docker CLI, origin
+// remote, and engine-locality facts are stubbed usable, so the backend's
+// side-effect-free preconditions (BackendUnusableReason, #6792 item 4) all
+// pass and the skip path is the one exercised — an unusable remote backend is
+// covered by TestCheckAgentBinaries_*_FailsNotSkips.
 func TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupDoctorRepo(t)
+	stubUsableDockerBackend(t, repo)
 	// No claude binary exists anywhere — on a docker backend that is fine.
 	writeInRepoConfig(t, repo, "backend = \"docker\"\n[docker]\nimage = \"af-runtime:latest\"\n[program_overrides]\nclaude = \"./bin/claude\"\n")
 	chdir(t, repo)
@@ -394,7 +396,7 @@ func TestCheckAgentBinaries_RemoteBackend_Misconfigured_FailsNotSkips(t *testing
 	require.True(t, row.Problem, "the misconfigured remote backend must be actionable")
 	require.Contains(t, row.Detail, "docker")
 	require.Contains(t, row.Detail, "docker.image")
-	require.Contains(t, agentsHeaderValue(rep), "misconfigured")
+	require.Contains(t, agentsHeaderValue(rep), "unusable")
 	// No per-agent binary rows ran: the session would refuse to launch.
 	for _, c := range rep.Checks {
 		require.NotEqual(t, tmux.ProgramClaude, c.Name,
@@ -437,11 +439,15 @@ func TestCheckAgentBinaries_UnknownBackend_FailsNotSkipped(t *testing.T) {
 // TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks is the setup-path twin
 // of TestCheckAgentBinaries_RemoteBackend_SkipsHostChecks: a repo on a docker
 // backend must not report the daemon host's missing agent binary as a setup
-// finding. The in-repo config supplies a valid docker.image so the backend's
-// session-creation precondition is satisfied and the skip path is exercised.
+// finding. The in-repo config supplies a valid docker.image and the CLI /
+// origin / engine-locality facts are stubbed usable, so the backend's
+// side-effect-free preconditions (BackendUnusableReason, #6792 item 4) all
+// pass and the skip path is exercised. The skip row is informational — a PASS
+// would claim a binary check that never ran.
 func TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	repo := setupDoctorRepo(t)
+	stubUsableDockerBackend(t, repo)
 	writeInRepoConfig(t, repo, "backend = \"docker\"\ndefault_program = \"claude\"\n[program_overrides]\nclaude = \"./bin/claude\"\n[docker]\nimage = \"af-runtime:latest\"\n")
 	chdir(t, repo)
 
@@ -452,8 +458,8 @@ func TestCheckAgentPrograms_RemoteBackend_SkipsHostChecks(t *testing.T) {
 	require.Zero(t, rep.UnresolvedCount(),
 		"a remote-backend skip must not produce an actionable finding: %+v", rep.Findings)
 	row := findCheck(t, rep, "agent-program")
-	require.Equal(t, StatusPass, row.Status,
-		"a remote-backend skip is recorded as a non-actionable pass row")
+	require.Equal(t, StatusInfo, row.Status,
+		"a remote-backend skip is an observation, not a pass/fail")
 	require.Contains(t, row.Detail, "docker")
 }
 
@@ -514,7 +520,7 @@ func TestCheckAgentPrograms_MalformedInRepoConfig_Actionable(t *testing.T) {
 
 	findings := findByCheck(rep, "agent-program")
 	require.NotEmpty(t, findings, "an unresolvable in-repo config must produce a finding")
-	require.Contains(t, findings[0].Detail, "could not resolve the in-repo config")
+	require.Contains(t, findings[0].Detail, "could not resolve config for the repo")
 	require.True(t, rep.UnresolvedCount() > 0,
 		"an unresolvable in-repo config must drive the exit code")
 }

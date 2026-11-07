@@ -197,28 +197,44 @@ func (i *Instance) RecordPendingManualAccountSwapMissionDelivery(from, to string
 // before a delivery attempt touches the composer. A crash after this boundary
 // reloads ambiguity, never the positive non-delivery verdict that admitted the
 // attempt.
-func (i *Instance) BeginPendingManualAccountSwapMissionDelivery(from, to string) (PromptDeliveryStatus, error) {
+//
+// The displaced verdict's attempt instant retires with it (#6798), the same
+// contract the automatic notice's begin already carries: notice evidence is
+// only ever armed against the timestamp of the attempt that is actually
+// pending, and a positively-missed attempt's timestamp never counts. Without
+// the retire a crash after the boundary reloads (could-not-confirm, STALE
+// attempt instant), the re-verification watch arms against the missed
+// attempt's timestamp, and a turn begun after it — with no relation to the
+// never-submitted retry — satisfies the evidence contract and retires a
+// mission that was never sent. It returns the displaced pair so a failed
+// persistence can restore them atomically.
+func (i *Instance) BeginPendingManualAccountSwapMissionDelivery(from, to string) (PromptDeliveryStatus, time.Time, error) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	pending := i.pendingAccountSwap
 	if pending == nil || !pending.Manual || pending.From != from || pending.To != to {
-		return "", fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
+		return "", time.Time{}, fmt.Errorf("manual account swap from %q to %q is no longer pending", from, to)
 	}
 	if !pending.ReplacementPanesStarted {
-		return "", fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
+		return "", time.Time{}, fmt.Errorf("manual account swap from %q to %q has no replacement panes", from, to)
 	}
 	previous := pending.MissionDeliveryStatus
-	if previous != PromptCouldNotConfirm {
+	previousAttempt := pending.MissionDeliveryAttemptAt
+	if previous != PromptCouldNotConfirm || !previousAttempt.IsZero() {
 		pending.MissionDeliveryStatus = PromptCouldNotConfirm
+		pending.MissionDeliveryAttemptAt = time.Time{}
 		i.touchLocked()
 	}
-	return previous, nil
+	return previous, previousAttempt, nil
 }
 
-// RestorePendingManualAccountSwapMissionDelivery rolls back a begin boundary
-// only when persistence failed before submission began. Empty is allowed here:
-// an initial delivery with no prior attempt has no verdict to restore.
-func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus) error {
+// RestorePendingManualAccountSwapMissionDelivery rolls a begin boundary back
+// to the exact verdict/attempt pair it displaced when persistence failed
+// before submission began — status AND instant together, so the restored
+// record is exactly what evidence armed against before the boundary (#6798).
+// Empty status is allowed here: an initial delivery with no prior attempt has
+// no verdict to restore.
+func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to string, status PromptDeliveryStatus, attemptedAt time.Time) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	pending := i.pendingAccountSwap
@@ -228,8 +244,9 @@ func (i *Instance) RestorePendingManualAccountSwapMissionDelivery(from, to strin
 	if status != "" && !status.Valid() {
 		return fmt.Errorf("invalid manual account swap mission delivery status %q", status)
 	}
-	if pending.MissionDeliveryStatus != status {
+	if pending.MissionDeliveryStatus != status || !pending.MissionDeliveryAttemptAt.Equal(attemptedAt) {
 		pending.MissionDeliveryStatus = status
+		pending.MissionDeliveryAttemptAt = attemptedAt
 		i.touchLocked()
 	}
 	return nil

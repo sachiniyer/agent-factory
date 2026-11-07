@@ -128,8 +128,9 @@ func (m *Manager) prepareRuntimeReplacement(repoID, key string, instance *sessio
 	// reports the outcome exactly once.
 	instance.InterruptTaskRunForRestoreBoundary()
 	// Runs at the respawn's live boundary, inside Recover/Respawn, which every
-	// caller reaches while holding the repository's worktree admission lock — so
-	// the start lock must not be taken here (#6197).
+	// caller reaches while holding the repository's worktree admission lock —
+	// or, for a non-local backend, under the operation fence alone — so the
+	// start lock must not be taken here (#6197, #6880).
 	if err := m.persistSettlementUnderAdmission(repoID, key, instance); err != nil {
 		return fmt.Errorf("the predecessor runtime could not be retired before its replacement became live: %w", err)
 	}

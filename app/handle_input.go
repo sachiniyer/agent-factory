@@ -218,8 +218,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// sendProgramForCreate already pins that program explicit; an unchosen
 		// preselect stays implicit alongside the program and lets the daemon
 		// resolve both.
+		//
+		// The preselect DISPLAYS the configured default in the field, but a
+		// displayed default is not a choice: only a user pick may travel as an
+		// explicit account — on off-box backends the daemon otherwise reads the
+		// default as a user request and refuses the create instead of dropping
+		// it (#6695).
 		sendAccount := m.pendingAccount
-		if sendProgram == "" {
+		if sendProgram == "" || !m.pendingAccountChosen {
 			sendAccount = ""
 		}
 		// The failed-create draft needs the user's CHOICES beside the wire

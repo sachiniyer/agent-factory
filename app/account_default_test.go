@@ -17,9 +17,11 @@ import (
 // The distinction is the whole issue. The session is identical either way — the
 // daemon applies the same default — so what these pin is the difference between a
 // form that says "Ambient identity" while the create runs as `work`, and one that
-// says `work` before the user presses Enter. The second is also what makes the
-// version-skew check mean anything: a client that sent no account has nothing to
-// compare the created session against.
+// says `work` before the user presses Enter. Display and wire are deliberately
+// different contracts (#6695): the field SHOWS the resolved default so nothing is
+// applied in silence, but only an account the user actually picked goes on the
+// wire as explicit — an unchosen preselect sent as explicit is read as a user
+// request, which off-box backends refuse instead of dropping the default.
 
 // requireNamingFormOpened asserts that pressing `n`/`N` OPENED the naming form
 // rather than refusing the keypress.
@@ -61,17 +63,20 @@ func deliverAccountDefault(t *testing.T, h *home, naming *session.Instance, agen
 }
 
 // TestNamingFormPreselectsTheProjectDefaultAccount is the issue's headline: the
-// default is visible on the form and is what the create actually sends.
+// default is visible on the form — and stays DISPLAY-ONLY on the wire: the
+// create carries no explicit account, so the daemon resolves the default
+// itself (#6695). A preselect sent as explicit is read as a user request —
+// on off-box backends that refuses the create instead of dropping the default.
 func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 	h := newTestHome(t)
 	h.errBox.SetSize(200, 1)
 	var got sessionStartRequest
 	t.Cleanup(SetSessionStarterForTest(func(inst *session.Instance, req sessionStartRequest) (*session.Instance, error) {
 		got = req
-		// A daemon that knows the field echoes it back on the created session; the
-		// skew check compares the two, which is only possible because the account
-		// was SENT rather than left for the daemon to fill in.
-		return startedWithAccount(t, inst.Title, req.Account), nil
+		// The daemon resolves the configured default itself when no explicit
+		// account arrives: the session still runs as `work` — exactly the pair
+		// the field showed, with provenance recorded rather than an explicit ask.
+		return startedWithAccount(t, inst.Title, "work"), nil
 	}))
 	calls, asked := stubAccounts(t, withDefaults(map[string]string{"claude": "work"}), nil)
 	inst := startNaming(t, h, "defaulted")
@@ -83,8 +88,8 @@ func TestNamingFormPreselectsTheProjectDefaultAccount(t *testing.T) {
 		"the project's configured account must be preselected, not applied invisibly by the daemon")
 
 	require.True(t, submitNaming(t, h))
-	assert.Equal(t, "work", got.Account,
-		"the preselected account must be SENT, so the daemon's answer can be checked against what the user saw")
+	assert.Empty(t, got.Account,
+		"an unchosen preselect must not travel: the wire carries no explicit account (#6695)")
 }
 
 // TestProjectDefaultNeverOverridesADeliberatePick is the race this feature is one
