@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "7ec33ac83c7a";
+var CLIENT_VERSION = "4894c61529ba";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21272,6 +21272,38 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
   if (index > 0 && canClose) {
     const close = h("span", { class: "af-tab-close", title: `Delete tab \u201C${tabDisplayLabel(tab)}\u201D` }, icon("x"));
     close.setAttribute("aria-hidden", "true");
+    close.addEventListener("mousedown", (e) => e.preventDefault());
+    close.addEventListener("pointerdown", (e) => {
+      if (!e.isPrimary || e.button !== 0) {
+        return;
+      }
+      const strip = btn.closest(".af-tabbar");
+      if (!strip) {
+        return;
+      }
+      const disarm = () => {
+        window.removeEventListener("click", onClick, true);
+        window.removeEventListener("pointerdown", disarm, true);
+        window.removeEventListener("pointercancel", disarm, true);
+        window.removeEventListener("blur", disarm);
+      };
+      const onClick = (ev) => {
+        disarm();
+        const target = ev.target;
+        if (ev.detail === 0) {
+          return;
+        }
+        if (target instanceof Element && target !== close && target.closest(".af-tabbar") !== null) {
+          ev.preventDefault();
+          ev.stopPropagation();
+          closeTab2();
+        }
+      };
+      window.addEventListener("click", onClick, true);
+      window.addEventListener("pointerdown", disarm, true);
+      window.addEventListener("pointercancel", disarm, true);
+      window.addEventListener("blur", disarm);
+    });
     close.addEventListener("click", (e) => {
       e.stopPropagation();
       closeTab2();
