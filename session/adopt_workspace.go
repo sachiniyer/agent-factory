@@ -59,12 +59,14 @@ func (i *Instance) recordedTransport() (*RecordedTransport, error) {
 	if p == nil || strings.TrimSpace(p.sshCmd) == "" {
 		// Reached only with the unknown-cleanup flag clear — the fail-closed
 		// shape is refused earlier, in confirmStoppedBeforeAdopt — so this row
-		// owes nothing af can still reap and `af sessions kill` does remove it.
-		// Warn about the preserved directory BEFORE naming its removal: it is
-		// the session's unpushed work, and the kill drops the record, which is
-		// the last pointer af has to it (#6791).
+		// owes nothing af can still reap and `af sessions kill` removes only
+		// the row: with no transport af cannot reach the host, so the
+		// directory is the user's to remove. Warn about the preserved
+		// directory BEFORE naming its removal: it is the session's unpushed
+		// work, and the kill drops the record, which is the last pointer af
+		// has to it (#6791/#6940).
 		if w := i.preservedWorkspaceOwed(); w != nil {
-			return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; its workspace at %s holds the session's unpushed work — copy it or push its branch on the host first if you want to keep it — then `af sessions kill %q` removes the row, and you remove the workspace yourself", i.Title, w.Dir, i.Title)
+			return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; its workspace at %s holds the session's unpushed work — copy it or push its branch on the host first if you want to keep it — then `af sessions kill %q` removes the row only; the workspace stays on its host for you to remove", i.Title, w.Dir, i.Title)
 		}
 		return nil, fmt.Errorf("session %q recorded no transport to its host, so its preserved workspace cannot be checked; kill the session to remove it", i.Title)
 	}
@@ -409,14 +411,15 @@ func (i *Instance) confirmStoppedBeforeAdopt() error {
 		}
 		// Kill on this shape runs the real teardown, which reaps the preserved
 		// workspace — the session's unpushed work — so the warning precedes the
-		// verb, same as every other refusal on this path (#6791).
+		// verb, and the verb says it reaps that workspace rather than reading
+		// as the row-only removal it is on the no-transport shape (#6791/#6940).
 		i.mu.RLock()
 		wsDir := ""
 		if i.archivedWorkspace != nil {
 			wsDir = i.archivedWorkspace.Dir
 		}
 		i.mu.RUnlock()
-		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or — since its workspace at %s holds the session's unpushed work (copy it or push its branch on the host first if you want to keep it) — `af sessions kill %q` removes the row", i.Title, err, wsDir, i.Title)
+		return fmt.Errorf("session %q: an agent-server af started in its preserved workspace is not confirmed stopped (%v); not starting another beside it — retry once the host is reachable, or — since its workspace at %s holds the session's unpushed work (copy it or push its branch on the host first if you want to keep it) — `af sessions kill %q` removes the row and reaps that workspace", i.Title, err, wsDir, i.Title)
 	}
 	i.mu.Lock()
 	i.runtimeCleanupStateUnknown = false
