@@ -299,4 +299,21 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 		require.True(t, inst.SetLimitReachedAtEpoch(later, "reset at 9pm", newBanner, inst.stateEpoch))
 		requireParkedReset(t, inst, later)
 	})
+
+	t.Run("a reused phrase at a different anchor is a new wall", func(t *testing.T) {
+		// The day-after shape: a NEW banner at a different pane position
+		// happens to re-use "reset at 3pm". The phrase matches the recorded
+		// wall — the durable ledger row too — but the anchor proves it is not
+		// that banner, so its own parse applies and the ledger tightens.
+		inst := &Instance{Program: tmux.ProgramClaude, Account: "work"}
+		inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+		inst.ClearLimitReached()
+		moved := LimitBanner{Prefix: "entirely different transcript\nwith more rows\n", Count: 1}
+		require.True(t, inst.SetLimitReachedAtEpoch(later, clockResetEvidence, moved, inst.stateEpoch))
+		requireParkedReset(t, inst, later)
+		obs := inst.AccountLimitObservations()
+		require.Len(t, obs, 1, "the same reset-claim KIND still merges")
+		require.True(t, obs[0].ResetAt.Equal(later),
+			"the durable row must tighten to the new wall's own instant, not keep yesterday's")
+	})
 }

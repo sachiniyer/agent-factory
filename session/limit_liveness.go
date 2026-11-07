@@ -295,7 +295,12 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 //     re-worded clause, a resolved-reset-without-phrase, or a banner printed
 //     below is a different fact and falls through.
 //   - the durable observation ledger — the named identity's recorded wall —
-//     which survives the restart the memory-only shadow cannot.
+//     but only for a sighting that carries no pane anchor of its own (the
+//     committed-copy shape). A phrase match alone cannot tell a clipped
+//     re-read from a NEW banner that happens to re-use the phrase (the next
+//     day's identical "reset at 3pm"), so an anchored sighting is judged by
+//     the live and shadow reads above — positional evidence a copied,
+//     pane-free sighting simply does not have.
 //
 // A sighting none of those recognize keeps its own parse: a genuinely new
 // limit fact parks with its own reset.
@@ -326,7 +331,7 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 			return w.resetAt, evidence
 		}
 	}
-	if evidence != "" {
+	if banner == (LimitBanner{}) && evidence != "" {
 		for idx := range i.accountLimitObservations {
 			observation := &i.accountLimitObservations[idx]
 			if observation.Agent == agent && observation.Account == i.Account &&
@@ -414,15 +419,14 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		// review).
 		if observation.Agent == agent && observation.Account == account &&
 			observation.ResetAt.IsZero() == resetAt.IsZero() {
+			// resetAt arrives already resolved: the caller's
+			// originalLimitResetLocked has judged whether the sighting is the
+			// recorded wall's re-read or a genuinely new fact, so the merge
+			// keeps only the safer bound — a repeated phrase that resolved
+			// to the recorded instant merges in place, and a new wall that
+			// re-uses a phrase (the next day's identical "reset at 3pm")
+			// still tightens the row to its own instant (#6959).
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if evidence != "" && observation.Evidence == evidence {
-				// The phrase the stored reset parsed from re-reads
-				// identically: this is that banner's re-parse, not a new
-				// claim. A clock-relative phrase mints a later instant on
-				// every pass, so the later value is never adopted — the
-				// first parse stays (#6959).
-				retained = observation.ResetAt
-			}
 			if wasParked && observation.ResetAt.Equal(retained) &&
 				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 				return
