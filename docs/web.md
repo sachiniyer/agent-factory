@@ -183,7 +183,10 @@ for tab and view navigation.
 The pane header's **Retry limit** appears for a session waiting on a usage limit
 and requests another attempt. If an agent or account handoff could not confirm
 mission delivery, inspect the pane first; the same place shows **Retry handoff**
-as the explicit override while automatic redelivery stays suppressed, and
+as the explicit override while automatic redelivery stays suppressed,
+**Queue for limit resume** when the unconfirmed handoff is parked at its
+usage-limit wall with an unknown startup state — the daemon queues the
+mission for the next resume rather than resending or restarting — and
 **Mark delivered** to retire it without resending when the pane shows the mission
 already landed. If that retry delivers the mission while its final disk
 settlement remains pending, the web keeps a confirmed-mutation warning on screen

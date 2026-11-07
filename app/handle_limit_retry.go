@@ -54,22 +54,21 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 		// labelled as a resend.
 		resend := handoffResolveNoResend
 		switch {
-		case selected.PendingHandoffMission() != "" && selected.LimitReached() && selected.StartupStateUnknown():
-			// A startup-unknown agent handoff parked at its limit wall IS
-			// admitted — the admission predicate deliberately stays wide
-			// because the daemon routes on it — but retryPendingHandoff's
-			// limit arm queues the mission into the stored Prompt for the
-			// scheduled retry: nothing is resent now and nothing is
-			// restarted, so the honest label is the queue, not "Retry send"
-			// and not a restart (#6800; #6928 review MED: admission must not
-			// narrow for the label's sake).
+		case selected.PendingHandoffMission() != "" && selected.LimitReached() && selected.CanRetryPendingHandoffMissionDelivery():
+			// Gate on the admission predicate — the same bit the daemon
+			// routes on and the web mirror checks — not on
+			// StartupStateUnknown: within the crash window a startup-unknown
+			// row at the wall with a "delivered" verdict is NOT admitted, and
+			// labelling the refused verb "Queue…" would lie again. For every
+			// admitted shape retryPendingHandoff's limit arm queues the
+			// mission into the stored Prompt for the next resume: nothing is
+			// resent now and nothing is restarted (#6800; #6928 review).
 			resend = handoffResolveQueueLimit
 		case selected.PendingHandoffMission() != "" && selected.LimitReached():
-			// A KNOWN-state handoff parked at its limit is not admitted by
-			// CanRetryPendingHandoffMissionDelivery (its liveness arm needs
-			// Running/Ready or startup-unknown), so the daemon runs the
-			// plain limit resume — it un-stalls the agent and leaves the
-			// pending mission unsent.
+			// A pending handoff at the wall that is NOT admitted — a known
+			// liveness, or a startup-unknown row whose verdict is delivered —
+			// takes the plain limit resume: the daemon un-stalls the agent
+			// and leaves the pending mission unsent.
 			resend = handoffResolveResumeLimit
 		case canRetry:
 			resend = handoffResolveResendMission

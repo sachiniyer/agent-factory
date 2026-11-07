@@ -328,7 +328,7 @@ test("resumeFromLimit resolves the queue note for a committed handoff transfer",
       json: async () => ({
         data: {
           ok: true,
-          reason: "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+          reason: "the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off",
         },
         error: null,
       }),
@@ -336,7 +336,7 @@ test("resumeFromLimit resolves the queue note for a committed handoff transfer",
 
   assert.equal(
     await resumeFromLimit("id-repoB", "feature", "tok"),
-    "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+    "the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off",
   );
 });
 

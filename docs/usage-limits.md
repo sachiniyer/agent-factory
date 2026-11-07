@@ -586,10 +586,15 @@ submission may already have landed. Inspect the replacement pane, then choose
 the explicit override when it is needed: if the agent is already acting on the
 mission, mark it delivered (no resend) — **Mark delivered** in the TUI's
 **`c`** picker, **Mark delivered** in the web pane header, or
-`af sessions retry-limit <title> --delivered`; otherwise resend it — **Try
+`af sessions retry-limit <title> --delivered`; otherwise resend it — **Retry
 send** in the **`c`** picker, **Retry handoff** in the web pane header, or run
-`af sessions retry-limit <title>`. The retry verdict is attached to that pending
-handoff mission; sending another prompt does not make the daemon resend it.
+`af sessions retry-limit <title>`. When the unconfirmed handoff is also parked
+at its usage-limit wall with an unknown startup state, the override is neither
+a resend nor a restart — the daemon queues the mission into the session's
+stored prompt for the next limit resume, and the surfaces name it **Queue for
+limit resume** (TUI `c` picker and web pane header). The retry verdict is
+attached to that pending handoff mission; sending another prompt does not
+make the daemon resend it.
 If that explicit retry delivers the mission but cannot persist its final
 settlement, every client reports the retry as completed with a warning. The TUI
 shows the warning as a completion message, the web keeps it in the confirmed

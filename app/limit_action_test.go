@@ -662,11 +662,13 @@ func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsQueueForLimitRe
 	var gotRequest daemon.ResumeFromLimitRequest
 	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) (daemon.ResumeFromLimitResponse, error) {
 		gotRequest = request
-		// The RPC's REAL answer for this shape: OK with a queue note — the
-		// transfer committed, nothing restarted, nothing failed.
+		// The RPC's REAL answer for this shape under the default config
+		// (limit_auto_resume off): OK with a queue note that names the
+		// operator's own verb — the transfer committed, nothing restarted,
+		// nothing failed, and nothing is scheduled.
 		return daemon.ResumeFromLimitResponse{
 			OK:     true,
-			Reason: "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+			Reason: "the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off",
 		}, nil
 	})
 	defer restore()
@@ -694,12 +696,12 @@ func TestHandleLimitRetry_StartupUnknownAgentHandoffAtLimitLabelsQueueForLimitRe
 
 	h.errBox.SetSize(200, 1)
 	h.handleLimitRetried(done)
-	require.Contains(t, statusNoticeText(h), "queued for the scheduled limit retry",
+	require.Contains(t, statusNoticeText(h), "the pending mission was queued",
 		"the committed transfer surfaces its note, not a failure")
 	require.False(t, statusNoticeIsFailure(h),
 		"a queued mission is not a failure notice")
 	require.True(t, inst.LimitReached(),
-		"the wall persists — the scheduled retry owns the mission now, so the badge must stay")
+		"the wall persists — the mission sends on the next resume, so the badge must stay")
 }
 
 // A manual retry retains its target while the tea.Cmd waits to run. If a

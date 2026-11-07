@@ -38,11 +38,24 @@ func (s *controlServer) ResumeFromLimit(req ResumeFromLimitRequest, resp *Resume
 	}
 	switch {
 	case outcome == resumeTransferred:
-		resp.Reason = "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes"
+		resp.Reason = s.manager.resumeTransferredNote()
 	case !resp.OK:
 		resp.Reason = "the session changed or another operation owns its retry"
 	}
 	return nil
+}
+
+// resumeTransferredNote phrases the queued-transfer outcome for the live
+// config. The mission goes out on the NEXT limit resume — which is automatic
+// only when limit_auto_resume is on, and that defaults OFF, so the note must
+// otherwise say how to send it (#6928 review MED). Kept beside the outcome
+// so the RPC, the TUI notice, the CLI's note field and the web toast all
+// quote one string.
+func (m *Manager) resumeTransferredNote() string {
+	if cfg := m.Config(); cfg != nil && cfg.LimitAutoResume {
+		return "the pending mission was queued for the scheduled limit retry — it sends when the agent resumes"
+	}
+	return "the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off"
 }
 
 // testHookResumeAfterFirstLock fires in resumeFromLimitOutcome immediately after

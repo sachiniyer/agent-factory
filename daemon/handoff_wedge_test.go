@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -141,6 +142,24 @@ func TestResumeFromLimit_StartupUnknownHandoffAtLimitTransfersTheMission(t *test
 
 	_, prompts := backend.snapshot()
 	require.Empty(t, prompts, "no resend happened — the honesty the TUI label mirrors")
+
+	// The note the RPC answers must be true in the config the test manager
+	// runs: DefaultConfig has limit_auto_resume OFF, so nothing is scheduled —
+	// the note must say how to send the queued mission, not promise a
+	// scheduled retry that does not exist (#6928 review MED).
+	require.Equal(t,
+		"the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off",
+		manager.resumeTransferredNote(),
+		"with limit_auto_resume off (the default) the note names the operator's own verb")
+
+	// The on-config variant is the only one that may call the retry scheduled.
+	onCfg := config.DefaultConfig()
+	onCfg.LimitAutoResume = true
+	manager.live.Store(&livePosturePublication{cfg: onCfg})
+	require.Equal(t,
+		"the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+		manager.resumeTransferredNote(),
+		"with limit_auto_resume on the scheduler owns the send, so 'scheduled' is true")
 }
 
 // absentPaneHandoffBackend answers the liveness probe with a definite "no such
