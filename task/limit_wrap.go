@@ -283,6 +283,21 @@ func wrapSplitsMonth(pre, post string) bool {
 		if strings.HasPrefix(joined, m) {
 			return true
 		}
+		// A multi-row split of a month token — a very narrow pane breaking
+		// "November" one letter per row ("N\no\nvember") — presents a
+		// 2-letter fragment ("No") at the first wrap that is not yet a
+		// complete 3-letter month abbreviation, so the prefix check above
+		// misses it and the wrap would space to "N o vember", which monthDay
+		// cannot match (degrading the reset to time-only). Rejoin when the
+		// fragment is a strict prefix of a month abbreviation so the next
+		// wrap sees "November" and rejoins in turn. The fragment is at
+		// least 2 letters (head and tail are both non-empty), and within a
+		// reset clause the only letter-newline-letter wraps that yield a
+		// 2-letter month-prefix are month tokens being split, so this does
+		// not rejoin a word-boundary wrap.
+		if len(joined) < len(m) && strings.HasPrefix(m, joined) {
+			return true
+		}
 	}
 	return false
 }

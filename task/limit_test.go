@@ -746,6 +746,21 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
 		{
+			// A very narrow pane may split a month token across MORE than
+			// two rows — "November" splits as "N\no\nvember" — and each
+			// wrap sees only the letter run up to the next newline, so the
+			// first join is the 2-letter fragment "No". The fragment is not
+			// a complete month abbreviation, but it is a strict prefix of
+			// one, so the wrap rejoins ("No") and the next wrap rejoins
+			// "November" in turn; otherwise normalization would yield
+			// "N o vember", monthDay would miss the explicit date, and the
+			// reset would degrade to time-only. Same EST instant as the
+			// unwrapped "November 6, 2027 9am" form.
+			name:    "weekly date: month wraps across multiple rows",
+			content: "Claude usage limit reached. Your limit will reset at N\no\nvember 6, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
 			// A narrow pane may wrap BETWEEN separate numeric tokens — the
 			// day "6" followed by the year "2026" with no comma ("Nov 6\n2026
 			// 9am"). The wrap must NOT rejoin the digits (it is not a mid-token
@@ -1074,6 +1089,19 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "Claude usage limit reached. Your limit will reset at Nov 6, 20\r\n27 9am (America/New_York).",
 			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
+		{
+			// tmux `capture-pane -e` keeps ANSI SGR escapes, and the anchor's
+			// abbreviated-month branch admits them across a wrap, so a styled
+			// date whose color resets between the month's period and the wrap
+			// — "Nov.\x1b[39m\n6" — still reaches the normalizer. The SGR
+			// bytes must be stripped so monthDay matches "Nov. 6" rather
+			// than "Nov.\x1b[39m 6" (which it cannot match, degrading the
+			// reset to time-only). Same EST instant as the unwrapped
+			// "Nov. 6, 2027 9am" form.
+			name:    "weekly date: SGR escape between abbreviated month and wrap",
+			content: "Claude usage limit reached. Your limit will reset at Nov.\x1b[39m\n6, 2027 9am (America/New_York).",
+			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {
@@ -1286,6 +1314,24 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 		t.Fatalf("wrapped weekday+word evidence = %q, want %q", evWrappedWeekdayAt, want)
 	}
 
+	// A month token split across MORE than two rows — "November" splits as
+	// "N\no\nvember" — must produce the SAME evidence as the unwrapped
+	// "November 6, 2027 9am" form: each 2-letter fragment rejoins (it is a
+	// strict prefix of a month abbreviation) so the next wrap sees the
+	// longer fragment and rejoins in turn, keeping the identity stable
+	// across pane resizes (rather than spacing to "N o vember", which
+	// monthDay misses).
+	unwrappedMultiRowMonth := "Claude usage limit reached. Your limit will reset at November 6, 2027 9am (America/New_York)."
+	wrappedMultiRowMonth := "Claude usage limit reached. Your limit will reset at N\no\nvember 6, 2027 9am (America/New_York)."
+	_, _, _, evUnwrappedMultiRowMonth := det.Check(unwrappedMultiRowMonth, tmux.ProgramClaude, now)
+	_, _, _, evWrappedMultiRowMonth := det.Check(wrappedMultiRowMonth, tmux.ProgramClaude, now)
+	if evUnwrappedMultiRowMonth != evWrappedMultiRowMonth {
+		t.Fatalf("a multi-row month split must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedMultiRowMonth, evWrappedMultiRowMonth)
+	}
+	if want := "reset at November 6, 2027 9am (America/New_York)."; evWrappedMultiRowMonth != want {
+		t.Fatalf("multi-row month evidence = %q, want %q", evWrappedMultiRowMonth, want)
+	}
+
 	// The production gutter+indent layout: a wrap inside the tz paren that
 	// carries the 5-space continuation indent — "(America/\n     New_York)"
 	// — must produce the SAME evidence as the unwrapped "(America/New_York)"
@@ -1340,6 +1386,23 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	}
 	if want := "reset at Nov 12th, 2027 9am (America/New_York)."; evWrappedOrdinalComma != want {
 		t.Fatalf("wrapped ordinal-suffix-comma evidence = %q, want %q", evWrappedOrdinalComma, want)
+	}
+
+	// A styled abbreviated date whose ANSI color resets between the
+	// month's period and the wrap — "Nov.\x1b[39m\n6" — must produce the
+	// SAME evidence as the unwrapped "Nov. 6, 2027 9am" form: the SGR
+	// bytes are stripped by the normalizer (not left between "Nov." and
+	// the day) so monthDay matches the date and the identity stays stable
+	// across pane resizes.
+	unwrappedStyledMonth := "Claude usage limit reached. Your limit will reset at Nov. 6, 2027 9am (America/New_York)."
+	wrappedStyledMonth := "Claude usage limit reached. Your limit will reset at Nov.\x1b[39m\n6, 2027 9am (America/New_York)."
+	_, _, _, evUnwrappedStyledMonth := det.Check(unwrappedStyledMonth, tmux.ProgramClaude, now)
+	_, _, _, evWrappedStyledMonth := det.Check(wrappedStyledMonth, tmux.ProgramClaude, now)
+	if evUnwrappedStyledMonth != evWrappedStyledMonth {
+		t.Fatalf("a styled abbreviated-month wrap must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedStyledMonth, evWrappedStyledMonth)
+	}
+	if want := "reset at Nov. 6, 2027 9am (America/New_York)."; evWrappedStyledMonth != want {
+		t.Fatalf("styled abbreviated-month evidence = %q, want %q", evWrappedStyledMonth, want)
 	}
 }
 

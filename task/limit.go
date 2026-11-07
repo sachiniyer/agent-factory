@@ -517,6 +517,30 @@ func normalizeResetWhitespace(s string) string {
 			lastDigit = false
 			lastLetter = false
 			lastColon = false
+		case c == '\x1b':
+			// tmux `capture-pane -e` keeps ANSI SGR escapes, and the anchor's
+			// abbreviated-month branch admits them across a wrap, so a styled
+			// date like "Nov.\x1b[39m\n6" reaches the normalizer with the SGR
+			// bytes sitting between the month's period and the day. Strip the
+			// escape sequence transparently — without resetting the token-state
+			// flags or emitting a byte — so the wrap's rejoin/space decision
+			// sees the surrounding tokens directly and monthDay matches
+			// "Nov. 6" rather than "Nov.\x1b[39m 6" (which it cannot match, so
+			// the reset degrades to time-only). Stripping applies inside a
+			// paren too, so a styled zone "(America/\x1b[39m\nNew_York)"
+			// still rejoins to "(America/New_York)".
+			k := i + 1
+			if k < len(s) && s[k] == '[' {
+				k++
+				for k < len(s) && s[k] >= 0x30 && s[k] <= 0x3F {
+					k++
+				}
+				if k < len(s) && s[k] >= 0x40 && s[k] <= 0x7E {
+					k++
+				}
+			}
+			i = k - 1
+			continue
 		case depth > 0:
 			// Inside a parenthesized span: drop the wrap's newlines so a split
 			// zone token rejoins; keep every other byte (including the genuine
