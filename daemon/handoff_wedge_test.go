@@ -112,10 +112,13 @@ func TestResumeFromLimit_StartupUnknownHandoffAtLimitTransfersTheMission(t *test
 	}
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "wedged-limit-handoff", backend)
 	mission := "continue the inherited work"
-	stageHandoffWedge(t, inst, mission, session.PromptSentUnverified)
+	// The wall must be parked BEFORE the wedge's BeginHandoff raises the
+	// OpReplacing fence: setLimitReachedLocked refuses under any in-flight op.
 	inst.SetLimitReached(time.Now().Add(time.Hour))
+	stageHandoffWedge(t, inst, mission, session.PromptSentUnverified)
 	manager.persistInstance(repoID, inst)
 
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at the wall")
 	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
 		"fixture: startup-unknown at the wall must still ADMIT the explicit retry — "+
 			"the daemon routes on this bit")
