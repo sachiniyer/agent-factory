@@ -275,6 +275,14 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	if agent == "" {
 		return nil
 	}
+	// Rollout adoption is attributed to the runtime this attempt commits
+	// for: a new same-directory rollout is only a directory match until the
+	// pane's own process generation provably holds it open — a same-cwd
+	// sibling minted while the session waits unprompted is provably foreign
+	// and stays unrecorded (#6847). The binding re-resolves the pane on each
+	// judgement, so a snapshot armed before the pane exists still attributes
+	// to the runtime the pane later holds.
+	snap = inst.BindConversationCaptureRuntime(snap)
 	conv, err := session.CaptureAgentConversation(agent, snap, timeout)
 	if err != nil {
 		return err

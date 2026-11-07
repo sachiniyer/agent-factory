@@ -61,3 +61,7 @@ func readWorkingDir(int) (string, bool) {
 func openWorkingDir(int) (*os.File, string, bool) {
 	return nil, "", false
 }
+
+func openFilePaths(int) (map[string]struct{}, error) {
+	return nil, ErrUnsupportedPlatform
+}

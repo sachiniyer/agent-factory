@@ -48,6 +48,9 @@ func codexLoopTestInstance(t *testing.T) (*Manager, *session.Instance, string, s
 	})
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSession("codex-worker", tmux.ProgramCodex))
+	// Attribution needs a runtime holding the rollout open; the fixture's
+	// pane is a name-only handle, so the test hands the walk its store.
+	inst.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
 	// A real worktree: the deferred baseline resolves the launch directory
 	// through GetWorktreePath, which stays empty without one.
 	gw, err := sessiongit.NewGitWorktreeFromStorage(repoPath, repoPath, inst.Title, "main", "", false, true)
