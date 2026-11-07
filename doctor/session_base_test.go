@@ -1,0 +1,450 @@
+package doctor
+
+// #6792: a doctor PASS for an agent program must mean "a session created now
+// would find that program". Sessions launch in a clean worktree created from
+// the repo's BASE tree — origin's default branch when the repo has one
+// (resolveOriginHead reads origin/HEAD, then origin/main, then origin/master,
+// falling back to HEAD; session/git/worktree_ops.go), so any executable the
+// launch needs that is not a runnable file in THAT tree resolves in this
+// checkout but is absent — or present but not runnable — at launch. #6740
+// checked the current checkout's index (`git ls-files`), which misses every
+// shape where the index or working tree disagrees with that base tree.
+
+import (
+	"context"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"testing"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// setupDoctorRepoWithOrigin returns a repo with an `origin` remote whose
+// default branch carries only the initial commit: work committed afterwards
+// is "not pushed", work only staged is "staged-only", and work on another
+// branch is "feature-branch" — all absent from the tree a new session's
+// worktree checks out while `git ls-files` reports them tracked.
+func setupDoctorRepoWithOrigin(t *testing.T) string {
+	t.Helper()
+	repo := setupDoctorRepo(t)
+	origin := filepath.Join(testguard.CanonicalTempDir(t), "origin.git")
+	require.NoError(t, exec.Command("git", "init", "--bare", origin).Run())
+	// Push the initial commit under the deterministic branch name the base-ref
+	// probe reads after origin/HEAD: origin/main.
+	require.NoError(t, exec.Command("git", "-C", repo, "checkout", "-B", "main").Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "remote", "add", "origin", origin).Run())
+	require.NoError(t, exec.Command("git", "-C", repo, "push", "-u", "origin", "main").Run())
+	return repo
+}
+
+// ---------------------------------------------------------------------------
+// Item 1 — the check must run against the tree a session branches from, not
+// the current checkout's index.
+// ---------------------------------------------------------------------------
+
+// TestCheckAgentBinaries_UnpushedRelativeOverride_WarnsNotPasses is the
+// committed-but-not-pushed case: `git ls-files` reports bin/claude tracked, so
+// #6740's check keeps the PASS, but the file is absent from origin's default
+// branch — the tree a new session's worktree materializes.
+func TestCheckAgentBinaries_UnpushedRelativeOverride_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepoWithOrigin(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude") // committed locally, deliberately NOT pushed
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, tmux.ProgramClaude)
+	require.Equal(t, StatusWarn, row.Status,
+		"a committed-but-unpushed override is absent from origin's default branch — WARN, not PASS")
+	require.False(t, row.Problem, "an absent-from-base override is advisory, not actionable")
+	require.Contains(t, row.Detail, "origin's default branch")
+	require.Contains(t, row.Detail, "absent at launch")
+	require.Contains(t, row.Remediation, "push")
+	require.Contains(t, row.Remediation, "setup_commands")
+	require.Contains(t, agentsHeaderValue(rep), "claude=present")
+	require.Zero(t, rep.UnresolvedCount(), "an absent-from-base override is advisory, not actionable")
+}
+
+// TestCheckAgentPrograms_UnpushedRelativeOverride_WarnsNotPasses is the
+// setup-path twin: the same committed-but-unpushed file must WARN on
+// `af doctor --setup` too.
+func TestCheckAgentPrograms_UnpushedRelativeOverride_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepoWithOrigin(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude") // committed locally, deliberately NOT pushed
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	require.Zero(t, rep.UnresolvedCount(), "an absent-from-base override is advisory, not actionable")
+	for _, field := range []string{"default_program", "program_overrides.claude"} {
+		row := findCheck(t, rep, field)
+		require.Equal(t, StatusWarn, row.Status,
+			"a committed-but-unpushed override must WARN, not PASS: %s", field)
+		require.False(t, row.Problem)
+		require.Contains(t, row.Detail, "origin's default branch")
+		require.Contains(t, row.Detail, "absent at launch")
+		require.Contains(t, row.Remediation, "push")
+		require.Contains(t, row.Remediation, "setup_commands")
+	}
+}
+
+// TestCheckAgentPrograms_StagedOnlyRelativeOverride_WarnsNotPasses is the
+// staged-but-uncommitted shape: the file is in the index (so `git ls-files`
+// reports it tracked) but in no committed tree — a session's clean checkout
+// will not contain it.
+func TestCheckAgentPrograms_StagedOnlyRelativeOverride_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepoWithOrigin(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	require.NoError(t, exec.Command("git", "-C", repo, "add", "--", "bin/claude").Run()) // staged, not committed
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"a staged-but-uncommitted override is absent from the committed tree — WARN, not PASS")
+	require.False(t, row.Problem)
+	require.Contains(t, row.Detail, "absent at launch")
+}
+
+// TestCheckAgentPrograms_FeatureBranchRelativeOverride_WarnsNotPasses pins
+// that the base tree is origin's default branch and not HEAD: bin/claude is
+// committed on a feature branch, so HEAD's own tree contains it — yet a
+// session branches from origin/main and would not find it.
+func TestCheckAgentPrograms_FeatureBranchRelativeOverride_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepoWithOrigin(t)
+	require.NoError(t, exec.Command("git", "-C", repo, "checkout", "-b", "feature").Run())
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "bin/claude") // committed on `feature` — absent from origin/main
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "bin/claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"an override committed only on a feature branch is absent from origin's default branch — WARN, not PASS")
+	require.Contains(t, row.Detail, "origin's default branch")
+}
+
+// ---------------------------------------------------------------------------
+// Item 2 — a relative WRAPPER around an installed agent must be qualified the
+// same way. `tools/ionice -c 3 claude` carries two executable obligations:
+// tools/ionice is what the shell launches first, and claude is the detected
+// agent. Only the agent's resolved path was recorded before, so an untracked
+// wrapper the clean worktree cannot launch still reported PASS.
+// ---------------------------------------------------------------------------
+
+func TestCheckAgentPrograms_UntrackedRelativeWrapper_WarnsNotPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "tools"), "ionice", "#!/bin/sh\nexit 0\n")
+	// tools/ionice is deliberately NOT committed.
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "tools/ionice -c 3 claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"an untracked relative wrapper must WARN even though the wrapped agent resolves on PATH")
+	require.False(t, row.Problem)
+	require.Contains(t, row.Detail, "tools/ionice")
+	require.Contains(t, row.Detail, "absent at launch")
+	require.Contains(t, row.Remediation, "commit the file")
+	require.Contains(t, row.Remediation, "setup_commands")
+}
+
+// TestCheckAgentPrograms_CommittedRelativeWrapper_StillPasses is the no-false-
+// positive guard for the same command: once the wrapper is in the base tree,
+// both executable obligations hold in the worktree and the check stays PASS.
+func TestCheckAgentPrograms_CommittedRelativeWrapper_StillPasses(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "tools"), "ionice", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "tools/ionice")
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	t.Setenv("PATH", binDir+string(os.PathListSeparator)+os.Getenv("PATH"))
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "tools/ionice -c 3 claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	require.Zero(t, rep.UnresolvedCount())
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"a committed wrapper plus a PATH-resolved agent satisfies the worktree — PASS")
+}
+
+// ---------------------------------------------------------------------------
+// Item 3 — cwd dependence must come from the RESOLVED executables, not a
+// first-token re-parse of the command. The old token split understood leading
+// assignments and a bare `env`, so `env -i`, `env -u`, `env -C`, quoted
+// targets, and relative PATH= entries all slipped the qualification even
+// though their resolved target is relative to the launch directory.
+// ---------------------------------------------------------------------------
+
+// prefixedOverrideRepo builds a repo whose relative override targets exist in
+// the working tree (each command resolves) but are not committed (each is
+// absent from the tree a session checks out).
+func prefixedOverrideRepo(t *testing.T) string {
+	t.Helper()
+	repo := setupDoctorRepo(t)
+	for _, d := range []string{"bin", filepath.Join("sub", "bin"), "tools"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, d), 0o755))
+	}
+	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(repo, "bin"), "my claude", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(repo, "sub", "bin"), "claude", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(repo, "tools"), "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+	return repo
+}
+
+// The commands share the fixtures: env chdir lands in sub/, env PATH= and the
+// shell PATH= land in tools/, the plain relative targets land in bin/, and
+// "bin/my claude" is the quoted-path-with-a-space shape.
+var prefixedRelativeCommands = []string{
+	"env -i bin/claude",          // env -i clears the environment; the target is still relative
+	"env -u FOO bin/claude",      // env -u unsets one variable; the target is still relative
+	`env FOO="a b" bin/claude`,   // env carrying a quoted assignment value
+	"env -C sub bin/claude",      // env -C itself moves the launch directory
+	"env -i PATH=tools claude",   // a relative PATH= entry inside env -i
+	"PATH=tools claude",          // a relative PATH= as a leading shell assignment
+	`env -u FOO "bin/my claude"`, // a quoted relative path containing a space
+}
+
+func TestCheckAgentPrograms_PrefixedRelativeOverride_WarnsNotPasses(t *testing.T) {
+	prefixedOverrideRepo(t)
+	for _, command := range prefixedRelativeCommands {
+		cfg := &config.Config{
+			DefaultProgram:   tmux.ProgramClaude,
+			ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+		}
+		rep := &Report{}
+		checkAgentPrograms(cfg, rep)
+
+		row := findCheck(t, rep, "program_overrides.claude")
+		require.Equal(t, StatusWarn, row.Status,
+			"%q: the resolved target is relative to the launch directory and absent from the base tree — WARN, not PASS",
+			command)
+		require.False(t, row.Problem)
+		require.Contains(t, row.Detail, "absent at launch", "command %q", command)
+	}
+}
+
+// TestCheckAgentPrograms_PrefixedRelativeOverride_StillPasses is the same
+// command table with every target committed: a runnable file in the base tree
+// keeps the PASS — the qualification must not downgrade the tracked case.
+func TestCheckAgentPrograms_PrefixedRelativeOverride_StillPasses(t *testing.T) {
+	repo := prefixedOverrideRepo(t)
+	for _, rel := range []string{"bin/claude", "bin/my claude", "sub/bin/claude", "tools/claude"} {
+		commitRepoFile(t, repo, rel)
+	}
+	for _, command := range prefixedRelativeCommands {
+		cfg := &config.Config{
+			DefaultProgram:   tmux.ProgramClaude,
+			ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+		}
+		rep := &Report{}
+		checkAgentPrograms(cfg, rep)
+
+		row := findCheck(t, rep, "program_overrides.claude")
+		require.Equal(t, StatusPass, row.Status,
+			"%q: a committed relative target satisfies the clean-checkout worktree — PASS", command)
+	}
+}
+
+// ---------------------------------------------------------------------------
+// Item 4 — a remote backend must be USABLE before doctor reports a skip.
+// BackendConfigError covers missing config keys only; the missing backend
+// CLI, a missing `origin` remote, a non-local Docker engine, and an
+// unrunnable hook command are runtime facts BackendUnusableReason checks
+// side-effect-free — the same call a default create fails on.
+// ---------------------------------------------------------------------------
+
+// TestCheckAgentBinaries_HookBackendCommandMissing_FailsNotSkips: a hook
+// backend whose launch_cmd is not on PATH fails every create, so the sweep
+// must FAIL rather than skipping host checks and exiting clean.
+func TestCheckAgentBinaries_HookBackendCommandMissing_FailsNotSkips(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"hook\"\ndefault_program = \"claude\"\n[remote_hooks]\nlaunch_cmd = \"af-test-missing-hook-cmd\"\ndelete_cmd = \"/bin/true\"\n")
+	chdir(t, repo)
+	restore := session.SetLookPathForTest(func(name string) (string, error) {
+		if name == "af-test-missing-hook-cmd" {
+			return "", exec.ErrNotFound
+		}
+		return "/usr/bin/" + name, nil
+	})
+	defer restore()
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"a remote backend whose hook command cannot run must FAIL, not silently skip host checks")
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, "not usable")
+	require.Contains(t, row.Detail, "af-test-missing-hook-cmd")
+	for _, c := range rep.Checks {
+		require.NotEqual(t, tmux.ProgramClaude, c.Name,
+			"no per-agent binary row should run when the remote backend is unusable")
+	}
+	require.NotZero(t, rep.UnresolvedCount(), "an unusable remote backend must drive the exit code")
+}
+
+// TestCheckAgentBinaries_SSHBackendNoOrigin_FailsNotSkips: an ssh backend in a
+// repo with no `origin` remote fails every create (the runtime clones the
+// workspace from origin), so the sweep must FAIL rather than skip.
+func TestCheckAgentBinaries_SSHBackendNoOrigin_FailsNotSkips(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t) // deliberately no `origin` remote
+	writeInRepoConfig(t, repo, "backend = \"ssh\"\ndefault_program = \"claude\"\n[ssh]\nhost = \"agent-host.internal\"\n")
+	chdir(t, repo)
+	// The ssh CLI check is hermetic — the test asserts the missing origin, not
+	// whether this host happens to ship `ssh`.
+	restore := session.SetLookPathForTest(func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	})
+	defer restore()
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"a remote backend without an `origin` remote must FAIL, not silently skip host checks")
+	require.True(t, row.Problem)
+	require.Contains(t, row.Detail, "not usable")
+	require.Contains(t, row.Detail, "origin")
+	require.NotZero(t, rep.UnresolvedCount())
+}
+
+// TestCheckAgentPrograms_RemoteBackendUnusable_ActionableNotSkips is the
+// setup-path twin: a hook backend whose command cannot run must produce an
+// actionable finding, not a silent skip — and a skip it does report is an
+// informational row, never a PASS for a check that never ran.
+func TestCheckAgentPrograms_RemoteBackendUnusable_ActionableNotSkips(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "backend = \"hook\"\ndefault_program = \"claude\"\n[remote_hooks]\nlaunch_cmd = \"af-test-missing-hook-cmd\"\ndelete_cmd = \"/bin/true\"\n")
+	chdir(t, repo)
+	restore := session.SetLookPathForTest(func(name string) (string, error) {
+		if name == "af-test-missing-hook-cmd" {
+			return "", exec.ErrNotFound
+		}
+		return "/usr/bin/" + name, nil
+	})
+	defer restore()
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	findings := findByCheck(rep, "agent-program")
+	require.NotEmpty(t, findings,
+		"an unusable remote backend must produce a finding, not a silent skip")
+	require.Contains(t, findings[0].Detail, "not usable")
+	require.Contains(t, findings[0].Detail, "af-test-missing-hook-cmd")
+	require.True(t, rep.UnresolvedCount() > 0,
+		"an unusable remote backend must drive the exit code")
+}
+
+// ---------------------------------------------------------------------------
+// Item 5 — resolution failures must name the layer that actually failed. A
+// malformed LEGACY repo config (~/.agent-factory/repos/<id>/config.json) fails
+// the same resolve as a malformed in-repo file, but the doctor blamed "the
+// in-repo config" either way and the underlying error named no file.
+// ---------------------------------------------------------------------------
+
+func TestCheckAgentBinaries_LegacyRepoConfigError_NamesTheFile(t *testing.T) {
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repo := setupDoctorRepo(t)
+	legacyDir := filepath.Join(home, "repos", config.RepoIDFromRoot(repo))
+	require.NoError(t, os.MkdirAll(legacyDir, 0o755))
+	legacyFile := filepath.Join(legacyDir, config.RepoConfigFileName)
+	require.NoError(t, os.WriteFile(legacyFile, []byte("{"), 0o644))
+	chdir(t, repo)
+
+	cfg := globalConfigWithoutOverrides()
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"an unresolvable legacy repo config is an actionable config failure")
+	require.NotContains(t, row.Detail, "in-repo config",
+		"the failing layer is the LEGACY repo config — the doctor must not blame the checked-in in-repo file")
+	require.Contains(t, row.Detail, legacyFile,
+		"the resolution error must name the file that failed to parse")
+	require.NotZero(t, rep.UnresolvedCount())
+}
+
+// stubUsableDockerBackend makes BackendUnusableReason's docker prerequisites
+// pass hermetically: a `docker` CLI on PATH, a local engine endpoint, and an
+// `origin` remote — the same side-effect-free facts a create would need.
+func stubUsableDockerBackend(t *testing.T, repo string) {
+	t.Helper()
+	// The host's DOCKER_HOST/DOCKER_CONTEXT win over `docker context inspect`,
+	// so clear them — the endpoint then comes from the stubbed CLI answer.
+	t.Setenv("DOCKER_HOST", "")
+	t.Setenv("DOCKER_CONTEXT", "")
+	restoreLookPath := session.SetLookPathForTest(func(name string) (string, error) {
+		return "/usr/bin/" + name, nil
+	})
+	t.Cleanup(restoreLookPath)
+	restoreExec := session.SetDockerExecForTest(func(ctx context.Context, environ []string, args ...string) ([]byte, error) {
+		return []byte("unix:///var/run/docker.sock\n"), nil
+	})
+	t.Cleanup(restoreExec)
+	require.NoError(t, exec.Command("git", "-C", repo, "remote", "add", "origin",
+		"https://example.invalid/repo.git").Run())
+}

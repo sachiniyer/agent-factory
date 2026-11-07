@@ -215,7 +215,7 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 		// at the checked-in in-repo file.
 		report.addActionableFinding(Finding{
 			Check: "agent-program",
-			Detail: fmt.Sprintf("could not resolve the in-repo config at %s — fix the config layer named in this error and rerun `af doctor --setup`: %v",
+			Detail: fmt.Sprintf("could not resolve config for the repo at %s — fix the config layer named in this error and rerun `af doctor --setup`: %v",
 				repo.Root, resolveErr),
 		})
 		return
@@ -228,14 +228,16 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 		return
 	}
 	if !isLocalBackend(backend) {
-		// Validate the selector and the backend's config the way session
+		// Validate the selector and the backend's preconditions the way session
 		// creation does. An unknown backend value (e.g. `backend = "dokcer"`)
 		// is a misconfiguration af refuses at create time, not a remote backend
-		// to skip host checks for; and a supported but misconfigured one
-		// (docker without docker.image, ssh without ssh.host, hook without
-		// remote_hooks) is rejected by BackendConfigError. Either way report an
-		// actionable finding instead of a silent skip that exits cleanly for a
-		// repo whose every default create would fail.
+		// to skip host checks for; and a supported but unusable one (docker
+		// without docker.image or a docker CLI, ssh without ssh.host or an
+		// `origin` remote, hook without runnable remote_hooks) is rejected by
+		// BackendUnusableReason — the same side-effect-free check a default
+		// create fails. Either way report an actionable finding instead of a
+		// silent skip that exits cleanly for a repo whose every default create
+		// would fail (#6792 item 4).
 		kind, kerr := session.ParseBackendKind(backend)
 		if kerr != nil {
 			report.addActionableFinding(Finding{
@@ -246,10 +248,10 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 			return
 		}
 		if resolved != nil {
-			if reason := session.BackendConfigError(kind, resolved); reason != nil {
+			if reason := session.BackendUnusableReason(kind, resolved, repo.Root); reason != nil {
 				report.addActionableFinding(Finding{
 					Check: "agent-program",
-					Detail: fmt.Sprintf("backend %q is not usable for sessions in this repo: %v — address the missing config key named above and rerun `af doctor --setup`",
+					Detail: fmt.Sprintf("backend %q is not usable for sessions in this repo: %v — address the problem named above and rerun `af doctor --setup`",
 						backend, reason),
 				})
 				return
@@ -258,8 +260,9 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 		// docker/ssh/hook/sandbox run the agent off the daemon host, so the
 		// host's agent binaries are not prerequisites for them — mirroring
 		// daemon.createNeedsDaemonHostPrereqs. Report a non-actionable row so
-		// the setup profile records why no binary check ran.
-		report.Pass(sectionEnvironment, "agent-program",
+		// the setup profile records why no binary check ran: an informational
+		// row, not a PASS for a check that never ran.
+		report.Info(sectionEnvironment, "agent-program",
 			fmt.Sprintf("host agent binaries not checked — this repo's sessions run on the %q backend", backend))
 		return
 	}
@@ -294,15 +297,16 @@ func checkOneProgram(workspace string, repoErr error, field, agent, command stri
 		})
 		return
 	}
-	// A relative override that resolves in the main checkout but is untracked
-	// will be absent from the clean-checkout worktree a session launches in
-	// (#6499): the repo-root anchor genuinely predicts the worktree only for
-	// tracked relative paths. Downgrade the PASS to an advisory WARN so the
-	// doctor does not report a guaranteed-false PASS for an untracked file.
-	if relativeOverrideUntracked(workspace, command, check.Path) {
-		report.Warn(sectionEnvironment, field,
-			untrackedOverrideMessage(command, check.Path),
-			untrackedOverrideRemediation, false)
+	// A resolution that depended on the launch directory and landed inside the
+	// repo is honest only when the tree a session branches from — origin's
+	// default branch, else HEAD — holds a runnable file at the same
+	// repo-relative path: the worktree is a clean checkout of that tree, not
+	// of this checkout's index or working tree (#6499, #6792). Downgrade the
+	// PASS to an advisory WARN so the doctor does not report a
+	// guaranteed-false PASS for a file the session's worktree will not
+	// contain.
+	if detail, remediation := overrideAbsentFromSessionBase(workspace, check); detail != "" {
+		report.Warn(sectionEnvironment, field, detail, remediation, false)
 		return
 	}
 	report.Pass(sectionEnvironment, field, fmt.Sprintf("%q uses %s", command, check.Path))

@@ -35,6 +35,27 @@ type ProgramCheck struct {
 	Command    string
 	Executable string
 	Path       string
+	// ShellExecutable is the token the shell itself launches — the wrapper in
+	// `tools/ionice -c 3 claude` — recorded only when it differs from
+	// Executable ("" when the shell's executable IS the detected agent, in
+	// which case Executable and Path already describe it).
+	ShellExecutable string
+	// ShellPath is ShellExecutable's resolved absolute path. It stays "" when
+	// there is no distinct wrapper or the wrapper could not be resolved — the
+	// returned error then describes that failure.
+	ShellPath string
+	// PathViaWorkingDir reports whether Path's resolution depended on the
+	// launch directory: a relative Executable token is joined to it, and a
+	// bare name found under a relative or empty PATH entry is resolved inside
+	// it — both answer differently from a session worktree's cwd than they do
+	// here. An absolute token, a ~ expansion, or a bare name found under an
+	// absolute PATH entry resolves the same file from any directory (false).
+	// On a failed resolution it still reports whether the ATTEMPTED lookup
+	// depended on the directory — a not-found under a relative PATH entry is
+	// true.
+	PathViaWorkingDir bool
+	// ShellViaWorkingDir is PathViaWorkingDir for ShellPath.
+	ShellViaWorkingDir bool
 }
 
 // CheckTmux verifies that tmux is present and can report its version.
@@ -122,9 +143,16 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	// obligations. For `ionice ... codex`, approving codex alone can still lose
 	// the handoff to a missing ionice; approving ionice alone repeats the shipped
 	// bug and discovers a missing codex only after teardown. Validate both, using
-	// the shell prefix for the wrapper and the shared env/cwd model for the target.
+	// the shell prefix for the wrapper and the shared env/cwd model for the
+	// target — and record the wrapper's own resolution on the check, because a
+	// caller verifying "would a clean worktree contain this program" needs the
+	// wrapper's path too, not only the detected agent's (#6792 item 2).
 	if shellExe != exe {
-		if _, shellErr := resolveShellExecutableAt(words, shellExe, launchDir); shellErr != nil {
+		check.ShellExecutable = shellExe
+		shellPath, shellVia, shellErr := resolveShellExecutableAt(words, shellExe, launchDir)
+		check.ShellPath = shellPath
+		check.ShellViaWorkingDir = shellVia
+		if shellErr != nil {
 			kind := "command wrapper"
 			if isEnvExecutable(shellExe) {
 				kind = "env wrapper"
@@ -136,11 +164,12 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 	if override := launch.Override("PATH"); override.Present {
 		pathValue, pathSet = override.Value, override.Set
 	}
-	path, err := resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
+	path, via, err := resolveExecutableAt(exe, launch.WorkingDir, pathValue, pathSet)
+	check.Path = path
+	check.PathViaWorkingDir = via
 	if err != nil {
 		return check, err
 	}
-	check.Path = path
 	return check, nil
 }
 
@@ -148,7 +177,7 @@ func checkCommand(command, workingDir string) (*ProgramCheck, error) {
 // Only leading shell assignments affect that lookup; an env-internal PATH= value
 // applies later to env's child, and an arbitrary wrapper's later operands cannot
 // retroactively change how the wrapper was found.
-func resolveShellExecutableAt(words []string, executable, workingDir string) (string, error) {
+func resolveShellExecutableAt(words []string, executable, workingDir string) (string, bool, error) {
 	pathValue, pathSet := os.LookupEnv("PATH")
 	for _, word := range words {
 		name, value, assignment := strings.Cut(word, "=")
@@ -157,7 +186,7 @@ func resolveShellExecutableAt(words []string, executable, workingDir string) (st
 		}
 		if name == "PATH" {
 			if !envcommand.IsLiteral(value) {
-				return "", fmt.Errorf("PATH uses shell expansion; use a literal value for launch preflight")
+				return "", false, fmt.Errorf("PATH uses shell expansion; use a literal value for launch preflight")
 			}
 			pathValue, pathSet = value, true
 		}
@@ -165,24 +194,42 @@ func resolveShellExecutableAt(words []string, executable, workingDir string) (st
 	return resolveExecutableAt(executable, workingDir, pathValue, pathSet)
 }
 
-func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (string, error) {
+// resolveExecutableAt resolves exe against workingDir and pathValue exactly as
+// the launch will, and reports whether that answer depended on workingDir: a
+// relative path token is joined to it, and a bare name found under a relative
+// or empty PATH entry is resolved inside it — both answer differently from a
+// different cwd. An absolute token, a ~ expansion, or a bare name under an
+// absolute PATH entry resolves the same file from any directory
+// (viaWorkingDir=false). On failure the flag still describes the ATTEMPTED
+// lookup — a not-found under a relative PATH entry is true — so a caller can
+// tell "could not resolve because of the directory" from "could not resolve
+// anywhere".
+func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (string, bool, error) {
 	if strings.ContainsRune(exe, filepath.Separator) || strings.HasPrefix(exe, "~") {
 		path := config.ExpandTilde(exe)
-		if !filepath.IsAbs(path) {
-			path = filepath.Join(workingDir, path)
+		if filepath.IsAbs(path) {
+			resolved, err := resolveExecutable(path)
+			return resolved, false, err
 		}
-		return resolveExecutable(path)
+		resolved, err := resolveExecutable(filepath.Join(workingDir, path))
+		return resolved, true, err
 	}
 	if !pathSet {
-		return "", fmt.Errorf("%w: executable %q was not found because PATH is unset", errProgramNotFound, exe)
+		return "", false, fmt.Errorf("%w: executable %q was not found because PATH is unset", errProgramNotFound, exe)
 	}
 	var notExecutable string
+	var notExecutableVia bool
+	sawRelativeDir := false
 	for _, dir := range filepath.SplitList(pathValue) {
+		relative := false
 		if dir == "" {
 			dir = workingDir
+			relative = true
 		} else if !filepath.IsAbs(dir) {
 			dir = filepath.Join(workingDir, dir)
+			relative = true
 		}
+		sawRelativeDir = sawRelativeDir || relative
 		candidate := filepath.Join(dir, exe)
 		info, err := os.Stat(candidate)
 		if err != nil || info.IsDir() {
@@ -191,16 +238,17 @@ func resolveExecutableAt(exe, workingDir, pathValue string, pathSet bool) (strin
 		if info.Mode().Perm()&0o111 == 0 {
 			if notExecutable == "" {
 				notExecutable = candidate
+				notExecutableVia = relative
 			}
 			continue
 		}
-		return candidate, nil
+		return candidate, relative, nil
 	}
 	if notExecutable != "" {
-		return "", fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
+		return "", notExecutableVia, fmt.Errorf("%w: executable %q is not executable; run: %s", errProgramNotExecutable, exe,
 			shellsuggest.Command("chmod", "+x", notExecutable))
 	}
-	return "", fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
+	return "", sawRelativeDir, fmt.Errorf("%w: executable %q was not found on PATH", errProgramNotFound, exe)
 }
 
 func resolveExecutable(exe string) (string, error) {

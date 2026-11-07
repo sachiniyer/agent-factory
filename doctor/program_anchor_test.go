@@ -11,6 +11,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -356,7 +357,7 @@ func TestCheckAgentPrograms_RelativeOverrideUntracked_WarnsNotPasses(t *testing.
 		require.Equal(t, StatusWarn, row.Status,
 			"an untracked relative override must WARN, not PASS: %s", field)
 		require.False(t, row.Problem, "an untracked override is advisory: %s", field)
-		require.Contains(t, row.Detail, "untracked")
+		require.Contains(t, row.Detail, "not in HEAD")
 		require.Contains(t, row.Detail, "clean checkouts")
 		require.Contains(t, row.Detail, "absent at launch")
 		require.Contains(t, row.Remediation, "commit the file")
@@ -385,7 +386,7 @@ func TestCheckAgentBinaries_RelativeOverrideUntracked_WarnsNotPasses(t *testing.
 	require.Equal(t, StatusWarn, row.Status,
 		"an untracked relative override must WARN, not PASS")
 	require.False(t, row.Problem, "an untracked override is advisory")
-	require.Contains(t, row.Detail, "untracked")
+	require.Contains(t, row.Detail, "not in HEAD")
 	require.Contains(t, row.Detail, "clean checkouts")
 	require.Contains(t, row.Detail, "absent at launch")
 	require.Contains(t, row.Remediation, "commit the file")
@@ -502,74 +503,106 @@ func TestDoctorSetup_RelativeOverrideUntracked_WarnsNotActionable(t *testing.T) 
 	row := findCheck(t, report, "program_overrides.claude")
 	require.Equal(t, StatusWarn, row.Status)
 	require.False(t, row.Problem)
-	require.Contains(t, row.Detail, "untracked")
+	require.Contains(t, row.Detail, "not in HEAD")
 	require.Contains(t, row.Detail, "clean checkouts")
 	require.Contains(t, row.Remediation, "commit the file")
 	require.Contains(t, row.Remediation, "setup_commands")
 }
 
-// TestRelativeOverrideUntracked_HelperContract pins the helper's contract
-// directly: only a cwd-dependent command (a relative path with a separator)
-// whose resolved executable is inside the workspace and untracked returns
-// true. Absolute paths, bare names, tracked files, and paths outside the
-// workspace all return false, and a git probe failure is conservative (false).
-func TestRelativeOverrideUntracked_HelperContract(t *testing.T) {
+// TestOverrideAbsentFromSessionBase_HelperContract pins the helper's contract
+// directly: only a working-dir-dependent resolution landing inside the
+// workspace whose repo-relative path is absent — or present but not runnable
+// — in the tree sessions branch from produces a warning. Committed runnable
+// files, outside-workspace resolutions, cwd-independent resolutions, and
+// probe failures all keep the PASS (#6792 items 1–3).
+func TestOverrideAbsentFromSessionBase_HelperContract(t *testing.T) {
 	repo := setupDoctorRepo(t)
 	require.NoError(t, os.MkdirAll(filepath.Join(repo, "bin"), 0o755))
 	writeExecutable(t, filepath.Join(repo, "bin"), "claude", "#!/bin/sh\nexit 0\n")
 	commitRepoFile(t, repo, "bin/claude")
-	// Untracked sibling for the untracked case.
+	// Sibling that exists only in the working tree — absent from HEAD's tree
+	// (this repo has no origin remote, so sessions branch from HEAD).
 	writeExecutable(t, filepath.Join(repo, "bin"), "untracked", "#!/bin/sh\nexit 0\n")
+	// Sibling committed WITHOUT the executable bit — in the tree, but the
+	// worktree materializes it non-executable.
+	require.NoError(t, os.WriteFile(filepath.Join(repo, "bin", "noexec"), []byte("#!/bin/sh\n"), 0o644))
+	commitRepoFile(t, repo, "bin/noexec")
+	// Sibling staged but never committed — in the index, not in the tree.
+	writeExecutable(t, filepath.Join(repo, "bin"), "staged", "#!/bin/sh\nexit 0\n")
+	require.NoError(t, exec.Command("git", "-C", repo, "add", "--", "bin/staged").Run())
 
 	tracked := filepath.Join(repo, "bin", "claude")
 	untracked := filepath.Join(repo, "bin", "untracked")
+	noexec := filepath.Join(repo, "bin", "noexec")
+	staged := filepath.Join(repo, "bin", "staged")
 
-	// Tracked relative override -> false (PASS is kept).
-	require.False(t, relativeOverrideUntracked(repo, "bin/claude", tracked),
-		"a tracked relative override is not untracked")
+	check := func(executable, path string, via bool) *preflight.ProgramCheck {
+		return &preflight.ProgramCheck{
+			Command: executable, Executable: executable, Path: path, PathViaWorkingDir: via,
+		}
+	}
 
-	// Untracked relative override -> true (PASS is downgraded to WARN).
-	require.True(t, relativeOverrideUntracked(repo, "bin/untracked", untracked),
-		"an untracked relative override is untracked")
+	// Committed runnable file -> "" (PASS is kept).
+	detail, _ := overrideAbsentFromSessionBase(repo, check("bin/claude", tracked, true))
+	require.Empty(t, detail, "a committed relative override satisfies the base tree")
 
-	// Absolute path -> false (not cwd-dependent).
-	require.False(t, relativeOverrideUntracked(repo, tracked, tracked),
-		"an absolute path is not cwd-dependent")
+	// Untracked relative override -> absent detail.
+	detail, _ = overrideAbsentFromSessionBase(repo, check("bin/untracked", untracked, true))
+	require.Contains(t, detail, "not in HEAD")
+	require.Contains(t, detail, "absent at launch")
 
-	// Bare name -> false (not cwd-dependent).
-	require.False(t, relativeOverrideUntracked(repo, "claude", tracked),
-		"a bare name is not cwd-dependent")
+	// Staged-only -> absent detail (in the index, but not in the tree).
+	detail, _ = overrideAbsentFromSessionBase(repo, check("bin/staged", staged, true))
+	require.Contains(t, detail, "absent at launch",
+		"a staged-but-uncommitted file is absent from the committed tree")
 
-	// Empty workspace -> false (no repo to check against).
-	require.False(t, relativeOverrideUntracked("", "bin/claude", tracked),
-		"an empty workspace means no repo to check against")
+	// Committed without the executable bit -> not-executable detail.
+	detail, remediation := overrideAbsentFromSessionBase(repo, check("bin/noexec", noexec, true))
+	require.Contains(t, detail, "executable")
+	require.Contains(t, remediation, "chmod +x")
 
-	// Path outside the workspace -> false (the worktree check does not apply).
+	// via=false -> "": an absolute token or an absolute-PATH resolution finds
+	// the same file from any directory even when it lands inside the repo.
+	detail, _ = overrideAbsentFromSessionBase(repo, check("bin/untracked", untracked, false))
+	require.Empty(t, detail, "a cwd-independent resolution is not the worktree's problem")
+
+	// Path outside the workspace -> "" (the worktree check does not apply).
 	parent := filepath.Dir(repo)
-	require.False(t, relativeOverrideUntracked(repo, filepath.Join("..", "bin", "claude"),
-		filepath.Join(parent, "bin", "claude")),
-		"a path resolving outside the workspace is not checked")
+	detail, _ = overrideAbsentFromSessionBase(repo,
+		check(filepath.Join("..", "bin", "x"), filepath.Join(parent, "bin", "x"), true))
+	require.Empty(t, detail, "a path resolving outside the workspace is not checked")
 
-	// Git probe failure (non-existent workspace) -> false (conservative).
-	require.False(t, relativeOverrideUntracked(filepath.Join(t.TempDir(), "no-such-repo"),
-		"bin/claude", tracked),
-		"a git probe failure is conservative, not a downgrade")
+	// Empty workspace -> "" (no repo to check against).
+	detail, _ = overrideAbsentFromSessionBase("", check("bin/untracked", untracked, true))
+	require.Empty(t, detail, "an empty workspace means no repo to check against")
 
-	// A relative target behind a leading VAR=value assignment is still
-	// cwd-dependent: `FOO=x bin/untracked` launches bin/untracked, which is
-	// untracked, so the helper must downgrade (not read only the first token).
-	require.True(t, relativeOverrideUntracked(repo, "FOO=x bin/untracked", untracked),
-		"a relative override behind a leading assignment is still cwd-dependent and untracked")
+	// Git probe failure (non-existent workspace) -> "" (conservative).
+	detail, _ = overrideAbsentFromSessionBase(filepath.Join(t.TempDir(), "no-such-repo"),
+		check("bin/untracked", untracked, true))
+	require.Empty(t, detail, "a git probe failure is conservative, not a downgrade")
 
-	// A relative target behind an `env` wrapper is still cwd-dependent.
-	require.True(t, relativeOverrideUntracked(repo, "env bin/untracked", untracked),
-		"a relative override behind an `env` wrapper is still cwd-dependent and untracked")
+	// Nil check -> "".
+	detail, _ = overrideAbsentFromSessionBase(repo, nil)
+	require.Empty(t, detail)
+
+	// The wrapper candidate: the agent itself resolves on PATH, but the
+	// relative wrapper is absent from the base tree -> wrapper detail (#6792
+	// item 2).
+	wrapped := &preflight.ProgramCheck{
+		Command: "tools/ionice -c 3 claude", Executable: "claude", Path: "/usr/bin/claude",
+		ShellExecutable: "tools/ionice", ShellPath: untracked, ShellViaWorkingDir: true,
+	}
+	detail, _ = overrideAbsentFromSessionBase(repo, wrapped)
+	require.Contains(t, detail, "tools/ionice")
+	require.Contains(t, detail, "absent at launch")
 }
 
-// TestCommandDependsOnCwd pins that leading VAR=value assignments and an `env`
-// wrapper are skipped before the cwd-dependence test, so `FOO=x bin/claude`
-// and `env bin/claude` count as cwd-dependent while bare names and absolute
-// paths do not (#6499).
+// TestCommandDependsOnCwd pins that the cwd-dependence gate reads the
+// resolved executables — and their resolution's working-dir dependence —
+// rather than the command's first token: `env -i bin/claude` counts while a
+// bare name does not, and a bare name under a relative PATH= entry counts too
+// (#6792 item 3). With no resolved check, the coarse commandToken split is
+// the fallback and keeps its old answers.
 func TestCommandDependsOnCwd(t *testing.T) {
 	for _, tc := range []struct {
 		command string
@@ -587,7 +620,24 @@ func TestCommandDependsOnCwd(t *testing.T) {
 		{"FOO=x /usr/bin/codex", false},
 		{"", false},
 	} {
-		require.Equal(t, tc.want, commandDependsOnCwd(tc.command),
-			"commandDependsOnCwd(%q) = %v, want %v", tc.command, !tc.want, tc.want)
+		require.Equal(t, tc.want, commandDependsOnCwd(nil, tc.command),
+			"commandDependsOnCwd(nil, %q) = %v, want %v", tc.command, !tc.want, tc.want)
+	}
+	for _, tc := range []struct {
+		name  string
+		check *preflight.ProgramCheck
+		want  bool
+	}{
+		{"relative executable", &preflight.ProgramCheck{Executable: "bin/claude"}, true},
+		{"bare executable", &preflight.ProgramCheck{Executable: "claude"}, false},
+		{"bare executable resolved via a relative PATH entry",
+			&preflight.ProgramCheck{Executable: "claude", PathViaWorkingDir: true}, true},
+		{"absolute executable", &preflight.ProgramCheck{Executable: "/usr/bin/claude"}, false},
+		{"relative wrapper", &preflight.ProgramCheck{Executable: "claude", ShellExecutable: "tools/ionice"}, true},
+		{"bare executable with a cwd-dependent wrapper",
+			&preflight.ProgramCheck{Executable: "claude", ShellViaWorkingDir: true}, true},
+	} {
+		require.Equal(t, tc.want, commandDependsOnCwd(tc.check, "claude"),
+			"commandDependsOnCwd(%s) = %v, want %v", tc.name, !tc.want, tc.want)
 	}
 }
