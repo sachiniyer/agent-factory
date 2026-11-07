@@ -2755,7 +2755,14 @@ export class AppShell {
 
     const children: HTMLElement[] = tabs.map((tab, i) =>
       tabButton(tab, i, i === active, shown.has(i), canRename, canClose, this.actions,
-        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i), selected.id ?? ""),
+        () => this.openTab(i), () => this.closeTab(i), () => this.liveTabIdentity(i),
+        (id) => {
+          const at = this.currentTabIds.indexOf(id);
+          if (at > 0) {
+            this.closeTab(at);
+          }
+        },
+        selected.id ?? ""),
     );
     const chrome = this.terminalChrome;
     if (chrome) {
@@ -3566,6 +3573,14 @@ function tabButton(
    *  it: it is called when a GESTURE fires, so the identity is the one the roster the
    *  user is looking at carries, not the one `tab` happened to be stamped with. */
   liveIdentity: () => string,
+  /** Closes a tab by IDENTITY, resolving it against the CURRENT roster — the
+   *  press-capture guard's path. Its gesture can span a roster rebuild (another
+   *  client closes or reorders tabs between down and up), where this button's
+   *  bound ordinal would name whichever tab has since moved into the slot —
+   *  the same reason closeSessionTab re-resolves its target while the modal is
+   *  open. A resolution that comes up empty means the pressed tab is already
+   *  gone, and the close refuses rather than guessing at a neighbour. */
+  closeTabByIdentity: (id: string) => void,
   /** The selected session's id as of THIS render — a value, not a getter, precisely
    *  because it must be the session the edit OPENS on: the bar is rebuilt whenever the
    *  selection changes (a new tab set, a new signature), so a button only ever belongs
@@ -3626,10 +3641,12 @@ function tabButton(
     // reveal armed before the gesture, a rebuild swapping the buttons out):
     // whatever such a gesture's click lands on inside the strip is a victim,
     // not a choice — the press began on the ×, so resolve its click back to
-    // the close instead of letting it activate. A fresh press anywhere, a
-    // cancel, or a blur disarms the guard before it could capture an
-    // unrelated click; the same listener also self-clears on the first click
-    // it sees, whether or not it acts on it.
+    // the close instead of letting it activate. The close resolves by the
+    // pressed tab's IDENTITY, never this button's bound ordinal, since the
+    // gesture can span a roster change. A fresh press anywhere, a cancel, or
+    // a blur disarms the guard before it could capture an unrelated click;
+    // the same listener also self-clears on the first click it sees, whether
+    // or not it acts on it.
     close.addEventListener("pointerdown", (e) => {
       if (!e.isPrimary || e.button !== 0) {
         return;
@@ -3638,6 +3655,11 @@ function tabButton(
       if (!strip) {
         return;
       }
+      // The pressed TAB's identity, captured at gesture start: the gesture can
+      // outlive this button (a roster rebuild swaps the bar's children
+      // mid-press), and only an identity still names the tab the user pressed
+      // on the roster the release lands in.
+      const pressedId = liveIdentity();
       const disarm = () => {
         window.removeEventListener("click", onClick, true);
         window.removeEventListener("pointerdown", disarm, true);
@@ -3658,7 +3680,7 @@ function tabButton(
         if (target instanceof Element && target !== close && target.closest<HTMLElement>(".af-tabbar") !== null) {
           ev.preventDefault();
           ev.stopPropagation();
-          closeTab();
+          closeTabByIdentity(pressedId);
         }
       };
       window.addEventListener("click", onClick, true);

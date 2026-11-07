@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "4894c61529ba";
+var CLIENT_VERSION = "0d63991a99f8";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -20688,6 +20688,12 @@ var AppShell = class {
         () => this.openTab(i),
         () => this.closeTab(i),
         () => this.liveTabIdentity(i),
+        (id) => {
+          const at = this.currentTabIds.indexOf(id);
+          if (at > 0) {
+            this.closeTab(at);
+          }
+        },
         selected.id ?? ""
       )
     );
@@ -21251,7 +21257,7 @@ function tabCenters(bar) {
     return r.left + r.width / 2;
   });
 }
-function tabButton(tab, index, active, shown, canRename, canClose, actions2, openTab2, closeTab2, liveIdentity, selectedSessionId) {
+function tabButton(tab, index, active, shown, canRename, canClose, actions2, openTab2, closeTab2, liveIdentity, closeTabByIdentity, selectedSessionId) {
   const cls = `af-tab${active ? " af-tab-active" : ""}${shown && !active ? " af-tab-shown" : ""}`;
   const btn = h("button", { type: "button", class: cls, draggable: true });
   btn.setAttribute("role", "tab");
@@ -21281,6 +21287,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
       if (!strip) {
         return;
       }
+      const pressedId = liveIdentity();
       const disarm = () => {
         window.removeEventListener("click", onClick, true);
         window.removeEventListener("pointerdown", disarm, true);
@@ -21296,7 +21303,7 @@ function tabButton(tab, index, active, shown, canRename, canClose, actions2, ope
         if (target instanceof Element && target !== close && target.closest(".af-tabbar") !== null) {
           ev.preventDefault();
           ev.stopPropagation();
-          closeTab2();
+          closeTabByIdentity(pressedId);
         }
       };
       window.addEventListener("click", onClick, true);
