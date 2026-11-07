@@ -717,8 +717,12 @@ func ResolveRegisteredProjectRepo(parent context.Context, project Project) (*Rep
 // checkout-identity, and lock failures are returned before fn runs.
 //
 // Identity-changing operations use this to keep their final personal-policy
-// read and durable identity checkpoint atomic with af config set/unset
-// --project. The ordinary resolver intentionally remains a point-in-time read.
+// read and in-memory identity selection atomic with af config set/unset
+// --project. The durable identity checkpoint is deliberately NOT inside the
+// atomic region: it runs after this lock is released so its persist can take
+// the per-repo start lock without spanning the fence <-> start-lock order
+// (#6874), and the pre-spawn re-admission covers the window that opens
+// (#6880). The ordinary resolver intentionally remains a point-in-time read.
 func WithProjectConfigLockForRoot(root string, fn func() error) error {
 	project, found, err := projectForRoot(root)
 	if err != nil {

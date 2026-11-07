@@ -752,9 +752,10 @@ func (m *Manager) persistInstanceErr(repoID string, instance *session.Instance) 
 // takes only the instances.json file lock and is what actually serializes writers
 // of the row.
 //
-// Safe for the same reason rebuildTeardownNotify is: every caller runs under the
-// session's op-lock and restore/recover fence, the op axis already excludes the
-// poll's whole-row persist (the InFlightOp gate in settleInstancePoll), and every
+// Safe for the same reason rebuildTeardownNotify is: every caller runs under
+// the session's op-lock and its restore/recover/resume fence, the op axis
+// already excludes the poll's whole-row persist (the InFlightOp gate in
+// settleInstancePoll), and every
 // other mutation writer for the row is action-gated while the op is up. The
 // snapshot is still taken inside the write, never passed in.
 func (m *Manager) persistUnderAdmission(repoID string, instance *session.Instance) error {

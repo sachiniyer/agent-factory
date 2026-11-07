@@ -19,12 +19,15 @@ func (m *Manager) lockWorktreeAdmissionWithin(repoID string) (*sync.Mutex, time.
 	return lock, waited, acquired
 }
 
-// lockLocalWorktreeAdmissionWithin joins a user-requested local restore to the
-// same per-repository admission boundary as create. The mutex is acquired only
-// while the caller holds the target session's operation lock and before it
-// claims or fences that session, so a stalled create can delay this request only
-// up to opLockTimeout and cannot leave the row advertised as busy indefinitely.
-// A non-local backend cannot register a local worktree and needs no admission.
+// lockLocalWorktreeAdmissionWithin joins a user-requested local restore or
+// resume to the same per-repository admission boundary as create. The mutex is
+// acquired only while the caller holds the target session's operation lock —
+// either before it claims or fences that session (an entry probe, whose bound
+// keeps a timeout an untouched refusal) or inside the fenced body, where the
+// shared limit-resume path takes it for just the respawn's rebuild span — so a
+// stalled create can delay the request only up to opLockTimeout and cannot
+// leave the row advertised as busy indefinitely. A non-local backend cannot
+// register a local worktree and needs no admission.
 func (m *Manager) lockLocalWorktreeAdmissionWithin(
 	repoID, title, operation string,
 	instance *session.Instance,
@@ -45,9 +48,11 @@ func (m *Manager) lockLocalWorktreeAdmissionWithin(
 // tryLocalWorktreeAdmission is the non-blocking form for daemon poll work.
 // LocalBackend has exactly one missing-worktree rebuild choke point,
 // respawnWithConversation. Its callers are Lost recovery and limit/account
-// resume; each daemon entry takes this admission before it can reach that
-// choke point. A contended poll attempt skips and retries on a later tick rather
-// than delaying unrelated status and self-healing work.
+// resume; each daemon path holds this admission for that choke point's span
+// and no longer — holding it across a whole pass would sit it left of the
+// start lock the pass's own persists take (#6880). A contended poll attempt
+// skips and retries on a later tick rather than delaying unrelated status and
+// self-healing work.
 func (m *Manager) tryLocalWorktreeAdmission(repoID string, instance *session.Instance) (*sync.Mutex, bool) {
 	if instance.Capabilities().Workspace != session.WorkspaceLocalWorktree {
 		return nil, true
