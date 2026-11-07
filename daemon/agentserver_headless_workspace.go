@@ -52,10 +52,31 @@ func (hs *headlessServer) StopPreserving(_ struct{}, resp *agentOKResponse) erro
 	return nil
 }
 
+// agentRelaunchResponse carries the relaunch's own conversation verdict back
+// to the driving daemon (#6868): what the respawn it performed did to the
+// session's conversation. Conversation is nil only when the serving runtime
+// cannot report — a driving daemon built before the field keeps exactly its
+// no-report answer.
+type agentRelaunchResponse struct {
+	OK           bool                                `json:"ok"`
+	Conversation *session.RelaunchConversationReport `json:"conversation,omitempty"`
+}
+
 // Relaunch stops the agent and starts it again in this workspace. Nothing is
 // pushed, reaped or re-cloned: the branch, tree and uncommitted work stay as
-// they are.
-func (hs *headlessServer) Relaunch(_ struct{}, resp *agentOKResponse) error {
+// they are. When the runtime can report it, the answer carries the relaunch's
+// own resume verdict — the only carried/not-carried answer the driving daemon
+// can truthfully relay for a sandbox session (#6868).
+func (hs *headlessServer) Relaunch(_ struct{}, resp *agentRelaunchResponse) error {
+	if rr, ok := hs.as.(session.AgentRelaunchReporter); ok {
+		report, err := rr.RelaunchReporting()
+		if err != nil {
+			return err
+		}
+		resp.OK = true
+		resp.Conversation = report
+		return nil
+	}
 	r, ok := hs.as.(session.AgentRelauncher)
 	if !ok {
 		return session.ErrRelaunchUnsupported

@@ -546,6 +546,16 @@ type Instance struct {
 	// carry it. Guarded by mu.
 	reportedConversation AgentConversationData
 
+	// respawnReport is the conversation verdict the last sandbox respawn
+	// produced (#6868): what an in-sandbox relaunch reported back over the
+	// wire (noteRelaunchConversationReport), or what decideRecovery recorded
+	// itself when the branch was a re-provision no relaunch could report for.
+	// nil means the respawn — if one ran — left nothing to read: an
+	// agent-server build that predates the report, or a relaunch that never
+	// happened. Cleared as each recovery picks its branch so a stale verdict
+	// can never describe the branch a new respawn took. Guarded by mu.
+	respawnReport *RelaunchConversationReport
+
 	// pendingConversationCapture is a capture baseline parked by a respawn that
 	// retired a refused conversation id (#6769): the replacement's rollout may
 	// already exist by the time the daemon's deferred arm builds a fresh

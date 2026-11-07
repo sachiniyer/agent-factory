@@ -690,6 +690,13 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 			// the answer is the pending record's state as it now stands
 			// (#6768).
 			conversation = instance.PendingAccountSwapConversation()
+		} else if instance.Capabilities().Workspace == session.WorkspaceRemote {
+			// A sandbox's relaunch-vs-re-provision decision is made inside the
+			// respawn, and the in-place relaunch reports its own resume verdict
+			// back over the wire — so a sandbox answer exists only AFTER the
+			// call (#6868).
+			rerr = instance.RespawnWithLiveBoundary(beforeLive)
+			conversation = instance.ResumeConversationOutcome()
 		} else {
 			// Answer the conversation question BEFORE the respawn rewrites the
 			// recorded state it is asked about (#6768).

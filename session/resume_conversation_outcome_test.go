@@ -62,18 +62,18 @@ func TestResumeConversationOutcomeNamesTheFreshStart(t *testing.T) {
 		inst.ResumeConversationOutcome())
 }
 
-// A sandbox (remote-workspace) session never reports Carried: the driving
-// daemon cannot prove whether its respawn carried the conversation — the
-// rollout or transcript that proves a resume lives in the sandbox's own store,
-// which the daemon cannot read off-box, and which branch the respawn takes
-// (in-place relaunch or re-provision) is decided later inside
-// RespawnWithLiveBoundary, not by a capability probe taken here. Under-reporting
-// is the honest direction, so the CarryFailure text is the same whichever
-// branch the respawn actually takes and does not depend on CanRelaunchInPlace
-// or --force-reap (the user-visible part of #6863). A correct carried:true for
-// a sandbox session needs the relaunch to report its outcome back from the
-// sandbox, which is a protocol change tracked separately.
-func TestResumeConversationOutcomeSandboxNeverCarries(t *testing.T) {
+// A sandbox (remote-workspace) session answers not-carried until a respawn
+// has reported back: the rollout or transcript that proves a resume lives in
+// the sandbox's own store, which the daemon cannot read off-box, and which
+// branch the respawn takes (in-place relaunch or re-provision) is decided
+// inside RespawnWithLiveBoundary, not by a capability probe taken here.
+// Under-reporting is the honest direction, so asked BEFORE a respawn — or
+// after one that left no report — the CarryFailure text is the same
+// whichever branch the respawn will take or took, and does not depend on
+// CanRelaunchInPlace or --force-reap (the user-visible part of #6863). The
+// carried answer a sandbox relaunch reports back is #6868, covered in
+// sandbox_respawn_conversation_test.go.
+func TestResumeConversationOutcomeSandboxAnswersUnprovenBeforeARespawn(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
 	const sandboxCarryFailure = "this session runs in a sandbox, and af cannot prove from the driving daemon that its respawn carried the conversation"

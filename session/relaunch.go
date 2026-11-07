@@ -52,6 +52,45 @@ type AgentRelauncher interface {
 	CanRelaunch() (bool, error)
 }
 
+// RelaunchConversationReport is the in-sandbox agent-server's account of what
+// the relaunch it just performed did to its session's conversation (#6868):
+// carried only when that relaunch's respawn resumed this session's OWN
+// conversation — the same verdict a local respawn's conversation outcome
+// computes, evaluated on the sandbox's own provider store and command. The
+// wire field is additive: an agent-server build that predates it answers the
+// relaunch without one, and the driving daemon then reports exactly what it
+// does today.
+type RelaunchConversationReport struct {
+	// Session names the session the report describes; the driving daemon
+	// drops a report that does not bind to its own title.
+	Session string `json:"session,omitempty"`
+	// Carried is true only when the relaunch's respawn resumed this session's
+	// own conversation.
+	Carried bool `json:"carried"`
+	// CarryFailure is why it did not — the same texts a local respawn's
+	// verdict produces for a fresh start.
+	CarryFailure string `json:"carry_failure,omitempty"`
+	// Conversation names the provider conversation the relaunch resumed when
+	// it resumed one by id — the recorded conversation an exact resume names.
+	// A worktree-scoped resume cannot name the conversation it will land on
+	// before the launch picks it, and a fresh start has none, so both leave
+	// it empty.
+	Conversation AgentConversationData `json:"conversation,omitempty"`
+}
+
+// AgentRelaunchReporter is the optional reporting half of an in-place relaunch
+// (#6868): the relaunch returns the conversation outcome of the respawn it
+// ACTUALLY performed, which is the only carried/not-carried answer a driving
+// daemon can truthfully report for a sandbox session. The decision between
+// relaunching and re-provisioning is made at the call site on the driving
+// daemon, so nothing computed BEFORE the relaunch can answer for the branch
+// that ran — only the relaunch itself can.
+type AgentRelaunchReporter interface {
+	// RelaunchReporting relaunches the agent in place and reports what its
+	// respawn did to the session's conversation.
+	RelaunchReporting() (*RelaunchConversationReport, error)
+}
+
 // CanRelaunchInPlace reports whether this instance's runtime can relaunch its
 // agent in place right now. False on any doubt — the caller then keeps the
 // re-provisioning behaviour it always had.
@@ -88,6 +127,11 @@ func (i *Instance) RelaunchInPlace() error {
 // older sandbox build, or a runtime with no provisioned sandbox at all. Any other
 // relaunch failure is returned as is: the sandbox answered, its workspace may
 // hold unpushed work, and replacing it would destroy that.
+//
+// This is also where the retry-limit conversation answer is settled (#6868):
+// the relaunch it calls reports its own resume verdict back over the wire, and
+// the re-provision branch records its own not-carried, so whatever this call
+// actually ran is what a later ResumeConversationOutcome reports.
 func relaunchOrRecoverSandbox(i *Instance) error {
 	return decideRecovery(i, (*Instance).RelaunchInPlace, recoverSandbox)
 }
@@ -95,11 +139,15 @@ func relaunchOrRecoverSandbox(i *Instance) error {
 // decideRecovery is relaunchOrRecoverSandbox with its two actions injected, so
 // the policy — not the provisioning — can be tested.
 func decideRecovery(i *Instance, relaunch, replace func(*Instance) error) error {
+	// A report an earlier respawn left must not describe the branch this one
+	// is about to pick (#6868).
+	i.clearRespawnConversationReport()
 	// An explicit --force-reap is a request to REPLACE the sandbox: honouring it
 	// by relaunching would retain exactly the work the operator asked to discard,
 	// and an unreachable sandbox would fail the relaunch's health probe and never
 	// reach the replacement the flag promises.
 	if i.forceSandboxReplacement.Load() {
+		i.noteRespawnConversationReport(sandboxReprovisionedReport)
 		return replace(i)
 	}
 	err := relaunch(i)
@@ -112,6 +160,7 @@ func decideRecovery(i *Instance, relaunch, replace func(*Instance) error) error 
 		return nil
 	}
 	if relaunchFallsBackToReprovision(err) {
+		i.noteRespawnConversationReport(sandboxReprovisionedReport)
 		return replace(i)
 	}
 	return fmt.Errorf("relaunching the agent in place for session %q: %w", i.Title, err)
@@ -135,13 +184,31 @@ func relaunchFallsBackToReprovision(err error) bool {
 // local runtime. Overlapping requests collapse onto one attempt (relaunchFlight).
 func (s *localAgentServer) Relaunch() error { return s.relaunchWith(s.inst.relaunchLocalAgent) }
 
-// relaunchWith runs one relaunch through the single-flight guard.
+// relaunchWith runs one relaunch through the single-flight guard, dropping the
+// attempt's report.
 func (s *localAgentServer) relaunchWith(run func() error) error {
-	return s.relaunch.do(func() error {
+	_, err := s.relaunchReporting(func() (*RelaunchConversationReport, error) {
+		return nil, run()
+	})
+	return err
+}
+
+// relaunchReporting is relaunchWith for the body that can answer for the
+// respawn it ran: the attempt's report joins the attempt's result, so every
+// request this attempt served gets the same verdict.
+func (s *localAgentServer) relaunchReporting(run func() (*RelaunchConversationReport, error)) (*RelaunchConversationReport, error) {
+	return s.relaunch.do(func() (*RelaunchConversationReport, error) {
 		s.agentOpMu.Lock()
 		defer s.agentOpMu.Unlock()
 		return run()
 	})
+}
+
+// RelaunchReporting is the relaunch's own conversation verdict (#6868): what
+// the respawn it performed did to the session's conversation, evaluated on
+// this sandbox's own store inside the attempt that ran it.
+func (s *localAgentServer) RelaunchReporting() (*RelaunchConversationReport, error) {
+	return s.relaunchReporting(s.inst.relaunchLocalAgentReporting)
 }
 
 // relaunchFlight makes a relaunch ONE serialized operation across its whole
@@ -149,31 +216,32 @@ func (s *localAgentServer) relaunchWith(run func() error) error {
 // out and retried while the first relaunch is still running would otherwise run
 // a second one concurrently — stopping the replacement the first just started,
 // or racing its startup. A request that arrives mid-flight JOINS the running
-// attempt and returns its result, the same shape as the headless archive route.
-// A request after it finished is a new relaunch.
+// attempt and returns its result — report included (#6868) — the same shape as
+// the headless archive route. A request after it finished is a new relaunch.
 type relaunchFlight struct {
 	mu     sync.Mutex
 	active *relaunchAttempt
 }
 
 type relaunchAttempt struct {
-	done chan struct{}
-	err  error
+	done   chan struct{}
+	report *RelaunchConversationReport
+	err    error
 }
 
 // relaunchJoinTimeout bounds how long a joiner waits for the running attempt;
 // the leader is bounded by the same call budget the driving daemon applies.
 var relaunchJoinTimeout = AgentRelaunchCallTimeout
 
-func (f *relaunchFlight) do(run func() error) error {
+func (f *relaunchFlight) do(run func() (*RelaunchConversationReport, error)) (*RelaunchConversationReport, error) {
 	f.mu.Lock()
 	if a := f.active; a != nil {
 		f.mu.Unlock()
 		select {
 		case <-a.done:
-			return a.err
+			return a.report, a.err
 		case <-time.After(relaunchJoinTimeout):
-			return errors.New("relaunch: a relaunch of this agent is still running; not starting a second one beside it")
+			return nil, errors.New("relaunch: a relaunch of this agent is still running; not starting a second one beside it")
 		}
 	}
 	a := &relaunchAttempt{done: make(chan struct{})}
@@ -187,17 +255,20 @@ func (f *relaunchFlight) do(run func() error) error {
 		close(a.done)
 	}()
 	a.err = errors.New("relaunch: attempt aborted before it finished")
-	a.err = run()
-	return a.err
+	a.report, a.err = run()
+	return a.report, a.err
 }
 
 // CanRelaunch is always true for the local runtime: it owns the tmux session.
 func (s *localAgentServer) CanRelaunch() (bool, error) { return true, nil }
 
 var (
-	_ AgentRelauncher = (*localAgentServer)(nil)
-	_ AgentRelauncher = (*remoteAgentServer)(nil)
-	_ AgentRelauncher = (*deadRemoteAgentServer)(nil)
+	_ AgentRelauncher       = (*localAgentServer)(nil)
+	_ AgentRelauncher       = (*remoteAgentServer)(nil)
+	_ AgentRelauncher       = (*deadRemoteAgentServer)(nil)
+	_ AgentRelaunchReporter = (*localAgentServer)(nil)
+	_ AgentRelaunchReporter = (*remoteAgentServer)(nil)
+	_ AgentRelaunchReporter = (*deadRemoteAgentServer)(nil)
 )
 
 // relaunchLocalAgent stops a running agent and starts it again through the same
@@ -209,21 +280,46 @@ var (
 // stop aborts before anything starts (the SwapAgent rule). An agent that is
 // already gone needs no stop.
 func (i *Instance) relaunchLocalAgent() error {
+	_, err := i.relaunchLocalAgentReporting()
+	return err
+}
+
+// relaunchLocalAgentReporting is relaunchLocalAgent plus the relaunch's own
+// conversation verdict (#6868): the plan the respawn about to run will apply —
+// whether it resumes this session's own conversation, and which recorded
+// conversation it names when it resumes one by id. The verdict is computed
+// where the respawn is, on this runtime's own store and command, so it answers
+// for the relaunch that actually ran rather than a check made before it.
+func (i *Instance) relaunchLocalAgentReporting() (*RelaunchConversationReport, error) {
 	b, ok := i.currentBackend().(*LocalBackend)
 	if !ok {
-		return fmt.Errorf("relaunch: session %q has no local runtime to relaunch in", i.Title)
+		return nil, fmt.Errorf("relaunch: session %q has no local runtime to relaunch in", i.Title)
 	}
 	i.mu.RLock()
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 	if ts == nil {
-		return fmt.Errorf("relaunch: session %q has no tmux binding", i.Title)
+		return nil, fmt.Errorf("relaunch: session %q has no tmux binding", i.Title)
 	}
 	alive, err := i.AgentServer().Alive()
 	if err != nil {
-		return fmt.Errorf("relaunch: cannot tell whether %q's agent is running: %w", i.Title, err)
+		return nil, fmt.Errorf("relaunch: cannot tell whether %q's agent is running: %w", i.Title, err)
 	}
-	return stopThenRespawn(i.Title, ts, alive, func() error { return b.Respawn(i) })
+	var report *RelaunchConversationReport
+	err = stopThenRespawn(i.Title, ts, alive, func() error {
+		outcome, resumed := i.respawnConversationPlan()
+		report = &RelaunchConversationReport{
+			Session:      i.Title,
+			Carried:      outcome.Carried,
+			CarryFailure: outcome.CarryFailure,
+			Conversation: resumed,
+		}
+		return b.Respawn(i)
+	})
+	if err != nil {
+		return nil, err
+	}
+	return report, nil
 }
 
 // stopThenRespawn is the order that makes a relaunch safe: the stop runs FIRST
@@ -266,16 +362,43 @@ func (s *remoteAgentServer) CanRelaunch() (bool, error) {
 // ring discarded, fresh dial, every attached client re-seeded with a repaint of
 // the replacement's screen.
 func (s *remoteAgentServer) Relaunch() error {
-	if err := s.rc.callWithin("/v1/agent/relaunch", struct{}{}, nil, AgentRelaunchCallTimeout); err != nil {
+	report, err := s.RelaunchReporting()
+	if err != nil {
 		return err
 	}
-	s.resetBrokerCaptures()
+	if s.inst != nil {
+		s.inst.noteRelaunchConversationReport(s.rc, report)
+	}
 	return nil
+}
+
+// agentRelaunchResp is the relaunch route's response body: the relaunch's own
+// resume verdict (#6868). An agent-server that predates the field answers
+// without it — Conversation stays nil and the driving daemon reports exactly
+// what it does today.
+type agentRelaunchResp struct {
+	OK           bool                        `json:"ok"`
+	Conversation *RelaunchConversationReport `json:"conversation,omitempty"`
+}
+
+// RelaunchReporting is Relaunch with the sandbox's own resume verdict returned
+// (#6868): nil when the answering agent-server is a build that predates the
+// report.
+func (s *remoteAgentServer) RelaunchReporting() (*RelaunchConversationReport, error) {
+	var resp agentRelaunchResp
+	if err := s.rc.callWithin("/v1/agent/relaunch", struct{}{}, &resp, AgentRelaunchCallTimeout); err != nil {
+		return nil, err
+	}
+	s.resetBrokerCaptures()
+	return resp.Conversation, nil
 }
 
 // A runtime with no live sandbox cannot relaunch in it: the typed
 // not-provisioned error sends the caller to re-provisioning.
 func (s *deadRemoteAgentServer) Relaunch() error { return s.err() }
+func (s *deadRemoteAgentServer) RelaunchReporting() (*RelaunchConversationReport, error) {
+	return nil, s.err()
+}
 func (s *deadRemoteAgentServer) CanRelaunch() (bool, error) {
 	return false, s.err()
 }
