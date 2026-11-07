@@ -1017,6 +1017,40 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			content: "⎿  Claude usage limit reached. Your limit will reset Mon\n     day at 9am (America/New_York).",
 			want:    time.Date(2026, 1, 5, 9, 0, 0, 0, est).UTC(), // Mon 9am EST -> 14:00Z
 		},
+		{
+			// The production gutter+indent layout applied to a wrap inside
+			// the leading "reset" keyword — "re\n     set at 2pm" — confirms
+			// the anchor tolerates the continuation indent between the
+			// keyword's letters (not just an unindented \n) and the
+			// normalizer rejoins it to "reset". Without the indent tolerance
+			// the anchor misses the clause and the banner loses its reset
+			// time. Same EST instant as the unwrapped "2pm" form.
+			name:    "5h wrapped: keyword wraps inside its letters with gutter indent",
+			content: "⎿  Claude usage limit reached. Your limit will re\n     set at 2pm (America/New_York).",
+			want:    want2pm,
+		},
+		{
+			// The production gutter+indent layout applied to a wrapped
+			// abbreviated date — "Nov.\n     6, 2026 9am" — confirms the
+			// anchor's abbreviated-month branch tolerates the continuation
+			// indent after the period (not just an unindented \n\d) so the
+			// capture crosses the wrap and the clock still resolves. Same
+			// EST instant as the unwrapped "Nov. 6, 2026 9am" form.
+			name:    "weekly date: abbreviated month wraps after its period with gutter indent",
+			content: "⎿  Claude usage limit reached. Your limit will reset at Nov.\n     6, 2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A CRLF wrap inside a four-digit year token — "Nov 6, 20\r\n27
+			// 9am" — must be consumed as a single wrap so the digit-rejoin
+			// classifier sees "20"+"27" (joined ≤ 4) and rejoins to "2027";
+			// processing the \r and \n in separate passes would space them to
+			// "20 27" and discard the explicit year. Same EST instant as the
+			// unwrapped "Nov 6, 2027 9am" form.
+			name:    "weekly date: year wraps inside its digits over CRLF",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6, 20\r\n27 9am (America/New_York).",
+			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
 	}
 	det := NewLimitDetector(nil)
 	for _, tc := range cases {

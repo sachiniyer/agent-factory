@@ -459,7 +459,7 @@ var (
 // still locates the clause; normalizeResetWhitespace rejoins it to "reset"
 // (gated on the joined letters forming "reset") so the evidence matches the
 // unwrapped render.
-var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n)?e(?:\r?\n)?s(?:\r?\n)?e(?:\r?\n)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n[ \t]*)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
+var claudeResetAnchor = regexp.MustCompile(`(?is)r(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?s(?:\r?\n[ \t]*)?e(?:\r?\n[ \t]*)?t\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n[ \t]*\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap](?:\r?\n[ \t]*)?m\b(?:[ \t]*\([^()]*\))*[ \t]*\.?(?:\r?\n[ \t]*\([^()]*\)(?:\.|\r?\n[ \t]*\.))?(?:\r?\n[ \t]*\.)?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a
@@ -544,6 +544,18 @@ func normalizeResetWhitespace(s string) string {
 			lastLetter = false
 			lastColon = false
 		case c == '\n' || c == '\r':
+			// CRLF is a single wrap: the anchor accepts \r\n, so the captured
+			// content may carry it. Process the pair as one wrap here — if the
+			// \r and \n were handled in separate passes, the \r pass would emit
+			// a space and clear the token-state flags (lastDigit/lastLetter/
+			// lastColon) before the \n pass sees the continuation token, so a
+			// token-internal CRLF wrap like "Nov 6, 20\r\n27 9am" normalized to
+			// "20 27" (discarding the explicit year) instead of rejoining to
+			// "2027". Skip the CR and let the LF iteration apply the rejoin
+			// classifiers to the whole CRLF as a single wrap.
+			if c == '\r' && i+1 < len(s) && s[i+1] == '\n' {
+				continue
+			}
 			// A wrap newline outside a paren. Real tmux wraps sit under a
 			// "  ⎿  " gutter and carry a 5-space indent on continuation rows
 			// (task/testdata/claude_working_tool.ansi), so the byte after the
