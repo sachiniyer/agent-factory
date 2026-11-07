@@ -395,9 +395,11 @@ func TestCheckCommandAtEnvChdirAbsolute_NotViaWorkingDir(t *testing.T) {
 	}
 }
 
-// PathCandidates records EVERY runnable PATH match in order, so a caller can
-// tell whether the search's later entries rescue the name when the selected
-// file is absent at launch. Path is always the first.
+// PathCandidates records EVERY PATH location the search tried, in order —
+// including locations whose file is missing or non-executable in this
+// checkout — so a caller can judge each location's launch-time answer: a
+// clean worktree can still resolve a committed file this checkout deleted.
+// Path is the first currently-runnable match.
 func TestCheckCommandAtCollectsPathCandidates(t *testing.T) {
 	dir1 := t.TempDir()
 	dir2 := t.TempDir()
@@ -420,6 +422,33 @@ func TestCheckCommandAtCollectsPathCandidates(t *testing.T) {
 	}
 	if check.Path != first {
 		t.Fatalf("Path = %q, want the first match %q", check.Path, first)
+	}
+}
+
+// A PATH location whose file does not exist in this checkout is still a
+// candidate — a clean session worktree can resolve it from the committed
+// tree — and Path skips it to the first runnable match.
+func TestCheckCommandAt_PathCandidatesKeepMissingLocations(t *testing.T) {
+	dir1 := t.TempDir() // intentionally no codex in dir1
+	dir2 := t.TempDir()
+	second := filepath.Join(dir2, "codex")
+	if err := os.WriteFile(second, []byte("#!/bin/sh\n"), 0o755); err != nil {
+		t.Fatalf("write %s: %v", second, err)
+	}
+	t.Setenv("PATH", dir1+string(os.PathListSeparator)+dir2)
+
+	check, err := CheckCommandAt("codex", t.TempDir())
+	if err != nil {
+		t.Fatalf("CheckCommandAt: %v", err)
+	}
+	if len(check.PathCandidates) != 2 ||
+		check.PathCandidates[0].Path != filepath.Join(dir1, "codex") ||
+		check.PathCandidates[1].Path != second {
+		t.Fatalf("PathCandidates = %+v, want the missing location retained ahead of %s",
+			check.PathCandidates, second)
+	}
+	if check.Path != second {
+		t.Fatalf("Path = %q, want the first runnable match %q", check.Path, second)
 	}
 }
 
