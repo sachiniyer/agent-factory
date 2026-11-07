@@ -833,6 +833,27 @@ func TestLimitPark_TopOfCaptureShadowKeepsTombstone(t *testing.T) {
 		"the tombstone survives an anchorless shadow re-park — its send already went out")
 }
 
+// TestLimitPark_GutterAnchorShadowKeepsTombstone is the #6972 Codex gutter
+// arm: the detector retains the banner's lead marker in Prefix, so a claim
+// recorded mid-capture can carry a gutter-only anchor that proves no
+// position. The anchorless fallback must still carry the tombstone through a
+// same-phrase re-park, or the scheduler replays the delivered prompt.
+func TestLimitPark_GutterAnchorShadowKeepsTombstone(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(-time.Hour))()
+
+	gutter := LimitBanner{Prefix: "⎿  ", Count: 1}
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, gutter, false)
+	inst.ClearLimitReachedSent()
+
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, gutter, inst.stateEpoch),
+		"the unchanged gutter-anchored banner re-parks its recorded claim")
+	require.True(t, inst.LimitWallPromptSent(),
+		"a gutter-only prefix is anchorless — the tombstone must survive its re-park")
+}
+
 // TestLimitPark_ReplacedRuntimeDropsTombstone is the #6972 Codex runtime
 // arm: a tombstoned parked row whose runtime was replaced (a relaunch that
 // preserves LiveLimitReached) must not keep the dead runtime's tombstone on

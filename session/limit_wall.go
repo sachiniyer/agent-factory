@@ -1,8 +1,11 @@
 package session
 
 import (
+	"strings"
 	"time"
 	"unicode/utf8"
+
+	xansi "github.com/charmbracelet/x/ansi"
 )
 
 // The recorded-wall machinery of the usage-limit liveness axis: the wall
@@ -62,6 +65,17 @@ func (i *Instance) limitWallClaimsLocked() [2]limitWallClaim {
 	return [2]limitWallClaim{live, i.lastLimitWall}
 }
 
+// limitWallPrefixDistinguishing reports whether a recorded anchor carries
+// content that could prove position — real text above the banner's own row.
+// A prefix that is empty, only the banner's gutter marker, or only blank and
+// styled lines admits no positional proof (sameLimitBannerPosition rejects
+// it for the same reason) and falls back to the phrase/count reads (#6972,
+// Codex).
+func limitWallPrefixDistinguishing(prefix string) bool {
+	body := prefix[:strings.LastIndexByte(prefix, '\n')+1]
+	return strings.TrimSpace(xansi.Strip(body)) != ""
+}
+
 // limitWallAnchorAdmits reports whether a sighting can still be the recorded
 // emission's re-read. Positional proof via sameLimitBannerPosition settles it
 // when the claim's anchor carries distinguishing bytes; a claim recorded at
@@ -77,7 +91,7 @@ func limitWallAnchorAdmits(claim LimitBanner, claimEvidence string, banner Limit
 	if sameLimitBannerPosition(claim.Prefix, banner.Prefix) {
 		return true
 	}
-	if claim.Prefix != "" {
+	if limitWallPrefixDistinguishing(claim.Prefix) {
 		return false
 	}
 	if evidence != "" && evidence == claimEvidence {
