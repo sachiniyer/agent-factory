@@ -274,6 +274,53 @@ test("text typed while the add was in flight survives its success edge", () => {
     "the untouched field still held committed text, so it retires");
 });
 
+// Codex P2: adds are not serialized — a second "Add host" can go out while
+// the first is still in flight, and the answers may land in either order.
+// Each success must retire ITS OWN send's draft; a single pending snapshot
+// would retire the last send's values under any success, so an earlier send's
+// success eats a draft a later refusal was supposed to keep for correction.
+test("overlapping adds: each success retires its own send's draft", () => {
+  const sent: HostAddDraft[] = [];
+  const pane = new ConfigPane(actions({
+    hosts: { check: () => {}, add: (d) => { sent.push(d); }, remove: () => {} },
+  }));
+  const accts = accounts();
+  const q = quota();
+  const hs = hosts();
+  pane.update(HOST_ROWS, "", null, accts, q, "system", hs);
+
+  hostField(pane, "name").value = "box2";
+  hostField(pane, "host").value = "gpu.tailnet";
+  el(pane).querySelector(".af-hosts-add")!.click();
+
+  // The first send is still out; the user retypes and submits a second host.
+  hostField(pane, "name").value = "box3";
+  hostField(pane, "host").value = "fast.tailnet";
+  el(pane).querySelector(".af-hosts-add")!.click();
+  assert.equal(sent.length, 2);
+
+  // The FIRST send's success lands: it answers box2's send, so it must not
+  // touch box3's fields — that draft belongs to the send still in flight.
+  const added2 = hosts({ status: { name: "", message: "saved host box2 (gpu.tailnet)", error: false } });
+  pane.update(HOST_ROWS.map((e) => ({ ...e })), "", null, accts, q, "system", added2);
+
+  assert.equal(hostField(pane, "name").value, "box3",
+    "the first send's success must not eat the second send's draft");
+  assert.equal(hostField(pane, "host").value, "fast.tailnet");
+
+  // The second send is refused — its draft is still there to be corrected.
+  const refused3 = hosts({ status: { name: "", message: 'host "box3" is already listed in config', error: true } });
+  pane.update(HOST_ROWS.map((e) => ({ ...e })), "", null, accts, q, "system", refused3);
+  assert.equal(hostField(pane, "name").value, "box3", "a refused send keeps its draft");
+  assert.equal(hostField(pane, "host").value, "fast.tailnet");
+
+  // And when the second send's own success lands, the form clears for real.
+  const added3 = hosts({ status: { name: "", message: "saved host box3 (fast.tailnet)", error: false } });
+  pane.update(HOST_ROWS.map((e) => ({ ...e })), "", null, accts, q, "system", added3);
+  assert.equal(hostField(pane, "name").value, "", "the second send's own success retires its own draft");
+  assert.equal(hostField(pane, "host").value, "");
+});
+
 // A check-all success writes the same `name: ""` non-error shape with
 // `check: true` — it is a probe outcome, not an add commit, and must never be
 // mistaken for one: treating it as a commit would eat a half-typed form.

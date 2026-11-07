@@ -391,12 +391,15 @@ export class ConfigPane {
   private lastQuota: QuotaState | null = null;
   private lastTheme: ThemeChoice | null = null;
 
-  /** The Hosts add form exactly as it stood when its send went out — keyed by
-   *  HOST_INPUT_ATTR like readHostDrafts' map. On the success edge each field
-   *  still holding what was sent is retired; one retyped while the send was in
-   *  flight is the NEXT host's draft, not a replay of the saved one (#6861).
-   *  Null when no add has been submitted. */
-  private committedHostAdd: Map<string, { value: string; checked: boolean }> | null = null;
+  /** The Hosts add form exactly as it stood when each send went out — keyed by
+   *  HOST_INPUT_ATTR like readHostDrafts' map, and filed under the submitted
+   *  name so a success edge retires ITS OWN send's draft. Adds are not
+   *  serialized: a second "Add host" can go out while the first is still in
+   *  flight, and the answers may land in either order — one snapshot would
+   *  retire the wrong send's values. On the success edge each field still
+   *  holding what was sent is retired; one retyped since is the NEXT host's
+   *  draft, not a replay of the saved one (#6861). */
+  private readonly committedHostAdds = new Map<string, Map<string, { value: string; checked: boolean }>>();
   /** HostActions with `add` wrapped to snapshot the form at send time — the
    *  only record of what was committed, since the returned status names no
    *  draft. The other verbs pass straight through. */
@@ -408,7 +411,7 @@ export class ConfigPane {
     this.hostActions = {
       ...actions.hosts,
       add: (draft: HostAddDraft) => {
-        this.committedHostAdd = this.readHostDrafts();
+        this.committedHostAdds.set(draft.name, this.readHostDrafts());
         actions.hosts.add(draft);
       },
     };
@@ -451,7 +454,7 @@ export class ConfigPane {
     const hostAddSucceeded = hosts.status !== this.hosts.status && hosts.status !== null
       && hosts.status.name === "" && !hosts.status.error && hosts.status.check !== true;
     if (hostAddSucceeded) {
-      this.retireCommittedHostAdd();
+      this.retireCommittedHostAdd(hosts.status!.message);
     }
     this.lastEntries = entries;
     this.lastStatus = status;
@@ -844,24 +847,35 @@ export class ConfigPane {
    *  still holding exactly what was sent clears, while one retyped since keeps
    *  its new text — that text is the NEXT host's draft, and clearing it would
    *  be the same silent loss the draft mechanism exists to prevent. Runs before
-   *  readHostDrafts so retired values are never snapshotted for a replay. */
-  private retireCommittedHostAdd(): void {
-    const committed = this.committedHostAdd;
-    this.committedHostAdd = null;
-    if (committed === null) {
+   *  readHostDrafts so retired values are never snapshotted for a replay.
+   *
+   *  `message` names the send this success answers (`saved host <name> (…)` —
+   *  host names carry no spaces or parens, config/hosts.go hostNameRE), so an
+   *  add landing while another is still in flight retires its own draft rather
+   *  than whichever send happened to be last. When the name cannot be matched
+   *  — the format drifting, or a send this pane never saw — the oldest pending
+   *  snapshot is the best available answer. */
+  private retireCommittedHostAdd(message: string): void {
+    const named = /^saved host ([a-z0-9-]+)/.exec(message)?.[1];
+    const key = named !== undefined && this.committedHostAdds.has(named)
+      ? named
+      : this.committedHostAdds.keys().next().value;
+    if (key === undefined) {
       return;
     }
-    for (const [key, sent] of committed) {
-      const field = this.hostInput(key);
-      if (field === null) {
+    const committed = this.committedHostAdds.get(key)!;
+    this.committedHostAdds.delete(key);
+    for (const [field, sent] of committed) {
+      const input = this.hostInput(field);
+      if (input === null) {
         continue;
       }
-      if (field instanceof HTMLInputElement && field.type === "checkbox") {
-        if (field.checked === sent.checked) {
-          field.checked = false;
+      if (input instanceof HTMLInputElement && input.type === "checkbox") {
+        if (input.checked === sent.checked) {
+          input.checked = false;
         }
-      } else if (field.value === sent.value) {
-        field.value = "";
+      } else if (input.value === sent.value) {
+        input.value = "";
       }
     }
   }

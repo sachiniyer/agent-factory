@@ -7055,7 +7055,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "b50205194c3b";
+var CLIENT_VERSION = "73ad5c5a1882";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8915,7 +8915,7 @@ var ConfigPane = class {
     this.hostActions = {
       ...actions2.hosts,
       add: (draft) => {
-        this.committedHostAdd = this.readHostDrafts();
+        this.committedHostAdds.set(draft.name, this.readHostDrafts());
         actions2.hosts.add(draft);
       }
     };
@@ -8978,12 +8978,15 @@ var ConfigPane = class {
   lastHosts = null;
   lastQuota = null;
   lastTheme = null;
-  /** The Hosts add form exactly as it stood when its send went out — keyed by
-   *  HOST_INPUT_ATTR like readHostDrafts' map. On the success edge each field
-   *  still holding what was sent is retired; one retyped while the send was in
-   *  flight is the NEXT host's draft, not a replay of the saved one (#6861).
-   *  Null when no add has been submitted. */
-  committedHostAdd = null;
+  /** The Hosts add form exactly as it stood when each send went out — keyed by
+   *  HOST_INPUT_ATTR like readHostDrafts' map, and filed under the submitted
+   *  name so a success edge retires ITS OWN send's draft. Adds are not
+   *  serialized: a second "Add host" can go out while the first is still in
+   *  flight, and the answers may land in either order — one snapshot would
+   *  retire the wrong send's values. On the success edge each field still
+   *  holding what was sent is retired; one retyped since is the NEXT host's
+   *  draft, not a replay of the saved one (#6861). */
+  committedHostAdds = /* @__PURE__ */ new Map();
   /** HostActions with `add` wrapped to snapshot the form at send time — the
    *  only record of what was committed, since the returned status names no
    *  draft. The other verbs pass straight through. */
@@ -9003,7 +9006,7 @@ var ConfigPane = class {
     }
     const hostAddSucceeded = hosts.status !== this.hosts.status && hosts.status !== null && hosts.status.name === "" && !hosts.status.error && hosts.status.check !== true;
     if (hostAddSucceeded) {
-      this.retireCommittedHostAdd();
+      this.retireCommittedHostAdd(hosts.status.message);
     }
     this.lastEntries = entries;
     this.lastStatus = status;
@@ -9186,24 +9189,33 @@ var ConfigPane = class {
    *  still holding exactly what was sent clears, while one retyped since keeps
    *  its new text — that text is the NEXT host's draft, and clearing it would
    *  be the same silent loss the draft mechanism exists to prevent. Runs before
-   *  readHostDrafts so retired values are never snapshotted for a replay. */
-  retireCommittedHostAdd() {
-    const committed = this.committedHostAdd;
-    this.committedHostAdd = null;
-    if (committed === null) {
+   *  readHostDrafts so retired values are never snapshotted for a replay.
+   *
+   *  `message` names the send this success answers (`saved host <name> (…)` —
+   *  host names carry no spaces or parens, config/hosts.go hostNameRE), so an
+   *  add landing while another is still in flight retires its own draft rather
+   *  than whichever send happened to be last. When the name cannot be matched
+   *  — the format drifting, or a send this pane never saw — the oldest pending
+   *  snapshot is the best available answer. */
+  retireCommittedHostAdd(message) {
+    const named = /^saved host ([a-z0-9-]+)/.exec(message)?.[1];
+    const key = named !== void 0 && this.committedHostAdds.has(named) ? named : this.committedHostAdds.keys().next().value;
+    if (key === void 0) {
       return;
     }
-    for (const [key, sent] of committed) {
-      const field2 = this.hostInput(key);
-      if (field2 === null) {
+    const committed = this.committedHostAdds.get(key);
+    this.committedHostAdds.delete(key);
+    for (const [field2, sent] of committed) {
+      const input = this.hostInput(field2);
+      if (input === null) {
         continue;
       }
-      if (field2 instanceof HTMLInputElement && field2.type === "checkbox") {
-        if (field2.checked === sent.checked) {
-          field2.checked = false;
+      if (input instanceof HTMLInputElement && input.type === "checkbox") {
+        if (input.checked === sent.checked) {
+          input.checked = false;
         }
-      } else if (field2.value === sent.value) {
-        field2.value = "";
+      } else if (input.value === sent.value) {
+        input.value = "";
       }
     }
   }
