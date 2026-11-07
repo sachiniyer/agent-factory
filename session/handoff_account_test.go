@@ -74,19 +74,28 @@ func TestManualAccountSwapMissionDeliveryBoundaryRetiresTheAttemptInstant(t *tes
 		"a failed checkpoint restores the displaced verdict AND its instant atomically")
 }
 
-func TestStartupUnknownManualAccountSwapDoesNotExposeRetry(t *testing.T) {
-	inst := &Instance{
-		liveness:            LiveRunning,
-		startupStateUnknown: true,
-		pendingAccountSwap: &AccountSwapData{
-			Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
-			MissionDeliveryStatus: PromptCouldNotConfirm,
-		},
+// The committed-swap bypass in the daemon's ResumeFromLimit admission
+// (committedAccountSwap) and BeginManualAccountSwap's skipped startup check
+// mean the daemon resends the committed mission on a startup-unknown row:
+// the marker suppresses only automatic retries until the operator inspects,
+// and the explicit retry IS that inspection. The predicate must follow what
+// the daemon will do — refusing it would put the "pending mission is not
+// resent" label on a row whose resume re-pastes the mission (#6922 review).
+func TestStartupUnknownManualAccountSwapExposesHonestRetry(t *testing.T) {
+	for _, liveness := range []Liveness{LiveRunning, LiveLimitReached} {
+		inst := &Instance{
+			liveness:            liveness,
+			startupStateUnknown: true,
+			pendingAccountSwap: &AccountSwapData{
+				Manual: true, From: "work", To: "personal", ReplacementPanesStarted: true,
+				MissionDeliveryStatus: PromptCouldNotConfirm,
+			},
+		}
+		require.True(t, inst.PendingManualAccountSwapDeliveryUnconfirmed(),
+			"startup uncertainty must not erase the mission's ambiguous verdict")
+		require.True(t, inst.CanRetryPendingManualAccountSwapDelivery(),
+			"the daemon resends the committed manual mission past the startup gate — %v must expose the honest retry", liveness)
 	}
-	require.True(t, inst.PendingManualAccountSwapDeliveryUnconfirmed(),
-		"startup uncertainty must not erase the mission's ambiguous verdict")
-	require.False(t, inst.CanRetryPendingManualAccountSwapDelivery(),
-		"an unknown replacement runtime must stay inert instead of advertising a delivery retry")
 }
 
 func TestUnavailableManualAccountSwapDoesNotExposeRetry(t *testing.T) {

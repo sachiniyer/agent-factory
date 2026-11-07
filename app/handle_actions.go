@@ -557,6 +557,7 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("session '%s' is being deleted", selected.Title))
 	}
 	canRetry := selected.CanRetryPendingManualAccountSwapDelivery() ||
+		selected.CanRetryPendingAccountSwapNoticeDelivery() ||
 		selected.CanRetryPendingHandoffMissionDelivery()
 	canConfirm := selected.CanConfirmPendingHandoffDelivery() ||
 		selected.CanConfirmPendingAccountSwapDelivery()

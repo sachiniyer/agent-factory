@@ -105,6 +105,12 @@ type ConversationCaptureSnapshot struct {
 	// though the copy lands after the snapshot, so capture only ever reports a
 	// thread Codex itself minted.
 	carried AgentConversationData
+	// runtime is the process generation this capture attributes rollouts to.
+	// Armed snapshots are bound to their instance's live pane at arm time
+	// (BindConversationCaptureRuntime); an unbound snapshot attributes
+	// nothing and adopts nothing — a rollout's appearance inside the window
+	// is not evidence of which process wrote it (#6847).
+	runtime *codexRuntimeAttribution
 }
 
 // codexReceiptState is the receipt-check memory carried inside a snapshot.
@@ -554,20 +560,42 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 			"%w: %d new rollout files appeared and %d had uncorrelatable session metadata",
 			errCodexCaptureUndecided, len(observed), uncorrelated)
 	}
-	switch len(candidates) {
-	case 0:
+	if len(candidates) == 0 {
 		return AgentConversationData{}, true, nil
-	case 1:
+	}
+	// A same-directory match only says WHICH DIRECTORY a rollout names; it
+	// says nothing about WHICH PROCESS wrote it. A sibling Codex sharing the
+	// worktree and the account-scoped store mints exactly this evidence
+	// shape, and adopting it records a foreign thread as this session's
+	// conversation (#6847). Appearance alone never earned adoption: the
+	// rollout this session owns is the one its runtime holds open — Codex
+	// keeps the write descriptor on its thread file for the process's life.
+	attributed, inconclusive := snap.attributeCodexRollouts(candidates)
+	switch {
+	case inconclusive:
+		// Evidence exists but could not be read — a process table or
+		// descriptor set that failed mid-walk. Like a mid-write
+		// session_meta it is a not-yet-answer, so it gets the same
+		// bounded settle rather than a verdict.
+		return AgentConversationData{}, true, fmt.Errorf(
+			"%w: could not enumerate the runtime's open files to attribute %d new rollout files",
+			errCodexCaptureUndecided, len(candidates))
+	case len(attributed) == 1:
 		return AgentConversationData{
 			Agent:       tmux.ProgramCodex,
-			ID:          codexConversationIDFromPath(candidates[0]),
+			ID:          codexConversationIDFromPath(attributed[0]),
 			CapturedAt:  time.Now(),
 			CaptureKind: ConversationCaptureCodexRollout,
 		}, false, nil
-	default:
+	case len(attributed) > 1:
 		return AgentConversationData{}, false, fmt.Errorf(
-			"codex conversation capture ambiguous: %d new rollout files matched launch working directory",
-			len(candidates))
+			"codex conversation capture ambiguous: %d new rollout files are held open by the session's runtime",
+			len(attributed))
+	default:
+		// Every candidate is provably another process's thread — a same-cwd
+		// sibling, not this session's. Unknown stays unrecorded; the caller
+		// keeps waiting for the rollout the runtime itself mints.
+		return AgentConversationData{}, true, nil
 	}
 }
 

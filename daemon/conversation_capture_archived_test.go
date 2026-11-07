@@ -36,6 +36,10 @@ func captureArchiveTestInstance(t *testing.T) (*Manager, *session.Instance, stri
 	})
 	require.NoError(t, err)
 	inst.SetTmuxSession(tmux.NewTmuxSession("codex-worker", tmux.ProgramCodex))
+	// The capture must RESOLVE the seeded rollout so the archived gate is
+	// what refuses it — a name-only pane cannot hold it, so the test hands
+	// attribution the fixture store.
+	inst.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
 	inst.SetStatusForTest(session.Running)
 	key := daemonInstanceKey(repo.ID, inst.Title)
 	manager.mu.Lock()

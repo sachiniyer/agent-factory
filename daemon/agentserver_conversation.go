@@ -32,7 +32,9 @@ func (hs *headlessServer) captureCodexConversation(snap session.ConversationCapt
 		return
 	}
 	go func() {
-		conv, err := session.CaptureAgentConversation(token.Agent(), snap, agentServerCaptureTimeout)
+		// Adoption is attributed to the launched runtime's own open files,
+		// not merely to a new rollout naming the right directory (#6847).
+		conv, err := session.CaptureAgentConversation(token.Agent(), hs.inst.BindConversationCaptureRuntime(snap), agentServerCaptureTimeout)
 		if err != nil || !conv.HasID() {
 			return
 		}

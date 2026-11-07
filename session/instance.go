@@ -438,6 +438,17 @@ type Instance struct {
 	// before this evidence existed and everywhere runtimeProgram is cleared.
 	runtimePID     int
 	runtimeStartID uint64
+	// codexRuntimeHeldOverride, when set by a test, replaces the live
+	// descriptor walk capture attribution performs against this runtime.
+	codexRuntimeHeldOverride func() (map[string]struct{}, error)
+	// codexAttrMu, codexAttrGen and codexAttrVerdicts carry rollout-attribution
+	// verdicts for the CURRENTLY resolved runtime generation. The deferred
+	// capture loop re-binds a fresh attribution object on every attempt, so
+	// the memo that keeps a judged sibling from being re-walked lives on the
+	// instance, pinned to the generation it was judged under (#6847 review).
+	codexAttrMu       sync.Mutex
+	codexAttrGen      string
+	codexAttrVerdicts map[string]bool
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.

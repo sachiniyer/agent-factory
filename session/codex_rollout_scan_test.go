@@ -100,7 +100,9 @@ func TestNewCodexRolloutFiles_OldDateDirsAreNotWalked(t *testing.T) {
 		require.NotContains(t, candidates, path)
 	}
 
-	// The public capture path resolves the same observation to a conversation.
+	// The public capture path resolves the same observation to a conversation
+	// once the runtime provably holds the file open (#6847).
+	snap = bindRuntimeHeldFiles(snap, map[string]struct{}{fresh: {}})
 	conv, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 0)
 	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
