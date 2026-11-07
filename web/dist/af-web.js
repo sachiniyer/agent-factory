@@ -6736,7 +6736,13 @@ function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
   const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true && liveness !== Liveness.LimitReached) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && // Mirrors CanRetryPendingHandoffMissionDelivery: ADMISSION, not
+  // presentation — the daemon routes on this shape, and its limit arm
+  // transfers a startup-unknown-at-the-wall mission to scheduled retry
+  // rather than refusing it (#6928 review). The resend-vs-resume label
+  // split lives in the TUI picker; the web offers the retry the daemon
+  // admits.
+  (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
 }
 function isPendingAgentHandoffDeliveryConfirmable(s) {
   const liveness = livenessOf(s);
@@ -7055,7 +7061,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "88c110a5392c";
+var CLIENT_VERSION = "dc6629bb9920";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",

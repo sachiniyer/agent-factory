@@ -577,6 +577,14 @@ func (m *home) handleLimitRetry() (tea.Model, tea.Cmd) {
 		// labelled as a resend.
 		resend := handoffResolveNoResend
 		switch {
+		case selected.PendingHandoffMission() != "" && selected.LimitReached():
+			// An agent handoff parked at its limit wall IS admitted — the
+			// admission predicate deliberately stays wide because the daemon
+			// routes on it — but retryPendingHandoff's limit arm transfers
+			// the mission into scheduled retry without resubmitting, so the
+			// honest label is the resume, not "Retry send" (#6800; #6928
+			// review: admission must not narrow for the label's sake).
+			resend = handoffResolveResumeLimit
 		case canRetry:
 			resend = handoffResolveResendMission
 		case selected.LimitReached():

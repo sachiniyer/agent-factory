@@ -416,8 +416,14 @@ export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolea
     ambiguousHandoffDelivery(status) &&
     s.user_killed !== true &&
     !dead &&
+    // Mirrors CanRetryPendingHandoffMissionDelivery: ADMISSION, not
+    // presentation — the daemon routes on this shape, and its limit arm
+    // transfers a startup-unknown-at-the-wall mission to scheduled retry
+    // rather than refusing it (#6928 review). The resend-vs-resume label
+    // split lives in the TUI picker; the web offers the retry the daemon
+    // admits.
     (liveness === Liveness.Running || liveness === Liveness.Ready ||
-      (s.startup_state_unknown === true && liveness !== Liveness.LimitReached)) &&
+      s.startup_state_unknown === true) &&
     (op === InFlightOp.None || op === InFlightOp.Replacing)
   );
 }

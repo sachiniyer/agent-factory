@@ -113,11 +113,15 @@ func (i *Instance) PendingHandoffMissionSettleable() bool {
 // wait and the send run. A probe that does not answer refuses the retry and
 // leaves the row as it was.
 //
-// The limit wall is the one startup-unknown shape the marker must NOT admit:
-// retryPendingHandoff's LiveLimitReached arm transfers the mission into the
-// scheduled limit retry and returns unperformed — the explicit retry never
-// submits there, so "Retry send" would lie. The row falls back to the
-// truthful no-resend resume label instead (#6800 follow-up).
+// This predicate is ADMISSION, not presentation: the daemon routes on it
+// (daemon/limit_resume.go checks it before retryPendingHandoff), so it must
+// report every shape the explicit retry performs — including a startup-unknown
+// row parked at LiveLimitReached, where the retry's limit arm transfers the
+// mission into the scheduled limit retry WITHOUT resubmitting. Whether that
+// admission is a resend or a transfer is the picker's label question, answered
+// in app/handle_actions.go; narrowing this predicate to serve the label once
+// stranded exactly that shape behind a "not blocked on a usage limit" refusal
+// (#6928 review).
 func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -127,8 +131,7 @@ func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	dead := i.liveness == LiveLost || i.liveness == LiveDead || i.liveness == LiveArchived
 	return i.pendingHandoffMission != "" && ambiguous && !i.userKilled && !dead &&
 		(i.inFlightOp == OpNone || i.inFlightOp == OpReplacing) &&
-		(i.liveness == LiveRunning || i.liveness == LiveReady ||
-			(i.startupStateUnknown && i.liveness != LiveLimitReached))
+		(i.liveness == LiveRunning || i.liveness == LiveReady || i.startupStateUnknown)
 }
 
 // CanConfirmPendingHandoffDelivery reports whether an operator can retire the
