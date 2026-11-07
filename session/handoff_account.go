@@ -712,13 +712,31 @@ func accountSwapDataEqual(a, b *AccountSwapData) bool {
 
 // ParkManualAccountSwapAtLimit attributes a readiness wall to the replacement
 // identity without releasing the account transaction's fence or its mission.
-func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence string) error {
+// banner is the LimitReachedError's detection anchor; freshRuntime reports
+// that the pane the error came out of was launched by THIS attempt — a
+// fresh-runtime wall is always a new sighting, while a parked row re-reading
+// the unchanged banner off an unchanged pane is the parked re-sight no-op
+// recordAccountLimitObservationAtLocked keeps (#6880).
+func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime))
+}
+
+// sendPathReSightingLocked classifies a send-path park's sighting as a parked
+// re-sight — the no-op kind — only when every discriminator says the pane's
+// evidence did not change: the row is parked at LiveLimitReached, this attempt
+// did not replace the runtime that produced the error, and the reported banner
+// anchor is the same banner the row recorded. A refused retry whose
+// replacement pane is still alive re-reads readiness off the same pane and
+// re-detects the same banner; stamping that re-read would outlive a proof
+// already on its way between the two reads and wedge the swap by its own copy
+// (#6880). Caller holds i.mu.
+func (i *Instance) sendPathReSightingLocked(banner LimitBanner, freshRuntime bool) bool {
+	return i.liveness == LiveLimitReached && !freshRuntime && i.sameLiveLimitBannerLocked(banner)
 }
 
 // ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit
@@ -749,7 +767,7 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 	// the same unchanged claim (#6880). A row parked at some OTHER wall is
 	// parked-at-a-different-fact, and the record's same-kind match scopes the
 	// no-op to the same claim kind in either case.
-	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, i.liveness == LiveLimitReached)
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, LimitBanner{}, i.liveness == LiveLimitReached)
 }
 
 // parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
@@ -760,16 +778,22 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 // pane's own observation time for the pair, the re-admission's freshest
 // matched-source instant for the committed twin.
 //
-// wasParked is the caller's own classification, not derived here: the send-path
-// pair passes false because a LimitReachedError out of the fresh runtime is
-// always a new sighting — the row it lands on may still be parked under the
-// resume fence by owner bookkeeping (ReparkLimitUnderResumeFence restores the
-// window the attempt entered with), and treating that bookkeeping marker as a
-// re-sight would let a stale proof retract a wall the NEW runtime just
-// reported (#6927 review). Only the committed twin passes lv ==
-// LiveLimitReached: its copy carries no new pane observation at all, so the
+// wasParked is the caller's own classification, not derived here: the
+// send-path pair reports a parked re-sight only when the row is parked at the
+// SAME banner still on the SAME pane (sendPathReSightingLocked) — a fresh
+// runtime's LimitReachedError is always a new sighting even when the row is
+// parked under the resume fence by owner bookkeeping
+// (ReparkLimitUnderResumeFence restores the window the attempt entered with
+// and never touches the anchor), and even a stale-pane re-read whose banner
+// anchor differs is new wall evidence (#6880). The committed twin passes lv
+// == LiveLimitReached: its copy carries no pane observation at all, so the
 // row's own parked marker is exactly the "same wall still standing" signal.
-func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, wasParked bool) error {
+//
+// banner is the sighting's anchor — the pair's LimitReachedError carries it,
+// the committed copy carries none. The row's live anchor is re-stamped with
+// it, matching setLimitReachedLocked, so the NEXT same-pane re-read has a
+// stored anchor to compare against.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked bool) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -777,6 +801,8 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	// phrase keeps the daemon's first poll from re-parsing the unchanged banner
 	// against a later clock and moving the stored reset (#6765).
 	i.limitResetEvidence = evidence
+	i.limitBannerPrefix = banner.Prefix
+	i.limitBannerCount = banner.Count
 	i.attributeLimitIdentityAsLocked(agent)
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
@@ -836,11 +862,16 @@ func (i *Instance) SetAccountSwapReplacementPanesStartedForTest(started bool) {
 // pair and its re-verification watch). A wall found before this attempt's
 // send cannot settle a notice an earlier send may already have delivered, so
 // the positive-non-delivery flip stays scoped to the manual mission.
-func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence string) error {
+// banner is the LimitReachedError's detection anchor; freshRuntime reports
+// that the pane the error came out of was launched by THIS attempt — a
+// fresh-runtime wall is always a new sighting, while a parked row re-reading
+// the unchanged banner off an unchanged pane is the parked re-sight no-op
+// recordAccountLimitObservationAtLocked keeps (#6880).
+func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), banner, i.sendPathReSightingLocked(banner, freshRuntime))
 }

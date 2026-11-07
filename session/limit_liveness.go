@@ -199,6 +199,19 @@ func sameLimitBannerPosition(stored, current string) bool {
 	return strings.HasSuffix(longer, shorter)
 }
 
+// sameLiveLimitBannerLocked reports whether a sighting's banner anchor is the
+// SAME banner the live wall row already carries — the unchanged banner a
+// re-read of the same pane returns — versus a newly printed wall. It mirrors
+// applyDegradedResightLocked's two discriminating reads: the last-match
+// position must coincide (the capture window may slide while the banner sits
+// still), and the visible match count must not have grown past the recorded
+// one — more matches than the recorded sighting counted means a banner
+// printed BELOW the recorded wall: a genuinely new wall. Caller holds i.mu.
+func (i *Instance) sameLiveLimitBannerLocked(banner LimitBanner) bool {
+	return sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) &&
+		!(i.limitBannerCount > 0 && banner.Count > i.limitBannerCount)
+}
+
 // setLimitReachedLocked is the shared body: mark the instance limit-blocked and
 // record its reset time, evidence, and banner anchor, skipping a row with any
 // operation in flight so it never clobbers that operation's fence. Reports
@@ -309,7 +322,14 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 				return
 			}
 			observation.ResetAt = retained
-			observation.ObservedAt = sighted
+			// The row's newest sighting never rewinds: the instant is when the
+			// row last saw this claim's wall, and a copy stamped with an older
+			// source instant — or a lagging detection clock — must not move it
+			// back below a sighting the row genuinely made, or a proof dated in
+			// the gap would retract a wall S saw AFTER the proof (#6880 review).
+			if sighted.After(observation.ObservedAt) {
+				observation.ObservedAt = sighted
+			}
 			i.accountLimitObsUnpersisted = true
 			i.touchLocked()
 			return
