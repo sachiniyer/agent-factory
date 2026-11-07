@@ -40,6 +40,15 @@ import "sync"
 //	automatic Lost restore  try-admission (non-blocking), released right after the
 //	                     rebuild; its persists under admission use
 //	                     persistUnderAdmission (#6198)
+//	limit resume         shared by the scheduler, the manual RPC, and account
+//	                     handoff through resumeFromLimitLockedOutcome:
+//	                     target -> op -> start (fence publish, the swap commit's
+//	                     settle, every settlement, and the completion
+//	                     checkpoint) -> admission held ONLY across the respawn,
+//	                     whose in-flight writes use persistUnderAdmission and
+//	                     persistInstanceData (#6880). Operator entries wait on
+//	                     admission bounded; the scheduler TryLocks; both entries
+//	                     may probe admission at the door and release it at once.
 //
 // A path that needs the start lock (a persist through persistInstanceErr) must not
 // be holding admission when it asks for it: that is the inversion CreateSession's

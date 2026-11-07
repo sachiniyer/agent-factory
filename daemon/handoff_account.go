@@ -44,16 +44,20 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 		return m.handoffAccountOffBox(req, instance, repoID, key)
 	}
 	// A local account handoff can rebuild a vanished persisted worktree through
-	// the shared respawn path. Acquire repository admission before the handoff can
-	// commit an identity or stop a pane; a timeout therefore remains an untouched,
-	// retryable refusal rather than a half-applied replacement.
+	// the shared respawn path, whose caller now takes repository admission only
+	// around that rebuild — holding it across the whole request sat it LEFT of
+	// the start lock the body's own persists take, the inversion #6198 forbids
+	// (#6880). The bounded probe here keeps a different property of the old
+	// placement: for a swap that has not committed yet, contention at entry
+	// still produces an untouched, retryable refusal rather than a
+	// committed-but-incomplete replacement. It releases at once; the
+	// authoritative acquisition happens inside the shared body, right before
+	// the respawn.
 	worktreeAdmission, err := m.lockLocalWorktreeAdmissionWithin(repoID, instance.Title, "hand off", instance)
 	if err != nil {
 		return HandoffSessionResponse{}, err
 	}
-	if worktreeAdmission != nil {
-		defer worktreeAdmission.Unlock()
-	}
+	unlockWorktreeAdmission(worktreeAdmission)
 	// An account-only request follows the agent selected by the preceding
 	// operation, including a handoff that finished while we waited for the lock.
 	target := strings.TrimSpace(req.To)

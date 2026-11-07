@@ -37,7 +37,10 @@ const (
 	// that stayed staged, a withheld remedy Enter, or a withheld redelivery.
 	TaskStatusSentUnverified = "sent-unverified"
 	// TaskStatusSentUnconfirmed: the pane could not be observed at all, so the
-	// daemon has no verdict either way.
+	// daemon has no verdict either way. It re-verifies like sent-unverified:
+	// the send's turn watch stays armed and promotes the verdict to sent if
+	// the agent demonstrably begins that send's turn inside its evidence
+	// window (#6819); a pane that stays unobservable leaves it unconfirmed.
 	TaskStatusSentUnconfirmed = "sent-unconfirmed"
 )
 
@@ -195,9 +198,10 @@ func deliverTaskPromptRun(t *task.Task, prompt string, deferWhileAttached bool, 
 		Prompt:     prompt,
 		TaskRepoID: t.RepoID,
 		TaskOrigin: true,
-		// Names this delivery's owning task so a sent-unverified verdict can arm
-		// the daemon's re-verification feed against this run's recorded status
-		// (#6590).
+		// Names this delivery's owning task so an unproven verdict —
+		// sent-unverified, or sent-unconfirmed when the pane could not be
+		// observed — can arm the daemon's re-verification feed against this
+		// run's recorded status (#6590, #6819).
 		TaskID: t.ID,
 		// Re-checked at the daemon boundary on EVERY firing, and a missing target
 		// is never created (#5571 W3.5).

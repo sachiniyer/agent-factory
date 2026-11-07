@@ -406,7 +406,10 @@ func (m *Manager) admitAccountSwapWith(instance *session.Instance, global *confi
 // (fences -> start lock vs CreateSession's start lock -> accountLimitMu) and
 // deadlock the daemon — the fence <-> start-lock ABBA (#6197 inversion class).
 // The "durable before launch" property is preserved because the caller runs
-// settle between fence release and the replacement runtime's spawn.
+// settle between fence release and the replacement runtime's spawn — and the
+// limit evidence this admission committed under is re-checked immediately
+// before that spawn (committedSwapAccountWall), closing the window the
+// released fences leave open (#6880).
 //
 // probe is the liveness probe the caller computed BEFORE acquiring the global
 // fences (see resumeFromLimitLockedOutcome and prepareRuntimeForAccountSwap):
