@@ -128,6 +128,25 @@ func TestPendingConversationCaptureRestoreAndDrop(t *testing.T) {
 		"a permanently-moot row drops the park explicitly")
 }
 
+// TestDropPendingConversationCaptureIfMoot: the moot clear names its reasons —
+// archived here — and a live unrecorded row keeps its park. The condition and
+// the drop share one lock hold so nothing can park between them (#6946 review).
+func TestDropPendingConversationCaptureIfMoot(t *testing.T) {
+	inst := retireTestInstance(t)
+	snap := BeginConversationCaptureAtCodexHomeAndWorkingDir(t.TempDir(), inst.Path)
+	inst.RetireConversationForFreshRuntime("019f386f-7206-7fc2-803b-f7045e07a242", snap)
+
+	require.False(t, inst.DropPendingConversationCaptureIfMoot(),
+		"a live unrecorded row is not moot — the park stays")
+	require.True(t, inst.PendingConversationCaptureParkedForTest())
+
+	inst.SetStatusForTest(Archived)
+	require.True(t, inst.DropPendingConversationCaptureIfMoot(),
+		"an archived row can never arm again")
+	require.False(t, inst.PendingConversationCaptureParkedForTest(),
+		"the moot row's park is dropped")
+}
+
 func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("CODEX_HOME", t.TempDir()) // empty store: the recorded rollout is missing

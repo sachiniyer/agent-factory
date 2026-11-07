@@ -233,12 +233,11 @@ func (m *Manager) ArmConversationCaptures() {
 			// would bind the wrong store.
 			continue
 		}
-		if inst.AgentConversation().HasID() || inst.UserKilled() || inst.IsArchived() {
+		if inst.DropPendingConversationCaptureIfMoot() {
 			// A recorded, killed, or archived row can never arm again, so its
-			// parked baseline is permanently moot: it is dropped here, on the
-			// record, rather than left for a consumer that will never come
-			// (#6946).
-			inst.DropPendingConversationCapture()
+			// parked baseline is permanently moot: the check and the drop are
+			// one atomic step so a respawn parking its baseline between them
+			// is never destroyed (#6946).
 			continue
 		}
 		switch inst.GetLiveness() {
@@ -283,8 +282,7 @@ func (m *Manager) armDeferredConversationCaptureLocked(repoID, key string, inst 
 	if m.instances[key] != inst {
 		return
 	}
-	if inst.AgentConversation().HasID() || inst.UserKilled() || inst.IsArchived() {
-		inst.DropPendingConversationCapture()
+	if inst.DropPendingConversationCaptureIfMoot() {
 		return
 	}
 	if armed, ok := m.armedConversationCaptures[inst]; ok && armed == token {

@@ -290,6 +290,29 @@ func (i *Instance) DropPendingConversationCapture() {
 	i.pendingConversationCapture = nil
 }
 
+// DropPendingConversationCaptureIfMoot clears the parked baseline exactly when
+// the row can never arm again — a recorded conversation, a kill, or an
+// archive — with the condition read under the same i.mu hold that clears, so
+// a respawn parking its baseline between the read and the drop cannot have it
+// destroyed underneath it (#6946 review). Reports whether the row is moot so
+// the caller can still skip it.
+func (i *Instance) DropPendingConversationCaptureIfMoot() bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	moot := i.userKilled || i.liveness == LiveArchived
+	if !moot {
+		if len(i.Tabs) > 0 {
+			moot = i.Tabs[0].Conversation.HasID()
+		} else {
+			moot = i.reportedConversation.HasID()
+		}
+	}
+	if moot {
+		i.pendingConversationCapture = nil
+	}
+	return moot
+}
+
 // PendingConversationCaptureParkedForTest reports whether a parked baseline
 // still waits for its deferred arm.
 func (i *Instance) PendingConversationCaptureParkedForTest() bool {
