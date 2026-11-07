@@ -215,26 +215,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 	case enterInteractiveMsg:
 		// Deferred by the first-time interactive help screen's dismiss cmd
-		// (#1089 PR 2); the pane pointer is re-validated inside.
-		cmd := m.activateInteractive(msg.pane)
-		// The replay exists to forward the transition keystroke INTO the pane
-		// rather than swallow it (#1576). The host-reserved exit key is the one
-		// key that is not pane input, so replaying it here would run the mode we
-		// just entered straight back out.
-		//
-		// That is #2413, and the first-run help is what walks users into it: any
-		// key dismisses that overlay, and its last line reads "Press ctrl+] to
-		// return to navigation" — so the key the screen names is the key most
-		// likely to be pressed while reading it, and pressing it made interactive
-		// mode look broken on the very first try. Guarding at this sink rather
-		// than at either producer means no future replay source can reintroduce
-		// it. The key keeps working as the exit once the user is actually in the
-		// mode; only the synthetic replay of it is dropped.
-		if msg.replay && m.interactive && !isInteractiveExitKey(msg.replayKey) {
-			_, replayCmd := m.handleInteractiveKey(msg.replayKey)
-			cmd = tea.Batch(cmd, replayCmd)
-		}
-		return m, cmd
+		// (#1089 PR 2); the pane pointer is re-validated inside. The message
+		// carries no keystroke: the key that triggered the mode switch was
+		// consumed by the transition and must never be replayed into the pane's
+		// PTY, where it would submit whatever sits on the input line (#4722).
+		return m, m.activateInteractive(msg.pane)
 	case beginAttachMsg:
 		if msg.run == nil {
 			m.attachTransitioning = false

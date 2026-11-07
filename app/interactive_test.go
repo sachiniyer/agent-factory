@@ -65,17 +65,14 @@ func runHermeticCmd(t *testing.T, h *home, cmd tea.Cmd, depth int) {
 }
 
 // enterInteractive presses Enter on the focused pane and drives the deferred
-// activation to completion. That entry Enter is itself forwarded into the pane
-// (#1576) — TestFirstEnterOnFocusedPaneForwardsIntoPane pins that behavior. The
-// recorded keys are reset here so callers can assert on the keystrokes they
-// send NEXT without the entry Enter sitting in front of them.
+// activation to completion. The entry Enter is consumed by the mode switch and
+// never reaches the pane (#4722), so the fake's recorded keys afterwards are
+// exactly the keystrokes the test sends — an entry-key leak would surface as a
+// stray "enter" in front of them.
 func enterInteractive(t *testing.T, h *home) {
 	t.Helper()
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	runHermeticCmd(t, h, cmd, 0)
-	if lt := focusedFake(h); lt != nil {
-		lt.keys = nil
-	}
 }
 
 func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
@@ -92,34 +89,35 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 	assert.Contains(t, h.menu.String(), "ctrl+]", "the status bar must show the escape hatch")
 }
 
-// TestFirstEnterOnFocusedPaneForwardsIntoPane is the #1576 regression: with the
-// interactive help already seen (every established user), pressing Enter on an
-// already-focused pane must both enter interactive mode AND forward that first
-// Enter into the pane — the transition key is the pane's first in-pane
-// keystroke and must not be swallowed. Before the fix only the once-ever
-// first-run help path replayed the entry key, so every later entry dropped it.
-func TestFirstEnterOnFocusedPaneForwardsIntoPane(t *testing.T) {
+// TestEnterOnFocusedPaneNeverReachesPTY is the #4722 regression: the Enter that
+// switches a focused pane from nav to interactive mode is consumed by the mode
+// switch and must NOT reach the pane's PTY. Forwarding it submits whatever sits
+// on the input line — a half-typed shell command executes, or an agent's draft
+// prompt is sent — and appends a phantom empty prompt line on every entry.
+// Driven through the real Update path (handleKeyPress → dispatch → handleEnter →
+// the deferred enterInteractiveMsg activation), not the handler directly.
+func TestEnterOnFocusedPaneNeverReachesPTY(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 
-	// Drive the entry WITHOUT the key-resetting enterInteractive helper so the
-	// forwarded entry keystroke is observable.
-	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	runHermeticCmd(t, h, cmd, 0)
 
 	require.True(t, h.interactive, "Enter on a focused pane must enter interactive mode")
 	require.Len(t, *fakes, 1)
-	assert.Equal(t, []string{"enter"}, (*fakes)[0].keys,
-		"the Enter that enters a focused pane must forward into the pane, not be swallowed (#1576)")
+	assert.Empty(t, (*fakes)[0].keys,
+		"the nav→interactive Enter is a mode-switch key: it must be consumed, never forwarded (#4722)")
 
-	// And the pane keeps forwarding normally afterwards.
+	// Once the mode is live, keystrokes forward normally — including the NEXT
+	// Enter, which is real pane input, not a transition.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
-	assert.Equal(t, []string{"enter", "z"}, (*fakes)[0].keys,
-		"subsequent keystrokes must forward on top of the entry Enter")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, []string{"z", "enter"}, (*fakes)[0].keys,
+		"keys typed while interactive still forward — only the transition key is consumed")
 }
 
-// TestEnterFromTreeDoesNotForwardIntoPane guards the other half of #1576: a
-// navigation Enter (tree/sidebar selection) opens+enters the pane but must NOT
-// type into the agent — only an already-focused-pane Enter forwards.
+// TestEnterFromTreeDoesNotForwardIntoPane guards the other half of the same
+// contract: a navigation Enter (tree/sidebar selection) opens+enters the pane
+// but must NOT type into the agent.
 func TestEnterFromTreeDoesNotForwardIntoPane(t *testing.T) {
 	h := newTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
@@ -141,7 +139,7 @@ func TestEnterFromTreeDoesNotForwardIntoPane(t *testing.T) {
 		"a tree/nav select Enter opens the pane but must not type into the agent (#1576)")
 }
 
-func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
+func TestFirstRunInteractiveHelpConsumesDismissKey(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
 
@@ -156,11 +154,12 @@ func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
 
 	require.True(t, h.interactive, "dismissing first-run help should enter interactive mode")
 	require.Len(t, *fakes, 1)
-	assert.Equal(t, []string{"q"}, (*fakes)[0].keys,
-		"the key that dismisses the first-run interactive help must reach the pane")
+	assert.Empty(t, (*fakes)[0].keys,
+		"the key that dismisses the first-run interactive help is consumed by the overlay — "+
+			"it completes the mode switch, so it must never reach the pane (#4722)")
 }
 
-func TestFirstRunInteractiveHelpForwardsNavigationKey(t *testing.T) {
+func TestFirstRunInteractiveHelpConsumesNavigationKey(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
 
@@ -173,8 +172,8 @@ func TestFirstRunInteractiveHelpForwardsNavigationKey(t *testing.T) {
 
 	require.True(t, h.interactive, "j must dismiss first-run help rather than scroll it")
 	require.Len(t, *fakes, 1)
-	assert.Equal(t, []string{"j"}, (*fakes)[0].keys,
-		"the navigation key that dismisses first-run help must reach the pane")
+	assert.Empty(t, (*fakes)[0].keys,
+		"the navigation key that dismisses first-run help must be consumed, not typed into the pane (#4722)")
 }
 
 func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
@@ -422,9 +421,9 @@ func TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection(t *testing.T) {
 	// FOCUSED pane routes keystrokes.
 	require.Len(t, *fakes, 2)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
-	// The entry Enter forwards into focused pane A (#1576), then Z on top — both
-	// land on A's attachment, never sidebar-selected B's.
-	assert.Equal(t, []string{"enter", "Z"}, focusedFake(h).keys,
+	// The entry Enter was consumed by the mode switch (#4722); Z lands on A's
+	// attachment alone, never sidebar-selected B's.
+	assert.Equal(t, []string{"Z"}, focusedFake(h).keys,
 		"keystrokes route to the focused pane's attachment")
 }
 
@@ -584,6 +583,8 @@ func TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack(t *testing.T) 
 	// to the session the pane used to show.
 	assert.Equal(t, previewed, p.Instance(), "the click enters the previewed target")
 	assert.Nil(t, h.panePreviewTxn, "entering a pane resolves its preview")
+	assert.Empty(t, focusedFake(h).keys,
+		"click-to-interact writes nothing to the pane's input — same #4722 contract as Enter")
 }
 
 // TestActivateInteractiveDropsStaleActivationUnderAttachHelp is the #598 fence on
@@ -630,7 +631,7 @@ func TestEnterPaneIgnoredDuringAttachTransition(t *testing.T) {
 
 	h.attachTransitioning = true // the 20ms beginAttachTransition window
 
-	_, cmd := h.enterPane(pane, nil)
+	_, cmd := h.enterPane(pane)
 	runHermeticCmd(t, h, cmd, 0)
 
 	assert.False(t, h.interactive, "the attach owns the screen: no interactive entry")
@@ -711,7 +712,7 @@ func TestClickCommittingWebTabPreviewShowsGuardNotAttach(t *testing.T) {
 	h.updatePanePreview(webInst, webIdx, true, false)
 	require.True(t, h.paneIsPreviewing(pane), "the pane previews the web tab")
 
-	_, _ = h.enterPane(pane, nil)
+	_, _ = h.enterPane(pane)
 
 	// Every signal here is written SYNCHRONOUSLY by enterPane, so the test asserts
 	// without draining cmds. That is deliberate: the returned batch carries
