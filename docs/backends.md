@@ -1143,7 +1143,7 @@ What the sandbox host needs, and what af does to it:
     row stays Lost and holds *no* agent-server client: it carries the "not
     provisioned" sentinel (`ErrRemoteSandboxNotProvisioned`), which restore
     reads as *absent* (`probeAbsent` in `daemon/restore.go` and
-    `daemon/lostrestore.go`), not as a sandbox that answered dead. Absent
+    `daemon/lostrestore_attempt.go`), not as a sandbox that answered dead. Absent
     means replacement is unconditional: the old runtime is torn down and a
     fresh sandbox is provisioned from the session's branch on `origin`.
     **Nothing is pushed first, so work the sandbox never pushed is not
