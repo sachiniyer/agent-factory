@@ -244,9 +244,12 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 			candidates = append([]preflight.ExecutableCandidate{{Path: grp.path, ViaWorkingDir: grp.via}}, candidates...)
 			selIdx = 0
 		}
+		// Only candidates that can precede or supply the launch winner make
+		// the lookup launch-dir-dependent: trailing relative entries after
+		// an absolute selection are unreachable at launch and must not gate.
 		launchDependent := grp.via
-		for _, cand := range candidates {
-			launchDependent = launchDependent || cand.ViaWorkingDir
+		for i := 0; i < selIdx && !launchDependent; i++ {
+			launchDependent = candidates[i].ViaWorkingDir
 		}
 		if !grp.proven && launchDependent {
 			// The modeled launch dir is unverified — an opaque prefix may
@@ -280,17 +283,15 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 			}
 		}
 		// The verdict is established only when every location that could
-		// affect it was proven: an unproven location before the selected —
-		// or before the apparent winner — could hold a committed file the
-		// session resolves instead, so one rule covers them all: any
-		// unknown before the outcome means the outcome is unverified.
+		// affect it was proven: an unproven location before the apparent
+		// winner could hold a committed file the session resolves instead —
+		// any unknown before the outcome means the outcome is unverified.
+		// Locations after a proven winner are unreachable at launch, and
+		// when nothing proved runnable every location's answer counts.
 		firstUncertain := -1
-		limit := selIdx
-		switch {
-		case launchIdx < 0:
-			limit = len(results) // nothing proved runnable — every location's answer counts
-		case launchIdx > selIdx:
-			limit = launchIdx // the rescue's identity needs everything before it proven
+		limit := len(results)
+		if launchIdx >= 0 {
+			limit = launchIdx
 		}
 		for i := 0; i < limit; i++ {
 			if !results[i].provable || results[i].verdict == baseTreeUnknown {
@@ -456,6 +457,21 @@ func readTreeLink(workspace, ref, rel string) (string, bool) {
 // is a bounded read; the cap keeps pathological chains finite.
 const treeLinkDepth = 8
 
+// linkTargetUnresolvable reports whether a committed symlink target contains
+// a ".." component. POSIX resolves such a target component-wise — an
+// intermediate ".." only works when the preceding real directory exists —
+// which Clean would collapse wrongly (e.g. "missing/../realbin" cleans to
+// "realbin" even when "missing" is absent and the link dangles). af does not
+// model that traversal, so the target is unverifiable, never runnable.
+func linkTargetUnresolvable(target string) bool {
+	for _, part := range strings.Split(target, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
 func baseTreeEntryAt(workspace, ref, rel string, depth int) baseTreeEntry {
 	if depth >= treeLinkDepth {
 		return baseTreeUnknown
@@ -507,6 +523,9 @@ func baseTreeLinkAt(workspace, ref, rel string, depth int) baseTreeEntry {
 		}
 		return baseTreeAbsent
 	}
+	if linkTargetUnresolvable(target) {
+		return baseTreeUnknown // ".." traversal is unverifiable inside the tree
+	}
 	resolved := filepath.Clean(filepath.Join(filepath.Dir(rel), target))
 	if resolved == ".." || filepath.IsAbs(resolved) ||
 		strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
@@ -552,6 +571,9 @@ func resolveTreeRel(workspace, ref, rel string, depth int) (string, baseTreeEntr
 					return "", baseTreeRunnable
 				}
 				return "", baseTreeAbsent
+			}
+			if linkTargetUnresolvable(target) {
+				return "", baseTreeUnknown
 			}
 			resolved := filepath.Clean(filepath.Join(
 				append([]string{filepath.Dir(prefix), target}, parts[i+1:]...)...))
