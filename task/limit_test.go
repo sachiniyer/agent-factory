@@ -723,6 +723,38 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
 		{
+			// A narrow pane may wrap BETWEEN separate numeric tokens — the
+			// day "6" followed by the year "2026" with no comma ("Nov 6\n2026
+			// 9am"). The wrap must NOT rejoin the digits (it is not a mid-token
+			// split): "Nov 62026" would let monthDay consume "62" as the day and
+			// time.Date would normalize it months later. The wrap stays a
+			// space so monthDay sees "Nov 6 2026" (day 6, year 2026) — the same
+			// EST instant as the unwrapped "Nov 6, 2026 9am" form.
+			name:    "weekly date: year wraps after the day without a comma",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6\n2026 9am (America/New_York).",
+			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
+			// A narrow pane may wrap INSIDE a clock at the colon — the
+			// minutes "30" land on the next row ("2:\n30pm"). The wrap
+			// newline must rejoin (drop, not space) so parseClockTime sees
+			// "2:30pm" (hour 2, minute 30) rather than "2: 30pm", which it
+			// rejects (the disjoint "30pm" reads hour 30 > 12). Same EST
+			// instant as the unwrapped "2:30pm" form.
+			name:    "5h: minutes wrap after the colon",
+			content: "Claude usage limit reached. Your limit will reset at 2:\n30pm (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
+		{
+			// The colon itself may wrap onto the next row ("2\n:30pm"). The
+			// wrap newline must rejoin (drop, not space) so parseClockTime
+			// sees "2:30pm" rather than "2 :30pm". Same EST instant as the
+			// unwrapped "2:30pm" form.
+			name:    "5h: colon wraps before the minutes",
+			content: "Claude usage limit reached. Your limit will reset at 2\n:30pm (America/New_York).",
+			want:    time.Date(2026, 1, 2, 14, 30, 0, 0, est).UTC(), // 2:30pm EST -> 19:30Z
+		},
+		{
 			// A wrapped-to-next-row parenthesized timezone must carry a
 			// trailing period (the shipped wrapped-banner shape): without one,
 			// the paren on the next row is treated as unrelated transcript text

@@ -463,6 +463,7 @@ func normalizeResetWhitespace(s string) string {
 	outsideSpace := false // whether the last char emitted outside a paren was a collapsed space
 	lastDigit := false    // whether the last char emitted outside a paren was an ASCII digit
 	lastLetter := false   // whether the last char emitted outside a paren was an ASCII letter
+	lastColon := false    // whether the last char emitted outside a paren was a clock colon
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -472,6 +473,7 @@ func normalizeResetWhitespace(s string) string {
 			outsideSpace = false
 			lastDigit = false
 			lastLetter = false
+			lastColon = false
 		case c == ')':
 			if depth > 0 {
 				depth--
@@ -480,6 +482,7 @@ func normalizeResetWhitespace(s string) string {
 			outsideSpace = false
 			lastDigit = false
 			lastLetter = false
+			lastColon = false
 		case depth > 0:
 			// Inside a parenthesized span: drop the wrap's newlines so a split
 			// zone token rejoins; keep every other byte (including the genuine
@@ -491,6 +494,7 @@ func normalizeResetWhitespace(s string) string {
 			outsideSpace = false
 			lastDigit = false
 			lastLetter = false
+			lastColon = false
 		case c == ' ' || c == '\t':
 			// Outside a paren: collapse runs of spaces/tabs to a single space.
 			if !outsideSpace {
@@ -499,22 +503,58 @@ func normalizeResetWhitespace(s string) string {
 			}
 			lastDigit = false
 			lastLetter = false
+			lastColon = false
 		case c == '\n' || c == '\r':
 			// A wrap newline outside a paren. When it splits a multi-digit
 			// token (a calendar day or a clock hour) the newline is dropped so
 			// the digits rejoin — "Nov 1\n2" → "Nov 12", "1\n1am" → "11am" —
-			// otherwise the day/hour resolves to the wrong instant. When it
-			// splits a month-name token the newline is likewise dropped so the
+			// otherwise the day/hour resolves to the wrong instant. The rejoin
+			// is gated on the joined digits forming a single day/hour token
+			// (≤ 2 digits): a wrap BETWEEN separate numeric tokens — e.g.
+			// "Nov 6\n2026" (the day followed by the year), or "2026\n9am"
+			// (the year followed by the clock hour) — must stay a space, or
+			// monthDay would consume "62" as the day and time.Date would
+			// normalize it into a much later month. When it splits a
+			// month-name token the newline is likewise dropped so the
 			// letters rejoin — "No\nv" → "Nov" — otherwise monthDay misses the
 			// explicit date. The mid-token rejoin is gated on the joined
 			// letters forming a month name (wrapSplitsMonth): a wrap between
 			// complete words ("reset\nat") is byte-identical to a mid-token
 			// wrap at the newline, so only a month-shaped join rejoins; a
 			// word-boundary wrap takes a space, preserving the unwrapped
-			// evidence ("reset at") for the #6765 re-read identity. Otherwise
-			// collapse to a single space (the wrap between the clock and the
-			// tz paren, or between complete words).
+			// evidence ("reset at") for the #6765 re-read identity. A wrap
+			// immediately before or after the clock's colon also rejoins —
+			// "2\n:30pm" and "2:\n30pm" both collapse to "2:30pm" rather than
+			// spacing to "2 :30pm"/"2: 30pm", which parseClockTime rejects —
+			// so a narrow pane that wraps at the colon keeps its reset time.
+			// Otherwise collapse to a single space (the wrap between the
+			// clock and the tz paren, or between complete words).
 			if lastDigit && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+				pre := b.String()
+				preRun := 0
+				for preRun < len(pre) {
+					ch := pre[len(pre)-1-preRun]
+					if ch < '0' || ch > '9' {
+						break
+					}
+					preRun++
+				}
+				postRun := 0
+				for i+1+postRun < len(s) {
+					ch := s[i+1+postRun]
+					if ch < '0' || ch > '9' {
+						break
+					}
+					postRun++
+				}
+				if preRun+postRun <= 2 {
+					continue
+				}
+			}
+			if lastColon && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+				continue
+			}
+			if lastDigit && i+1 < len(s) && s[i+1] == ':' {
 				continue
 			}
 			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && wrapSplitsMonth(b.String(), s[i+1:]) {
@@ -526,11 +566,13 @@ func normalizeResetWhitespace(s string) string {
 			}
 			lastDigit = false
 			lastLetter = false
+			lastColon = false
 		default:
 			b.WriteByte(c)
 			outsideSpace = false
 			lastDigit = c >= '0' && c <= '9'
 			lastLetter = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')
+			lastColon = c == ':'
 		}
 	}
 	return b.String()
