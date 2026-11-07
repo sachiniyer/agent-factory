@@ -365,8 +365,12 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 // scheduling decision and replays it.
 func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
 	advance := withFrozenClock(t)
-	base := nowFunc()
-	resetAt := base.Add(30 * time.Minute) // the wall lifts in half an hour
+	// Anchor the reset to the wall clock, not the frozen scheduler clock: the
+	// residue gate reads the session package's instanceNow (real time), so a
+	// reset anchored to the frozen 2023 base reads as already expired and the
+	// re-park below would be refused as residue. The early retry is manual —
+	// it fires regardless of the reset's due-ness on either clock.
+	resetAt := time.Now().Add(30 * time.Minute) // the wall lifts in half an hour
 	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", resetAt)
 
 	const banner = "some earlier agent output\n$ af sessions list\n" +
@@ -397,8 +401,9 @@ func TestResumeLimitedSessions_NoReplayAfterEarlyRetryRepark(t *testing.T) {
 		t.Fatal("the unchanged banner before R re-parks the row at its recorded reset")
 	}
 
-	// At R + grace the scheduler must not replay the prompt.
-	advance(30*time.Minute + limitResumeGrace + time.Second)
+	// At R + grace the scheduler must not replay the prompt. nowFunc is still
+	// the frozen base, so advance the delta that puts it just past reset+grace.
+	advance(resetAt.Sub(nowFunc()) + limitResumeGrace + time.Second)
 	manager.ResumeLimitedSessions()
 	if _, _, prompts := backend.snapshot(); len(prompts) != 1 {
 		t.Fatalf("the wall the early retry already answered must not re-send at R+grace: prompts=%v", prompts)
