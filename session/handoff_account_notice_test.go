@@ -206,6 +206,58 @@ func TestSettlePendingAccountSwapNoticeDeliveryClearsTheCrossAgentSameLabelWall(
 		"the outgoing provider's wall clears even though the account label matches the target")
 }
 
+// A pending record whose attempt instant is ZERO has no send for the wall to
+// be stale against — the shape a crash between Begin and Record leaves —
+// so attribution alone decides and the incoming wall survives (#6921-review
+// test gap). Clearing it would strand the session outside the scheduled
+// recovery the parked row was waiting for, the exact harm #6799 fixed.
+func TestSettlePendingAccountSwapNoticeDeliveryKeepsTheIncomingWallOnAZeroAttempt(t *testing.T) {
+	for _, manual := range []bool{false, true} {
+		inst := noticePendingSwap(manual, PromptCouldNotConfirm, time.Time{})
+		if manual {
+			inst.pendingAccountSwap.AccountAgent = "claude"
+		}
+		inst.limitResetAt = time.Now().Add(time.Hour)
+		inst.limitAgent = "claude"
+		inst.limitAccount = "personal" // == pending.To: the incoming identity's wall
+		inst.accountLimitObservations = []AccountLimitObservationData{
+			{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: time.Now()},
+		}
+		require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "personal", time.Time{}))
+		require.Nil(t, inst.pendingAccountSwap)
+		require.Equal(t, LiveLimitReached, inst.GetLiveness(),
+			"no attempt instant means no send exists that could have proven the wall stale — attribution keeps it")
+		agent, account, ok := inst.LimitIdentity()
+		require.True(t, ok)
+		require.Equal(t, "claude", agent)
+		require.Equal(t, "personal", account)
+	}
+}
+
+// A ledger row with a ZERO ObservedAt carries no provable sighting instant —
+// it cannot be told apart from a wall recorded before the send, so it reads
+// as stale and the settle clears it (#6921-review test gap).
+func TestSettlePendingAccountSwapNoticeDeliveryClearsAZeroObservedAtWall(t *testing.T) {
+	attemptAt := time.Now().Add(-time.Minute)
+	for _, manual := range []bool{false, true} {
+		inst := noticePendingSwap(manual, PromptCouldNotConfirm, attemptAt)
+		if manual {
+			inst.pendingAccountSwap.AccountAgent = "claude"
+		}
+		inst.limitResetAt = time.Now().Add(time.Hour)
+		inst.limitAgent = "claude"
+		inst.limitAccount = "personal" // == pending.To on the label axis
+		inst.accountLimitObservations = []AccountLimitObservationData{
+			{Agent: "claude", Account: "personal", ResetAt: inst.limitResetAt, ObservedAt: time.Time{}},
+		}
+		require.NoError(t, inst.SettlePendingAccountSwapNoticeDelivery("work", "personal", attemptAt))
+		require.Equal(t, LiveRunning, inst.GetLiveness(),
+			"an unprovable sighting instant reads as stale — the wall clears")
+		_, _, ok := inst.LimitIdentity()
+		require.False(t, ok, "no attribution may survive the cleared wall")
+	}
+}
+
 func TestSettlePendingAccountSwapNoticeDeliveryRefusals(t *testing.T) {
 	attemptAt := time.Now().Add(-time.Minute)
 	for _, tc := range []struct {
