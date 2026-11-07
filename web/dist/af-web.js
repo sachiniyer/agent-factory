@@ -6720,10 +6720,13 @@ function isArchived(s) {
 function isLimitReached(s) {
   return livenessOf(s) === Liveness.LimitReached && (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None;
 }
+function hasLimitWallLiveness(s) {
+  return livenessOf(s) === Liveness.LimitReached;
+}
 function isPendingManualHandoffDeliveryUnconfirmed(s) {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
-  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.startup_state_unknown !== true && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
+  return (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None && s.user_killed !== true && (liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached) && pending?.manual === true && pending.replacement_panes_started === true && pending.mission_delivery_status !== void 0 && pending.mission_delivery_status !== "not-delivered";
 }
 function ambiguousHandoffDelivery(status) {
   return status === "sent-unverified" || status === "could-not-confirm";
@@ -6736,7 +6739,13 @@ function isPendingAgentHandoffDeliveryUnconfirmed(s) {
   const status = s.pending_handoff_delivery_status;
   const op = s.in_flight_op ?? InFlightOp.None;
   const dead = liveness === Liveness.Lost || liveness === Liveness.Dead || liveness === Liveness.Archived;
-  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
+  return s.pending_handoff_mission !== void 0 && s.pending_handoff_mission !== "" && ambiguousHandoffDelivery(status) && s.user_killed !== true && !dead && // Mirrors CanRetryPendingHandoffMissionDelivery: ADMISSION, not
+  // presentation — the daemon routes on this shape, and its limit arm
+  // transfers a startup-unknown-at-the-wall mission to scheduled retry
+  // rather than refusing it (#6928 review). The resend-vs-resume label
+  // split lives in the TUI picker; the web offers the retry the daemon
+  // admits.
+  (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) && (op === InFlightOp.None || op === InFlightOp.Replacing);
 }
 function isPendingAgentHandoffDeliveryConfirmable(s) {
   const liveness = livenessOf(s);
@@ -7055,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "dc04dc52aecc";
+var CLIENT_VERSION = "264ae4f39c1d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7214,6 +7223,7 @@ async function resumeFromLimit(id, title, token2) {
   if (!result.ok) {
     throw new Error(result.reason || "resume was not performed");
   }
+  return result.reason ?? null;
 }
 var CONFIRM_HANDOFF_UNSUPPORTED = "daemon does not serve ConfirmHandoffDelivery (likely an older daemon \u2014 upgrade it); the pending mission was left untouched";
 async function confirmHandoffDelivery(id, title, token2) {
@@ -19033,6 +19043,13 @@ function isOpenableSession(s) {
   return s.is_root === true && typeof s.id === "string" && s.id !== "" && !hasInFlightOp(s) && s.user_killed !== true && s.startup_state_unknown !== true && s.pending_account_swap === void 0 && !s.unreachable;
 }
 function retryActionForSession(s) {
+  if (isPendingAgentHandoffDeliveryUnconfirmed(s) && s.startup_state_unknown === true && hasLimitWallLiveness(s)) {
+    return {
+      kind: "handoff",
+      label: "Queue for limit resume",
+      title: "Queue the pending mission \u2014 it sends when the agent resumes"
+    };
+  }
   if (isPendingManualHandoffDeliveryUnconfirmed(s) || isPendingAgentHandoffDeliveryUnconfirmed(s)) {
     return {
       kind: "handoff",
@@ -23605,7 +23622,11 @@ function doRetryLimit() {
   if (!sel || tok === null) {
     return;
   }
-  void resumeFromLimit(sel.id, sel.title, tok).catch((e) => {
+  void resumeFromLimit(sel.id, sel.title, tok).then((note) => {
+    if (note) {
+      surfaceNotice(note);
+    }
+  }).catch((e) => {
     if (isMutationCommittedError(e)) {
       surfaceMutationError(e, "confirmed");
       return;

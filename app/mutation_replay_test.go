@@ -87,7 +87,10 @@ func tuiMutations() map[string]func() error {
 			_, err := handoffSessionThroughDaemon(daemon.HandoffSessionRequest{ID: "i"})
 			return err
 		},
-		"/v1/ResumeFromLimit": func() error { return resumeFromLimitThroughDaemon(daemon.ResumeFromLimitRequest{ID: "i"}) },
+		"/v1/ResumeFromLimit": func() error {
+			_, err := resumeFromLimitThroughDaemon(daemon.ResumeFromLimitRequest{ID: "i"})
+			return err
+		},
 		"/v1/CreateTab": func() error {
 			_, err := createTabThroughDaemon(daemon.CreateTabRequest{ID: "i"})
 			return err

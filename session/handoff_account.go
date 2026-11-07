@@ -517,11 +517,15 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 // the marker suppresses only automatic retries until the operator inspects,
 // and the explicit retry IS that inspection. Refusing it here would offer
 // the picker's no-resend label on a row the daemon resends (#6922 review).
+// The marker is not itself a liveness, though: it must not resurrect the
+// dead-row guard — the daemon still refuses a manual resend on
+// lost/dead/archived/unproven liveness, so the admission stays exactly
+// Running/Ready/LiveLimitReached whether or not startup went blind.
 func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
-	return (knownLive || i.startupStateUnknown) && i.inFlightOp == OpNone && !i.userKilled &&
+	return knownLive && i.inFlightOp == OpNone && !i.userKilled &&
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 

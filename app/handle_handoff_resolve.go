@@ -44,12 +44,19 @@ const (
 	// runs the plain limit resume. It un-stalls the agent and leaves the
 	// pending mission unsent.
 	handoffResolveResumeLimit
+	// handoffResolveQueueLimit: a pending handoff mission on a row parked at
+	// its limit is transferred into the stored Prompt — the scheduled limit
+	// retry sends it when the agent resumes. Nothing is resent now and
+	// nothing is restarted (#6928 review MED: the resume phrasing lied both
+	// ways on this shape).
+	handoffResolveQueueLimit
 )
 
 // handoffResolveResendLabels maps each resume kind to its picker row.
 var handoffResolveResendLabels = map[handoffResolveResendKind]string{
 	handoffResolveResendMission: "Retry send — submit the pending mission again",
 	handoffResolveResumeLimit:   "Resume from limit — restart the stalled agent; the pending mission is not resent",
+	handoffResolveQueueLimit:    "Queue for limit resume — the mission is sent when the agent resumes",
 }
 
 // handoffResolveState is the resolve picker's retained context, held on home

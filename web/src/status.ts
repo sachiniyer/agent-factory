@@ -351,18 +351,33 @@ export function isLimitReached(s: SessionData): boolean {
   );
 }
 
+/** True when the row's liveness is the limit wall — INCLUDING under a parked
+ * handoff fence, which isLimitReached deliberately excludes. The queued-
+ * transfer label needs the wall itself, not the fence-free badge shape
+ * (#6928 review MED). */
+export function hasLimitWallLiveness(s: SessionData): boolean {
+  return livenessOf(s) === Liveness.LimitReached;
+}
+
 /** True when an operator must inspect the pane before explicitly retrying a
  * manual handoff mission whose first submission may already have landed. The
  * verdict is transaction-scoped; session-wide prompt evidence may describe a
- * later, unrelated delivery. */
+ * later, unrelated delivery.
+ *
+ * Mirrors session.Instance.CanRetryPendingManualAccountSwapDelivery: the
+ * limit wall admits because the daemon's manual-swap resume re-pastes the
+ * mission, and startup-unknown admits at the same live livenesses because the
+ * committed-swap bypass resends past the startup gate — the marker
+ * suppresses only automatic retries, and the explicit retry IS the
+ * inspection it waits for. Dead liveness states still refuse: the daemon
+ * will not act on them. */
 export function isPendingManualHandoffDeliveryUnconfirmed(s: SessionData): boolean {
   const pending = s.pending_account_swap;
   const liveness = livenessOf(s);
   return (
     (s.in_flight_op ?? InFlightOp.None) === InFlightOp.None &&
-    s.startup_state_unknown !== true &&
     s.user_killed !== true &&
-    (liveness === Liveness.Running || liveness === Liveness.Ready) &&
+    (liveness === Liveness.Running || liveness === Liveness.Ready || liveness === Liveness.LimitReached) &&
     pending?.manual === true &&
     pending.replacement_panes_started === true &&
     pending.mission_delivery_status !== undefined &&
@@ -392,7 +407,13 @@ function confirmableHandoffDelivery(status: PromptDeliveryStatus | undefined): b
  * probes the pane first and restores the runtime binding only if it answers,
  * then runs readiness and the send; a pane that does not answer refuses the
  * retry. Dead liveness states still refuse: restore owns a runtime that no
- * longer exists. Mirrors session.Instance.CanRetryPendingHandoffMissionDelivery. */
+ * longer exists. A startup-unknown row parked at its limit wall stays IN too
+ * — the admission is deliberately wide because the daemon routes on it —
+ * but its retry transfers the mission into the stored Prompt for the
+ * scheduled limit retry rather than submitting: nothing is sent and nothing
+ * is restarted, which is why the web labels that shape "Queue for limit
+ * resume" instead of "Retry handoff" (#6928 review MED).
+ * Mirrors session.Instance.CanRetryPendingHandoffMissionDelivery. */
 export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolean {
   const liveness = livenessOf(s);
   const status = s.pending_handoff_delivery_status;
@@ -405,7 +426,14 @@ export function isPendingAgentHandoffDeliveryUnconfirmed(s: SessionData): boolea
     ambiguousHandoffDelivery(status) &&
     s.user_killed !== true &&
     !dead &&
-    (liveness === Liveness.Running || liveness === Liveness.Ready || s.startup_state_unknown === true) &&
+    // Mirrors CanRetryPendingHandoffMissionDelivery: ADMISSION, not
+    // presentation — the daemon routes on this shape, and its limit arm
+    // transfers a startup-unknown-at-the-wall mission to scheduled retry
+    // rather than refusing it (#6928 review). The resend-vs-resume label
+    // split lives in the TUI picker; the web offers the retry the daemon
+    // admits.
+    (liveness === Liveness.Running || liveness === Liveness.Ready ||
+      s.startup_state_unknown === true) &&
     (op === InFlightOp.None || op === InFlightOp.Replacing)
   );
 }

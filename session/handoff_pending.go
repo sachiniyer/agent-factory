@@ -112,6 +112,16 @@ func (i *Instance) PendingHandoffMissionSettleable() bool {
 // that answers restores `started` (ResolveStartupState) before the readiness
 // wait and the send run. A probe that does not answer refuses the retry and
 // leaves the row as it was.
+//
+// This predicate is ADMISSION, not presentation: the daemon routes on it
+// (daemon/limit_resume.go checks it before retryPendingHandoff), so it must
+// report every shape the explicit retry performs — including a startup-unknown
+// row parked at LiveLimitReached, where the retry's limit arm transfers the
+// mission into the scheduled limit retry WITHOUT resubmitting. Whether that
+// admission is a resend or a transfer is the picker's label question, answered
+// in app/handle_actions.go; narrowing this predicate to serve the label once
+// stranded exactly that shape behind a "not blocked on a usage limit" refusal
+// (#6928 review).
 func (i *Instance) CanRetryPendingHandoffMissionDelivery() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()

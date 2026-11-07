@@ -155,6 +155,7 @@ func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *test
 		status         PromptDeliveryStatus
 		startupUnknown bool
 		lost           bool
+		atLimit        bool
 		want           bool
 	}{
 		{name: "could not confirm", status: PromptCouldNotConfirm, want: true},
@@ -166,6 +167,15 @@ func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *test
 		{name: "startup unknown admits the explicit resend", status: PromptCouldNotConfirm, startupUnknown: true, want: true},
 		{name: "lost runtime is not inspectable", status: PromptCouldNotConfirm, lost: true},
 		{name: "lost plus startup unknown stays refused", status: PromptCouldNotConfirm, startupUnknown: true, lost: true},
+		// The daemon's explicit retry at the limit wall transfers the mission
+		// into the scheduled limit retry — it never submits (the
+		// LiveLimitReached arm of retryPendingHandoff returns unperformed after
+		// the transfer). "Retry send" would lie — but the presentation split
+		// lives in the picker's label choice, not in this admission predicate:
+		// the daemon routes on it (#6928 review — narrowing it stranded the
+		// mission behind a "not blocked on a usage limit" refusal).
+		{name: "the limit wall is a transfer, not a resend", status: PromptCouldNotConfirm, atLimit: true},
+		{name: "startup unknown at the limit wall still admits the transfer", status: PromptCouldNotConfirm, startupUnknown: true, atLimit: true, want: true},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			inst, err := NewInstance(InstanceOptions{Title: "ambiguous-handoff", Path: t.TempDir(), Program: "claude"})
@@ -187,6 +197,10 @@ func TestPendingHandoffMissionExplicitRetryRequiresAmbiguousKnownRuntime(t *test
 				if err := inst.RecordPendingHandoffMissionDelivery(mission, tc.status); err != nil {
 					t.Fatal(err)
 				}
+			}
+			if tc.atLimit {
+				inst.liveness = LiveLimitReached
+				inst.limitResetAt = time.Now().Add(time.Hour)
 			}
 			if tc.startupUnknown {
 				inst.MarkStartupStateUnknown()

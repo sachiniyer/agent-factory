@@ -5,6 +5,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -93,6 +94,72 @@ func TestResumeFromLimit_ExplicitRetryClearsStartupUnknownWedge(t *testing.T) {
 
 	_, prompts := backend.snapshot()
 	require.Equal(t, []string{mission}, prompts, "exactly one resend of the exact mission")
+}
+
+// #6928-review: a startup-unknown agent handoff parked AT its usage-limit wall
+// must still reach retryPendingHandoff — its LiveLimitReached arm transfers
+// the mission into the scheduled limit retry and returns unperformed (no
+// resend). When CanRetryPendingHandoffMissionDelivery was narrowed to refuse
+// this shape for the picker label's sake, the SAME bit also gated the routing
+// in resumeFromLimitOutcomeConversation: the call fell through to
+// accountSwapResumeEligible — which refuses startup-unknown — and the operator
+// got "not blocked on a usage limit" with the mission still pending and no
+// recovery door left. Admission and presentation must split, not narrow.
+func TestResumeFromLimit_StartupUnknownHandoffAtLimitTransfersTheMission(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	backend := &handoffBackend{
+		FakeBackend:    session.NewFakeBackend(),
+		deliveryStatus: session.PromptSentUnverified,
+	}
+	inst := registerHandoffSubject(t, manager, repoID, repoPath, "wedged-limit-handoff", backend)
+	mission := "continue the inherited work"
+	// The wall must be parked BEFORE the wedge's BeginHandoff raises the
+	// OpReplacing fence: setLimitReachedLocked refuses under any in-flight op.
+	inst.SetLimitReached(time.Now().Add(time.Hour))
+	stageHandoffWedge(t, inst, mission, session.PromptSentUnverified)
+	manager.persistInstance(repoID, inst)
+
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at the wall")
+	require.True(t, inst.CanRetryPendingHandoffMissionDelivery(),
+		"fixture: startup-unknown at the wall must still ADMIT the explicit retry — "+
+			"the daemon routes on this bit")
+
+	outcome, err := manager.resumeFromLimitOutcome(ResumeFromLimitRequest{
+		ID: inst.ID, Title: inst.Title, RepoID: repoID,
+	})
+	require.NoError(t, err,
+		"the limit arm transfers the mission to scheduled retry — refusing strands it")
+	require.Equal(t, resumeTransferred, outcome,
+		"a committed transfer is its own outcome — it must surface as a queued "+
+			"success, not the not-performed refusal that reads as a failure to "+
+			"every client (#6928 review MED)")
+
+	require.Empty(t, inst.PendingHandoffMission(), "the transfer retires the durable obligation")
+	require.Equal(t, mission, inst.Prompt, "the brief moved into the stored prompt")
+	require.True(t, inst.LimitReached(), "the wall stays — scheduled recovery still owns it")
+	require.False(t, inst.StartupStateUnknown(), "the answering probe resolves the flag")
+	require.True(t, inst.Started(), "and restores the binding the flag lowered")
+
+	_, prompts := backend.snapshot()
+	require.Empty(t, prompts, "no resend happened — the honesty the TUI label mirrors")
+
+	// The note the RPC answers must be true in the config the test manager
+	// runs: DefaultConfig has limit_auto_resume OFF, so nothing is scheduled —
+	// the note must say how to send the queued mission, not promise a
+	// scheduled retry that does not exist (#6928 review MED).
+	require.Equal(t,
+		"the pending mission was queued — resume the session (the c key, or 'af sessions retry-limit') to send it; automatic retry is off",
+		manager.resumeTransferredNote(),
+		"with limit_auto_resume off (the default) the note names the operator's own verb")
+
+	// The on-config variant is the only one that may call the retry scheduled.
+	onCfg := config.DefaultConfig()
+	onCfg.LimitAutoResume = true
+	manager.live.Store(&livePosturePublication{cfg: onCfg})
+	require.Equal(t,
+		"the pending mission was queued for the scheduled limit retry — it sends when the agent resumes",
+		manager.resumeTransferredNote(),
+		"with limit_auto_resume on the scheduler owns the send, so 'scheduled' is true")
 }
 
 // absentPaneHandoffBackend answers the liveness probe with a definite "no such

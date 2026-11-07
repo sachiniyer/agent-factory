@@ -507,8 +507,25 @@ test("pending manual handoff retry reads mission-scoped delivery evidence", () =
       startup_state_unknown: true,
       pending_account_swap: pending,
     })),
+    true,
+    "the committed-swap bypass resends past the startup gate — the explicit retry is the inspection the marker waits for",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.LimitReached,
+      pending_account_swap: pending,
+    })),
+    true,
+    "a manual swap parked at the wall is an honest resend — the resume re-pastes the mission",
+  );
+  assert.equal(
+    isPendingManualHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.Dead,
+      startup_state_unknown: true,
+      pending_account_swap: pending,
+    })),
     false,
-    "an unknown replacement runtime must remain inert instead of offering Retry",
+    "startup-unknown must not lift the dead-row guard — the daemon will not act on a dead row",
   );
   assert.equal(
     isPendingManualHandoffDeliveryUnconfirmed(sess({
@@ -557,6 +574,16 @@ test("pending agent handoff retry admits startup-unknown rows but not dead ones"
     })),
     false,
     "a lost runtime has no pane to resend into",
+  );
+  assert.equal(
+    isPendingAgentHandoffDeliveryUnconfirmed(sess({
+      liveness: Liveness.LimitReached,
+      startup_state_unknown: true,
+      pending_handoff_mission: "continue the inherited work",
+      pending_handoff_delivery_status: "sent-unverified",
+    })),
+    true,
+    "at the wall the daemon still ADMITS the retry — its limit arm transfers the mission to scheduled retry; the resend-vs-resume split is presentation",
   );
   assert.equal(
     isPendingAgentHandoffDeliveryUnconfirmed(sess({

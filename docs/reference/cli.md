@@ -2970,6 +2970,13 @@ The command fails when neither recovery obligation exists. Use 'af sessions
 list' to find sessions carrying the [limit] badge; the TUI and web expose
 Retry handoff and Mark delivered for an unconfirmed handoff.
 
+A startup-unknown agent handoff parked at its limit is not resent: the daemon
+queues the mission into the session's stored prompt for the next limit resume.
+That committed transfer exits 0 with a "note" field naming how the send
+happens — the scheduled retry when limit_auto_resume is on, or an explicit
+'c'/'retry-limit' when it is off (the default). The TUI offers the same verb
+as "Queue for limit resume" and the web as the Queue for limit resume button.
+
 The output's conversation object says whether the agent serving the session
 afterwards can read its previous conversation: carried=true when the retry
 resumed it (the committed account swap's carry, the recorded conversation id,

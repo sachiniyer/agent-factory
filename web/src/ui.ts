@@ -57,6 +57,7 @@ import {
   idleReasonDetail,
   unreachableDetail,
   isLimitReached,
+  hasLimitWallLiveness,
   isPendingAgentHandoffDeliveryUnconfirmed,
   isPendingAgentHandoffDeliveryConfirmable,
   isPendingManualHandoffDeliveryUnconfirmed,
@@ -204,6 +205,21 @@ export type RetryActionPresentation = {
 /** The selected row's explicit recovery action. A delivery-unconfirmed handoff
  * keeps a distinct label so Retry never looks like an unrelated quota control. */
 export function retryActionForSession(s: SessionData): RetryActionPresentation | null {
+  if (
+    isPendingAgentHandoffDeliveryUnconfirmed(s) &&
+    s.startup_state_unknown === true &&
+    hasLimitWallLiveness(s)
+  ) {
+    // The daemon's LiveLimitReached arm queues the pending mission into the
+    // stored Prompt — the scheduled limit retry sends it when the agent
+    // resumes. Nothing is resent now and nothing is restarted, so the button
+    // must not promise either (#6928 review MED).
+    return {
+      kind: "handoff",
+      label: "Queue for limit resume",
+      title: "Queue the pending mission — it sends when the agent resumes",
+    };
+  }
   if (
     isPendingManualHandoffDeliveryUnconfirmed(s) ||
     isPendingAgentHandoffDeliveryUnconfirmed(s)
