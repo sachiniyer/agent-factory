@@ -413,10 +413,16 @@ var (
 // a period followed by a newline DOES end the clause EXCEPT when the period
 // belongs to an abbreviated month ("Nov.\n6, 2026 9am"): the explicit
 // month-abbreviation branch consumes "Nov.\n" (plus any trailing ANSI SGR
-// escapes and an optional CR before the LF) as a unit so the wrapped date
-// continues to the clock, mirroring the unwrapped "Nov. 6" form. A plain
-// period-plus-newline that is not a month abbreviation still terminates.
-var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
+// escapes and an optional CR before the LF) AND requires the next row to begin
+// with a digit (the day of the date continuation) as a unit, so the wrapped
+// date continues to the clock, mirroring the unwrapped "Nov. 6" form. The
+// digit guard stops an unparseable clause that merely ends with an abbreviated
+// month — "reset sometime in Nov.\nuser draft: meet at 2pm" — from crossing
+// into the transcript's clock: without it the month branch would consume
+// "Nov.\n" and the span would adopt the unrelated "2pm". A plain
+// period-plus-newline that is not a month abbreviation (or whose next row is
+// not a date continuation) still terminates.
+var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)\.(?:\x1b\[[0-9;]*m)*\r?\n\d|[^.]|\.(?:[^\n\x1b]))*?\d{1,2}(?::\d{2})?\s*[ap]m\b(?:\s*\([^()]*\))*\s*\.?)`)
 
 // normalizeResetWhitespace collapses the whitespace a wrapped Claude banner
 // introduces, so the paren-timezone and clock scans in parseClaudeReset see a
@@ -427,13 +433,19 @@ var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|fe
 // the token — "(America/\nNew_York)" — must rejoin to "(America/New_York)",
 // not "(America/ New_York)", or time.LoadLocation rejects it and the clock
 // silently falls back to the host zone); genuine spaces inside a paren, e.g.
-// the descriptor "(5h limit)", are kept verbatim. The same normalization is
-// applied to the evidence so it stays stable for the #6765 re-read identity.
+// the descriptor "(5h limit)", are kept verbatim. A wrap that splits a
+// multi-digit token outside a paren — a calendar day ("Nov 1\n2, 2026" →
+// "Nov 12, 2026") or a clock hour ("1\n1am" → "11am") — rejoins by dropping
+// the newline rather than spacing it, so the day/hour resolves as the unwrapped
+// form instead of the off-by-a-digit "Nov 1 2" / "1 1am" parse. The same
+// normalization is applied to the evidence so it stays stable for the #6765
+// re-read identity.
 func normalizeResetWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
 	depth := 0
 	outsideSpace := false // whether the last char emitted outside a paren was a collapsed space
+	lastDigit := false    // whether the last char emitted outside a paren was an ASCII digit
 	for i := 0; i < len(s); i++ {
 		c := s[i]
 		switch {
@@ -441,12 +453,14 @@ func normalizeResetWhitespace(s string) string {
 			depth++
 			b.WriteByte(c)
 			outsideSpace = false
+			lastDigit = false
 		case c == ')':
 			if depth > 0 {
 				depth--
 			}
 			b.WriteByte(c)
 			outsideSpace = false
+			lastDigit = false
 		case depth > 0:
 			// Inside a parenthesized span: drop the wrap's newlines so a split
 			// zone token rejoins; keep every other byte (including the genuine
@@ -455,15 +469,34 @@ func normalizeResetWhitespace(s string) string {
 				continue
 			}
 			b.WriteByte(c)
-		case c == ' ' || c == '\t' || c == '\n' || c == '\r':
-			// Outside a paren: collapse runs to a single space.
+			outsideSpace = false
+			lastDigit = false
+		case c == ' ' || c == '\t':
+			// Outside a paren: collapse runs of spaces/tabs to a single space.
 			if !outsideSpace {
 				b.WriteByte(' ')
 				outsideSpace = true
 			}
+			lastDigit = false
+		case c == '\n' || c == '\r':
+			// A wrap newline outside a paren. When it splits a multi-digit
+			// token (a calendar day or a clock hour) the newline is dropped so
+			// the digits rejoin — "Nov 1\n2" → "Nov 12", "1\n1am" → "11am" —
+			// otherwise the day/hour resolves to the wrong instant. Otherwise
+			// collapse to a single space (the wrap between the clock and the
+			// tz paren, or between words).
+			if lastDigit && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
+				continue
+			}
+			if !outsideSpace {
+				b.WriteByte(' ')
+				outsideSpace = true
+			}
+			lastDigit = false
 		default:
 			b.WriteByte(c)
 			outsideSpace = false
+			lastDigit = c >= '0' && c <= '9'
 		}
 	}
 	return b.String()
