@@ -95,11 +95,12 @@ func TestConfirmPendingAccountSwapDeliveryResolvesTheWedge(t *testing.T) {
 	require.NoError(t, inst.TabSpawnBlocked())
 }
 
-// The limit-wall settle splits on the swap's kind (#6767): a MANUAL swap may
-// be parked at the incoming identity's own wall and keeps it, but an
-// AUTOMATIC swap's wall belongs to the outgoing identity — a notice the
-// operator just confirmed delivered is already running on the new account's
-// quota, so the parked disposition retires with the transaction.
+// The limit-wall settle splits on the wall's ATTRIBUTION (#6799): a swap of
+// either kind parked at the incoming identity's own wall keeps it, but an
+// AUTOMATIC swap parked at the OUTGOING identity's wall — the shape this
+// test's limit_account == pending.From fixture carries — retires it with
+// the transaction: a notice the operator just confirmed delivered is
+// already running on the new account's quota.
 func TestConfirmPendingAccountSwapDeliveryAutomaticClearsTheOutgoingWall(t *testing.T) {
 	inst := confirmableManualSwap(PromptCouldNotConfirm)
 	inst.pendingAccountSwap.Manual = false

@@ -83,8 +83,10 @@ func TestPendingAccountSwapDeliveryUnconfirmed(t *testing.T) {
 
 // SettlePendingAccountSwapNoticeDelivery retires the obligation on pane
 // evidence bound to exactly the send that produced the recorded verdict —
-// either swap kind — and releases the parked limit the way the delivered
-// send's own success path does (#6767).
+// either swap kind — and releases a parked OUTGOING-identity limit
+// (limit_account == pending.From here) the way the delivered send's own
+// success path does (#6767). The INCOMING-identity wall survives instead —
+// see its #6799 twin below.
 func TestSettlePendingAccountSwapNoticeDelivery(t *testing.T) {
 	attemptAt := time.Now().Add(-time.Minute)
 	for _, manual := range []bool{false, true} {
