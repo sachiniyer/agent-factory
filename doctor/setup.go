@@ -168,6 +168,17 @@ func checkGit(report *Report) {
 		// same one the daemon uses, instead of the bare fall-through that
 		// treated every answered failure as "not a repository".
 		_, repoErr := config.RepoFromPath(cwd)
+		if repoErr == nil {
+			// The toplevel probe refused but the resolver still accepted
+			// the path: a bare repository has no work tree, so
+			// --show-toplevel exits 128 while the resolver's direct-bare
+			// fallback recovers the bare root. Treat it as the valid
+			// repository the resolver says it is so the identity check
+			// runs instead of being silently skipped (#6954 review).
+			report.Pass(sectionConfig, "git repo", cwd)
+			checkGitIdentity(gitPath, cwd, report)
+			return
+		}
 		if errors.Is(repoErr, config.ErrNotGitRepository) {
 			report.addActionableFinding(Finding{
 				Check:       "git-repo",
@@ -179,9 +190,19 @@ func checkGit(report *Report) {
 		// Answered, but the answer says nothing about whether this is a
 		// repository: keep the failure visible without "git init" advice, which
 		// is misleading for a checkout that already exists.
+		// Format the captured stderr, not just "exit status 128", so the user
+		// can see git's own diagnostic (dubious ownership, unreadable .git,
+		// ...) and pick the matching remedy (#6954 review).
+		gitErrDetail := fmt.Sprintf("%v", err)
+		var exitErr *exec.ExitError
+		if errors.As(err, &exitErr) {
+			if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+				gitErrDetail = stderr
+			}
+		}
 		report.addActionableFinding(Finding{
 			Check:       "git-repo",
-			Detail:      fmt.Sprintf("git could not resolve a repository root at %s — check git's own error: %v", cwd, err),
+			Detail:      fmt.Sprintf("git could not resolve a repository root at %s — git's error: %s", cwd, gitErrDetail),
 			Remediation: "address the git error above (e.g. `git config --global --add safe.directory <path>` for an ownership refusal), then rerun `af doctor --setup`",
 		})
 		return
