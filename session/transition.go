@@ -806,6 +806,8 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		i.limitBannerCount = 0
 		i.limitWallRuntimePID = 0
 		i.limitWallRuntimeStartID = 0
+		i.limitWallRuntimeGen = 0
+		i.limitPromptSent = false
 	case limitResetFromEvent:
 		// The event's reset arrives with the phrase that produced it (the
 		// handoff wait path resolved both), so the evidence slot records it —
@@ -820,18 +822,20 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// freshRuntime mark is the producer's knowledge that the sighting
 		// came off a pane the row had never seen — new evidence no recorded
 		// claim may veto.
-		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
+		resetAt, evidence, promptSent := i.originalLimitResetLocked(i.currentAgentNameLocked(),
 			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached,
 			ev.freshRuntime, time.Time{}, time.Time{})
 		i.limitResetAt = resetAt
 		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix
 		i.limitBannerCount = ev.banner.Count
+		i.limitPromptSent = promptSent
 		// The wall was sighted on the runtime currently up (the incoming
 		// one for a handoff park): pin the claim to it so a sighting after
 		// a replacement cannot pass as its re-read (#6959 review).
 		i.limitWallRuntimePID = i.runtimePID
 		i.limitWallRuntimeStartID = i.runtimeStartID
+		i.limitWallRuntimeGen = i.agentRuntimeGeneration
 	}
 	if ev.kind == tkParkHandoff {
 		// The incoming runtime, not the retired predecessor, produced this wall.

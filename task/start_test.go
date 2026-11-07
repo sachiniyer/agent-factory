@@ -210,7 +210,7 @@ func TestWaitForReadyAndSendPromptWithStatusPreservesNonDeliveryVerdict(t *testi
 	backend := &startBackend{}
 	inst := newStartTestInstance(t, backend)
 
-	status, err := WaitForReadyAndSendPromptWithStatus(context.Background(), inst, "do work")
+	status, err := WaitForReadyAndSendPromptWithStatus(context.Background(), inst, "do work", false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -237,7 +237,7 @@ func TestWaitForReadyAndSubmitPromptRunsBoundaryBetweenReadinessAndSend(t *testi
 			t.Errorf("beforeSubmit ran after the composer was touched (sent %q)", backend.sentPrompt)
 		}
 		return nil
-	})
+	}, false)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
 	}
@@ -264,7 +264,7 @@ func TestWaitForReadyAndSubmitPromptSkipsBoundaryWhenReadinessFails(t *testing.T
 	_, err := WaitForReadyAndSubmitPrompt(context.Background(), newStartTestInstance(t, backend), "do work", func() error {
 		called = true
 		return nil
-	})
+	}, false)
 	if !errors.Is(err, ErrAgentReadiness) {
 		t.Fatalf("error = %v, want ErrAgentReadiness", err)
 	}
@@ -285,7 +285,7 @@ func TestWaitForReadyAndSubmitPromptRefusedBoundarySendsNothing(t *testing.T) {
 
 	status, err := WaitForReadyAndSubmitPrompt(context.Background(), newStartTestInstance(t, backend), "do work", func() error {
 		return boundaryErr
-	})
+	}, false)
 	if !errors.Is(err, boundaryErr) {
 		t.Fatalf("error = %v, want the boundary's own error", err)
 	}

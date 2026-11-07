@@ -80,7 +80,7 @@ func TestWaitForReadyFirstProbeMatchesTickerProbe(t *testing.T) {
 				})
 				done := make(chan error, 1)
 				go func() {
-					done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
+					done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock(), false)
 				}()
 				receiveReadinessEvent(t, clock.timers, "initial readiness timer")
 				receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker")
@@ -142,7 +142,7 @@ func TestWaitForReadyNotReadyAtFirstProbeKeepsPolling(t *testing.T) {
 			})
 			done := make(chan error, 1)
 			go func() {
-				done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock())
+				done <- waitForReadyOn(context.Background(), instanceReadinessTarget{inst: inst}, clock.clock(), false)
 			}()
 			receiveReadinessEvent(t, clock.timers, "initial readiness timer")
 			receiveReadinessEvent(t, clock.tickerStarted, "readiness ticker")
@@ -183,7 +183,7 @@ func TestWaitForReadyCancelledBeforeFirstProbeCapturesNothing(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
 
-	err := waitForReadyOn(ctx, instanceReadinessTarget{inst: inst}, newObservedReadinessClock().clock())
+	err := waitForReadyOn(ctx, instanceReadinessTarget{inst: inst}, newObservedReadinessClock().clock(), false)
 	if !errors.Is(err, context.Canceled) {
 		t.Fatalf("a cancelled wait must return context.Canceled, got %v", err)
 	}

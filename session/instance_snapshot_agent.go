@@ -65,6 +65,7 @@ func (i *Instance) ReconcileAgentRuntimeSnapshot(data InstanceData) bool {
 		// Any asynchronous conversation capture belongs to the process described
 		// by the prior snapshot and must not write into this replacement's slot.
 		i.agentRuntimeGeneration++
+		i.retireLimitWallShadowOnRuntimeReplaceLocked()
 	}
 	i.touchLocked()
 	return true

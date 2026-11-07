@@ -36,9 +36,15 @@ func (b *LocalBackend) HasUpdatedObserved(i *Instance) (updated bool, hasPrompt 
 // resetAgentBrokerCaptures is the single post-replacement hook for every local
 // pane respawn. A handoff and a recovery both replace the process behind the
 // same stable tab; retaining a broker capture from either old pane strands every
-// existing and future subscriber on a silent read loop.
-func resetAgentBrokerCaptures(i *Instance) {
-	i.noteAgentRuntimeReplaced()
+// existing and future subscriber on a silent read loop. replaced is the
+// runtime verdict: a verified reattach to a surviving pane is NOT a
+// replacement — the broker loop resets but the runtime generation and the
+// wall claims pinned to it must stay, or a reattached runtime's unchanged
+// banner re-mints the claim its own pane already retired (#6972, Codex).
+func resetAgentBrokerCaptures(i *Instance, replaced bool) {
+	if replaced {
+		i.noteAgentRuntimeReplaced()
+	}
 	if as, ok := i.AgentServer().(*localAgentServer); ok {
 		as.resetBrokerCaptures()
 	}

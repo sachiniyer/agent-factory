@@ -342,3 +342,24 @@ func (d InstanceData) ForStorage() InstanceData {
 	d.archiveReportPending = false
 	return d
 }
+
+// ForClients returns data suitable for session API payloads — the snapshot
+// index every client reconciles, the event fan-out, and the RPC row returns.
+// InstanceData doubles as the instances.json record, so it also carries the
+// daemon-side usage-limit wall machinery (banner anchor, runtime pins, the
+// retired shadow, the send tombstone): raw pane text and process identity kept
+// solely for the daemon's own stale-read/residue matching (#6972 item 5). No
+// client renders or decides anything from those fields, so the projection
+// withholds them; the visible badge facts — LimitResetAt, LimitResetEvidence,
+// LimitAgent, LimitAccount — stay.
+func (d InstanceData) ForClients() InstanceData {
+	d.LimitBannerPrefix = ""
+	d.LimitBannerCount = 0
+	d.LimitWallRuntimePID = 0
+	d.LimitWallRuntimeStartID = 0
+	d.LimitWallRuntimeGen = 0
+	d.LimitPromptSent = false
+	d.AgentRuntimeGeneration = 0
+	d.LastLimitWall = nil
+	return d
+}

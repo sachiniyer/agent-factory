@@ -486,6 +486,9 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 			i.limitResetAt = time.Time{}
 			i.limitAgent = ""
 			i.limitAccount = ""
+			i.lastLimitWall.retired = true
+			i.lastLimitWall.retiredKnown = true
+			i.limitWallUnpersisted = true
 		}
 	} else {
 		// A confirmed notice is work the agent already has (#5023): publish
@@ -671,6 +674,9 @@ func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 			i.limitResetAt = time.Time{}
 			i.limitAgent = ""
 			i.limitAccount = ""
+			i.lastLimitWall.retired = true
+			i.lastLimitWall.retiredKnown = true
+			i.limitWallUnpersisted = true
 		}
 	} else {
 		_ = i.transitionLocked(ObserveLiveness(LiveRunning))
@@ -834,7 +840,7 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	if copiedSighting {
 		ordSightedAt = sightedAt
 	}
-	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
+	resetAt, evidence, promptSent := i.originalLimitResetLocked(agent, resetAt, evidence, banner,
 		parked, freshRuntime || (parked && !wasParked), sightedAt, ordSightedAt)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
@@ -845,11 +851,14 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	i.limitResetEvidence = evidence
 	i.limitBannerPrefix = banner.Prefix
 	i.limitBannerCount = banner.Count
+	i.limitPromptSent = promptSent
 	// The wall was sighted on the runtime currently up: pin the claim to it
 	// so a sighting judged after a replacement cannot pass as its re-read
-	// (#6959 review).
+	// (#6959 review) — the generation pin is what still binds when the pane
+	// resolves no concrete process (#6972).
 	i.limitWallRuntimePID = i.runtimePID
 	i.limitWallRuntimeStartID = i.runtimeStartID
+	i.limitWallRuntimeGen = i.agentRuntimeGeneration
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
 	// Readiness found the incoming identity's wall before mission submission,

@@ -262,7 +262,7 @@ func (m *Manager) retryPendingHandoff(entry pendingHandoffEntry, mission string,
 		repoID: entry.repoID, key: entry.key, title: entry.instance.Title,
 		mission: mission, instance: entry.instance,
 	}
-	status, err, beginErr := m.waitAndSubmitHandoffMission(delivery)
+	status, err, beginErr := m.waitAndSubmitHandoffMission(delivery, false)
 	if beginErr != nil {
 		if wasUnknown {
 			// Nothing was sent; the row goes back to what it was before the probe.

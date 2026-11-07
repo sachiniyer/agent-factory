@@ -276,6 +276,21 @@ type InstanceData struct {
 	// the recorded wall's re-read.
 	LimitWallRuntimePID     int    `json:"limit_wall_runtime_pid,omitempty"`
 	LimitWallRuntimeStartID uint64 `json:"limit_wall_runtime_start_id,omitempty"`
+	// LimitWallRuntimeGen is the agent runtime generation the live wall claim
+	// was sighted on — the pin that binds the claim when no concrete process
+	// resolves (LimitWallRuntimePID 0), durable for the same reason the PID
+	// pin is (#6972).
+	LimitWallRuntimeGen uint64 `json:"limit_wall_runtime_gen,omitempty"`
+	// LimitPromptSent is the live claim's send tombstone — the parked wall's
+	// resume prompt already landed — so a re-park after a restart keeps the
+	// scheduler's never-replay property (#6972).
+	LimitPromptSent bool `json:"limit_prompt_sent,omitempty"`
+	// AgentRuntimeGeneration is the row's durable runtime-replacement counter:
+	// wall claims pin the generation that sighted them, so the counter must
+	// survive the restart that would otherwise read every recorded claim as
+	// a foreign-runtime emission (#6972). In-memory captures still restart
+	// at zero — no goroutine survives — but the counter itself is evidence.
+	AgentRuntimeGeneration uint64 `json:"agent_runtime_generation,omitempty"`
 	// LastLimitWall is the durable "last wall" shadow — the claim the row
 	// last parked on, kept in every liveness past ClearLimitReached (#6959).
 	// It is what makes the stale-read and residue decisions identical across
@@ -649,7 +664,11 @@ func (d InstanceData) ForClientRead() InstanceData {
 	d.ArchiveReport = nil
 	d.archiveReportSource = nil
 	d.archiveReportPending = false
-	return d
+	// The daemon-only limit-wall machinery rides on the same record: the banner
+	// anchor is raw pane text and the runtime pins/shadow/tombstone exist solely
+	// for the daemon's own matching. A daemonless `sessions list`/`get --json`
+	// must emit the same shape the live RPC path does (#6972 item 5).
+	return d.ForClients()
 }
 
 // Storage handles saving and loading instances using the state interface.

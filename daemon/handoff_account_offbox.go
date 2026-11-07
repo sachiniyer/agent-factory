@@ -189,7 +189,9 @@ func (m *Manager) finishOffBoxFailover(repoID, key string, instance *session.Ins
 // `sessions send-prompt` can repeat it.
 func (m *Manager) deliverOffBoxAccountNotice(instance *session.Instance, agent string, res session.OffBoxAccountSwap, reason string) error {
 	notice := offBoxAccountNotice(agent, res.From, res.To, offBoxAccountReason(reason), instance.GetPrompt())
-	status, err := task.WaitForReadyAndSubmitPrompt(context.Background(), instance, notice, nil)
+	// The off-box replacement pane was just swapped in — a lookalike limit
+	// banner there is the new runtime's own wall, never residue (#6972).
+	status, err := task.WaitForReadyAndSubmitPrompt(context.Background(), instance, notice, nil, true)
 	if err = handoffDeliveryResultError(status, err); err != nil {
 		return fmt.Errorf("account handoff of %q completed, but the notice for the new account was not delivered (send the task again with `af sessions send-prompt`): %w", instance.Title, err)
 	}

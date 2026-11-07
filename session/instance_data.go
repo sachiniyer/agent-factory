@@ -59,6 +59,7 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 		RuntimeProgram:           i.runtimeProgram,
 		RuntimePID:               i.runtimePID,
 		RuntimeStartID:           i.runtimeStartID,
+		AgentRuntimeGeneration:   i.agentRuntimeGeneration,
 		Account:                  i.Account,
 		Host:                     i.Host,
 		BranchUnpushed:           i.branchUnpushed,
@@ -525,16 +526,6 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		taskRunTurnObservedAt:    taskRunTurnObservedAtFromData(data),
 		taskRunPromptAttemptAt:   taskRunAttemptAt,
 		taskRunPromptBound:       data.TaskRunActive && data.TaskRunPromptBound,
-		limitResetAt:             data.LimitResetAt,
-		limitResetEvidence:       data.LimitResetEvidence,
-		limitAgent:               limitAgent,
-		limitAccount:             limitAccount,
-		limitBannerPrefix:        data.LimitBannerPrefix,
-		limitBannerCount:         data.LimitBannerCount,
-		limitWallRuntimePID:      data.LimitWallRuntimePID,
-		limitWallRuntimeStartID:  data.LimitWallRuntimeStartID,
-		lastLimitWall:            limitWallClaimFromData(data.LastLimitWall),
-		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),
 		archiveWarning:           data.ArchiveWarning,
 		callbackUnavailable:      data.CallbackUnavailable,
@@ -608,6 +599,7 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 	}
 	instance.dropAttentionIfStoppedLocked()
 	instance.runtimeCleanupStateUnknown = data.RuntimeCleanupStateUnknown
+	instance.restoreLimitClaims(data, limitAgent, limitAccount, accountLimitObservations)
 	instance.hydrateLimitWallShadowOnRestore()
 	// The pending on_complete obligation rides the restart so the daemon can
 	// re-drive the teardown it could not finish (#4162). An archived row cannot

@@ -181,7 +181,6 @@ func (m *Manager) resumeLimitedSession(
 	if inst.UserKilled() || session.IsReservedTitle(inst.Title) {
 		return
 	}
-
 	// Two keys, deliberately, exactly as restoreLostSession carries them. `key`
 	// (repo/title) addresses the SLOT — killsInFlight, the per-session op lock, the
 	// m.instances re-read below. stateKey addresses this SESSION's stable identity,
@@ -293,6 +292,29 @@ func (m *Manager) resumeLimitedSession(
 	_, killing := m.killsInFlight[key]
 	m.mu.Unlock()
 	if killing || current != inst || inst.UserKilled() || session.IsReservedTitle(inst.Title) || !accountSwapScheduledResumeEligible(inst) {
+		return
+	}
+	if inst.LimitWallPromptSent() {
+		// The parked wall's resume prompt already landed — an explicit retry
+		// sent past it before the reset, the unchanged banner re-parked the
+		// same claim, and a send here would be the replay (#6972 item 4). At
+		// due the wall's wait is over whether the banner scrolled off or not:
+		// settle the answered claim back to ordinary classification — the
+		// tombstoned shadow stays, so a lingering banner still reads as
+		// residue — rather than parking the row on a wall it already answered
+		// forever (#6972, Codex). The settle routes through the same
+		// persist-and-publish path every poll transition takes: an in-memory
+		// clear alone leaves the stored row parked and clients displaying a
+		// limit block that no longer exists (#6972, Codex).
+		before := inst.GetLiveness()
+		beforeReset, _ := inst.LimitResetAt()
+		beforeEvidence := inst.LimitResetEvidence()
+		inst.ClearLimitReached()
+		// The settle is a one-shot settlement checkpoint: a transient write
+		// failure must enroll the obligation so FlushOwedSettlements retires
+		// the durable limit block instead of leaving the row parked on disk
+		// forever (#6972, Codex).
+		m.persistPollChangeWithIdleEvidence(repoID, inst, before, beforeReset, beforeEvidence, false, true)
 		return
 	}
 	// A TUI attached to this session holds the attach pause lease, and the resume
