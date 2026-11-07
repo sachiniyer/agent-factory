@@ -59,14 +59,41 @@ func writeCodexRolloutFileWithSource(t *testing.T, codexHome, name, cwd string, 
 // bindRuntimeHeldFiles returns snap with its runtime channel bound to a fake
 // whose open-file set is the given map — the test-side analogue of
 // Instance.BindConversationCaptureRuntime. The map is read on every
-// attribution, so a test can grant (or withdraw) held files between polls by
-// mutating it.
+// attribution, possibly from a capture goroutine, so it must NOT be mutated
+// after binding; tests that grant held files mid-poll use codexHeldFixture.
 func bindRuntimeHeldFiles(snap ConversationCaptureSnapshot, held map[string]struct{}) ConversationCaptureSnapshot {
+	return bindRuntimeHeldFixture(snap, &codexHeldFixture{m: held})
+}
+
+// codexHeldFixture is a mutation-safe held set: grant synchronizes with the
+// descriptor snapshot each judgement takes, so a poll in a capture goroutine
+// and a test writing held files never share a map.
+type codexHeldFixture struct {
+	mu sync.Mutex
+	m  map[string]struct{}
+}
+
+func (h *codexHeldFixture) grant(path string) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.m[path] = struct{}{}
+}
+
+func (h *codexHeldFixture) snapshot() (map[string]struct{}, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	cp := make(map[string]struct{}, len(h.m))
+	for path := range h.m {
+		cp[path] = struct{}{}
+	}
+	return cp, nil
+}
+
+func bindRuntimeHeldFixture(snap ConversationCaptureSnapshot, fixture *codexHeldFixture) ConversationCaptureSnapshot {
 	verdicts := make(map[string]bool)
 	var mu sync.Mutex
 	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
-		return judgeCodexRollouts(func() (map[string]struct{}, error) { return held, nil },
-			verdicts, &mu, candidates)
+		return judgeCodexRollouts(fixture.snapshot, verdicts, &mu, candidates)
 	}}
 	return snap
 }
@@ -413,8 +440,8 @@ func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *te
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	const name = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
-	held := make(map[string]struct{})
-	snap = bindRuntimeHeldFiles(snap, held)
+	held := &codexHeldFixture{m: make(map[string]struct{})}
+	snap = bindRuntimeHeldFixture(snap, held)
 	minted := writeEmptyCodexRolloutFile(t, codexHome, name)
 
 	done := make(chan captureResult, 1)
@@ -431,7 +458,7 @@ func TestCaptureAgentConversation_CodexSessionMetaSettlesAfterBaseDeadline(t *te
 	}
 
 	writeCodexRolloutFileWithCwd(t, codexHome, name, workDir)
-	held[minted] = struct{}{}
+	held.grant(minted)
 	select {
 	case r := <-done:
 		require.NoError(t, r.err)
@@ -471,8 +498,8 @@ func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *test
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	const first = "rollout-2026-08-13T01-56-28-019ffa56-4ff5-7f81-b31f-36d3fc702b3e.jsonl"
-	held := make(map[string]struct{})
-	snap = bindRuntimeHeldFiles(snap, held)
+	held := &codexHeldFixture{m: make(map[string]struct{})}
+	snap = bindRuntimeHeldFixture(snap, held)
 	writeEmptyCodexRolloutFile(t, codexHome, first)
 
 	done := make(chan captureResult, 1)
@@ -495,8 +522,8 @@ func TestCaptureAgentConversation_CodexSettleWindowKeepsAmbiguityRefusal(t *test
 	// Both settled rollouts held by the same runtime: ambiguity, as inside the
 	// base window.
 	writeCodexRolloutFileWithCwd(t, codexHome, first, workDir)
-	held[filepath.Join(codexRolloutDayDir(codexHome, time.Now()), first)] = struct{}{}
-	held[second] = struct{}{}
+	held.grant(filepath.Join(codexRolloutDayDir(codexHome, time.Now()), first))
+	held.grant(second)
 
 	select {
 	case r := <-done:

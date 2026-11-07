@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"sync"
+	"syscall"
 	"testing"
 	"time"
 
@@ -135,9 +136,11 @@ func TestCodexRuntimeHeldPaths(t *testing.T) {
 	require.NoError(t, os.WriteFile(heldFile, []byte("x\n"), 0o644))
 
 	// The holder keeps the file open in a real process the process table can
-	// see. A grandchild exercises the same process-tree membership the pane
-	// root's descendants get.
+	// see — in its OWN session, so the member walk enumerates just this
+	// runtime rather than every process the test suite's shared session
+	// happens to contain.
 	holder := exec.Command("tail", "-f", heldFile)
+	holder.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
 	require.NoError(t, holder.Start())
 	t.Cleanup(func() { _ = holder.Process.Kill() })
 
@@ -154,19 +157,27 @@ func TestCodexRuntimeHeldPaths(t *testing.T) {
 	inst.runtimePID, inst.runtimeStartID = root.PID, root.StartID
 
 	var held map[string]struct{}
+	var lastErr error
 	require.Eventually(t, func() bool {
 		_, heldFor, err := inst.codexRuntimeJudgement()
 		if err != nil {
+			lastErr = err
 			return false
 		}
 		paths, err := heldFor()
 		if err != nil {
+			lastErr = err
 			return false
 		}
 		held = paths
 		return true
-	}, 5*time.Second, 20*time.Millisecond, "the pane-member walk must resolve")
-	_, ok := held[heldFile]
+	}, 5*time.Second, 20*time.Millisecond, "the pane-member walk must resolve: %v", lastErr)
+	resolved, err := filepath.EvalSymlinks(heldFile)
+	require.NoError(t, err)
+	_, ok := held[resolved]
+	if !ok {
+		_, ok = held[heldFile]
+	}
 	require.True(t, ok, "a file open in the runtime's own process set must be found")
 }
 

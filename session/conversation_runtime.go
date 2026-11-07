@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"io/fs"
+	"os"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -83,10 +84,11 @@ func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts ma
 	if err != nil {
 		return attributed, true
 	}
+	set := newCodexHeldSet(held)
 	mu.Lock()
 	defer mu.Unlock()
 	for _, path := range pending {
-		ours := codexHeldPathContains(held, path)
+		ours := set.contains(path)
 		verdicts[path] = ours
 		if ours {
 			attributed = append(attributed, path)
@@ -95,39 +97,68 @@ func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts ma
 	return attributed, false
 }
 
-// codexHeldPathContains answers membership with alias tolerance: a store
-// reached through a symlinked CODEX_HOME yields candidate paths under the
-// alias while /proc and vnode answers carry the resolved path (#6847 review).
-// File identity would need a stat per path; resolving the lexical alias is
-// the same answer the kernel's descriptor targets already provide.
-func codexHeldPathContains(held map[string]struct{}, path string) bool {
-	if _, ok := held[path]; ok {
-		return true
-	}
-	resolved, err := filepath.EvalSymlinks(path)
-	if err != nil || resolved == path {
-		return false
-	}
-	_, ok := held[resolved]
-	return ok
+// fileID is a (device, inode) pair: the identity a file has regardless of
+// which alias named it.
+type fileID struct {
+	dev, ino uint64
 }
 
-// canonicalHeldPaths wraps a held-set source so its answers match on the
-// resolved path too: a held path recorded under an alias must find a
-// candidate that arrived under the real one.
-func canonicalHeldPaths(source func() (map[string]struct{}, error)) (map[string]struct{}, error) {
-	raw, err := source()
+// fileIdentityOf stats path into its kernel identity. Stat follows symlinks,
+// so an aliased path and the resolved path yield the same id.
+func fileIdentityOf(path string) (fileID, bool) {
+	fi, err := os.Stat(path)
 	if err != nil {
-		return nil, err
+		return fileID{}, false
 	}
-	held := make(map[string]struct{}, len(raw))
+	st, ok := fi.Sys().(*syscall.Stat_t)
+	if !ok {
+		return fileID{}, false
+	}
+	return fileID{dev: uint64(st.Dev), ino: uint64(st.Ino)}, true
+}
+
+// codexHeldSet answers "does the runtime hold this path" under every alias
+// shape: a store reached through a symlinked CODEX_HOME yields candidates
+// under the alias while kernel descriptor answers carry the resolved path —
+// and on darwin even EvalSymlinks output and vnode paths can differ in form
+// (/var vs /private/var). Identity comparison bypasses path spelling
+// entirely (#6847 review).
+type codexHeldSet struct {
+	byPath map[string]struct{}
+	byID   map[fileID]struct{}
+}
+
+func newCodexHeldSet(raw map[string]struct{}) *codexHeldSet {
+	s := &codexHeldSet{
+		byPath: make(map[string]struct{}, len(raw)),
+		byID:   make(map[fileID]struct{}, len(raw)),
+	}
 	for path := range raw {
-		held[path] = struct{}{}
+		s.byPath[path] = struct{}{}
 		if resolved, err := filepath.EvalSymlinks(path); err == nil {
-			held[resolved] = struct{}{}
+			s.byPath[resolved] = struct{}{}
+		}
+		if id, ok := fileIdentityOf(path); ok {
+			s.byID[id] = struct{}{}
 		}
 	}
-	return held, nil
+	return s
+}
+
+func (s *codexHeldSet) contains(path string) bool {
+	if _, ok := s.byPath[path]; ok {
+		return true
+	}
+	if id, ok := fileIdentityOf(path); ok {
+		if _, ok := s.byID[id]; ok {
+			return true
+		}
+	}
+	if resolved, err := filepath.EvalSymlinks(path); err == nil {
+		_, ok := s.byPath[resolved]
+		return ok
+	}
+	return false
 }
 
 // BindConversationCaptureRuntime attaches this instance's live runtime — the
@@ -182,7 +213,7 @@ func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[stri
 	i.mu.RUnlock()
 	if override != nil {
 		return "test-override", func() (map[string]struct{}, error) {
-			return canonicalHeldPaths(override)
+			return override()
 		}, nil
 	}
 	roots, err := i.codexRuntimeRoots()
@@ -190,9 +221,7 @@ func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[stri
 		return "", nil, err
 	}
 	return codexGenerationKey(roots), func() (map[string]struct{}, error) {
-		return canonicalHeldPaths(func() (map[string]struct{}, error) {
-			return i.heldPathsForRoots(roots)
-		})
+		return i.heldPathsForRoots(roots)
 	}, nil
 }
 
