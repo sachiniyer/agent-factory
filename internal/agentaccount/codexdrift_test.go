@@ -180,6 +180,15 @@ func TestCodexRuntimeDriftKeyProgramOverride(t *testing.T) {
 			"codex --config 'sandbox_mode=\"workspace-write\"'",
 			"codex '--config=sandbox_mode=\"workspace-write\"'",
 			"codex '-csandbox_mode=\"workspace-write\"'",
+			// Unquoted -c values take upstream's raw-string fallback — a bare
+			// word is still a valid mode override.
+			"codex -c sandbox_mode=workspace-write",
+			"codex -c=sandbox_mode=workspace-write",
+			"codex --config=sandbox_mode=workspace-write",
+			"codex -csandbox_mode=workspace-write",
+			// A dedicated flag outranks -c wherever both appear upstream.
+			"codex -s workspace-write -c 'sandbox_mode=\"read-only\"'",
+			"codex --dangerously-bypass-approvals-and-sandbox -s workspace-write",
 			"codex -c check_for_update_on_startup=false -s workspace-write",
 			"codex -c check_for_update_on_startup=false resume abc123 -s workspace-write",
 			"codex exec -s workspace-write",
@@ -226,8 +235,10 @@ func TestCodexRuntimeDriftKeyProgramOverride(t *testing.T) {
 			"codex -c 'sandbox_mode=\"read-only\"'",
 			"codex -s read-only -s read-only",
 			"codex -s read-only -c 'sandbox_mode=\"read-only\"'",
-			// Two non-workspace signals never disagree on the class that
-			// decides inertness, so precedence is moot.
+			// Last -s wins within the dedicated layer; a dedicated flag also
+			// outranks a -c override.
+			"codex -s workspace-write -s read-only",
+			"codex -s read-only -c 'sandbox_mode=\"workspace-write\"'",
 			"codex --dangerously-bypass-approvals-and-sandbox -s read-only",
 		} {
 			differing()
@@ -254,14 +265,11 @@ func TestCodexRuntimeDriftKeyProgramOverride(t *testing.T) {
 			"codex -c not-toml",
 			"codex -c 'sandbox_mode=7'",
 			"codex -c ''",
-			// Unquoted -c value: the shell strips the inner quotes, so codex
-			// receives a TOML-invalid operand — no claim can be made from it.
-			"codex -c=sandbox_mode=workspace-write",
-			"codex --config=sandbox_mode=workspace-write",
+			// Profile selection and profile contents are per-home state the
+			// command string cannot resolve.
+			"codex -c 'profile=\"work\"'",
+			"codex -c 'profiles.work.sandbox_mode=\"read-only\"'",
 			"codex --bogus-flag",
-			"codex -s workspace-write -s read-only",                    // disagreeing signals
-			"codex -s workspace-write -c 'sandbox_mode=\"read-only\"'", // precedence unknown
-			"codex --dangerously-bypass-approvals-and-sandbox -s workspace-write",
 			"codex login",
 			"codex foo bar", // more positionals than a bare prompt allows
 			"codex resume one two three",
@@ -272,6 +280,43 @@ func TestCodexRuntimeDriftKeyProgramOverride(t *testing.T) {
 			if key != "sandbox_workspace_write" || !inc {
 				t.Fatalf("program %q: got (%q,%v), want (\"sandbox_workspace_write\",true)", program, key, inc)
 			}
+		}
+	})
+
+	t.Run("-c override a selected profile can shadow is incomparable", func(t *testing.T) {
+		// A -c override lands on the root config; a selected profile's
+		// sandbox_mode is consulted before it, so the program cannot prove
+		// the effective mode — here the source profile forces
+		// workspace-write with the wider table live.
+		writeCodexConfig(t, src, "profile = \"w\"\n[profiles.w]\nsandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = false\n")
+		key, inc := CodexRuntimeDriftKey(src, tgt, "codex -c 'sandbox_mode=\"read-only\"'")
+		if key != "sandbox_workspace_write" || !inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",true)", key, inc)
+		}
+	})
+
+	t.Run("-c override is proven when the selected profile sets no mode", func(t *testing.T) {
+		writeCodexConfig(t, src, "profile = \"w\"\n[profiles.w]\nmodel = \"o3\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "model = \"o3\"\nsandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = false\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt, "codex -c 'sandbox_mode=\"read-only\"'"); key != "" || inc {
+			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
+		}
+	})
+
+	t.Run("-c override agrees with the selected profile's mode", func(t *testing.T) {
+		writeCodexConfig(t, src, "profile = \"w\"\n[profiles.w]\nsandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = false\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt, "codex -c sandbox_mode=workspace-write"); key != "sandbox_workspace_write" || inc {
+			t.Fatalf("got (%q,%v), want (\"sandbox_workspace_write\",false)", key, inc)
+		}
+	})
+
+	t.Run("dedicated -s outranks a selected profile", func(t *testing.T) {
+		writeCodexConfig(t, src, "profile = \"w\"\n[profiles.w]\nsandbox_mode = \"workspace-write\"\n[sandbox_workspace_write]\nnetwork_access = true\n")
+		writeCodexConfig(t, tgt, "sandbox_mode = \"read-only\"\n[sandbox_workspace_write]\nnetwork_access = false\n")
+		if key, inc := CodexRuntimeDriftKey(src, tgt, "codex -s read-only"); key != "" || inc {
+			t.Fatalf("got (%q,%v), want (\"\",false)", key, inc)
 		}
 	})
 }

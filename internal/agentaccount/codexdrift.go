@@ -64,7 +64,20 @@ func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, inc
 	if reason != "" {
 		return "", true
 	}
-	cliMode, cliOK := codexProgramSandboxOverride(program)
+	cliMode, cliDedicated, cliOK := codexProgramSandboxOverride(program)
+	if cliOK && cliMode != "" && !cliDedicated {
+		// A -c override lands on the root config, where a selected inline
+		// profile's sandbox_mode is consulted before it (upstream
+		// derive_sandbox_policy takes the dedicated flag, then the profile,
+		// then the root). The override is proven only when neither home's
+		// selected profile sets a conflicting mode.
+		if pm := codexSelectedProfileMode(sourceDoc); pm != "" && pm != cliMode {
+			cliOK = false
+		}
+		if pm := codexSelectedProfileMode(targetDoc); pm != "" && pm != cliMode {
+			cliOK = false
+		}
+	}
 	// Config-effective modes, captured before the command line substitutes
 	// its own: codexRuntimeSource shape-validates the table only under a
 	// config mode of workspace-write, so the malformed-table check below
@@ -121,4 +134,17 @@ func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, inc
 		}
 	}
 	return "", false
+}
+
+// codexSelectedProfileMode is the sandbox_mode the config's selected inline
+// profile sets — "" when no profile is selected or it sets none. An
+// unverifiable selection is already incomparable upstream in
+// codexRuntimeSource, so this reads only the resolvable case.
+func codexSelectedProfileMode(doc map[string]any) string {
+	profile, reason := codexSelectedProfile(doc)
+	if reason != "" {
+		return ""
+	}
+	mode, _ := profile["sandbox_mode"].(string)
+	return mode
 }

@@ -85,33 +85,38 @@ var codexProgramOtherSubcommands = map[string]bool{
 // command-line sandbox override applies before config.toml's sandbox_mode —
 // so the config alone cannot answer whether sandbox_workspace_write is inert.
 //
-// ("", true): the program is one provable codex invocation carrying no
+// ("", _, true): the program is one provable codex invocation carrying no
 // sandbox override; the homes' configs decide the effective mode.
-// (mode, true): every mode-setting flag in the argv agreed on mode, so codex's
-// precedence order never had to be modeled.
-// (_, false): the program cannot be reduced to a provable codex argv — a
+// (mode, dedicated, true): every mode-setting flag in the argv agreed on
+// mode, so codex's precedence order never had to be modeled. dedicated marks
+// the dedicated sandbox flags (-s/--sandbox, the --full-auto family,
+// --dangerously-bypass-approvals-and-sandbox) — codex applies those above a
+// selected config profile, while a -c/--config override lands on the root
+// config where the profile can shadow it, so the caller must check profile
+// shadowing only for the dedicated=false answer.
+// (_, _, false): the program cannot be reduced to a provable codex argv — a
 // wrapper af does not model, a compound command, an unknown flag, an
 // unresolvable -p profile selection, a malformed -c override, or disagreeing
 // mode flags. No effective-mode claim may be made; the caller fails closed.
-func codexProgramSandboxOverride(program string) (mode string, ok bool) {
+func codexProgramSandboxOverride(program string) (mode string, dedicated bool, ok bool) {
 	argv, ok := sessionenv.LiteralInvocationArgv(program)
 	if !ok || len(argv) == 0 || !strings.EqualFold(filepath.Base(argv[0]), "codex") {
-		return "", false
+		return "", false, false
 	}
 
-	workspaceWrite := false
-	other := ""
+	// Mode signals split by where codex layers them: dedicated flags resolve
+	// above a selected config profile AND above -c overrides, which land on
+	// the root config underneath both. Within a layer the last occurrence
+	// wins — clap's rule for a non-append option and parse_overrides' rule
+	// for repeated -c keys alike — so only the last signal per layer matters.
+	dedicatedMode := ""
+	configMode := ""
+
+	recordDedicated := func(v string) { dedicatedMode = v }
+	recordConfig := func(v string) { configMode = v }
+
 	inSubcommand := false
 	positionals := 0
-
-	recordMode := func(v string) {
-		if v == "workspace-write" {
-			workspaceWrite = true
-		} else if other == "" {
-			other = v
-		}
-	}
-
 	args := argv[1:]
 	for i := 0; i < len(args); i++ {
 		arg := args[i]
@@ -126,7 +131,7 @@ func codexProgramSandboxOverride(program string) (mode string, ok bool) {
 			// precede it.
 			if !inSubcommand && positionals == 0 {
 				if codexProgramOtherSubcommands[arg] {
-					return "", false
+					return "", false, false
 				}
 				if codexProgramAgentSubcommands[arg] {
 					inSubcommand = true
@@ -139,79 +144,77 @@ func codexProgramSandboxOverride(program string) (mode string, ok bool) {
 			// -p selects a config profile or (newer codex) a profile file;
 			// which profile table it lands in is per-home state the command
 			// string cannot resolve.
-			return "", false
+			return "", false, false
 		case arg == "-s" || arg == "--sandbox":
 			if i+1 >= len(args) {
-				return "", false
+				return "", false, false
 			}
 			i++
-			recordMode(args[i])
+			recordDedicated(args[i])
 		case strings.HasPrefix(arg, "--sandbox="):
-			recordMode(strings.TrimPrefix(arg, "--sandbox="))
+			recordDedicated(strings.TrimPrefix(arg, "--sandbox="))
 		case strings.HasPrefix(arg, "-s") && len(arg) > 2:
-			recordMode(strings.TrimPrefix(arg[2:], "="))
+			recordDedicated(strings.TrimPrefix(arg[2:], "="))
 		case arg == "--dangerously-bypass-approvals-and-sandbox" || arg == "--yolo":
-			recordMode("danger-full-access")
+			recordDedicated("danger-full-access")
 		case arg == "--full-auto" || arg == "--approve-for-me" || arg == "--not-so-yolo":
 			// --full-auto was removed upstream, but the session under a
 			// drift compare ran an older codex that accepted it; both forms
 			// mean workspace-write with an unattended approval policy.
-			recordMode("workspace-write")
+			recordDedicated("workspace-write")
 		case arg == "-c" || arg == "--config":
 			if i+1 >= len(args) {
-				return "", false
+				return "", false, false
 			}
 			i++
 			v, has, ok := codexConfigOverrideMode(args[i])
 			if !ok {
-				return "", false
+				return "", false, false
 			}
 			if has {
-				recordMode(v)
+				recordConfig(v)
 			}
 		case strings.HasPrefix(arg, "--config="):
 			v, has, ok := codexConfigOverrideMode(strings.TrimPrefix(arg, "--config="))
 			if !ok {
-				return "", false
+				return "", false, false
 			}
 			if has {
-				recordMode(v)
+				recordConfig(v)
 			}
 		case strings.HasPrefix(arg, "-c") && len(arg) > 2:
 			v, has, ok := codexConfigOverrideMode(strings.TrimPrefix(arg[2:], "="))
 			if !ok {
-				return "", false
+				return "", false, false
 			}
 			if has {
-				recordMode(v)
+				recordConfig(v)
 			}
 		case codexProgramValueOptions[arg]:
 			if i+1 >= len(args) {
-				return "", false
+				return "", false, false
 			}
 			i++
 		case attachedValueOption(arg):
 			// --name=value or -xvalue/-x=value for a known value option.
 		case codexProgramBooleanOptions[arg]:
 		default:
-			return "", false
+			return "", false, false
 		}
 		if positionals > codexProgramMaxPositionals(inSubcommand) {
-			return "", false
+			return "", false, false
 		}
 	}
-	if workspaceWrite && other != "" {
-		// Two mode signals disagree on the question that matters; codex's
-		// precedence would decide, but af does not model it — fail closed.
-		return "", false
+	// A dedicated flag outranks a -c override wherever the two appear
+	// together upstream, so the answer never depends on their relative
+	// order or the codex version.
+	if dedicatedMode != "" {
+		return dedicatedMode, true, true
 	}
-	if workspaceWrite {
-		return "workspace-write", true
+	if configMode != "" {
+		return configMode, false, true
 	}
-	if other != "" {
-		return other, true
-	}
-	return "", true
+	return "", false, true
 }
 
 // codexProgramMaxPositionals bounds positional words af can prove belong to
@@ -244,23 +247,34 @@ func attachedValueOption(arg string) bool {
 	return false
 }
 
-// codexConfigOverrideMode parses one -c/--config operand the way codex's
-// CliConfigOverrides does: a TOML `key = value` line. hasMode reports the
-// operand set sandbox_mode; mode is its string. ok=false means the operand
-// cannot be proven — an unparseable line, an empty document, or a
-// sandbox_mode whose value is not a string — so no claim may be made from it.
+// codexConfigOverrideMode interprets one -c/--config operand the way codex's
+// CliConfigOverrides does (codex-rs utils/cli/config_override.rs): split on
+// the first '=', parse the right side as a TOML value, and fall back to the
+// raw string — so `sandbox_mode=workspace-write` (no quotes) is as valid an
+// override as `sandbox_mode="workspace-write"`. hasMode reports the operand
+// sets sandbox_mode; mode is its resolved string. ok=false means no claim
+// can be made from the operand: no '=', an empty key, a non-string
+// sandbox_mode value, or a profile-family key — profile selection and
+// profile contents are per-home state the command string cannot resolve.
 func codexConfigOverrideMode(operand string) (mode string, hasMode, ok bool) {
-	var doc map[string]any
-	if err := toml.Unmarshal([]byte(operand), &doc); err != nil || len(doc) == 0 {
+	key, value, found := strings.Cut(operand, "=")
+	if !found || key == "" {
 		return "", false, false
 	}
-	value, exists := doc["sandbox_mode"]
-	if !exists {
+	if key == "profile" || key == "profiles" || strings.HasPrefix(key, "profiles.") {
+		return "", false, false
+	}
+	if key != "sandbox_mode" {
 		return "", false, true
 	}
-	mode, isString := value.(string)
-	if !isString {
+	var doc map[string]any
+	if err := toml.Unmarshal([]byte("_ = "+value), &doc); err == nil {
+		if s, isString := doc["_"].(string); isString {
+			return s, true, true
+		}
 		return "", false, false
 	}
-	return mode, true, true
+	// Upstream's raw-string fallback also strips one layer of surrounding
+	// quotes from the unparsed value.
+	return strings.Trim(value, `"'`), true, true
 }
