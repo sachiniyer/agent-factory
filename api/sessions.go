@@ -201,8 +201,26 @@ func getSessionByTitle(title string) (*session.InstanceData, string, error) {
 			got, _, derr := findInstanceByTitle(title)
 			switch {
 			case derr == nil:
+				// A positive disk resolution is not proof of uniqueness: the
+				// scan skipped corrupted/unreadable repos whose files may also
+				// hold this title, and findInstanceByTitle returns only the
+				// matched row — its per-repo skip channel is logged to the
+				// rotating log file, not surfaced to the caller. Re-read the
+				// same gaps the match branch's widening does (#6882) and caveat
+				// the result so a bare `sessions get foo` does not read as
+				// exhaustive when a second project may hold the title behind a
+				// corrupted record (#3479/#3511). Reported rather than refused
+				// — a presence this scan can see is not weakened by a file it
+				// could not read (#3507). findInstanceByTitle already checked
+				// cross-project ambiguity; the guard below is a TOCTOU safety
+				// net mirroring the match branch.
+				repoIDs, repoPaths, unreadable, corrupted, werr := diskRepoPathsForTitle(title, nil)
+				if werr == nil && len(repoIDs) > 1 {
+					return nil, "", session.AmbiguousTitleError(title, repoPaths)
+				}
+				notice := warnIncompleteTitleWidening(title, unreadable, corrupted, werr)
 				view := unconfirmedLiveProjection(got.ForClientRead())
-				return &view, "", nil
+				return &view, notice, nil
 			case !errors.Is(derr, errTitleNotFound):
 				return nil, "", derr
 			}
