@@ -538,7 +538,7 @@ func removeTOMLRootAgentsEntries(content string, paths map[string]bool) (string,
 				// `root_agents.'<path>' = {…}` or `root_agents.'<path>'.leaf = …`.
 				target = parts[1]
 			}
-			if target != "" && !removed[target] {
+			if target != "" {
 				raw := expr.Raw
 				start, end := wholeLineRange(data, int(raw.Offset), int(raw.Offset+raw.Length))
 				ranges = append(ranges, byteRange{start: start, end: end})

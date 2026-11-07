@@ -338,6 +338,56 @@ func TestMigrateRootAgentsDropsEverySpellingForOneProject(t *testing.T) {
 		"the profile that moved is the effective one — the winning entry's")
 }
 
+// TestMigrateRootAgentsRemovesEveryDottedLeaf covers the spellings where one
+// entry is written as SEVERAL assignments — `'<path>'.enabled` plus
+// `'<path>'.program` under a bare [root_agents] header, or the same as
+// root-level `root_agents.'<path>'.leaf` keys. Excising only the first leaves a
+// partial entry behind: still decoded, still deprecated, still warned about.
+func TestMigrateRootAgentsRemovesEveryDottedLeaf(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		body func(repoRoot string) string
+	}{
+		{
+			name: "dotted leaves under a bare [root_agents] header",
+			body: func(repoRoot string) string {
+				return "keep_me = 'x'\n\n[root_agents]\n'" + repoRoot + "'.enabled = true\n'" + repoRoot + "'.program = 'codex'\n"
+			},
+		},
+		{
+			name: "root-level root_agents.'<path>'.leaf keys",
+			body: func(repoRoot string) string {
+				return "keep_me = 'x'\n\nroot_agents.'" + repoRoot + "'.enabled = true\nroot_agents.'" + repoRoot + "'.program = 'codex'\n"
+			},
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, repoRoot, project := registeredTestProject(t)
+			configPath := writeMigrateConfig(t, home, tc.body(repoRoot))
+
+			result, err := MigrateGlobalConfig()
+			require.NoError(t, err)
+			require.Len(t, result.MigratedRootAgents, 1)
+			assert.Empty(t, result.Left)
+
+			content := readFile(t, configPath)
+			assert.NotContains(t, content, repoRoot,
+				"every leaf spelling of the migrated entry must be excised")
+			migratedCfg, err := parseConfigTOML([]byte(content), configPath)
+			require.NoError(t, err)
+			assert.Empty(t, migratedCfg.RootAgents,
+				"no partial entry may survive for the deprecation warning to keep firing on")
+			assert.Contains(t, content, "keep_me = 'x'",
+				"an unrelated root key must survive the excision")
+
+			personal := loadedPersonalLayer(t, project.ID)
+			require.NotNil(t, personal)
+			assert.True(t, personal.Value.Enabled)
+			assert.Equal(t, "codex", personal.Value.Program)
+		})
+	}
+}
+
 // TestMigrateRootAgentsCoversEveryProfileField is the guard that keeps the
 // patch writer honest: RootAgent is the whole effective profile, so a field
 // added to it must also be carried by the migration — the same rule
