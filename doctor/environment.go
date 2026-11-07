@@ -281,7 +281,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		// branch too, and "fix .agent-factory/config.toml" would not clear it.
 		report.AddHeader("agents", "n/a (repo config unresolved)")
 		report.Fail(sectionConfig, "agent-config",
-			fmt.Sprintf("could not resolve the in-repo config at %s: %v", repo.Root, resolveErr),
+			fmt.Sprintf("could not resolve config for the repo at %s: %v", repo.Root, resolveErr),
 			"fix the config layer named in the error above and rerun `af doctor`")
 		return
 	}
@@ -300,18 +300,20 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 			return
 		}
 		// A supported non-local backend still has to be USABLE for a session in
-		// this repo: config resolution accepts `backend = "docker"` without
-		// docker.image, `backend = "ssh"` without ssh.host, or
-		// `backend = "hook"` without remote_hooks, while session creation
-		// rejects them through BackendConfigError. Run that same side-effect-free
-		// config-key validation before reporting a skip, so the doctor does not
-		// exit cleanly for a repo whose every default create would fail.
+		// this repo before the skip below is honest: config resolution accepts
+		// `backend = "docker"` without docker.image, `backend = "ssh"` without
+		// ssh.host, or `backend = "hook"` without remote_hooks, and a configured
+		// backend can still be unusable — no docker/ssh CLI, no `origin` remote,
+		// a remote Docker engine, or a hook command that cannot run. Run the
+		// same side-effect-free preconditions session creation does
+		// (BackendUnusableReason), so the doctor does not exit cleanly for a
+		// repo whose every default create would fail (#6792 item 4).
 		if resolved != nil {
-			if reason := session.BackendConfigError(kind, resolved); reason != nil {
-				report.AddHeader("agents", fmt.Sprintf("n/a (backend %q misconfigured)", backend))
+			if reason := session.BackendUnusableReason(kind, resolved, repo.Root); reason != nil {
+				report.AddHeader("agents", fmt.Sprintf("n/a (backend %q unusable)", backend))
 				report.Fail(sectionConfig, "agent-config",
 					fmt.Sprintf("backend %q is not usable for sessions in this repo: %v", backend, reason),
-					"address the missing config key named above and rerun `af doctor`")
+					"address the problem named above and rerun `af doctor`")
 				return
 			}
 		}
@@ -334,17 +336,17 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 		}
 		check, err, outsideRepo := checkProgramCommand(workspace, repoErr, command)
 		if err == nil {
-			// A relative override that resolves in the main checkout but is
-			// untracked will be absent from the clean-checkout worktree a
-			// session launches in (#6499): the repo-root anchor genuinely
-			// predicts the worktree only for tracked relative paths.
-			// Downgrade the PASS to an advisory WARN so the doctor does not
-			// report a guaranteed-false PASS for an untracked file.
-			if relativeOverrideUntracked(workspace, command, check.Path) {
+			// A resolution that depended on the launch directory and landed
+			// inside the repo is honest only when the tree a session branches
+			// from — origin's default branch, else HEAD — holds a runnable
+			// file at the same repo-relative path: the worktree is a clean
+			// checkout of that tree, not of this checkout's index or working
+			// tree (#6499, #6792). Downgrade the PASS to an advisory WARN so
+			// the doctor does not report a guaranteed-false PASS for a file
+			// the session's worktree will not contain.
+			if detail, remediation := overrideAbsentFromSessionBase(workspace, check); detail != "" {
 				header = append(header, agent+"=present")
-				report.Warn(sectionEnvironment, agent,
-					untrackedOverrideMessage(command, check.Path),
-					untrackedOverrideRemediation, false)
+				report.Warn(sectionEnvironment, agent, detail, remediation, false)
 				continue
 			}
 			header = append(header, agent+"=present")
