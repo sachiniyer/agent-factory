@@ -358,6 +358,52 @@ func TestCanRetryPendingManualAccountSwapDelivery(t *testing.T) {
 	}
 }
 
+// TestCanRetryPendingAccountSwapNoticeDelivery is the automatic swap's half
+// of TestCanRetryPendingManualAccountSwapDelivery (#6800): the daemon's
+// ResumeFromLimit fork re-submits the committed notice
+// (deliverAutomaticAccountNotice), so an ambiguous verdict on a known-live
+// row is an honest resend — including at the limit wall. Positive
+// non-delivery stays with the scheduler, and every refusal keeps the verb
+// hidden so the picker cannot lie about what Row 0 does.
+func TestCanRetryPendingAccountSwapNoticeDelivery(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		mutate func(*Instance)
+		want   bool
+	}{
+		{name: "ambiguous on a running row", mutate: func(*Instance) {}, want: true},
+		{name: "ready", mutate: func(i *Instance) { i.liveness = LiveReady }, want: true},
+		{name: "limit reached — the resume re-sends the notice, so the row is an honest retry", mutate: func(i *Instance) { i.liveness = LiveLimitReached }, want: true},
+		{name: "sent-unverified verdict", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptSentUnverified }, want: true},
+		{name: "delivered crash window", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptDelivered }, want: true},
+
+		{name: "startup-unknown is inert even at the limit wall", mutate: func(i *Instance) { i.liveness = LiveLimitReached; i.startupStateUnknown = true }},
+		{name: "retry in progress", mutate: func(i *Instance) { i.inFlightOp = OpRespawning }},
+		{name: "kill tombstone", mutate: func(i *Instance) { i.userKilled = true }},
+		{name: "lost", mutate: func(i *Instance) { i.liveness = LiveLost }},
+		{name: "dead", mutate: func(i *Instance) { i.liveness = LiveDead }},
+		{name: "archived", mutate: func(i *Instance) { i.liveness = LiveArchived }},
+		{name: "no proven liveness", mutate: func(i *Instance) { i.liveness = LivenessUnset }},
+		{name: "not delivered belongs to automatic recovery", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered }},
+		{name: "not delivered at the limit wall stays with automatic recovery", mutate: func(i *Instance) {
+			i.liveness = LiveLimitReached
+			i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
+		}},
+		{name: "no verdict recorded", mutate: func(i *Instance) { i.pendingAccountSwap.MissionDeliveryStatus = "" }},
+		{name: "manual swap", mutate: func(i *Instance) { i.pendingAccountSwap.Manual = true }},
+		{name: "replacement panes never started", mutate: func(i *Instance) { i.pendingAccountSwap.ReplacementPanesStarted = false }},
+		{name: "no pending swap", mutate: func(i *Instance) { i.pendingAccountSwap = nil }},
+		{name: "another op in flight", mutate: func(i *Instance) { i.inFlightOp = OpKilling }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := confirmableManualSwap(PromptCouldNotConfirm)
+			inst.pendingAccountSwap.Manual = false
+			tc.mutate(inst)
+			require.Equal(t, tc.want, inst.CanRetryPendingAccountSwapNoticeDelivery())
+		})
+	}
+}
+
 // Every refusal leaves the transaction exactly as it was: a confirm that
 // fails must not half-retire the swap or its launch plan.
 func TestConfirmPendingAccountSwapDeliveryRefusals(t *testing.T) {

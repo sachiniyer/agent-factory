@@ -443,6 +443,28 @@ func (i *Instance) CanRetryPendingManualAccountSwapDelivery() bool {
 		i.pendingManualAccountSwapDeliveryUnconfirmedLocked()
 }
 
+// CanRetryPendingAccountSwapNoticeDelivery is the automatic swap's half of
+// CanRetryPendingManualAccountSwapDelivery (#6800): the daemon's
+// ResumeFromLimit fork re-submits the committed notice
+// (deliverAutomaticAccountNotice → SendPromptWithEvidence), so a parked row
+// whose notice verdict is ambiguous is an honest resend — not the no-resend
+// restart the agent-handoff arm performs. Same admission contract: a
+// known-live row with no op held, startup known, and an unconfirmed notice
+// verdict; positive non-delivery stays with the scheduler and every other
+// row keeps its owner.
+func (i *Instance) CanRetryPendingAccountSwapNoticeDelivery() bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	knownLive := i.liveness == LiveRunning || i.liveness == LiveReady || i.liveness == LiveLimitReached
+	return knownLive && i.inFlightOp == OpNone && !i.startupStateUnknown && !i.userKilled &&
+		i.pendingAutomaticAccountSwapDeliveryUnconfirmedLocked()
+}
+
+func (i *Instance) pendingAutomaticAccountSwapDeliveryUnconfirmedLocked() bool {
+	return i.pendingAccountSwap != nil && !i.pendingAccountSwap.Manual &&
+		i.pendingAccountSwapDeliveryUnconfirmedLocked()
+}
+
 // CanConfirmPendingAccountSwapDelivery reports whether an operator can
 // retire a pending account swap's mission on the attestation that it
 // already landed — the same "it is already running" exit the agent-handoff
