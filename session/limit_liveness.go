@@ -273,10 +273,26 @@ func (i *Instance) attributeLimitIdentityAsLocked(agent string) {
 // session) once per second for as long as the session stayed parked.
 // Caller holds i.mu.
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, wasParked bool) {
+	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, wasParked, instanceNow().UTC())
+}
+
+// recordAccountLimitObservationAtLocked is recordAccountLimitObservationLocked
+// with the sighting instant supplied by the caller: a park that copies a wall
+// it did not itself observe stamps the SOURCE's event time, never a later
+// instant — a copy that postdates its source observation outlives every
+// retraction that was already on its way between the source's sighting and the
+// park (#6880). Caller holds i.mu.
+func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, wasParked bool, sightedAt time.Time) {
 	if agent == "" || account == "" {
 		return
 	}
-	sighted := instanceNow().UTC()
+	sighted := sightedAt.UTC()
+	if sighted.IsZero() {
+		// A caller with no instant is observing the wall right now; stamping
+		// zero would write an observation that orders against no retraction at
+		// all — the same wedge the explicit instant exists to close (#6880).
+		sighted = instanceNow().UTC()
+	}
 	for idx := range i.accountLimitObservations {
 		observation := &i.accountLimitObservations[idx]
 		// One row per reset claim KIND, not per identity: merging a

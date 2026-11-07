@@ -53,7 +53,7 @@ func TestCommittedSwapAccountWall_IgnoresTheSubjectRowsInheritedWall(t *testing.
 			{Agent: tmux.ProgramClaude, Account: "work", ProvenAt: observedAt.Add(time.Nanosecond)},
 		}}, nil
 	}
-	_, _, walled, err := manager.committedSwapAccountWall(swap, loadProof)
+	_, _, _, walled, err := manager.committedSwapAccountWall(swap, loadProof)
 	require.NoError(t, err)
 	require.False(t, walled,
 		"a committed replacement must not be walled by its own inherited live wall once the evidence is retracted")
@@ -61,7 +61,7 @@ func TestCommittedSwapAccountWall_IgnoresTheSubjectRowsInheritedWall(t *testing.
 	// Without the proof, the row's own stored observation — fail-closed
 	// evidence a no-reset wall stands on — keeps it walled. The self-skip
 	// removes the unorderable projection, not the durable fact.
-	_, _, walled, err = manager.committedSwapAccountWall(swap, ledgerBackedEvidence())
+	_, _, _, walled, err = manager.committedSwapAccountWall(swap, ledgerBackedEvidence())
 	require.NoError(t, err)
 	require.True(t, walled,
 		"absent a retraction, the parked row's own durable observation still excludes the committed identity")
@@ -86,7 +86,7 @@ func TestParkCommittedSwapAtIncomingWall_FilesWallUnderCommittedNamespace(t *tes
 	inst.SetInFlightOpForTest(session.OpRespawning)
 
 	reset := time.Now().Add(2 * time.Hour)
-	err := manager.parkCommittedSwapAtIncomingWall(repoID, daemonInstanceKey(repoID, inst.Title), inst.Title, inst, swap, reset, "")
+	err := manager.parkCommittedSwapAtIncomingWall(repoID, daemonInstanceKey(repoID, inst.Title), inst.Title, inst, swap, reset, time.Now().UTC(), "")
 	require.Error(t, err, "the park reports the launch refusal")
 
 	agent, account, limited := inst.LimitIdentity()
