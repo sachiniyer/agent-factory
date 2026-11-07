@@ -488,13 +488,16 @@ test("docs mermaid: the render frame is an opaque origin — it cannot reach the
   expect(fresh, "a fresh render frame must open for the next render").toBeTruthy();
   expect(await fresh?.evaluate(() => self.origin), "the fresh frame is opaque too").toBe("null");
 
-  // The fresh frame's navigation revalidated: the doc is ~5 MB inline, so a
-  // re-open's wire cost is a 304's body (none), not the library again. A
+  // The fresh frame's navigation revalidated: the doc is ~3.4 MB inline, so
+  // a re-open's wire cost is a 304's body (none), not the library again. A
   // browser that answered from cache without even revalidating would emit no
   // second request — that is the same property satisfied harder, not a miss.
   const docBytes = await Promise.all(frameDocBytes);
   expect(docBytes.length, "at most the first open and the re-open fetch the document").toBeLessThanOrEqual(2);
-  expect(docBytes[0], "the first open fetches the whole library once").toBeGreaterThan(1_000_000);
+  // ~0.95 MB on the wire after #6943 — the whole document, not a sliver of
+  // it. Whatever the size drifts to, an open fetches it all while a
+  // revalidation fetches nothing.
+  expect(docBytes[0], "the first open fetches the whole library once").toBeGreaterThan(500_000);
   if (docBytes.length === 2) {
     expect(docBytes[1], "the re-open revalidates — a 304 body, not the library again").toBeLessThan(100_000);
   }
@@ -561,4 +564,40 @@ test("docs mermaid: the frame document is inert outside af's own origin — fore
   expect(top.origin, "a top-level load must still be an opaque origin — the CSP sandbox covers it").toBe("null");
   expect(top.localStorage, "an opaque origin must not reach af's storage").toBe("threw");
   await expect(page.locator("svg"), "no parent handshake means nothing renders").toHaveCount(0);
+});
+
+// #6943 shrank the frame document by about a third — ELK and KaTeX are out.
+// Both were reachable before: a flowchart-elk fence or an %%{init}%%
+// directive could select the elk layout engine, and a $$…$$ sequence label
+// went through KaTeX. The build now resolves the elk loader's chunk import
+// to dagre's, so every diagram that could ask for elk still renders — with
+// dagre — and KaTeX is a stub that returns the TeX source, so a $$ label
+// shows its source instead of typeset math. Every diagram still renders.
+test("docs mermaid: a fence that asks for elk renders with dagre; $$ labels still render", async ({ page, request }) => {
+  const pane = await openDocs(page, request, "mermaid-shrunk-probe", "mermaid-shrunk-plan", {
+    "a-elk-type": `# ELK by type\n\n${fence("flowchart-elk LR\n  A --> B --> C")}\n`,
+    "b-elk-init": `# ELK by directive\n\n${fence('%%{init: {"layout": "elk"}}%%\nflowchart LR\n  A --> B --> C')}\n`,
+    "c-math": `# Math\n\n${fence("flowchart LR\n  A[\"$$x^2$$\"] --> B")}\n\n${fence("sequenceDiagram\n  A->>B: $$x^2$$")}\n`,
+  });
+  // elk-by-type: the fence's own words select the elk layout engine. The
+  // engine is not in the bundle — the loader resolves to dagre and the
+  // diagram renders anyway.
+  await expect(pane.locator(".cm-md-mermaid svg"), "a flowchart-elk fence must still render").toBeVisible({ timeout: 30_000 });
+  // elk-by-directive: the %%{init}%% key is not secure-listed, so it also
+  // selects elk — same dagre substitution.
+  await pane.locator(".af-docs-tab", { hasText: "b-elk-init" }).click();
+  await expect(pane.locator(".cm-md-mermaid svg"), "an init directive asking for elk must still render").toBeVisible({ timeout: 30_000 });
+  // $$: the stub answers renderToString with the TeX source, so the label
+  // pipeline resolves and the diagram renders — a sequence $$ message's
+  // foreignObject is stripped by the parent sanitizer as it always was
+  // (KaTeX's markup lived in one too), and a flowchart $$ label is SVG
+  // <text> that shows the source literally, exactly as before.
+  await pane.locator(".af-docs-tab", { hasText: "c-math" }).click();
+  const diagrams = pane.locator(".cm-md-mermaid svg");
+  await expect(diagrams, "both math-carrying diagrams must render").toHaveCount(2, { timeout: 30_000 });
+  await expect(diagrams.first(), "the flowchart $$ label renders its source as SVG text").toContainText("x^2");
+  for (const i of [0, 1]) {
+    expect(await diagrams.nth(i).innerHTML(),
+      "typeset-KaTeX markup must not appear — the package is stubbed out").not.toContain("katex-html");
+  }
 });

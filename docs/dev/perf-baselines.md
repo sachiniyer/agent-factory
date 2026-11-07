@@ -103,8 +103,8 @@ under the `perf-baselines` artifact.
 | lazy_gzip_bytes | 129634.000 | 129634.000–129634.000 | 0.000 | 136115.700 |
 | codeblocks_raw_bytes | 321641.000 | 321641.000–321641.000 | 0.000 | 337723.050 |
 | codeblocks_gzip_bytes | 125499.000 | 125499.000–125499.000 | 0.000 | 131773.950 |
-| mermaid_raw_bytes | 5187694.000 | 5187694.000–5187694.000 | 0.000 | 5447078.700 |
-| mermaid_gzip_bytes | 1500355.000 | 1500355.000–1500355.000 | 0.000 | 1575983.450 |
+| mermaid_raw_bytes | 3442877.000 | 3442877.000–3442877.000 | 0.000 | 3615020.850 |
+| mermaid_gzip_bytes | 948300.000 | 948300.000–948300.000 | 0.000 | 995715.000 |
 | first_terminal_ms | 2870.417 | 2675.500–3033.000 | 118.562 | 5740.833 |
 | echo_ms | 307.550 | 273.300–338.100 | 20.394 | 615.100 |
 | rail_ms | 726.383 | 711.500–749.500 | 12.348 | 1452.767 |
@@ -170,34 +170,54 @@ proxied origin would have to spell, and no `Access-Control-Allow-Origin`
 grant anywhere (the chunk CORS the first cut added is gone).
 
 Against master's committed dist measured with the same `.html`-inclusive
-filter: the `mermaid.js`/`mermaid-*` set (5,187,694 raw / 1,507,069 gzip) is
-replaced by the single frame document (5,256,397 / 1,484,809) — +68,703 raw /
-**−22,260 gzip**, a single-file bundle being smaller compressed than the split
-set's per-chunk framing. (The script is authorized by sha256 now rather than a
-stamped nonce, so the served bytes are static and the document's ETag survives
-a daemon restart; `lazy/mermaid-frame.sha256`, the sidecar the CSP names, is
-44 bytes and outside the `.js|.css|.html` filter.) `lazy_*` moves to 399,058 /
-129,835 (+651 / +149 of epoch-guarded frame loading and the wire-source
-gates) and the shell entries are byte-identical (+0 / +0 — `index.html` counts
-on both sides). Every entry stays inside its existing budget —
-`mermaid_gzip_bytes` lands 5% under — so no baseline moves. Every timing and
-layout-shift baseline is unchanged.
+filter: the `mermaid.js`/`mermaid-*` set (5,187,694 raw / 1,507,069 gzip) was
+replaced by the single frame document — first at 5,256,397 / 1,484,809, and
+after #6943 at **3,442,877 / 948,300** (−34.5% raw / −36.1% gzip from dropping
+the vendored ELK layout engine and the KaTeX package — see below). (The
+script is authorized by sha256 rather than a stamped nonce, so the served
+bytes are static and the document's ETag survives a daemon restart;
+`lazy/mermaid-frame.sha256`, the sidecar the CSP names, is 44 bytes and
+outside the `.js|.css|.html` filter.) `lazy_*` sits at 399,058 / 130,073 and
+the shell entries are byte-identical (+0 / +0 — `index.html` counts on both
+sides). The `mermaid_*` baselines moved to the new, smaller document so the
+budget still catches a regrowth; every other entry is unchanged, and every
+timing and layout-shift baseline is unchanged.
 
-**The wire cost the byte table does not show (#6669 re-review).** These
-entries measure embedded bytes, not fetches-per-open — and the two diverge.
-Under master's split chunks a first flowchart fetched ~29 files, 867 KB raw /
-239 KB gzip. Under this design the frame's first open fetches the whole
-document — 5.26 MB raw / 1.48 MB gzip — and on loopback first render is
-~1.1 s in Chromium and ~3.5 s in WebKit (independent review's figures,
-~0.30 s/~0.36 s on master): the price of the one-navigation property, since
+**The wire cost AND the parse cost the byte table does not show (#6669
+re-review, corrected by #6943).** These entries measure embedded bytes, not
+fetches-per-open — and the two diverge. Under master's split chunks a first
+flowchart fetched ~29 files, 867 KB raw / 239 KB gzip. The frame document is
+one navigation with everything inline — the zero-subresource property, since
 any subresource the frame fetched would arrive at an authenticating proxy
-with no credentials to answer. That is a first-open cost, paid once: the
-document now carries `ETag` + `Cache-Control: no-cache`, so every later open
-revalidates — measured on the wire as a 304 with a zero-length body in both
-engines — and a frame re-open happens only when the renderer is torn down
-(a self-navigation, a channel failure or a hung render), never on an ordinary
-render or theme flip. On a 400 kbps link the 1.48 MB download is ~30 s, which
-is why the open timeout is 60 s rather than the document's own 30 s.
+with no credentials to answer — so its transfer is paid once: `ETag` +
+`Cache-Control: no-cache` answer every later fetch with a 304 and an empty
+body in both engines.
+
+An earlier draft of this paragraph called the whole cost "a first-open cost,
+paid once". That is true of the BYTES and false of the PARSE: the frame lives
+at module level and survives Docs unmounts, but a fresh page load opens it
+again and pays the document's entire script parse + eval — which dominates.
+Measured on the real daemon headers (loopback, iframe `src` set → ready
+announce, this build):
+
+- first open: Chromium ~0.50–0.57 s (was ~0.74 s at 5.26 MB; the reviewer
+  measured ~1.07 s on a slower host and ~0.30 s on master), WebKit
+  ~1.1–1.7 s (was ~3.4 s at 5.26 MB; reviewer ~3.8 s; master ~0.36 s);
+- after a reload (304 revalidation, full re-parse): Chromium ~0.23–0.29 s
+  (was ~0.31 s), WebKit ~0.4–0.7 s (was ~1.2–2.5 s).
+
+Removing the ~34.5% of bytes that were parsed but never executed is what
+bought the WebKit number back. ELK was the cheap lever (#6943): af pins
+`layout: "dagre"` and the build resolves the elk loader's chunk import to
+dagre's, so a doc that still asks for elk — a `flowchart-elk` fence or an
+`%%{init:{"layout":"elk"}}%%` directive, both verified reachable — renders
+with dagre instead of erroring. KaTeX went for the same reason: `$$…$$` math
+labels (reachable in sequence-diagram actors/messages and any foreignObject
+label path; flowchart's SVG labels never typeset math even before) now show
+their TeX source — every diagram still renders.
+
+On a 400 kbps link the ~0.95 MB download is ~19 s — the open timeout stays
+60 s.
 
 ### Code-fence grammar lazy chunk provenance (#6731)
 

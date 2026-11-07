@@ -139,23 +139,23 @@
         "margin": 6274.95
     },
     "mermaid_raw_bytes": {
-        "baseline": 5187694,
+        "baseline": 3442877,
         "samples": [
-            5187694,
-            5187694,
-            5187694
+            3442877,
+            3442877,
+            3442877
         ],
         "stddev": 0,
-        "margin": 259384.7
+        "margin": 172143.85
     },
     "mermaid_gzip_bytes": {
-        "baseline": 1500355,
+        "baseline": 948300,
         "samples": [
-            1500355,
-            1500355,
-            1500355
+            948300,
+            948300,
+            948300
         ],
         "stddev": 0,
-        "margin": 75628.45
+        "margin": 47415
     }
 }
