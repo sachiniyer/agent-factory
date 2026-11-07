@@ -27,9 +27,14 @@ var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "appro
 
 // CodexRuntimeDriftKey compares the effective runtime settings of a source
 // home (the session's own account dir, or the ambient home) against a
-// candidate account home. It answers the one question the engine's candidate
-// filter needs: does moving to target keep the session's model, effort,
-// approval, and sandbox — or is the candidate ineligible?
+// candidate account home. program is the session's recorded launch command:
+// when any argument in it could change the sandbox mode or the selected
+// profile — anything beyond the words af itself injects — the configs'
+// non-workspace mode cannot prove sandbox_workspace_write inert and the
+// table is compared instead of skipped (#6902). It answers the one question
+// the engine's candidate filter needs: does moving to target keep the
+// session's model, effort, approval, and sandbox — or is the candidate
+// ineligible?
 //
 // (key, false): the candidate is ineligible — it sets a different value, or
 // sets/omits a key asymmetrically. No presence gap is presumed harmless:
@@ -38,12 +43,13 @@ var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "appro
 // effective runtime, not a seedable gap.
 // ("", false): comparable and equal.
 // ("", true): unevaluable — an unreadable or unparseable config on either
-// side, or a doc whose runtime cannot be verified. Unevaluable also makes the
-// candidate ineligible; the caller names the reason.
+// side, a doc whose runtime cannot be verified, or a program whose effective
+// sandbox mode cannot be proven. Unevaluable also makes the candidate
+// ineligible; the caller names the reason.
 //
 // No credential material, profile, or provider configuration is compared or
 // copied — the same boundary the registration seeder holds.
-func CodexRuntimeDriftKey(sourceDir, targetDir string) (key string, incomparable bool) {
+func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, incomparable bool) {
 	_, sourceDoc, err := readCodexSettings(filepath.Join(sourceDir, "config.toml"))
 	if err != nil || sourceDoc == nil {
 		return "", true
@@ -60,20 +66,28 @@ func CodexRuntimeDriftKey(sourceDir, targetDir string) (key string, incomparable
 	if reason != "" {
 		return "", true
 	}
+	// The one question the launch program can settle for this compare: could
+	// it change the sandbox mode or the selected profile? Only a program
+	// provably built of af's own argument words answers no; anything else —
+	// another -c operand, a mode or profile flag, a wrapper — answers yes,
+	// and sandbox_workspace_write must be compared even when both configs
+	// call it inert (#6902).
+	programNeutral := codexProgramSandboxNeutral(program)
 	for _, k := range codexRuntimeCompareKeys {
 		// sandbox_workspace_write is only effective under workspace-write.
 		// codexRuntimeSource shape-validates the table only in that mode, and
 		// the seeder never strips an operator's leftover [sandbox_workspace_write]
 		// when the mode changes, so in another mode a stale table is inert.
 		// The compare skips the key only when both sides are explicitly in a
-		// non-workspace mode: an omitted sandbox_mode is not presumed inert,
-		// because upstream Codex may default it to workspace-write (project
-		// trust), and silently skipping a differing table there could widen
-		// the sandbox. Because codexRuntimeSource does not validate the table
-		// outside workspace-write, a malformed inactive table (e.g. a
-		// wrong-type value) is incomparable here, never silently equal.
-		// sandbox_mode is compared earlier in this list, so a cross-mode
-		// widening is already caught and cannot be hidden by this gate.
+		// non-workspace mode AND the launch program is proven neutral: an
+		// omitted sandbox_mode is not presumed inert, because upstream Codex
+		// may default it to workspace-write (project trust), and silently
+		// skipping a differing table there could widen the sandbox. Because
+		// codexRuntimeSource does not validate the table outside
+		// workspace-write, a malformed inactive table (e.g. a wrong-type
+		// value) is incomparable here, never silently equal. sandbox_mode is
+		// compared earlier in this list, so a cross-mode widening is already
+		// caught and cannot be hidden by this gate.
 		if k == "sandbox_workspace_write" {
 			sm, _ := source["sandbox_mode"].(string)
 			tm, _ := target["sandbox_mode"].(string)
@@ -87,7 +101,8 @@ func CodexRuntimeDriftKey(sourceDir, targetDir string) (key string, incomparable
 					return k, true
 				}
 			}
-			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" {
+			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" &&
+				programNeutral {
 				continue
 			}
 		}
