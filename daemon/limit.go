@@ -102,11 +102,20 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 	// can tell a clipped re-read of its recorded banner from a wall the pane
 	// shows afterward (#6823) — the claim alone cannot make that distinction.
 	if s := m.limitDetector.Load().Sight(content, agent, nowFunc()); s.Hit {
-		// Returns false when the decision was superseded; nothing to do about it
-		// here — the next tick observes the session as it is now.
-		_ = m.setLimitReachedAtEpoch(instance, s.ResetAt, s.Evidence,
-			session.LimitBanner{Prefix: s.BannerPrefix, Count: s.BannerCount}, epoch)
-		return
+		// The unchanged emission of a wall this row already recorded — reset
+		// spent, resume send landed — is residue, not a wall (#6959 review):
+		// a cleared row falls through to the ordinary liveness reads below
+		// instead of stalling on the stale banner until it scrolls off the
+		// capture. A still-parked row keeps the early return — the scheduler's
+		// resume owns that transition.
+		if instance.LimitReached() ||
+			!instance.RecordedLimitWallExpired(s.BannerPrefix, s.BannerCount, s.Evidence) {
+			// Returns false when the decision was superseded; nothing to do about
+			// it here — the next tick observes the session as it is now.
+			_ = m.setLimitReachedAtEpoch(instance, s.ResetAt, s.Evidence,
+				session.LimitBanner{Prefix: s.BannerPrefix, Count: s.BannerCount}, epoch)
+			return
+		}
 	}
 	if task.IsWorkingContent(content, agent) {
 		// Still mid-turn behind a still pane: hold Running so the #1766 status dot

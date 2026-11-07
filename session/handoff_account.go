@@ -742,11 +742,17 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 // became durable, or one the restart restore predates (#6959) — still
 // recognizes its own banner by the reset phrase it consumed: a missing anchor
 // is not evidence of a new banner, and only a differently-worded sighting can
-// be. Caller holds i.mu.
+// be. The phrase fallback still defers to a grown match count: a recorded
+// banner at byte zero legitimately carries an empty prefix, and a second wall
+// re-using its phrase arrives with a higher count — positional evidence of a
+// new emission the fallback may not override (#6959 review). Caller holds
+// i.mu.
 func (i *Instance) sendPathReSightingLocked(banner LimitBanner, evidence string, freshRuntime bool) bool {
 	return i.liveness == LiveLimitReached && !freshRuntime &&
 		(i.sameLiveLimitBannerLocked(banner) ||
-			(i.limitBannerPrefix == "" && evidence != "" && evidence == i.limitResetEvidence))
+			(i.limitBannerPrefix == "" &&
+				!(i.limitBannerCount > 0 && banner.Count > i.limitBannerCount) &&
+				evidence != "" && evidence == i.limitResetEvidence))
 }
 
 // ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit

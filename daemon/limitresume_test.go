@@ -335,11 +335,17 @@ func TestResumeLimitedSessions_SendsPromptOnceWhileResidueBannerShows(t *testing
 
 	// The unchanged banner still sits in the capture; the next poll's
 	// re-detection of it is residue — never a wall — so the row must not
-	// re-park, and no retry episode may re-arm.
+	// re-park, and no retry episode may re-arm. The residue verdict must also
+	// let the poll continue ordinary liveness classification: a cleared row
+	// stalling on its own stale banner would sit Running until the banner
+	// scrolls off instead of settling on the capture's real state.
 	_, epoch := inst.InFlightOpAndEpoch()
 	manager.resolveIdleLiveness(inst, residuePane, epoch)
 	if inst.LimitReached() {
 		t.Fatal("the row's own expired parked banner is residue, not a wall")
+	}
+	if got := inst.GetLiveness(); got != session.LiveReady {
+		t.Fatalf("a residue sighting must not block ordinary classification: liveness = %v, want ready", got)
 	}
 	for i := 0; i < 5; i++ {
 		advance(time.Minute)

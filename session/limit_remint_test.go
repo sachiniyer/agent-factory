@@ -345,6 +345,22 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 		requireParkedReset(t, inst, later)
 	})
 
+	t.Run("a grown count overrides the send-path phrase fallback", func(t *testing.T) {
+		// A wall recorded at byte zero carries an empty prefix but still
+		// counts its match; a second emission on the same pane re-using the
+		// phrase arrives with count 2. The anchorless phrase fallback must
+		// defer to that positional evidence — without the count gate the
+		// sighting classifies as a parked re-sight and the first wall's
+		// claim vetoes the second wall's reset (#6959 review).
+		inst := automaticAccountSwapLimitInstance("personal")
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence,
+			LimitBanner{Prefix: "", Count: 1}, false))
+		requireParkedReset(t, inst, parked)
+		secondWall := LimitBanner{Prefix: "usage limit reached. reset at 3pm\nmore transcript\n", Count: 2}
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(later, clockResetEvidence, secondWall, false))
+		requireParkedReset(t, inst, later)
+	})
+
 	t.Run("a fresh runtime's identical banner is a new sighting", func(t *testing.T) {
 		// The swap retry launched a replacement runtime whose pane emits the
 		// same clause at the same anchor: a coincidence of identical display,
