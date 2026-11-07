@@ -718,7 +718,7 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC())
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
 }
 
 // ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit
@@ -744,7 +744,12 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil {
 		return fmt.Errorf("account limit park requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt)
+	// The copy is a parked re-sight when the row still sits on the wall that
+	// refused it — the refused retry must not advance the sighting instant of
+	// the same unchanged claim (#6880). A row parked at some OTHER wall is
+	// parked-at-a-different-fact, and the record's same-kind match scopes the
+	// no-op to the same claim kind in either case.
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence, sightedAt, i.liveness == LiveLimitReached)
 }
 
 // parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
@@ -754,7 +759,17 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 // one found before it spawned. sightedAt is the wall's sighting instant — the
 // pane's own observation time for the pair, the re-admission's freshest
 // matched-source instant for the committed twin.
-func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time) error {
+//
+// wasParked is the caller's own classification, not derived here: the send-path
+// pair passes false because a LimitReachedError out of the fresh runtime is
+// always a new sighting — the row it lands on may still be parked under the
+// resume fence by owner bookkeeping (ReparkLimitUnderResumeFence restores the
+// window the attempt entered with), and treating that bookkeeping marker as a
+// re-sight would let a stale proof retract a wall the NEW runtime just
+// reported (#6927 review). Only the committed twin passes lv ==
+// LiveLimitReached: its copy carries no new pane observation at all, so the
+// row's own parked marker is exactly the "same wall still standing" signal.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, wasParked bool) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -777,12 +792,7 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	// A refused retry re-parks on the wall that refused it — the parked
-	// re-sight recordAccountLimitObservationAtLocked already treats as a
-	// no-op, so the refusal must never advance the wall's event time. wasParked
-	// here means "still parked when this park landed", the same convention
-	// setLimitReachedLocked keeps (#6880).
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, lv == LiveLimitReached, sightedAt)
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, wasParked, sightedAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -832,5 +842,5 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence s
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC())
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence, instanceNow().UTC(), false)
 }

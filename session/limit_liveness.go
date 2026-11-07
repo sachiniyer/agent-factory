@@ -304,7 +304,8 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		if observation.Agent == agent && observation.Account == account &&
 			observation.ResetAt.IsZero() == resetAt.IsZero() {
 			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if wasParked && observation.ResetAt.Equal(retained) {
+			if wasParked && observation.ResetAt.Equal(retained) &&
+				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 				return
 			}
 			observation.ResetAt = retained
@@ -319,6 +320,22 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 	})
 	i.accountLimitObsUnpersisted = true
 	i.touchLocked()
+}
+
+// reSightCrossesSendAttemptLocked reports whether a parked re-sight of an
+// unchanged claim still earns its stamp: the pending swap's notice send is the
+// recency boundary pendingSwapIncomingWallLocked orders wall freshness against
+// (#6921), so the FIRST sighting landing after the attempt instant is a new
+// fact — the wall genuinely re-observed after the send — while later re-sights
+// of the unchanged claim add nothing and stay the no-op #6802 keeps. A row
+// with no pending send attempt has no boundary to cross. Caller holds i.mu.
+func (i *Instance) reSightCrossesSendAttemptLocked(stored, sighted time.Time) bool {
+	pending := i.pendingAccountSwap
+	if pending == nil || pending.MissionDeliveryAttemptAt.IsZero() ||
+		!sighted.After(pending.MissionDeliveryAttemptAt) {
+		return false
+	}
+	return !stored.After(pending.MissionDeliveryAttemptAt)
 }
 
 // RetainedAccountLimitReset merges two negative quota observations without
