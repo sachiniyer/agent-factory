@@ -473,6 +473,13 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	start := time.Now()
 	absentDeadline := start.Add(timeout)
 	settleDeadline := start.Add(timeout + codexSessionMetaSettleTimeout)
+	// extended latches the settle window once any poll has seen evidence in
+	// flight. A later "not this session's" observation — a candidate judged
+	// while the runtime's hold on it was not yet visible — must not shrink
+	// the bound back to absent: the hold can still appear, and capture owes
+	// the file the full settle window the undecided evidence already earned
+	// (#6938).
+	extended := false
 	for {
 		conv, retry, err := captureCodexConversationOnce(snap)
 		if conv.HasID() || !retry || timeout <= 0 {
@@ -482,8 +489,11 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 		// absence (#3266): the file already appeared inside the base window, so
 		// the extended bound only waits for Codex to finish writing a header
 		// that classification — unchanged and fail-closed — will then rule on.
-		deadline := absentDeadline
 		if errors.Is(err, errCodexCaptureUndecided) {
+			extended = true
+		}
+		deadline := absentDeadline
+		if extended {
 			deadline = settleDeadline
 		}
 		if time.Now().After(deadline) {

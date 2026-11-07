@@ -10,6 +10,7 @@ import (
 	"strings"
 	"sync"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
@@ -32,8 +33,8 @@ import (
 // own session — is provably foreign. Verdicts are memoized on the INSTANCE,
 // keyed to the resolved generation, because the deferred capture loop re-binds
 // a fresh attribution object on every attempt: state carried only on the
-// snapshot's channel would re-walk the process table forever for a sibling
-// that is never adopted.
+// snapshot's channel would re-walk the process table on every poll for a
+// sibling that is never adopted.
 //
 // inconclusive is reserved for "evidence exists but could not be read" — a
 // process table or descriptor set that failed mid-walk — which is the same
@@ -58,21 +59,48 @@ func (s *ConversationCaptureSnapshot) attributeCodexRollouts(candidates []string
 	return r.attribute(candidates)
 }
 
+// codexAttributionRejudgeInterval bounds how long a "the runtime does not
+// hold this rollout" verdict may stand before the candidate is judged again.
+// Held is a stable positive — Codex keeps its rollout descriptor for the
+// process's life — so a positive verdict is final. A negative verdict is
+// only "not held as of that walk": a rollout's header and the runtime's hold
+// on it do not become visible in lockstep (#6938), and a first-sight answer
+// that is never re-asked pins a not-yet verdict as forever-foreign for the
+// life of the generation's cache. Re-judging on a cadence far slower than
+// the 50ms poll keeps a genuinely-foreign sibling from re-walking the
+// process table on every tick while letting a late-visible hold still
+// attribute inside the capture's settle window. Var, not const, so tests
+// can shorten the re-judgement cadence.
+var codexAttributionRejudgeInterval = 250 * time.Millisecond
+
+// codexRolloutVerdict records one judged answer for a candidate path. ours
+// is the verdict; judgedAt is when the descriptor set it came from was read.
+// A positive verdict never expires — a rollout's owner is fixed at mint.
+type codexRolloutVerdict struct {
+	ours     bool
+	judgedAt time.Time
+}
+
 // judgeCodexRollouts partitions candidates into rollouts the held set
 // positively contains and those it provably does not, memoizing each path's
-// verdict so an already-judged sibling is never re-walked. heldFor — the
-// expensive descriptor enumeration — runs only while unjudged candidates
-// exist; its error makes the unjudged remainder inconclusive ("could not
-// look" must never arrive as "nobody holds it").
-func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts map[string]bool, mu *sync.Mutex, candidates []string) (attributed []string, inconclusive bool) {
+// verdict so an already-judged sibling is never re-walked — except a stale
+// negative, which is only "not held as of the last walk" and is re-asked
+// once it ages past codexAttributionRejudgeInterval (#6938). heldFor — the
+// expensive descriptor enumeration — runs only while unjudged or
+// re-judgeable candidates exist; its error makes the unjudged remainder
+// inconclusive ("could not look" must never arrive as "nobody holds it").
+func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts map[string]codexRolloutVerdict, mu *sync.Mutex, candidates []string) (attributed []string, inconclusive bool) {
+	now := time.Now()
 	mu.Lock()
 	var pending []string
 	for _, path := range candidates {
-		if v, ok := verdicts[path]; ok {
-			if v {
-				attributed = append(attributed, path)
-			}
-		} else {
+		v, ok := verdicts[path]
+		switch {
+		case !ok:
+			pending = append(pending, path)
+		case v.ours:
+			attributed = append(attributed, path)
+		case now.Sub(v.judgedAt) >= codexAttributionRejudgeInterval:
 			pending = append(pending, path)
 		}
 	}
@@ -89,7 +117,7 @@ func judgeCodexRollouts(heldFor func() (map[string]struct{}, error), verdicts ma
 	defer mu.Unlock()
 	for _, path := range pending {
 		ours := set.contains(path)
-		verdicts[path] = ours
+		verdicts[path] = codexRolloutVerdict{ours: ours, judgedAt: now}
 		if ours {
 			attributed = append(attributed, path)
 		}
@@ -209,12 +237,12 @@ func (i *Instance) attributeCodexRolloutPaths(candidates []string) (attributed [
 // resetting it when the live generation changed — a respawned pane's
 // rollouts must be judged against the new process set, never inherit its
 // predecessor's verdicts.
-func (i *Instance) verdictsForGen(gen string) map[string]bool {
+func (i *Instance) verdictsForGen(gen string) map[string]codexRolloutVerdict {
 	i.codexAttrMu.Lock()
 	defer i.codexAttrMu.Unlock()
 	if i.codexAttrGen != gen {
 		i.codexAttrGen = gen
-		i.codexAttrVerdicts = make(map[string]bool)
+		i.codexAttrVerdicts = make(map[string]codexRolloutVerdict)
 	}
 	return i.codexAttrVerdicts
 }
