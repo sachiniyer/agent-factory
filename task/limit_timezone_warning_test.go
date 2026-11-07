@@ -21,9 +21,10 @@ func TestClaudeResetTimezoneWarningDeduplicated(t *testing.T) {
 	now := time.Date(2026, 9, 7, 11, 0, 0, 0, time.FixedZone("daemon", -4*60*60))
 	banner := "Claude usage limit reached. Your limit will reset at 5pm (XYZ)"
 	for i := 0; i < 3; i++ {
-		reset, _, ok := parseClaudeReset("", banner, now)
-		if !ok || reset.Format(time.RFC3339) != "2026-09-07T21:00:00Z" {
-			t.Fatalf("parse %d: reset=%s parsed=%v", i, reset, ok)
+		// Every candidate fails to load, so the clause records no reset —
+		// the rejection still warns once per distinct key (#6975 review).
+		if _, _, ok := parseClaudeReset("", banner, now); ok {
+			t.Fatalf("parse %d: a rejected zone candidate must yield no reset", i)
 		}
 	}
 	if got := strings.Count(warnings.String(), "\n"); got != 1 {
@@ -102,8 +103,8 @@ func TestClaudeResetTimezoneWarningKey(t *testing.T) {
 		{"Claude usage limit reached. Changed banner. Your limit will reset at 5pm (ABC)", 3},
 	}
 	for _, tc := range cases {
-		if _, _, ok := parseClaudeReset("", tc.content, now); !ok {
-			t.Fatal("reset not parsed")
+		if _, _, ok := parseClaudeReset("", tc.content, now); ok {
+			t.Fatalf("a rejected zone candidate must yield no reset for %q", tc.content)
 		}
 		if got := strings.Count(warnings.String(), "\n"); got != tc.lines {
 			t.Fatalf("warning lines=%d; want %d for %q", got, tc.lines, tc.content)
@@ -135,12 +136,12 @@ func TestClaudeResetLimitTimezoneWarningRequiresClock(t *testing.T) {
 	}
 
 	// Keep the first line and rejected candidates identical, completing only the
-	// clock. The incomplete capture must not suppress this actual fallback.
+	// clock. The incomplete capture must not suppress this actual rejection.
 	warnings.Reset()
 	for i := 0; i < 2; i++ {
 		hit, reset, parsed, _ = detector.Check(banner+"Your limit will reset at 5pm (XYZ)", "claude", now)
-		if !hit || !parsed || reset.Format(time.RFC3339) != "2026-09-07T21:00:00Z" {
-			t.Fatalf("complete banner: hit=%v parsed=%v reset=%s", hit, parsed, reset)
+		if !hit || parsed || !reset.IsZero() {
+			t.Fatalf("a rejected zone yields no reset: hit=%v parsed=%v reset=%s", hit, parsed, reset)
 		}
 		if got := strings.Count(warnings.String(), "\n"); got != 1 {
 			t.Errorf("complete capture %d: got %d warnings; want 1", i, got)

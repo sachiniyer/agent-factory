@@ -66,7 +66,7 @@ func (m *Manager) resolveIdleLiveness(instance *session.Instance, content string
 		// also keep the record from fixing it.
 		authoritative := false
 		if agent == tmux.ProgramClaude {
-			if resetAt, ok := instance.ClaudeActiveLimitReset(nowFunc()); ok {
+			if resetAt, ok := instance.ClaudeActiveLimitReset(nowFunc(), s.BannerText); ok {
 				s.ResetAt, authoritative = resetAt, true
 			}
 		}

@@ -7,10 +7,12 @@ import (
 	"math"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/quota"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // This file is the structural half of #6944: when Claude's usage-limit banner
@@ -62,12 +64,34 @@ const claudeLimitTailBytes = 512 * 1024
 // the caller's clock: a refusal whose resetsAt already passed is a wall that
 // ended, not a wall (the same compare Claude itself applies before treating
 // a recorded limit as current).
-func (i *Instance) ClaudeActiveLimitReset(now time.Time) (time.Time, bool) {
+//
+// banner is the sighting's matched banner text (LimitSighting.BannerText) —
+// it names WHICH wall the pane shows. The reset must come from the refusal
+// the pane shows (#6975 review): when the session's conversation id is known
+// that narrows candidates to the session's own transcript file; otherwise
+// only a record whose display text carries the same banner can be the wall
+// (a sibling conversation's refusal for a DIFFERENT limit — a five_hour
+// record overriding a weekly wall — is never this wall's). When nothing
+// proves the candidate is the one on screen the pane parse stands instead.
+func (i *Instance) ClaudeActiveLimitReset(now time.Time, banner string) (time.Time, bool) {
 	configDir, dirs, err := i.ClaudeRunTranscriptDirs()
 	if err != nil {
 		return time.Time{}, false
 	}
-	claim, ok := i.newestClaudeLimitClaim(configDir, dirs)
+	convID := ""
+	if conv := i.AgentConversation(); conv.Agent == tmux.ProgramClaude && conv.ID != "" &&
+		claudeConversationFileRE.MatchString(conv.ID+".jsonl") {
+		// The conversation id IS the transcript's file name — and the regex
+		// confines it to uuid characters, so it can never escape the dir.
+		convID = conv.ID
+	}
+	banner = claudeLimitNormText(banner)
+	if convID == "" && banner == "" {
+		// No conversation identity and no banner text: nothing can prove a
+		// candidate is the wall on screen — the pane parse stands.
+		return time.Time{}, false
+	}
+	claim, ok := i.newestClaudeLimitClaim(configDir, dirs, convID, banner, now)
 	if !ok || claim.verdict != quota.ClaudeLimitParsed ||
 		claim.record.ResetsAt == nil || !claim.record.ResetsAt.After(now) {
 		return time.Time{}, false
@@ -87,19 +111,22 @@ type claudeLimitClaim struct {
 	sortAt time.Time
 }
 
-// claudeLimitScanEntry is the memoized claim for one transcript at one file
+// claudeLimitScanEntry is the memoized claims for one transcript at one file
 // fingerprint — the decode result for exactly the bytes (modTime, size)
 // describes, read under exactly that carried-prefix watermark. A file that
 // grew or changed since the memo re-scans; an unchanged file replays its
-// verdict without re-decoding its tail. The watermark is part of the key
+// claims without re-decoding its tail. The watermark is part of the key
 // because an account carry changes which bytes the scan may trust WITHOUT
 // touching the file — a carry landing between polls must re-scan (#6944
-// review).
+// review). Every refusal claim in the eligible region is kept, not just the
+// freshest: the caller's filters (a future record timestamp, a banner the
+// text must match) change per tick, so they apply at selection time rather
+// than being baked into the memo.
 type claudeLimitScanEntry struct {
 	modTime   time.Time
 	size      int64
 	watermark int64
-	claim     claudeLimitClaim
+	claims    []claudeLimitClaim
 }
 
 // claudeLimitSnapshot reads the durable carry bookkeeping: the first
@@ -129,13 +156,23 @@ func claudeLimitSnapshot() (handoff.Snapshot, error) {
 }
 
 // newestClaudeLimitClaim returns the freshest refusal claim across the
-// candidate transcript directories, memoizing each file's claim by
+// candidate transcript directories, memoizing each file's claims by
 // fingerprint so an unchanged pane tick does not re-read every tail.
 // configDir is the selected account's home — the key QuarantinedAccounts
 // carries: an account whose carry quarantine overflowed cannot name which
 // of its transcripts is poison, so NO record under it may prove a reset —
 // the same fail-closed rule internal/quotaobs applies (#6975 review).
-func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (claudeLimitClaim, bool) {
+//
+// convID, when known, narrows candidates to the session's own transcript
+// file — sibling conversations' refusals may be a different limit's wall
+// and are never this one's (#6975 review). When it is empty, only a record
+// whose display text carries banner (the pane's matched banner lead) can be
+// the wall on screen; a MALFORMED claim carries no readable text, so it is
+// never banner-gated — it keeps its "unproven freshest statement" shadow:
+// it supplies nothing itself, but outranks a matching older claim rather
+// than letting it stand. A record stamped in the future cannot describe the
+// live wall and is skipped outright.
+func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convID, banner string, now time.Time) (claudeLimitClaim, bool) {
 	snap, snapErr := claudeLimitSnapshot()
 	if snapErr == nil && configDir != "" && snap.AccountUntrusted(configDir) {
 		return claudeLimitClaim{}, false
@@ -154,6 +191,10 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (clau
 	if conv := i.AgentConversation(); conv.CaptureKind == ConversationCaptureCarried && conv.ID != "" {
 		carriedName = conv.ID + ".jsonl"
 	}
+	own := ""
+	if convID != "" {
+		own = convID + ".jsonl"
+	}
 	i.claudeLimitScanMu.Lock()
 	defer i.claudeLimitScanMu.Unlock()
 	cache := i.claudeLimitScan
@@ -169,6 +210,11 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (clau
 			continue
 		}
 		for _, transcript := range transcripts {
+			if own != "" && transcript.name != own {
+				// The known conversation names its file — siblings are out
+				// of scope; their refusals may be a different limit's wall.
+				continue
+			}
 			path := filepath.Join(dir, transcript.name)
 			entry, ok := cache[path]
 			info, err := os.Stat(path)
@@ -187,20 +233,29 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (clau
 			}
 			if !ok || !entry.modTime.Equal(info.ModTime()) || entry.size != info.Size() ||
 				entry.watermark != watermark {
-				claim, err := transcriptLimitClaim(path, info.ModTime(), watermark)
+				claims, err := transcriptLimitClaims(path, info.ModTime(), watermark)
 				if err != nil {
 					continue
 				}
 				entry = claudeLimitScanEntry{
-					modTime: info.ModTime(), size: info.Size(), watermark: watermark, claim: claim,
+					modTime: info.ModTime(), size: info.Size(), watermark: watermark, claims: claims,
 				}
 			}
 			live[path] = entry
-			if entry.claim.verdict == quota.ClaudeLimitAbsent {
-				continue
-			}
-			if !found || entry.claim.sortAt.After(best.sortAt) {
-				best, found = entry.claim, true
+			for _, claim := range entry.claims {
+				if claim.sortAt.After(now) {
+					// A record stamped in the future cannot describe the
+					// live wall — its claimed timestamp is not evidence
+					// (#6975 review).
+					continue
+				}
+				if own == "" && claim.verdict == quota.ClaudeLimitParsed &&
+					!claudeLimitTextMatches(claim.record.Text, banner) {
+					continue
+				}
+				if !found || claim.sortAt.After(best.sortAt) {
+					best, found = claim, true
+				}
 			}
 		}
 	}
@@ -208,22 +263,23 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string) (clau
 	return best, found
 }
 
-// transcriptLimitClaim reads the transcript's tail and returns its freshest
-// refusal claim by record timestamp, or the absent claim when the tail holds
-// none. mtime is the ordering fallback for a malformed claim whose own
+// transcriptLimitClaims reads the transcript's tail and returns EVERY
+// refusal claim it holds — the caller filters per tick (future stamps,
+// banner matching), so the memoized decode stays valid across filter
+// changes. mtime is the ordering fallback for a malformed claim whose own
 // timestamp is unreadable. The eligible region is [watermark, size): bytes
 // below the carried-prefix watermark are the SOURCE account's records — a
 // refusal recorded before the file carried cannot supply the new account's
 // reset.
-func transcriptLimitClaim(path string, mtime time.Time, watermark int64) (claudeLimitClaim, error) {
+func transcriptLimitClaims(path string, mtime time.Time, watermark int64) ([]claudeLimitClaim, error) {
 	f, err := os.Open(path)
 	if err != nil {
-		return claudeLimitClaim{}, err
+		return nil, err
 	}
 	defer f.Close()
 	info, err := f.Stat()
 	if err != nil {
-		return claudeLimitClaim{}, err
+		return nil, err
 	}
 	offset := int64(0)
 	if size := info.Size(); size > claudeLimitTailBytes {
@@ -233,14 +289,14 @@ func transcriptLimitClaim(path string, mtime time.Time, watermark int64) (claude
 		offset = watermark
 	}
 	if offset >= info.Size() {
-		return claudeLimitClaim{verdict: quota.ClaudeLimitAbsent}, nil
+		return nil, nil
 	}
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
-		return claudeLimitClaim{}, err
+		return nil, err
 	}
 	tail, err := io.ReadAll(f)
 	if err != nil {
-		return claudeLimitClaim{}, err
+		return nil, err
 	}
 	lines := bytes.Split(tail, []byte{'\n'})
 	if offset > 0 && offset != watermark {
@@ -251,7 +307,7 @@ func transcriptLimitClaim(path string, mtime time.Time, watermark int64) (claude
 		// and stays — the same rule internal/rateindex applies.
 		lines = lines[1:]
 	}
-	claim := claudeLimitClaim{verdict: quota.ClaudeLimitAbsent}
+	var claims []claudeLimitClaim
 	for _, raw := range lines {
 		line := bytes.TrimSpace(raw)
 		if len(line) == 0 {
@@ -270,11 +326,25 @@ func transcriptLimitClaim(path string, mtime time.Time, watermark int64) (claude
 		default:
 			continue
 		}
-		if claim.verdict == quota.ClaudeLimitAbsent || !sortAt.Before(claim.sortAt) {
-			claim = claudeLimitClaim{verdict: verdict, record: record, sortAt: sortAt}
-		}
+		claims = append(claims, claudeLimitClaim{verdict: verdict, record: record, sortAt: sortAt})
 	}
-	return claim, nil
+	return claims, nil
+}
+
+// claudeLimitNormText normalizes banner/record text for comparison: fold
+// the typographic apostrophe Claude's renderer emits ("’") to ASCII and
+// collapse all whitespace — a wrapped pane can break the matched banner
+// anywhere, and the record's display text carries its own spacing.
+func claudeLimitNormText(s string) string {
+	return strings.Join(strings.Fields(strings.ReplaceAll(s, "’", "'")), " ")
+}
+
+// claudeLimitTextMatches reports whether the record's display text carries
+// the pane's banner lead — the proof that the record is the refusal the
+// pane shows rather than a sibling conversation's wall for a different
+// limit (#6975 review).
+func claudeLimitTextMatches(recordText, banner string) bool {
+	return strings.Contains(claudeLimitNormText(recordText), banner)
 }
 
 // claudeClaimTimestamp extracts a transcript line's own timestamp to order a

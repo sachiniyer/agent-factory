@@ -600,9 +600,10 @@ func (t instanceReadinessTarget) RecordedLimitWallExpired(prefix string, count i
 // ClaudeActiveLimitReset forwards the session's structural reset source: the
 // refusal record in the session's own Claude transcript carries the wall's
 // instant in epoch seconds — authoritative over a pane parse that a wrapped
-// banner can derail (#6944).
-func (t instanceReadinessTarget) ClaudeActiveLimitReset(now time.Time) (time.Time, bool) {
-	return t.inst.ClaudeActiveLimitReset(now)
+// banner can derail (#6944). banner is the sighting's matched banner text;
+// it names which wall the pane shows.
+func (t instanceReadinessTarget) ClaudeActiveLimitReset(now time.Time, banner string) (time.Time, bool) {
+	return t.inst.ClaudeActiveLimitReset(now, banner)
 }
 
 type readinessClock struct {
@@ -883,7 +884,7 @@ func limitParkError(detector LimitDetector, content, agent string, target Readin
 		// across a source switch (#6959/#6960/#6972).
 		if agent == tmux.ProgramClaude {
 			if src, ok := target.(claudeLimitResetTarget); ok {
-				if resetAt, ok := src.ClaudeActiveLimitReset(now); ok {
+				if resetAt, ok := src.ClaudeActiveLimitReset(now, s.BannerText); ok {
 					err.ResetAt = resetAt
 				}
 			}
@@ -909,7 +910,7 @@ type recordedLimitWallTarget interface {
 // wrapped pane banner cannot derail. session.Instance implements it; bare
 // tmux targets have no transcript and simply do not — the pane parse stands.
 type claudeLimitResetTarget interface {
-	ClaudeActiveLimitReset(now time.Time) (time.Time, bool)
+	ClaudeActiveLimitReset(now time.Time, banner string) (time.Time, bool)
 }
 
 // expiredRecordedLimitWall reports whether err is a LimitReachedError whose

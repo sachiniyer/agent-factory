@@ -26,6 +26,16 @@ import (
 // writes (fabricated content — no real transcript data).
 func claudeLimitRecord(t *testing.T, timestamp string, resetsAt any) []byte {
 	t.Helper()
+	return claudeLimitRecordWith(t, timestamp,
+		"You've hit your 5-hour limit · resets 9:40am (America/Los_Angeles)",
+		"five_hour", resetsAt)
+}
+
+// claudeLimitRecordWith builds a refusal record carrying its own display text
+// and rateLimitType — the shape a two-conversation fixture needs when the
+// sibling's wall is a DIFFERENT limit than the session's (#6975 review).
+func claudeLimitRecordWith(t *testing.T, timestamp, text, rateLimitType string, resetsAt any) []byte {
+	t.Helper()
 	rec := map[string]any{
 		"type":      "assistant",
 		"timestamp": timestamp,
@@ -33,12 +43,12 @@ func claudeLimitRecord(t *testing.T, timestamp string, resetsAt any) []byte {
 			"model": "<synthetic>",
 			"role":  "assistant",
 			"content": []any{
-				map[string]any{"type": "text", "text": "You've hit your 5-hour limit · resets 9:40am (America/Los_Angeles)"},
+				map[string]any{"type": "text", "text": text},
 			},
 		},
 		"apiError": "usage_limit_reached",
 		"apiErrorParams": map[string]any{
-			"rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": "five_hour"},
+			"rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": rateLimitType},
 		},
 		"isApiErrorMessage": true,
 		"session_id":        "28e1b947-ba23-4588-988b-3c688b6f241c",
@@ -52,6 +62,11 @@ func claudeLimitRecord(t *testing.T, timestamp string, resetsAt any) []byte {
 	}
 	return line
 }
+
+// claudeFiveHourBanner is the detect-match lead for the fixture's 5-hour
+// record text — the banner the pane's LimitSighting carries when that wall
+// shows (#6975 review: only a record whose text carries it can be the wall).
+const claudeFiveHourBanner = "You've hit your 5-hour limit"
 
 // claudeLimitInstance returns a claude instance rooted at a temp worktree, and
 // the worktree path Claude encodes into its project directory name.
@@ -119,7 +134,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		configDir := claudeLimitConfigDir(t, home, "")
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
-		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.True(t, ok, "a current refusal record must supply the reset")
 		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
 	})
@@ -131,7 +146,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		configDir := claudeLimitConfigDir(t, home, "")
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, staleUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "an expired wall must not supply a reset")
 	})
 
@@ -144,7 +159,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix),
 			claudeLimitRecord(t, now.Add(-30*time.Second).UTC().Format(time.RFC3339), later.Unix()))
-		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.True(t, ok)
 		require.True(t, resetAt.Equal(later), "resetAt = %v, want the newest refusal's %v", resetAt, later)
 	})
@@ -157,7 +172,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, now.Add(-3*time.Hour).UTC().Format(time.RFC3339), futureUnix),
 			claudeLimitRecord(t, recorded, staleUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "the newest refusal says the wall already ended")
 	})
 
@@ -168,7 +183,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		configDir := claudeLimitConfigDir(t, home, "")
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, nil))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok)
 	})
 
@@ -180,7 +195,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		other := filepath.Join(testguard.CanonicalTempDir(t), "elsewhere")
 		writeClaudeTranscript(t, configDir, other, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "another worktree's transcript must not supply this session's wall")
 	})
 
@@ -196,7 +211,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		oldDir := filepath.Join(afHome, "accounts", "claude", "old")
 		writeClaudeTranscript(t, oldDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "the previous account's transcript must not supply the reset")
 	})
 
@@ -213,7 +228,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		writeClaudeTranscript(t, filepath.Join(afHome, "accounts", "claude", "new"), workDir,
 			"28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
-		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.True(t, ok)
 		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
 	})
@@ -239,7 +254,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.NoError(t, err)
 		store := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName))
 		require.NoError(t, store.RecordCarriedPrefix(path, info.Size()))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "carried bytes describe the swapped-away account's wall")
 
 		// The new account's own refusal lands past the mark and counts.
@@ -250,7 +265,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 			now.Add(-time.Second).UTC().Format(time.RFC3339), own.Unix()), '\n'))
 		require.NoError(t, err)
 		require.NoError(t, f.Close())
-		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.True(t, ok, "the current account's record past the watermark must count")
 		require.True(t, resetAt.Equal(own), "resetAt = %v, want %v", resetAt, own)
 	})
@@ -275,21 +290,17 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		}}
 		writeClaudeTranscript(t, configDir, workDir, carriedID,
 			claudeLimitRecord(t, recorded, futureUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "an unattributable carried file must supply no reset")
 
-		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
-			claudeLimitRecord(t, recorded, staleUnix))
-		_, ok = inst.ClaudeActiveLimitReset(now)
-		require.False(t, ok, "a stale claim in another file still supplies nothing")
-
-		other := now.Add(90 * time.Minute)
+		// The known conversation names its file: a sibling's transcript is
+		// out of scope even when the own file is poisoned — its records are
+		// never this wall's to claim (#6975 review).
 		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
 			claudeLimitRecord(t, recorded, staleUnix),
-			claudeLimitRecord(t, now.UTC().Format(time.RFC3339), other.Unix()))
-		resetAt, ok := inst.ClaudeActiveLimitReset(now)
-		require.True(t, ok, "the uncarried conversation's refusal must still count")
-		require.True(t, resetAt.Equal(other), "resetAt = %v, want %v", resetAt, other)
+			claudeLimitRecord(t, now.UTC().Format(time.RFC3339), now.Add(90*time.Minute).Unix()))
+		_, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "a sibling transcript can never prove the own conversation's wall")
 	})
 
 	t.Run("a quarantined account home supplies nothing", func(t *testing.T) {
@@ -320,7 +331,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.NoError(t, err)
 		require.NoError(t, os.WriteFile(filepath.Join(instances, handoff.RailsFileName), rails, 0o600))
 
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "a quarantined home cannot prove any reset")
 	})
 
@@ -332,20 +343,111 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		// A second conversation in the same worktree on the same account: the
 		// account's wall is shared, so the freshest refusal statement wins —
 		// here it says the wall already ended, superseding the older future
-		// reset in the other transcript.
+		// reset in the other transcript. Both records carry the 5-hour
+		// banner's text, so either is provably that wall (#6975 review).
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
 		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
 			claudeLimitRecord(t, now.Add(-10*time.Second).UTC().Format(time.RFC3339), staleUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok, "the freshest refusal statement says the wall ended")
+	})
+
+	t.Run("a sibling conversation's different limit can never override the wall", func(t *testing.T) {
+		// #6975 review (Captain's reproduction): the dir-level scan took the
+		// freshest refusal across ALL conversations, so a sibling's five_hour
+		// refusal — stamped later, resetting sooner — overrode the session's
+		// weekly wall and resumed the session five hours early. Two
+		// conversations, same account and worktree, different rateLimitTypes.
+		ownID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		siblingID := "11111111-2222-3333-4444-555555555555"
+		weeklyReset := now.Add(48 * time.Hour) // Monday — the real wall
+		siblingReset := now.Add(time.Hour)     // the sibling's 5-hour wall
+		weeklyText := "You've hit your weekly limit · resets Mon 9am (America/Los_Angeles)"
+
+		build := func(t *testing.T) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			// The session's own conversation: weekly limit, OLDER timestamp.
+			writeClaudeTranscript(t, configDir, workDir, ownID,
+				claudeLimitRecordWith(t, recorded, weeklyText, "opus", weeklyReset.Unix()))
+			// A sibling conversation's 5-hour refusal, stamped later.
+			writeClaudeTranscript(t, configDir, workDir, siblingID,
+				claudeLimitRecord(t, now.Add(-5*time.Second).UTC().Format(time.RFC3339), siblingReset.Unix()))
+			return inst
+		}
+
+		t.Run("the known conversation narrows the scan to its own file", func(t *testing.T) {
+			inst := build(t)
+			inst.Tabs = []*Tab{{
+				Name: agentTabName, Kind: TabKindAgent,
+				Conversation: AgentConversationData{Agent: "claude", ID: ownID},
+			}}
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"resetAt = %v; the sibling's sooner %v must never win", resetAt, siblingReset)
+		})
+
+		t.Run("the pane's banner names which wall a record can prove", func(t *testing.T) {
+			inst := build(t)
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your weekly limit")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"the weekly banner must take the weekly record's reset: got %v", resetAt)
+			resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(siblingReset),
+				"the 5-hour banner can take the sibling's record — same limit, same wall")
+		})
+
+		t.Run("a banner no record carries supplies nothing", func(t *testing.T) {
+			inst := build(t)
+			// The wait-UI banner carries no limit name, so no record is
+			// provably its wall — the pane parse stands instead.
+			_, ok := inst.ClaudeActiveLimitReset(now, "Usage limit reached")
+			require.False(t, ok)
+			_, ok = inst.ClaudeActiveLimitReset(now, "")
+			require.False(t, ok, "no conversation id and no banner: nothing can prove the wall")
+		})
+	})
+
+	t.Run("a record stamped in the future cannot describe the live wall", func(t *testing.T) {
+		// #6975 review: the freshest refusal must have been issued for the
+		// wall on screen — a record claiming a future timestamp did not
+		// happen yet and cannot speak for it.
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		earlier := now.Add(3 * time.Hour)
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, earlier.Unix()),
+			claudeLimitRecord(t, now.Add(30*time.Second).UTC().Format(time.RFC3339), futureUnix))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok)
+		require.True(t, resetAt.Equal(earlier),
+			"the future-stamped record is skipped; the older claim answers: got %v", resetAt)
+	})
+
+	t.Run("a file whose only claim is future-stamped supplies nothing", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, now.Add(30*time.Second).UTC().Format(time.RFC3339), futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok)
 	})
 
 	t.Run("no transcript supplies nothing", func(t *testing.T) {
 		inst, _ := claudeLimitInstance(t, "")
 		home := t.TempDir()
 		t.Setenv("HOME", home)
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok)
 	})
 
@@ -357,7 +459,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		configDir := claudeLimitConfigDir(t, home, "")
 		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 			claudeLimitRecord(t, recorded, futureUnix))
-		_, ok := inst.ClaudeActiveLimitReset(now)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 		require.False(t, ok)
 	})
 }
@@ -378,14 +480,14 @@ func TestClaudeLimitScanMemoization(t *testing.T) {
 	path := writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
 		claudeLimitRecord(t, recorded, future.Unix()))
 
-	resetAt, ok := inst.ClaudeActiveLimitReset(now)
+	resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 	require.True(t, ok)
 	require.True(t, resetAt.Equal(future))
 
 	// The fingerprint is unchanged, so the memo must serve the claim even
 	// with the file unreadable: a re-read would error and drop it.
 	require.NoError(t, os.Chmod(path, 0o000))
-	resetAt, ok = inst.ClaudeActiveLimitReset(now)
+	resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 	require.True(t, ok, "an unchanged transcript must replay its memoized claim")
 	require.True(t, resetAt.Equal(future))
 	require.NoError(t, os.Chmod(path, 0o600))
@@ -398,7 +500,7 @@ func TestClaudeLimitScanMemoization(t *testing.T) {
 	_, err = f.Write(append(claudeLimitRecord(t, now.Add(-10*time.Second).UTC().Format(time.RFC3339), later.Unix()), '\n'))
 	require.NoError(t, err)
 	require.NoError(t, f.Close())
-	resetAt, ok = inst.ClaudeActiveLimitReset(now)
+	resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
 	require.True(t, ok)
 	require.True(t, resetAt.Equal(later), "a changed transcript must re-scan to its newest claim")
 }

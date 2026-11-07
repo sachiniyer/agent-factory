@@ -19,29 +19,35 @@ func TestClaudeResetParenTimezone(t *testing.T) {
 	}
 	now := time.Date(2026, 9, 7, 11, 0, 0, 0, loc)
 	cases := []struct {
-		zones []string
-		want  string
-		warn  bool
+		zones  []string
+		want   string // empty when every candidate is rejected: no reset (#6975)
+		parsed bool
+		warn   bool
 	}{
-		{[]string{"UTC"}, "2026-09-07T17:00:00Z", false},
-		{[]string{"GMT"}, "2026-09-07T17:00:00Z", false},
-		{[]string{"Zulu"}, "2026-09-07T17:00:00Z", false},
-		{[]string{"Japan"}, "2026-09-08T08:00:00Z", false},
-		{[]string{"Israel"}, "2026-09-08T14:00:00Z", false},
-		{[]string{"Singapore"}, "2026-09-08T09:00:00Z", false},
-		{[]string{"Turkey"}, "2026-09-08T14:00:00Z", false},
-		{[]string{"EST"}, "2026-09-07T22:00:00Z", false},
-		{[]string{"America/New_York"}, "2026-09-07T21:00:00Z", false},
-		{[]string{"Etc/UTC"}, "2026-09-07T17:00:00Z", false},
-		{[]string{"Etc/GMT+5"}, "2026-09-07T22:00:00Z", false},
-		{[]string{"Etc/GMT-9"}, "2026-09-08T08:00:00Z", false},
-		{[]string{"XYZ"}, "2026-09-07T21:00:00Z", true},
-		{[]string{"weekly"}, "2026-09-07T21:00:00Z", true},
-		{[]string{"5h limit"}, "2026-09-07T21:00:00Z", true},
-		{[]string{"Pro", "America/Los_Angeles"}, "2026-09-08T00:00:00Z", false},
-		{[]string{"UTC", "extra"}, "2026-09-07T17:00:00Z", false},
-		{[]string{"Pro", "Team"}, "2026-09-07T21:00:00Z", true},
-		{nil, "2026-09-07T21:00:00Z", false},
+		{[]string{"UTC"}, "2026-09-07T17:00:00Z", true, false},
+		{[]string{"GMT"}, "2026-09-07T17:00:00Z", true, false},
+		{[]string{"Zulu"}, "2026-09-07T17:00:00Z", true, false},
+		{[]string{"Japan"}, "2026-09-08T08:00:00Z", true, false},
+		{[]string{"Israel"}, "2026-09-08T14:00:00Z", true, false},
+		{[]string{"Singapore"}, "2026-09-08T09:00:00Z", true, false},
+		{[]string{"Turkey"}, "2026-09-08T14:00:00Z", true, false},
+		{[]string{"EST"}, "2026-09-07T22:00:00Z", true, false},
+		{[]string{"America/New_York"}, "2026-09-07T21:00:00Z", true, false},
+		{[]string{"Etc/UTC"}, "2026-09-07T17:00:00Z", true, false},
+		{[]string{"Etc/GMT+5"}, "2026-09-07T22:00:00Z", true, false},
+		{[]string{"Etc/GMT-9"}, "2026-09-08T08:00:00Z", true, false},
+		// Every candidate fails to load: the banner named a zone the parse
+		// cannot prove, so the clause records NO reset — never the host
+		// zone's guess (#6975 review: it once resumed five hours early).
+		{[]string{"XYZ"}, "", false, true},
+		{[]string{"weekly"}, "", false, true},
+		{[]string{"5h limit"}, "", false, true},
+		// Claude's real "(plan) (zone)" run: the plan name is not a zone,
+		// but the adjacent zone candidate still loads.
+		{[]string{"Pro", "America/Los_Angeles"}, "2026-09-08T00:00:00Z", true, false},
+		{[]string{"UTC", "extra"}, "2026-09-07T17:00:00Z", true, false},
+		{[]string{"Pro", "Team"}, "", false, true},
+		{nil, "2026-09-07T21:00:00Z", true, false},
 	}
 	for _, tc := range cases {
 		t.Run(strings.Join(tc.zones, ","), func(t *testing.T) {
@@ -54,12 +60,12 @@ func TestClaudeResetParenTimezone(t *testing.T) {
 				banner += " (" + zone + ")"
 			}
 			hit, reset, parsed, _ := NewLimitDetector(nil).Check(banner, tmux.ProgramClaude, now)
-			if !hit || !parsed || reset.Format(time.RFC3339) != tc.want {
-				t.Errorf("hit=%v parsed=%v reset=%s; want %s", hit, parsed, reset.Format(time.RFC3339), tc.want)
+			if !hit || parsed != tc.parsed || (tc.parsed && reset.Format(time.RFC3339) != tc.want) {
+				t.Errorf("hit=%v parsed=%v reset=%s; want parsed=%v reset=%s", hit, parsed, reset.Format(time.RFC3339), tc.parsed, tc.want)
 			}
 			if tc.warn {
-				if strings.Count(warnings.String(), "\n") != 1 || !strings.Contains(warnings.String(), banner) || !strings.Contains(warnings.String(), loc.String()) {
-					t.Errorf("want one warning naming banner and fallback zone; got %q", warnings.String())
+				if strings.Count(warnings.String(), "\n") != 1 || !strings.Contains(warnings.String(), banner) {
+					t.Errorf("want one warning naming the banner; got %q", warnings.String())
 				}
 				if !strings.Contains(warnings.String(), fmt.Sprintf("timezone candidates %q", tc.zones)) {
 					t.Errorf("warning must list all rejected candidates: %s", &warnings)

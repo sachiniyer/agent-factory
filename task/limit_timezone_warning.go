@@ -4,7 +4,6 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -38,12 +37,12 @@ func (c *timezoneWarningCache) first(key string) bool {
 	return true
 }
 
-func warnClaudeTimezoneOnce(content string, rejected []string, loc *time.Location) {
+func warnClaudeTimezoneOnce(content string, rejected []string) {
 	banner, _, _ := strings.Cut(content, "\n")
 	// Quote both fields to preserve exact text and candidate boundaries without
 	// collisions from delimiters that may themselves appear in the banner.
 	key := fmt.Sprintf("%q %q", rejected, banner)
 	if claudeTimezoneWarnings.first(key) {
-		log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone candidates %q; falling back to daemon zone %q", banner, rejected, loc.String())
+		log.WarningLog.Printf("Claude usage-limit banner %q: cannot load timezone candidates %q; recording no reset time", banner, rejected)
 	}
 }

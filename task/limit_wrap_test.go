@@ -70,25 +70,6 @@ func TestClaudeResetWrappedBanner(t *testing.T) {
 			wantEv:  "reset Mon day at 9am (America/New_York).",
 		},
 		{
-			// A genuine hard-split: the zone token exceeds the 13-column
-			// region and fills its row mid-token. Nothing in the geometry
-			// proves the split (a complete word can fill its row exactly),
-			// so the boundary keeps its space, the fused candidate
-			// "(America/New_ York)" fails to load, and the clock resolves in
-			// the injected clock's zone — the same bounded answer a
-			// paren-less banner produces, never a minted token.
-			name: "tz token hard-splits inside the paren on a very narrow pane",
-			content: "  ⎿  Claude usage\n" +
-				"     limit\n" +
-				"     reached. Your\n" +
-				"     limit will\n" +
-				"     reset at 2pm\n" +
-				"     (America/New_\n" +
-				"     York).",
-			want:   time.Date(2026, 1, 2, 14, 0, 0, 0, now.Location()).UTC(), // 2pm host zone
-			wantEv: "reset at 2pm (America/New_ York).",
-		},
-		{
 			// The banner's own name split across continuation rows: detection
 			// itself must span the wraps before the clause is ever reached.
 			name: "banner name split across continuation rows still detects",
@@ -205,6 +186,8 @@ func TestClaudeResetClauseEndsAtContinuationIndent(t *testing.T) {
 	twoPmHere := time.Date(2026, 1, 2, 14, 0, 0, 0, now.Location()).UTC()
 	sevenPmHere := time.Date(2026, 1, 2, 19, 0, 0, 0, now.Location()).UTC()
 	twoPmNY := time.Date(2026, 1, 2, 14, 0, 0, 0, est).UTC()
+	// now is 10:00 UTC, so a bare 9:40am mints tomorrow's occurrence.
+	nineFortyHere := time.Date(2026, 1, 3, 9, 40, 0, 0, now.Location()).UTC()
 
 	cases := []struct {
 		name      string
@@ -283,6 +266,46 @@ func TestClaudeResetClauseEndsAtContinuationIndent(t *testing.T) {
 				"(America/Los_Angeles)",
 			wantReset: &sevenPmHere,
 			wantEv:    "reset at 7pm",
+		},
+		{
+			// A genuine hard-split: the zone token exceeds the 13-column
+			// region and fills its row mid-token. Nothing in the geometry
+			// proves the split (a complete word can fill its row exactly),
+			// so the boundary keeps its space and the fused candidate
+			// "(America/New_ York)" fails to load. A rejected zone yields
+			// NO reset — never the host zone the clause cannot prove
+			// (#6975 review: host-zone fallback once resumed a session
+			// five hours early).
+			name: "tz token hard-splits inside the paren on a very narrow pane",
+			content: "  ⎿  Claude usage\n" +
+				"     limit\n" +
+				"     reached. Your\n" +
+				"     limit will\n" +
+				"     reset at 2pm\n" +
+				"     (America/New_\n" +
+				"     York).",
+			wantReset: nil,
+		},
+		{
+			// #6975 review: a following sentence in the SAME banner message
+			// rides the same continuation indent — with no closing period,
+			// punctuation cannot bound the clause. The clause's own grammar
+			// (clock, then an optional adjacent zone) ends it instead: the
+			// second sentence's weekday and zone are never this wall's.
+			name: "a same-indent second sentence's weekday and zone stay outside",
+			content: "  ⎿  You've hit your 5-hour limit · resets 9:40am\n" +
+				"     Your weekly wall also resets Mon 9am (Europe/Berlin)",
+			wantReset: &nineFortyHere,
+			wantEv:    "resets 9:40am",
+		},
+		{
+			// Captain's example: a banner without a trailing period must
+			// not absorb a following tip row's parenthesized zone.
+			name: "a same-indent tip row's parenthesized zone stays outside",
+			content: "  ⎿  You've hit your 5-hour limit · resets 9:40am\n" +
+				"     Tip: the Berlin office resets in (Europe/Berlin)",
+			wantReset: &nineFortyHere,
+			wantEv:    "resets 9:40am",
 		},
 	}
 

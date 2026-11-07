@@ -235,6 +235,13 @@ type LimitSighting struct {
 	// legitimately hold several (a retry trips the limit again before the
 	// first banner scrolls off); more than were recorded means a newer banner.
 	BannerCount int
+	// BannerText is the whitespace-normalized text of the LAST banner match —
+	// the lead the detector anchored on ("You've hit your 5-hour limit"). It
+	// names WHICH wall the pane shows, which is what lets a transcript
+	// refusal record prove it is the same wall's: a record whose own text
+	// does not carry the banner names a different limit's wall and can never
+	// supply this one's reset (#6975 review).
+	BannerText string
 }
 
 // NewLimitDetector builds a detector from per-agent detect-pattern overrides
@@ -309,7 +316,14 @@ func isLimitSighting(content, agent string, matchers map[string]agentLimitMatche
 		return LimitSighting{}
 	}
 	last := matches[len(matches)-1]
-	s := LimitSighting{Hit: true, BannerPrefix: content[:last[0]], BannerCount: len(matches)}
+	s := LimitSighting{
+		Hit:          true,
+		BannerPrefix: content[:last[0]],
+		BannerCount:  len(matches),
+		// The match can span a wrap inside the banner's own words; normalize
+		// so the sighting carries the lead's text, not its layout.
+		BannerText: strings.Join(strings.Fields(xansi.Strip(content[last[0]:last[1]])), " "),
+	}
 	if matcher.parseReset == nil {
 		return s
 	}
@@ -407,9 +421,13 @@ func claudeResetClause(rowLead, content string) (evidence, tail string) {
 	if m == nil {
 		return "", ""
 	}
-	end := claudeClauseEnd(joined[m[2]:])
+	tail = joined[m[2]:]
+	end := claudeClauseEnd(tail)
+	if g := claudeResetTailEnd(tail); g < end {
+		end = g
+	}
 	return strings.Join(strings.Fields(joined[m[0]:m[2]+end]), " "),
-		strings.TrimSpace(joined[m[2] : m[2]+end])
+		strings.TrimSpace(tail[:end])
 }
 
 // joinClaudeBannerRows rejoins the screen rows of ONE wrapped banner line into
@@ -432,9 +450,9 @@ func claudeResetClause(rowLead, content string) (evidence, tail string) {
 // tokens the clause never carried — "resets9:40am" loses the reset outright.
 // Every boundary therefore keeps its space. The cost is the genuine
 // hard-split — the paren zone is the only banner token ever wider than a
-// narrow region — which rejoins spaced; its candidate then fails to load and
-// the clause resolves in the injected clock's zone, the same bounded answer
-// every paren-less banner already produces. Never a fabrication.
+// narrow region — which rejoins spaced; its candidate then fails to load
+// and the clause records NO reset rather than resolving in a guessed host
+// zone (#6975 review). Never a fabrication.
 func joinClaudeBannerRows(rowLead, content string) string {
 	lead := xansi.Strip(rowLead)
 	indent := utf8.RuneCountInString(lead)
@@ -496,6 +514,45 @@ func claudeClauseEnd(tail string) int {
 	return len(tail)
 }
 
+// claudeResetTailEnd bounds the reset clause's tail at its own grammar: the
+// first 12-hour clock token, an optional RUN of following parenthesized
+// spans (Claude renders "(Pro) (America/New_York)" — plan then zone — so a
+// second adjacent paren is still the clause's own), and an optional
+// sentence-ending period. Anything beyond is text the banner's sentence
+// cannot contain — a following sentence in the same message rides the same
+// continuation indent and, when the banner carries no closing period, has
+// no punctuation boundary to stop it: a tip row's "(Europe/Berlin)" or a
+// later clause's "resets Mon 9am" would otherwise supply this wall's zone
+// or weekday (#6975 review). An unclosed paren keeps the rest — it is
+// adjacent to the clock but proves nothing, so the bound stays open rather
+// than guessing where it ends.
+func claudeResetTailEnd(tail string) int {
+	m := clockTime.FindStringIndex(tail)
+	if m == nil {
+		return len(tail)
+	}
+	end := m[1]
+	for {
+		i := end
+		for i < len(tail) && (tail[i] == ' ' || tail[i] == '\t') {
+			i++
+		}
+		if i >= len(tail) || tail[i] != '(' {
+			break
+		}
+		j := strings.IndexByte(tail[i:], ')')
+		if j < 0 {
+			return len(tail)
+		}
+		end = i + j + 1
+	}
+	if end < len(tail) && tail[end] == '.' &&
+		(end+1 == len(tail) || tail[end+1] == ' ' || tail[end+1] == '\t') {
+		end++
+	}
+	return end
+}
+
 // cutLine returns the first line and the remainder of s, splitting at the
 // first newline.
 func cutLine(s string) (line, rest string) {
@@ -507,10 +564,13 @@ func cutLine(s string) (line, rest string) {
 
 // parseClaudeReset scans the banner's rejoined line for Claude's "reset[s]
 // [at] <tail>" clause and resolves the tail, in order: an optional timezone in
-// parens (falling back to now's location when absent or invalid — Claude
-// renders in the account tz, which we cannot know without the paren, so the
-// injected clock's zone is the deterministic stand-in), a required 12-hour
-// clock time, and an optional calendar date or weekday (the weekly variant).
+// parens (falling back to now's location when ABSENT — Claude renders in the
+// account tz, which we cannot know without the paren, so the injected clock's
+// zone is the deterministic stand-in — while a candidate that fails to load
+// is a REJECTED zone: the banner named a zone the parse cannot prove, so the
+// clause yields no reset rather than resolving the clock in a guessed host
+// zone — #6975 review), a required 12-hour clock time, and an optional
+// calendar date or weekday (the weekly variant).
 // Without any date it mints the next occurrence of that clock time strictly
 // after now. The returned evidence is the whitespace-normalized clause itself
 // — "reset at 2pm (…)" — identical whenever the banner is re-read unchanged,
@@ -539,7 +599,14 @@ func parseClaudeReset(rowLead, content string, now time.Time) (time.Time, string
 		return time.Time{}, "", false
 	}
 	if len(rejected) > 0 && len(rejected) == len(candidates) {
-		warnClaudeTimezoneOnce(content, rejected, loc)
+		// The banner carried a parenthesized zone and every candidate failed
+		// to load — a hard-split rejoins spaced ("(America/New_ York)"), an
+		// unknown name is unknown, and neither can prove the zone the banner
+		// named. The wall records no reset rather than a host-zone guess
+		// (#6975 review: a rejected zone candidate resolving in the host
+		// zone resumed one session five hours early).
+		warnClaudeTimezoneOnce(content, rejected)
+		return time.Time{}, "", false
 	}
 
 	// Scan the reset clause with the parenthesized timezone spans blanked out:

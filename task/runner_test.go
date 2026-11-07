@@ -805,6 +805,7 @@ type limitResetStubTarget struct {
 	resetAt   time.Time
 	hasReset  bool
 	consulted bool
+	banner    string
 }
 
 func (s *limitResetStubTarget) ResolvedAgent() string { return s.agent }
@@ -815,8 +816,9 @@ func (s *limitResetStubTarget) PreviewContent(context.Context) (string, error) {
 
 func (s *limitResetStubTarget) HooksDone() <-chan struct{} { return nil }
 
-func (s *limitResetStubTarget) ClaudeActiveLimitReset(time.Time) (time.Time, bool) {
+func (s *limitResetStubTarget) ClaudeActiveLimitReset(_ time.Time, banner string) (time.Time, bool) {
 	s.consulted = true
+	s.banner = banner
 	return s.resetAt, s.hasReset
 }
 
@@ -851,6 +853,9 @@ func TestWaitForReadyParksOnTranscriptReset(t *testing.T) {
 		}
 		if !target.consulted {
 			t.Fatal("a claude wall must consult the transcript source")
+		}
+		if target.banner != "Claude usage limit reached." {
+			t.Fatalf("the consult must carry the pane's matched banner, got %q", target.banner)
 		}
 		if !limitErr.ResetAt.Equal(transcriptReset) {
 			t.Fatalf("ResetAt = %v, want the transcript's %v", limitErr.ResetAt, transcriptReset)
