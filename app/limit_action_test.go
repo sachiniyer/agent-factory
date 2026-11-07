@@ -314,6 +314,76 @@ func TestHandleLimitRetry_ManualSwapAtLimitOffersHonestRetrySendLabel(t *testing
 	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
 }
 
+// TestHandleLimitRetry_AutomaticSwapAtLimitOffersHonestRetrySendLabel is the
+// #6800 regression: an AUTOMATIC account swap parked at its usage-limit wall
+// with an ambiguous notice verdict routes through the same ResumeFromLimit
+// fork whose daemon re-submits the committed notice
+// (resumeFromLimitLockedOutcome → deliverAutomaticAccountNotice →
+// SendPromptWithEvidence). The row's restart IS a resend — but on master the
+// retry classification only admits manual swaps and agent handoffs, so Row 0
+// falls to "Resume from limit — the pending mission is not resent", a false
+// promise. The picker must instead label Row 0 "Retry send" — the honest
+// resend — exactly like the manual-swap arm.
+func TestHandleLimitRetry_AutomaticSwapAtLimitOffersHonestRetrySendLabel(t *testing.T) {
+	h := newTestHome(t)
+	base, err := session.NewInstance(session.InstanceOptions{
+		Title: "worker", Path: t.TempDir(), Program: "test",
+	})
+	require.NoError(t, err)
+	data := base.ToInstanceData()
+	data.Status = session.Running
+	data.Liveness = session.LiveLimitReached
+	data.LimitResetAt = time.Now().Add(time.Hour)
+	data.Worktree = session.GitWorktreeData{
+		RepoPath: data.Path, WorktreePath: data.Path, SessionName: data.Title, ExternalWorktree: true,
+	}
+	data.Account = "personal"
+	data.PendingAccountSwap = &session.AccountSwapData{
+		Manual: false, From: "work", To: "personal", ReplacementPanesStarted: true,
+		MissionDeliveryStatus:    session.PromptCouldNotConfirm,
+		MissionDeliveryAttemptAt: time.Now().Add(-time.Minute),
+	}
+	inst, err := session.FromInstanceData(data)
+	require.NoError(t, err)
+	inst.SetBackend(session.NewFakeBackend())
+	h.store.AddInstance(inst)
+	h.sidebar.SetSelectedInstance(0)
+
+	require.True(t, inst.LimitReached(), "fixture: the row is parked at its usage-limit wall")
+	require.True(t, inst.PendingAccountSwapDeliveryUnconfirmed(),
+		"fixture: the notice verdict is ambiguous")
+	require.True(t, inst.CanConfirmPendingAccountSwapDelivery(),
+		"fixture: the row is confirmable, so the resolve picker opens")
+
+	var gotRequest daemon.ResumeFromLimitRequest
+	restore := SetLimitResumerForTest(func(request daemon.ResumeFromLimitRequest) error {
+		gotRequest = request
+		return nil
+	})
+	defer restore()
+
+	_, cmd := h.handleLimitRetry()
+	require.Nil(t, cmd, "a confirmable row opens the resolve picker rather than dispatching")
+	require.Equal(t, stateSelectHandoffResolve, h.state)
+	require.NotNil(t, h.selectionOverlay)
+	require.Equal(t, []handoffResolveAction{handoffResolveResend, handoffResolveConfirm},
+		h.handoffResolve.actions, "Row 0 is the resume/resend and Row 1 is the confirm")
+	rendered := ansi.Strip(h.selectionOverlay.Render())
+	require.Contains(t, rendered, "Retry send",
+		"the automatic swap's resume re-submits the committed notice — Row 0 must be labelled honestly as a resend")
+	require.NotContains(t, rendered, "Resume from limit",
+		"the no-resend label must not appear on a row whose daemon resends the notice")
+	require.NotContains(t, rendered, "not resent",
+		"the false \"pending mission is not resent\" promise must not appear for a row whose daemon resends")
+
+	_, cmd = h.handleStateSelectHandoffResolve(tea.KeyMsg{Type: tea.KeyEnter})
+	require.NotNil(t, cmd, "Row 0 dispatches the resume (the resend) against the captured identity")
+	done, ok := cmd().(limitRetriedMsg)
+	require.True(t, ok)
+	require.NoError(t, done.err)
+	require.Equal(t, daemon.ResumeFromLimitRequest{ID: inst.ID, Title: inst.Title, RepoID: h.repoID}, gotRequest)
+}
+
 func TestHandleLimitRetry_StartupUnknownAccountHandoffDoesNotDispatch(t *testing.T) {
 	h := newTestHome(t)
 	base, err := session.NewInstance(session.InstanceOptions{
