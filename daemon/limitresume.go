@@ -267,16 +267,19 @@ func (m *Manager) resumeLimitedSession(
 	}
 	defer opLock.Unlock()
 	// Limit/account recovery reaches the same LocalBackend respawn choke point as
-	// Lost recovery and can rebuild a missing worktree. The poll must never wait
-	// for create's potentially unbounded worktree operation: skip while admission
-	// is held, before recording an attempt, and retry on a later tick.
+	// Lost recovery and can rebuild a missing worktree. The shared resume body
+	// now takes this admission itself, held only around that rebuild — holding
+	// it across the whole pass would sit it LEFT of the start lock its own
+	// persists take, the inversion #6198 forbids (#6880). The TryLock here keeps
+	// the poll's documented shape instead: skip a contended repo BEFORE
+	// recording an attempt, so a create's admission never burns this session's
+	// backoff step. It releases at once; the bounded or TryLock'd acquisition
+	// that actually guards the respawn happens inside the body.
 	worktreeAdmission, acquired := m.tryLocalWorktreeAdmission(repoID, inst)
 	if !acquired {
 		return
 	}
-	if worktreeAdmission != nil {
-		defer worktreeAdmission.Unlock()
-	}
+	unlockWorktreeAdmission(worktreeAdmission)
 
 	// Re-verify under the lock: a kill may have torn the session down, a
 	// self-recovery or the manual retry may have cleared the limit, or the map
