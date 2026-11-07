@@ -1,6 +1,7 @@
 package config
 
 import (
+	"sort"
 	"strings"
 
 	"github.com/pelletier/go-toml/v2"
@@ -456,6 +457,107 @@ func deleteTOMLInlineTableMember(line, section, leaf string) (string, bool) {
 		body = body[:members[target-1].trimEnd] + body[member.trimEnd:]
 	}
 	return line[:start] + body + line[end:], true
+}
+
+// removeTOMLRootAgentsEntries excises the given paths from the legacy
+// [root_agents] map, in every spelling TOML gives one map member:
+// `[root_agents.'<path>']` table headers (with their bodies and deeper
+// sub-tables), `'<path>' = {…}` or `'<path>'.leaf = …` leaves under a bare
+// [root_agents] header, `root_agents.'<path>'…` dotted root keys, and members
+// of a single-line `root_agents = {…}` inline map. The [root_agents] header
+// itself and entries not named stay. It returns the updated content and which
+// of the requested paths were actually removed — a member the decoded shape
+// carries but no spelling can be found for is reported false rather than
+// claimed.
+func removeTOMLRootAgentsEntries(content string, paths map[string]bool) (string, map[string]bool, error) {
+	removed := make(map[string]bool, len(paths))
+	if len(paths) == 0 {
+		return content, removed, nil
+	}
+
+	// The inline-map spelling is a single root assignment, so its members are
+	// edited inside the line rather than excised as ranges.
+	lines := strings.Split(content, "\n")
+	for i, line := range lines {
+		if _, _, ok := tomlInlineTableBody(line, LegacyRootAgentsKey); !ok {
+			continue
+		}
+		for path := range paths {
+			if removed[path] {
+				continue
+			}
+			if updated, ok := deleteTOMLInlineTableMember(line, LegacyRootAgentsKey, path); ok {
+				line = updated
+				removed[path] = true
+			}
+		}
+		lines[i] = line
+	}
+	data := []byte(strings.Join(lines, "\n"))
+
+	type tableBlock struct {
+		start  int
+		target bool
+		path   string
+	}
+	var (
+		parser       unstable.Parser
+		currentTable []string
+		currentBlock *tableBlock
+		ranges       []byteRange
+	)
+	parser.Reset(data)
+	for parser.NextExpression() {
+		expr := parser.Expression()
+		parts, firstKeyOffset := tomlExpressionKey(expr)
+		switch expr.Kind {
+		case unstable.Table, unstable.ArrayTable:
+			start, _ := wholeLineRange(data, firstKeyOffset, firstKeyOffset)
+			if currentBlock != nil && currentBlock.target {
+				end := leadingTableCommentStart(data, start, currentBlock.start)
+				ranges = append(ranges, byteRange{start: currentBlock.start, end: end})
+				removed[currentBlock.path] = true
+			}
+			isTarget := len(parts) >= 2 && parts[0] == LegacyRootAgentsKey && paths[parts[1]]
+			blockStart := start
+			if isTarget && currentBlock != nil {
+				blockStart = leadingTableCommentStart(data, start, currentBlock.start)
+			}
+			currentTable = parts
+			currentBlock = &tableBlock{start: blockStart, target: isTarget}
+			if isTarget {
+				currentBlock.path = parts[1]
+			}
+		case unstable.KeyValue:
+			target := ""
+			switch {
+			case len(currentTable) == 1 && currentTable[0] == LegacyRootAgentsKey && len(parts) >= 1 && paths[parts[0]]:
+				// `'<path>' = {…}` or `'<path>'.leaf = …` under [root_agents].
+				target = parts[0]
+			case len(currentTable) == 0 && len(parts) >= 2 && parts[0] == LegacyRootAgentsKey && paths[parts[1]]:
+				// `root_agents.'<path>' = {…}` or `root_agents.'<path>'.leaf = …`.
+				target = parts[1]
+			}
+			if target != "" && !removed[target] {
+				raw := expr.Raw
+				start, end := wholeLineRange(data, int(raw.Offset), int(raw.Offset+raw.Length))
+				ranges = append(ranges, byteRange{start: start, end: end})
+				removed[target] = true
+			}
+		}
+	}
+	if err := parser.Error(); err != nil {
+		return "", nil, err
+	}
+	if currentBlock != nil && currentBlock.target {
+		ranges = append(ranges, byteRange{start: currentBlock.start, end: len(data)})
+		removed[currentBlock.path] = true
+	}
+	sort.Slice(ranges, func(i, j int) bool { return ranges[i].start > ranges[j].start })
+	for _, r := range ranges {
+		data = append(data[:r.start], data[r.end:]...)
+	}
+	return string(data), removed, nil
 }
 
 // tomlRootScalarRawValue returns the value text of a root-block `leaf = …`

@@ -964,16 +964,23 @@ converted to config.toml on the way in, exactly as any af start would convert it
 
 Running it twice is safe: the second run finds nothing to migrate.
 
-Two things it will not do:
+root_agents is migrated entry by entry, not as one key. Every entry whose
+path is already a registered project moves into that project's personal
+[root_agent]: the leaves the effective profile needs (an empty entry means
+enabled, plus an optional program) are written when the project's own profile
+does not already produce the identical result, and the legacy entry is
+dropped. The resolved profile is compared before and after, so a project that
+was enabled stays enabled and one that was disabled stays disabled. Entries
+for paths that are not registered projects are reported and left exactly
+where they are — registering a project is durable state this file's migration
+does not get to invent — and so is any entry that cannot be proven safe to
+move, with the cause named beside it.
+
+One thing it will not do:
 
   A key written in BOTH spellings with different values is refused, naming the
   key. af has a documented winner at load time — the grouped value — but no
   migration should make that tie-break permanent on your behalf.
-
-  root_agents is reported and left exactly where it is. Its successor is a
-  registered project's personal [root_agent], so migrating it would mean
-  registering projects for you: durable state outside this file. The keys that
-  can move still move.
 
 Local-only: it rewrites the file on the machine it runs on, so
 --daemon-url/AF_DAEMON_URL is refused rather than ignored. Run it on the daemon

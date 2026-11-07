@@ -236,7 +236,7 @@ program = 'codex'
 	require.Len(t, result.Migrated, 2, "the migratable keys still migrate")
 	require.Len(t, result.Left, 1)
 	assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
-	assert.Equal(t, "register the path as a project, set enabled = true plus the optional program in its personal [root_agent], then remove its root_agents entry", result.Left[0].Step)
+	assert.Equal(t, legacyRootAgentsManualStep, result.Left[0].Step)
 	assert.Equal(t, []string{"/home/me/one", "/home/me/two"}, result.Left[0].Detail,
 		"each legacy path is named, sorted, so the reader need not open the file")
 
