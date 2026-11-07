@@ -403,7 +403,7 @@ func TestParseProcNetTCP(t *testing.T) {
 func TestProcTablesForAlwaysBothFamilies(t *testing.T) {
 	// Even a specific v4 request contends with a dual-stack [::] socket, and
 	// that socket is visible only in tcp6 — both tables are always read.
-	for _, addr := range []string{"127.0.0.1:8443", "0.0.0.0:8443", "::1:8443", ":8443"} {
+	for _, addr := range []string{"127.0.0.1:8443", "0.0.0.0:8443", "[::1]:8443", ":8443"} {
 		require.ElementsMatch(t, []string{"tcp", "tcp6"}, procTablesFor(reqFor(t, addr)))
 	}
 }
