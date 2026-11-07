@@ -89,6 +89,15 @@ test("the Mermaid renderer is its own frame document, outside the shell and the 
   assert.ok(!docs.includes("dagre"), "the Docs bundle must not bundle the Mermaid library");
   const html = readFileSync(frameDoc, "utf8");
   assert.ok(html.includes("dagre"), "the Mermaid library must live in the frame document");
+  // #6943: every byte in the frame document is parsed on every page load, so
+  // the vendored ELK layout engine (elkjs — af pins layout to dagre and a
+  // doc that asks for elk gets dagre) and the KaTeX package ($$ labels get
+  // their TeX source from the stub) are resolved out of the bundle. The
+  // org.eclipse.elk namespace marks elkjs internals; renderToString is the
+  // only KaTeX API the label pipeline calls.
+  assert.ok(!html.includes("org.eclipse.elk"), "the ELK layout engine must not be in the frame document");
+  assert.ok(!html.includes("KaTeX parse error"), "the KaTeX package must not be in the frame document");
+  assert.ok(!html.includes("katex-html"), "KaTeX's rendered-markup classes must not be in the frame document");
   assert.ok(!html.includes("nonce="), "the script element carries no nonce — the CSP authorizes it by sha256");
   // The sidecar is what the daemon's script-src names: the sha256 of the
   // script ELEMENT's text, recomputed here from the file — never trusted from
