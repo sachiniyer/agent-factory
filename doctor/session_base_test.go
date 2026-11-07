@@ -951,3 +951,36 @@ func TestCheckAgentPrograms_AbsDotDotLinkTarget_DoesNotShadow(t *testing.T) {
 	require.Equal(t, StatusPass, row.Status,
 		"the committed link dangles through '..' on the host too — installed/claude wins everywhere")
 }
+
+// A committed dir-link whose target carries significant whitespace points at
+// the whitespace path verbatim: `tools -> " realbin"` resolves through a
+// directory literally named " realbin", not "realbin". When that path only
+// exists untracked (so tools/claude resolves locally), the probe must still
+// report the committed link dangling rather than following trimmed bytes.
+func TestCheckAgentPrograms_WhitespaceLinkTarget_PreservesBytes(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "realbin/claude")
+	require.NoError(t, os.Symlink(" realbin", filepath.Join(repo, "tools")))
+	commitRepoFile(t, repo, "tools")
+	// Untracked " realbin/claude" makes tools/claude runnable locally only —
+	// the session worktree's link dangles.
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, " realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, " realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	command := "tools/claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"the committed link targets ' realbin' verbatim and dangles in the session worktree")
+	require.NotContains(t, row.Detail, "could not verify",
+		"the dangling verdict is proven, not merely unverifiable")
+}

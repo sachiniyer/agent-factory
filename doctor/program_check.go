@@ -442,15 +442,16 @@ func treeEntryMode(workspace, ref, rel string) (mode string, found bool, ok bool
 	return "", false, true
 }
 
-// readTreeLink returns a committed symlink's stored target — the blob's tiny
-// content — under GIT_NO_LAZY_FETCH, so a blob:none-filtered object answers
-// "unreadable" rather than promisor-fetching it.
+// readTreeLink returns a committed symlink's stored target — the blob's exact
+// bytes, untrimmed, since significant whitespace changes where the link points —
+// under GIT_NO_LAZY_FETCH, so a blob:none-filtered object answers "unreadable"
+// rather than promisor-fetching it.
 func readTreeLink(workspace, ref, rel string) (string, bool) {
 	out, err := gitTreeRead(workspace, "cat-file", "-p", ref+":"+rel)
 	if err != nil {
 		return "", false
 	}
-	return strings.TrimSpace(string(out)), true
+	return string(out), true
 }
 
 // treeLinkDepth bounds chained symlink resolution through the tree — each hop
