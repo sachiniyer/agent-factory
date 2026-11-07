@@ -4,10 +4,12 @@ import (
 	"bytes"
 	"encoding/json"
 	"io"
+	"math"
 	"os"
 	"path/filepath"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/quota"
 )
 
@@ -31,6 +33,13 @@ import (
 //     nothing — "unknown" — rather than a guessed instant, and a stale or
 //     reset-less freshest claim supplies nothing rather than resurrecting an
 //     older wall.
+//   - Directory scoping cannot attribute records inside a CARRIED file: an
+//     account swap copies the conversation transcript wholesale into the new
+//     account's home, so the first carried-prefix bytes are the swapped-away
+//     account's records. The durable watermark the carry writes
+//     (handoff.State.CarriedPrefixes, merged with the unrecorded-carry
+//     quarantine) bounds each file's eligible region — a claim below it is
+//     the source account's wall and is skipped (#6944 review).
 //
 // Cost: the poll consults this on every unchanged-pane tick while a banner
 // shows, and the sweep is serial — so per-file claims are memoized on the
@@ -77,18 +86,61 @@ type claudeLimitClaim struct {
 
 // claudeLimitScanEntry is the memoized claim for one transcript at one file
 // fingerprint — the decode result for exactly the bytes (modTime, size)
-// describes. A file that grew or changed since the memo re-scans; an
-// unchanged file replays its verdict without re-decoding its tail.
+// describes, read under exactly that carried-prefix watermark. A file that
+// grew or changed since the memo re-scans; an unchanged file replays its
+// verdict without re-decoding its tail. The watermark is part of the key
+// because an account carry changes which bytes the scan may trust WITHOUT
+// touching the file — a carry landing between polls must re-scan (#6944
+// review).
 type claudeLimitScanEntry struct {
-	modTime time.Time
-	size    int64
-	claim   claudeLimitClaim
+	modTime   time.Time
+	size      int64
+	watermark int64
+	claim     claudeLimitClaim
+}
+
+// claudeLimitCarriedPrefixes reads the durable carried-prefix watermarks:
+// the first watermark bytes of a carried transcript are the SOURCE
+// account's records, not the current account's — an account swap carries
+// the conversation file wholesale, so directory scoping alone cannot
+// attribute the records (#6944 review). A missing store is an empty map; a
+// corrupt one fails closed — the scan cannot prove record provenance, so
+// every file reads as fully carried rather than one carried byte leaking
+// through.
+func claudeLimitCarriedPrefixes() (map[string]int64, error) {
+	store, err := handoff.DefaultStore()
+	if err != nil {
+		return nil, err
+	}
+	railsStore, err := handoff.DefaultRailsStore()
+	if err != nil {
+		return nil, err
+	}
+	snap, stateErr, railsErr := handoff.LoadSnapshot(store, railsStore)
+	if stateErr != nil {
+		return nil, stateErr
+	}
+	if railsErr != nil {
+		return nil, railsErr
+	}
+	return snap.EffectiveCarriedPrefixes(), nil
 }
 
 // newestClaudeLimitClaim returns the freshest refusal claim across the
 // candidate transcript directories, memoizing each file's claim by
 // fingerprint so an unchanged pane tick does not re-read every tail.
 func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool) {
+	prefixes, prefixesErr := claudeLimitCarriedPrefixes()
+	// A carry that predates Claude watermarks left no durable boundary at
+	// all — but the session row durably marks the conversation it carries
+	// (ConversationCaptureCarried). Its transcript file cannot attribute
+	// ANY record to either account: below the unknown boundary is the
+	// source's refusal, above it the target's appends — with no mark the
+	// two are indistinguishable, so the whole file reads as carried.
+	carriedName := ""
+	if conv := i.AgentConversation(); conv.CaptureKind == ConversationCaptureCarried && conv.ID != "" {
+		carriedName = conv.ID + ".jsonl"
+	}
 	i.claudeLimitScanMu.Lock()
 	defer i.claudeLimitScanMu.Unlock()
 	cache := i.claudeLimitScan
@@ -110,12 +162,25 @@ func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool
 			if err != nil {
 				continue
 			}
-			if !ok || !entry.modTime.Equal(info.ModTime()) || entry.size != info.Size() {
-				claim, err := transcriptLimitClaim(path, info.ModTime())
+			// A failed watermark load reads as "everything is carried
+			// poison": the file may still hold the source account's
+			// refusal, so no byte in it can prove a reset.
+			watermark := int64(math.MaxInt64)
+			if prefixesErr == nil {
+				watermark = prefixes[filepath.Clean(path)]
+				if watermark == 0 && carriedName != "" && filepath.Base(path) == carriedName {
+					watermark = math.MaxInt64
+				}
+			}
+			if !ok || !entry.modTime.Equal(info.ModTime()) || entry.size != info.Size() ||
+				entry.watermark != watermark {
+				claim, err := transcriptLimitClaim(path, info.ModTime(), watermark)
 				if err != nil {
 					continue
 				}
-				entry = claudeLimitScanEntry{modTime: info.ModTime(), size: info.Size(), claim: claim}
+				entry = claudeLimitScanEntry{
+					modTime: info.ModTime(), size: info.Size(), watermark: watermark, claim: claim,
+				}
 			}
 			live[path] = entry
 			if entry.claim.verdict == quota.ClaudeLimitAbsent {
@@ -133,8 +198,11 @@ func (i *Instance) newestClaudeLimitClaim(dirs []string) (claudeLimitClaim, bool
 // transcriptLimitClaim reads the transcript's tail and returns its freshest
 // refusal claim by record timestamp, or the absent claim when the tail holds
 // none. mtime is the ordering fallback for a malformed claim whose own
-// timestamp is unreadable.
-func transcriptLimitClaim(path string, mtime time.Time) (claudeLimitClaim, error) {
+// timestamp is unreadable. The eligible region is [watermark, size): bytes
+// below the carried-prefix watermark are the SOURCE account's records — a
+// refusal recorded before the file carried cannot supply the new account's
+// reset.
+func transcriptLimitClaim(path string, mtime time.Time, watermark int64) (claudeLimitClaim, error) {
 	f, err := os.Open(path)
 	if err != nil {
 		return claudeLimitClaim{}, err
@@ -148,6 +216,12 @@ func transcriptLimitClaim(path string, mtime time.Time) (claudeLimitClaim, error
 	if size := info.Size(); size > claudeLimitTailBytes {
 		offset = size - claudeLimitTailBytes
 	}
+	if watermark > offset {
+		offset = watermark
+	}
+	if offset >= info.Size() {
+		return claudeLimitClaim{verdict: quota.ClaudeLimitAbsent}, nil
+	}
 	if _, err = f.Seek(offset, io.SeekStart); err != nil {
 		return claudeLimitClaim{}, err
 	}
@@ -156,8 +230,12 @@ func transcriptLimitClaim(path string, mtime time.Time) (claudeLimitClaim, error
 		return claudeLimitClaim{}, err
 	}
 	lines := bytes.Split(tail, []byte{'\n'})
-	if offset > 0 {
-		// The window opened mid-line: the first fragment is not a record.
+	if offset > 0 && offset != watermark {
+		// A window opening mid-file begins inside a line — the first
+		// fragment is not a record start and is dropped. Opening exactly
+		// AT the watermark is different: the watermark is a record
+		// boundary by contract, so the first line IS a complete record
+		// and stays — the same rule internal/rateindex applies.
 		lines = lines[1:]
 	}
 	claim := claudeLimitClaim{verdict: quota.ClaudeLimitAbsent}

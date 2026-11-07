@@ -7,6 +7,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/stretchr/testify/require"
@@ -217,6 +218,80 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
 	})
 
+	t.Run("a carried transcript's covered prefix is the source account's", func(t *testing.T) {
+		// An account swap copies the conversation transcript wholesale
+		// into the NEW account's home (#6944 review): its first covered
+		// bytes are the swapped-away account's records, and only the
+		// durable carried-prefix watermark tells them apart — directory
+		// scoping alone would adopt the old account's wall. The new
+		// account's own appends past the mark still count.
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		path := writeClaudeTranscript(t, configDir, workDir,
+			"28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+
+		// The carry's watermark covers every byte the copy installed.
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		store := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName))
+		require.NoError(t, store.RecordCarriedPrefix(path, info.Size()))
+		_, ok := inst.ClaudeActiveLimitReset(now)
+		require.False(t, ok, "carried bytes describe the swapped-away account's wall")
+
+		// The new account's own refusal lands past the mark and counts.
+		own := now.Add(3 * time.Hour)
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = f.Write(append(claudeLimitRecord(t,
+			now.Add(-time.Second).UTC().Format(time.RFC3339), own.Unix()), '\n'))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		require.True(t, ok, "the current account's record past the watermark must count")
+		require.True(t, resetAt.Equal(own), "resetAt = %v, want %v", resetAt, own)
+	})
+
+	t.Run("a carried conversation without a watermark supplies nothing", func(t *testing.T) {
+		// A carry that predates Claude watermarks left no durable
+		// boundary — but the session row still marks the conversation
+		// carried. Its records cannot be attributed to either account,
+		// so the file is skipped entirely; a DIFFERENT conversation's
+		// transcript in the same project still counts.
+		carriedID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		inst.Tabs = []*Tab{{
+			Name: agentTabName, Kind: TabKindAgent,
+			Conversation: AgentConversationData{
+				Agent: "claude", ID: carriedID, CaptureKind: ConversationCaptureCarried,
+			},
+		}}
+		writeClaudeTranscript(t, configDir, workDir, carriedID,
+			claudeLimitRecord(t, recorded, futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now)
+		require.False(t, ok, "an unattributable carried file must supply no reset")
+
+		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+			claudeLimitRecord(t, recorded, staleUnix))
+		_, ok = inst.ClaudeActiveLimitReset(now)
+		require.False(t, ok, "a stale claim in another file still supplies nothing")
+
+		other := now.Add(90 * time.Minute)
+		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+			claudeLimitRecord(t, recorded, staleUnix),
+			claudeLimitRecord(t, now.UTC().Format(time.RFC3339), other.Unix()))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now)
+		require.True(t, ok, "the uncarried conversation's refusal must still count")
+		require.True(t, resetAt.Equal(other), "resetAt = %v, want %v", resetAt, other)
+	})
+
 	t.Run("the newest refusal across the project's transcripts answers for the wall", func(t *testing.T) {
 		inst, workDir := claudeLimitInstance(t, "")
 		home := t.TempDir()
@@ -345,5 +420,23 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
 		reset, _ := i.LimitResetAt()
 		require.True(t, reset.Equal(transcriptReset))
+	})
+
+	t.Run("the durable account observation takes the correction too", func(t *testing.T) {
+		// #6975 review: a pane guess LATER than the record's instant must
+		// not survive in the account ledger — RetainedAccountLimitReset
+		// keeps the later bound, which would leave the account excluded
+		// past the wall's real end and gate retraction on a deadline the
+		// provider's record disproved.
+		latePane := transcriptReset.Add(24 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.Equal(t, "named", observations[0].Account)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must hold the record's instant, not the disproved pane bound: got %v",
+			observations[0].ResetAt)
 	})
 }

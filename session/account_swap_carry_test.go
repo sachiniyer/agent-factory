@@ -978,9 +978,11 @@ func TestConversationCarryDiscardsTheDisplacementBackupOnCommit(t *testing.T) {
 	require.Len(t, entries, 1, "a committed carry removes the displaced backup")
 }
 
-// Only codex leaves usage claims in its store — a claude carry commits no
-// watermark.
-func TestConversationCarrySkipsTheWatermarkForClaude(t *testing.T) {
+// Claude transcripts carry usage_limit_reached records a limit reader can
+// mistake for the target account's own — a claude carry leaves the same
+// carried-prefix watermark a codex carry does, so the copied bytes stay the
+// SOURCE account's evidence (#6944 review).
+func TestConversationCarryRecordsTheCarriedPrefixForClaude(t *testing.T) {
 	afHome := t.TempDir()
 	srcHome := t.TempDir()
 	dstDir := filepath.Join(afHome, "accounts", "claude", "work")
@@ -997,8 +999,10 @@ func TestConversationCarrySkipsTheWatermarkForClaude(t *testing.T) {
 	}
 	require.NoError(t, carry.copy())
 	require.FileExists(t, filepath.Join(dstDir, carryTestRel))
-	require.NoFileExists(t, filepath.Join(afHome, "instances", handoff.StateFileName),
-		"no usage claims live in a claude transcript — nothing to quarantine")
+	prefixes, err := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName)).CarriedPrefixes()
+	require.NoError(t, err)
+	require.Equal(t, int64(len("turn one\n")), prefixes[filepath.Join(dstDir, carryTestRel)],
+		"the copied transcript bytes are the source account's records")
 }
 
 // #6817 review: the shadow engine's require_carry fact must be admission's

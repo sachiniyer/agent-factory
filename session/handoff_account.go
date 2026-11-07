@@ -866,7 +866,7 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, wasParked, sightedAt)
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, wasParked, false, sightedAt)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
