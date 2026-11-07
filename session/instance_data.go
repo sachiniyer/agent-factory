@@ -531,6 +531,8 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		limitAccount:             limitAccount,
 		limitBannerPrefix:        data.LimitBannerPrefix,
 		limitBannerCount:         data.LimitBannerCount,
+		limitWallRuntimePID:      data.LimitWallRuntimePID,
+		limitWallRuntimeStartID:  data.LimitWallRuntimeStartID,
 		lastLimitWall:            limitWallClaimFromData(data.LastLimitWall),
 		accountLimitObservations: accountLimitObservations,
 		agentModelChange:         agentModelChangeForLiveness(data.ModelChange, liveness),

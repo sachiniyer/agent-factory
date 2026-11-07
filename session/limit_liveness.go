@@ -5,6 +5,7 @@ import (
 	"slices"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 )
@@ -43,6 +44,15 @@ type limitWallClaim struct {
 	resetAt  time.Time
 	evidence string
 	banner   LimitBanner
+	// runtimePID and runtimeStartID pin the claim to the concrete pane-root
+	// process the wall was sighted on — the same durable launch evidence
+	// runtimePID/runtimeStartID record for the launch itself. A sighting
+	// judged against a claim from a replaced process is a different
+	// emission, never residue. Zero means the recording runtime could not
+	// be pinned (a remote or adopted runtime): the check falls back to the
+	// position/phrase reads alone.
+	runtimePID     int
+	runtimeStartID uint64
 }
 
 // limitWallClaimsLocked is the row's recorded wall knowledge: the live claim
@@ -55,7 +65,8 @@ func (i *Instance) limitWallClaimsLocked() [2]limitWallClaim {
 		live = limitWallClaim{
 			agent: i.limitAgent, account: i.limitAccount,
 			resetAt: i.limitResetAt, evidence: i.limitResetEvidence,
-			banner: LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+			banner:     LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+			runtimePID: i.limitWallRuntimePID, runtimeStartID: i.limitWallRuntimeStartID,
 		}
 	}
 	return [2]limitWallClaim{live, i.lastLimitWall}
@@ -83,8 +94,27 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 		if c.agent != agent || c.account != i.Account {
 			continue
 		}
-		anchored := sameLimitBannerPosition(c.banner.Prefix, banner.Prefix) &&
-			!(c.banner.Count > 0 && banner.Count > c.banner.Count)
+		// The residue reads below prove the pane still displays the emission
+		// the claim recorded — impossible once the concrete process that
+		// displayed it is gone: a re-launched or handoff-replaced runtime
+		// showing the same phrase at the same position is a NEW emission
+		// that happens to resemble the old one, whatever the anchor says
+		// (the A→B→A case — #6959 review). A claim or row without a pinned
+		// process cannot distinguish runtimes and stays on the reads below.
+		if !i.limitWallRuntimeCurrentLocked(c.runtimePID, c.runtimeStartID) {
+			continue
+		}
+		if c.banner.Count > 0 && banner.Count > c.banner.Count {
+			// More banner matches than the recorded sighting counted: a
+			// banner printed BELOW the recorded one — a genuinely new wall.
+			// The count is positional evidence independent of the anchor,
+			// so it rejects the anchorless phrase fallback too: a recorded
+			// banner at byte zero legitimately carries an empty prefix, and
+			// a second emission re-using its phrase would otherwise read as
+			// residue (#6959 review).
+			continue
+		}
+		anchored := sameLimitBannerPosition(c.banner.Prefix, banner.Prefix)
 		if !anchored && !(c.banner.Prefix == "" && evidence != "" && evidence == c.evidence) {
 			continue
 		}
@@ -98,6 +128,19 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 	return false
 }
 
+// limitWallRuntimeCurrentLocked reports whether a wall claim's recorded
+// pane-root process can still be the process up now. Both pinned and
+// different proves a replacement — the pane the claim describes is gone and
+// no sighting can be that emission's re-read. Either side unpinned (a remote
+// or adopted runtime, a claim recorded before the pin existed) cannot
+// distinguish the processes and stays admissible. Caller holds i.mu.
+func (i *Instance) limitWallRuntimeCurrentLocked(pid int, startID uint64) bool {
+	if pid == 0 || i.runtimePID == 0 {
+		return true
+	}
+	return pid == i.runtimePID && startID == i.runtimeStartID
+}
+
 // limitWallPrefixPersistMax bounds the anchor tail serialized beside a wall
 // claim. The position compare consumes only the bytes immediately above the
 // banner, so a few screenfuls back is all the stale-read decision needs; the
@@ -106,12 +149,19 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 const limitWallPrefixPersistMax = 2048
 
 // limitWallPrefixTail bounds a serialized banner anchor to its trailing bytes
-// — the end nearest the banner, which is what the position compare reads.
+// — the end nearest the banner, which is what the position compare reads. The
+// cut lands on a rune boundary: a mid-rune slice survives JSON as U+FFFD, and
+// the repaired bytes would never suffix-match the unchanged pane again — a
+// restart would then read the recorded wall's own re-parse as fresh evidence.
 func limitWallPrefixTail(prefix string) string {
 	if len(prefix) <= limitWallPrefixPersistMax {
 		return prefix
 	}
-	return prefix[len(prefix)-limitWallPrefixPersistMax:]
+	start := len(prefix) - limitWallPrefixPersistMax
+	for start < len(prefix) && !utf8.RuneStart(prefix[start]) {
+		start++
+	}
+	return prefix[start:]
 }
 
 // limitWallClaimToData and limitWallClaimFromData convert the "last wall"
@@ -125,6 +175,7 @@ func limitWallClaimToData(w limitWallClaim) LimitWallClaimData {
 		Agent: w.agent, Account: w.account, ResetAt: w.resetAt,
 		Evidence:     w.evidence,
 		BannerPrefix: limitWallPrefixTail(w.banner.Prefix), BannerCount: w.banner.Count,
+		RuntimePID: w.runtimePID, RuntimeStartID: w.runtimeStartID,
 	}
 }
 
@@ -134,8 +185,9 @@ func limitWallClaimFromData(d *LimitWallClaimData) limitWallClaim {
 	}
 	return limitWallClaim{
 		agent: d.Agent, account: d.Account, resetAt: d.ResetAt,
-		evidence: d.Evidence,
-		banner:   LimitBanner{Prefix: d.BannerPrefix, Count: d.BannerCount},
+		evidence:   d.Evidence,
+		banner:     LimitBanner{Prefix: d.BannerPrefix, Count: d.BannerCount},
+		runtimePID: d.RuntimePID, runtimeStartID: d.RuntimeStartID,
 	}
 }
 
@@ -152,6 +204,8 @@ func (i *Instance) limitClaimsIntoData(data *InstanceData) {
 		data.LimitAccount = i.limitAccount
 		data.LimitBannerPrefix = limitWallPrefixTail(i.limitBannerPrefix)
 		data.LimitBannerCount = i.limitBannerCount
+		data.LimitWallRuntimePID = i.limitWallRuntimePID
+		data.LimitWallRuntimeStartID = i.limitWallRuntimeStartID
 	}
 	if wall := limitWallClaimToData(i.lastLimitWall); !wall.IsZero() {
 		data.LastLimitWall = &wall
@@ -168,7 +222,8 @@ func (i *Instance) hydrateLimitWallShadowOnRestore() {
 		i.lastLimitWall = limitWallClaim{
 			agent: i.limitAgent, account: i.limitAccount,
 			resetAt: i.limitResetAt, evidence: i.limitResetEvidence,
-			banner: LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+			banner:     LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount},
+			runtimePID: i.limitWallRuntimePID, runtimeStartID: i.limitWallRuntimeStartID,
 		}
 	}
 }
@@ -402,6 +457,10 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	i.limitResetEvidence = evidence
 	i.limitBannerPrefix = banner.Prefix
 	i.limitBannerCount = banner.Count
+	// The wall was sighted on the runtime currently up: pin the claim to it
+	// so a sighting judged after a replacement cannot pass as its re-read.
+	i.limitWallRuntimePID = i.runtimePID
+	i.limitWallRuntimeStartID = i.runtimeStartID
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
 	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, instanceNow().UTC())
@@ -413,14 +472,18 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 // as the row's last parked wall — the shadow a cleared row's re-park consults
 // before believing a re-parse minted a new reset (#6959). It always mirrors
 // what the row actually parked on: the RESOLVED claim, never the raw
-// re-parse. Caller holds i.mu.
+// re-parse. The runtime pin rides from the live fields so a re-mint that only
+// restores a prior claim (ReparkLimitUnderResumeFence, SetLimitResetAt) keeps
+// the process the wall was sighted on, not the one up at re-mint time.
+// Caller holds i.mu.
 func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner) {
 	i.lastLimitWall = limitWallClaim{
-		agent:    agent,
-		account:  i.Account,
-		resetAt:  resetAt,
-		evidence: evidence,
-		banner:   banner,
+		agent:      agent,
+		account:    i.Account,
+		resetAt:    resetAt,
+		evidence:   evidence,
+		banner:     banner,
+		runtimePID: i.limitWallRuntimePID, runtimeStartID: i.limitWallRuntimeStartID,
 	}
 }
 
@@ -485,10 +548,12 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 	}
 	if parked && i.limitAgent == agent && i.limitAccount == i.Account &&
 		evidence != "" && evidence == i.limitResetEvidence &&
+		i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID) &&
 		!ordSightedAt.After(i.accountLimitObservedAtLocked(agent, resetAt)) {
 		return i.limitResetAt, i.limitResetEvidence
 	}
 	if w := i.lastLimitWall; w.agent == agent && w.account == i.Account &&
+		i.limitWallRuntimeCurrentLocked(w.runtimePID, w.runtimeStartID) &&
 		sameLimitBannerPosition(w.banner.Prefix, banner.Prefix) &&
 		!(w.banner.Count > 0 && banner.Count > w.banner.Count) {
 		switch {
@@ -744,6 +809,12 @@ func (i *Instance) ReparkLimitUnderResumeFence(resetAt time.Time) error {
 	// The reset is the one the owner read off this row when it began the
 	// attempt — the stored evidence still describes it, so the slot stays.
 	i.limitResetAt = resetAt
+	// The repark restores the wall's own claim — including the runtime it
+	// was sighted on, which only the shadow still holds after the respawn's
+	// clear — so a coincidentally matching banner on the replacement
+	// runtime cannot pass as its re-read (#6959 review).
+	i.limitWallRuntimePID = i.lastLimitWall.runtimePID
+	i.limitWallRuntimeStartID = i.lastLimitWall.runtimeStartID
 	i.noteLimitWallClaimLocked(i.limitAgent, resetAt, i.limitResetEvidence,
 		LimitBanner{Prefix: i.limitBannerPrefix, Count: i.limitBannerCount})
 	i.noteStateChangeLocked(lv, op, prevReset)
@@ -792,6 +863,8 @@ func (i *Instance) ClearLimitReached() {
 	i.limitAccount = ""
 	i.limitBannerPrefix = ""
 	i.limitBannerCount = 0
+	i.limitWallRuntimePID = 0
+	i.limitWallRuntimeStartID = 0
 	// The epoch bump here is what a racing poll checks: it is the resume's
 	// completion point, so any limit re-detection made from content captured before
 	// it is stale by definition and must not land (#2135).

@@ -839,6 +839,11 @@ func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time,
 	i.limitResetEvidence = evidence
 	i.limitBannerPrefix = banner.Prefix
 	i.limitBannerCount = banner.Count
+	// The wall was sighted on the runtime currently up: pin the claim to it
+	// so a sighting judged after a replacement cannot pass as its re-read
+	// (#6959 review).
+	i.limitWallRuntimePID = i.runtimePID
+	i.limitWallRuntimeStartID = i.runtimeStartID
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
 	// Readiness found the incoming identity's wall before mission submission,

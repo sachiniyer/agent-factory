@@ -310,20 +310,29 @@ type Instance struct {
 	// sighting's is what proves "the same banner is still the last match" (its
 	// position ends the capture the same way) versus "a banner now sits below
 	// the recorded reset clause or pushes the count past what was recorded"
-	// (a new wall). Memory-only: it names a position inside a captured pane,
-	// meaningless after a restart — and the re-load path re-parks from a fresh
-	// poll sighting anyway.
+	// (a new wall). Persisted beside the rest of the live claim: a restart
+	// that dropped the anchor would read the recorded wall's own re-parse
+	// as fresh evidence and roll the reset forward again (#6959 review).
 	limitBannerPrefix string
 	limitBannerCount  int
+	// limitWallRuntimePID and limitWallRuntimeStartID pin the live wall
+	// claim to the concrete pane-root process it was sighted on — the same
+	// durable launch evidence runtimePID/runtimeStartID hold for the launch
+	// itself (#6959 review). A residue check judged against a claim from a
+	// replaced process must fail: the pane the claim describes is gone, so
+	// a sighting that matches its anchor is a different emission that
+	// happens to resemble it, never that emission's re-read.
+	limitWallRuntimePID     int
+	limitWallRuntimeStartID uint64
 	// lastLimitWall is the claim the live wall fields last recorded — kept
 	// after ClearLimitReached retires them (#6959). A retry's re-parse of the
 	// banner still on the pane resolves a clock-relative phrase against the
 	// later clock and would otherwise mint a rolled-forward reset the parked
 	// claim can no longer veto; the shadow is what proves the re-read is the
 	// wall the row already recorded (same identity, same anchor, compatible
-	// phrase) rather than a new fact. Memory-only, like the live anchor: it
-	// names a position inside a captured pane, meaningless after a restart —
-	// named identities still have the durable ledger for that boundary.
+	// phrase) rather than a new fact. Persisted as LastLimitWall: a daemon
+	// restart must not turn the recorded wall's own re-parse into fresh
+	// evidence and roll the reset the first fix pinned.
 	lastLimitWall limitWallClaim
 	// accountLimitObservations keep named identity walls after liveness clears.
 	accountLimitObservations []AccountLimitObservationData

@@ -178,6 +178,13 @@ type LimitWallClaimData struct {
 	// full capture the in-memory sighting carried.
 	BannerPrefix string `json:"banner_prefix,omitempty"`
 	BannerCount  int    `json:"banner_count,omitempty"`
+	// RuntimePID and RuntimeStartID pin the claim to the concrete pane-root
+	// process the wall was sighted on — the same launch evidence the row's
+	// RuntimePID/RuntimeStartID carry for the launch itself. A residue check
+	// judged against a claim from a replaced process must fail: the pane it
+	// describes is gone, so a matching sighting is a different emission.
+	RuntimePID     int    `json:"runtime_pid,omitempty"`
+	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
 }
 
 // IsZero reports whether the claim carries no recorded wall fact — the

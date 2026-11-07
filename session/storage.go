@@ -268,6 +268,14 @@ type InstanceData struct {
 	// position compare only consumes the bytes immediately above the banner.
 	LimitBannerPrefix string `json:"limit_banner_prefix,omitempty"`
 	LimitBannerCount  int    `json:"limit_banner_count,omitempty"`
+	// LimitWallRuntimePID and LimitWallRuntimeStartID pin the live claim to
+	// the concrete pane-root process the wall was sighted on (#6959 review)
+	// — durable because the residue check must know after a restart whether
+	// the process that displayed the claim's banner is still the one up: a
+	// replaced runtime's matching sighting is a different emission, never
+	// the recorded wall's re-read.
+	LimitWallRuntimePID     int    `json:"limit_wall_runtime_pid,omitempty"`
+	LimitWallRuntimeStartID uint64 `json:"limit_wall_runtime_start_id,omitempty"`
 	// LastLimitWall is the durable "last wall" shadow — the claim the row
 	// last parked on, kept in every liveness past ClearLimitReached (#6959).
 	// It is what makes the stale-read and residue decisions identical across

@@ -2,8 +2,10 @@ package session
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 	"github.com/stretchr/testify/require"
@@ -559,4 +561,136 @@ func TestLimitPark_RecordedWallExpired(t *testing.T) {
 	defer freezeInstanceNow(parked.Add(-time.Minute))()
 	require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
 		"a banner whose claimed reset has not passed is still a wall")
+}
+
+// TestLimitPark_AnchorlessCountGrowthIsANewWall is the count arm of the
+// residue gate: a recorded banner that started at byte zero legitimately
+// carries an EMPTY prefix — its count is the only positional identity the
+// claim has — so the anchorless phrase fallback must not waive the growth
+// evidence a second emission leaves in the capture (#6959 review).
+func TestLimitPark_AnchorlessCountGrowthIsANewWall(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	reReadAt := parked.Add(3 * time.Minute)
+	rolled := clockReset(reReadAt)
+	defer freezeInstanceNow(reReadAt)()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, LimitBanner{Count: 1})
+	requireParkedReset(t, inst, parked)
+	inst.ClearLimitReached()
+
+	// A second emission re-using the same phrase below the first: the
+	// capture's last match moved past the first banner's own line and the
+	// count grew — a genuinely new wall, not the recorded one's re-read.
+	second := LimitBanner{Prefix: "transcript\nClaude usage limit line\n", Count: 2}
+	require.False(t, inst.RecordedLimitWallExpired(second.Prefix, second.Count, clockResetEvidence),
+		"a grown match count is a new wall; the anchorless fallback cannot read it as residue")
+	require.True(t, inst.SetLimitReachedAtEpoch(rolled, clockResetEvidence, second, inst.stateEpoch),
+		"the new emission must park with its own parse")
+	requireParkedReset(t, inst, rolled)
+}
+
+// TestLimitPark_ResidueBindsToRecordedRuntime is the runtime-provenance arm
+// of the residue gate: a claim pins the concrete pane-root process its wall
+// was sighted on, so a REPLACEMENT runtime displaying a coincidentally
+// identical banner is a new emission — the A→B→A handoff where the
+// replacement re-meets the same provider wall. The binding travels with the
+// claim: the respawn arm's repark restores it from the shadow, and the
+// serialized row keeps it across a daemon restart (#6959 review).
+func TestLimitPark_ResidueBindsToRecordedRuntime(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	reReadAt := parked.Add(3 * time.Minute)
+	rolled := clockReset(reReadAt)
+
+	t.Run("same runtime keeps the residue read", func(t *testing.T) {
+		defer freezeInstanceNow(reReadAt)()
+		inst := &Instance{Program: tmux.ProgramClaude, runtimePID: 4242, runtimeStartID: 9}
+		inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+		require.True(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+			"the still-visible banner on the runtime that recorded it stays residue")
+	})
+
+	t.Run("replaced runtime's matching banner is a new wall", func(t *testing.T) {
+		defer freezeInstanceNow(reReadAt)()
+		inst := &Instance{Program: tmux.ProgramClaude, runtimePID: 4242, runtimeStartID: 9}
+		inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+		inst.ClearLimitReached()
+		require.True(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+			"before replacement the residue read holds")
+
+		// The process the wall was sighted on is gone: an A→B→A handoff or a
+		// respawn put a fresh pane in its place. A coincidentally identical
+		// banner on that pane is a different emission.
+		inst.runtimePID = 5555
+		require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+			"a replaced runtime's matching banner is a new wall, not residue")
+		require.True(t, inst.SetLimitReachedAtEpoch(rolled, clockResetEvidence, staleBanner, inst.stateEpoch),
+			"the fresh runtime's wall must park with its own parse")
+		requireParkedReset(t, inst, rolled)
+	})
+
+	t.Run("respawn repark keeps the wall's recorded runtime", func(t *testing.T) {
+		defer freezeInstanceNow(reReadAt)()
+		inst := &Instance{Program: tmux.ProgramClaude, runtimePID: 4242, runtimeStartID: 9, inFlightOp: OpRespawning}
+		inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+
+		// The respawn replaced the process and its ConfirmLive cleared the
+		// live claim fields; the resume's repark restores the wall claim —
+		// bound to the runtime the wall was sighted on, not the new one.
+		inst.liveness = LiveRunning
+		inst.limitResetAt = time.Time{}
+		inst.limitResetEvidence = ""
+		inst.limitBannerPrefix = ""
+		inst.limitBannerCount = 0
+		inst.limitWallRuntimePID = 0
+		inst.limitWallRuntimeStartID = 0
+		inst.runtimePID = 5555
+		require.NoError(t, inst.ReparkLimitUnderResumeFence(parked))
+		requireParkedReset(t, inst, parked)
+
+		require.False(t, inst.RecordedLimitWallExpired(staleBanner.Prefix, staleBanner.Count, clockResetEvidence),
+			"the reparked claim stays pinned to the sighting runtime — the fresh pane's matching banner is a new wall")
+	})
+
+	t.Run("the runtime binding is durable", func(t *testing.T) {
+		defer freezeInstanceNow(reReadAt)()
+		inst := &Instance{Program: tmux.ProgramClaude, runtimePID: 4242, runtimeStartID: 9}
+		inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner)
+		data := inst.ToInstanceData()
+		require.Equal(t, 4242, data.LimitWallRuntimePID)
+		require.Equal(t, uint64(9), data.LimitWallRuntimeStartID)
+		require.NotNil(t, data.LastLimitWall)
+		require.Equal(t, 4242, data.LastLimitWall.RuntimePID)
+		require.Equal(t, uint64(9), data.LastLimitWall.RuntimeStartID)
+	})
+}
+
+// TestLimitWallPrefixTail_PreservesUTF8Boundary: the persisted anchor tail
+// must cut on a rune boundary — a mid-rune slice marshals through JSON as
+// U+FFFD, and the repaired bytes never suffix-match the unchanged pane
+// again, so a restarted row reads its recorded wall's re-parse as fresh
+// evidence and rolls the reset forward (#6959 review).
+func TestLimitWallPrefixTail_PreservesUTF8Boundary(t *testing.T) {
+	// 700 three-byte runes (2100 bytes) push the cut inside a multibyte
+	// character on any boundary alignment.
+	prefix := strings.Repeat("界", 700) + "\n"
+	require.Greater(t, len(prefix), limitWallPrefixPersistMax)
+
+	tail := limitWallPrefixTail(prefix)
+	require.True(t, utf8.ValidString(tail), "the persisted tail must be valid UTF-8")
+	require.LessOrEqual(t, len(tail), limitWallPrefixPersistMax)
+	require.True(t, strings.HasSuffix(prefix, tail), "the tail is a clean suffix of the capture")
+
+	// The round trip that used to corrupt the anchor: JSON serialization
+	// preserves the tail verbatim, and the position compare the residue
+	// and stale-read decisions run still recognizes the unchanged pane.
+	encoded, err := json.Marshal(tail)
+	require.NoError(t, err)
+	var restored string
+	require.NoError(t, json.Unmarshal(encoded, &restored))
+	require.Equal(t, tail, restored)
+	require.True(t, sameLimitBannerPosition(restored, prefix),
+		"the restored anchor must still prove the unchanged pane's position")
 }
