@@ -12,6 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { existsSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,25 +72,47 @@ test("the Docs editor is a separate lazy bundle that the shell does not import",
   assert.match(lazy, /export\s*\{[^}]*DocsPane/, "the Docs bundle must export DocsPane");
 });
 
-// #6642: a ```mermaid fence renders through mermaid 12, which is far too big for
-// either the shell or the Docs bundle — so it ships as its own lazy set,
-// dist/lazy/mermaid.js plus the mermaid-* chunk files esbuild splits its dynamic
-// imports into, fetched by the Docs bundle only when a doc holds a mermaid fence.
-test("the Mermaid renderer is its own lazy chunk set, outside the shell and the Docs bundle", () => {
+// #6642 + #6669: a ```mermaid fence renders through mermaid 12, which is far
+// too big for either the shell or the Docs bundle — so it ships as its own
+// lazy DOCUMENT, dist/lazy/mermaid-frame.html, the whole library inlined into
+// the page the sandboxed render frame navigates to. The frame fetches
+// nothing of its own: nothing for an authenticating proxy to refuse, no CSP
+// URL-source for an IPv6 or proxied origin to spell.
+test("the Mermaid renderer is its own frame document, outside the shell and the Docs bundle", () => {
   execFileSync("node", ["build.mjs"], { cwd: webRoot, stdio: "pipe" });
   const shell = readFileSync(join(webRoot, "dist", "af-web.js"), "utf8");
   const docs = readFileSync(join(webRoot, "dist", "lazy", "docs-editor.js"), "utf8");
-  const entry = join(webRoot, "dist", "lazy", "mermaid.js");
-  assert.ok(existsSync(entry), "the Mermaid entry chunk must be built into dist/lazy");
+  const frameDoc = join(webRoot, "dist", "lazy", "mermaid-frame.html");
+  assert.ok(existsSync(frameDoc), "the Mermaid frame document must be built into dist/lazy");
   assert.ok(!shell.includes("mermaid"), "the shell must carry no Mermaid");
-  assert.ok(docs.includes('"./mermaid.js"'), "the Docs bundle must name the chunk it lazy-loads");
+  assert.ok(docs.includes('"./mermaid-frame.html"'), "the Docs bundle must name the document it navigates to");
   assert.ok(!docs.includes("dagre"), "the Docs bundle must not bundle the Mermaid library");
-  assert.match(readFileSync(entry, "utf8"), /export\s*\{[^}]*renderMermaidDiagram/, "the entry must export the renderer");
-  const set = readdirSync(join(webRoot, "dist", "lazy"))
-    .filter((f) => f.startsWith("mermaid") && f.endsWith(".js"))
-    .map((f) => readFileSync(join(webRoot, "dist", "lazy", f), "utf8"))
-    .join("");
-  assert.ok(set.includes("dagre"), "the Mermaid library must live in the lazy chunk set");
+  const html = readFileSync(frameDoc, "utf8");
+  assert.ok(html.includes("dagre"), "the Mermaid library must live in the frame document");
+  assert.ok(!html.includes("nonce="), "the script element carries no nonce — the CSP authorizes it by sha256");
+  // The sidecar is what the daemon's script-src names: the sha256 of the
+  // script ELEMENT's text, recomputed here from the file — never trusted from
+  // the builder's own pipeline.
+  const openTag = `<script type="module">`;
+  const scriptText = html.slice(
+    html.indexOf(openTag) + openTag.length,
+    html.lastIndexOf("</script>"),
+  );
+  const sidecar = readFileSync(join(webRoot, "dist", "lazy", "mermaid-frame.sha256"), "utf8").trim();
+  assert.equal(
+    sidecar,
+    createHash("sha256").update(scriptText, "utf8").digest("base64"),
+    "mermaid-frame.sha256 must hash the exact script text the CSP's hash source names",
+  );
+  assert.strictEqual(
+    (html.match(/<\/script/g) ?? []).length,
+    1,
+    "exactly one </script — the module's own close tag; an unescaped close inside the inlined code would end it early",
+  );
+  assert.ok(
+    !readdirSync(join(webRoot, "dist", "lazy")).some((f) => f.startsWith("mermaid") && f.endsWith(".js")),
+    "no mermaid-*.js files remain — the frame fetches zero subresources",
+  );
 });
 
 // #6731: the syntax grammars for ``` fences render through dist/lazy/codeblocks.js,

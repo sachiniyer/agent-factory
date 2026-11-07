@@ -36,6 +36,15 @@ test("the mermaid chunk is measured apart from the Docs lazy bundle", () => {
   assert.ok(sum.mermaid_gzip_bytes > 0);
 });
 
+test("the mermaid frame document still measures as mermaid (#6669)", () => {
+  // The renderer ships as lazy/mermaid-frame.html now — still the lazy
+  // mermaid* payload, so it must still land under mermaid_, not vanish.
+  const sum = bundleBytes([["lazy/docs-editor.js", Buffer.from("aa")], ["lazy/mermaid-frame.html", Buffer.from("bbbbb")]]);
+  assert.equal(sum.lazy_raw_bytes, 2);
+  assert.equal(sum.mermaid_raw_bytes, 5);
+  assert.equal(sum.raw_bytes, 0);
+});
+
 test("the codeblocks chunk is measured apart from the Docs lazy bundle", () => {
   const sum = bundleBytes([["lazy/docs-editor.js", Buffer.from("aa")], ["lazy/codeblocks.js", Buffer.from("bbb")]]);
   assert.equal(sum.lazy_raw_bytes, 2);

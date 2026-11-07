@@ -27,11 +27,12 @@ export function regressions(metrics, budgets) {
 }
 
 // Files under lazy/ load on demand (the Docs tab), not with the shell, so they
-// get their own budget instead of hiding inside the shell's. lazy/mermaid.js
-// (#6642) is lazier still — it fetches only when a doc holds a ```mermaid block
-// and dwarfs the editor — and lazy/codeblocks.js (#6731) likewise fetches only
-// when a doc holds a fenced block with a language, so each is measured under
-// its own pair of keys rather than inside the Docs chunk's.
+// get their own budget instead of hiding inside the shell's. lazy/mermaid-*
+// (#6642, served as the self-contained frame document since #6669) is lazier
+// still — it loads only when a doc holds a ```mermaid block and dwarfs the
+// editor — and lazy/codeblocks.js (#6731) likewise fetches only when a doc
+// holds a fenced block with a language, so each is measured under its own
+// pair of keys rather than inside the Docs chunk's.
 export function bundleBytes(files) {
   const sum = { raw_bytes: 0, gzip_bytes: 0, lazy_raw_bytes: 0, lazy_gzip_bytes: 0, mermaid_raw_bytes: 0, mermaid_gzip_bytes: 0, codeblocks_raw_bytes: 0, codeblocks_gzip_bytes: 0 };
   for (const [path, bytes] of files) {

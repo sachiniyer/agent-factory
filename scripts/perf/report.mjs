@@ -4,7 +4,11 @@ import { keys, summarize, budgetFor, regressions, bundleBytes } from "./check.mj
 const root = "/work/web/test-results";
 const web = JSON.parse(readFileSync(`${root}/web-runs.json`));
 const tui = JSON.parse(readFileSync(`${root}/tui-runs.json`));
-const files = readdirSync("/work/web/dist", { recursive: true }).filter(f => /\.(js|css)$/.test(f));
+// .html joined the measured set in #6669: the render frame is a served
+// document (lazy/mermaid-frame.html), the whole mermaid library inline, so
+// the lazy/mermaid* payload the mermaid_* keys budget is markup now, not js.
+// index.html lands in the shell sums — it always was served bytes.
+const files = readdirSync("/work/web/dist", { recursive: true }).filter(f => /\.(js|css|html)$/.test(f));
 assert(files.length > 0);
 const bundle = () => bundleBytes(files.map(file => [file, readFileSync(`/work/web/dist/${file}`)]));
 assert.equal(web.length, 3); assert.equal(tui.length, 3);

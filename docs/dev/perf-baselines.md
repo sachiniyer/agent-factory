@@ -134,21 +134,22 @@ reason to move a budget.
 
 A ```mermaid fence in a proposal doc renders as a diagram in the Docs view's
 live preview. The renderer is mermaid 12.2.0, shipped as `web/dist/lazy/`
-mermaid.js plus its `mermaid-*` split chunks — entry and shared core, plus one
-lazy file per diagram type, so a doc pays for what it draws rather than for the
-whole library. The Docs bundle fetches the entry only when a doc holds a
-```mermaid block; af-web.js carries none of it.
+mermaid-frame.html — the render frame's own DOCUMENT, the whole library and
+its postMessage bootstrap inlined into the page a sandboxed iframe navigates
+to (#6669; originally `mermaid.js` plus `mermaid-*` split chunks, one lazy
+file per diagram type). The Docs bundle navigates the frame to it only when a
+doc holds a ```mermaid block; af-web.js carries none of it, and the frame
+itself fetches nothing — the library is inline.
 
 The `mermaid_*` entries measure the whole committed `lazy/mermaid*` set —
 the payload the binary embeds — over `web/dist` with `bundleBytes` from
 `scripts/perf/check.mjs`, the function `report.mjs` calls; `lazy_*` keeps
-measuring only docs-editor.js. First render of a flowchart fetches the entry
-plus core plus the flowchart and dagre chunks (~1.1MB raw of the 5.19MB set),
-inside a srcdoc iframe whose own CSP denies every fetch the diagram names
-(the security review's frame isolation, #6642 re-review); the rest stays
-unfetched. Committed values are deterministic, three identical samples, margin
-baseline x 0.05, same as the other byte budgets. Not recorded with
-`make perf-container`; the figures are byte-exact.
+measuring only docs-editor.js and its shared chunk. `report.mjs`'s file
+filter gained `.html` when the payload became a document (#6669), which also
+brings `index.html` into the shell sums on every side of a comparison — the
+methodology, not the bytes, moved. Committed values are deterministic, three
+identical samples, margin baseline x 0.05, same as the other byte budgets.
+Not recorded with `make perf-container`; the figures are byte-exact.
 
 The same refresh moves `raw_bytes` to 1,377,536 (master's committed dist at
 `ea1b463514` was already 1,376,749 — the recorded 1,364,595 predated it — and
@@ -156,6 +157,47 @@ the new `.cm-md-mermaid` CSS adds 787), `gzip_bytes` to 315,696 (master 315,607
 +89), `lazy_raw_bytes` to 378,577 (master 371,254 +7,323 of widget, frame
 loader, sanitizer and theme code in the Docs bundle) and `lazy_gzip_bytes` to
 123,257 (120,175 +3,082). Every timing and layout-shift baseline is unchanged.
+
+#6669 re-frames the render iframe as a sandboxed opaque origin (sandbox
+without allow-same-origin) driven over a string-only postMessage protocol
+(`web/src/mermaid_wire.ts`) instead of a same-origin `contentWindow` call —
+and, after the security review, as a real navigated document rather than
+srcdoc: WebKit gives srcdoc the page's CSP, where 'self' matches nothing in
+an opaque origin. The whole library therefore ships INLINE in the frame's own
+`lazy/mermaid-frame.html` and the frame fetches nothing: no credential-less
+subrequest an authenticating proxy could refuse, no CSP URL-source an IPv6 or
+proxied origin would have to spell, and no `Access-Control-Allow-Origin`
+grant anywhere (the chunk CORS the first cut added is gone).
+
+Against master's committed dist measured with the same `.html`-inclusive
+filter: the `mermaid.js`/`mermaid-*` set (5,187,694 raw / 1,507,069 gzip) is
+replaced by the single frame document (5,256,397 / 1,484,809) — +68,703 raw /
+**−22,260 gzip**, a single-file bundle being smaller compressed than the split
+set's per-chunk framing. (The script is authorized by sha256 now rather than a
+stamped nonce, so the served bytes are static and the document's ETag survives
+a daemon restart; `lazy/mermaid-frame.sha256`, the sidecar the CSP names, is
+44 bytes and outside the `.js|.css|.html` filter.) `lazy_*` moves to 399,058 /
+129,835 (+651 / +149 of epoch-guarded frame loading and the wire-source
+gates) and the shell entries are byte-identical (+0 / +0 — `index.html` counts
+on both sides). Every entry stays inside its existing budget —
+`mermaid_gzip_bytes` lands 5% under — so no baseline moves. Every timing and
+layout-shift baseline is unchanged.
+
+**The wire cost the byte table does not show (#6669 re-review).** These
+entries measure embedded bytes, not fetches-per-open — and the two diverge.
+Under master's split chunks a first flowchart fetched ~29 files, 867 KB raw /
+239 KB gzip. Under this design the frame's first open fetches the whole
+document — 5.26 MB raw / 1.48 MB gzip — and on loopback first render is
+~1.1 s in Chromium and ~3.5 s in WebKit (independent review's figures,
+~0.30 s/~0.36 s on master): the price of the one-navigation property, since
+any subresource the frame fetched would arrive at an authenticating proxy
+with no credentials to answer. That is a first-open cost, paid once: the
+document now carries `ETag` + `Cache-Control: no-cache`, so every later open
+revalidates — measured on the wire as a 304 with a zero-length body in both
+engines — and a frame re-open happens only when the renderer is torn down
+(a self-navigation, a channel failure or a hung render), never on an ordinary
+render or theme flip. On a 400 kbps link the 1.48 MB download is ~30 s, which
+is why the open timeout is 60 s rather than the document's own 30 s.
 
 ### Code-fence grammar lazy chunk provenance (#6731)
 

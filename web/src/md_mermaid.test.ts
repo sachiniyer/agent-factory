@@ -250,6 +250,14 @@ test("pollUntil gives up past the deadline when nothing registers", async () => 
   assert.equal(got, undefined);
 });
 
+test("pollUntil treats any defined value as done — even falsy ones", async () => {
+  // The contract a probe must satisfy (#6669): "not yet" is undefined and
+  // nothing else — a false returned for "not ready" ends the poll instantly,
+  // which is why openRenderFrame maps its flag with `? true : undefined`.
+  const got = await pollUntil(() => false, 5_000);
+  assert.equal(got, false);
+});
+
 test("TimeoutLedger fails fast inside the cooldown, then lets the source retry", () => {
   const ledger = new TimeoutLedger(60_000, 4);
   ledger.note("k", 1_000);

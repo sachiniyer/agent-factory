@@ -1,11 +1,16 @@
-// The Mermaid library as its own lazy chunk, dist/lazy/mermaid.js (#6642).
-// md_mermaid.ts loads it inside a purpose-built srcdoc iframe whose own CSP
-// denies every fetch (default-src 'none' bar same-origin scripts and inline
-// styles), because renderers can make the browser ask for URLs the diagram
-// names — <img> label HTML, flowchart img metadata, font/url() CSS — long
-// before the svg string reaches sanitizeSvg. Inside the frame nothing the
-// diagram names can be fetched, on any origin; the svg comes out as a string
-// and is sanitized before it touches the real document.
+// The Mermaid library bundled into the render frame's own document,
+// dist/lazy/mermaid-frame.html (#6642, #6669). md_mermaid.ts navigates a
+// purpose-built iframe to that page — SANDBOXED without allow-same-origin, an
+// opaque origin — rather than srcdoc-loading it: srcdoc inherits the page's
+// CSP, and in WebKit 'self' matches nothing in an opaque origin so every load
+// is denied. The library is INLINE in the document the daemon serves (script
+// authorized by sha256, daemon/webserve.go), so the frame issues
+// zero fetches of its own: nothing for an authenticating proxy to refuse,
+// no CSP URL-source for an IPv6 or proxied origin to spell. Its CSP denies
+// every fetch the diagram could name anyway (default-src 'none') — renderers
+// can make the browser ask for URLs the diagram names long before the svg
+// string reaches sanitizeSvg — and the svg comes out as a string, over
+// postMessage, and is sanitized before it touches the real document.
 //
 // The config is still locked down too — defense in depth, not a substitute:
 //
@@ -26,6 +31,7 @@
 //                           is part of why the frame exists.
 
 import mermaid from "mermaid";
+import { decodeRenderRequest, encodeFrameReply, MSG_HELLO, MSG_READY, MSG_RENDERED, portGrantFor } from "./mermaid_wire.js";
 
 // A5: belt for the module itself — no caller-driven runMermaid() ever.
 mermaid.startOnLoad = false;
@@ -98,7 +104,47 @@ export function renderMermaidDiagram(source: string, theme: Record<string, strin
   return job;
 }
 
-// The chunk executes inside md_mermaid.ts's render iframe, so hand the parent
-// the API on the frame's window — the only channel out, and it carries a
-// string, never a node.
-(globalThis as { __afMermaidChunk?: unknown }).__afMermaidChunk = { renderMermaidDiagram };
+// The module executes inside md_mermaid.ts's render frame document — an
+// opaque origin (#6669) — so the window channel carries JSON strings only and
+// exactly twice (mermaid_wire.ts): the ready announce out, the port grant in.
+// The port then carries everything: a render request in (id + diagram source
+// + theme), an SVG string or the error text back out. Renders only ever
+// arrive on the granted port — a port lives in the DOCUMENT it was handed to
+// and dies with it, so a document that replaces this one if the frame
+// navigates itself can neither claim it nor have observed the hello nonce
+// the parent waits to hear echoed back.
+const hello = (() => {
+  const b = new Uint8Array(16);
+  crypto.getRandomValues(b);
+  return [...b].map((x) => x.toString(16).padStart(2, "0")).join("");
+})();
+
+// Announce the API is up — the parent answers with the port grant, and
+// renders flow only after the hello echo proves the port landed in THIS
+// document. "*" because the parent origin is unreachable from an opaque
+// origin; the announce carries nothing but the nonce.
+(window.parent as Window).postMessage(encodeFrameReply({ t: MSG_READY, hello }), "*");
+
+window.addEventListener("message", (e) => {
+  const port = portGrantFor(e, window.parent);
+  if (!port) return;
+  port.postMessage(encodeFrameReply({ t: MSG_HELLO, hello }));
+  port.onmessage = (pe: MessageEvent) => {
+    const req = decodeRenderRequest(pe.data);
+    if (!req) return;
+    void renderMermaidDiagram(req.source, req.theme).then(
+      (svg) =>
+        port.postMessage(encodeFrameReply({ t: MSG_RENDERED, id: req.id, ok: true, svg })),
+      (err: unknown) =>
+        port.postMessage(
+          encodeFrameReply({
+            t: MSG_RENDERED,
+            id: req.id,
+            ok: false,
+            error: err instanceof Error ? err.message : String(err),
+          }),
+        ),
+    );
+  };
+  port.start();
+});

@@ -65,31 +65,59 @@ await build({
   logLevel: "info",
 });
 
-// The Mermaid library is an even lazier chunk (#6642): the Docs bundle fetches
-// dist/lazy/mermaid.js (by URL, like docs_tab.ts fetches the Docs bundle) only
-// when a doc being previewed holds a ```mermaid fence — and mermaid's own
-// dynamic imports then pull only the diagram types that doc actually draws.
-// Splitting is ON for this build only: a single mermaid.js would be ~5MB of
-// renderer a flowchart doc does not need, while the entry plus its shared
-// chunks is about 0.7MB raw. af-web.js and docs-editor.js stay non-split so
-// nothing they share is promoted into a startup fetch. All output is named
-// mermaid* so the perf harness budgets it under its own keys and never in the
-// shell's — and it is embedded in dist, never a CDN, because af serves the web
-// offline.
-await build({
-  entryPoints: { mermaid: "src/mermaid_chunk.ts" },
+// The Mermaid library ships as the render frame's own DOCUMENT,
+// dist/lazy/mermaid-frame.html (#6642, #6669): the Docs pane navigates a
+// sandboxed iframe to it when a doc being previewed holds a ```mermaid fence.
+// It is a real served page rather than srcdoc — srcdoc inherits the page's
+// CSP, and in WebKit 'self' matches nothing in the frame's opaque origin, so
+// every load is denied — and the whole library plus its postMessage bootstrap
+// is INLINE, so the frame issues zero fetches of its own: no credential-less
+// request for an authenticating proxy to refuse, and no CSP URL-source an
+// IPv6 or proxied UI origin would have to spell. The daemon authorizes the
+// one script element by HASH (script-src 'sha256-…' read from the sidecar
+// written below, daemon/webserve.go), which is why the file needs no stamped
+// nonce — its bytes are static, and the ETag they feed stays valid across
+// restarts.
+const frameBuild = await build({
+  entryPoints: { "mermaid-frame": "src/mermaid_chunk.ts" },
   bundle: true,
   format: "esm",
   platform: "browser",
   target: "es2022",
   outdir: "dist/lazy",
-  splitting: true,
-  chunkNames: "mermaid-[name]-[hash]",
-  sourcemap: false,
   minify: true,
   legalComments: "none",
+  sourcemap: false,
   logLevel: "info",
+  write: false,
 });
+const frameJs = frameBuild.outputFiles.filter((f) => f.path.endsWith(".js"));
+if (frameJs.length !== 1) {
+  throw new Error(
+    `mermaid frame bundle must be exactly one file — got ${frameJs.length}: ` +
+      frameBuild.outputFiles.map((f) => f.path).join(", "),
+  );
+}
+const frameCode = frameJs[0].text;
+// Inlining is only safe with the two escapes below: `</script` in the module
+// text would end the element early (the HTML parser owns termination), and
+// `<!--` opens script-data-escaped mode. A backslash is a no-op inside
+// strings, templates and regexes alike, so escaping never changes the code.
+const frameInline = frameCode.replaceAll("<!--", "<\\!--").replaceAll("</script", "<\\/script");
+await writeFile(
+  "dist/lazy/mermaid-frame.html",
+  `<!doctype html><meta http-equiv="x-dns-prefetch-control" content="off">` +
+    `<meta charset="utf-8">` +
+    `<script type="module">${frameInline}</script>`,
+);
+// The CSP hash source is a digest of the script ELEMENT's text — the exact
+// bytes between <script> and </script> — so it is computed over frameInline,
+// not the file. The daemon reads the sidecar into script-src rather than
+// parsing it back out of the HTML (daemon/webserve.go).
+await writeFile(
+  "dist/lazy/mermaid-frame.sha256",
+  createHash("sha256").update(frameInline, "utf8").digest("base64"),
+);
 
 // The code-fence grammars (#6731) ship as dist/lazy/codeblocks.js, built above
 // alongside the Docs bundle. Naming stays `codeblocks*` so the perf harness

@@ -51,14 +51,33 @@ export default defineConfig({
     headless: true,
     // Capture a trace only on a failing run, into the gitignored artifacts dir.
     trace: "retain-on-failure",
-    // The harness container runs as root (it builds af + runs the daemon), and
-    // Chromium's setuid sandbox refuses to start as root; disable it. Safe here —
-    // the whole run is fenced inside a throwaway container, exactly like testbox.
-    // --disable-dev-shm-usage: a container's default 64MB /dev/shm is too small for
-    // Chromium and crashes it under load; route shared memory to /tmp instead.
-    launchOptions: { args: ["--no-sandbox", "--disable-dev-shm-usage"] },
   },
   outputDir: "./test-results",
   snapshotPathTemplate: "{testDir}/goldens/{arg}{ext}",
-  projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
+  projects: [
+    {
+      name: "chromium",
+      use: {
+        ...devices["Desktop Chrome"],
+        // The harness container runs as root (it builds af + runs the daemon), and
+        // Chromium's setuid sandbox refuses to start as root; disable it. Safe here —
+        // the whole run is fenced inside a throwaway container, exactly like testbox.
+        // --disable-dev-shm-usage: a container's default 64MB /dev/shm is too small for
+        // Chromium and crashes it under load; route shared memory to /tmp instead.
+        // These are Chromium flags — WebKit must not see them.
+        launchOptions: { args: ["--no-sandbox", "--disable-dev-shm-usage"] },
+      },
+    },
+    // #6669 demands a WebKit pass on the mermaid surface specifically: srcdoc
+    // inherits the page's CSP and in WebKit 'self' matches nothing inside an
+    // opaque origin — the only engine where the old shape rendered nothing.
+    // Scope it to the mermaid spec (testMatch by filename) so the suite does
+    // not double; the image already ships the browser. Goldens stay
+    // chromium-only — they are pixel-calibrated to one engine's rasterizer.
+    {
+      name: "webkit",
+      use: { ...devices["Desktop Safari"] },
+      testMatch: /docs-mermaid\.spec\.ts$/,
+    },
+  ],
 });
