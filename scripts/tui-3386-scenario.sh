@@ -23,9 +23,9 @@
 # That is turned into the end-to-end evidence rather than worked around, exactly as
 # scripts/tui-3844-scenario.sh does it: the refusal comes from the DAEMON and NAMES
 # THE ACCOUNT, which is only possible if a value nobody typed was resolved from the
-# project's config, applied to the create, and carried across the wire. A session
-# that actually RUNS as the account needs a real agent binary; that is the manual
-# leg in docs/dev/tui-manual-testing.md.
+# project's config and applied to the create by the daemon. A session that actually
+# RUNS as the account needs a real agent binary; that is the manual leg in
+# docs/dev/tui-manual-testing.md.
 set -euo pipefail
 
 # shellcheck source=/dev/null
@@ -125,9 +125,9 @@ drive_project_default() {
         'returning to claude restores its project default' || return 1
     _af_log 'assert OK: the default follows the program, per agent'
 
-    # The create carries it. The stand-in agent makes the account boundary refuse,
+    # The daemon resolves it. The stand-in agent makes the account boundary refuse,
     # and the refusal NAMES THE ACCOUNT — which is only possible if a value nobody
-    # typed came from the project config and rode CreateSessionRequest.Account.
+    # typed came from the project config and was applied by the daemon.
     af_send_literal 'defaulted-create'
     af_send Enter
     af_wait_for "account \"$PROJECT_ACCOUNT\"" "$AF_DRIVER_TIMEOUT" \

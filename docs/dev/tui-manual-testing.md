@@ -470,7 +470,7 @@ file it is set in.
 `scripts/tui-3386-scenario.sh` automates all of the above, with the same stand-in
 caveat as #3844's: the create is refused by the account boundary, and the refusal
 naming the account is the evidence that a value nobody typed was resolved from the
-project's config and carried across the wire.
+project's config by the daemon.
 
 `enter newline` is the overlay's own hint row, used as the marker rather than
 its `Initial prompt` title: the status-bar hint underneath says `initial
