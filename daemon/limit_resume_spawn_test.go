@@ -25,7 +25,7 @@ func TestCommittedSwapAccountWall_IgnoresTheSubjectRowsInheritedWall(t *testing.
 	inst.SetInFlightOpForTest(session.OpRespawning)
 	// Park at the incoming wall the way an earlier refusal did: no parsed
 	// reset — the window that can never expire on its own.
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, ""))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, "", session.LimitBanner{}, false))
 	swap := committedAccountSwap(inst)
 	require.NotNil(t, swap, "the parked row carries a committed pending swap")
 

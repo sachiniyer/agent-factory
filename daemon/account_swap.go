@@ -765,14 +765,20 @@ func (m *Manager) settleReplacementRuntime(
 	case errors.As(err, &limitErr):
 		// The incoming identity is itself at a wall — the same classification
 		// deliverManualAccountMission applies when its send-path wait sees one.
+		// The banner anchor travels with the sighting so a parked row re-reading
+		// the unchanged banner off an unchanged pane stays the parked re-sight
+		// no-op rather than re-stamping the wall's instant (#6880); launched is
+		// the fresh-runtime bit — a wall out of a pane this attempt spawned is
+		// always a new sighting.
+		banner := session.LimitBanner{Prefix: limitErr.BannerPrefix, Count: limitErr.BannerCount}
 		var parkErr error
 		if swap.manual {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
+			parkErr = instance.ParkManualAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence, banner, launched)
 			m.accountLimitMu.Unlock()
 		} else {
 			m.accountLimitMu.Lock()
-			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence)
+			parkErr = instance.ParkAutomaticAccountSwapAtLimit(limitErr.ResetAt, limitErr.Evidence, banner, launched)
 			m.accountLimitMu.Unlock()
 		}
 		return false, errors.Join(

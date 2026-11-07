@@ -161,7 +161,7 @@ func TestParkManualAccountSwapRecordsMissionNonDelivery(t *testing.T) {
 			MissionDeliveryStatus: PromptCouldNotConfirm,
 		},
 	}
-	require.NoError(t, inst.ParkManualAccountSwapAtLimit(time.Now().Add(time.Hour), ""))
+	require.NoError(t, inst.ParkManualAccountSwapAtLimit(time.Now().Add(time.Hour), "", LimitBanner{}, false))
 	require.Equal(t, PromptNotDelivered, inst.ToInstanceData().PendingAccountSwap.MissionDeliveryStatus)
 	require.False(t, inst.PendingManualAccountSwapDeliveryUnconfirmed(),
 		"an incoming limit observed before submission must retain scheduled recovery")

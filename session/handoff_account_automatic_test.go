@@ -41,7 +41,7 @@ func TestParkAutomaticAccountSwapAtLimit_AttributesAndRecordsIncomingIdentity(t 
 	reset := time.Date(2026, 10, 5, 14, 0, 0, 0, time.UTC)
 	inst := automaticAccountSwapLimitInstance("personal")
 
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{}, false))
 
 	require.Equal(t, LiveLimitReached, inst.GetLiveness())
 	got, ok := inst.LimitResetAt()
@@ -80,13 +80,13 @@ func TestParkAutomaticAccountSwapAtLimit_RefusesWithoutAutomaticPendingSwap(t *t
 	t.Run("resume fence not held", func(t *testing.T) {
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.inFlightOp = OpNone
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{}, false))
 	})
 
 	t.Run("no pending replacement", func(t *testing.T) {
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.pendingAccountSwap = nil
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{}, false))
 	})
 
 	t.Run("manual pending replacement", func(t *testing.T) {
@@ -97,7 +97,7 @@ func TestParkAutomaticAccountSwapAtLimit_RefusesWithoutAutomaticPendingSwap(t *t
 		// flip by parking through the automatic entry point.
 		inst := automaticAccountSwapLimitInstance("personal")
 		inst.pendingAccountSwap.Manual = true
-		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+		require.Error(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{}, false))
 		require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus,
 			"a refused park must not mutate delivery state")
 	})
@@ -120,7 +120,7 @@ func TestParkAutomaticAccountSwapAtLimit_DoesNotFlipManualDeliveryMarker(t *test
 	inst := automaticAccountSwapLimitInstance("personal")
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus)
 
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Now().Add(time.Hour), ""))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Now().Add(time.Hour), "", LimitBanner{}, false))
 
 	require.Equal(t, PromptCouldNotConfirm, inst.pendingAccountSwap.MissionDeliveryStatus,
 		"the automatic twin must NOT rewrite the notice send's delivery verdict")
@@ -179,14 +179,21 @@ func TestParkCommittedAccountSwapAtLimit_RefusedRetryKeepsTheSightingInstant(t *
 //
 // The scenario is the automatic arm's parked-across-the-send window
 // (daemon/swap_notice_confirm.go): the row parks at Ta, the notice send lands
-// ambiguous at T3 > Ta, and the pane's next limit detection at T4 re-sights
-// the same claim through the poll entry. The re-stamp must happen exactly
+// ambiguous at T3 > Ta, and the refused retry's readiness wait re-sights the
+// same claim at T4 through the send-path pair — the production route, since a
+// parked pending automatic row is skipped by the status poll
+// (manager_status.go:597). The re-stamp must happen exactly
 // once — the first sighting crossing the attempt boundary — and
 // SettlePendingAccountSwapNoticeDelivery must then keep the wall parked.
 func TestParkedAccountSwap_PostSendResightKeepsTheLiveWall(t *testing.T) {
 	parkedAt := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
 	sentAt := parkedAt.Add(10 * time.Minute)
 	resightedAt := parkedAt.Add(20 * time.Minute)
+	// The wall's banner anchor: a parked row's status poll is skipped for a
+	// pending automatic swap (manager_status.go:597), so the production path
+	// that delivers the post-send re-sight is the retry's own readiness park —
+	// the pair — which must recognize the unchanged pane's banner.
+	banner := LimitBanner{Prefix: "session transcript above\n", Count: 1}
 	clock := parkedAt
 	previous := instanceNow
 	instanceNow = func() time.Time { return clock }
@@ -196,7 +203,7 @@ func TestParkedAccountSwap_PostSendResightKeepsTheLiveWall(t *testing.T) {
 	inst.pendingAccountSwap.ReplacementPanesStarted = true
 
 	// The incoming identity's wall parks the swap at Ta.
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, ""))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, "", banner, false))
 
 	// The notice send lands at T3 with an ambiguous verdict; the automatic
 	// arm keeps the row parked across it and the resume fence comes down.
@@ -204,12 +211,15 @@ func TestParkedAccountSwap_PostSendResightKeepsTheLiveWall(t *testing.T) {
 	inst.lastPromptAttemptAt = sentAt
 	require.NoError(t, inst.RecordPendingAccountSwapNoticeDelivery("work", "personal", PromptCouldNotConfirm))
 
-	// The pane reports the wall again at T4 — a fresh banner parse, not the
-	// stored phrase's re-read, so the poll entry lets it through as a new
-	// observation. Parked re-sight of the unchanged claim, but it CROSSES
-	// the send attempt and must advance the sighting instant.
+	// The refused retry reads the SAME pane's unchanged banner at T4 — the
+	// probeAlive arm (runtime not replaced), so the park is a parked re-sight
+	// of the same claim. It CROSSES the send attempt and must advance the
+	// sighting instant exactly once: the wall observed after the send is new
+	// evidence, not the stale pre-send fact the settle may retire.
+	inst.inFlightOp = OpRespawning
 	clock = resightedAt
-	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "outage notice: back soon", LimitBanner{}, inst.stateEpoch))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, "", banner, false))
+	inst.inFlightOp = OpNone
 	require.True(t, inst.GetLiveness() == LiveLimitReached)
 
 	observations := inst.AccountLimitObservations()
@@ -220,8 +230,10 @@ func TestParkedAccountSwap_PostSendResightKeepsTheLiveWall(t *testing.T) {
 
 	// A tick later re-reading the SAME now-current observation adds nothing:
 	// the parked no-op still holds for the unchanged claim once it is fresh.
+	inst.inFlightOp = OpRespawning
 	clock = resightedAt.Add(time.Minute)
-	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "outage notice: still down", LimitBanner{}, inst.stateEpoch))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(time.Time{}, "", banner, false))
+	inst.inFlightOp = OpNone
 	observations = inst.AccountLimitObservations()
 	require.Len(t, observations, 1)
 	require.True(t, observations[0].ObservedAt.Equal(resightedAt),
@@ -265,7 +277,7 @@ func TestParkCommittedAccountSwapAtLimit_CopyNeverRewindsTheSightingInstant(t *t
 
 	// The row's own runtime reports the wall at T40 — a genuine sighting the
 	// row made, stamped with the pane's own instant.
-	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, ""))
+	require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{}, false))
 
 	// A committed copy arrives carrying a TIGHTER reset claim — a different
 	// fact that updates the row — but stamped with its source's earlier
@@ -283,4 +295,78 @@ func TestParkCommittedAccountSwapAtLimit_CopyNeverRewindsTheSightingInstant(t *t
 	require.False(t, AccountLimitObservationRetracted(observations[0],
 		AccountLimitRetractionData{Agent: tmux.ProgramClaude, Account: "personal", ProvenAt: provenAt}),
 		"a proof in (T10, T40) must not retract a wall the row saw at T40")
+}
+
+// TestParkAutomaticAccountSwapAtLimit_StaleBannerResightDoesNotRestamp pins the
+// stale-banner wedge: a refused retry whose replacement pane is still alive
+// takes the probeAlive arm (shouldRespawn=false), so settleReplacementRuntime
+// reads readiness off the SAME pane and re-detects the SAME banner. That
+// LimitReachedError is a re-read of the wall the row parked on — a parked
+// re-sight — and must not advance ObservedAt; stamping it anew would outlive
+// a usage proof recorded between the two reads and wedge the session on its
+// own re-read forever (#6880). The sighting instant advances only for a fresh
+// runtime, a new banner anchor, or a send crossing — the first two subtests
+// pin the two advance paths.
+func TestParkAutomaticAccountSwapAtLimit_StaleBannerResightDoesNotRestamp(t *testing.T) {
+	banner := LimitBanner{Prefix: "session transcript above\n", Count: 1}
+	// An unknown-reset wall is the wedge's sharpest shape: a proof need only
+	// postdate the sighting to defeat it — a known reset would also require
+	// the proof to postdate the stated boundary.
+	reset := time.Time{}
+	sightedAt := time.Date(2026, 11, 10, 9, 0, 0, 0, time.UTC)
+	provenAt := sightedAt.Add(time.Hour)
+	reReadAt := sightedAt.Add(2 * time.Hour)
+
+	newInstance := func(t *testing.T) *Instance {
+		clock := sightedAt
+		previous := instanceNow
+		instanceNow = func() time.Time { return clock }
+		t.Cleanup(func() { instanceNow = previous })
+		inst := automaticAccountSwapLimitInstance("personal")
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", banner, false))
+		return inst
+	}
+
+	t.Run("same banner on the unchanged pane is a no-op", func(t *testing.T) {
+		inst := newInstance(t)
+		instanceNow = func() time.Time { return reReadAt }
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", banner, false))
+
+		observations := inst.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ObservedAt.Equal(sightedAt),
+			"a stale-banner re-read must not advance the sighting instant: got %v, want %v",
+			observations[0].ObservedAt, sightedAt)
+		require.True(t, AccountLimitObservationRetracted(observations[0],
+			AccountLimitRetractionData{Agent: tmux.ProgramClaude, Account: "personal", ProvenAt: provenAt}),
+			"a proof dated between the two reads must still defeat the wall")
+	})
+
+	t.Run("fresh runtime always advances", func(t *testing.T) {
+		inst := newInstance(t)
+		instanceNow = func() time.Time { return reReadAt }
+		// The respawn arm relaunched the pane: even a coincidentally matching
+		// banner is a new sighting out of a NEW runtime.
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", banner, true))
+
+		observations := inst.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ObservedAt.Equal(reReadAt),
+			"a fresh-runtime wall is a new sighting: got %v, want %v",
+			observations[0].ObservedAt, reReadAt)
+	})
+
+	t.Run("a new banner anchor advances", func(t *testing.T) {
+		inst := newInstance(t)
+		instanceNow = func() time.Time { return reReadAt }
+		// A banner printed below the recorded one — a second match — is a new
+		// wall event even on the unchanged pane.
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(reset, "", LimitBanner{Prefix: "session transcript above\n", Count: 2}, false))
+
+		observations := inst.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ObservedAt.Equal(reReadAt),
+			"a new banner anchor is a new sighting: got %v, want %v",
+			observations[0].ObservedAt, reReadAt)
+	})
 }
