@@ -120,6 +120,8 @@ func TestResumeInterruptedTaskRunClearsPredecessorDeliveryVerdict(t *testing.T) 
 	inst.mu.RLock()
 	assert.Empty(t, inst.lastPromptDeliveryStatus,
 		"the re-arm clears the predecessor-owned delivery verdict")
+	assert.True(t, inst.lastPromptAttemptAt.IsZero(),
+		"the re-arm retires the predecessor-owned attempt timestamp with its verdict")
 	inst.mu.RUnlock()
 }
 
@@ -196,13 +198,15 @@ func TestResumedRunSurvivesRestartAfterInterruptWithStaleDeliveryVerdict(t *test
 	require.False(t, reloaded2.TaskRunInterrupted())
 
 	// The forced checkpoint after re-arm must not carry the stale
-	// PromptNotDelivered verdict.
+	// PromptNotDelivered verdict nor its paired attempt timestamp.
 	data3 := reloaded2.ToInstanceData()
 	require.True(t, data3.TaskRunActive, "the re-armed run is active")
 	require.False(t, data3.TaskRunPromptBound, "the boundary is unbound after re-arm")
 	require.True(t, data3.TaskRunPromptAttemptAt.IsZero(), "the boundary timestamp is zero after re-arm")
 	require.NotEqual(t, PromptNotDelivered, data3.LastPromptDeliveryStatus,
 		"the re-arm clears the predecessor-owned delivery verdict")
+	require.True(t, data3.LastPromptAttemptAt.IsZero(),
+		"the re-arm retires the predecessor-owned attempt timestamp with its verdict")
 
 	// Restart 3: loading the re-armed record must not fire the restart twin.
 	data3.BackendType = "docker"
@@ -214,4 +218,6 @@ func TestResumedRunSurvivesRestartAfterInterruptWithStaleDeliveryVerdict(t *test
 		"the restart twin must not fire for a run whose initial delivery succeeded")
 	require.False(t, reloaded3.ConsumeTaskRunFailed(),
 		"no failure stamp is armed for a live, resumed run")
+	require.True(t, reloaded3.TaskRunPromptAttemptAt().IsZero(),
+		"the run's prompt boundary is still zero after the final reload")
 }
