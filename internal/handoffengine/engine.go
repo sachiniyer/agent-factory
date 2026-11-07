@@ -55,8 +55,8 @@ type SessionInput struct {
 	CarryPossible bool   // local worktree + carry-capable agent
 	HomeDir       string // the runtime-bound account home (codex), "" elsewhere
 	Program       string // the recorded launch command (RuntimeProgram); the
-	// drift compare reads its command-line overrides — a session launched with
-	// `codex -s workspace-write` takes that mode over config.toml's (#6902)
+	// drift compare asks whether its words could change the sandbox mode or
+	// profile — anything beyond af's own injected args answers "yes" (#6902)
 	LimitAccount   string    // parked-on account, from instance limit facts
 	WallObservedAt time.Time // durable wall sighting; zero for banner-only
 	Captured       bool      // the poll produced a frame this pass

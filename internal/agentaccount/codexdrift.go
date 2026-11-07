@@ -27,12 +27,14 @@ var codexRuntimeCompareKeys = []string{"model", "model_reasoning_effort", "appro
 
 // CodexRuntimeDriftKey compares the effective runtime settings of a source
 // home (the session's own account dir, or the ambient home) against a
-// candidate account home. program is the session's recorded launch command —
-// a command-line sandbox override in it applies before config.toml's
-// sandbox_mode, so the mode that will actually take effect is not the config's
-// alone (#6902). It answers the one question the engine's candidate filter
-// needs: does moving to target keep the session's model, effort, approval,
-// and sandbox — or is the candidate ineligible?
+// candidate account home. program is the session's recorded launch command:
+// when any argument in it could change the sandbox mode or the selected
+// profile — anything beyond the words af itself injects — the configs'
+// non-workspace mode cannot prove sandbox_workspace_write inert and the
+// table is compared instead of skipped (#6902). It answers the one question
+// the engine's candidate filter needs: does moving to target keep the
+// session's model, effort, approval, and sandbox — or is the candidate
+// ineligible?
 //
 // (key, false): the candidate is ineligible — it sets a different value, or
 // sets/omits a key asymmetrically. No presence gap is presumed harmless:
@@ -64,66 +66,43 @@ func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, inc
 	if reason != "" {
 		return "", true
 	}
-	cliMode, cliDedicated, cliOK := codexProgramSandboxOverride(program)
-	if cliOK && cliMode != "" && !cliDedicated {
-		// A -c override lands on the root config, where a selected inline
-		// profile's sandbox_mode is consulted before it (upstream
-		// derive_sandbox_policy takes the dedicated flag, then the profile,
-		// then the root). The override is proven only when neither home's
-		// selected profile sets a conflicting mode.
-		if pm := codexSelectedProfileMode(sourceDoc); pm != "" && pm != cliMode {
-			cliOK = false
-		}
-		if pm := codexSelectedProfileMode(targetDoc); pm != "" && pm != cliMode {
-			cliOK = false
-		}
-	}
-	// Config-effective modes, captured before the command line substitutes
-	// its own: codexRuntimeSource shape-validates the table only under a
-	// config mode of workspace-write, so the malformed-table check below
-	// must key on what the file actually configures.
-	smConfig, _ := source["sandbox_mode"].(string)
-	tmConfig, _ := target["sandbox_mode"].(string)
-	if cliMode != "" {
-		// The same launch command travels with the session to the new home,
-		// so its override applies identically under either config.
-		source["sandbox_mode"] = cliMode
-		target["sandbox_mode"] = cliMode
-	}
+	// The one question the launch program can settle for this compare: could
+	// it change the sandbox mode or the selected profile? Only a program
+	// provably built of af's own argument words answers no; anything else —
+	// another -c operand, a mode or profile flag, a wrapper — answers yes,
+	// and sandbox_workspace_write must be compared even when both configs
+	// call it inert (#6902).
+	programNeutral := codexProgramSandboxNeutral(program)
 	for _, k := range codexRuntimeCompareKeys {
 		// sandbox_workspace_write is only effective under workspace-write.
 		// codexRuntimeSource shape-validates the table only in that mode, and
 		// the seeder never strips an operator's leftover [sandbox_workspace_write]
 		// when the mode changes, so in another mode a stale table is inert.
-		// The compare skips the key only when the EFFECTIVE modes — command
-		// line when the program proves one, config otherwise — are both
-		// explicitly non-workspace. An omitted sandbox_mode is not presumed
-		// inert (upstream Codex may default it to workspace-write under
-		// project trust), and a program whose sandbox override cannot be
-		// proven — a wrapper, an unknown flag, disagreeing mode flags — is
-		// incomparable rather than allowed to declare the table inert.
-		// Because codexRuntimeSource does not validate the table outside
-		// config workspace-write, a malformed inactive table (e.g. a
-		// wrong-type value) is incomparable here, never silently equal.
-		// sandbox_mode is compared earlier in this list, so a cross-mode
-		// widening is already caught and cannot be hidden by this gate.
+		// The compare skips the key only when both sides are explicitly in a
+		// non-workspace mode AND the launch program is proven neutral: an
+		// omitted sandbox_mode is not presumed inert, because upstream Codex
+		// may default it to workspace-write (project trust), and silently
+		// skipping a differing table there could widen the sandbox. Because
+		// codexRuntimeSource does not validate the table outside
+		// workspace-write, a malformed inactive table (e.g. a wrong-type
+		// value) is incomparable here, never silently equal. sandbox_mode is
+		// compared earlier in this list, so a cross-mode widening is already
+		// caught and cannot be hidden by this gate.
 		if k == "sandbox_workspace_write" {
-			if smConfig != "workspace-write" {
+			sm, _ := source["sandbox_mode"].(string)
+			tm, _ := target["sandbox_mode"].(string)
+			if sm != "workspace-write" {
 				if opts, exists := source["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
 					return k, true
 				}
 			}
-			if tmConfig != "workspace-write" {
+			if tm != "workspace-write" {
 				if opts, exists := target["sandbox_workspace_write"]; exists && !validCodexWorkspaceOptions(opts) {
 					return k, true
 				}
 			}
-			if !cliOK {
-				return k, true
-			}
-			sm, _ := source["sandbox_mode"].(string)
-			tm, _ := target["sandbox_mode"].(string)
-			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" {
+			if sm != "" && sm != "workspace-write" && tm != "" && tm != "workspace-write" &&
+				programNeutral {
 				continue
 			}
 		}
@@ -134,17 +113,4 @@ func CodexRuntimeDriftKey(sourceDir, targetDir, program string) (key string, inc
 		}
 	}
 	return "", false
-}
-
-// codexSelectedProfileMode is the sandbox_mode the config's selected inline
-// profile sets — "" when no profile is selected or it sets none. An
-// unverifiable selection is already incomparable upstream in
-// codexRuntimeSource, so this reads only the resolvable case.
-func codexSelectedProfileMode(doc map[string]any) string {
-	profile, reason := codexSelectedProfile(doc)
-	if reason != "" {
-		return ""
-	}
-	mode, _ := profile["sandbox_mode"].(string)
-	return mode
 }
