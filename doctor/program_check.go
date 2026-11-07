@@ -566,7 +566,12 @@ func resolveTreeRel(workspace, ref, rel string, depth int) (string, baseTreeEntr
 				return "", baseTreeUnknown
 			}
 			if filepath.IsAbs(target) {
-				joined := filepath.Join(append([]string{target}, parts[i+1:]...)...)
+				// Stat the RAW concatenation — the kernel resolves ".."
+				// component-wise through real directories, so a target like
+				// /host/missing/../installed fails correctly when
+				// /host/missing is absent. Join would Clean it away and
+				// prove a runnable path that dangles in the worktree.
+				joined := target + "/" + strings.Join(parts[i+1:], "/")
 				if runnableFile(joined) {
 					return "", baseTreeRunnable
 				}

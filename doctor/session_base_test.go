@@ -922,3 +922,32 @@ func TestCheckAgentPrograms_EarlierWinnerBoundsUncertaintyScan(t *testing.T) {
 	require.NotContains(t, row.Detail, "could not verify",
 		"the winner is proven — the verdict must assert the shadowing, not plead uncertainty")
 }
+
+// A committed dir-link whose ABSOLUTE target contains ".." is resolved
+// component-wise by the kernel — `tools -> <base>/missing/../installed`
+// dangles while <base>/missing is absent, so PATH=tools:<installed> selects
+// the installed binary in every checkout and no shadowing may be reported.
+func TestCheckAgentPrograms_AbsDotDotLinkTarget_DoesNotShadow(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	base := testguard.CanonicalTempDir(t)
+	installed := filepath.Join(base, "installed")
+	require.NoError(t, os.MkdirAll(installed, 0o755))
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	// Raw concatenation keeps the ".." — filepath.Join would clean it away.
+	target := filepath.Join(base, "missing") + "/../installed"
+	require.NoError(t, os.Symlink(target, filepath.Join(repo, "tools")))
+	commitRepoFile(t, repo, "tools")
+	chdir(t, repo)
+
+	command := "env PATH=tools:" + installed + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"the committed link dangles through '..' on the host too — installed/claude wins everywhere")
+}
