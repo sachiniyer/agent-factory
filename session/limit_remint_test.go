@@ -855,6 +855,49 @@ func TestLimitPark_ReplacedRuntimeDropsTombstone(t *testing.T) {
 		"the replaced runtime's wall never received a prompt — no tombstone may carry")
 }
 
+// TestLimitWallResidue_ChurnedClaimIsNotRetired is the #6972 Codex churn arm:
+// ordinary pane churn settles a parked row to Running WITHOUT delivering its
+// pending prompt and WITHOUT clearing the claim fields — so the shadow it
+// mirrors is a standing claim, not a retired one. Judging it residue would
+// ignore the unchanged banner forever and strand the send; the sighting must
+// re-park the row and keep it in the retry loop.
+func TestLimitWallResidue_ChurnedClaimIsNotRetired(t *testing.T) {
+	inst := &Instance{Program: tmux.ProgramClaude}
+	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", staleBanner, inst.stateEpoch))
+
+	require.NoError(t, inst.Transition(ObserveLiveness(LiveRunning).ChurnOnly()),
+		"pane churn settles liveness without retiring the claim")
+
+	require.True(t, inst.SetLimitReachedAtEpoch(time.Time{}, "", staleBanner, inst.stateEpoch),
+		"the unchanged banner is still the standing wall — it re-parks, it is not residue")
+	require.True(t, inst.LimitReached())
+	require.False(t, inst.LimitWallPromptSent(),
+		"no send landed for this wall — the row must stay in the retry loop")
+}
+
+// TestLimitWallResidue_FailedHandoffKeepsSentClaim is the #6972 Codex rollback
+// arm: a failed SwapAgentProgram's revert leaves the outgoing runtime running,
+// so its retired claims stay provable. Without the restore, the speculative
+// shadow drop plus generation advance turned an expired, already-answered wall
+// into a fresh park with no tombstone — the scheduler replayed its prompt.
+func TestLimitWallResidue_FailedHandoffKeepsSentClaim(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(2 * time.Hour))()
+
+	inst := handoffTestInstance(t, tmux.ProgramClaude)
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner, false)
+	inst.ClearLimitReachedSent()
+
+	entry, err := inst.SwapAgentProgram(tmux.ProgramGemini, HandoffReasonUsageLimit, "sha", false)
+	require.NoError(t, err)
+	require.NoError(t, inst.RevertHandoff(entry))
+
+	require.False(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch),
+		"the reverted swap's runtime still shows its own retired wall — residue, not a fresh park")
+	require.False(t, inst.LimitReached())
+}
+
 // TestLimitWallResidue_RemoteReplaceIsNewEmission is the #6972 Codex remote
 // arm of item 1: a docker/ssh/hook session's in-place relaunch marks the
 // runtime replaced without ever resolving a concrete PID — runtimePID stays

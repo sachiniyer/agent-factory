@@ -127,6 +127,15 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 		if c.agent != agent || c.account != i.Account {
 			continue
 		}
+		if idx == 1 && i.limitWallShadowMirrorsStandingClaimLocked() {
+			// The shadow still mirrors a standing claim — its live fields were
+			// never cleared, so nothing retired the wall. Ordinary pane churn
+			// can settle liveness out of parked WITHOUT delivering the pending
+			// prompt (the transition keeps the claim fields), and judging the
+			// mirror as "retired" would ignore the unchanged banner forever —
+			// the row settles Ready and the send is never made (#6972, Codex).
+			continue
+		}
 		// The residue reads below prove the pane still displays the emission
 		// the claim recorded — impossible once the RUNTIME that displayed it
 		// is gone: a re-launched or handoff-replaced runtime showing the same
@@ -169,6 +178,21 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 		}
 	}
 	return false
+}
+
+// limitWallShadowMirrorsStandingClaimLocked reports whether the retired-wall
+// shadow is still only a mirror of the row's standing claim. The shadow is
+// rewritten on every park so the row's wall record survives restart; it
+// becomes a retired claim only when a clear — the send-landed, manual, or
+// transition clear — zeroes the live fields. Churn transitions keep them, so
+// a shadow equal to the standing claim is that claim, not evidence the row
+// moved past a wall. Caller holds i.mu.
+func (i *Instance) limitWallShadowMirrorsStandingClaimLocked() bool {
+	w := i.lastLimitWall
+	return w.agent != "" &&
+		w.agent == i.limitAgent && w.account == i.limitAccount &&
+		w.resetAt.Equal(i.limitResetAt) && w.evidence == i.limitResetEvidence &&
+		w.banner.Prefix == i.limitBannerPrefix && w.banner.Count == i.limitBannerCount
 }
 
 // limitWallRuntimeCurrentLocked reports whether a wall claim's recorded
