@@ -447,15 +447,17 @@ var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|fe
 // silently falls back to the host zone); genuine spaces inside a paren, e.g.
 // the descriptor "(5h limit)", are kept verbatim. A wrap that splits a
 // multi-digit token outside a paren — a calendar day ("Nov 1\n2, 2026" →
-// "Nov 12, 2026") or a clock hour ("1\n1am" → "11am") — rejoins by dropping
-// the newline rather than spacing it, so the day/hour resolves as the unwrapped
-// form instead of the off-by-a-digit "Nov 1 2" / "1 1am" parse. A wrap that
-// splits a month-name token outside a paren ("No\nv" → "Nov") rejoins the same
-// way, gated on the joined letters forming a month name (wrapSplitsMonth) so a
-// word-boundary wrap ("reset\nat") takes a space rather than collapsing to
-// "resetat" — keeping the unwrapped evidence ("reset at") stable for the #6765
-// re-read identity. The same normalization is applied to the evidence so it
-// stays stable for the #6765 re-read identity.
+// "Nov 12, 2026"), a clock hour ("1\n1am" → "11am"), or a four-digit year
+// ("Nov 6, 20\n27 9am" → "Nov 6, 2027 9am") — rejoins by dropping the
+// newline rather than spacing it, so the day/hour/year resolves as the
+// unwrapped form instead of the off-by-a-digit "Nov 1 2" / "1 1am" /
+// "Nov 6, 20 27" parse. A wrap that splits a month-name token outside a
+// paren ("No\nv" → "Nov") rejoins the same way, gated on the joined
+// letters forming a month name (wrapSplitsMonth) so a word-boundary wrap
+// ("reset\nat") takes a space rather than collapsing to "resetat" —
+// keeping the unwrapped evidence ("reset at") stable for the #6765
+// re-read identity. The same normalization is applied to the evidence so
+// it stays stable for the #6765 re-read identity.
 func normalizeResetWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -506,15 +508,18 @@ func normalizeResetWhitespace(s string) string {
 			lastColon = false
 		case c == '\n' || c == '\r':
 			// A wrap newline outside a paren. When it splits a multi-digit
-			// token (a calendar day or a clock hour) the newline is dropped so
-			// the digits rejoin — "Nov 1\n2" → "Nov 12", "1\n1am" → "11am" —
-			// otherwise the day/hour resolves to the wrong instant. The rejoin
-			// is gated on the joined digits forming a single day/hour token
-			// (≤ 2 digits): a wrap BETWEEN separate numeric tokens — e.g.
-			// "Nov 6\n2026" (the day followed by the year), or "2026\n9am"
-			// (the year followed by the clock hour) — must stay a space, or
-			// monthDay would consume "62" as the day and time.Date would
-			// normalize it into a much later month. When it splits a
+			// token (a calendar day, a clock hour, or a four-digit year)
+			// the newline is dropped so the digits rejoin — "Nov 1\n2" →
+			// "Nov 12", "1\n1am" → "11am", "Nov 6, 20\n27" → "Nov 6, 2027"
+			// — otherwise the day/hour/year resolves to the wrong instant
+			// (or monthDay misses the explicit year and the evidence
+			// diverges from the unwrapped form). The rejoin is gated on
+			// the joined digits forming a single day/hour/year token
+			// (≤ 4 digits): a wrap BETWEEN separate numeric tokens — e.g.
+			// "Nov 6\n2026" (the day followed by the year, 5 digits), or
+			// "2026\n9am" (the year followed by the clock hour, 5 digits)
+			// — must stay a space, or monthDay would consume "62" as the
+			// day and time.Date would normalize it into a much later When it splits a
 			// month-name token the newline is likewise dropped so the
 			// letters rejoin — "No\nv" → "Nov" — otherwise monthDay misses the
 			// explicit date. The mid-token rejoin is gated on the joined
@@ -547,7 +552,18 @@ func normalizeResetWhitespace(s string) string {
 					}
 					postRun++
 				}
-				if preRun+postRun <= 2 {
+				// Rejoin when the joined digit run is a single token: a
+				// calendar day or clock hour (≤ 2 digits) OR a four-digit
+				// year (≤ 4 digits) — a wrap INSIDE the year ("20\n27" →
+				// "2027") would otherwise space to "20 27" and monthDay would
+				// miss the explicit year, degrading the parse and shifting
+				// the evidence away from the unwrapped form. A wrap BETWEEN
+				// separate numeric tokens has a longer joined run (a day
+				// followed by a year is 5 digits, "Nov 6\n2026"; a year
+				// followed by a clock hour is 5, "2026\n9am") and stays a
+				// space, or monthDay would consume "62" as the day and
+				// time.Date would normalize it into a much later month.
+				if preRun+postRun <= 4 {
 					continue
 				}
 			}

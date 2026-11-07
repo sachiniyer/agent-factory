@@ -735,6 +735,19 @@ func TestClaudeResetWrappedBannerTimezone(t *testing.T) {
 			want:    time.Date(2026, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
 		},
 		{
+			// A narrow pane may wrap INSIDE a four-digit year token —
+			// "2027" splits as "20\n27" ("Nov 6, 20\n27 9am") — and the
+			// wrap newline must rejoin (drop, not space) so monthDay sees
+			// the explicit year "2027" rather than "20 27", which would
+			// miss the year and diverge the evidence from the unwrapped
+			// form (breaking the #6765 re-read identity across pane
+			// resizes). Same EST instant as the unwrapped "Nov 6, 2027
+			// 9am" form.
+			name:    "weekly date: year wraps inside its digits",
+			content: "Claude usage limit reached. Your limit will reset at Nov 6, 20\n27 9am (America/New_York).",
+			want:    time.Date(2027, 11, 6, 9, 0, 0, 0, est).UTC(), // EST -> 14:00Z
+		},
+		{
 			// A narrow pane may wrap INSIDE a clock at the colon — the
 			// minutes "30" land on the next row ("2:\n30pm"). The wrap
 			// newline must rejoin (drop, not space) so parseClockTime sees
