@@ -196,3 +196,93 @@ func TestResumeLimitedSessions_AutoSwapIncomingWall_ReloadCarriesIncomingAttribu
 	require.True(t, record.LimitResetAt.Equal(incomingWallReset),
 		"the reloaded reset window is the incoming wall's")
 }
+
+// parkAutoSwapOnIncomingLimit is the automatic-swap twin of
+// parkManualHandoffOnIncomingLimit: it drives the same flow as
+// TestResumeLimitedSessions_AutoSwapIncomingWallAttributesAndRecordsIncomingIdentity
+// and leaves the session parked at the incoming identity's usage-limit wall. The
+// first scheduler pass commits the automatic swap, settleReplacementRuntime's
+// readiness wait sees the incoming identity's limit banner, and
+// ParkAutomaticAccountSwapAtLimit attributes the wall to the incoming identity
+// (claude, "work") with the incoming window's reset. The session is left
+// LiveLimitReached with the pending swap still set and
+// PendingManualAccountSwap == false — the row shape the manual twin tests
+// exercise, but for an automatic transaction. The first pass records one
+// attempt (the baseline for the cadence tests below).
+func parkAutoSwapOnIncomingLimit(t *testing.T) (*Manager, string, *session.Instance, *limitResumeBackend, func(time.Duration)) {
+	t.Helper()
+	advance := withFrozenClock(t)
+	base := nowFunc()
+	outgoingReset := base.Add(time.Hour)
+	manager, repoID, inst, backend := newAutoResumeManager(t, "", true, "finish the migration", outgoingReset)
+	configureLimitAccountCandidate(t, manager, "work")
+	wallBackend := &accountIncomingLimitBackend{
+		limitResumeBackend: backend,
+		banner:             claudeIncomingLimitBanner,
+	}
+	inst.SetBackend(wallBackend)
+	advance(time.Second)
+	manager.ResumeLimitedSessions()
+	require.True(t, inst.LimitReached(), "the incoming-wall arm parks the session at the limit")
+	agent, account, ok := inst.LimitIdentity()
+	require.True(t, ok)
+	require.Equal(t, tmux.ProgramClaude, agent, "the wall is attributed to the incoming agent")
+	require.Equal(t, "work", account, "the wall is attributed to the incoming account")
+	_, _, pending := inst.PendingAccountSwap()
+	require.True(t, pending, "the pending swap marker stays set after the incoming-wall park")
+	manual, _ := inst.PendingManualAccountSwap()
+	require.False(t, manual, "the committed swap is automatic, not manual")
+	return manager, repoID, inst, backend, advance
+}
+
+// TestResumeLimitedSessions_AutoSwapIncomingWallWaitsBeforeReset is the
+// automatic-swap twin of TestResumeLimitedSessions_ParkedManualIncomingResetWaits.
+// A committed automatic swap parked at its own target's usage-limit wall must wait
+// for the incoming identity's reset + grace before retrying — the identity match
+// already discriminates the incoming wall, so the manual gate's exclusion of
+// automatic swaps was the bug. Before the fix the scheduler re-attempted on every
+// backoff step throughout the wall window; after the fix it waits.
+func TestResumeLimitedSessions_AutoSwapIncomingWallWaitsBeforeReset(t *testing.T) {
+	m, repo, inst, backend, advance := parkAutoSwapOnIncomingLimit(t)
+	stateKey := stableSessionKey(repo, inst)
+	require.Equal(t, 1, m.limitResumeStates[stateKey].attempts,
+		"the first scheduler pass records one attempt")
+	_, beforeRespawns, beforePrompts := backend.snapshot()
+
+	// Advance well past the backoff base (10s) but far short of the incoming
+	// wall's reset + grace (incomingWallReset is years away on the frozen
+	// clock). Each pass clears the backoff gate, so without the fix each one
+	// would fire a futile attempt against the exhausted incoming account.
+	for i := 0; i < 5; i++ {
+		advance(6 * time.Minute)
+		m.ResumeLimitedSessions()
+	}
+
+	_, afterRespawns, afterPrompts := backend.snapshot()
+	require.Equal(t, beforeRespawns, afterRespawns,
+		"the scheduler must not re-spawn while waiting for the incoming wall's reset")
+	require.Equal(t, beforePrompts, afterPrompts,
+		"the scheduler must not re-deliver a prompt while waiting for the incoming wall's reset")
+	require.Equal(t, 1, m.limitResumeStates[stateKey].attempts,
+		"the scheduler must wait for the incoming account's reset plus grace, not re-attempt on every backoff step")
+}
+
+// TestResumeLimitedSessions_AutoSwapIncomingWallFiresAfterGrace is the
+// automatic-swap twin of
+// TestResumeLimitedSessions_ParkedManualIncomingResetFiresAfterGrace. Once the
+// incoming wall's reset + grace has elapsed, the scheduler must fire and retry
+// the delivery — the same cadence the manual twin honors.
+func TestResumeLimitedSessions_AutoSwapIncomingWallFiresAfterGrace(t *testing.T) {
+	m, repo, inst, _, advance := parkAutoSwapOnIncomingLimit(t)
+	stateKey := stableSessionKey(repo, inst)
+	require.Equal(t, 1, m.limitResumeStates[stateKey].attempts,
+		"the first scheduler pass records one attempt")
+
+	// Advance past the incoming wall's reset + grace.
+	advance(incomingWallReset.Add(limitResumeGrace).Sub(nowFunc()) + time.Second)
+
+	m.ResumeLimitedSessions()
+
+	require.Equal(t, 2, m.limitResumeStates[stateKey].attempts,
+		"the scheduler must fire once the incoming wall's reset plus grace has elapsed")
+}

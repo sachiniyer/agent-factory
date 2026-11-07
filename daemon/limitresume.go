@@ -220,7 +220,7 @@ func (m *Manager) resumeLimitedSession(
 		ordinaryDue = resetAt.Add(limitResumeGrace)
 	}
 	incomingManualReset := false
-	if accountSwap != nil && accountSwap.manual && hasReset {
+	if accountSwap != nil && hasReset {
 		limitedAgent, limitedAccount, limited := inst.LimitIdentity()
 		incomingManualReset = limited && limitedAgent == accountSwap.accountNamespace() && limitedAccount == accountSwap.to
 	}
@@ -228,9 +228,12 @@ func (m *Manager) resumeLimitedSession(
 	if accountSwap != nil && !incomingManualReset {
 		// Account labels are agent-scoped. The ordinary reset belongs to the
 		// outgoing agent/account, so it cannot delay candidate preflight for a
-		// different identity. A parked manual transaction is different: only when
-		// both its agent and label name the incoming identity is ordinaryDue exactly
-		// when that same identity may be contacted again.
+		// different identity. A parked committed transaction is different: only
+		// when both its agent and label name the incoming identity is ordinaryDue
+		// exactly when that same identity may be contacted again. This holds for
+		// both manual and automatic swaps — the incoming-wall park attributes the
+		// limit to the incoming identity either way — so the daemon never hammers a
+		// genuinely-exhausted plan.
 		due = now
 	}
 	// The per-attempt backoff/interval gate sits on top of the due time, so the
