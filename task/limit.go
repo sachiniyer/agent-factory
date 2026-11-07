@@ -450,11 +450,12 @@ var claudeResetAnchor = regexp.MustCompile(`(?is)reset\s+(?:at\s+)?((?:(?:jan|fe
 // "Nov 12, 2026") or a clock hour ("1\n1am" → "11am") — rejoins by dropping
 // the newline rather than spacing it, so the day/hour resolves as the unwrapped
 // form instead of the off-by-a-digit "Nov 1 2" / "1 1am" parse. A wrap that
-// splits an alphabetic token outside a paren — a month name ("No\nv" → "Nov")
-// — rejoins the same way, so monthDay still sees the month rather than the
-// spaced "No v" form, which would miss the explicit date and resume months
-// early. The same normalization is applied to the evidence so it stays stable
-// for the #6765 re-read identity.
+// splits a month-name token outside a paren ("No\nv" → "Nov") rejoins the same
+// way, gated on the joined letters forming a month name (wrapSplitsMonth) so a
+// word-boundary wrap ("reset\nat") takes a space rather than collapsing to
+// "resetat" — keeping the unwrapped evidence ("reset at") stable for the #6765
+// re-read identity. The same normalization is applied to the evidence so it
+// stays stable for the #6765 re-read identity.
 func normalizeResetWhitespace(s string) string {
 	var b strings.Builder
 	b.Grow(len(s))
@@ -503,15 +504,20 @@ func normalizeResetWhitespace(s string) string {
 			// token (a calendar day or a clock hour) the newline is dropped so
 			// the digits rejoin — "Nov 1\n2" → "Nov 12", "1\n1am" → "11am" —
 			// otherwise the day/hour resolves to the wrong instant. When it
-			// splits a mid-word alphabetic token (a month name) the newline is
-			// likewise dropped so the letters rejoin — "No\nv" → "Nov" —
-			// otherwise monthDay misses the explicit date. Otherwise collapse
-			// to a single space (the wrap between the clock and the tz paren,
-			// or between complete words).
+			// splits a month-name token the newline is likewise dropped so the
+			// letters rejoin — "No\nv" → "Nov" — otherwise monthDay misses the
+			// explicit date. The mid-token rejoin is gated on the joined
+			// letters forming a month name (wrapSplitsMonth): a wrap between
+			// complete words ("reset\nat") is byte-identical to a mid-token
+			// wrap at the newline, so only a month-shaped join rejoins; a
+			// word-boundary wrap takes a space, preserving the unwrapped
+			// evidence ("reset at") for the #6765 re-read identity. Otherwise
+			// collapse to a single space (the wrap between the clock and the
+			// tz paren, or between complete words).
 			if lastDigit && i+1 < len(s) && s[i+1] >= '0' && s[i+1] <= '9' {
 				continue
 			}
-			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') {
+			if lastLetter && i+1 < len(s) && (s[i+1] >= 'a' && s[i+1] <= 'z' || s[i+1] >= 'A' && s[i+1] <= 'Z') && wrapSplitsMonth(b.String(), s[i+1:]) {
 				continue
 			}
 			if !outsideSpace {
@@ -528,6 +534,51 @@ func normalizeResetWhitespace(s string) string {
 		}
 	}
 	return b.String()
+}
+
+// wrapSplitsMonth reports whether a wrap newline between two ASCII letters
+// splits a month-name token (a mid-token wrap) rather than falling between two
+// complete words (a word-boundary wrap). The two shapes are byte-identical at
+// the newline — "No\nv" (mid-token, the wrapped month "Nov") and "reset\nat"
+// (word boundary) both present as letter-newline-letter with no surrounding
+// spaces — so the distinction is semantic: the trailing letters already
+// emitted (the run at the end of pre) and the leading letters still ahead (the
+// run at the start of post) are rejoined and checked against the month
+// abbreviations monthDay accepts. A month-shaped join rejoins so monthDay
+// still sees the date; anything else takes a space so the unwrapped evidence
+// ("reset at") is preserved for the #6765 re-read identity.
+func wrapSplitsMonth(pre, post string) bool {
+	j := len(pre)
+	for j > 0 {
+		c := pre[j-1]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		j--
+	}
+	head := pre[j:]
+	if head == "" {
+		return false
+	}
+	k := 0
+	for k < len(post) {
+		c := post[k]
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z')) {
+			break
+		}
+		k++
+	}
+	tail := post[:k]
+	if tail == "" {
+		return false
+	}
+	joined := strings.ToLower(head + tail)
+	for m := range monthIndex {
+		if strings.HasPrefix(joined, m) {
+			return true
+		}
+	}
+	return false
 }
 
 // parseClaudeReset scans the detector-matched tail for Claude's "reset at

@@ -798,6 +798,22 @@ func TestClaudeResetWrappedBannerEvidenceStability(t *testing.T) {
 	if want := "reset at 2pm (America/New_York)"; evT != want {
 		t.Fatalf("trailing rows must not be swallowed into the evidence: got %q, want %q", evT, want)
 	}
+
+	// A wrap between complete words ("reset\nat") is byte-identical to a
+	// mid-token wrap at the newline, so the normalizer must not collapse it to
+	// "resetat": the evidence must match the unwrapped render ("reset at …")
+	// so a pane resize between reads does not change the identity phrase and
+	// bypass the same-wall dedupe in SetLimitReachedAtEpoch.
+	unwrappedAt := "Claude usage limit reached. Your limit will reset at 2pm (America/New_York)."
+	wrappedAt := "Claude usage limit reached. Your limit will reset\nat 2pm (America/New_York)."
+	_, _, _, evUnwrappedAt := det.Check(unwrappedAt, tmux.ProgramClaude, now)
+	_, _, _, evWrappedAt := det.Check(wrappedAt, tmux.ProgramClaude, now)
+	if evUnwrappedAt != evWrappedAt {
+		t.Fatalf("a word-boundary wrap must not change the evidence: unwrapped=%q wrapped=%q", evUnwrappedAt, evWrappedAt)
+	}
+	if want := "reset at 2pm (America/New_York)."; evWrappedAt != want {
+		t.Fatalf("wrapped word-boundary evidence = %q, want %q", evWrappedAt, want)
+	}
 }
 
 // TestClaudeResetWrappedBannerNoTimezoneFallback confirms that a wrapped banner
