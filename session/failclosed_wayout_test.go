@@ -4,6 +4,10 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
+	"os"
+	"os/exec"
+	"path/filepath"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -460,4 +464,157 @@ func TestInertAtKillMarkerRowKeepsNoopKill(t *testing.T) {
 		"a marker-admitted tombstone carries positive evidence nothing is owed — unknown must stay clear")
 	assert.NoError(t, restored.Kill(),
 		"the marker's admission is the no-op kill: anything else leaves the tombstone unfinished")
+}
+
+// The tests below pin #6940, the independent review's leftover wording items on
+// the same way-out text.
+
+// TestNonKilledWayOutNamesOnlyVerbsThatWork is #6940 property 1: on a plain
+// (nothing-preserved) row whose kill is not recorded, the outcome step must
+// offer only verbs that can succeed on this row's shape and state. The way out
+// named `af sessions archive` as a retry — but on exactly this shape (a remote
+// row loaded inert, remoteClient nil) ArchiveSandbox refuses at its live-client
+// gate before it can reach the teardown, and it refuses the same way AFTER a
+// repair (a rebuilt handle still loads with no client). The test proves the
+// dead end on the same row, then pins that the way out names only the verbs
+// that can succeed: restore and kill.
+func TestNonKilledWayOutNamesOnlyVerbsThatWork(t *testing.T) {
+	// A non-killed Lost legacy docker row whose handle cannot be rebuilt (no
+	// engine id) — the same fixture as
+	// TestUnrebuildableHandleRefusalOnNonKilledRow.
+	row := InstanceData{
+		ID:          "wayout-verbs-id",
+		Title:       "wayout-verbs",
+		Path:        "/repo",
+		BackendType: "docker",
+		Liveness:    LiveLost,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: "sha256:deadbeef",
+		}},
+	}
+	restored, err := FromInstanceData(row.ForStorage())
+	require.NoError(t, err)
+	require.False(t, restored.UserKilled(), "premise: the row's kill is NOT recorded")
+
+	// Premise: `af sessions archive` cannot succeed on this shape —
+	// ArchiveSandbox refuses at the live-client gate BEFORE its Kill can reach
+	// the teardown. And a repair does not change that: a row whose handle
+	// rebuilds cleanly still loads inert (remoteClient nil), so archive
+	// refuses it the same way.
+	_, archErr := restored.ArchiveSandbox()
+	require.Error(t, archErr)
+	assert.Contains(t, archErr.Error(), "no live client",
+		"the verb the way out must not name: archive refuses this row's shape outright")
+	repaired, err := FromInstanceData(InstanceData{
+		ID: "wayout-verbs-ok-id", Title: "wayout-verbs-ok", Path: "/repo",
+		BackendType: "docker", Liveness: LiveLost,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: "sha256:deadbeef", EngineID: "engine-1",
+		}},
+	}.ForStorage())
+	require.NoError(t, err)
+	require.NotNil(t, repaired.runtimeTeardown, "premise: the repaired handle rebuilds")
+	_, archOK := repaired.ArchiveSandbox()
+	require.Error(t, archOK)
+	assert.Contains(t, archOK.Error(), "no live client",
+		"archive refuses the repaired row too — it still loads with no client")
+
+	_, err = restored.provisionForRestore()
+	require.Error(t, err, "an unrebuildable handle must refuse the re-provision's reap")
+	msg := err.Error()
+	assert.NotContains(t, msg, "af sessions archive",
+		"archive refuses this shape at the live-client gate before and after a repair; naming it is a dead end: %s", msg)
+	assert.Contains(t, msg, "af sessions restore",
+		"restore reaches the rebuilt teardown and can succeed: %s", msg)
+	assert.Contains(t, msg, "af sessions kill",
+		"the give-up route stays named — with its warning: %s", msg)
+}
+
+// TestKillMessageSaysWhatKillDoesOnItsShape is #6940 property 2: each refusal
+// that names `af sessions kill` must say what the kill does on ITS shape —
+// remove the row only, or remove the row and reap the preserved workspace.
+// Master's two messages both read "removes the row" while doing different
+// things.
+func TestKillMessageSaysWhatKillDoesOnItsShape(t *testing.T) {
+	t.Run("bound transport: kill reaps the workspace", func(t *testing.T) {
+		run := func(time.Duration, string, io.Reader, bool) ([]byte, error) {
+			return nil, errors.New("ssh: connection refused")
+		}
+		row := leakRow(t, "777", "new-ref", run)
+		row.runtimeCleanupStateUnknown = true
+
+		_, err := row.provisionForRestore()
+		require.Error(t, err)
+		msg := err.Error()
+		kill := strings.Index(msg, "af sessions kill")
+		require.GreaterOrEqual(t, kill, 0, "the refusal names the kill verb: %s", msg)
+		assert.Contains(t, msg[kill:], "reap",
+			"kill on this shape runs the real teardown, which reaps the preserved workspace — the message must say so: %s", msg)
+		warn := strings.Index(msg, "unpushed work")
+		require.GreaterOrEqual(t, warn, 0, "the refusal keeps the unpushed-work warning: %s", msg)
+		assert.Less(t, warn, kill,
+			"the unpushed-work warning still precedes the verb that reaps it: %s", msg)
+	})
+
+	t.Run("no transport: kill removes the row only", func(t *testing.T) {
+		inst := &Instance{
+			Title:   "wayout-notransport",
+			ID:      "wayout-notransport-id",
+			Path:    t.TempDir(),
+			backend: newInertSandboxBackend("ssh"),
+			archivedWorkspace: &ArchivedWorkspaceData{
+				Dir: "/home/remote/.af-sessions/wayout-notransport",
+			},
+		}
+		_, err := inst.recordedTransport()
+		require.Error(t, err)
+		msg := err.Error()
+		assert.Contains(t, msg, "af sessions kill", "the refusal names the kill verb: %s", msg)
+		assert.Contains(t, msg, "removes the row only",
+			"with no transport af cannot reach the host, so kill removes only the row and the workspace is the user's to remove: %s", msg)
+		assert.Contains(t, msg, "workspace stays",
+			"the message says the kill leaves the directory in place: %s", msg)
+		// And prove it: kill on this shape is the no-op success that leaves
+		// the directory — nothing af has can reach the host.
+		require.NoError(t, inst.Kill(),
+			"kill on this shape removes only the row (nil teardown → no-op)")
+	})
+}
+
+// TestWayOutGrepCommandQuotesAFHome is #6940's test gap (property 3): the
+// `grep -l` step of the manual way out must work when the AF home path contains
+// a space. The emitted command quotes the home prefix while the glob stays
+// outside the quotes so it still expands; this test extracts the command the
+// refusal hands the operator and runs it for real against a spaced home.
+func TestWayOutGrepCommandQuotesAFHome(t *testing.T) {
+	home := filepath.Join(t.TempDir(), "af home")
+	repoDir := filepath.Join(home, "instances", "repoX")
+	require.NoError(t, os.MkdirAll(repoDir, 0o755))
+	instancesFile := filepath.Join(repoDir, "instances.json")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+
+	restored := restoredFailClosedPreservedArchive(t, "wayout-grep")
+	require.NoError(t, os.WriteFile(instancesFile,
+		[]byte(`[{"id":"`+restored.ID+`"}]`), 0o600))
+
+	err := restored.runtimeTeardown()
+	require.Error(t, err)
+	msg := err.Error()
+
+	// Extract the `grep -l …` command the way out hands the operator.
+	start := strings.Index(msg, "`grep -l ")
+	require.GreaterOrEqual(t, start, 0, "the way out names the grep step: %s", msg)
+	rest := msg[start+1:]
+	end := strings.Index(rest, "`")
+	require.Greater(t, end, 0, "the grep command is backtick-quoted: %s", msg)
+	grepCmd := rest[:end]
+
+	// The home prefix is quoted; the glob is not, so it still expands.
+	assert.Contains(t, grepCmd, strconv.Quote(home)+"/instances/*/instances.json",
+		"the emitted command quotes only the home prefix: %s", grepCmd)
+
+	// Run it for real: a home path containing a space still names the file.
+	out, runErr := exec.Command("sh", "-c", grepCmd).Output()
+	require.NoError(t, runErr, "the emitted grep command must run under sh with a space in the AF home: %s", grepCmd)
+	assert.Equal(t, instancesFile, strings.TrimSpace(string(out)))
 }
