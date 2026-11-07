@@ -360,21 +360,53 @@ func (i *Instance) RecordPendingAccountSwapNoticeDelivery(from, to string, statu
 }
 
 // pendingSwapIncomingWallLocked reports whether the row's recorded limit wall
-// is attributed to the committed swap's INCOMING identity — the replacement
+// is a fresh wall of the committed swap's INCOMING identity — the replacement
 // the swap moved this session to (#6799). Either kind can be parked there:
 // ParkManualAccountSwapAtLimit before mission submission, and
 // ParkAutomaticAccountSwapAtLimit when an automatic retry's readiness wait
-// found the replacement's own quota. A wall matches only on BOTH axes it
+// found the replacement's own quota.
+//
+// Two tests must both hold. ATTRIBUTION: the wall matches on both axes it
 // carries — the account label (limit_account == pending.To) and the agent
 // namespace (limit_agent == pending.AccountAgent): a cross-agent manual swap
 // may reuse the outgoing label in a different provider's namespace (Claude
 // `work` → Codex `work`), where the account axis alone misattributes the
 // outgoing provider's wall to the incoming identity. An automatic swap never
 // crosses agents and carries no AccountAgent — as do records written before
-// the field — so both fall back to the account axis alone. Caller holds i.mu.
+// the field — so both fall back to the account axis alone. RECENCY: the
+// wall's sighting must postdate the send being retired (#6921 review) — a
+// wall recorded BEFORE the confirmed/settled attempt is stale evidence: the
+// send demonstrably got past it, and keeping it lets the scheduler resume a
+// working agent. A pending record with no attempt instant has no send for
+// the wall to be stale against, so attribution alone decides.
 func (i *Instance) pendingSwapIncomingWallLocked(pending *AccountSwapData) bool {
-	return i.limitAccount == pending.To &&
-		(pending.AccountAgent == "" || i.limitAgent == pending.AccountAgent)
+	if i.limitAccount != pending.To ||
+		(pending.AccountAgent != "" && i.limitAgent != pending.AccountAgent) {
+		return false
+	}
+	if pending.MissionDeliveryAttemptAt.IsZero() {
+		return true
+	}
+	return i.incomingLimitObservedAtLocked().After(pending.MissionDeliveryAttemptAt)
+}
+
+// incomingLimitObservedAtLocked is the recorded sighting instant of the row's
+// current limit wall — the newest ObservedAt among the durable
+// account-limit observation rows carrying the same (limitAgent, limitAccount)
+// attribution. Zero when the ledger has no matching row (ambient walls,
+// which the ledger skips, and rows written before the field existed): an
+// unprovable sighting orders before any recorded send, so the wall reads as
+// stale rather than fresh (#6921 review). Caller holds i.mu.
+func (i *Instance) incomingLimitObservedAtLocked() time.Time {
+	var observedAt time.Time
+	for idx := range i.accountLimitObservations {
+		o := &i.accountLimitObservations[idx]
+		if o.Agent == i.limitAgent && o.Account == i.limitAccount &&
+			o.ObservedAt.After(observedAt) {
+			observedAt = o.ObservedAt
+		}
+	}
+	return observedAt
 }
 
 // SettlePendingAccountSwapNoticeDelivery retires the committed swap's notice
