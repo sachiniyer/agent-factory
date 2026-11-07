@@ -812,6 +812,49 @@ func TestLimitPark_NewEmissionDropsPromptSent(t *testing.T) {
 		"a provably new emission re-using the reset phrase must not inherit the sent tombstone")
 }
 
+// TestLimitPark_TopOfCaptureShadowKeepsTombstone is the #6972 Codex
+// anchorless arm: a tombstoned claim recorded at the capture's start has no
+// prefix bytes to prove position — the anchorless fallback must still carry
+// the send tombstone through a same-phrase re-park, or the scheduler replays
+// the prompt at reset+grace.
+func TestLimitPark_TopOfCaptureShadowKeepsTombstone(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(-time.Hour))()
+
+	top := LimitBanner{Prefix: "", Count: 1}
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, top, false)
+	inst.ClearLimitReachedSent()
+
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, top, inst.stateEpoch),
+		"the anchorless same-phrase re-read re-parks the recorded claim")
+	require.True(t, inst.LimitWallPromptSent(),
+		"the tombstone survives an anchorless shadow re-park — its send already went out")
+}
+
+// TestLimitPark_ReplacedRuntimeDropsTombstone is the #6972 Codex runtime
+// arm: a tombstoned parked row whose runtime was replaced (a relaunch that
+// preserves LiveLimitReached) must not keep the dead runtime's tombstone on
+// a lookalike banner — the replacement's wall was never answered.
+func TestLimitPark_ReplacedRuntimeDropsTombstone(t *testing.T) {
+	sightedAt := time.Date(2026, 11, 10, 14, 0, 0, 0, time.UTC)
+	parked := clockReset(sightedAt)
+	defer freezeInstanceNow(parked.Add(-time.Hour))()
+
+	inst := &Instance{Program: tmux.ProgramClaude}
+	inst.SetLimitReachedAtEvidence(parked, clockResetEvidence, staleBanner, false)
+	inst.ClearLimitReachedSent()
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch))
+	require.True(t, inst.LimitWallPromptSent())
+
+	inst.MarkAgentRuntimeReplacedForTest(true)
+	require.True(t, inst.SetLimitReachedAtEpoch(parked, clockResetEvidence, staleBanner, inst.stateEpoch),
+		"the replacement's identical banner re-parks as its own emission")
+	require.False(t, inst.LimitWallPromptSent(),
+		"the replaced runtime's wall never received a prompt — no tombstone may carry")
+}
+
 // TestLimitWallResidue_RemoteReplaceIsNewEmission is the #6972 Codex remote
 // arm of item 1: a docker/ssh/hook session's in-place relaunch marks the
 // runtime replaced without ever resolving a concrete PID — runtimePID stays

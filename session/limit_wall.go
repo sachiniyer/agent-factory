@@ -62,6 +62,30 @@ func (i *Instance) limitWallClaimsLocked() [2]limitWallClaim {
 	return [2]limitWallClaim{live, i.lastLimitWall}
 }
 
+// limitWallAnchorAdmits reports whether a sighting can still be the recorded
+// emission's re-read. Positional proof via sameLimitBannerPosition settles it
+// when the claim's anchor carries distinguishing bytes; a claim recorded at
+// the capture's start (an empty prefix) cannot be told apart positionally, so
+// the fallback reads what remains: the phrase the claim advertised, or — for
+// a claim that advertised none — an unchanged match count (a claim that
+// recorded count 0 has no anchor at all and admits nothing). The
+// count-growth and runtime checks run before this read, so the ambiguity left
+// is "same emission" versus "a lookalike new emission at the same start" —
+// undecidable locally and resolved toward the recorded claim, the same
+// direction the parked same-phrase dedupe takes.
+func limitWallAnchorAdmits(claim LimitBanner, claimEvidence string, banner LimitBanner, evidence string) bool {
+	if sameLimitBannerPosition(claim.Prefix, banner.Prefix) {
+		return true
+	}
+	if claim.Prefix != "" {
+		return false
+	}
+	if evidence != "" && evidence == claimEvidence {
+		return true
+	}
+	return evidence == "" && claimEvidence == "" && claim.Count > 0 && banner.Count == claim.Count
+}
+
 // limitWallResidueLocked reports whether a sighting is a re-read of the row's
 // OWN recorded wall — its live claim while parked, or the shadow the last
 // park left behind — whose claimed reset has already passed. Such a sighting
@@ -124,8 +148,7 @@ func (i *Instance) limitWallResidueLocked(banner LimitBanner, evidence string, n
 			// residue (#6959 review).
 			continue
 		}
-		anchored := sameLimitBannerPosition(c.banner.Prefix, banner.Prefix)
-		if !anchored && !(c.banner.Prefix == "" && evidence != "" && evidence == c.evidence) {
+		if !limitWallAnchorAdmits(c.banner, c.evidence, banner, evidence) {
 			continue
 		}
 		if evidence != "" && c.evidence != "" && evidence != c.evidence {

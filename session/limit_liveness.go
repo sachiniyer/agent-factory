@@ -128,6 +128,7 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			return i.applyDegradedResightLocked(banner)
 		}
 		if evidence == i.limitResetEvidence &&
+			i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) &&
 			!(i.limitBannerCount > 0 && banner.Count > i.limitBannerCount) {
 			// Already parked on the SAME wall claim — a re-read of an
 			// unchanged banner is not a new observation, whatever shape its
@@ -140,7 +141,9 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			// tombstone onto a wall whose prompt never went out (#6972,
 			// Codex). A moved anchor at an unchanged count is ambiguous —
 			// the capture window may simply have slid — so position alone
-			// does not veto.
+			// does not veto. The runtime pin is checked for the same reason:
+			// a replacement runtime's identical banner is a new emission and
+			// must not keep the dead runtime's tombstone.
 			return true
 		}
 	}
@@ -183,7 +186,11 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 // durable is minted: the recorded observations keep their own bounds and no
 // never-expiring untimed row is appended on a guess.
 func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
-	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount {
+	// A sighting on a runtime that replaced the parked wall's emitter is a
+	// new emission, never a clipped re-read — the pane that displayed the
+	// recorded banner is gone (#6972, Codex).
+	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount ||
+		!i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) {
 		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
 	}
 	if sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) {
@@ -367,7 +374,7 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 	}
 	if w := i.lastLimitWall; w.agent == agent && w.account == i.Account &&
 		i.limitWallRuntimeCurrentLocked(w.runtimePID, w.runtimeStartID, w.runtimeGen) &&
-		sameLimitBannerPosition(w.banner.Prefix, banner.Prefix) &&
+		limitWallAnchorAdmits(w.banner, w.evidence, banner, evidence) &&
 		!(w.banner.Count > 0 && banner.Count > w.banner.Count) {
 		switch {
 		case resetAt.IsZero() && evidence == "":
