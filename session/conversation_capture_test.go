@@ -98,7 +98,7 @@ func (h *codexHeldFixture) snapshot() (map[string]struct{}, error) {
 }
 
 func bindRuntimeHeldFixture(snap ConversationCaptureSnapshot, fixture *codexHeldFixture) ConversationCaptureSnapshot {
-	verdicts := make(map[string]bool)
+	verdicts := make(map[string]codexRolloutVerdict)
 	var mu sync.Mutex
 	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
 		return judgeCodexRollouts(fixture.snapshot, verdicts, &mu, candidates)

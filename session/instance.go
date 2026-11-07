@@ -448,7 +448,7 @@ type Instance struct {
 	// instance, pinned to the generation it was judged under (#6847 review).
 	codexAttrMu       sync.Mutex
 	codexAttrGen      string
-	codexAttrVerdicts map[string]bool
+	codexAttrVerdicts map[string]codexRolloutVerdict
 	// Account is the credential account this instance's agent runs as, or empty
 	// for the ambient identity — which is the behaviour every session had before
 	// #3051 and remains the default.

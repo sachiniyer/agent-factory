@@ -108,7 +108,7 @@ func TestCaptureAgentConversation_CodexAttributionVerdictsAreMemoized(t *testing
 	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
 
 	calls := 0
-	verdicts := make(map[string]bool)
+	verdicts := make(map[string]codexRolloutVerdict)
 	var mu sync.Mutex
 	snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
 		return judgeCodexRollouts(func() (map[string]struct{}, error) {
@@ -287,7 +287,9 @@ func TestCodexAttributionDoesNotContaminateReplacementGeneration(t *testing.T) {
 
 	inst.codexAttrMu.Lock()
 	defer inst.codexAttrMu.Unlock()
-	require.Equal(t, map[string]bool{newCand: true}, inst.codexAttrVerdicts,
+	require.Len(t, inst.codexAttrVerdicts, 1,
+		"the replacement generation's cache must hold only its own verdicts")
+	require.True(t, inst.codexAttrVerdicts[newCand].ours,
 		"the replacement generation's cache must hold only its own verdicts")
 }
 
