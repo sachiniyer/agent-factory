@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"syscall"
 	"testing"
 	"time"
@@ -60,14 +61,12 @@ func TestSecondHomeDaemonNeverTakesDefaultPortFromForeignDaemon(t *testing.T) {
 	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
 
 	// The first daemon's home marker: a live, flock'd daemon.lock in a home
-	// that is not ours. A real af daemon holds exactly this fd for its whole
-	// lifetime, and its path IS the home — the identity the classification
-	// reads without trusting argv or environment spelling.
+	// that is not ours, with a daemon.pid naming this process. A real af
+	// daemon holds exactly this fd pair for its whole lifetime, and its path
+	// IS the home — the identity the classification reads without trusting
+	// argv or environment spelling.
 	foreignHome := testguard.SocketTempDir(t)
-	lock, err := os.OpenFile(filepath.Join(foreignHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
-	require.NoError(t, err)
-	require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-	defer func() { _ = lock.Close() }()
+	afDaemonHomeFixture(t, foreignHome)
 
 	// Shrink the retry backoff so the retry loop actually runs inside the
 	// test window instead of parking on its 1s→30s schedule.
@@ -133,6 +132,20 @@ func takeoverFixture(t *testing.T) (*webListeners, string) {
 	m.webListeners = wl
 	t.Cleanup(func() { _ = wl.close() })
 	return wl, defHome
+}
+
+// afDaemonHomeFixture marks home as owned by THIS process the way a live af
+// daemon marks its own home: a flock'd daemon.lock plus a daemon.pid naming
+// our pid — the fd+identity evidence the holder classifier proves
+// daemon-hood on (a bare daemon.lock basename proves nothing).
+func afDaemonHomeFixture(t *testing.T, home string) {
+	t.Helper()
+	require.NoError(t, os.WriteFile(filepath.Join(home, "daemon.pid"),
+		[]byte(strconv.Itoa(os.Getpid())), 0600))
+	lock, err := os.OpenFile(filepath.Join(home, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
+	require.NoError(t, err)
+	require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
+	t.Cleanup(func() { _ = lock.Close() })
 }
 
 // reqFor resolves a listen_addr the way the gate sees it.
@@ -259,20 +272,29 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 
 	t.Run("a lock fd in a foreign home classifies foreign", func(t *testing.T) {
 		foreignHome := testguard.SocketTempDir(t)
-		lock, err := os.OpenFile(filepath.Join(foreignHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
-		require.NoError(t, err)
-		require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
-		defer func() { _ = lock.Close() }()
+		afDaemonHomeFixture(t, foreignHome)
 		verdict, home := classifyPortHolder(req)
 		require.Equal(t, holderForeign, verdict)
 		require.Equal(t, foreignHome, home)
 	})
 
-	t.Run("a lock fd in OUR home classifies own — the #6386 case", func(t *testing.T) {
-		lock, err := os.OpenFile(filepath.Join(myHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
+	t.Run("a bare daemon.lock basename proves nothing without a naming daemon.pid", func(t *testing.T) {
+		// A non-af process can hold a file named daemon.lock; the fd is only
+		// af identity when the sibling daemon.pid names the holder. Ours does
+		// not — the pid file is absent — so this process is what it is: the
+		// test binary, provably not an af daemon.
+		foreignHome := testguard.SocketTempDir(t)
+		lock, err := os.OpenFile(filepath.Join(foreignHome, daemonLockFileName), os.O_CREATE|os.O_RDWR, 0600)
 		require.NoError(t, err)
 		require.NoError(t, syscall.Flock(int(lock.Fd()), syscall.LOCK_EX|syscall.LOCK_NB))
 		defer func() { _ = lock.Close() }()
+		verdict, _ := classifyPortHolder(req)
+		require.Equal(t, holderNonDaemon, verdict,
+			"a stray daemon.lock fd must not turn a squatter into a foreign af daemon")
+	})
+
+	t.Run("a lock fd in OUR home classifies own — the #6386 case", func(t *testing.T) {
+		afDaemonHomeFixture(t, myHome)
 		verdict, _ := classifyPortHolder(req)
 		require.Equal(t, holderOwn, verdict,
 			"our own predecessor holding the port is the recovery the retry must keep")
@@ -364,6 +386,42 @@ func TestRefuseWebForeignLatch(t *testing.T) {
 	require.Equal(t, reason, wl.foreignRefusals[addr])
 	wl.mu.Unlock()
 	require.Equal(t, reason, snap().TCPRefusalReason)
+}
+
+func TestLatchedRefusalHoldsOnRebind(t *testing.T) {
+	wl, _ := takeoverFixture(t)
+
+	// Serve a real free port first — the "daemon bound a different port
+	// after refusing" state.
+	l, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serving := l.Addr().String()
+	require.NoError(t, l.Close())
+	cfg := wl.manager.Config()
+	cfg.ListenAddr = serving
+	failed, err := wl.reconcile(cfg)
+	require.NoError(t, err)
+	require.Empty(t, failed)
+	require.Equal(t, serving, wl.webBoundAddr)
+
+	// A refusal latched while handleless must survive into the rebind path:
+	// re-applying that address reports refused and keeps the healthy
+	// listener rather than binding it during the foreign daemon's gap.
+	const refused = "127.0.0.1:1"
+	const reason = "refusing to bind " + refused + ": held by another AF home"
+	wl.mu.Lock()
+	wl.foreignRefusals = map[string]string{refused: reason}
+	wl.mu.Unlock()
+
+	cfg2 := wl.manager.Config()
+	cfg2.ListenAddr = refused
+	failed, err = wl.reconcile(cfg2)
+	require.Error(t, err)
+	require.Contains(t, err.Error(), "held by another AF home")
+	require.Contains(t, failed, "network.listen_addr")
+	require.Equal(t, serving, wl.webBoundAddr, "a refused rebind keeps the listener it already holds")
+	require.NotNil(t, wl.webHandle)
+	require.Empty(t, wl.webRefusal, "a kept listener is not the non-serving refusal state")
 }
 
 func TestParseProcNetTCP(t *testing.T) {

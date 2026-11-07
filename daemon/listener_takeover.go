@@ -230,6 +230,13 @@ func classifyPortHolder(req *net.TCPAddr) (portHolderVerdict, string) {
 // provable). provable=false means we could not establish either daemon-hood or
 // home — the caller must not treat the holder as foreign OR as safely ours.
 func holderDaemonHome(pid int) (string, bool, bool) {
+	// Every path we might read from this process's fd table resolves in ITS
+	// mount namespace, not ours — a holder in a container or chroot whose
+	// "/x/daemon.lock" names a different directory would hand us a home that
+	// is not its home. Unverifiable, never a guess in our frame.
+	if !sameProcessRoot(pid) {
+		return "", false, false
+	}
 	// A live af daemon holds its per-home daemon.lock flock for its entire
 	// life, so an fd whose link target is */daemon.lock proves daemon-hood AND
 	// names the home in one read — the strongest evidence there is.
@@ -392,10 +399,13 @@ func socketFDInode(target string) (uint64, bool) {
 	return ino, err == nil && ino != 0
 }
 
-// lockFDHome returns the af home of the process whose fd table contains a
-// daemon.lock fd — the flock a live daemon holds for its whole life — as the
-// lock file's already-resolved absolute dir. ("", true) means the fd table was
-// readable and held no daemon.lock fd; ok=false means it could not be read.
+// lockFDHome returns the af home of the process whose fd table holds a
+// daemon.lock, as the lock file's already-resolved absolute dir. A basename
+// alone is not proof — any process can open a file named daemon.lock — so the
+// fd counts only when the sibling daemon.pid names THIS process: the identity
+// af publishes into its own home alongside the lock it holds for life.
+// ("", true) means the fd table was readable and held no proven lock fd;
+// ok=false means it could not be read.
 func lockFDHome(pid int) (home string, ok bool) {
 	fdDir := filepath.Join(procRoot, strconv.Itoa(pid), "fd")
 	fds, err := os.ReadDir(fdDir)
@@ -408,10 +418,25 @@ func lockFDHome(pid int) (home string, ok bool) {
 			continue
 		}
 		if filepath.Base(target) == daemonLockFileName {
-			return filepath.Dir(target), true
+			if home = filepath.Dir(target); daemonPIDFileNames(home, pid) {
+				return home, true
+			}
 		}
 	}
 	return "", true
+}
+
+// daemonPIDFileNames reports whether dir's daemon.pid names pid — the
+// liveness identity af publishes for its daemon in the same home dir as the
+// lock. A daemon serving a contested socket published its pid long ago; a
+// missing or mismatched file just means the lock fd proves nothing.
+func daemonPIDFileNames(dir string, pid int) bool {
+	data, err := os.ReadFile(filepath.Join(dir, "daemon.pid"))
+	if err != nil {
+		return false
+	}
+	n, err := strconv.Atoi(strings.TrimSpace(string(data)))
+	return err == nil && n == pid
 }
 
 // sameAFHome reports whether two home paths identify the same install:
@@ -438,6 +463,45 @@ func normalizeHomePath(p string) string {
 		p = abs
 	}
 	return pathutil.ResolveForCompare(p)
+}
+
+// foreignGateRefusalLocked returns the #6858 refusal for attempting addr: a
+// latched refusal first (it never un-refuses), then the default home's claim
+// when the gate polices this address at all. req is the resolved request.
+// Caller holds wl.mu.
+func (wl *webListeners) foreignGateRefusalLocked(addr string, req *net.TCPAddr) string {
+	if refusal, latched := wl.foreignRefusals[addr]; latched {
+		return refusal
+	}
+	if !takeoverGateApplies(req) {
+		return ""
+	}
+	return defaultHomeClaimRefusal(req)
+}
+
+// refuseOrKeepLocked applies a #6858 refusal to the current listener state.
+// With no listener the refusal becomes the stable non-serving state
+// refuseWebForeignLocked records. With a live listener — a rebind onto a
+// refused or foreign-held address — the refusal latches for every later
+// attempt, the bind is refused as an ordinary apply failure naming the
+// still-serving address, and the healthy listener is never released into a
+// takeover. The ERROR logs once per refusal text; a repeated reconcile error
+// is visible without spamming the log.
+// Caller holds wl.mu.
+func (wl *webListeners) refuseOrKeepLocked(addr, refusal string) error {
+	if wl.webHandle == nil {
+		wl.refuseWebForeignLocked(addr, refusal)
+		return nil
+	}
+	if wl.foreignRefusals[addr] != refusal {
+		if wl.foreignRefusals == nil {
+			wl.foreignRefusals = map[string]string{}
+		}
+		wl.foreignRefusals[addr] = refusal
+		log.ErrorLog.Printf("%s", refusal)
+	}
+	return fmt.Errorf("apply network.listen_addr %q: %s — daemon still serving on %s",
+		addr, refusal, servingOn(wl.webConfigAddr))
 }
 
 // refuseWebForeignLocked records a foreign-takeover refusal: the listener is a

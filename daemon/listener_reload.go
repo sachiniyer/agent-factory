@@ -483,22 +483,17 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// no longer carries. A retained socket skips this: a failed rebind keeps
 	// the PREVIOUS configured address serving, and the configured half must
 	// keep naming it.
-	// The #6858 no-takeover gate, checked while we hold no listener (a held
-	// listener means a rebind, which keeps its own release/rollback path):
-	// once-latched refusals stay refused, then the default-home claim, before
-	// the lifecycle's configured half moves to the attempted address — a
-	// refused bind must report refused, never "configured, not bound".
-	if wl.webHandle == nil {
-		if refusal, latched := wl.foreignRefusals[addr]; latched {
-			wl.refuseWebForeignLocked(addr, refusal)
-			return nil
-		}
-		if req, rerr := net.ResolveTCPAddr("tcp", addr); rerr == nil &&
-			takeoverGateApplies(req) {
-			if refusal := defaultHomeClaimRefusal(req); refusal != "" {
-				wl.refuseWebForeignLocked(addr, refusal)
-				return nil
-			}
+	// The #6858 no-takeover gate: once-latched refusals stay refused for this
+	// daemon's life, and the default home's claim refuses before any bind —
+	// checked before the lifecycle's configured half moves to the attempted
+	// address, so a refused bind reports refused, never "configured, not
+	// bound". The gate applies to a REBIND target too: a daemon serving on
+	// another port that re-applies a refused or claimed address must not
+	// take it during the other daemon's restart gap — refuseOrKeepLocked
+	// then latches the refusal and keeps the healthy listener serving.
+	if req, rerr := net.ResolveTCPAddr("tcp", addr); rerr == nil {
+		if refusal := wl.foreignGateRefusalLocked(addr, req); refusal != "" {
+			return wl.refuseOrKeepLocked(addr, refusal)
 		}
 	}
 	if wl.webHandle == nil && wl.manager.lifecycle != nil {
@@ -545,11 +540,10 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			// refusal latches so no later gap can hand us the port. Every
 			// other holder — our OWN predecessor (the #6386 recovery), a
 			// third-party squatter, anything unprovable — keeps the retry.
-			if wl.webHandle == nil {
-				if refusal := foreignHolderRefusal(req); refusal != "" {
-					wl.refuseWebForeignLocked(addr, refusal)
-					return nil
-				}
+			// This guards a rebind target too: a held listener does not
+			// release for a foreign-held address, it keeps serving.
+			if refusal := foreignHolderRefusal(req); refusal != "" {
+				return wl.refuseOrKeepLocked(addr, refusal)
 			}
 		}
 		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))
