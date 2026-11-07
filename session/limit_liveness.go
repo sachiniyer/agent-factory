@@ -245,7 +245,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	}
 	agent := i.currentAgentNameLocked()
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		i.liveness == LiveLimitReached, false)
+		i.liveness == LiveLimitReached, false, time.Time{})
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -312,9 +312,17 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 // only that the new emission resembles the old, and its own parse is the
 // wall's current claim.
 //
+// sightedAt is the sighting's event time when the park COPIES a wall fact —
+// the committed-admission twin stamps the source's own observation instant —
+// and zero for a sighting this row read itself. It orders the ledger arm's
+// phrase match: a copy whose source observed the wall AFTER this row's own
+// record of that claim is fresher evidence, so the source's resolved
+// deadline stands rather than the row's older one; a copy carrying nothing
+// newer than the record borrows the recorded claim.
+//
 // A sighting none of those recognize keeps its own parse: a genuinely new
 // limit fact parks with its own reset.
-func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked, freshEvidence bool) (time.Time, string) {
+func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked, freshEvidence bool, sightedAt time.Time) (time.Time, string) {
 	if freshEvidence {
 		return resetAt, evidence
 	}
@@ -348,7 +356,7 @@ func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evi
 		for idx := range i.accountLimitObservations {
 			observation := &i.accountLimitObservations[idx]
 			if observation.Agent == agent && observation.Account == i.Account &&
-				observation.Evidence == evidence {
+				observation.Evidence == evidence && !sightedAt.After(observation.ObservedAt) {
 				return observation.ResetAt, observation.Evidence
 			}
 		}

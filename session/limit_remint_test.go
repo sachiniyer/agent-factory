@@ -236,6 +236,26 @@ func TestLimitPark_CommittedSwapCopyKeepsRecordedReset(t *testing.T) {
 	newReset := parked.Add(6 * time.Hour)
 	require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, newReset, "", sightedAt.Add(4*time.Hour)))
 	requireParkedReset(t, inst, newReset)
+
+	t.Run("a copy sighted no newer than the record borrows the recorded claim", func(t *testing.T) {
+		inst := automaticAccountSwapLimitInstance("personal")
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		inst.ClearLimitReached()
+		require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, rolled, clockResetEvidence, instanceNow().Add(-time.Minute)))
+		requireParkedReset(t, inst, parked)
+	})
+
+	t.Run("a copy sighted newer than the record keeps the source's reset", func(t *testing.T) {
+		// A sibling re-observed the same wall AFTER this row's own record:
+		// its resolved deadline is the wall's current claim and stands —
+		// phrase equality alone cannot tell a re-parse from a fresher fact.
+		inst := automaticAccountSwapLimitInstance("personal")
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		inst.ClearLimitReached()
+		later := clockReset(parked.Add(25 * time.Hour))
+		require.NoError(t, inst.ParkCommittedAccountSwapAtLimit(tmux.ProgramClaude, later, clockResetEvidence, instanceNow().Add(2*time.Hour)))
+		requireParkedReset(t, inst, later)
+	})
 }
 
 // TestLimitPark_RereadSamePhraseKeepsReset_CodexRelative is the Codex shape:

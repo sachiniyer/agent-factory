@@ -257,6 +257,14 @@ var sensitiveJSONKeys = map[string]bool{
 	// free-text prompt/goal verbatim, the same sensitivity class as prompt. A
 	// record that fails the typed decode must still drop it (#2419).
 	"pending_handoff_mission": true,
+	// evidence and limit_reset_evidence are the reset clause a stored wall
+	// parsed from — provider free text that can embed the rendered timezone
+	// name, the operator's locale. The typed path marks both
+	// (AccountLimitObservations[].Evidence mirrors LimitResetEvidence), so the
+	// fallback masks both keys wherever a rejected record carries them: the
+	// per-observation spelling inside account_limit_observations and the
+	// live-claim spelling beside it (#6959).
+	"evidence": true, "limit_reset_evidence": true,
 	// attention mirrors the typed path, which blanks Attention.Reason: the agent
 	// writes it as free text about the user's work. The whole object goes here
 	// because a record the typed decode rejected may hold the reason elsewhere.

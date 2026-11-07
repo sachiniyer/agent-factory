@@ -810,7 +810,7 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked bool) error {
 	parked := i.liveness == LiveLimitReached
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		parked, parked && !wasParked)
+		parked, parked && !wasParked, sightedAt)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
