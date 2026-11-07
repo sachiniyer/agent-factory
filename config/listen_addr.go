@@ -56,6 +56,14 @@ func validateListenAddrValue(value string) error {
 	return nil
 }
 
+// DefaultListenAddr is the built-in network.listen_addr every install gets
+// unless the operator sets another: the loopback web/API port the docs,
+// bookmarks and proxies assume. The daemon's no-takeover gate compares a
+// contested bind against it — "my listen_addr is only the default" is a
+// value question, not a file-presence one, because first-run materialization
+// writes the key into every config.toml (#6858).
+func DefaultListenAddr() string { return defaultListenAddr }
+
 // IsLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback
 // interface (127.0.0.1 / ::1 / localhost). It governs the loopback token
 // exemption, and the distinction is load-bearing for security now that the
