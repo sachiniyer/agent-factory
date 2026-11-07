@@ -777,14 +777,19 @@ test("#6635 (run 42361281090): a claim withheld while parked still reaches the w
 // reclaim stood itself down and the emulator rested at the peer's 109.
 //
 // Driven deterministically: the probe plays the insistent peer verbatim
-// (claim, then the repeat inside the window) so the pane yields and rests
-// on 34 rows. A real pointerenter then activates it — its claim crosses the
-// wire on any version — and the probe's third write lands while the
-// pre-activation sightings are still inside the window: on master that is
-// the second sighting of the same wall-clock contest and the pane yields
-// again, stranded at 34; on the fix the activation cleared the sighting
-// history, the third write is the FIRST answer to the activation's claim,
-// and the pane re-asserts its host fit.
+// (claim, then the repeat inside the window) so the pane yields. A real
+// pointerenter then activates it — its claim crosses the wire on any
+// version — and the probe's third write lands inside the SAME window: the
+// contested record keeps the FIRST sighting's timestamp and repeats do not
+// refresh it, so master's yield test is "was this grid first seen less
+// than 1500ms ago". The whole claim→repeat→activate→counter chain below is
+// therefore kept deliberately tight — a wait too generous between the
+// repeat and the counter lets the record expire, master's contest reads
+// fresh, and the spec passes without testing anything. On master the
+// counter is the same wall-clock contest's next repeat and the pane yields
+// to the very write it was activated to take; on the fix the activation
+// cleared the sighting history, the counter is the FIRST answer to the
+// activation's claim, and the pane re-asserts its host fit.
 test("#6635 (run 42370084465): a user activation restarts the contest epoch — the peer's post-activation write contests, not repeats", async ({
   page,
   request,
@@ -883,19 +888,26 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
       // live client fits.
       w.__probe.send(new Uint8Array([0x02, 0, 34, 0, 100]));
     });
+  const echoCount = () =>
+    page.evaluate(() => (window as unknown as { __echoes: number[] }).__echoes.length);
 
-  // The peer's claim: the pane's first contested sighting, answered by one
-  // reclaim echo.
+  // Let the probe's subscribe replay and the attach's settle land, then
+  // anchor every read past them — leftover authority from an earlier spec
+  // can shift absolute echo positions without shifting the assertions.
+  await page.waitForTimeout(500);
+  const base = await echoCount();
+
+  // The peer's claim: the pane's first contested sighting of 34x100 —
+  // contestedEchoes stamps it with THIS instant — answered by one reclaim
+  // echo.
   await writeForeign();
-  const atClaim = await waitEchoEq(34, 0, "peer's foreign claim");
+  const atClaim = await waitEchoEq(34, base, "peer's foreign claim");
   const atReclaim = await waitEchoEq(gridRows, atClaim + 1, "the pane's reclaim");
-  // The peer's repeat inside the yield window: the pane must stand down and
-  // its emulator rest on the peer's grid.
+  // The peer's repeat inside the yield window: the pane must stand down.
+  // The record still carries the FIRST sighting's timestamp — the repeat
+  // does not refresh it — which is why the counter below must stay close.
   await writeForeign();
   const atRepeat = await waitEchoEq(34, atReclaim + 1, "peer's repeat");
-  await expect
-    .poll(rows, { message: "the yielded pane rests on the peer's grid", timeout: 10_000 })
-    .toBe(34);
 
   // A real activation: a pointerenter the platform marks trusted, the same
   // signal the desktop shell's pointer reclaim rides. Move off the pane
@@ -903,14 +915,15 @@ test("#6635 (run 42370084465): a user activation restarts the contest epoch — 
   await page.mouse.move(4, 4);
   await page.locator(".af-pane-host").first().hover();
   // The activation's own claim is on the wire now — on master and the fix
-  // alike. What differs is the classification of the next foreign echo.
+  // alike — and confirming it here is what keeps the counter's echo ordered
+  // after the claim, which is the question the spec asks.
   const atActivated = await waitEchoEq(gridRows, atRepeat + 1, "the activation claim");
 
   // The peer's write answering the activation — delivered while the
-  // pre-activation sightings still sit inside the yield window. On master
-  // it counts as a repeat and the pane yields to the very write it was
-  // activated to take; on the fix the epoch restarted at the gesture and
-  // this is the first answer, contested like any fresh foreign grid.
+  // pre-activation FIRST sighting still sits inside the yield window. On
+  // master it counts as a repeat and the pane yields to the very write it
+  // was activated to take; on the fix the epoch restarted at the gesture
+  // and this is the first answer, contested like any fresh foreign grid.
   await writeForeign();
   const atCounter = await waitEchoEq(34, atActivated + 1, "the peer's post-activation write");
   await waitEchoEq(gridRows, atCounter + 1, "post-activation reclaim");
