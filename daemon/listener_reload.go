@@ -72,6 +72,17 @@ type webListeners struct {
 	// every path that leaves the refused posture: a successful bind, the opt-out
 	// teardown, or a posture the predicate no longer refuses.
 	webRefusal string
+	// foreignRefusals latches the #6858 no-takeover refusals this daemon has
+	// already made, keyed by the requested listen_addr: once a bind was refused
+	// because another AF home claims or holds the port, NO later attempt at
+	// that address binds — not on a retry tick and not on an unrelated apply —
+	// because any bind that lands in the other daemon's restart gap IS the
+	// takeover this gate exists to prevent. Unlike webRefusal (a posture
+	// verdict re-derived on every reconcile), a foreign refusal is an event,
+	// so it must be remembered to stay refused. It clears only on daemon
+	// restart — re-evaluation — or by configuring a different address, which
+	// is the remedy the refusal names.
+	foreignRefusals map[string]string
 	// webBoundAddr is the RESOLVED address that binding is accepting on — what
 	// ":0" or ":8443" actually became. It is what a save surface must report back
 	// to an operator who just moved the listener (#3722): the config value alone
@@ -462,6 +473,24 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 	// no longer carries. A retained socket skips this: a failed rebind keeps
 	// the PREVIOUS configured address serving, and the configured half must
 	// keep naming it.
+	// The #6858 no-takeover gate, checked while we hold no listener (a held
+	// listener means a rebind, which keeps its own release/rollback path):
+	// once-latched refusals stay refused, then the default-home claim, before
+	// the lifecycle's configured half moves to the attempted address — a
+	// refused bind must report refused, never "configured, not bound".
+	if wl.webHandle == nil {
+		if refusal, latched := wl.foreignRefusals[addr]; latched {
+			wl.refuseWebForeignLocked(addr, refusal)
+			return nil
+		}
+		if req, rerr := net.ResolveTCPAddr("tcp", addr); rerr == nil &&
+			takeoverGateApplies(req) {
+			if refusal := defaultHomeClaimRefusal(req); refusal != "" {
+				wl.refuseWebForeignLocked(addr, refusal)
+				return nil
+			}
+		}
+	}
 	if wl.webHandle == nil && wl.manager.lifecycle != nil {
 		wl.manager.lifecycle.setTCPConfigured(addr)
 	}
@@ -498,6 +527,19 @@ func (wl *webListeners) bindWebLocked(addr string) error {
 			}
 			if wl.webHandle != nil && boundListenerBlocks(wl.webBoundAddr, req) {
 				return wl.rebindWebSamePortLocked(addr, policy, notice)
+			}
+			// Nothing of ours explains the conflict — so whose is it? A live
+			// af daemon of ANOTHER home holding the port is a takeover in
+			// waiting: our retry loop would win the bind the moment that
+			// daemon's restart releases it (#6858). Refuse instead; the
+			// refusal latches so no later gap can hand us the port. Every
+			// other holder — our OWN predecessor (the #6386 recovery), a
+			// third-party squatter, anything unprovable — keeps the retry.
+			if wl.webHandle == nil {
+				if refusal := foreignHolderRefusal(req); refusal != "" {
+					wl.refuseWebForeignLocked(addr, refusal)
+					return nil
+				}
 			}
 		}
 		return fmt.Errorf("apply network.listen_addr %q: %w — daemon still serving on %s", addr, err, servingOn(wl.webConfigAddr))

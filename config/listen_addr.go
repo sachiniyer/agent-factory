@@ -1,8 +1,12 @@
 package config
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
 	"net"
+	"os"
+	"path/filepath"
 	"strings"
 )
 
@@ -63,6 +67,32 @@ func validateListenAddrValue(value string) error {
 // value question, not a file-presence one, because first-run materialization
 // writes the key into every config.toml (#6858).
 func DefaultListenAddr() string { return defaultListenAddr }
+
+// ListenAddrInHome reports the network.listen_addr a daemon running in homeDir
+// (an AF home OTHER than the caller's own) would take: the value its
+// config.toml parses to on top of DefaultConfig, so an absent key reads as the
+// built-in default — exactly what the daemon there would bind. found is false
+// when the home has no config.toml at all: a never-configured home claims no
+// port by itself. A file that exists but fails to parse reports found=true
+// with the error, so the caller can tell "no claim" apart from "claim we could
+// not read". Read-only: no materialization, no writes, no provenance. Used by
+// the daemon's #6858 no-takeover gate to ask whether the DEFAULT home claims
+// the default web port.
+func ListenAddrInHome(homeDir string) (addr string, found bool, err error) {
+	path := filepath.Join(homeDir, TomlConfigFileName)
+	data, err := os.ReadFile(path)
+	if errors.Is(err, fs.ErrNotExist) {
+		return "", false, nil
+	}
+	if err != nil {
+		return "", false, err
+	}
+	cfg, err := parseConfigTOML(data, path)
+	if err != nil {
+		return "", true, err
+	}
+	return cfg.ListenAddr, true, nil
+}
 
 // IsLoopbackListenAddr reports whether a listen_addr binds ONLY the loopback
 // interface (127.0.0.1 / ::1 / localhost). It governs the loopback token
