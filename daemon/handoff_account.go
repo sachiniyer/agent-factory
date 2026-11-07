@@ -138,6 +138,7 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 			manual: true, promptOverride: req.Brief, from: from, to: strings.TrimSpace(req.Account),
 			fromAgent: outgoing, agent: target, reason: reason,
 			accountOnly: strings.TrimSpace(req.To) == "",
+			instance:    instance,
 		}
 	}
 	outcome, conversation, err := m.resumeFromLimitLockedOutcome(repoID, key, instance, instance.Title, swap, true)

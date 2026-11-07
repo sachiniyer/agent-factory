@@ -634,6 +634,35 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || !i.pendingAccountSwap.Manual {
 		return fmt.Errorf("manual account limit requires the pending replacement fence")
 	}
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
+}
+
+// ParkCommittedAccountSwapAtLimit is the pre-spawn twin of the Park*AtLimit
+// pair: the daemon's committed-identity re-admission found a wall on the
+// incoming account BEFORE the replacement spawned, when pane and runtime
+// evidence still run the outgoing identity and currentAgentNameLocked would
+// file the incoming account's wall under the outgoing agent — a cross-agent
+// handoff would then exclude an unrelated outgoing-namespace account and
+// incomingManualReset would not recognize the incoming reset window (#6915
+// review). The caller names the committed swap's namespace instead; every
+// other contract — the fence, the incoming account already on i.Account, the
+// manual path's not-delivered marker, the durable observation — matches the
+// pair.
+func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Time, evidence string) error {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil {
+		return fmt.Errorf("account limit park requires the pending replacement fence")
+	}
+	return i.parkAccountSwapAtLimitLocked(agent, resetAt, evidence)
+}
+
+// parkAccountSwapAtLimitLocked is the shared body of the Park*AtLimit family:
+// the caller holds i.mu, has verified the pending replacement fence, and names
+// the agent namespace the wall files under — currentAgentNameLocked for a wall
+// found on the already-running replacement, the committed swap's namespace for
+// one found before it spawned.
+func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string) error {
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -641,15 +670,18 @@ func (i *Instance) ParkManualAccountSwapAtLimit(resetAt time.Time, evidence stri
 	// phrase keeps the daemon's first poll from re-parsing the unchanged banner
 	// against a later clock and moving the stored reset (#6765).
 	i.limitResetEvidence = evidence
-	i.attributeLimitIdentityLocked()
+	i.attributeLimitIdentityAsLocked(agent)
 	// Readiness found the incoming identity's wall before mission submission,
 	// which is positive non-delivery evidence for this transaction. Replace any
-	// earlier ambiguity so the scheduler may resume it after the recorded reset.
-	if i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
+	// earlier ambiguity so the scheduler may resume it after the recorded
+	// reset. The marker is consulted only on the manual path
+	// (pendingManualAccountSwapDeliveryUnconfirmedLocked early-returns when the
+	// swap is not manual), so automatic swaps never set it.
+	if i.pendingAccountSwap.Manual && i.pendingAccountSwap.MissionDeliveryStatus != PromptNotDelivered {
 		i.pendingAccountSwap.MissionDeliveryStatus = PromptNotDelivered
 		i.touchLocked()
 	}
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
+	i.recordAccountLimitObservationLocked(agent, i.Account, resetAt, false)
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return nil
 }
@@ -696,14 +728,5 @@ func (i *Instance) ParkAutomaticAccountSwapAtLimit(resetAt time.Time, evidence s
 	if i.inFlightOp != OpRespawning || i.pendingAccountSwap == nil || i.pendingAccountSwap.Manual {
 		return fmt.Errorf("automatic account limit requires the pending replacement fence")
 	}
-	lv, op, prevReset := i.lifecycleStateLocked()
-	i.assignLivenessLocked(LiveLimitReached)
-	i.limitResetAt = resetAt
-	// See ParkManualAccountSwapAtLimit: the reset's phrase accompanies it so the
-	// daemon's first poll recognizes the re-read as the same observation (#6765).
-	i.limitResetEvidence = evidence
-	i.attributeLimitIdentityLocked()
-	i.recordAccountLimitObservationLocked(i.currentAgentNameLocked(), i.Account, resetAt, false)
-	i.noteStateChangeLocked(lv, op, prevReset)
-	return nil
+	return i.parkAccountSwapAtLimitLocked(i.currentAgentNameLocked(), resetAt, evidence)
 }

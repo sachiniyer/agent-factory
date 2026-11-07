@@ -107,7 +107,17 @@ func (m *Manager) committedSwapAccountWall(swap *autoAccountSwap, loadEvidence a
 		// Same guard as the admission set: a manual handoff may already have
 		// rewritten Program to a different agent, so its live wall still names
 		// the outgoing namespace and must not be read under the incoming one.
-		if !manual {
+		//
+		// The subject row's own live wall is skipped outright: on a row an
+		// earlier refusal parked at this same incoming identity, that marker
+		// is the refusal's own projection, not independent evidence. The
+		// durable observation the park wrote is the fact a retraction can
+		// defeat, while the live marker has no ordering clock — a no-reset
+		// window never expires and no later proof retires it. Counting it
+		// would wedge a committed replacement behind its own inherited wall
+		// forever, since the refused runtime can never spawn to produce the
+		// prompt delivery that clears it (#6915 review).
+		if other != swap.instance && !manual {
 			liveAgent, liveAccount, limitedNow := other.LimitIdentity()
 			if limitedNow && liveAgent == namespace && liveAccount == account {
 				wallReset, hasReset := other.LimitResetAt()
@@ -137,13 +147,13 @@ func (m *Manager) committedSwapAccountWall(swap *autoAccountSwap, loadEvidence a
 // park durable; the returned error is the honest statement that the launch —
 // not the transaction — did not happen.
 func (m *Manager) parkCommittedSwapAtIncomingWall(repoID, key, requestedTitle string, instance *session.Instance, swap *autoAccountSwap, resetAt time.Time, evidence string) error {
-	var parkErr error
+	// The replacement has not spawned, so the pane still runs the outgoing
+	// identity and the pane-derived attribution ParkManual/ParkAutomatic rely
+	// on would file this incoming wall under the wrong agent namespace.
+	// ParkCommittedAccountSwapAtLimit takes the committed swap's namespace
+	// explicitly instead (#6915 review).
 	m.accountLimitMu.Lock()
-	if swap.manual {
-		parkErr = instance.ParkManualAccountSwapAtLimit(resetAt, evidence)
-	} else {
-		parkErr = instance.ParkAutomaticAccountSwapAtLimit(resetAt, evidence)
-	}
+	parkErr := instance.ParkCommittedAccountSwapAtLimit(swap.accountNamespace(), resetAt, evidence)
 	m.accountLimitMu.Unlock()
 	return errors.Join(
 		fmt.Errorf("account replacement for %q found its committed identity %s at a usage limit before launch; the mission stays pending until that wall lifts",
