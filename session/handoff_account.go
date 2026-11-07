@@ -802,10 +802,15 @@ func (i *Instance) ParkCommittedAccountSwapAtLimit(agent string, resetAt time.Ti
 // writes: a retry that re-parses the banner the row already parked on mints a
 // rolled-forward instant off a clock-relative phrase, and the recorded claim
 // — live, shadowed, or durable — vetoes it (#6959). A sighting that is
-// genuinely new keeps its own parse.
+// genuinely new keeps its own parse — and the send-path pair's wasParked
+// classification IS that judgment: a parked row the caller did NOT classify
+// as a parked re-sight (a fresh replacement runtime's emission, a different
+// banner on the unchanged pane) carries new wall evidence no recorded claim
+// may veto (#6880).
 func (i *Instance) parkAccountSwapAtLimitLocked(agent string, resetAt time.Time, evidence string, sightedAt time.Time, banner LimitBanner, wasParked bool) error {
+	parked := i.liveness == LiveLimitReached
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		i.liveness == LiveLimitReached)
+		parked, parked && !wasParked)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt

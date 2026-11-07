@@ -802,7 +802,7 @@ func (i *Instance) transitionLocked(ev TransitionEvent) error {
 		// parked on keeps the recorded claim's first parse instead of the
 		// rolled-forward instant its re-parse minted (#6959).
 		resetAt, evidence := i.originalLimitResetLocked(i.currentAgentNameLocked(),
-			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached)
+			ev.resetAt, ev.evidence, ev.banner, from.liveness == LiveLimitReached, false)
 		i.limitResetAt = resetAt
 		i.limitResetEvidence = evidence
 		i.limitBannerPrefix = ev.banner.Prefix

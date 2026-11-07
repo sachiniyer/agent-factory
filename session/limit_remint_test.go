@@ -300,6 +300,21 @@ func TestLimitPark_NewSightingKeepsItsOwnReset(t *testing.T) {
 		requireParkedReset(t, inst, later)
 	})
 
+	t.Run("a fresh runtime's identical banner is a new sighting", func(t *testing.T) {
+		// The swap retry launched a replacement runtime whose pane emits the
+		// same clause at the same anchor: a coincidence of identical display,
+		// not a re-read — sendPathReSightingLocked already classifies the
+		// sighting fresh, and its own parse is the wall's current claim.
+		inst := automaticAccountSwapLimitInstance("personal")
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(parked, clockResetEvidence, staleBanner, false))
+		requireParkedReset(t, inst, parked)
+		require.NoError(t, inst.ParkAutomaticAccountSwapAtLimit(later, clockResetEvidence, staleBanner, true))
+		requireParkedReset(t, inst, later)
+		obs := inst.AccountLimitObservations()
+		require.True(t, obs[0].ResetAt.Equal(later),
+			"the fresh runtime's claim tightens the durable wall: got %v", obs[0].ResetAt)
+	})
+
 	t.Run("a reused phrase at a different anchor is a new wall", func(t *testing.T) {
 		// The day-after shape: a NEW banner at a different pane position
 		// happens to re-use "reset at 3pm". The phrase matches the recorded

@@ -245,7 +245,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	}
 	agent := i.currentAgentNameLocked()
 	resetAt, evidence = i.originalLimitResetLocked(agent, resetAt, evidence, banner,
-		i.liveness == LiveLimitReached)
+		i.liveness == LiveLimitReached, false)
 	lv, op, prevReset := i.lifecycleStateLocked()
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
@@ -302,9 +302,22 @@ func (i *Instance) noteLimitWallClaimLocked(agent string, resetAt time.Time, evi
 //     the live and shadow reads above — positional evidence a copied,
 //     pane-free sighting simply does not have.
 //
+// parked reports the row sat at its live wall when the sighting was read.
+// freshEvidence is the caller's knowledge that the sighting is new wall
+// evidence, never the recorded wall's re-read — a fresh replacement
+// runtime's emission or a different banner on the same pane, the shapes the
+// send-path pair's wasParked classification already refuses (#6880). No
+// recorded claim may stand in for it, not even a coincidentally identical
+// phrase at a coincidentally identical anchor: on a fresh pane those prove
+// only that the new emission resembles the old, and its own parse is the
+// wall's current claim.
+//
 // A sighting none of those recognize keeps its own parse: a genuinely new
 // limit fact parks with its own reset.
-func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked bool) (time.Time, string) {
+func (i *Instance) originalLimitResetLocked(agent string, resetAt time.Time, evidence string, banner LimitBanner, parked, freshEvidence bool) (time.Time, string) {
+	if freshEvidence {
+		return resetAt, evidence
+	}
 	if parked && i.limitAgent == agent && i.limitAccount == i.Account &&
 		evidence != "" && evidence == i.limitResetEvidence {
 		return i.limitResetAt, i.limitResetEvidence
