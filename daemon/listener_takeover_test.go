@@ -303,8 +303,9 @@ func writeAutostartUnit(t *testing.T, dir, home string) {
 	require.NoError(t, os.WriteFile(filepath.Join(dir, autostartUnitName), []byte(unit), 0644))
 }
 
-// claimRefusal drops the claim's endpoint half where a test asserts only the
-// refusal text — the claimed-endpoint behaviour is pinned separately.
+// claimRefusal drops the claim's endpoint half where a subtest asserts only
+// the refusal text; subtests that pin what the latch must key on call
+// defaultHomeClaimRefusal directly and assert both returns.
 func claimRefusal(req *net.TCPAddr) string {
 	r, _ := defaultHomeClaimRefusal(req)
 	return r
@@ -330,8 +331,11 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 	t.Run("a live daemon.lock claims the port — running evidence", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
-		require.Contains(t, claimRefusal(req), "claims this port")
-		require.Contains(t, claimRefusal(req), "daemon.lock")
+		refusal, claimed := defaultHomeClaimRefusal(req)
+		require.Contains(t, refusal, "claims this port")
+		require.Contains(t, refusal, "daemon.lock")
+		require.Equal(t, defaultWebListenAddr, claimed,
+			"with no config intent the claim is the built-in default endpoint — what the latch must key on")
 	})
 	t.Run("a live daemon narrowed away by a moved listener claims nothing", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
@@ -350,15 +354,21 @@ func TestDefaultHomeClaimRefusal(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		writeDefHomeConfig(t, defHome, `"0.0.0.0:8443"`)
-		require.Contains(t, claimRefusal(req), "claims this port")
+		refusal, claimed := defaultHomeClaimRefusal(req)
+		require.Contains(t, refusal, "claims this port")
+		require.Equal(t, "0.0.0.0:8443", claimed,
+			"a wildcard claim legitimately covers every address on the port")
 	})
 	t.Run("a live daemon with an unreadable config stays claimed", func(t *testing.T) {
 		lock := flockHomeLock(t, defHome)
 		defer func() { _ = lock.Close() }()
 		require.NoError(t, os.WriteFile(filepath.Join(defHome, "config.toml"),
 			[]byte("this is [ not toml"), 0600))
-		require.Contains(t, claimRefusal(req), "claims this port",
+		refusal, claimed := defaultHomeClaimRefusal(req)
+		require.Contains(t, refusal, "claims this port",
 			"unreadable intent is not disproven intent — a running daemon keeps its claim")
+		require.Equal(t, defaultWebListenAddr, claimed,
+			"an unreadable config narrows nothing — the claim is the built-in endpoint")
 	})
 	t.Run("a stale daemon.pid claims nothing", func(t *testing.T) {
 		// daemon.lock exists but nobody holds it; the pid file names a pid
@@ -430,9 +440,11 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 	t.Run("a lock fd in a foreign home classifies foreign", func(t *testing.T) {
 		foreignHome := testguard.SocketTempDir(t)
 		afDaemonHomeFixture(t, foreignHome)
-		verdict, home, _ := classifyPortHolder(req)
+		verdict, home, endpoints := classifyPortHolder(req)
 		require.Equal(t, holderForeign, verdict)
 		require.Equal(t, foreignHome, home)
+		require.Equal(t, []string{req.String()}, endpoints,
+			"the latch must name the contested socket's own bound endpoint")
 	})
 
 	t.Run("a lock-less af daemon holder classifies foreign by argv and environ", func(t *testing.T) {
@@ -443,10 +455,12 @@ func TestClassifyPortHolderRealProc(t *testing.T) {
 		// so argv, environ and the fd table are all the kernel's own.
 		foreignHome := testguard.SocketTempDir(t)
 		bound := spawnHelperDaemon(t, foreignHome)
-		verdict, home, _ := classifyPortHolder(reqFor(t, bound))
+		verdict, home, endpoints := classifyPortHolder(reqFor(t, bound))
 		require.Equal(t, holderForeign, verdict)
 		require.True(t, sameAFHome(home, foreignHome),
 			"the helper's home resolved in its own process frame = %q, want %q", home, foreignHome)
+		require.Equal(t, []string{bound}, endpoints,
+			"the lock-less path names the same proven endpoint")
 	})
 
 	t.Run("a bare daemon.lock basename proves nothing without a naming daemon.pid", func(t *testing.T) {
@@ -764,6 +778,69 @@ func TestLatchedRefusalKeepsDistinctAddressesFree(t *testing.T) {
 	require.Empty(t, refusal,
 		"a distinct address on the contested port must not be shadowed by a wildcard attempt's latch")
 	wl.mu.Unlock()
+}
+
+// The real-socket half of the proven-endpoint latch: a foreign daemon holds
+// 127.0.0.1:P, a wildcard request fails EADDRINUSE against it, and the latch
+// must record {127.0.0.1:P} — the hold that was proven — so a later move to
+// the genuinely distinct 127.0.0.2:P binds while every spelling overlapping
+// the proven hold stays refused. Everything here is a kernel socket: the
+// foreign hold is a real LISTEN socket in this process marked as another
+// home's daemon, and the move binds for real.
+func TestWildcardRefusalLatchesProvenEndpointEndToEnd(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("port-holder identification reads /proc on linux")
+	}
+	wl, _, _ := takeoverFixture(t)
+
+	// The foreign daemon's hold: a real loopback listener, and the lock+pid
+	// fixture that marks THIS process as another home's af daemon.
+	holder, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	defer func() { _ = holder.Close() }()
+	contested := holder.Addr().String()
+	oldDefault := defaultWebListenAddr
+	defaultWebListenAddr = contested
+	t.Cleanup(func() { defaultWebListenAddr = oldDefault })
+	foreignHome := testguard.SocketTempDir(t)
+	afDaemonHomeFixture(t, foreignHome)
+
+	// The wildcard request meets the foreign hold: EADDRINUSE → classified
+	// foreign → refused. The request spelled the wildcard; the latch must
+	// name the proven 127.0.0.1:P endpoint and nothing else.
+	port := strconv.Itoa(reqFor(t, contested).Port)
+	cfg := wl.manager.Config()
+	cfg.ListenAddr = "0.0.0.0:" + port
+	_, err = wl.reconcile(cfg)
+	require.NoError(t, err, "a refusal is a decision, not a bind error")
+	wl.mu.Lock()
+	require.Len(t, wl.foreignRefusals, 1)
+	require.Equal(t, wl.webRefusal, wl.foreignRefusals[contested],
+		"the latch keys on the proven foreign endpoint, not the attempted wildcard")
+	wl.mu.Unlock()
+
+	// The remedy the refusal names — moving this listener to a distinct
+	// address on the same port — must actually work: 127.0.0.2 overlaps
+	// nothing the foreign daemon holds.
+	cfg2 := wl.manager.Config()
+	cfg2.ListenAddr = "127.0.0.2:" + port
+	_, err = wl.reconcile(cfg2)
+	require.NoError(t, err)
+	snap := wl.manager.lifecycle.snapshot().listeners
+	require.True(t, snap.TCPBound)
+	require.Equal(t, "127.0.0.2:"+port, wl.webBoundAddr,
+		"a distinct address on the contested port binds — the wildcard attempt's latch does not shadow it")
+
+	// And the latch still bites from the serving state: re-applying an
+	// address overlapping the proven hold is refused, not bound during the
+	// foreign daemon's next restart gap.
+	cfg3 := wl.manager.Config()
+	cfg3.ListenAddr = "0.0.0.0:" + port
+	failed, err := wl.reconcile(cfg3)
+	require.Error(t, err)
+	require.Contains(t, failed, "network.listen_addr")
+	require.Equal(t, "127.0.0.2:"+port, wl.webBoundAddr,
+		"a refused rebind keeps the listener it already holds")
 }
 
 func TestLatchedRefusalHoldsOnRebind(t *testing.T) {
