@@ -632,7 +632,10 @@ func TestCheckAgentPrograms_OpaqueWrapperTarget_KeepsQualification(t *testing.T)
 		"an opaque wrapper's launch dir is unproven — the relative target's qualification must be retained")
 	require.Contains(t, row.Detail, "cannot prove",
 		"the resolution is unverified — the warning must say so rather than asserting it")
-	require.Contains(t, row.Detail, "absent at launch")
+	require.Contains(t, row.Detail, "unverified",
+		"an unproven launch dir means the session's answer is unknown — never 'absent'")
+	require.NotContains(t, row.Detail, "absent at launch",
+		"what af cannot resolve is unknown, not absent")
 }
 
 // ---------------------------------------------------------------------------
@@ -700,6 +703,71 @@ func TestCheckAgentPrograms_ValidSymlinkShadow_WarnsNotPasses(t *testing.T) {
 	require.Contains(t, row.Detail, "tools/claude")
 }
 
+// A committed executable reached THROUGH a symlinked directory resolves in
+// the worktree exactly as in this checkout: `claude -> bin/claude` where
+// `bin` itself is `bin -> realbin` lands on realbin/claude — the probe must
+// follow intermediate links the way the worktree's filesystem will, not
+// report the literal path absent.
+func TestCheckAgentPrograms_SymlinkedDirTarget_ResolvesThroughTree(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	require.NoError(t, os.Symlink("realbin", filepath.Join(repo, "bin")))
+	require.NoError(t, os.Symlink(filepath.Join("bin", "claude"), filepath.Join(repo, "claude")))
+	commitRepoFile(t, repo, "realbin/claude")
+	commitRepoFile(t, repo, "bin")
+	commitRepoFile(t, repo, "claude")
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "./claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"claude -> bin/claude -> realbin/claude resolves in the worktree exactly as here — PASS")
+}
+
+// An unproven location BEFORE the apparent winner voids the conclusion:
+// `PATH=tools:<installed> claude` selects /installed in this checkout, but
+// when tools/claude's tree read fails, the session may still resolve a
+// committed tools/claude first — the lookup must report unverified, not an
+// unqualified PASS.
+func TestCheckAgentPrograms_UncertainEarlierLocation_ReportsUnverified(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	// No tools/claude locally — the checkout skips it; whether the worktree
+	// holds it is exactly what the failed probe cannot answer.
+	installed := testguard.CanonicalTempDir(t)
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	orig := gitTreeRead
+	gitTreeRead = func(workspace string, args ...string) ([]byte, error) {
+		if len(args) > 0 && args[0] == "rev-parse" {
+			return orig(workspace, args...) // the ref resolves; only tree reads fail
+		}
+		return nil, errProbeStub
+	}
+	defer func() { gitTreeRead = orig }()
+	chdir(t, repo)
+
+	command := "env PATH=tools:" + installed + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"an unproven earlier location means the launch winner is unestablished — fail closed, not PASS")
+	require.Contains(t, row.Detail, "could not verify")
+	require.False(t, row.Problem)
+}
+
 // Once the checkout-selected executable is proven the launch winner, no
 // further location is probed: `PATH=<installed>:bin claude` probes nothing
 // past /installed — trailing relative entries cannot change the answer and
@@ -756,4 +824,163 @@ func stubUsableDockerBackend(t *testing.T, repo string) {
 	t.Cleanup(restoreExec)
 	require.NoError(t, exec.Command("git", "-C", repo, "remote", "add", "origin",
 		"https://example.invalid/repo.git").Run())
+}
+
+// ---------------------------------------------------------------------------
+// Review follow-ups, round 4 (PR #6929 head) — ".." inside a committed link
+// target is POSIX traversal af cannot prove inside the tree; trailing PATH
+// entries after an absolute selection cannot gate launch dependence; and a
+// proven earlier winner bounds the uncertainty scan.
+// ---------------------------------------------------------------------------
+
+// A committed link chain whose intermediate dir-link target contains ".."
+// cannot be proven inside the tree: `claude -> bin/claude` with
+// `bin -> missing/../realbin` resolves locally only because an untracked
+// empty `missing/` exists — a clean checkout has no `missing`, so the link
+// dangles. af must report the lookup unverified, never runnable-or-absent.
+func TestCheckAgentPrograms_DotDotLinkTarget_ReportsUnverified(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	// Untracked empty dir: makes `missing/../realbin` resolve locally but it
+	// is absent from the committed tree, so the worktree's link dangles.
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "missing"), 0o755))
+	require.NoError(t, os.Symlink("missing/../realbin", filepath.Join(repo, "bin"))) // raw: Join would clean the ".."
+	require.NoError(t, os.Symlink(filepath.Join("bin", "claude"), filepath.Join(repo, "claude")))
+	commitRepoFile(t, repo, "realbin/claude")
+	commitRepoFile(t, repo, "bin")
+	commitRepoFile(t, repo, "claude")
+	chdir(t, repo)
+
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: "./claude"},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"a '..' traversal af cannot prove inside the tree must be unverified — not runnable, not absent")
+	require.Contains(t, row.Detail, "could not verify")
+}
+
+// Trailing relative PATH entries after an absolute selection are unreachable
+// at launch: `env PATH=<installed>:bin tools/wrapper claude` under an opaque
+// wrapper resolves the absolute installed binary in any launch dir, so the
+// unproven launch dir must not turn the check unverified.
+func TestCheckAgentPrograms_TrailingRelativePathEntry_DoesNotGate(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "tools"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "tools"), "wrapper", "#!/bin/sh\nexec \"$@\"\n")
+	commitRepoFile(t, repo, "tools/wrapper")
+	installed := testguard.CanonicalTempDir(t)
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	command := "env PATH=" + installed + ":bin tools/wrapper claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"the absolute installed claude wins in every launch dir — the trailing relative entry is unreachable")
+}
+
+// A proven launch winner BEFORE the selection bounds the uncertainty scan:
+// `PATH=basebin:missing:tools claude` resolves basebin/claude (committed,
+// locally deleted) at launch before ever reaching the unprobed middle entry,
+// so the verdict is the proven shadowing — not an unverifiable lookup.
+func TestCheckAgentPrograms_EarlierWinnerBoundsUncertaintyScan(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	for _, d := range []string{"basebin", "tools"} {
+		require.NoError(t, os.MkdirAll(filepath.Join(repo, d), 0o755))
+	}
+	writeExecutable(t, filepath.Join(repo, "basebin"), "claude", "#!/bin/sh\nexit 0\n")
+	writeExecutable(t, filepath.Join(repo, "tools"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "basebin/claude")
+	// Locally deleted: the checkout selects tools/claude; the worktree gets basebin/claude.
+	require.NoError(t, os.Remove(filepath.Join(repo, "basebin", "claude")))
+	chdir(t, repo)
+
+	command := "env PATH=basebin:missing:tools claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status)
+	require.Contains(t, row.Detail, "basebin/claude",
+		"the proven earlier winner decides the lookup — the unprobed middle entry cannot unverify it")
+	require.NotContains(t, row.Detail, "could not verify",
+		"the winner is proven — the verdict must assert the shadowing, not plead uncertainty")
+}
+
+// A committed dir-link whose ABSOLUTE target contains ".." is resolved
+// component-wise by the kernel — `tools -> <base>/missing/../installed`
+// dangles while <base>/missing is absent, so PATH=tools:<installed> selects
+// the installed binary in every checkout and no shadowing may be reported.
+func TestCheckAgentPrograms_AbsDotDotLinkTarget_DoesNotShadow(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	base := testguard.CanonicalTempDir(t)
+	installed := filepath.Join(base, "installed")
+	require.NoError(t, os.MkdirAll(installed, 0o755))
+	writeExecutable(t, installed, "claude", "#!/bin/sh\nexit 0\n")
+	// Raw concatenation keeps the ".." — filepath.Join would clean it away.
+	target := filepath.Join(base, "missing") + "/../installed"
+	require.NoError(t, os.Symlink(target, filepath.Join(repo, "tools")))
+	commitRepoFile(t, repo, "tools")
+	chdir(t, repo)
+
+	command := "env PATH=tools:" + installed + " claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusPass, row.Status,
+		"the committed link dangles through '..' on the host too — installed/claude wins everywhere")
+}
+
+// A committed dir-link whose target carries significant whitespace points at
+// the whitespace path verbatim: `tools -> " realbin"` resolves through a
+// directory literally named " realbin", not "realbin". When that path only
+// exists untracked (so tools/claude resolves locally), the probe must still
+// report the committed link dangling rather than following trimmed bytes.
+func TestCheckAgentPrograms_WhitespaceLinkTarget_PreservesBytes(t *testing.T) {
+	repo := setupDoctorRepo(t)
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, "realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, "realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	commitRepoFile(t, repo, "realbin/claude")
+	require.NoError(t, os.Symlink(" realbin", filepath.Join(repo, "tools")))
+	commitRepoFile(t, repo, "tools")
+	// Untracked " realbin/claude" makes tools/claude runnable locally only —
+	// the session worktree's link dangles.
+	require.NoError(t, os.MkdirAll(filepath.Join(repo, " realbin"), 0o755))
+	writeExecutable(t, filepath.Join(repo, " realbin"), "claude", "#!/bin/sh\nexit 0\n")
+	chdir(t, repo)
+
+	command := "tools/claude"
+	cfg := &config.Config{
+		DefaultProgram:   tmux.ProgramClaude,
+		ProgramOverrides: map[string]string{tmux.ProgramClaude: command},
+	}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	row := findCheck(t, rep, "program_overrides.claude")
+	require.Equal(t, StatusWarn, row.Status,
+		"the committed link targets ' realbin' verbatim and dangles in the session worktree")
+	require.NotContains(t, row.Detail, "could not verify",
+		"the dangling verdict is proven, not merely unverifiable")
 }

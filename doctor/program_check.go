@@ -210,11 +210,14 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 		candidates  []preflight.ExecutableCandidate
 		wrapper     bool
 		// proven is false when an opaque prefix leaves the modeled launch
-		// dir unverified (preflight's LaunchDirKnown) — the warn then
-		// reports the resolution as unproven rather than asserting it.
+		// dir unverified (preflight's LaunchDirKnown) — the launch answer
+		// is then reported unverified instead of probing the wrong dir.
 		proven bool
 	}{
 		{check.Executable, check.Path, check.PathViaWorkingDir, check.PathCandidates, false, check.LaunchDirKnown},
+		// The wrapper token itself is resolved by the session's shell in the
+		// session's launch dir — always proven, unlike the agent's post-
+		// wrapper cwd which an opaque prefix can move (LaunchDirKnown).
 		{check.ShellExecutable, check.ShellPath, check.ShellViaWorkingDir, check.ShellCandidates, true, true},
 	} {
 		candidates := grp.candidates
@@ -241,6 +244,22 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 			candidates = append([]preflight.ExecutableCandidate{{Path: grp.path, ViaWorkingDir: grp.via}}, candidates...)
 			selIdx = 0
 		}
+		// Only candidates that can precede or supply the launch winner make
+		// the lookup launch-dir-dependent: trailing relative entries after
+		// an absolute selection are unreachable at launch and must not gate.
+		launchDependent := grp.via
+		for i := 0; i < selIdx && !launchDependent; i++ {
+			launchDependent = candidates[i].ViaWorkingDir
+		}
+		if !grp.proven && launchDependent {
+			// The modeled launch dir is unverified — an opaque prefix may
+			// change it — so the tree probe answers the wrong question
+			// entirely. Report the launch resolution unverified outright
+			// rather than probing a dir the session may not run in.
+			r, _ := baseRef()
+			return unprovenLaunchDirDetail(check.Command, grp.token, grp.path, grp.wrapper, r),
+				unprovenLaunchDirRemediation()
+		}
 		// Walk the lookup in order and simulate the launch: each location's
 		// launch answer is its own verdict, so the session's resolution is
 		// the FIRST provably-runnable location — which may sit before the
@@ -263,29 +282,47 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 				break
 			}
 		}
-		if launchIdx == selIdx {
+		// The verdict is established only when every location that could
+		// affect it was proven: an unproven location before the apparent
+		// winner could hold a committed file the session resolves instead —
+		// any unknown before the outcome means the outcome is unverified.
+		// Locations after a proven winner are unreachable at launch, and
+		// when nothing proved runnable every location's answer counts.
+		firstUncertain := -1
+		limit := len(results)
+		if launchIdx >= 0 {
+			limit = launchIdx
+		}
+		for i := 0; i < limit; i++ {
+			if !results[i].provable || results[i].verdict == baseTreeUnknown {
+				firstUncertain = i
+				break
+			}
+		}
+		if launchIdx == selIdx && firstUncertain < 0 {
 			continue // the session resolves the same file — the PASS is honest
 		}
 		r, _ := baseRef()
 		var detail, remediation string
 		sel := results[selIdx]
 		switch {
+		case firstUncertain >= 0:
+			// An unproven location precedes the apparent winner (or nothing
+			// proved runnable at all) — the session's resolution is not
+			// established. Fail closed: report it unverified, never an
+			// assertion or an unqualified PASS.
+			display := results[firstUncertain].display
+			if display == "" {
+				display = candidates[firstUncertain].Path
+			}
+			detail, remediation = unverifiableLookupDetail(check.Command, grp.token, grp.path, display, launchDisplay, grp.wrapper, r),
+				unverifiableInBaseRemediation()
 		case launchIdx >= 0 && launchIdx < selIdx:
 			// An earlier location shadows the selection: the session
 			// resolves a different file regardless of what the selection's
 			// own verdict is.
 			detail, remediation = shadowedAtLaunchDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper),
 				shadowedAtLaunchRemediation()
-		case !sel.provable:
-			// Resolved outside the repo or no base ref exists — the
-			// worktree question does not apply, not an unproven answer.
-			continue
-		case sel.verdict == baseTreeUnknown:
-			// The probe could not answer for the selected file — fail
-			// closed: report the launch resolution as unverified rather
-			// than letting it pass on a git error.
-			detail, remediation = unverifiableInBaseDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper, r),
-				unverifiableInBaseRemediation()
 		case launchIdx > selIdx:
 			// The session skips the proven-missing selection for a rescue.
 			detail, remediation = fallsBackDetail(check.Command, grp.token, grp.path, launchDisplay, grp.wrapper, sel.verdict, r),
@@ -302,9 +339,6 @@ func overrideAbsentFromSessionBase(workspace string, check *preflight.ProgramChe
 				detail, remediation = notAFileInBaseDetail(check.Command, grp.token, grp.path, grp.wrapper, r),
 					notAFileInBaseRemediation()
 			}
-		}
-		if !grp.proven {
-			detail = unprovenLaunchDirClause() + detail
 		}
 		return detail, remediation
 	}
@@ -389,49 +423,99 @@ func baseTreeProbe(workspace, ref, rel string) baseTreeEntry {
 	return baseTreeEntryAt(workspace, ref, rel, 0)
 }
 
-func baseTreeEntryAt(workspace, ref, rel string, depth int) baseTreeEntry {
+// treeEntryMode returns the git mode of rel's entry in ref's tree via
+// `git ls-tree -z <ref> -- <rel>` — ("", true, false) when absent,
+// ("", _, false) on probe error.
+func treeEntryMode(workspace, ref, rel string) (mode string, found bool, ok bool) {
 	out, err := gitTreeRead(workspace, "ls-tree", "-z", ref, "--", rel)
 	if err != nil {
-		return baseTreeUnknown
+		return "", false, false
 	}
 	for _, entry := range strings.Split(strings.TrimRight(string(out), "\x00"), "\x00") {
-		meta, path, found := strings.Cut(entry, "\t")
-		if !found || path != rel {
+		meta, path, isEntry := strings.Cut(entry, "\t")
+		if !isEntry || path != rel {
 			continue
 		}
-		mode, _, _ := strings.Cut(meta, " ")
-		switch mode {
-		case "100755": // executable blob — runnable
-			return baseTreeRunnable
-		case "120000":
-			return baseTreeSymlinkAt(workspace, ref, rel, depth)
-		case "100644":
-			return baseTreeNotExecutable
-		default:
-			return baseTreeNotAFile
-		}
+		mode, _, _ = strings.Cut(meta, " ")
+		return mode, true, true
 	}
-	return baseTreeAbsent
+	return "", false, true
 }
 
-// baseTreeSymlinkAt answers whether the symlink materialized at rel resolves
-// to a runnable file in the session's worktree: the worktree's content is the
-// base tree's, so a repo-relative target is answered by the entry IT lands
-// on (link chains recurse, bounded at depth), and an absolute target names
-// the same host file at launch. An escaping target, an unreadable blob (a
-// promised object GIT_NO_LAZY_FETCH refuses to pull), or an over-deep chain
-// is unverifiable — never "runnable" by default: a dangling committed link
-// stays dangling in the worktree and must not shadow the real resolution.
-func baseTreeSymlinkAt(workspace, ref, rel string, depth int) baseTreeEntry {
-	if depth >= 4 {
-		return baseTreeUnknown
-	}
+// readTreeLink returns a committed symlink's stored target — the blob's exact
+// bytes, untrimmed, since significant whitespace changes where the link points —
+// under GIT_NO_LAZY_FETCH, so a blob:none-filtered object answers "unreadable"
+// rather than promisor-fetching it.
+func readTreeLink(workspace, ref, rel string) (string, bool) {
 	out, err := gitTreeRead(workspace, "cat-file", "-p", ref+":"+rel)
 	if err != nil {
+		return "", false
+	}
+	return string(out), true
+}
+
+// treeLinkDepth bounds chained symlink resolution through the tree — each hop
+// is a bounded read; the cap keeps pathological chains finite.
+const treeLinkDepth = 8
+
+// linkTargetUnresolvable reports whether a committed symlink target contains
+// a ".." component. POSIX resolves such a target component-wise — an
+// intermediate ".." only works when the preceding real directory exists —
+// which Clean would collapse wrongly (e.g. "missing/../realbin" cleans to
+// "realbin" even when "missing" is absent and the link dangles). af does not
+// model that traversal, so the target is unverifiable, never runnable.
+func linkTargetUnresolvable(target string) bool {
+	for _, part := range strings.Split(target, "/") {
+		if part == ".." {
+			return true
+		}
+	}
+	return false
+}
+
+func baseTreeEntryAt(workspace, ref, rel string, depth int) baseTreeEntry {
+	if depth >= treeLinkDepth {
 		return baseTreeUnknown
 	}
-	target := strings.TrimSpace(string(out))
-	if target == "" {
+	mode, found, ok := treeEntryMode(workspace, ref, rel)
+	if !ok {
+		return baseTreeUnknown
+	}
+	if !found {
+		// Not a literal tree path — an intermediate component may still be a
+		// committed symlink redirecting the lookup elsewhere in the tree,
+		// exactly as the worktree's filesystem will resolve it.
+		resolved, verdict := resolveTreeRel(workspace, ref, rel, depth+1)
+		if resolved == "" {
+			return verdict
+		}
+		return baseTreeEntryAt(workspace, ref, resolved, depth+1)
+	}
+	switch mode {
+	case "100755": // executable blob — runnable
+		return baseTreeRunnable
+	case "120000":
+		return baseTreeLinkAt(workspace, ref, rel, depth+1)
+	case "100644":
+		return baseTreeNotExecutable
+	default:
+		return baseTreeNotAFile
+	}
+}
+
+// baseTreeLinkAt answers whether the symlink materialized at rel resolves to
+// a runnable file in the session's worktree: an absolute target names the
+// same host file at launch; a repo-relative target is answered by the tree
+// entry IT lands on — followed through any further links or symlinked
+// directories. An escaping target, an unreadable blob, or an over-deep chain
+// is unverifiable — never "runnable" by default: a dangling committed link
+// stays dangling in the worktree and must not shadow the real resolution.
+func baseTreeLinkAt(workspace, ref, rel string, depth int) baseTreeEntry {
+	if depth >= treeLinkDepth {
+		return baseTreeUnknown
+	}
+	target, ok := readTreeLink(workspace, ref, rel)
+	if !ok || target == "" {
 		return baseTreeUnknown
 	}
 	if filepath.IsAbs(target) {
@@ -440,12 +524,77 @@ func baseTreeSymlinkAt(workspace, ref, rel string, depth int) baseTreeEntry {
 		}
 		return baseTreeAbsent
 	}
+	if linkTargetUnresolvable(target) {
+		return baseTreeUnknown // ".." traversal is unverifiable inside the tree
+	}
 	resolved := filepath.Clean(filepath.Join(filepath.Dir(rel), target))
 	if resolved == ".." || filepath.IsAbs(resolved) ||
 		strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
 		return baseTreeUnknown // escapes the repo — the launch target is unverifiable
 	}
-	return baseTreeEntryAt(workspace, ref, resolved, depth+1)
+	return baseTreeEntryAt(workspace, ref, resolved, depth)
+}
+
+// resolveTreeRel follows rel's intermediate components through ref's tree the
+// way the worktree's filesystem resolves them: each component may itself be a
+// symlink (`bin -> realbin`) redirecting the rest of the path — possibly
+// through further links. Returns (resolved, _) when a link redirects the
+// lookup to another in-tree path for the caller to classify, or ("", verdict)
+// when resolution settles: Absent (a component is missing, a non-directory
+// entry stands in the way, or every component is a real directory and the
+// leaf simply is not there), Runnable/Absent for an absolute link's host
+// path, or Unknown for anything unverifiable.
+func resolveTreeRel(workspace, ref, rel string, depth int) (string, baseTreeEntry) {
+	if depth >= treeLinkDepth {
+		return "", baseTreeUnknown
+	}
+	parts := strings.Split(rel, "/")
+	for i := 0; i < len(parts)-1; i++ {
+		prefix := strings.Join(parts[:i+1], "/")
+		mode, found, ok := treeEntryMode(workspace, ref, prefix)
+		if !ok {
+			return "", baseTreeUnknown
+		}
+		if !found {
+			return "", baseTreeAbsent
+		}
+		switch mode {
+		case "040000": // a real directory — descend
+			continue
+		case "120000": // a directory symlink — follow it as the worktree would
+			target, ok := readTreeLink(workspace, ref, prefix)
+			if !ok || target == "" {
+				return "", baseTreeUnknown
+			}
+			if filepath.IsAbs(target) {
+				// Stat the RAW concatenation — the kernel resolves ".."
+				// component-wise through real directories, so a target like
+				// /host/missing/../installed fails correctly when
+				// /host/missing is absent. Join would Clean it away and
+				// prove a runnable path that dangles in the worktree.
+				joined := target + "/" + strings.Join(parts[i+1:], "/")
+				if runnableFile(joined) {
+					return "", baseTreeRunnable
+				}
+				return "", baseTreeAbsent
+			}
+			if linkTargetUnresolvable(target) {
+				return "", baseTreeUnknown
+			}
+			resolved := filepath.Clean(filepath.Join(
+				append([]string{filepath.Dir(prefix), target}, parts[i+1:]...)...))
+			if resolved == ".." || filepath.IsAbs(resolved) ||
+				strings.HasPrefix(resolved, ".."+string(filepath.Separator)) {
+				return "", baseTreeUnknown // escapes the repo — unverifiable at launch
+			}
+			// The redirect lands on another in-tree path — hand it back so
+			// the caller classifies its leaf (and walks ITS intermediates).
+			return resolved, baseTreeAbsent
+		default: // a blob or gitlink has no children — nothing lives under it
+			return "", baseTreeAbsent
+		}
+	}
+	return "", baseTreeAbsent // all intermediates are real directories — the leaf is simply absent
 }
 
 // baseRefLabel names the tree the worktree materializes — origin's default
@@ -576,32 +725,42 @@ func shadowedAtLaunchRemediation() string {
 		"or provision it via setup_commands — or accept that sessions resolve the checked-in file"
 }
 
-// unprovenLaunchDirClause prefixes a launch-dir-dependent warning whose
-// modeled anchor is unverified — an opaque prefix (a wrapper, cd) may change
-// the real cwd before exec, so the modeled resolution cannot be proven. The
-// qualification is retained (the launch dir is the model's best answer) but
-// reported as unverified rather than asserted.
-func unprovenLaunchDirClause() string {
-	return "af cannot prove the directory this command launches in — an opaque prefix may change it — but as modeled, "
+// unprovenLaunchDirDetail reports a launch-dir-relative resolution whose
+// launch directory the model cannot prove — an opaque prefix may change it.
+// Probing the modeled dir's tree would answer the wrong question, so the
+// session's resolution is unverified outright.
+func unprovenLaunchDirDetail(command, token, resolvedPath string, wrapper bool, ref string) string {
+	return fmt.Sprintf("%s, but af cannot prove the directory the session launches in — "+
+		"an opaque prefix may change it — so what the session resolves against %s is unverified",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
 }
 
-// unverifiableInBaseDetail reports a worktree-mapped candidate the base-tree
-// probe could not answer: the ref resolves but reading its tree failed (a
-// promised object that will not fetch under GIT_NO_LAZY_FETCH, a damaged
-// object store). The check fails closed — the launch resolution is reported
-// as unverified rather than allowed to pass unqualified, and a known rescue
-// is hedged as "if it is absent", not asserted.
-func unverifiableInBaseDetail(command, token, resolvedPath, fallback string, wrapper bool, ref string) string {
-	detail := fmt.Sprintf("%s, but af could not verify whether %s contains it — "+
-		"the base-tree probe failed, so what the session resolves is unverified",
-		baseAbsenceSubject(command, token, resolvedPath, wrapper), baseRefLabel(ref))
-	if fallback != "" {
-		detail += fmt.Sprintf("; if it is absent there, the session's lookup falls back to %s", fallback)
+func unprovenLaunchDirRemediation() string {
+	return "pin the command down — an absolute path is launch-dir-independent — " +
+		"or check by hand where the session actually lands"
+}
+
+// unverifiableLookupDetail reports a PATH location whose launch answer the
+// base-tree probe could not establish — the ref resolves but reading its
+// tree failed (a promised object that will not fetch under
+// GIT_NO_LAZY_FETCH, a damaged object store), or the location resolves
+// outside the repo where no tree question applies. Because it precedes the
+// apparent winner, the session's resolution is not established: the check
+// fails closed and reports the lookup unverified rather than asserting a
+// conclusion or passing unqualified. A known later winner is hedged as a
+// fall-through, not a fact.
+func unverifiableLookupDetail(command, token, resolvedPath, uncertain, winner string, wrapper bool, ref string) string {
+	detail := fmt.Sprintf("%s, but af could not verify what the session resolves — "+
+		"the launch answer for %s could not be established against %s",
+		baseAbsenceSubject(command, token, resolvedPath, wrapper), uncertain, baseRefLabel(ref))
+	if winner != "" {
+		detail += fmt.Sprintf("; if nothing earlier resolves, the lookup reaches %s", winner)
 	}
 	return detail
 }
 
 func unverifiableInBaseRemediation() string {
-	return "retry once git can read the tree — or commit and push the file " +
-		"so the session does not depend on the probe's answer"
+	return "check by hand that the file resolves in a clean checkout of the " +
+		"base branch — `git worktree add` is the same tree a session gets — " +
+		"or commit and push it so the session does not depend on the probe's answer"
 }
