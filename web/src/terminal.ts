@@ -372,6 +372,18 @@ export class AttachTerminal {
   // an authoritative echo that matches is a no-op.
   private lastRows = 0;
   private lastCols = 0;
+  // A force write that could not leave — dropped before the parked
+  // classification landed, or withheld by a parked/hidden page — is still owed
+  // as a CLAIM, not just as a size: the flush that eventually carries it is an
+  // ordinary deduped write, and applyEchoedSize credits lastRows/lastCols from
+  // every echo. When the subscribe replay carries the same grid the claim was
+  // about to assert (the pane's own fit already matched the authority), the
+  // credit lands first and the deferred write dedups to nothing — the claim
+  // evaporates without a frame ever reaching the broker (#6635, run
+  // 42361281090: B's subscribe claim never produced its echo). The flag rides
+  // onto the next write attempt and survives until ANY frame leaves, a yield
+  // concedes it, or a new socket starts the epoch over.
+  private owedForceResize = false;
   // When this pane last re-contested each foreign authoritative grid. A repeat
   // of the same foreign grid inside FOREIGN_ECHO_YIELD_MS is an insistent
   // writer and wins unchallenged; anything else gets one reclaim. The history
@@ -406,8 +418,27 @@ export class AttachTerminal {
   // authoritative echo. When this window becomes active again, its visible host
   // becomes the local writer: refit once instead of leaving a peer-sized emulator in
   // an unchanged container until the user physically resizes the window (#2347).
-  private readonly onWindowFocus = (): void => {
+  //
+  // A user-coupled activation does two things, not one: it un-parks the page
+  // AND starts a new contest epoch. contestedEchoes timestamps are wall-clock
+  // only, so a foreign grid echoed again inside FOREIGN_ECHO_YIELD_MS reads as
+  // an insistent writer no matter when the sighting was recorded — including
+  // sightings from BEFORE this activation, which are not answers to the claim
+  // it is about to produce but the previous contest's echoes arriving late.
+  // Counting them stands the fresh activation down to the very write it was
+  // meant to take (#6635, run 42370084465: the counter-echo landed ~16ms after
+  // the activation claim, ~820ms after the pre-claim sighting, and the yield
+  // branch stranded the pane on the peer's rows). Only signals the platform
+  // ties to a user qualify — trusted input, window focus, a real visibility
+  // or phone-boundary change. Observer and layout deliveries (Intersection-
+  // Observer, ResizeObserver, the scheduled-fit pair) wake a page without
+  // user intent and must not erase a concession another client just won.
+  private noteActivation(): void {
     this.parked = false;
+    this.contestedEchoes.clear();
+  }
+  private readonly onWindowFocus = (): void => {
+    this.noteActivation();
     this.scheduleVisibleFit();
   };
   private readonly onWindowBlur = (): void => {
@@ -419,7 +450,7 @@ export class AttachTerminal {
   };
   private readonly onVisibilityChange = (): void => {
     if (document.visibilityState === "visible") {
-      this.parked = false;
+      this.noteActivation();
       this.scheduleVisibleFit();
     } else {
       this.mouseOverrideKeyHeld = false;
@@ -428,8 +459,9 @@ export class AttachTerminal {
   // A crossing of the phone boundary re-picks the default pitch (#5492) —
   // rotation past 768px, or a desktop window dragged narrow and back.
   private readonly onPhoneChange = (): void => {
-    // A media-query change cannot evaluate without layout — the page is awake.
-    this.parked = false;
+    // A media-query change cannot evaluate without layout — the page is awake,
+    // and the viewport change that triggered it is a real user resize.
+    this.noteActivation();
     this.applyDeviceFontSize();
   };
   // Entering a pane is the earliest reliable activation signal for side-by-side
@@ -437,7 +469,7 @@ export class AttachTerminal {
   // first gesture rather than making the user scroll twice.
   private readonly onPointerEnter = (event: PointerEvent): void => {
     if (event.isTrusted) {
-      this.parked = false;
+      this.noteActivation();
     }
     this.fitVisibleHost();
   };
@@ -450,7 +482,7 @@ export class AttachTerminal {
       // The touch→wheel bridge's synthetics are not a user scroll (#4982).
       return;
     }
-    this.parked = false;
+    this.noteActivation();
     // A real wheel is a new scroll intent — the coast must not fight it.
     this.stopCoast();
     this.handleUserScroll("wheel");
@@ -546,7 +578,7 @@ export class AttachTerminal {
   };
   private readonly onTouchMove = (event: TouchEvent): void => {
     if (event.isTrusted) {
-      this.parked = false;
+      this.noteActivation();
     }
     this.handleUserScroll("touch");
     const touch = event.touches[0];
@@ -615,6 +647,13 @@ export class AttachTerminal {
     // lifts — so this is what tells onMouseDownCapture below whether the click it is
     // about to rewrite came from a finger.
     this.lastPointerWasTouch = event.pointerType === "touch";
+    // A press is an activation wherever it lands: a click-to-focus on an
+    // already-hovered pane produces no fresh pointerenter, so the contest
+    // epoch must be marked here or a stale yield window can stand the
+    // reclaim down (#6635).
+    if (event.isTrusted) {
+      this.noteActivation();
+    }
     // Any fresh pointer press is new scroll intent: a mouse/pen down on a hybrid
     // device, or a second finger, must not fight a touch flick still coasting.
     this.stopCoast();
@@ -623,9 +662,6 @@ export class AttachTerminal {
     // an ordinary terminal click targets the screen and keeps the saved anchor.
     const viewport = this.container.querySelector(".xterm-viewport");
     if (event.target === viewport) {
-      if (event.isTrusted) {
-        this.parked = false;
-      }
       this.handleUserScroll("scrollbar");
       return;
     }
@@ -1444,9 +1480,13 @@ export class AttachTerminal {
     this.ws = ws;
     // A new socket is a new contest epoch: the first delivered echo on it is
     // the subscribe admission, and sighting history from the dead connection
-    // cannot say whether a grid is being insisted on now.
+    // cannot say whether a grid is being insisted on now. The claim ledger
+    // restarts too — a force write still owed from the old socket is owed to
+    // the dead connection, and onopen's own force-send re-raises it if the
+    // classification withholds again.
     this.contestedEchoes.clear();
     this.admittedEcho = false;
+    this.owedForceResize = false;
 
     ws.onopen = () => {
       this.retry = 0;
@@ -1881,21 +1921,26 @@ export class AttachTerminal {
     // defers to whichever twin delivers first: that fit carries or withholds
     // the size. Nothing extra is armed (the constructor's pair already is),
     // and lastRows/lastCols stay un-credited so the classified fit converges
-    // on its own.
+    // on its own — except a force write, whose claim semantics the deferred
+    // deduped flush would lose to an intervening echo credit (the field note).
     if (this.parked === null) {
+      this.owedForceResize ||= force;
       return;
     }
     if (this.parked ||
         (typeof document !== "undefined" && document.visibilityState !== "visible")) {
+      this.owedForceResize ||= force;
       this.retryOwedResize(rows, cols);
       return;
     }
+    force ||= this.owedForceResize;
     if (!force && rows === this.lastRows && cols === this.lastCols) {
       return;
     }
     if (this.send(encode(resizeFrame(rows, cols)))) {
       this.lastRows = rows;
       this.lastCols = cols;
+      this.owedForceResize = false;
       return;
     }
     // The socket could not carry the frame. It stays owed — lastSent is
@@ -1906,11 +1951,13 @@ export class AttachTerminal {
 
   /** Keeps the wake probe armed while a resize is owed — withheld by a
    *  parked/hidden page. Self-limiting: the check re-reads the divergence,
-   *  so a converged grid stops re-arming. Re-arms ONLY the frame probe —
+   *  so a converged grid stops re-arming — UNLESS the owed write is a claim,
+   *  which has no wire-visible effect to converge against and must still
+   *  reach the broker (owedForceResize). Re-arms ONLY the frame probe —
    *  the channel whose delivery can change the outcome; arming the timer
    *  would just fit-and-withhold again on every tick. */
   private retryOwedResize(rows: number, cols: number): void {
-    if (rows !== this.lastRows || cols !== this.lastCols) {
+    if (this.owedForceResize || rows !== this.lastRows || cols !== this.lastCols) {
       this.armWakeProbe();
     }
   }
@@ -1995,8 +2042,10 @@ export class AttachTerminal {
             // armed — the deferred wire half of a forfeited reclaim, a parked
             // page's wake probe — was queued to re-assert the grid just
             // conceded. Delivered now it would refit the emulator off the
-            // authoritative grid and write the conceded size back out.
+            // authoritative grid and write the conceded size back out — as
+            // would a force write still owed from before the concession.
             this.cancelVisibleFitFrame();
+            this.owedForceResize = false;
           }
         }
       }

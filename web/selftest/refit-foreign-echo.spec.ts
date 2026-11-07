@@ -593,3 +593,331 @@ test("#6635 (2026-11-06 recurrence): a pane already owning the authority yields 
     await ctxB.close();
   }
 });
+
+// #6635 (run 42361281090 — "no B's subscribe claim resize echo within 10s
+// (saw 109)"): a claim withheld before it reaches the wire must stay a
+// CLAIM. sendResize drops a forced write while the parked classification is
+// still unknown, and withholds while the page is parked or hidden — but the
+// flush that eventually carries it is an ordinary deduped write, and
+// applyEchoedSize credits lastRows/lastCols on every echo. When the
+// subscribe replay carries the very grid the claim was about to assert —
+// B's own fit already matched the authority, so its replay is a no-op —
+// the credit lands first and the deferred flush dedups to nothing: the
+// claim evaporates without a frame ever reaching the broker, and every
+// subscriber waits on an echo that can never exist.
+//
+// The strand is forced, not raced: A owns gridRows; B's page parks BEFORE
+// its pane exists so the on-open force-send is withheld every time — and
+// B's host is the same 1280x2000, so the replay credits exactly the size
+// B's deferred flush would send. Unparking delivers whatever is armed: on
+// master the deduped flush is eaten and the converged re-arm check armed
+// no probe, so the broker never hears from B at all; on the fix the owed
+// claim leaves FORCED and a second gridRows echo crosses the wire.
+test("#6635 (run 42361281090): a claim withheld while parked still reaches the wire — the replay's credit cannot dedup a forced write", async ({
+  browser,
+  request,
+}) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
+  expect(selected?.id).toBeTruthy();
+
+  const ctxA = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  const ctxB = await browser.newContext({ viewport: { width: 1280, height: 2000 } });
+  try {
+    const settleFonts = (p: Page) =>
+      p.evaluate(
+        () =>
+          document.fonts.ready.then(
+            () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+          ),
+      );
+    const attach = async (p: Page) => {
+      await p.goto("/");
+      await p.locator("#app[data-af-resync-settled]").waitFor();
+      await settleFonts(p);
+      await p.evaluate((sessionId) => {
+        window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+      }, selected.id);
+      await expect(p.locator(".af-main")).toHaveAttribute("data-term-status", "open", {
+        timeout: 15_000,
+      });
+    };
+
+    // A attaches first and claims gridRows — the authority B's replay carries.
+    const pageA = await ctxA.newPage();
+    await attach(pageA);
+    const rowsA = () => pageA.locator(".af-term-host .xterm-rows > div").count();
+    await expect.poll(rowsA, { timeout: 10_000 }).toBeGreaterThan(60);
+    const gridRows = await rowsA();
+
+    // The ordering probe on the same broker (?tab=0 binds the broker the
+    // pane's ?tab_id= attach lands on). Every OpResize the broker applies is
+    // broadcast back to it, in broker order. Base indices are read off the
+    // live list so leftover authority from an earlier spec can shift
+    // absolute positions without shifting the assertions.
+    await pageA.evaluate(
+      async ({ sessionId }) => {
+        const w = window as unknown as {
+          __echoes: number[];
+          __probe: WebSocket;
+          __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+        };
+        w.__echoes = [];
+        const ws = new WebSocket(
+          `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
+            `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
+        );
+        ws.binaryType = "arraybuffer";
+        ws.onmessage = (ev) => {
+          if (typeof ev.data !== "string") {
+            return;
+          }
+          try {
+            const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
+            if (msg.type === "resize" && typeof msg.rows === "number") {
+              w.__echoes.push(msg.rows);
+            }
+          } catch {
+            // not a control frame
+          }
+        };
+        w.__waitRows = (pred, after, label) =>
+          new Promise<number>((resolve, reject) => {
+            const timer = setTimeout(
+              () =>
+                reject(new Error(`no ${label} resize echo within 10s (saw ${w.__echoes.join(",")})`)),
+              10_000,
+            );
+            const poll = setInterval(() => {
+              const at = w.__echoes.findIndex((r, i) => i >= after && pred(r));
+              if (at >= 0) {
+                clearTimeout(timer);
+                clearInterval(poll);
+                resolve(at);
+              }
+            }, 20);
+          });
+        w.__probe = ws;
+        await new Promise<void>((resolve, reject) => {
+          ws.onopen = () => resolve();
+          ws.onerror = () => reject(new Error("probe stream failed to open"));
+        });
+      },
+      { sessionId: selected.id },
+    );
+    const waitEchoEq = (want: number, after: number, label: string) =>
+      pageA.evaluate(
+        ([n, a, l]) => {
+          const w = window as unknown as {
+            __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+          };
+          return w.__waitRows((r) => r === n, a, l);
+        },
+        [want, after, label] as const,
+      );
+    const echoCount = () =>
+      pageA.evaluate(() => (window as unknown as { __echoes: number[] }).__echoes.length);
+
+    // Let the probe's subscribe replay (gridRows) and any settle-time write
+    // land, then anchor every later read past them.
+    await pageA.waitForTimeout(500);
+    const base = await echoCount();
+
+    // B's page boots and settles fonts FIRST — after park() its rAF never
+    // runs, so nothing later may wait on a frame. Then park BEFORE the pane
+    // exists: the mount's fit delivers through the starved-frame timer twin,
+    // marks the page parked, and connects anyway. The on-open force-send is
+    // withheld every time — there is no race left — and the subscribe replay
+    // that follows immediately credits lastRows with gridRows, B's own fit.
+    const pageB = await ctxB.newPage();
+    await pageB.goto("/");
+    await pageB.locator("#app[data-af-resync-settled]").waitFor();
+    await settleFonts(pageB);
+    await park(pageB);
+    await pageB.evaluate((sessionId) => {
+      window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+    }, selected.id);
+    await expect(pageB.locator(".af-main")).toHaveAttribute("data-term-status", "open", {
+      timeout: 15_000,
+    });
+    // Give the parked classification its 250ms timer twin so the parked
+    // branch — not the unclassified one — is what holds the owed claim.
+    await pageB.waitForTimeout(500);
+    // The scenario's precondition, checked rather than assumed: B's own fit
+    // is exactly the replayed authority — the no-op whose credit is what
+    // eats the deferred claim on master. If B's emulator ever fits a
+    // different grid this spec must say so, not pass vacuously.
+    await expect
+      .poll(() => pageB.locator(".af-term-host .xterm-rows > div").count(), {
+        message: "B's emulator sits on the replayed grid — the same-grid replay precondition",
+        timeout: 10_000,
+      })
+      .toBe(gridRows);
+
+    // Un-hide: the deferred frames replay and the withheld claim must now
+    // leave. On master the flush dedups against the replay's credit and the
+    // wire stays silent; on the fix the claim rides out forced.
+    await unpark(pageB);
+    await waitEchoEq(gridRows, base, "B's unparked claim flush");
+  } finally {
+    await ctxA.close();
+    await ctxB.close();
+  }
+});
+
+// #6635 (run 42370084465 — "desktop shell: pointer activation must refit …
+// rows 109"): a user-coupled activation starts a NEW contest epoch.
+// contestedEchoes are wall-clock sightings, so a foreign grid echoed again
+// inside FOREIGN_ECHO_YIELD_MS counts as insistent no matter when it was
+// last seen — including sightings from BEFORE the activation, which are not
+// answers to its claim but the previous contest's echo arriving late. The
+// observed strand: the pane yielded to a peer's repeat in the setup fight,
+// ~820ms later the user activated it and its claim rewrote the grid — and a
+// foreign echo 16ms after that read as the same contest's repeat, so the
+// reclaim stood itself down and the emulator rested at the peer's 109.
+//
+// Driven deterministically: the probe plays the insistent peer verbatim
+// (claim, then the repeat inside the window) so the pane yields and rests
+// on 34 rows. A real pointerenter then activates it — its claim crosses the
+// wire on any version — and the probe's third write lands while the
+// pre-activation sightings are still inside the window: on master that is
+// the second sighting of the same wall-clock contest and the pane yields
+// again, stranded at 34; on the fix the activation cleared the sighting
+// history, the third write is the FIRST answer to the activation's claim,
+// and the pane re-asserts its host fit.
+test("#6635 (run 42370084465): a user activation restarts the contest epoch — the peer's post-activation write contests, not repeats", async ({
+  page,
+  request,
+}) => {
+  const snap = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const selected = snap.data.instances.find((s: { title: string }) => s.title === session);
+  expect(selected?.id).toBeTruthy();
+
+  await page.setViewportSize({ width: 1280, height: 2000 });
+  await page.goto("/");
+  await page.locator("#app[data-af-resync-settled]").waitFor();
+  // Fonts settle before the pane attaches — its first fit must already be
+  // the final grid, or a font-metric change writes a second claim whose
+  // echo re-contests the pane and masks the yield this spec pins.
+  await page.evaluate(
+    () =>
+      document.fonts.ready.then(
+        () => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve()))),
+      ),
+  );
+  await page.evaluate((sessionId) => {
+    window.location.hash = `#/session/${encodeURIComponent(sessionId)}`;
+  }, selected.id);
+  await expect(page.locator(".af-main")).toHaveAttribute("data-term-status", "open", {
+    timeout: 15_000,
+  });
+  const rows = () => page.locator(".af-term-host .xterm-rows > div").count();
+  await expect.poll(rows, { timeout: 10_000 }).toBeGreaterThan(60);
+  const gridRows = await rows();
+
+  // The ordering probe on the same broker.
+  await page.evaluate(
+    async ({ sessionId }) => {
+      const w = window as unknown as {
+        __echoes: number[];
+        __probe: WebSocket;
+        __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+      };
+      w.__echoes = [];
+      const ws = new WebSocket(
+        `${location.protocol === "https:" ? "wss" : "ws"}://${location.host}` +
+          `/v1/sessions/${encodeURIComponent(sessionId)}/stream?access_token=&tab=0`,
+      );
+      ws.binaryType = "arraybuffer";
+      ws.onmessage = (ev) => {
+        if (typeof ev.data !== "string") {
+          return;
+        }
+        try {
+          const msg = JSON.parse(ev.data) as { type?: string; rows?: number };
+          if (msg.type === "resize" && typeof msg.rows === "number") {
+            w.__echoes.push(msg.rows);
+          }
+        } catch {
+          // not a control frame
+        }
+      };
+      w.__waitRows = (pred, after, label) =>
+        new Promise<number>((resolve, reject) => {
+          const timer = setTimeout(
+            () =>
+              reject(new Error(`no ${label} resize echo within 10s (saw ${w.__echoes.join(",")})`)),
+            10_000,
+          );
+          const poll = setInterval(() => {
+            const at = w.__echoes.findIndex((r, i) => i >= after && pred(r));
+            if (at >= 0) {
+              clearTimeout(timer);
+              clearInterval(poll);
+              resolve(at);
+            }
+          }, 20);
+        });
+      w.__probe = ws;
+      await new Promise<void>((resolve, reject) => {
+        ws.onopen = () => resolve();
+        ws.onerror = () => reject(new Error("probe stream failed to open"));
+      });
+    },
+    { sessionId: selected.id },
+  );
+  const waitEchoEq = (want: number, after: number, label: string) =>
+    page.evaluate(
+      ([n, a, l]) => {
+        const w = window as unknown as {
+          __waitRows: (pred: (r: number) => boolean, after: number, label: string) => Promise<number>;
+        };
+        return w.__waitRows((r) => r === n, a, l);
+      },
+      [want, after, label] as const,
+    );
+  const writeForeign = () =>
+    page.evaluate(() => {
+      const w = window as unknown as { __probe: WebSocket };
+      // OpResize 0x02 + rows,cols as big-endian uint16s — 34x100, a grid no
+      // live client fits.
+      w.__probe.send(new Uint8Array([0x02, 0, 34, 0, 100]));
+    });
+
+  // The peer's claim: the pane's first contested sighting, answered by one
+  // reclaim echo.
+  await writeForeign();
+  const atClaim = await waitEchoEq(34, 0, "peer's foreign claim");
+  const atReclaim = await waitEchoEq(gridRows, atClaim + 1, "the pane's reclaim");
+  // The peer's repeat inside the yield window: the pane must stand down and
+  // its emulator rest on the peer's grid.
+  await writeForeign();
+  const atRepeat = await waitEchoEq(34, atReclaim + 1, "peer's repeat");
+  await expect
+    .poll(rows, { message: "the yielded pane rests on the peer's grid", timeout: 10_000 })
+    .toBe(34);
+
+  // A real activation: a pointerenter the platform marks trusted, the same
+  // signal the desktop shell's pointer reclaim rides. Move off the pane
+  // first so the enter is a fresh crossing, not a stale hover.
+  await page.mouse.move(4, 4);
+  await page.locator(".af-pane-host").first().hover();
+  // The activation's own claim is on the wire now — on master and the fix
+  // alike. What differs is the classification of the next foreign echo.
+  const atActivated = await waitEchoEq(gridRows, atRepeat + 1, "the activation claim");
+
+  // The peer's write answering the activation — delivered while the
+  // pre-activation sightings still sit inside the yield window. On master
+  // it counts as a repeat and the pane yields to the very write it was
+  // activated to take; on the fix the epoch restarted at the gesture and
+  // this is the first answer, contested like any fresh foreign grid.
+  await writeForeign();
+  const atCounter = await waitEchoEq(34, atActivated + 1, "the peer's post-activation write");
+  await waitEchoEq(gridRows, atCounter + 1, "post-activation reclaim");
+  await expect
+    .poll(rows, {
+      message: "the activated pane reclaims its host grid past the stale window",
+      timeout: 10_000,
+    })
+    .toBe(gridRows);
+});
