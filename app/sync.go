@@ -501,9 +501,24 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 	// condition so `E details` opens it independently of the shared retained
 	// slot. A transient copy is queued for the bar so the operator sees the
 	// full hint once before the standing line takes over.
+	//
+	// A direct switch from skipped project A to skipped project B while A's
+	// repair-hint transient is still within its three-second painted window
+	// would otherwise leave A's project-specific guidance on the bar until
+	// B's pending notice is consumed (or the timer expires), and `E
+	// details` could not resolve in that interval because showErrorDetails
+	// compares A's painted text against B's newly retained text. Retract
+	// the outgoing skip's transient on any changed skip entry before
+	// installing the incoming one, not only when the skip clears. Only
+	// retract when the painted text IS the outgoing hint, so an unrelated
+	// notice the bar is showing stays untouched (#4742 review).
+	outgoing := m.skippedRepoRetained
 	m.applyStandingNotice()
 	m.skippedRepoRetained = skippedRepoNotice(cur).Error()
 	m.pendingSkippedRepoNotice = m.skippedRepoRetained
+	if outgoing != "" && outgoing != m.skippedRepoRetained {
+		m.errBox.RetractTransient(outgoing)
+	}
 	return true
 }
 

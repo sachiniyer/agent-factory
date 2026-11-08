@@ -904,6 +904,59 @@ func TestApplySkippedRepo_ClearRetractsPaintedTransient(t *testing.T) {
 		"an unrelated notice the bar is showing must survive a skip retraction")
 }
 
+// TestApplySkippedRepo_SkippedToSkippedRetractsOutgoingTransient pins the #4742
+// review finding on the skipped-to-skipped switch: when the user switches
+// directly from skipped project A to skipped project B while A's repair-hint
+// transient is still within its three-second painted window, the incoming
+// skip must retract A's outgoing transient before installing B's — otherwise
+// the bar keeps showing A's project-specific guidance until B's pending
+// notice is consumed (or the timer expires), and `E details` cannot resolve in
+// that interval because showErrorDetails compares A's painted text against B's
+// newly retained text. The retraction must not touch an unrelated notice.
+func TestApplySkippedRepo_SkippedToSkippedRetractsOutgoingTransient(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	// Fire skip A and drain its full repair-hint transient onto the bar.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.NotEmpty(t, h.pendingSkippedRepoNotice)
+	cmd := h.consumeSkippedRepoNotice()
+	require.NotNil(t, cmd)
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.FullError(), corruptedRepoRepairHint,
+		"precondition: skip A's repair-hint transient is painted on the bar")
+	require.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint,
+		"precondition: skip A owns its retained hint")
+
+	// Switch directly to skipped project B (a different reason so the entry
+	// changed). A's painted transient must retract so the bar stops showing
+	// A's guidance, and B's pending notice / retained hint take over.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonUnreadableInstancesJSON})
+	h.errBox.SetSize(200, 1)
+	assert.Empty(t, h.errBox.FullError(),
+		"a skipped-to-skipped switch must retract the outgoing skip's painted transient")
+	assert.NotContains(t, ansi.Strip(h.errBox.String()), corruptedRepoRepairHint,
+		"the bar must not keep rendering the outgoing skip's repair hint")
+	assert.Contains(t, h.skippedRepoRetained, unreadableRepoRepairHint,
+		"the incoming skip owns its own retained hint")
+	assert.Equal(t, h.skippedRepoRetained, h.pendingSkippedRepoNotice,
+		"the incoming skip's transient is queued for the bar")
+
+	// An unrelated notice on the bar survives a skipped-to-skipped switch:
+	// retraction only drops a transient matching the outgoing skip's hint, so
+	// an unrelated notice the bar is showing stays untouched.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	h.errBox.Expire()
+	h.setTransientNotice(errors.New("unrelated transient notice"))
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, ansi.Strip(h.errBox.String()), "unrelated transient notice")
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonUnreadableInstancesJSON})
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, ansi.Strip(h.errBox.String()), "unrelated transient notice",
+		"an unrelated notice the bar is showing must survive a skipped-to-skipped switch")
+}
+
 // TestUpdateOpenPickerSkipState_DegradedRegistryPreservesRegistryRows pins the
 // #4742 review finding on the open-picker refresh: when a successful background
 // snapshot coincides with a degraded registry read, buildProjectListFrom omits
