@@ -275,6 +275,57 @@ var sensitiveJSONKeys = map[string]bool{
 	// writes it as free text about the user's work. The whole object goes here
 	// because a record the typed decode rejected may hold the reason elsewhere.
 	"attention": true,
+	// The #5571 off-box workstream, #5189 prune intent, #5105 missing worktree,
+	// and #5459 push mode all added typed-path redactions in redactInstanceData
+	// and redactTabData without mirroring them here. A record the typed decode
+	// REJECTS must never be less private than one it accepts, so each field the
+	// typed path redacts gets the fallback's treatment too: wholesale object
+	// drops where the typed path nils the struct, whole-value blanking for
+	// scalars — the same two conventions every entry above follows.
+	//
+	// placement, archived_workspace, and prune_intent are dropped WHOLESALE,
+	// matching how runtime_cleanup, remote_meta, and attention are handled
+	// above: the typed path nils each struct (d.Placement = nil,
+	// d.ArchivedWorkspace = nil, and every sensitive field inside PruneIntent is
+	// redacted), and on a shape this path could not parse the per-field layout
+	// is not worth relying on. The marker replaces the VALUE and leaves the KEY,
+	// so "this row had a placement / an archived workspace / a prune intent"
+	// survives for triage while the locators and nonces inside do not.
+	"placement": true, "archived_workspace": true, "prune_intent": true,
+	// host is the listed host a session was placed on (#5571 W6.3). The operator
+	// names it, and the name can carry an internal hostname, so it never reaches
+	// a shared bundle verbatim. The typed path digests it to a stable
+	// [host:<8 hex>] placeholder; this path cannot digest (it has no record to
+	// key on), so it blanks the value wholesale.
+	"host": true,
+	// callback_unavailable is the reason a session has no af callback (#5571
+	// W3.1) — mint refusals and revalidation failures can embed the operator's
+	// configured callback endpoint or sandbox host detail, the same class of
+	// user-chosen text as Account. The typed path replaces it with the marker.
+	"callback_unavailable": true,
+	// archive_nonce is the occupant nonce stamped into the archived worktree's
+	// registration leaf (#5189). It is an unguessable occupancy proof, so a
+	// shared bundle does not carry it. The typed path replaces it with the
+	// marker; this path does the same.
+	"archive_nonce": true,
+	// tombstone_path, leaf_name, leaf_nonce, and nonce are the prune intent's
+	// durable locators and occupancy proofs (#5189). prune_intent is dropped
+	// wholesale above, but these keys are mirrored individually too — a legacy
+	// or hand-edited record may carry them at a different level, and the map
+	// is deliberately broad and fail-safe. The typed path collapses
+	// tombstone_path via collapsePathField and replaces the nonces and leaf
+	// name with the marker; this path blanks each value.
+	"tombstone_path": true, "leaf_name": true, "leaf_nonce": true, "nonce": true,
+	// missing_reason is the operator-facing explanation behind
+	// worktree.Missing (#5102) — it embeds the worktree path, a user-meaningful
+	// repo location, in an af-authored sentence. The typed path rebuilds it
+	// from af's own forms or collapses it whole; this path blanks it.
+	"missing_reason": true,
+	// push_mode is a docs tab's push mode (#5459). The typed path keeps only
+	// "auto"/"manual"; a hand-edited value cannot carry user text into a shared
+	// report, so this path blanks it wholesale — on a shape it could not parse
+	// it cannot distinguish the two enum words from a hand-edited string.
+	"push_mode": true,
 }
 
 // redactUnknownJSON recursively rebuilds a decoded JSON value, blanking any
