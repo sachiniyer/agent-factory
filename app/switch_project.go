@@ -493,12 +493,6 @@ func (m *home) refreshSidebarProjects() {
 		m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), errSidebarSnapshotDegraded)
 		return
 	}
-	// Route the successful synchronous refresh through applySidebarProjects
-	// too, so a skipped repo with no registry/root_agents/active row and no
-	// cached sidebar row (a fresh launch, or a session-only repo first skipped
-	// this poll) is preserved/ensured the same way background snapshots do —
-	// setSidebarProjects alone would omit it from the Projects section despite
-	// its ID being in the returned skip set (#4742 review).
 	m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), nil)
 }
 
