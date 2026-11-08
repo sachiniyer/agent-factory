@@ -9,8 +9,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 )
 
 // -- Helper function tests --
@@ -766,4 +768,37 @@ func TestApplySkippedRepo_DetailsSurviveTransientOverwrite(t *testing.T) {
 	// When the skip retracts, its details retract with it.
 	h.applySkippedRepo(nil)
 	assert.Empty(t, h.skippedRepoRetained, "the skip's details must retract with the condition")
+}
+
+// TestRefreshSidebarProjectsFromSnapshot_MarksSkippedRepoHidden proves the
+// background poll threads the cross-repo skip set (#4742) into the always-
+// visible Projects section: a skipped repo's zero count is incomplete, not
+// "no sessions", so its row is marked "· hidden" instead of presented as a
+// clean empty project — the same incompleteness channel the picker carries.
+func TestRefreshSidebarProjectsFromSnapshot_MarksSkippedRepoHidden(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot = "/tmp/af-projects-skip/acme"
+	h.repoID = config.RepoIDFromRoot(h.repoRoot)
+	resizeHome(h, 120, 45)
+
+	// The active-root pre-seed surfaces the project row even with no live
+	// sessions; the daemon skipped it, so its zero count is hidden.
+	skipped := []daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}}
+	changed := h.refreshSidebarProjectsFromSnapshot(nil, skipped, nil)
+	require.True(t, changed, "a skipped repo's row must reach the section")
+	require.NotEmpty(t, h.projects.Projects(), "the active-root pre-seed must surface the skipped project's row")
+	row := h.projects.Projects()[0]
+	assert.True(t, row.Hidden, "a skipped repo's row must be marked hidden")
+	h.projects.SetRect(layout.Rect{X: 0, Y: 0, W: 60, H: 8})
+	assert.Contains(t, ansi.Strip(h.projects.String()), "· hidden",
+		"the section must render the hidden marker for a skipped repo")
+
+	// A healthy re-poll (no skip) retracts the marker.
+	h.refreshSidebarProjectsFromSnapshot(nil, nil, nil)
+	require.NotEmpty(t, h.projects.Projects())
+	assert.False(t, h.projects.Projects()[0].Hidden,
+		"clearing the skip must retract the hidden marker")
+	h.projects.SetRect(layout.Rect{X: 0, Y: 0, W: 60, H: 8})
+	assert.NotContains(t, ansi.Strip(h.projects.String()), "· hidden",
+		"the section must not render the hidden marker once the repo is no longer skipped")
 }

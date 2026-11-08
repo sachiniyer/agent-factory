@@ -71,6 +71,15 @@ type snapshotFetchedMsg struct {
 	// blanking the section on a hiccup.
 	allRepos    []session.InstanceData
 	allReposErr error
+	// allReposSkipped is the daemon's startup-skipped repo set for the CROSS-repo
+	// (RepoID:"") snapshot (#4742): the repos the daemon dropped at startup, whose
+	// zero count in allRepos is incomplete, not "no sessions". The background
+	// refresh (refreshSidebarProjectsFromSnapshot) marks those rows hidden so the
+	// always-visible Projects section never presents a skipped repo as a clean
+	// empty project — the same incompleteness channel the picker carries. A
+	// separate field from skippedRepos (the repo-scoped set handleSnapshot reads)
+	// because the two scopes answer different Snapshot requests on the same poll.
+	allReposSkipped []daemon.SkippedRepo
 }
 
 // -- Ticker commands --
@@ -147,16 +156,16 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		// The cross-repo skip set is consumed by the project picker's own fetch
-		// (buildProjectListWithSnapshotStatus), not this poll, so it is discarded
-		// here — the repo-scoped skip set (resp.SkippedRepos) is what the
-		// handleSnapshot notice reads.
-		allReposData, _, allReposErr := allRepos(context.Background())
+		// The cross-repo skip set travels with the data so the background
+		// refresh can mark a skipped repo's zero count as hidden (#4742),
+		// instead of presenting it as a clean "no sessions" — the repo-scoped
+		// skip set (resp.SkippedRepos) is what the handleSnapshot notice reads.
+		allReposData, allReposSkipped, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
 			skippedRepos: resp.SkippedRepos,
 			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
-			allRepos: allReposData, allReposErr: allReposErr,
+			allRepos: allReposData, allReposErr: allReposErr, allReposSkipped: allReposSkipped,
 		}
 	}
 }

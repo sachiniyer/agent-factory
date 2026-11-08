@@ -80,7 +80,7 @@ func TestRemoteDegradedRegistryPreservesLiveSessionCounts(t *testing.T) {
 	// wholesale (no merge). alpha reports its two live sessions; beta is present
 	// with none.
 	h.remote.applyFresh(&remoteReads{projects: []config.Project{registryAlpha, registryBeta}})
-	require.True(t, h.refreshSidebarProjectsFromSnapshot(snapshot, nil),
+	require.True(t, h.refreshSidebarProjectsFromSnapshot(snapshot, nil, nil),
 		"the healthy tick changes the visible rows")
 	rows := visibleByRepoID()
 	require.Contains(t, rows, "aaaaaaaaaaaa")
@@ -98,7 +98,7 @@ func TestRemoteDegradedRegistryPreservesLiveSessionCounts(t *testing.T) {
 	// count the snapshot reported.
 	h.remote.applyFresh(&remoteReads{projectsErr: errors.New("rpc failed")})
 	require.NotNil(t, h.remote.projectsErr, "the cache records the degraded registry read")
-	require.True(t, h.refreshSidebarProjectsFromSnapshot(snapshot, nil),
+	require.True(t, h.refreshSidebarProjectsFromSnapshot(snapshot, nil, nil),
 		"the degraded tick still refreshes from the live snapshot")
 	rows = visibleByRepoID()
 	require.Equal(t, 2, rows["aaaaaaaaaaaa"].SessionCount,
@@ -128,7 +128,7 @@ func TestRemoteDegradedRegistryPreservesLiveSessionCounts(t *testing.T) {
 	// outage does not decay the counts over repeated polls. The refresh's own
 	// change-flag is a repaint hint (steady-state rows did not change), not the
 	// contract — the row contents are.
-	h.refreshSidebarProjectsFromSnapshot(snapshot, nil)
+	h.refreshSidebarProjectsFromSnapshot(snapshot, nil, nil)
 	rows = visibleByRepoID()
 	require.Equal(t, 2, rows["aaaaaaaaaaaa"].SessionCount,
 		"a sustained degraded registry does not decay the live count over repeated polls")
@@ -138,7 +138,7 @@ func TestRemoteDegradedRegistryPreservesLiveSessionCounts(t *testing.T) {
 	// install (no merge). Confirms the fix did not break the healthy path or strand
 	// stale rows on recovery.
 	h.remote.applyFresh(&remoteReads{projects: []config.Project{registryAlpha, registryBeta}})
-	h.refreshSidebarProjectsFromSnapshot(snapshot, nil)
+	h.refreshSidebarProjectsFromSnapshot(snapshot, nil, nil)
 	rows = visibleByRepoID()
 	require.Equal(t, 2, rows["aaaaaaaaaaaa"].SessionCount,
 		"registry recovery restores the non-merge path with the live counts intact")

@@ -407,7 +407,10 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 
 // projectRows maps the discovered project list into Projects-section rows,
 // marking the active project so the section highlights where the rail is scoped.
-func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
+// skipped names the repos the daemon dropped at startup (#4742); a row whose
+// RepoID is in the set is marked Hidden so the section shows "· hidden" instead
+// of presenting the skipped repo's zero count as a clean "no sessions".
+func (m *home) projectRows(projects []overlay.Project, skipped map[string]bool) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
@@ -417,9 +420,24 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 			SessionCount: p.SessionCount,
 			InPlaceCount: p.InPlaceCount,
 			Active:       p.Root == m.repoRoot,
+			Hidden:       skipped != nil && skipped[p.RepoID],
 		})
 	}
 	return rows
+}
+
+// skippedRepoIDSet converts the daemon's startup-skip set (#4742) into the
+// RepoID lookup the Projects-section row builder uses to mark a skipped repo's
+// zero count as hidden rather than absent.
+func skippedRepoIDSet(skipped []daemon.SkippedRepo) map[string]bool {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(skipped))
+	for _, s := range skipped {
+		out[s.RepoID] = true
+	}
+	return out
 }
 
 // sidebarProjectRows is projectRows' inverse for the merge fallback in
@@ -464,18 +482,22 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
-// launch and on project switch (paths that fetch synchronously).
+// launch and on project switch (paths that fetch synchronously). The cross-repo
+// skip set (#4742) travels through so a skipped repo's row is marked hidden
+// rather than presented as a clean "no sessions".
 func (m *home) refreshSidebarProjects() {
-	projects, registryDegraded := m.buildProjectList()
-	m.setSidebarProjects(projects, registryDegraded)
+	projects, registryDegraded, _, skipped := m.buildProjectListWithSnapshotStatus()
+	m.setSidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped))
 }
 
 // setSidebarProjects is the funnel every Projects-section update flows
 // through: it records the applied row set in sidebarProjects (the merge
-// source a session-snapshot failure reads) before rendering it.
-func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool) {
+// source a session-snapshot failure reads) before rendering it. skipped
+// names the repos the daemon dropped at startup (#4742) so the rendered
+// rows mark a skipped repo's zero count as hidden.
+func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool) {
 	m.sidebarProjects = projects
-	m.projects.SetProjects(m.projectRows(projects))
+	m.projects.SetProjects(m.projectRows(projects, skipped))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
 }
@@ -484,10 +506,13 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 // session snapshot the background poll already fetched off-loop, so the always-
 // visible counts stay live when sessions change in ANOTHER repo — without a
 // second on-loop daemon RPC. A fetch error leaves the last-known rows intact
-// (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
-func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
+// (like handleSnapshot/refreshTasks). The cross-repo skip set (#4742) travels
+// through so a skipped repo's row is marked hidden rather than presented as a
+// clean "no sessions" — the same incompleteness channel the picker carries.
+// Returns whether the visible rows changed.
+func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) bool {
 	projects, registryDegraded := m.buildProjectListFrom(data)
-	return m.applySidebarProjects(projects, registryDegraded, fetchErr)
+	return m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), fetchErr)
 }
 
 // applySidebarProjects pushes an already-built project list into the Projects
@@ -497,9 +522,11 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, f
 // half may still have read fine, so the section merges the fresh registry
 // rows into its last-known set rather than discarding them — a rebind that
 // moved a record between polls would otherwise leave the old root on screen
-// indefinitely while the poll stays unhealthy (#4888 review). Returns whether
-// the visible rows changed.
-func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, fetchErr error) bool {
+// indefinitely while the poll stays unhealthy (#4888 review). skipped names
+// the repos the daemon dropped at startup (#4742) so the rendered rows mark
+// a skipped repo's zero count as hidden. Returns whether the visible rows
+// changed.
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool, fetchErr error) bool {
 	if fetchErr != nil || registryDegraded {
 		if fetchErr != nil {
 			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
@@ -521,7 +548,7 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 		}
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
 	}
-	changed := m.projects.SetProjects(m.projectRows(projects))
+	changed := m.projects.SetProjects(m.projectRows(projects, skipped))
 	m.sidebarProjects = projects
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true

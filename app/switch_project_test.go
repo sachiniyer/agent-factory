@@ -98,7 +98,7 @@ func TestBuildProjectListBareCloneKeepsLinkedWorkspace(t *testing.T) {
 		"one bare repository must not split into identity and workspace project rows")
 	assert.Equal(t, worktree, projects[0].Root, "project switching must retain a usable linked workspace")
 	assert.Equal(t, 1, projects[0].SessionCount)
-	rows := h.projectRows(projects)
+	rows := h.projectRows(projects, nil)
 	require.Len(t, rows, 1)
 	assert.True(t, rows[0].Active)
 }

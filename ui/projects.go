@@ -31,6 +31,12 @@ type SidebarProject struct {
 	// split; the row label itself renders only the total.
 	InPlaceCount int
 	Active       bool
+	// Hidden marks a repo the daemon skipped at startup (#4742): its sessions
+	// are hidden, not absent, so the row's zero count is incomplete. The
+	// section marks it "· hidden" rather than presenting it as a clean
+	// "no sessions" — the same incompleteness channel the CLI and web surface
+	// for a skipped repo.
+	Hidden bool
 }
 
 // projectsTitleStyle / projectsTitleDimStyle paint the section header — the
@@ -282,6 +288,11 @@ func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 		name = "(unnamed)"
 	}
 	label := fmt.Sprintf("%s (%d)", name, proj.SessionCount)
+	// A skipped repo's zero count is hidden, not absent (#4742): mark the row
+	// so the section does not present it as a clean "no sessions".
+	if proj.Hidden {
+		label += " · hidden"
+	}
 	// The marker occupies 2 cells; fit the label into the rest of the row.
 	label = fitLine(label, p.rect.W-2)
 	if selected {

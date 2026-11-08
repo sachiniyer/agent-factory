@@ -196,7 +196,11 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 // it re-arms would name a root nobody is waiting on.
 func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
 	fresh, degraded := m.buildProjectListFrom(msg.data)
-	m.applySidebarProjects(fresh, degraded, msg.fetchErr)
+	// The rebind conflict snapshot does not carry the cross-repo skip set; the
+	// next background poll (refreshSidebarProjectsFromSnapshot) marks a skipped
+	// repo's row hidden (#4742), so a stale hidden marker does not survive a
+	// rebind that moved the registration.
+	m.applySidebarProjects(fresh, degraded, nil, msg.fetchErr)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
