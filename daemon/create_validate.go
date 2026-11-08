@@ -53,7 +53,7 @@ func validateCreateFirst(req CreateSessionRequest) error {
 	// own contract. A whitespace-only value is treated as absent for the same
 	// reason the account is trimmed above.
 	if host := strings.TrimSpace(req.Host); host != "" {
-		if err := config.ValidateHostPick(cfg.Hosts, req.Host); err != nil {
+		if err := config.ValidateHostPick(cfg.Hosts, host); err != nil {
 			return err
 		}
 	}
