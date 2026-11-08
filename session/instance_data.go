@@ -103,17 +103,24 @@ func (i *Instance) toInstanceDataLocked() InstanceData {
 			// persistKillTombstone copy that flips the kill flag after this read.
 			data.runtimeCleanup = provider.runtimeCleanupData()
 		}
-		// A fail-closed reload of a preserved archive retains the rejected
-		// handle on the instance (failedRuntimeCleanup) because the inert
-		// backend's runtimeCleanupData() is nil. Stage it here so the next
-		// ForStorage can republish it and a later restart retries the rebuild
-		// instead of laundering the handle into the orphan the marker exists
-		// to prevent (#5867). Scoped to preserved archives: a non-archived
-		// row's ForStorage default branch already preserves the unknown flag
-		// across generations, so the handle is not needed for durability
-		// there; and a non-preserved archive owes nothing to reap.
+		// A fail-closed reload retains the rejected handle on the instance
+		// (failedRuntimeCleanup) because the inert backend's
+		// runtimeCleanupData() is nil. Stage it here so the next ForStorage
+		// can republish it and a later restart retries the rebuild instead of
+		// laundering the handle into the orphan the marker exists to prevent
+		// (#5867). The gate covers every fail-closed row: a preserved archive
+		// (keepsPreservedWorkspaceHandle) AND a non-archived row — a UserKilled
+		// tombstone or unknown-cleanup retention row. The non-archived half is
+		// required by #6791: the refusal a later restart's rebuild produces
+		// names the off-box resource through the handle, so the first whole-row
+		// write must not erase runtime_cleanup — otherwise the refusal degrades
+		// to a generic, unactionable fallback while the field is now empty.
+		// The unknown flag alone keeps the row fail-closed but does not name
+		// the resource; the handle does. A non-preserved archive owes nothing
+		// to reap and never carries failedRuntimeCleanup, so it is not admitted.
 		if data.runtimeCleanup == nil && i.failedRuntimeCleanup != nil &&
-			data.Liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() {
+			(data.Liveness == LiveArchived && data.keepsPreservedWorkspaceHandle() ||
+				data.Liveness != LiveArchived) {
 			data.runtimeCleanup = i.failedRuntimeCleanup.clone()
 		}
 		// Stage the inert-at-kill marker privately on every snapshot of a sandbox
