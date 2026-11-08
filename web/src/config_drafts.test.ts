@@ -162,7 +162,10 @@ test("drafts in TWO config rows both survive a rebuild (#6692)", () => {
 // save edge — the daemon holds the value now — while every OTHER row's draft
 // keeps surviving.
 test("a saved row's draft retires on its success edge; sibling drafts survive", () => {
-  const pane = new ConfigPane(actions());
+  const sent: { key: string; value: string }[] = [];
+  const pane = new ConfigPane(actions({
+    save: (key, value) => { sent.push({ key, value }); },
+  }));
   const accts = accounts();
   const q = quota();
   const hs = hosts();
@@ -171,17 +174,31 @@ test("a saved row's draft retires on its success edge; sibling drafts survive", 
   type(configInput(pane, "default_program"), "codex");
   type(configInput(pane, "network.listen_addr"), "127.0.0.1:9999");
 
+  // The commit gesture a text row gets: click Save records the send via
+  // commitSave (the pane's only record of what went out), like production —
+  // a hand-fed status the pane never sent finds no pending send and the
+  // retirement branch never runs, so the test must traverse the real path.
+  saveButton(pane, "default_program").click();
+  assert.deepEqual(sent, [{ key: "default_program", value: "codex" }]);
+
   // applyConfigValueNow's own sequence: the save's status edge lands first
   // (entries still old), then refreshConfig delivers the committed value.
   const saved: ConfigStatus = { key: "default_program", value: "codex", notice: "", error: "" };
+  // The status edge lands first, entries still old: the retired draft must
+  // not repaint — the row shows the manifest value ("claude") until the
+  // refetch. This assertion fails for any non-retiring implementation (the
+  // stale draft "codex" would replay), so it pins the positive retirement
+  // path the #6949 guard narrowed but left uncovered.
   pane.update(TWO_ROWS, "", saved, accts, q, "system", hs);
-  const refetched = TWO_ROWS.map((e) => (e.key === "default_program" ? { ...e, value: "codex" } : { ...e }));
-  pane.update(refetched, "", saved, accts, q, "system", hs);
-
-  assert.equal(configInput(pane, "default_program").value, "codex",
-    "the saved row paints the daemon's committed value, never a stale draft");
+  assert.equal(configInput(pane, "default_program").value, "claude",
+    "the saved row's draft retires on its success edge — the manifest value paints, never a stale draft");
   assert.equal(configInput(pane, "network.listen_addr").value, "127.0.0.1:9999",
     "a row that was never saved keeps its draft through its sibling's save");
+
+  const refetched = TWO_ROWS.map((e) => (e.key === "default_program" ? { ...e, value: "codex" } : { ...e }));
+  pane.update(refetched, "", saved, accts, q, "system", hs);
+  assert.equal(configInput(pane, "default_program").value, "codex",
+    "the committed value paints once the refetch delivers it");
 });
 
 // A refused save is the opposite edge: the rejected text stays so the user can
