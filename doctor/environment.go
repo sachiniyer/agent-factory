@@ -40,7 +40,11 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 
 	reportConfigValidity(report, load, cfgErr)
 	checkHomeHealth(ctx, report)
-	repoRoot, repoErr := currentRepoRoot()
+	repo, repoErr := ctx.repoProbe()
+	var repoRoot string
+	if repoErr == nil {
+		repoRoot = repo.Root
+	}
 	mode := worktreeMode(cfg, load.Missing, load.EmptyStub)
 	report.AddHeader("repo", repoHeader(repoRoot, repoErr, mode))
 	checkWorktreeMode(ctx, report, repoRoot, repoErr, mode)
@@ -50,7 +54,7 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 func checkEnvironment(ctx *scanContext, report *Report, cfg *config.Config) {
 	checkTmuxEnvironment(report)
 	checkTmuxServerState(ctx, report)
-	checkAgentBinaries(cfg, report)
+	checkAgentBinariesImpl(ctx, cfg, report)
 }
 
 func reportConfigValidity(report *Report, load config.ReadOnlyConfigLoad, err error) {
@@ -125,12 +129,39 @@ func checkStorageDir(report *Report, path, name string) {
 	}
 }
 
+// errCurrentDirUnreadable marks a repo probe that failed before reaching git
+// because the process's working directory could not be resolved (e.g. it was
+// removed mid-run). Such a failure is neither "outside a repository" nor a git
+// refusal, so the not-inspectable detail must not label it "git's error" or
+// advise safe.directory — neither can fix a missing cwd (#6995 review).
+var errCurrentDirUnreadable = errors.New("current directory could not be determined")
+
 func currentRepoContext() (*config.RepoContext, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, err
+		// A getwd failure (e.g. the process's working directory was removed
+		// mid-run) happens before git is ever asked anything, so it is neither
+		// "outside a repository" nor a git refusal. Mark it so the
+		// not-inspectable detail does not label it "git's error" or advise
+		// safe.directory — neither can fix a missing cwd (#6995 review).
+		return nil, fmt.Errorf("%w: %v", errCurrentDirUnreadable, err)
 	}
 	return config.RepoFromPath(cwd)
+}
+
+// repoProbe returns the run's single memoized repository-context probe.
+// Sharing one probe across the repo header, the worktree-mode row, and the
+// agent-config row keeps them from disagreeing when the probe is flaky: a
+// first probe that fails while a later one succeeds would otherwise leave the
+// header saying "repo not inspectable" while the agent checks PASS and the run
+// exits 0 — the worktree check skipped on a probe the agent checks never saw
+// fail (#6995 review).
+func (c *scanContext) repoProbe() (*config.RepoContext, error) {
+	if !c.repoProbed {
+		c.repo, c.repoErr = currentRepoContext()
+		c.repoProbed = true
+	}
+	return c.repo, c.repoErr
 }
 
 func currentRepoRoot() (string, error) {
@@ -190,6 +221,13 @@ func isLocalBackend(backend string) bool {
 // addressing the git error ("af doctor --setup" for the setup profile, "af
 // doctor" for the default profile).
 func repoNotInspectableDetail(cwd string, repoErr error, rerunCmd string) (detail, remediation string) {
+	if errors.Is(repoErr, errCurrentDirUnreadable) {
+		// A getwd failure predates git: safe.directory and "run from inside a
+		// repository" cannot fix a cwd that no longer exists, so name the
+		// real cause and the matching remedy (#6995 review).
+		return fmt.Sprintf("could not determine the current directory: %v; the in-repo config layer and its backend could not be checked", repoErr),
+			"move to a directory that still exists and is readable, then rerun `" + rerunCmd + "`"
+	}
 	if config.RepoProbeUnanswered(repoErr) {
 		return fmt.Sprintf("%s — the in-repo config layer and its backend could not be checked",
 				config.RepoProbeUnansweredClaim("the current directory", cwd)),
@@ -300,6 +338,13 @@ func checkTmuxEnvironment(report *Report) {
 }
 
 func checkAgentBinaries(cfg *config.Config, report *Report) {
+	// Thin wrapper for callers (and tests) that resolve agent binaries in
+	// isolation: it runs a self-contained probe. Production code shares one
+	// probe across the default profile via checkAgentBinariesImpl + ctx.
+	checkAgentBinariesImpl(&scanContext{}, cfg, report)
+}
+
+func checkAgentBinariesImpl(ctx *scanContext, cfg *config.Config, report *Report) {
 	// Resolve the effective config the way session launch does: when the doctor
 	// is inside a git repo, merge the in-repo layer over the global config
 	// (config.ResolveConfigForRepoInspectionWithGlobalNonStrict) so the command and
@@ -315,7 +360,7 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	// repo the launch directory cannot be determined, so today's CheckCommand
 	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	repo, repoErr := currentRepoContext()
+	repo, repoErr := ctx.repoProbe()
 	workspace := ""
 	if repoErr == nil {
 		workspace = repo.Root

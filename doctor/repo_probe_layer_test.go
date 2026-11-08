@@ -3,7 +3,9 @@ package doctor
 import (
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -441,4 +443,148 @@ func TestRepoHeader_GenuineNonRepo_StillClassifiesAsNotInsideARepo(t *testing.T)
 	row := findCheck(t, rep, "worktrees")
 	require.Contains(t, row.Remediation, "inside a git repository",
 		"a genuine non-repo must still advise running from inside a git repository")
+}
+
+// ---------------------------------------------------------------------------
+// Shared repo probe (default profile): the repo header, worktree-mode row, and
+// agent-config row must observe ONE repo probe so a flaky git cannot make them
+// disagree (#6995 review).
+// ---------------------------------------------------------------------------
+
+// installFlakyProbeGit installs a git shim first on PATH that fails its FIRST
+// invocation (kills itself → an unanswered probe) and delegates to the real git
+// thereafter. The real git must already have been used for repo setup before
+// this is installed. It returns the path to a counter file whose content is the
+// number of git invocations the shim has fielded, so a test can assert how many
+// probes actually ran.
+func installFlakyProbeGit(t *testing.T) (counter string) {
+	t.Helper()
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err, "git must be on PATH for the test to run")
+	binDir := t.TempDir()
+	counter = filepath.Join(binDir, "counter")
+	require.NoError(t, os.WriteFile(counter, []byte("0"), 0o644))
+	shim := "#!/bin/sh\n" +
+		"n=$(cat " + counter + ")\n" +
+		"n=$((n+1))\n" +
+		"echo $n > " + counter + "\n" +
+		"if [ \"$n\" -eq 1 ]; then kill -9 $$; fi\n" +
+		"exec " + realGit + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(binDir, "git"), []byte(shim), 0o755))
+	t.Setenv("PATH", binDir)
+	return counter
+}
+
+// TestScanContext_RepoProbe_Memoizes pins the memoization that lets the default
+// profile share one probe: two calls on the same scanContext run git exactly
+// once and return the same result. Without this, checkConfigAndStorage and
+// checkAgentBinaries would each probe independently and a flaky git could make
+// their verdicts disagree (#6995 review).
+func TestScanContext_RepoProbe_Memoizes(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	chdir(t, repo)
+	counter := installFlakyProbeGit(t)
+
+	ctx := &scanContext{opts: Options{ConfigDir: t.TempDir()}}
+	r1, err1 := ctx.repoProbe()
+	r2, err2 := ctx.repoProbe()
+	require.Same(t, r1, r2, "the memoized probe must return the same *RepoContext")
+	require.Equal(t, err1, err2)
+	require.Error(t, err1, "the first (flaky-failed) probe is the one both calls see")
+	require.Nil(t, r1, "a failed probe returns a nil RepoContext")
+	require.True(t, config.RepoProbeUnanswered(err1),
+		"fixture: the killed first probe is an unanswered probe")
+	require.Equal(t, "1", strings.TrimSpace(string(mustReadFile(t, counter))),
+		"exactly one git invocation must run across both calls")
+}
+
+// TestDefaultProfile_RepoHeaderAndAgentChecks_ShareProbe pins the end-to-end
+// sharing fix (#6995 review): when the repo probe is flaky — the first call
+// fails and a later one would succeed — the repo header and the agent-config
+// row must NOT diverge. Before the fix, checkConfigAndStorage saw the failure
+// (header "repo not inspectable", worktree skipped) while checkAgentBinaries'
+// second probe succeeded and emitted PASS rows, so the run exited 0 having
+// skipped the worktree check. Sharing one memoized probe makes both see the
+// same first failure.
+func TestDefaultProfile_RepoHeaderAndAgentChecks_ShareProbe(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	chdir(t, repo)
+	counter := installFlakyProbeGit(t)
+
+	// A present global-layer binary so the OLD bug's second probe (which would
+	// succeed) would have emitted PASS rows — the only reason agents stays
+	// "not inspectable" here is the shared first-probe failure.
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	cfg := config.DefaultConfig()
+	cfg.DefaultProgram = tmux.ProgramClaude
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: filepath.Join(binDir, "claude")}
+
+	ctx := &scanContext{opts: Options{ConfigDir: t.TempDir()}}
+	rep := &Report{}
+	checkConfigAndStorage(ctx, rep)
+	checkAgentBinariesImpl(ctx, cfg, rep)
+
+	require.Contains(t, repoHeaderValue(rep), "repo not inspectable",
+		"the first probe failed; the repo header must say the repo was not inspectable")
+	require.Contains(t, agentsHeaderValue(rep), "repo not inspectable",
+		"the agent checks must see the SAME (failed) probe, not a fresh successful one")
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status, "the shared failed probe drives an agent-config FAIL")
+	require.True(t, row.Problem, "the agent-config FAIL must drive the exit code")
+	require.True(t, noGlobalLayerPassRows(rep),
+		"the shared failed probe must not emit global-layer PASS rows")
+	require.Equal(t, "1", strings.TrimSpace(string(mustReadFile(t, counter))),
+		"exactly one git invocation must run across the header and the agent checks — the probe is shared")
+}
+
+// ---------------------------------------------------------------------------
+// cwd-resolution errors: a getwd failure (e.g. the cwd was removed mid-run) is
+// neither "outside a repository" nor a git refusal, so the not-inspectable
+// finding must not label it "git's error" or advise safe.directory (#6995
+// review).
+// ---------------------------------------------------------------------------
+
+// TestCheckAgentBinaries_CwdUnreadable_NotLabeledAsGitError pins the
+// default-profile fix: when os.Getwd fails before git is asked anything, the
+// agent-config finding must name the cwd failure and advise moving to an
+// accessible directory — not "git's error" + safe.directory, which cannot fix a
+// missing cwd. Before the fix, repoNotInspectableDetail formatted repoErr with
+// %v (yielding only the getwd path error) and recommended safe.directory.
+func TestCheckAgentBinaries_CwdUnreadable_NotLabeledAsGitError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	// chdir into a directory, then remove it so os.Getwd fails for the
+	// checkAgentBinaries probe. The chdir helper's cleanup restores the
+	// original (still-extant) cwd afterward.
+	gone := t.TempDir()
+	chdir(t, gone)
+	require.NoError(t, os.Remove(gone))
+
+	cfg := config.DefaultConfig()
+	cfg.DefaultProgram = tmux.ProgramClaude
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status,
+		"a cwd-resolution failure must produce an agent-config FAIL, not a silent global-layer PASS")
+	require.True(t, row.Problem, "the cwd failure must drive the exit code")
+	require.Contains(t, row.Detail, "could not determine the current directory",
+		"the finding must name the cwd failure, not attribute it to git")
+	require.NotContains(t, row.Detail, "git's error",
+		"a getwd failure is not a git error and must not be labeled as one")
+	require.Contains(t, row.Remediation, "move to a directory",
+		"the remedy is to leave the gone directory, not to fix git")
+	require.NotContains(t, row.Remediation, "safe.directory",
+		"safe.directory cannot fix a missing cwd and must not be suggested for it")
+}
+
+// mustReadFile reads path or fails the test.
+func mustReadFile(t *testing.T, path string) []byte {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	require.NoError(t, err)
+	return b
 }
