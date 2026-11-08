@@ -84,6 +84,20 @@ func (m *home) clearTransientMessageAfterDelay(noticeID uint64) tea.Cmd {
 // retained it still answers the key — a transient hint on the same bar — so the
 // user can tell "nothing to show" apart from "the key did nothing" (#5351).
 func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
+	// A skipped repo's full repair hint is bound to the skip condition itself
+	// (skippedRepoRetained), independent of the shared most-recent-notice slot
+	// any later transient overwrites, so `E details` opens it for as long as
+	// the skip is true and never an unrelated notice (#4742 review).
+	if full := m.skippedRepoRetained; full != "" {
+		m.textOverlay = overlay.NewTextOverlay("Last notice" + "\n\n" + m.errBox.SanitizeNoticeText(full))
+		m.textOverlayDismissAnyKey = false
+		m.textOverlayDismissPolicy = nil
+		m.textOverlayPendingSeenMask = 0
+		m.replayHelpDismissKey = false
+		m.layoutTextOverlay()
+		m.state = stateHelp
+		return m, nil
+	}
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {
 		// A hint, not a notice: acknowledging an empty store must leave it

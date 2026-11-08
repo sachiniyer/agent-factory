@@ -438,11 +438,18 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 // persistent notice for (#5413). When the repo is no longer skipped (the daemon
 // re-read the file on a polling refresh, #603), the standing notice is retracted.
 //
-// A transition into a skipped state — or a reason/FailedRows change — queues a
-// pending transient notice (pendingSkippedRepoNotice) carrying the full
-// reason-specific repair hint, which the caller drains as a tea.Cmd so `E
-// details` can open it. The standing notice takes over after the transient fades.
-// A same-entry poll does not re-fire, so the 750ms cadence never churns the bar.
+// A transition into a skipped state — or a reason/FailedRows/RepoID change —
+// queues a pending transient notice (pendingSkippedRepoNotice) carrying the full
+// reason-specific repair hint, which the caller drains as a tea.Cmd so it lands
+// on the bar. The standing notice takes over after the transient fades. A
+// same-entry poll does not re-fire, so the 750ms cadence never churns the bar.
+//
+// The skip's full repair hint is bound to the skip condition itself
+// (skippedRepoRetained), not the shared most-recent-notice slot any later
+// transient overwrites, so `E details` opens it for as long as the skip is true
+// (#4742 review). The standing notice is composed with the web-listener's
+// (applyStandingNotice) so the two conditions never overwrite each other on
+// every poll (#4742 review).
 //
 // Returns whether the visible state changed (the caller repaints on a diff).
 // Only ever called on a successful snapshot: a transient RPC error leaves the
@@ -455,16 +462,46 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 	m.skippedRepo = cur
 	if cur == nil {
 		// The repo was skipped and is now repaired (the daemon re-read its
-		// instances.json on a polling refresh). Retract the standing notice so
-		// the bar stops naming a condition that is no longer true.
-		m.errBox.SetStanding("")
+		// instances.json on a polling refresh). Retract the skip's condition-
+		// owned details and re-composing the standing bar (the web-listener
+		// notice, if any, reappears) so the bar stops naming a condition that
+		// is no longer true.
+		m.skippedRepoRetained = ""
+		m.applyStandingNotice()
 		return true
 	}
-	// Raise the standing notice for the persistent condition and queue the full
-	// repair hint as a transient notice so `E details` can open it.
-	m.errBox.SetStanding(skippedRepoStandingNotice(cur))
-	m.pendingSkippedRepoNotice = skippedRepoNotice(cur).Error()
+	// Raise the standing notice for the persistent condition (composed with
+	// the web-listener notice) and bind the full repair hint to the skip
+	// condition so `E details` opens it independently of the shared retained
+	// slot. A transient copy is queued for the bar so the operator sees the
+	// full hint once before the standing line takes over.
+	m.applyStandingNotice()
+	m.skippedRepoRetained = skippedRepoNotice(cur).Error()
+	m.pendingSkippedRepoNotice = m.skippedRepoRetained
 	return true
+}
+
+// applyStandingNotice composes the skip and web-listener standing conditions
+// onto the bar's single standing slot. The two conditions are tracked in
+// separate home fields so a 15-second listener poll cannot overwrite the
+// skip's hidden-sessions warning and a skip retraction cannot erase a still-
+// valid listener warning; both are re-applied here whenever either changes
+// (#4742 review). When both are up they are joined with " · " — the bar's own
+// separator for multi-line notices — so a watcher can still tell which
+// condition(s) hold, truncated by the standing line's width math.
+func (m *home) applyStandingNotice() {
+	skip := skippedRepoStandingNotice(m.skippedRepo)
+	listener := m.webListenerStanding
+	switch {
+	case skip != "" && listener != "":
+		m.errBox.SetStanding(skip + " · " + listener)
+	case skip != "":
+		m.errBox.SetStanding(skip)
+	case listener != "":
+		m.errBox.SetStanding(listener)
+	default:
+		m.errBox.SetStanding("")
+	}
 }
 
 // refreshTasks mirrors an out-of-band tasks.json change (a CLI/daemon `af tasks

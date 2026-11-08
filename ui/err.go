@@ -70,6 +70,12 @@ func (e *ErrBox) SetHint(err error) { e.err = err }
 // the outcome of an action.
 func (e *ErrBox) SetStanding(text string) { e.standing = sanitizeError(text) }
 
+// SanitizeNoticeText returns raw with the same control/ANSI/newline stripping
+// the bar applies to a notice, so a caller binding condition-owned details
+// outside the shared retained slot can render them through `E details` the
+// same way RetainedNotice would (#4742 review).
+func (e *ErrBox) SanitizeNoticeText(raw string) string { return sanitizeError(raw) }
+
 func (e *ErrBox) set(err error, failure bool) {
 	e.err = err
 	if err == nil {

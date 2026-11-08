@@ -35,6 +35,18 @@ type home struct {
 	// notice for (#5413). A nil-to-non-nil or reason change queues a pending
 	// transient notice (pendingSkippedRepoNotice) with the full repair hint.
 	skippedRepo *daemon.SkippedRepo
+	// skippedRepoRetained is the full reason-specific repair hint for the
+	// current skip, owned by the skip condition itself so `E details` opens it
+	// for as long as the skip is true — independent of the shared
+	// most-recent-notice slot any later transient overwrites (#4742 review).
+	// Cleared when the skip retracts, so details never claim sessions are
+	// hidden after the repo is repaired.
+	skippedRepoRetained string
+	// webListenerStanding is the daemon's web-listener standing notice text
+	// (#6386), "" when the listener is bound. Tracked separately from the
+	// skip's standing notice so the two conditions compose before updating
+	// the bar instead of overwriting each other on every poll (#4742 review).
+	webListenerStanding string
 	// pendingSkippedRepoNotice is a one-shot repair-hint message a skip-state
 	// transition queued for the next frame that can show it (the snapshotFetchedMsg
 	// handler drains it as a tea.Cmd so `E details` can open the full hint). The

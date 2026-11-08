@@ -394,7 +394,9 @@ func TestHandleSnapshot_SkippedRepoNotInScopeNoNotice(t *testing.T) {
 // -- consumeSkippedRepoNotice tests --
 
 // TestConsumeSkippedRepoNotice_DrainsPending proves the method drains the
-// pending notice and returns a tea.Cmd that sets the retained slot for `E details`.
+// pending notice and returns a tea.Cmd that paints the full repair hint on the
+// bar for one cycle, while the skip-owned skippedRepoRetained slot carries it
+// for `E details` independently of the shared retained slot (#4742 review).
 func TestConsumeSkippedRepoNotice_DrainsPending(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot, h.repoID = "/project", "project"
@@ -407,10 +409,18 @@ func TestConsumeSkippedRepoNotice_DrainsPending(t *testing.T) {
 	require.NotNil(t, cmd)
 	assert.Empty(t, h.pendingSkippedRepoNotice, "the pending notice must be drained")
 
-	// The retained notice must carry the full repair hint for `E details`.
+	// The skip-owned retained slot carries the full repair hint for `E details`,
+	// independent of the shared most-recent-notice slot any later transient
+	// overwrites.
+	assert.NotEmpty(t, h.skippedRepoRetained, "the skip condition owns its repair hint")
+	assert.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint)
+
+	// The transient copy paints on the bar for one cycle (a hint, not a notice:
+	// it must not land in the shared retained slot).
+	assert.Contains(t, h.errBox.FullError(), corruptedRepoRepairHint,
+		"the transient copy must paint the full hint on the bar")
 	text, failure := h.errBox.RetainedNotice()
-	assert.NotEmpty(t, text)
-	assert.Contains(t, text, corruptedRepoRepairHint)
+	assert.Empty(t, text, "the skip's hint must NOT land in the shared retained slot")
 	assert.False(t, failure, "a skip notice is guidance, not a failure")
 }
 
@@ -558,12 +568,19 @@ func TestUpdate_SnapshotFetchedMsg_DrainsSkippedRepoNotice(t *testing.T) {
 	require.NotNil(t, cmd, "Update must return a cmd that drains the skip notice")
 
 	// The pending notice must be drained (the cmd was built, but not yet executed).
-	// Execute the cmd to set the retained notice.
+	// Execute the cmd to paint the transient hint on the bar.
 	cmd()
 
-	// After executing the cmd, the retained notice must carry the full repair hint.
+	// The skip condition owns its repair hint (skippedRepoRetained), independent
+	// of the shared retained slot, so `E details` opens it for as long as the
+	// skip is true — never an unrelated notice that overwrote the shared slot.
+	assert.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint,
+		"the skip condition must own its repair hint for E details")
+	// The shared retained slot is NOT the skip hint: a later transient can
+	// overwrite it without displacing the skip's details.
 	text, _ := h.errBox.RetainedNotice()
-	assert.Contains(t, text, corruptedRepoRepairHint, "E details must be able to open the full repair hint")
+	assert.NotContains(t, text, corruptedRepoRepairHint,
+		"the skip's hint must not ride in the shared retained slot")
 }
 
 // -- All reasons covered test --
@@ -670,4 +687,83 @@ func TestSwitchProject_AppliesSkippedRepoNotice(t *testing.T) {
 	rendered := ansi.Strip(h.errBox.String())
 	assert.Contains(t, rendered, "hidden")
 	assert.Contains(t, rendered, "corrupted")
+}
+
+// TestApplySkippedRepo_StandingComposesWithWebListener proves the skip and
+// web-listener standing notices are tracked in separate state and composed
+// before updating the bar (#4742 review): a 15-second listener poll cannot
+// overwrite the skip's hidden-sessions warning, and clearing the skip cannot
+// erase a still-valid listener warning.
+func TestApplySkippedRepo_StandingComposesWithWebListener(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	// The skip is up first.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	h.errBox.Expire() // drop the transient hint so the standing line renders
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, ansi.Strip(h.errBox.String()), "hidden")
+
+	// A later listener poll reports an unbound web listener: the skip's notice
+	// must stay (the listener poll must not overwrite it).
+	h.handleWebListenerNotice(webListenerNoticeMsg{notice: "web listener unbound"})
+	h.errBox.SetSize(200, 1)
+	rendered := ansi.Strip(h.errBox.String())
+	assert.Contains(t, rendered, "hidden", "the skip notice must survive a listener poll")
+	assert.Contains(t, rendered, "web listener unbound", "the listener notice must compose in")
+
+	// Clearing the skip re-applies the (still-tracked) listener warning rather
+	// than erasing it.
+	h.applySkippedRepo(nil)
+	h.errBox.SetSize(200, 1)
+	rendered = ansi.Strip(h.errBox.String())
+	assert.NotContains(t, rendered, "hidden", "the skip retraction must remove the skip notice")
+	assert.Contains(t, rendered, "web listener unbound", "clearing the skip must restore the listener warning")
+
+	// The listener binding clears the last condition.
+	h.handleWebListenerNotice(webListenerNoticeMsg{notice: ""})
+	h.errBox.SetSize(200, 1)
+	rendered = ansi.Strip(h.errBox.String())
+	assert.NotContains(t, rendered, "hidden", "no conditions must render no condition text")
+	assert.NotContains(t, rendered, "web listener", "no conditions must render no condition text")
+}
+
+// TestApplySkippedRepo_DetailsSurviveTransientOverwrite proves the skip's full
+// repair hint is bound to the skip condition (skippedRepoRetained), not the
+// shared most-recent-notice slot any later transient overwrites (#4742
+// review): `E details` opens the skip's hint for as long as the skip is true,
+// even after an unrelated transient notice fires, and retracts with the skip.
+func TestApplySkippedRepo_DetailsSurviveTransientOverwrite(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint)
+
+	// Drain the skip's transient hint so the shared retained slot is empty.
+	h.consumeSkippedRepoNotice()
+
+	// An unrelated transient notice fires and lands in the shared retained slot.
+	h.setTransientNotice(errors.New("unrelated transient notice"))
+	shared, _ := h.errBox.RetainedNotice()
+	assert.Contains(t, shared, "unrelated transient notice", "precondition: the shared slot holds the unrelated notice")
+
+	// The skip's details are untouched, and `E details` opens them — not the
+	// unrelated notice — for as long as the skip is true. The shared retained
+	// slot holds the unrelated notice; the skip's hint lives only in the
+	// condition-owned skippedRepoRetained, which showErrorDetails prefers.
+	assert.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint,
+		"the skip condition still owns its repair hint after an unrelated transient")
+	assert.Contains(t, shared, "unrelated transient notice",
+		"the shared retained slot holds the unrelated notice, not the skip's hint")
+	model, _ := h.showErrorDetails()
+	h = model.(*home)
+	require.Equal(t, stateHelp, h.state, "E details must open the skip's hint while the skip is active")
+	require.NotNil(t, h.textOverlay, "E details must open the skip's hint")
+
+	// When the skip retracts, its details retract with it.
+	h.applySkippedRepo(nil)
+	assert.Empty(t, h.skippedRepoRetained, "the skip's details must retract with the condition")
 }

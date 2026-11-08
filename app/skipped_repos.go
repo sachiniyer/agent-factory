@@ -133,18 +133,22 @@ func skippedRepoNoticeChanged(prev, cur *daemon.SkippedRepo) bool {
 }
 
 // consumeSkippedRepoNotice drains a skip-state transition's pending repair-hint
-// notice as a tea.Cmd so it lands on the bar and in the errBox's retained slot
-// (which `E details` reads). The standing notice already names the condition on
-// the bar; this sets the retained slot with the full reason-specific repair hint.
-// Returns nil when no notice is pending, so the caller appends it unconditionally.
-// The pending text is cleared regardless: a caller that cannot show it (recovery
-// screen up) does not re-queue it forever.
+// notice as a tea.Cmd so it lands on the bar for one cycle. The standing notice
+// already names the condition on the bar; the full repair hint rides in the
+// skip-owned skippedRepoRetained slot (which `E details` reads) so a later
+// transient cannot overwrite it (#4742 review). The transient copy here is a
+// hint, not a notice: it paints on the same bar and fades on the same timer, but
+// it never lands in the shared retained slot, so the skip's details stay bound
+// to the skip condition and retract with it. Returns nil when no notice is
+// pending, so the caller appends it unconditionally. The pending text is
+// cleared regardless: a caller that cannot show it (recovery screen up) does
+// not re-queue it forever.
 func (m *home) consumeSkippedRepoNotice() tea.Cmd {
 	if m.pendingSkippedRepoNotice == "" {
 		return nil
 	}
 	notice := m.pendingSkippedRepoNotice
 	m.pendingSkippedRepoNotice = ""
-	id := m.setTransientNotice(errors.New(notice))
+	id := m.setTransientHint(errors.New(notice))
 	return m.clearTransientMessageAfterDelay(id)
 }

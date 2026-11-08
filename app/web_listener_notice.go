@@ -71,8 +71,12 @@ func webListenerNoticeCmd(ctx context.Context, fetch func() string, delay time.D
 }
 
 // handleWebListenerNotice applies one read and re-arms the poll. It reports the
-// state on the bar, and nothing more: no retained notice, no log spam.
+// state on the bar, and nothing more: no retained notice, no log spam. The
+// notice is tracked in m.webListenerStanding and composed with the skip's
+// standing notice via applyStandingNotice so the two conditions never
+// overwrite each other on every poll (#4742 review).
 func (m *home) handleWebListenerNotice(msg webListenerNoticeMsg) (tea.Model, tea.Cmd) {
-	m.errBox.SetStanding(msg.notice)
+	m.webListenerStanding = msg.notice
+	m.applyStandingNotice()
 	return m, webListenerNoticeCmd(m.ctx, m.webListenerFetcher, webListenerPollInterval)
 }
