@@ -28,19 +28,7 @@ import (
 // registering a new repo on the fly. The picker navigates like the instances
 // rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
-	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListWithSnapshotStatus()
-	// Graft the Projects section's last-known rows for any skipped repo the
-	// fresh picker list no longer represents (#4742 review): an inactive repo
-	// discovered only from its live sessions has no instance once the daemon
-	// skips it, so buildProjectListFrom drops its row and the picker would
-	// open without it — closing and reopening Ctrl+P would drop the row even
-	// while the Projects section still shows it as hidden. Mirrors
-	// preserveSkippedProjectRows (sidebar) and preserveSkippedPickerRows
-	// (background refresh); the skip set installed below marks the grafted
-	// row hidden.
-	if len(skipped) > 0 && len(m.sidebarProjects) > 0 {
-		projects = preserveSkippedPickerRows(projects, m.sidebarProjects, skippedRepoIDSet(skipped))
-	}
+	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListForPicker()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	// Surface the snapshot-fetch failure as a first-class degraded state so

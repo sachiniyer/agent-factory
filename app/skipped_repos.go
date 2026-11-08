@@ -306,6 +306,36 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	m.projectPickerOverlay.SetSkippedRepoHints(hints)
 }
 
+// graftSkippedSidebarRows grafts the Projects section's last-known rows for
+// any skipped repo the fresh picker list no longer represents (#4742 review):
+// an inactive repo discovered only from its live sessions has no instance
+// once the daemon skips it, so buildProjectListFrom drops its row and the
+// picker would open without it — closing and reopening Ctrl+P would drop the
+// row even while the Projects section still shows it as hidden. Mirrors
+// preserveSkippedProjectRows (sidebar) and preserveSkippedPickerRows
+// (background refresh); the skip set the caller installs below marks the
+// grafted row hidden. No-op when there is nothing to graft from.
+func (m *home) graftSkippedSidebarRows(projects []overlay.Project, skipped []daemon.SkippedRepo) []overlay.Project {
+	if len(skipped) == 0 || len(m.sidebarProjects) == 0 {
+		return projects
+	}
+	return preserveSkippedPickerRows(projects, m.sidebarProjects, skippedRepoIDSet(skipped))
+}
+
+// buildProjectListForPicker is buildProjectListWithSnapshotStatus with the
+// skipped-row graft folded in (#4742 review): a session-only repo the daemon
+// skips has no instance in the fresh snapshot, so buildProjectListFrom drops
+// its row and the picker would open without it — closing and reopening Ctrl+P
+// would drop the row even while the Projects section still shows it hidden.
+// Grafting the sidebar's retained row for each skipped ID (mirrors
+// preserveSkippedProjectRows/preserveSkippedPickerRows) keeps it in the open
+// picker marked hidden. Lives here rather than switch_project.go to keep that
+// file under the file-length lint (#1145).
+func (m *home) buildProjectListForPicker() ([]overlay.Project, bool, bool, []daemon.SkippedRepo) {
+	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListWithSnapshotStatus()
+	return m.graftSkippedSidebarRows(projects, skipped), registryDegraded, snapshotDegraded, skipped
+}
+
 // preserveSkippedPickerRows grafts last-known rows from the open picker for
 // any skipped repo the fresh project list no longer represents (#4742 review):
 // an inactive repo discovered only from its live sessions has no instance
