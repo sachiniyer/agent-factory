@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "6f40d4ce7828";
+var CLIENT_VERSION = "3cbeae228d9d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -21050,6 +21050,9 @@ var AppShell = class {
           return;
         }
         if (press?.held) {
+          return;
+        }
+        if (e.target instanceof Element && e.target.closest(".af-tab-close")) {
           return;
         }
         const btn = e.target instanceof Element ? e.target.closest(".af-tab") : null;

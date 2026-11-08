@@ -2943,6 +2943,14 @@ export class AppShell {
         if (press?.held) {
           return; // a drag is already in flight; a second finger must not hijack it
         }
+        // The × owns its whole press on touch exactly as it does on mouse (its
+        // mousedown preventDefault suppresses dragstart there): a press that
+        // begins on .af-tab-close must never arm the long-press pick-up, or a
+        // held touch on the × lifts the tab into a reorder/pane-split and the
+        // close confirm never opens (#6937 parity with #2899).
+        if (e.target instanceof Element && e.target.closest<HTMLElement>(".af-tab-close")) {
+          return;
+        }
         const btn = e.target instanceof Element ? e.target.closest<HTMLElement>(".af-tab") : null;
         if (!btn || !bar.contains(btn)) {
           return;
