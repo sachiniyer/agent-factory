@@ -409,6 +409,28 @@ var (
 	}
 )
 
+// claudeAnchorSentenceNamesLimit reports whether the sentence the reset
+// anchor sits in names the limit — the clause's subject is the wall itself,
+// not another noun the message went on to discuss. Every banner shape
+// re-names it in the clause's own sentence ("Your limit will reset…",
+// "your 5-hour limit · resets…"), so a sentence that opens an anchor without
+// one ("Tip: your password will reset at 2pm" riding the same indent) is a
+// different clause whose deadline this wall cannot adopt (#6975 review).
+// The sentence's left edge is the last sentence-ending punctuation before
+// the anchor — "."/"!"/"?" followed by whitespace, claudeClauseEnd's own
+// convention — else the message's start.
+func claudeAnchorSentenceNamesLimit(joined string, anchorAt int) bool {
+	start := 0
+	for i := 0; i+1 < anchorAt; i++ {
+		if c := joined[i]; c == '.' || c == '!' || c == '?' {
+			if joined[i+1] == ' ' || joined[i+1] == '\t' {
+				start = i + 1
+			}
+		}
+	}
+	return strings.Contains(strings.ToLower(joined[start:anchorAt]), "limit")
+}
+
 // claudeResetAnchor locates Claude's reset clause and captures the tail after
 // "reset " / "resets " up to end of line, e.g. "2pm (America/New_York)" (5h) or
 // "Monday at 9am (…)" / "Nov 6, 2026 9am (…)" (weekly). The "at" is optional
@@ -426,7 +448,13 @@ var claudeResetAnchor = regexp.MustCompile(`(?i)\bresets?\s+(?:at\s+)?([^\r\n]+)
 // the parse's evidence and the tail after "reset[s] [at] " the clause carries.
 func claudeResetClause(rowLead, content string) (evidence, tail string) {
 	joined := joinClaudeBannerRows(rowLead, content)
-	m := claudeResetAnchor.FindStringSubmatchIndex(joined)
+	var m []int
+	for _, loc := range claudeResetAnchor.FindAllStringSubmatchIndex(joined, -1) {
+		if claudeAnchorSentenceNamesLimit(joined, loc[0]) {
+			m = loc
+			break
+		}
+	}
 	if m == nil {
 		return "", ""
 	}

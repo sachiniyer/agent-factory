@@ -317,6 +317,16 @@ func TestClaudeResetClauseEndsAtContinuationIndent(t *testing.T) {
 				"     Tip: meet Monday at 2pm (America/New_York)",
 			wantReset: nil,
 		},
+		{
+			// #6975 review: the reset ANCHOR can sit in a sentence that is
+			// not the wall's — "your password will reset at 2pm" is a tip's
+			// clause. The anchor's own sentence must name the limit before
+			// its tail is ever read.
+			name: "a reset clause whose sentence does not name the limit stays outside",
+			content: "  ⎿  Claude usage limit reached.\n" +
+				"     Tip: your password will reset at 2pm (America/New_York)",
+			wantReset: nil,
+		},
 	}
 
 	det := NewLimitDetector(nil)
