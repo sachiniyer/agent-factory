@@ -169,6 +169,11 @@ var rebindConflictRefreshTimeout = 10 * time.Second
 // treats as "session rows unknown, registry truth still applies".
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
+	// Capture the cross-repo snapshot sequence at open time so the reply can
+	// detect a newer regular poll that applied while this 10-second off-loop
+	// fetch was in flight, and retain the sidebar's current skip set instead
+	// of clobbering it with a stale one (#4742 review).
+	openedSeq := m.crossRepoSnapshotSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
@@ -179,12 +184,13 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 				rebindConflictRefreshTimeout)
 		}
 		return rebindConflictSnapshotMsg{
-			token:     msg.token,
-			projectID: msg.projectID,
-			refusal:   msg.err,
-			data:      data,
-			skipped:   skipped,
-			fetchErr:  err,
+			token:       msg.token,
+			projectID:   msg.projectID,
+			refusal:     msg.err,
+			data:        data,
+			skipped:     skipped,
+			fetchErr:    err,
+			snapshotSeq: openedSeq,
 		}
 	}
 }
@@ -208,7 +214,26 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	if msg.fetchErr != nil {
 		skipped = nil
 	}
-	m.applySidebarProjects(fresh, degraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), msg.fetchErr)
+	// This off-loop fetch can take up to rebindConflictRefreshTimeout (10s) to
+	// answer; a regular background poll may apply a NEWER cross-repo snapshot
+	// — and thus a newer skip set — while it is in flight. If so, this reply's
+	// skip set is stale: applying it would replace sidebarProjectsSkipped with
+	// the older set and, if the daemon began skipping a repo between the two
+	// reads, briefly clear that repo's Hidden gate and expose stale counts
+	// until another poll lands. Retain the sidebar's current skip set and
+	// hints instead, so the newer poll's hidden markers survive (#4742
+	// review). The conflict's fresh rows/counts still apply via the merge.
+	staleSkip := msg.fetchErr == nil && m.crossRepoSnapshotSeq > msg.snapshotSeq
+	var skipSet map[string]bool
+	var hintSet map[string]string
+	if staleSkip {
+		skipSet = m.sidebarProjectsSkipped
+		hintSet = m.sidebarProjectsSkippedHints
+	} else {
+		skipSet = skippedRepoIDSet(skipped)
+		hintSet = skippedRepoHintSet(skipped)
+	}
+	m.applySidebarProjects(fresh, degraded, skipSet, hintSet, msg.fetchErr)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
@@ -231,11 +256,27 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// above already gates the D path on the global fetch-failure refusal, so
 	// deletion stays disabled (#4742 review).
 	if msg.fetchErr == nil {
-		skippedIDs := make([]string, 0, len(skipped))
-		hints := make(map[string]string, len(skipped))
-		for _, s := range skipped {
-			skippedIDs = append(skippedIDs, s.RepoID)
-			hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+		var skippedIDs []string
+		var hints map[string]string
+		if staleSkip {
+			// Reuse the sidebar's current (newer) skip set and hints so the
+			// picker does not regress to the stale conflict set the newer
+			// poll already superseded (#4742 review).
+			skippedIDs = make([]string, 0, len(m.sidebarProjectsSkipped))
+			hints = make(map[string]string, len(m.sidebarProjectsSkippedHints))
+			for id, h := range m.sidebarProjectsSkippedHints {
+				hints[id] = h
+			}
+			for id := range m.sidebarProjectsSkipped {
+				skippedIDs = append(skippedIDs, id)
+			}
+		} else {
+			skippedIDs = make([]string, 0, len(skipped))
+			hints = make(map[string]string, len(skipped))
+			for _, s := range skipped {
+				skippedIDs = append(skippedIDs, s.RepoID)
+				hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+			}
 		}
 		m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
 		m.projectPickerOverlay.SetSkippedRepoHints(hints)

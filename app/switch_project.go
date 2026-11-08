@@ -42,22 +42,9 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	// count is incomplete, but the incompleteness is scoped to that project,
 	// not every healthy project in a multi-project workspace. The picker's
 	// refuse notice names the skip rather than a fetch failure the fetch did
-	// not have.
-	skippedIDs := make([]string, 0, len(skipped))
-	for _, s := range skipped {
-		skippedIDs = append(skippedIDs, s.RepoID)
-	}
-	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
-	// Carry each skipped repo's reason-specific repair hint (#4742) so the D
-	// path's refusal names the highlighted project's applicable remedy
-	// directly: a skipped project the operator highlighted may not be the
-	// currently active one, so the status bar's skip notice (populated only
-	// from the repo-scoped active snapshot) may hold nothing for it.
-	hints := make(map[string]string, len(skipped))
-	for _, s := range skipped {
-		hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
-	}
-	m.projectPickerOverlay.SetSkippedRepoHints(hints)
+	// not have. Lives in skipped_repos.go to keep this file under the
+	// file-length lint (#1145).
+	m.setPickerSkippedIDsAndHints(skipped, snapshotDegraded)
 	if isRemoteTarget() {
 		// The picker's registry rows come from the LOCAL config.ListProjects
 		// and its path input resolves on THIS filesystem, but a rebind would
@@ -597,15 +584,28 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	// of dropping the only degradation marker for the affected project.
 	if len(skipped) > 0 {
 		projects = m.preserveSkippedProjectRows(projects, skipped)
+		// A skipped repo the daemon omitted every instance for, and that has
+		// no registry/root_agents/active row and no cached sidebar row to
+		// graft (a fresh start, or a session-only repo first skipped this
+		// poll), would otherwise be absent from the Projects section despite
+		// its ID being in SkippedRepos. Synthesize an ID-level degraded row
+		// so the operator can see the repo is skipped, not absent; mirrors
+		// buildProjectListForPicker so the section and the picker stay
+		// consistent (#4742 review).
+		projects = ensureSkippedRows(projects, skipped)
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects, skipped, hints))
 	m.sidebarProjects = projects
 	if fetchErr == nil {
 		// Retain the skip set the next error path reads. A failed fetch
 		// reuses the prior set above, so it must not overwrite the retained
-		// copy with nil.
+		// copy with nil. Bump the cross-repo snapshot sequence so a stale
+		// off-loop reply (the 10-second rebind-conflict refresh) can detect
+		// that a newer poll has since applied and retain this set instead
+		// of clobbering it (#4742 review).
 		m.sidebarProjectsSkipped = skipped
 		m.sidebarProjectsSkippedHints = hints
+		m.crossRepoSnapshotSeq++
 	}
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true

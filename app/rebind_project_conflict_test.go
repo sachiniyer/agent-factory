@@ -541,3 +541,60 @@ func TestRebindConflictRefresh_PreservesSessionOnlySkippedRows(t *testing.T) {
 	assert.Equal(t, corruptedRepoRepairHint, displayed.SkippedRepoHint(gammaID),
 		"the preserved row carries the daemon's reason-specific repair hint for the skip reason")
 }
+
+// TestRebindConflictRefresh_RetainsSkipSetWhenNewerPollApplied pins the #4742
+// review finding on the conflict-rebuild path: the off-loop conflict fetch can
+// overlap a regular background poll. A newer poll that began skipping a repo
+// AFTER the conflict fetch opened must not have its Hidden gate cleared by the
+// stale conflict reply landing later. The conflict handler detects the newer
+// poll (crossRepoSnapshotSeq advanced past the value captured at open time) and
+// retains the sidebar's current skip set and hints instead of replacing them.
+func TestRebindConflictRefresh_RetainsSkipSetWhenNewerPollApplied(t *testing.T) {
+	h, id := activeRebindHome(t)
+	root, ok := registeredProjectRoot(id)
+	require.True(t, ok)
+
+	// alpha is a repo the daemon began skipping AFTER the conflict fetch
+	// opened. The sidebar's newer poll already marked it skipped and retained
+	// the repair hint; the picker already carries that marker.
+	const alphaID = "alpha-skipped-id"
+	h.sidebarProjectsSkipped = map[string]bool{alphaID: true}
+	h.sidebarProjectsSkippedHints = map[string]string{alphaID: "repair alpha"}
+	h.crossRepoSnapshotSeq = 5
+	displayed := h.projectPickerOverlay
+	displayed.SetSkippedRepoIDs([]string{alphaID})
+	displayed.SetSkippedRepoHints(map[string]string{alphaID: "repair alpha"})
+	require.True(t, displayed.IsRepoSkipped(alphaID), "precondition: alpha marked skipped")
+	require.Equal(t, "repair alpha", displayed.SkippedRepoHint(alphaID), "precondition: alpha carries its repair hint")
+
+	// Another client rebinds the active project, so this rebind conflicts.
+	_, err := config.RebindProject(id, initTestGitRepo(t))
+	require.NoError(t, err)
+	stubRebindCAS(t)
+
+	// The conflict fetch opened BEFORE the newer poll (the seq it captured is
+	// 5), and its reply's skip set does NOT include alpha (it was not skipped
+	// yet). A newer regular poll applies while this fetch is in flight,
+	// bumping the seq to 6.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		h.crossRepoSnapshotSeq = 6
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: root}}},
+			nil, // stale reply: alpha not yet skipped at fetch-open time
+			nil
+	}))
+
+	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	require.NotNil(t, cmd)
+	h.Update(cmd())
+
+	require.False(t, displayed.RebindPending(), "precondition: the conflict reply was applied")
+	// The stale reply must not clear alpha's hidden marker the newer poll set.
+	assert.True(t, h.sidebarProjectsSkipped[alphaID],
+		"a stale conflict reply must not replace the newer poll's skip set")
+	assert.Equal(t, "repair alpha", h.sidebarProjectsSkippedHints[alphaID],
+		"a stale conflict reply must not replace the newer poll's repair hint")
+	assert.True(t, displayed.IsRepoSkipped(alphaID),
+		"the picker must retain the newer poll's skip marker for alpha")
+	assert.Equal(t, "repair alpha", displayed.SkippedRepoHint(alphaID),
+		"the picker must retain the newer poll's repair hint for alpha")
+}

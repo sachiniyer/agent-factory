@@ -200,6 +200,16 @@ func (p *ProjectPickerOverlay) SetSnapshotDegraded(degraded bool) { p.snapshotDe
 // confirmed (#1973 / #1985).
 func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegraded }
 
+// FormActive reports whether the add-project or rebind path-input form is
+// currently active. RefreshRows is a no-op while either form is open (those
+// modes consume every key so D is unreachable, and rebuilding the form's
+// target mid-entry would disrupt the typing); callers that propagate a
+// background poll's skip set and degraded guard must consult this so they do
+// not clear the guard or replace skip IDs while the rows behind them are
+// still stale, which would re-enable the D path against unrefreshed counts
+// once the form closes (#4742 review).
+func (p *ProjectPickerOverlay) FormActive() bool { return p.adding || p.rebinding }
+
 // SetSkippedRepoIDs records the repos the daemon skipped at startup (#4742)
 // so the destructive D path can gate on the HIGHLIGHTED project being skipped.
 // A skipped repo's zero count is incomplete, but the incompleteness is scoped

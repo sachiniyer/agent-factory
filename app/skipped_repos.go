@@ -257,6 +257,17 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
 		return
 	}
+	// RefreshRows is a no-op while the add/rebind path-input form is active,
+	// so the rows stay stale for as long as the form is open. Applying the
+	// poll's guard/skip-ID changes anyway would clear SnapshotDegraded and
+	// replace skip IDs without installing the fresh counts behind them, and
+	// the user could then close the form and press D against the stale rows
+	// — deletion enabled on counts the form-suppressed refresh never
+	// installed. Defer the whole update to the next poll after the form
+	// closes (#4742 review).
+	if m.projectPickerOverlay.FormActive() {
+		return
+	}
 	m.projectPickerOverlay.SetSnapshotDegraded(fetchErr != nil)
 	if fetchErr != nil {
 		// Keep the picker's last-known skip IDs/hints (captured at open time
@@ -322,6 +333,41 @@ func (m *home) graftSkippedSidebarRows(projects []overlay.Project, skipped []dae
 	return preserveSkippedPickerRows(projects, m.sidebarProjects, skippedRepoIDSet(skipped))
 }
 
+// setPickerSkippedIDsAndHints installs the daemon's startup-skipped repo IDs
+// and reason-specific repair hints into an open picker (#4742), so the D path
+// gates only on the HIGHLIGHTED project being skipped and the refusal names
+// the applicable remedy directly. On a degraded-open path (the synchronous
+// fetch failed and returned no skip set) the sidebar may already know a repo
+// is skipped from an earlier poll; reuse the retained skip IDs and hints
+// instead of leaving the picker with no skip markers while the sidebar still
+// shows the repo hidden (#4742 review). Lives here rather than switch_project.go
+// to keep that file under the file-length lint (#1145).
+func (m *home) setPickerSkippedIDsAndHints(skipped []daemon.SkippedRepo, snapshotDegraded bool) {
+	var skippedIDs []string
+	var hints map[string]string
+	if snapshotDegraded && len(skipped) == 0 && len(m.sidebarProjectsSkipped) > 0 {
+		skippedIDs = make([]string, 0, len(m.sidebarProjectsSkipped))
+		hints = make(map[string]string, len(m.sidebarProjectsSkippedHints))
+		for id, h := range m.sidebarProjectsSkippedHints {
+			hints[id] = h
+		}
+		for id := range m.sidebarProjectsSkipped {
+			skippedIDs = append(skippedIDs, id)
+		}
+	} else {
+		skippedIDs = make([]string, 0, len(skipped))
+		for _, s := range skipped {
+			skippedIDs = append(skippedIDs, s.RepoID)
+		}
+		hints = make(map[string]string, len(skipped))
+		for _, s := range skipped {
+			hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+		}
+	}
+	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
+	m.projectPickerOverlay.SetSkippedRepoHints(hints)
+}
+
 // buildProjectListForPicker is buildProjectListWithSnapshotStatus with the
 // skipped-row graft folded in (#4742 review): a session-only repo the daemon
 // skips has no instance in the fresh snapshot, so buildProjectListFrom drops
@@ -333,7 +379,79 @@ func (m *home) graftSkippedSidebarRows(projects []overlay.Project, skipped []dae
 // file under the file-length lint (#1145).
 func (m *home) buildProjectListForPicker() ([]overlay.Project, bool, bool, []daemon.SkippedRepo) {
 	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListWithSnapshotStatus()
-	return m.graftSkippedSidebarRows(projects, skipped), registryDegraded, snapshotDegraded, skipped
+	// On a degraded-open path the synchronous fetch failed, so the daemon's
+	// skip set is unknown (buildProjectListWithSnapshotStatus returns nil).
+	// The sidebar may already know a repo is skipped from an earlier poll;
+	// reuse the retained skip set for grafting so the picker still shows the
+	// cached row marked hidden, while SnapshotDegraded stays set to gate the D
+	// path on the global fetch-failure refusal (#4742 review). The returned
+	// skipped stays nil so the caller can detect the degraded path and reuse
+	// the retained hints (a reconstructed []SkippedRepo would lose the reason
+	// the hints are derived from).
+	graftSkipped := skipped
+	if snapshotDegraded && len(skipped) == 0 && len(m.sidebarProjectsSkipped) > 0 {
+		graftSkipped = retainedSkippedRepos(m.sidebarProjectsSkipped)
+	}
+	projects = m.graftSkippedSidebarRows(projects, graftSkipped)
+	// A skipped repo the daemon omitted every instance for, and that has no
+	// registry/root_agents/active row and no cached sidebar row to graft (a
+	// fresh start before the first poll, or a session-only repo first skipped
+	// this poll), would otherwise be absent from the picker despite its ID
+	// being in SkippedRepos. Synthesize an ID-level degraded row so the
+	// operator can see the repo is skipped, not absent (#4742 review).
+	projects = ensureSkippedRows(projects, skippedRepoIDSet(graftSkipped))
+	return projects, registryDegraded, snapshotDegraded, skipped
+}
+
+// retainedSkippedRepos reconstructs the daemon's skipped-repo set from the
+// sidebar's retained skip map (#4742 review). Used on the degraded-open picker
+// path, where the synchronous fetch failed and buildProjectListWithSnapshotStatus
+// returns a nil skip set: the sidebar may already know a repo is skipped from an
+// earlier poll, and reusing that set lets the picker graft the cached row and
+// mark it hidden while SnapshotDegraded stays set. The Reason is unknown for a
+// retained ID, so entries carry an empty Reason; the degraded guard gates D
+// globally, so the skip-specific hint is not consulted on this path.
+func retainedSkippedRepos(skipped map[string]bool) []daemon.SkippedRepo {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make([]daemon.SkippedRepo, 0, len(skipped))
+	for id := range skipped {
+		out = append(out, daemon.SkippedRepo{RepoID: id})
+	}
+	return out
+}
+
+// ensureSkippedRows synthesizes an ID-level degraded row for any skipped repo
+// the project list still does not represent (#4742 review). A skipped repo the
+// daemon omitted every instance for, and that has no
+// registry/root_agents/active row and no cached sidebar row to graft (a fresh
+// start, or a session-only repo first skipped this poll), would otherwise be
+// absent from the Projects section and a newly opened picker despite its ID
+// being in SkippedRepos — leaving the operator no indication the repo exists
+// but is skipped. The synthesized row carries only the RepoID (its name IS the
+// ID) and is marked hidden via the skip set by projectRows/renderRow; its empty
+// Root makes switch (Enter) fail gracefully, and the destructive paths are
+// already gated (D by the skip, rebind by the empty RegistryID), so the row is
+// informational only. Rows already present for a skipped ID are left untouched.
+func ensureSkippedRows(projects []overlay.Project, skipped map[string]bool) []overlay.Project {
+	if len(skipped) == 0 {
+		return projects
+	}
+	present := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		if p.RepoID != "" {
+			present[p.RepoID] = true
+		}
+	}
+	for id := range skipped {
+		if id == "" || present[id] {
+			continue
+		}
+		projects = append(projects, overlay.Project{RepoID: id, Name: id})
+		present[id] = true
+	}
+	return projects
 }
 
 // preserveSkippedPickerRows grafts last-known rows from the open picker for

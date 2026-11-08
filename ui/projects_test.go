@@ -254,3 +254,28 @@ func TestProjectsEmptyStateUsesSentenceCase(t *testing.T) {
 	assert.NotContains(t, out, "no other projects yet",
 		"the lowercase form must be gone:\n%s", out)
 }
+
+// TestProjectsPaneHiddenMarkerSurvivesTruncation pins the #4742 review finding
+// on row rendering: the "· hidden" marker must stay visible when the row is
+// truncated, because it is the only proactive indication that a skipped
+// project's zero count is incomplete. Appending the marker after the name and
+// count let fitLine eat it first at narrow widths, so a skipped inactive
+// project rendered identically to a complete one apart from an ellipsis. The
+// marker is reserved before truncating so a long name or a narrow rail
+// truncates the name instead.
+func TestProjectsPaneHiddenMarkerSurvivesTruncation(t *testing.T) {
+	rows := []SidebarProject{
+		{Name: "a-very-long-repository-name-that-overflows", Root: "/repos/long", SessionCount: 0, Hidden: true},
+	}
+	p := NewProjectsPane()
+	p.SetProjects(rows)
+	// A narrow rail: the name alone would not fit, so the marker must be
+	// reserved and the name truncated instead.
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 24, H: 4})
+
+	out := stripANSI(p.String())
+	assert.Contains(t, out, "hidden",
+		"the hidden marker must survive truncation at a narrow width:\n%s", out)
+	assert.Contains(t, out, "…",
+		"the name is truncated (with an ellipsis) to make room for the marker:\n%s", out)
+}

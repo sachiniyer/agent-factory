@@ -393,6 +393,17 @@ type home struct {
 	// row instead of pointing at a status bar that may hold no skip notice
 	// for it.
 	sidebarProjectsSkippedHints map[string]string
+	// crossRepoSnapshotSeq is a monotonic sequence over successful cross-repo
+	// snapshot applications to the Projects section (#4742 review). The
+	// regular background poll and a synchronous picker/conflict refresh both
+	// flow through applySidebarProjects, which bumps this whenever it installs
+	// a fresh skip set. A long-lived off-loop fetch (the 10-second rebind-
+	// conflict refresh) captures the value at open time and, when its reply
+	// lands, compares it against the current value: a newer poll applying in
+	// between means the reply's skip set is stale, so the conflict handler
+	// retains the sidebar's current skip set instead of letting the stale
+	// reply clear a Hidden gate the newer poll correctly set.
+	crossRepoSnapshotSeq uint64
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

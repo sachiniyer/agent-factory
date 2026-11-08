@@ -295,12 +295,19 @@ func (p *ProjectsPane) projectRow(proj SidebarProject, selected bool) string {
 	}
 	label := fmt.Sprintf("%s (%d)", name, proj.SessionCount)
 	// A skipped repo's zero count is hidden, not absent (#4742): mark the row
-	// so the section does not present it as a clean "no sessions".
+	// so the section does not present it as a clean "no sessions". Reserve
+	// space for the marker BEFORE truncating so a long name or a narrow rail
+	// truncates the name (with an ellipsis) instead of eating the only
+	// proactive indication that the count is incomplete (#4742 review).
+	hiddenMarker := ""
 	if proj.Hidden {
-		label += " · hidden"
+		hiddenMarker = " · hidden"
 	}
-	// The marker occupies 2 cells; fit the label into the rest of the row.
-	label = fitLine(label, p.rect.W-2)
+	avail := p.rect.W - 2 - layout.Cells(hiddenMarker)
+	if avail < 0 {
+		avail = 0
+	}
+	label = fitLine(label, avail) + hiddenMarker
 	if selected {
 		cursor := "▸ "
 		if proj.Active {
