@@ -136,6 +136,7 @@ func TestCheckAgentBinaries_MalformedOverride_LeadsWithCouldNotStartNotInstall(t
 func TestCheckAgentBinaries_NotFound_LeadsWithInstall(t *testing.T) {
 	// PATH holds no agent binaries, so a bare name resolves to not-found.
 	binDir := t.TempDir()
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
 
@@ -177,6 +178,7 @@ func TestCheckAgentBinaries_NotFound_LeadsWithInstall(t *testing.T) {
 func TestCheckAgentBinaries_PresentBinaryStillPasses(t *testing.T) {
 	binDir := t.TempDir()
 	fakeClaude := writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 
 	cfg := &config.Config{
@@ -202,6 +204,7 @@ func TestCheckAgentBinaries_PresentBinaryStillPasses(t *testing.T) {
 // classified remediation still flows through; only the severity differs.
 func TestCheckAgentBinaries_UnconfiguredAgentIsWarnNotFail(t *testing.T) {
 	binDir := t.TempDir()
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
 
@@ -229,6 +232,7 @@ func TestCheckAgentBinaries_UnconfiguredAgentIsWarnNotFail(t *testing.T) {
 // against the classified remediation rather than just the status.
 func TestCheckAgentBinaries_NilConfigIsAdvisoryForEveryAgent(t *testing.T) {
 	binDir := t.TempDir()
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
 

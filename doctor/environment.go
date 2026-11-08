@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -179,6 +180,24 @@ func isLocalBackend(backend string) bool {
 	return backend == "" || backend == config.BackendLocal
 }
 
+// repoNotInspectableDetail words the finding for a repo probe that failed for
+// any reason OTHER than ErrNotGitRepository: the in-repo config layer and its
+// backend could not be checked, so the doctor must not silently validate the
+// global layer's programs. The unanswered-probe case uses the resolver's claim
+// sentence (config.RepoProbeUnansweredClaim); an answered refusal surfaces
+// git's own error text. rerunCmd is the command the user should rerun after
+// addressing the git error ("af doctor --setup" for the setup profile, "af
+// doctor" for the default profile).
+func repoNotInspectableDetail(cwd string, repoErr error, rerunCmd string) (detail, remediation string) {
+	if config.RepoProbeUnanswered(repoErr) {
+		return fmt.Sprintf("%s — the in-repo config layer and its backend could not be checked",
+				config.RepoProbeUnansweredClaim("the current directory", cwd)),
+			"rerun `" + rerunCmd + "`; if it persists, check that git runs in this directory"
+	}
+	return fmt.Sprintf("could not inspect the repository at %s — git's error: %v; the in-repo config layer and its backend could not be checked", cwd, repoErr),
+		"address the git error above (e.g. `git config --global --add safe.directory <path>` for an ownership refusal), then rerun `" + rerunCmd + "`"
+}
+
 func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
 	if cfg != nil && cfg.WorktreeRoot != "" {
 		return cfg.WorktreeRoot
@@ -266,6 +285,24 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	workspace := ""
 	if repoErr == nil {
 		workspace = repo.Root
+	}
+	// Classify the repo probe the way checkGit does (#3794's twin): only
+	// ErrNotGitRepository entitles the agent checks to fall back to the
+	// global config layer. An answered git refusal or an unanswered probe
+	// says nothing about whether this is a repository, so the in-repo layer
+	// and its backend could not be inspected — report that as an actionable
+	// config failure instead of silently validating the global layer's
+	// programs, which the repo's sessions will not launch (config/repo.go,
+	// ErrNotGitRepository doc).
+	if repoErr != nil && !errors.Is(repoErr, config.ErrNotGitRepository) {
+		cwd := "<unknown>"
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+		detail, remediation := repoNotInspectableDetail(cwd, repoErr, "af doctor")
+		report.AddHeader("agents", "n/a (repo not inspectable)")
+		report.Fail(sectionConfig, "agent-config", detail, remediation)
+		return
 	}
 	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
 	if resolveErr != nil {

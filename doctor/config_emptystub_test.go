@@ -51,7 +51,9 @@ func TestMissingConfigKeepsDefaultAgentBinaryAdvisory(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("SHELL", "/bin/sh")
-	t.Setenv("PATH", t.TempDir())
+	pathDir := t.TempDir()
+	linkRealGitInto(t, pathDir)
+	t.Setenv("PATH", pathDir)
 
 	ctx := &scanContext{opts: Options{ConfigDir: home}}
 	report := &Report{}
