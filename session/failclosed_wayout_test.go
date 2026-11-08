@@ -441,6 +441,102 @@ func TestFailClosedKillRefusalSurvivesSecondRestart(t *testing.T) {
 	assert.True(t, CleanupHandleUnusable(err))
 }
 
+// TestFailClosedNonArchivedTombstoneRefusalSurvivesSecondRestart pins the same
+// #6791 cross-restart contract for the non-archived tombstone shape: a
+// UserKilled docker row whose handle a restart cannot rebuild (a legacy
+// container id with no engine identity) must keep naming the container across a
+// whole-row write + reload. Pre-fix the staging gate in toInstanceDataLocked
+// narrowed to preserved archives only, so the first checkpoint erased
+// runtime_cleanup from the persisted record and the second restart's refusal
+// degraded from "remove container sha256:deadbeef" to the generic, unactionable
+// fallback — exactly the dead end #6791 was fixed to eliminate. The preserved-
+// archive second-restart test above passes on master because its durable
+// archived_workspace field names the resource even with the handle gone; this
+// test exercises the shape where the handle IS the only nameable resource.
+func TestFailClosedNonArchivedTombstoneRefusalSurvivesSecondRestart(t *testing.T) {
+	// A UserKilled docker tombstone whose handle a restart cannot rebuild: a
+	// container id without an engine id is the legacy shape
+	// restoreRuntimeCleanup rejects ("no engine identity (legacy record)").
+	rejected := InstanceData{
+		ID:          "wayout-tombstone-second-id",
+		Title:       "wayout-tombstone-second",
+		Path:        "/repo",
+		BackendType: "docker",
+		Liveness:    LiveRunning,
+		UserKilled:  true,
+		RuntimeCleanup: &RuntimeCleanupData{Docker: &DockerRuntimeCleanupData{
+			ContainerID: "sha256:deadbeef",
+		}},
+	}
+
+	// First load: fail-closed, and the refusal names the container.
+	restored, err := FromInstanceData(rejected.ForStorage())
+	require.NoError(t, err)
+	require.NotNil(t, restored.runtimeTeardown, "the reload must fail closed, not load the row inert")
+	firstErr := restored.runtimeTeardown()
+	require.Error(t, firstErr)
+	assert.True(t, errors.Is(firstErr, ErrWorkspaceStateUnknown))
+	assert.True(t, CleanupHandleUnusable(firstErr),
+		"an unrebuildable handle cannot heal by retrying: %v", firstErr)
+	firstMsg := firstErr.Error()
+	assert.Contains(t, firstMsg, "sha256:deadbeef",
+		"the first restart's refusal must name the container: %s", firstMsg)
+	assert.NotContains(t, firstMsg, "whatever off-box resource",
+		"the first restart's refusal must not degrade to the generic fallback: %s", firstMsg)
+
+	// The first whole-row write (a checkpoint flush, a durable-change poll
+	// write, or the stop-tail flush) must NOT erase runtime_cleanup from the
+	// persisted record. Pre-fix the staging gate narrowed to preserved archives
+	// only and this write erased the handle.
+	stored := restored.ToInstanceData().ForStorage()
+	require.NotNil(t, stored.RuntimeCleanup,
+		"the checkpoint must republish the rejected handle so the second restart's refusal can name the resource (#6791)")
+	require.NotNil(t, stored.RuntimeCleanup.Docker,
+		"the republished handle must carry the docker variant")
+	assert.Equal(t, "sha256:deadbeef", stored.RuntimeCleanup.Docker.ContainerID,
+		"the republished handle must carry the container id")
+	assert.True(t, stored.RuntimeCleanupStateUnknown,
+		"the durable unknown flag must survive the checkpoint so the second restart retries the fail-closed rebuild")
+	assert.False(t, stored.KilledWithoutLiveRuntime,
+		"the nothing-owed marker must not be staged; the row's cleanup state is unknown, not nothing-owed")
+
+	// JSON round-trip + reload: the second restart's refusal names the same
+	// container — a checkpoint does not launder the refusal back into a dead end.
+	raw, err := json.Marshal(stored)
+	require.NoError(t, err)
+	var reloaded InstanceData
+	require.NoError(t, json.Unmarshal(raw, &reloaded))
+	require.NotNil(t, reloaded.RuntimeCleanup,
+		"the republished handle did not survive the JSON round-trip; the second restart's refusal cannot name the resource")
+	reProjected := reloaded.ForStorage()
+	require.NotNil(t, reProjected.RuntimeCleanup,
+		"ForStorage on the reloaded row erased the public RuntimeCleanup; the second restart has nothing to rebuild from")
+	again, err := FromInstanceData(reProjected)
+	require.NoError(t, err)
+	require.NotNil(t, again.runtimeTeardown,
+		"the second restart must fail closed, not load the row inert")
+	secondErr := again.runtimeTeardown()
+	require.Error(t, secondErr)
+	assert.True(t, errors.Is(secondErr, ErrWorkspaceStateUnknown),
+		"the second restart's refusal must still classify as unknown-state: %v", secondErr)
+	assert.True(t, CleanupHandleUnusable(secondErr),
+		"the second restart's refusal must still classify ErrCleanupHandleUnusable: %v", secondErr)
+	secondMsg := secondErr.Error()
+	// The #6791 contract: the second restart's refusal names the same resource
+	// as the first — the container id the republished handle carries.
+	for _, want := range []string{
+		"sha256:deadbeef",
+		again.ID,
+		"instances/*/instances.json",
+		"Quit every af TUI",
+	} {
+		assert.Contains(t, secondMsg, want,
+			"the second restart's refusal must name the same way out as the first: %s", secondMsg)
+	}
+	assert.NotContains(t, secondMsg, "whatever off-box resource",
+		"the second restart's refusal must not degrade to the generic fallback — the handle was republished: %s", secondMsg)
+}
+
 // Boundary guard (green on master): the inert-at-kill marker path must NOT pick
 // up the way-out text — a row that positively owes nothing stays a no-op, not a
 // refusal. Asserts the three observable parts of that admission, so the guard

@@ -625,6 +625,14 @@ func TestSnapshotUnderWriteLockDoesNotDeadlock(t *testing.T) {
 // pointing at a runtime whose fate this first reload correctly could not
 // determine — the orphan the orphan guard exists to prevent, reached through a
 // second restart.
+//
+// The handle itself is also republished across the checkpoint (#6791): the
+// refusal a later restart's rebuild produces names the off-box resource through
+// the handle, so the first whole-row write after the fail-closed reload must
+// not erase runtime_cleanup from the persisted record. Pre-fix the gate
+// narrowed to preserved archives only, so a non-archived fail-closed row's
+// first checkpoint erased the handle and the second restart's refusal degraded
+// from "remove container sha256:…" to a generic, unactionable fallback.
 func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	// An ordinary LIVE docker row whose persisted handle a restart cannot
 	// rebuild: a container id without an engine id is the legacy shape
@@ -661,8 +669,15 @@ func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	if !stored.RuntimeCleanupStateUnknown {
 		t.Fatal("a rejected cleanup handle's checkpoint dropped RuntimeCleanupStateUnknown; the next restart would not retry the fail-closed rebuild")
 	}
-	if stored.RuntimeCleanup != nil {
-		t.Fatalf("a rejected handle's checkpoint published a cleanup handle; the inert backend has none to publish: %#v", stored.RuntimeCleanup)
+	// The rejected handle is republished across the checkpoint (#6791): the
+	// second restart's refusal names the off-box resource through the handle,
+	// so the first whole-row write must not erase runtime_cleanup. Pre-fix the
+	// gate narrowed to preserved archives only and the handle was erased here.
+	if stored.RuntimeCleanup == nil {
+		t.Fatal("a rejected handle's checkpoint dropped RuntimeCleanup; the second restart's refusal cannot name the off-box resource without it (#6791)")
+	}
+	if stored.RuntimeCleanup.Docker == nil || stored.RuntimeCleanup.Docker.ContainerID != "sha256:deadbeef" {
+		t.Fatalf("a rejected handle's checkpoint republished the wrong handle: %#v", stored.RuntimeCleanup)
 	}
 	if stored.KilledWithoutLiveRuntime {
 		t.Fatal("a rejected-handle row staged the nothing-owed marker; the row's cleanup state is unknown, not nothing-owed, and the marker would let a no-op kill delete the only record")
@@ -679,6 +694,9 @@ func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	if !reloaded.RuntimeCleanupStateUnknown {
 		t.Fatal("the RuntimeCleanupStateUnknown flag did not survive the JSON round-trip; the second restart would not retry the fail-closed rebuild")
 	}
+	if reloaded.RuntimeCleanup == nil {
+		t.Fatal("the republished handle did not survive the JSON round-trip; the second restart's refusal cannot name the off-box resource without it (#6791)")
+	}
 	restoredAgain, err := FromInstanceData(reloaded)
 	if err != nil {
 		t.Fatalf("restore the second restart: %v", err)
@@ -686,8 +704,20 @@ func TestRejectedCleanupHandlePersistsUnknownAcrossRestart(t *testing.T) {
 	if restoredAgain.runtimeTeardown == nil {
 		t.Fatal("the second restart loaded a nil teardown; the durable unknown flag should have driven the same fail-closed rebuild, not the inert nothing-owed shape")
 	}
-	if err := restoredAgain.runtimeTeardown(); !errors.Is(err, ErrWorkspaceStateUnknown) {
-		t.Fatalf("the second restart's teardown returned %v, not ErrWorkspaceStateUnknown; the durable unknown flag should have re-driven the fail-closed rebuild", err)
+	secondErr := restoredAgain.runtimeTeardown()
+	if !errors.Is(secondErr, ErrWorkspaceStateUnknown) {
+		t.Fatalf("the second restart's teardown returned %v, not ErrWorkspaceStateUnknown; the durable unknown flag should have re-driven the fail-closed rebuild", secondErr)
+	}
+	// The #6791 way-out contract: the second restart's refusal names the same
+	// off-box resource as the first — the republished handle carries the
+	// container id, so the refusal says "remove container sha256:deadbeef"
+	// instead of degrading to the generic fallback a handle-less row produces.
+	secondMsg := secondErr.Error()
+	if !strings.Contains(secondMsg, "sha256:deadbeef") {
+		t.Fatalf("the second restart's refusal does not name the container id the republished handle carries; the way-out degraded to a dead end: %s", secondMsg)
+	}
+	if strings.Contains(secondMsg, "whatever off-box resource") {
+		t.Fatalf("the second restart's refusal degraded to the generic fallback; the republished handle should name the resource: %s", secondMsg)
 	}
 	// A kill committed against the reloaded row must not stage the nothing-owed
 	// marker: the rebuilt (sentinel) teardown is non-nil, so the gate's
