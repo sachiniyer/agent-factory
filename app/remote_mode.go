@@ -222,6 +222,16 @@ func (m *home) activeTasks(repoRoot, repoID string) ([]task.Task, error) {
 // host, so the context comes from the row's registry identity, never from a
 // local git probe.
 func (m *home) repoContextForSelection(root, repoID string) (*config.RepoContext, error) {
+	// A synthesized ID-level skipped row (ensureSkippedRows) carries only a
+	// RepoID and an empty Root: it is informational, not a navigable
+	// checkout. Resolving "" locally probes the process working directory
+	// (the launch repo) and would silently switch to it; remotely an empty
+	// root would resolve to a synthetic context that goes nowhere. Refuse
+	// before resolution so Enter on such a row reports the project is
+	// hidden rather than switching somewhere unexpected (#4742 review).
+	if root == "" {
+		return nil, errors.New("its sessions are hidden and it has no checkout to open")
+	}
 	if !isRemoteTarget() {
 		return config.RepoFromPath(root)
 	}

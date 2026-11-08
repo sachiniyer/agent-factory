@@ -340,6 +340,20 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		m.projectPickerOverlay.SetRebindConflict(text, merged)
 		return m, nil
 	}
+	// When staleSkip, a newer background poll already refreshed the picker's
+	// rows/counts (and the skip set retained above is that newer poll's).
+	// Installing the stale conflict fresh here would regress those counts —
+	// the newer poll may have observed a newly created session the stale
+	// fresh still reports as zero — and the user could cancel the re-armed
+	// form and press D before the next poll, building "no live sessions"
+	// confirmation from the stale zero count. Keep the picker's current
+	// (newer) rows; only the re-armed form's refusal text and cursor reseat
+	// travel from this reply, both safe because the newer poll saw the same
+	// rebind move the conflict snapshot reports (#4742 review).
+	if staleSkip {
+		m.projectPickerOverlay.SetRebindConflict(text, m.projectPickerOverlay.Projects())
+		return m, nil
+	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)
 	return m, nil
 }

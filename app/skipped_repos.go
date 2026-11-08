@@ -103,7 +103,10 @@ func skippedRepoRepairHintForReason(reason string) string {
 // never advertises a key that does not open the details in the current state —
 // a captive Projects section, a rebound error_details, or an overlay that owns
 // the keyboard. An empty detailsKey omits the instruction instead of naming a
-// dead key (#4742 review).
+// dead key (#4742 review). The instruction leads the line so the bar's
+// standing-line truncation cuts the trailing reason (which the retained hint
+// also carries) rather than the only on-bar mention of the repair key (#4742
+// review).
 func skippedRepoStandingNotice(s *daemon.SkippedRepo, detailsKey string) string {
 	if s == nil {
 		return ""
@@ -111,8 +114,8 @@ func skippedRepoStandingNotice(s *daemon.SkippedRepo, detailsKey string) string 
 	if detailsKey == "" {
 		return fmt.Sprintf("Sessions in this project are hidden — %s.", skippedRepoReasonLabel(s.Reason))
 	}
-	return fmt.Sprintf("Sessions in this project are hidden — %s. Press %s for repair steps.",
-		skippedRepoReasonLabel(s.Reason), detailsKey)
+	return fmt.Sprintf("Press %s for repair steps · Sessions in this project are hidden — %s.",
+		detailsKey, skippedRepoReasonLabel(s.Reason))
 }
 
 // skippedRepoNotice is the full repair notice for a skipped repo, carried in the
@@ -266,6 +269,18 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	// installed. Defer the whole update to the next poll after the form
 	// closes (#4742 review).
 	if m.projectPickerOverlay.FormActive() {
+		// Defer the full update to the next poll after the form closes —
+		// BUT a poll that newly reports a skipped repo or a failed fetch
+		// would otherwise leave the picker with SnapshotDegraded == false
+		// and no skip ID for the new condition, so the user could close the
+		// form and press D against the stale counts (deletion enabled on
+		// counts the form-suppressed refresh never installed) before the
+		// next poll lands. Set a conservative degraded guard now so D stays
+		// disabled until a post-form poll installs fresh counts and skip
+		// IDs; the next poll restores the precise flag (#4742 review).
+		if fetchErr != nil || len(skipped) > 0 {
+			m.projectPickerOverlay.SetSnapshotDegraded(true)
+		}
 		return
 	}
 	m.projectPickerOverlay.SetSnapshotDegraded(fetchErr != nil)
@@ -305,6 +320,17 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 		skippedIDSet[s.RepoID] = true
 	}
 	projects = preserveSkippedPickerRows(projects, m.projectPickerOverlay.Projects(), skippedIDSet)
+	// A skipped repo the daemon first discovered this poll, that has no
+	// registry/root_agents/active row and no cached picker row to graft
+	// (preserveSkippedPickerRows above only grafts old rows), would still
+	// be absent from the open picker even though the Projects section
+	// synthesizes it from the same poll — the two project views would
+	// disagree and the picker would not surface the new degradation until
+	// closed and reopened. Synthesize an ID-level degraded row for any
+	// skipped ID the picker still does not represent, mirroring
+	// buildProjectListForPicker and the sidebar's refreshSidebarProjects
+	// (#4742 review).
+	projects = ensureSkippedRows(projects, skippedIDSet)
 	m.projectPickerOverlay.RefreshRows(projects)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	skippedIDs := make([]string, 0, len(skipped))

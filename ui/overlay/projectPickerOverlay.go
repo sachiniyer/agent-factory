@@ -642,7 +642,7 @@ func (p *ProjectPickerOverlay) Render() string {
 		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … %d more above", start)), cw))
 	}
 	for i := start; i < end; i++ {
-		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle), cw))
+		lines = append(lines, truncateOverlayLine(p.renderRow(i, selectedStyle, normalStyle, countStyle, addStyle, cw), cw))
 	}
 	if showBelow {
 		lines = append(lines, truncateOverlayLine(overflowStyle.Render(fmt.Sprintf("    … and %d more below", p.rowCount()-end)), cw))
@@ -683,8 +683,12 @@ func (p *ProjectPickerOverlay) Render() string {
 }
 
 // renderRow renders one navigable row: a project ("name (N)") or the trailing
-// "+ Add project…" affordance, highlighting the selected one.
-func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, countStyle, addStyle lipgloss.Style) string {
+// "+ Add project…" affordance, highlighting the selected one. cw is the content
+// width the row must fit; the hidden marker's cells are reserved before the
+// name is truncated so a long name or a narrow picker truncates the name (with
+// an ellipsis) instead of eating the only proactive indication the count is
+// incomplete, mirroring the Projects pane (#4742 review).
+func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, countStyle, addStyle lipgloss.Style, cw int) string {
 	selected := i == p.selectedIdx
 	if i == len(p.all) {
 		text := "+ Add project…"
@@ -707,13 +711,17 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 	// the D path gates on, surfaced as a visible marker rather than only an
 	// action guard.
 	hidden := ""
+	hiddenCells := 0
 	if p.IsRepoSkipped(proj.RepoID) {
 		hidden = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(" · hidden")
+		hiddenCells = layout.Cells(hidden)
 	}
 	if selected {
-		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing + hidden
+		body := "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing
+		return truncateOverlayLine(body, cw-hiddenCells) + hidden
 	}
-	return "    " + normalStyle.Render(proj.Name) + count + missing + hidden
+	body := "    " + normalStyle.Render(proj.Name) + count + missing
+	return truncateOverlayLine(body, cw-hiddenCells) + hidden
 }
 
 // formLines lays out the add/rebind path form inside rows text rows (rows <= 0
