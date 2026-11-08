@@ -159,6 +159,25 @@ type nonResolvingLegacyKey struct {
 	probeErr error
 }
 
+// findResolvingGroupByProjectIdentity returns the resolving group whose project
+// is the same one as spelled, if one exists. After a checkout move, a project
+// can have both a resolving key (the moved checkout, found by the checkout
+// marker) and a non-resolving key (the stale recorded root, found by the
+// recorded-root leg). The two keys hash to different repo IDs, so the
+// hash-merge leg cannot join them; matching by project ID does, keeping one
+// group per project so the migration carries the daemon's actual winner once.
+func findResolvingGroupByProjectIdentity(resolving map[string]*legacyMigrateGroup, spelled *Project) *legacyMigrateGroup {
+	if spelled == nil {
+		return nil
+	}
+	for _, g := range resolving {
+		if g.project.ID == spelled.ID {
+			return g
+		}
+	}
+	return nil
+}
+
 // classifyLegacyRootAgents sorts every configured root_agents path into the
 // three states the migration treats differently: groups it can move
 // (registered-project membership is proven), paths it cannot move because no
@@ -255,7 +274,11 @@ func classifyLegacyRootAgents(ctx context.Context, paths []string) (groups []*le
 		case !PathIsDeterminatelyFree(pending.cleaned, pending.probeErr):
 			ambiguous = append(ambiguous, fmt.Sprintf("%s — it spells the recorded root of registered project %s, but whether that path still holds the checkout could not be proven: %s", pending.key, spelled.ID, pending.probeErr))
 		default:
-			groups = append(groups, &legacyMigrateGroup{project: *spelled, keys: []string{pending.key}})
+			if g := findResolvingGroupByProjectIdentity(resolving, spelled); g != nil {
+				g.keys = append(g.keys, pending.key)
+			} else {
+				groups = append(groups, &legacyMigrateGroup{project: *spelled, keys: []string{pending.key}})
+			}
 		}
 	}
 	for _, g := range resolving {

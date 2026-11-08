@@ -407,3 +407,84 @@ func TestMigrateRootAgentsCoversEveryProfileField(t *testing.T) {
 	after := effectiveRootAgent(loadedGlobalLayer(t, configPath), personal, nil)
 	assert.Equal(t, RootAgent{Enabled: true}, after)
 }
+
+// TestMigrateRootAgentsMovedCheckoutPreservesWinner covers the split that
+// classifyLegacyRootAgents can produce after a registered project's checkout is
+// moved: the moved path resolves (checkout marker travels with the move) while
+// the stale recorded-root key does not. Before the fix these two keys of the
+// SAME project landed in two separate groups — the recorded-root group's
+// personal write masked the resolving group's winner (personal > legacy in
+// ResolveRootAgent), silently reprogramming the project's root agent. The fix
+// merges both keys into one group so the daemon's actual winner is carried once.
+func TestMigrateRootAgentsMovedCheckoutPreservesWinner(t *testing.T) {
+	for _, tc := range []struct {
+		name         string
+		oldProgram   string
+		movedProgram string
+	}{
+		{name: "old=opus moved=sonic preserves sonic", oldProgram: "opus", movedProgram: "sonic"},
+		{name: "old=sonic moved=opus preserves opus", oldProgram: "sonic", movedProgram: "opus"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home, repoRoot, project := registeredTestProject(t)
+			// The moved path must sort AFTER the recorded root so the
+			// recorded-root group is processed first — the order that lets
+			// its personal write mask the resolving group's winner. The
+			// registered repo lives at "<base>/repo"; "zmoved" sorts after
+			// "repo" deterministically.
+			moved := filepath.Join(filepath.Dir(repoRoot), "zmoved")
+			require.NoError(t, os.Rename(repoRoot, moved))
+
+			body := "[root_agents.'" + repoRoot + "']\nprogram = '" + tc.oldProgram + "'\n\n[root_agents.'" + moved + "']\nprogram = '" + tc.movedProgram + "'\n"
+			configPath := writeMigrateConfig(t, home, body)
+
+			// The daemon's pre-migration winner is the moved checkout's entry:
+			// it resolves (the checkout marker traveled with the rename) while
+			// the stale recorded-root key does not, so LegacyRootAgentForRepoContext
+			// attributes the moved key's program.
+			beforeGlobal := loadedGlobalLayer(t, configPath)
+			beforePersonal := loadedPersonalLayer(t, project.ID)
+			before, err := parseConfigTOML([]byte(body), configPath)
+			require.NoError(t, err)
+			movedEntry := before.RootAgents[moved]
+			wantEffective := effectiveRootAgent(beforeGlobal, beforePersonal, &movedEntry)
+
+			result, err := MigrateGlobalConfig()
+			require.NoError(t, err)
+
+			// Both keys are migrated; nothing is left behind.
+			require.Len(t, result.MigratedRootAgents, 2, "every spelling of the project's opt-in must move")
+			paths := []string{result.MigratedRootAgents[0].Path, result.MigratedRootAgents[1].Path}
+			assert.ElementsMatch(t, []string{repoRoot, moved}, paths)
+			assert.Empty(t, result.Left, "no entry may be reported left when both spellings moved")
+
+			// The effective profile is identical to the pre-migration winner —
+			// the core guarantee: a project's root agent is never silently altered.
+			gotEffective := effectiveRootAgent(loadedGlobalLayer(t, configPath), loadedPersonalLayer(t, project.ID), nil)
+			assert.Equal(t, wantEffective, gotEffective,
+				"the project's effective root-agent profile must not change after a checkout move")
+
+			// The personal layer carries the daemon's actual winner (the moved
+			// checkout's program), not the stale recorded-root entry's.
+			personal := loadedPersonalLayer(t, project.ID)
+			require.NotNil(t, personal)
+			assert.True(t, personal.Value.Enabled)
+			assert.Equal(t, tc.movedProgram, personal.Value.Program,
+				"the personal profile must carry the moved checkout's winner, not the stale recorded root's")
+
+			// Every migrated entry reports the same effective profile and that
+			// a personal write was needed to carry it.
+			for _, m := range result.MigratedRootAgents {
+				assert.Equal(t, wantEffective, m.Profile,
+					"every migrated entry must report the project's effective profile")
+				assert.True(t, m.PersonalWritten,
+					"a personal write was needed to carry the winner")
+			}
+
+			// Both keys are gone from the global file.
+			globalData := readFile(t, configPath)
+			assert.NotContains(t, globalData, repoRoot)
+			assert.NotContains(t, globalData, moved)
+		})
+	}
+}
