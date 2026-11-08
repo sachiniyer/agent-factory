@@ -157,6 +157,28 @@ func (r *Report) addAdvisoryFinding(f Finding) {
 	r.Findings = append(r.Findings, f)
 }
 
+// hasActionableFindingByCheck reports whether the run already recorded an
+// actionable finding whose Check slug matches any of checks. Detectors that
+// share an underlying probe use it to avoid double-counting one failure: a
+// later detector skips its own finding when an earlier one already reported
+// the same root cause (#6995 review).
+func (r *Report) hasActionableFindingByCheck(checks ...string) bool {
+	if len(checks) == 0 {
+		return false
+	}
+	for _, f := range r.Findings {
+		if !f.Actionable || f.Fixed {
+			continue
+		}
+		for _, c := range checks {
+			if f.Check == c {
+				return true
+			}
+		}
+	}
+	return false
+}
+
 // UnresolvedCount returns how many underlying issues remain un-remediated
 // (whether automated or manual). Advisory observations are intentionally
 // excluded: the count is the health-probe boundary and may only include

@@ -275,3 +275,95 @@ func TestCheckAgentBinaries_GenuineNonRepo_StillFallsBackToGlobal(t *testing.T) 
 			"no agent-config FAIL should appear for a genuine non-repo")
 	}
 }
+
+// TestCheckAgentPrograms_AnsweredGitFailure_SurfacesGitStderr pins the
+// setup-profile stderr-surfacing: when checkAgentPrograms runs in isolation
+// (no prior git/git-repo finding), the agent-program finding must carry git's
+// own stderr diagnostic, not just "exit status 128" (#6995 review).
+func TestCheckAgentPrograms_AnsweredGitFailure_SurfacesGitStderr(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "default_program = \"codex\"\n[program_overrides]\ncodex = \"bin/definitely-missing\"\n")
+	chdir(t, repo)
+	restore := answeredFailureRepo(t, repo)
+	defer restore()
+
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	cfg := config.DefaultConfig()
+	cfg.DefaultProgram = tmux.ProgramClaude
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: filepath.Join(binDir, "claude")}
+	rep := &Report{}
+	checkAgentPrograms(cfg, rep)
+
+	findings := findByCheck(rep, "agent-program")
+	require.NotEmpty(t, findings)
+	require.Contains(t, findings[0].Detail, "fatal:",
+		"the finding must surface git's own stderr diagnostic, not just the exit status")
+	require.NotContains(t, findings[0].Detail, "exit status 128",
+		"the bare exit-status text is not git's diagnostic and must not stand in for it")
+}
+
+// TestCheckSetup_AnsweredGitFailure_DoesNotDoubleCount pins the double-count
+// fix (#6995 review): in the --setup flow, checkGit already records the
+// git-repo finding for an answered git refusal, so checkAgentPrograms must
+// NOT add a second agent-program finding for the same underlying git failure.
+// Before the fix, UnresolvedCount reported two issues for one git error.
+func TestCheckSetup_AnsweredGitFailure_DoesNotDoubleCount(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "default_program = \"codex\"\n[program_overrides]\ncodex = \"bin/definitely-missing\"\n")
+	chdir(t, repo)
+	restore := answeredFailureRepo(t, repo)
+	defer restore()
+
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "tmux", "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then echo 'tmux 3.4'; exit 0; fi\nexit 0\n")
+	linkRealGitInto(t, binDir)
+	t.Setenv("PATH", binDir)
+	cfg := config.DefaultConfig()
+	cfg.DefaultProgram = tmux.ProgramClaude
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: filepath.Join(binDir, "claude")}
+
+	rep := &Report{}
+	checkGit(rep)
+	checkAgentPrograms(cfg, rep)
+
+	// checkGit's git-repo finding remains the single actionable record of the
+	// underlying git failure; checkAgentPrograms must not duplicate it.
+	require.NotEmpty(t, findByCheck(rep, "git-repo"),
+		"checkGit must record the underlying git failure as a git-repo finding")
+	require.Empty(t, findByCheck(rep, "agent-program"),
+		"checkAgentPrograms must not add a second agent-program finding for the same git failure (double-count)")
+}
+
+// TestCheckAgentBinaries_AnsweredGitFailure_SurfacesGitStderr pins the
+// default-profile stderr-surfacing fix (#6995 review): when Git answers with a
+// refusal, the agent-config finding must carry Git's own diagnostic line (the
+// captured *exec.ExitError.Stderr), not just the bare "exit status 128" that
+// %v of an *exec.ExitError produces. Without the extraction the user sees a
+// finding labeled "git's error" that does not name the error, leaving them
+// unable to pick the matching remedy in the default af doctor profile.
+func TestCheckAgentBinaries_AnsweredGitFailure_SurfacesGitStderr(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	writeInRepoConfig(t, repo, "default_program = \"codex\"\n[program_overrides]\ncodex = \"bin/definitely-missing\"\n")
+	chdir(t, repo)
+	restore := answeredFailureRepo(t, repo)
+	defer restore()
+
+	binDir := t.TempDir()
+	writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
+	cfg := config.DefaultConfig()
+	cfg.DefaultProgram = tmux.ProgramClaude
+	cfg.ProgramOverrides = map[string]string{tmux.ProgramClaude: filepath.Join(binDir, "claude")}
+	rep := &Report{}
+	checkAgentBinaries(cfg, rep)
+
+	row := findCheckByName(t, rep, "agent-config")
+	require.Equal(t, StatusFail, row.Status)
+	require.Contains(t, row.Detail, "fatal:",
+		"the finding must surface git's own stderr diagnostic, not just the exit status")
+	require.NotContains(t, row.Detail, "exit status 128",
+		"the bare exit-status text is not git's diagnostic and must not stand in for it")
+}

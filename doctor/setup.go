@@ -256,11 +256,22 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 	// it entitles the agent checks to fall back to the global config layer.
 	// An answered git refusal (dubious ownership, an invalid .git) or an
 	// unanswered probe says nothing about whether this is a repository, so
-	// the in-repo layer and its backend could not be inspected — report
-	// that as an actionable finding instead of silently validating the
-	// global layer's programs, which the repo's sessions will not launch
-	// (config/repo.go, ErrNotGitRepository doc).
+	// the in-repo layer and its backend could not be inspected — the global
+	// layer's programs must not be silently validated, because the repo's
+	// sessions will not launch them (config/repo.go, ErrNotGitRepository doc).
+	//
+	// In the --setup flow, checkGit (above) has already classified this same
+	// probe and recorded the matching git/git-repo finding. Adding a second
+	// agent-program finding here would double-count one underlying git
+	// failure in UnresolvedCount and the summary, so reuse that finding:
+	// when checkGit already reported the probe, skip the program checks
+	// without a new finding. When checkAgentPrograms runs in isolation (no
+	// prior git/git-repo finding), emit the agent-program finding so the
+	// failure is never silent (#6995 review).
 	if repoErr != nil && !errors.Is(repoErr, config.ErrNotGitRepository) {
+		if report.hasActionableFindingByCheck("git", "git-repo") {
+			return
+		}
 		cwd := "<unknown>"
 		if wd, err := os.Getwd(); err == nil {
 			cwd = wd

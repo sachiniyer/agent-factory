@@ -4,6 +4,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -194,7 +195,19 @@ func repoNotInspectableDetail(cwd string, repoErr error, rerunCmd string) (detai
 				config.RepoProbeUnansweredClaim("the current directory", cwd)),
 			"rerun `" + rerunCmd + "`; if it persists, check that git runs in this directory"
 	}
-	return fmt.Sprintf("could not inspect the repository at %s — git's error: %v; the in-repo config layer and its backend could not be checked", cwd, repoErr),
+	// Surface git's own diagnostic, not just "exit status 128" (the
+	// *exec.ExitError.Error() text), so the user can pick the matching
+	// remedy — dubious ownership, an unreadable .git, an invalid gitfile —
+	// mirroring checkGit's setup-profile handling (#6954 review, #6995
+	// review).
+	gitErrDetail := fmt.Sprintf("%v", repoErr)
+	var exitErr *exec.ExitError
+	if errors.As(repoErr, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			gitErrDetail = stderr
+		}
+	}
+	return fmt.Sprintf("could not inspect the repository at %s — git's error: %s; the in-repo config layer and its backend could not be checked", cwd, gitErrDetail),
 		"address the git error above (e.g. `git config --global --add safe.directory <path>` for an ownership refusal), then rerun `" + rerunCmd + "`"
 }
 
