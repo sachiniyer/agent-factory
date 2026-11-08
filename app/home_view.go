@@ -87,16 +87,23 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	// A skipped repo's full repair hint is bound to the skip condition itself
 	// (skippedRepoRetained), independent of the shared most-recent-notice slot
 	// any later transient overwrites, so `E details` opens it for as long as
-	// the skip is true and never an unrelated notice (#4742 review).
-	if full := m.skippedRepoRetained; full != "" {
-		m.textOverlay = overlay.NewTextOverlay("Last notice" + "\n\n" + m.errBox.SanitizeNoticeText(full))
-		m.textOverlayDismissAnyKey = false
-		m.textOverlayDismissPolicy = nil
-		m.textOverlayPendingSeenMask = 0
-		m.replayHelpDismissKey = false
-		m.layoutTextOverlay()
-		m.state = stateHelp
-		return m, nil
+	// the skip is true and never an unrelated notice (#4742 review). It opens
+	// the skip's hint ONLY when the standing skip warning is what the bar is
+	// actually showing — no transient notice is up and the skip is active — so
+	// a later clipped notice or failure the bar is currently displaying keeps
+	// its own details reachable through E instead of being shadowed by the
+	// skip's repair text until the skip clears (#4742 review).
+	if m.errBox.FullError() == "" && m.skippedRepo != nil {
+		if full := m.skippedRepoRetained; full != "" {
+			m.textOverlay = overlay.NewTextOverlay("Last notice" + "\n\n" + m.errBox.SanitizeNoticeText(full))
+			m.textOverlayDismissAnyKey = false
+			m.textOverlayDismissPolicy = nil
+			m.textOverlayPendingSeenMask = 0
+			m.replayHelpDismissKey = false
+			m.layoutTextOverlay()
+			m.state = stateHelp
+			return m, nil
+		}
 	}
 	full, failure := m.errBox.RetainedNotice()
 	if full == "" {

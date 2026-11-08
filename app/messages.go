@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -110,7 +111,13 @@ type rebindConflictSnapshotMsg struct {
 	projectID string
 	refusal   error
 	data      []session.InstanceData
-	fetchErr  error
+	// skipped carries the cross-repo skip set (#4742) the conflict refresh
+	// read alongside the instances, so handleRebindConflictSnapshot can mark
+	// a skipped repo's row hidden and keep the picker's D gate degraded for
+	// the highlighted project instead of presenting its zero count as
+	// complete and reopening the delete path (#4742 review).
+	skipped  []daemon.SkippedRepo
+	fetchErr error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

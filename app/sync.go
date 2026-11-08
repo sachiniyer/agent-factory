@@ -474,8 +474,13 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 		// instances.json on a polling refresh). Retract the skip's condition-
 		// owned details and re-composing the standing bar (the web-listener
 		// notice, if any, reappears) so the bar stops naming a condition that
-		// is no longer true.
+		// is no longer true. Drop any pending repair-hint notice a skip-state
+		// transition queued too: a cold start or project switch may have queued
+		// one for the now-repaired repo, and the next handler would otherwise
+		// drain it onto a healthy project as a stale transient claiming its
+		// sessions are hidden (#4742 review).
 		m.skippedRepoRetained = ""
+		m.pendingSkippedRepoNotice = ""
 		m.applyStandingNotice()
 		return true
 	}
@@ -499,7 +504,7 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 // separator for multi-line notices — so a watcher can still tell which
 // condition(s) hold, truncated by the standing line's width math.
 func (m *home) applyStandingNotice() {
-	skip := skippedRepoStandingNotice(m.skippedRepo)
+	skip := skippedRepoStandingNotice(m.skippedRepo, m.skippedRepoStandingDetailsKey())
 	listener := m.webListenerStanding
 	switch {
 	case skip != "" && listener != "":

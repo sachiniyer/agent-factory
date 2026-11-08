@@ -152,6 +152,14 @@ type ProjectPickerOverlay struct {
 	// instead of the global snapshotDegraded flag so one corrupt project does
 	// not disable D for every healthy project in a multi-project workspace.
 	skippedRepoIDs map[string]bool
+	// skippedRepoHints carries the reason-specific repair hint for each repo
+	// the daemon skipped at startup (#4742), keyed by RepoID. The D path's
+	// refusal names the highlighted project's applicable repair guidance
+	// directly instead of directing the operator to the status bar, which may
+	// hold no skip notice when the highlighted skipped project is not the
+	// currently active project (m.skippedRepo is populated only from the
+	// repo-scoped active snapshot).
+	skippedRepoHints map[string]string
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -200,6 +208,7 @@ func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegrad
 func (p *ProjectPickerOverlay) SetSkippedRepoIDs(ids []string) {
 	if len(ids) == 0 {
 		p.skippedRepoIDs = nil
+		p.skippedRepoHints = nil
 		return
 	}
 	p.skippedRepoIDs = make(map[string]bool, len(ids))
@@ -213,6 +222,26 @@ func (p *ProjectPickerOverlay) SetSkippedRepoIDs(ids []string) {
 // is incomplete without disabling D for every other healthy project.
 func (p *ProjectPickerOverlay) IsRepoSkipped(repoID string) bool {
 	return p.skippedRepoIDs != nil && p.skippedRepoIDs[repoID]
+}
+
+// SetSkippedRepoHints records the reason-specific repair hint for each skipped
+// repo (#4742), so the D path's refusal can name the highlighted project's
+// applicable repair guidance directly instead of directing the operator to a
+// status bar that may hold no skip notice for it. Cleared together with the
+// ID set.
+func (p *ProjectPickerOverlay) SetSkippedRepoHints(hints map[string]string) {
+	p.skippedRepoHints = hints
+}
+
+// SkippedRepoHint returns the reason-specific repair hint the daemon reported
+// for repoID, or "" when the repo is not in the skip set. The D path's refusal
+// uses it so a skipped project the operator highlighted directly receives the
+// applicable remedy rather than a pointer elsewhere (#4742 review).
+func (p *ProjectPickerOverlay) SkippedRepoHint(repoID string) string {
+	if p.skippedRepoHints == nil {
+		return ""
+	}
+	return p.skippedRepoHints[repoID]
 }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
@@ -611,10 +640,19 @@ func (p *ProjectPickerOverlay) renderRow(i int, selectedStyle, normalStyle, coun
 	if proj.MissingPath {
 		missing = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(" · missing")
 	}
-	if selected {
-		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing
+	// A skipped repo's zero count is hidden, not absent (#4742): mark the row
+	// so a user browsing Ctrl+P can tell hidden sessions from a genuinely empty
+	// project without attempting deletion or switching to it. The same skip set
+	// the D path gates on, surfaced as a visible marker rather than only an
+	// action guard.
+	hidden := ""
+	if p.IsRepoSkipped(proj.RepoID) {
+		hidden = lipgloss.NewStyle().Foreground(ui.CurrentTheme().Dead).Render(" · hidden")
 	}
-	return "    " + normalStyle.Render(proj.Name) + count + missing
+	if selected {
+		return "  " + ui.SelectionMarker("▸ ") + selectedStyle.Render(proj.Name+fmt.Sprintf(" (%d)", proj.SessionCount)) + missing + hidden
+	}
+	return "    " + normalStyle.Render(proj.Name) + count + missing + hidden
 }
 
 // formLines lays out the add/rebind path form inside rows text rows (rows <= 0

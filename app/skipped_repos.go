@@ -6,6 +6,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/keys"
 )
 
 // This file is the TUI's half of the skipped-repos incompleteness channel the
@@ -93,27 +94,43 @@ func skippedRepoRepairHintForReason(reason string) string {
 // skippedRepoStandingNotice is the persistent one-line condition the TUI paints on
 // the status bar while the current repo is skipped, so an operator can tell
 // "no sessions" from "sessions are hidden" without a transient notice that
-// fades. It names the repo and the reason; the full repair hint rides in the
-// retained notice (skippedRepoNotice) so `E details` can open it.
-func skippedRepoStandingNotice(s *daemon.SkippedRepo) string {
+// fades. It names the reason; the full repair hint rides in the skip-owned
+// retained slot (skippedRepoRetained) so `E details` can open it. The closing
+// "Press <key> for repair steps." instruction is built from the same state-aware
+// binding noticeDetailsKey uses (passed in as detailsKey), so the standing text
+// never advertises a key that does not open the details in the current state —
+// a captive Projects section, a rebound error_details, or an overlay that owns
+// the keyboard. An empty detailsKey omits the instruction instead of naming a
+// dead key (#4742 review).
+func skippedRepoStandingNotice(s *daemon.SkippedRepo, detailsKey string) string {
 	if s == nil {
 		return ""
 	}
-	return fmt.Sprintf("Sessions in this project are hidden — %s. Press E for repair steps.",
-		skippedRepoReasonLabel(s.Reason))
+	if detailsKey == "" {
+		return fmt.Sprintf("Sessions in this project are hidden — %s.", skippedRepoReasonLabel(s.Reason))
+	}
+	return fmt.Sprintf("Sessions in this project are hidden — %s. Press %s for repair steps.",
+		skippedRepoReasonLabel(s.Reason), detailsKey)
 }
 
 // skippedRepoNotice is the full repair notice for a skipped repo, carried in the
 // errBox's retained slot so `E details` can open it. It names the repo, the
-// reason, and the reason-specific repair hint mirroring api/skipped_repos.go.
+// reason, the reason-specific repair hint mirroring api/skipped_repos.go, and —
+// for rows-failed-to-load — the FailedRows count the daemon supplies so a
+// change from one hidden session to many produces a different notice and the
+// operator can see what changed (mirroring the CLI and web, #4742 review).
 // Fired as a transient notice when the skip state changes so retained is set;
 // the standing notice takes over after the transient fades.
 func skippedRepoNotice(s *daemon.SkippedRepo) error {
 	if s == nil {
 		return nil
 	}
+	reason := skippedRepoReasonLabel(s.Reason)
+	if s.Reason == daemon.SkippedRepoReasonRowsFailedToLoad && s.FailedRows > 0 {
+		reason = fmt.Sprintf("%s (%d session(s) hidden)", reason, s.FailedRows)
+	}
 	return fmt.Errorf("Sessions in project %q are hidden — %s.\n%s",
-		s.RepoID, skippedRepoReasonLabel(s.Reason), skippedRepoRepairHintForReason(s.Reason))
+		s.RepoID, reason, skippedRepoRepairHintForReason(s.Reason))
 }
 
 // skippedRepoNoticeChanged reports whether two skip entries differ in a way that
@@ -130,6 +147,22 @@ func skippedRepoNoticeChanged(prev, cur *daemon.SkippedRepo) bool {
 		return true
 	}
 	return prev.RepoID != cur.RepoID || prev.Reason != cur.Reason || prev.FailedRows != cur.FailedRows
+}
+
+// skippedRepoStandingDetailsKey returns the label of the key that opens the
+// skip's repair details in the current state, or "" when no key does — in which
+// case skippedRepoStandingNotice omits the "Press … for repair steps."
+// instruction rather than advertise a key that does nothing (a captive
+// Projects section, a rebound error_details, an overlay that owns the
+// keyboard). It is the same state-aware binding noticeDetailsKey uses, so the
+// standing text and the bar's details hint always agree on whether `E` works
+// (#4742 review).
+func (m *home) skippedRepoStandingDetailsKey() string {
+	b, ok := m.noticeDetailsKey()
+	if !ok {
+		return ""
+	}
+	return keys.HelpLabel(b.Keys())
 }
 
 // consumeSkippedRepoNotice drains a skip-state transition's pending repair-hint

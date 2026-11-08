@@ -238,6 +238,19 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	// like `/` so the captive-section no-op below does not swallow it.
 	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDeleteProject]) {
 		if proj, ok := m.projects.SelectedProject(); ok {
+			// A skipped repo's row is marked Hidden (#4742): its zero count is
+			// incomplete, so the destructive D path must not build confirmation
+			// copy from those counts and dispatch the daemon deletion the way it
+			// does for a genuinely empty project. The picker has its own skip-
+			// specific refusal; this parallel Projects-section path needs the
+			// same gate so it cannot claim there are no live sessions before
+			// archiving or tearing down the hidden ones.
+			if proj.Hidden {
+				return m, m.handleNotice(fmt.Errorf(
+					"cannot delete project %q: its sessions are hidden (the daemon skipped this repo at startup), "+
+						"so its live-session count is incomplete; repair the repo (see the status bar) and retry",
+					proj.Name)), true
+			}
 			mod, cmd := m.handleDeleteProject(proj)
 			return mod, cmd, true
 		}

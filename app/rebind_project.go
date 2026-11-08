@@ -172,7 +172,7 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
-		data, _, err := fetch(ctx)
+		data, skipped, err := fetch(ctx)
 		if err != nil && ctx.Err() != nil {
 			err = fmt.Errorf(
 				"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
@@ -183,6 +183,7 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 			projectID: msg.projectID,
 			refusal:   msg.err,
 			data:      data,
+			skipped:   skipped,
 			fetchErr:  err,
 		}
 	}
@@ -196,11 +197,18 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 // it re-arms would name a root nobody is waiting on.
 func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
 	fresh, degraded := m.buildProjectListFrom(msg.data)
-	// The rebind conflict snapshot does not carry the cross-repo skip set; the
-	// next background poll (refreshSidebarProjectsFromSnapshot) marks a skipped
-	// repo's row hidden (#4742), so a stale hidden marker does not survive a
-	// rebind that moved the registration.
-	m.applySidebarProjects(fresh, degraded, nil, msg.fetchErr)
+	// The conflict refresh carries the cross-repo skip set (#4742): a
+	// successful refresh that returns a nonempty skipped set must keep a
+	// skipped repo's row hidden and the picker's D gate degraded for it,
+	// instead of treating the replacement counts as complete and reopening
+	// the delete path for a project whose sessions are hidden. A failed
+	// refresh drops the set so the D gate falls back to the global fetch-
+	// failure refusal (#4742 review).
+	skipped := msg.skipped
+	if msg.fetchErr != nil {
+		skipped = nil
+	}
+	m.applySidebarProjects(fresh, degraded, skippedRepoIDSet(skipped), msg.fetchErr)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
@@ -213,6 +221,17 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// delete-project confirmation claim "no live sessions" (#4888 review). A
 	// fetch that answered rebuilds the counts, so it clears the flag.
 	m.projectPickerOverlay.SetSnapshotDegraded(msg.fetchErr != nil)
+	// Carry the skip set so the D gate refuses for the highlighted project
+	// and the row renders the hidden marker, mirroring the fresh picker
+	// (#4742 review).
+	skippedIDs := make([]string, 0, len(skipped))
+	hints := make(map[string]string, len(skipped))
+	for _, s := range skipped {
+		skippedIDs = append(skippedIDs, s.RepoID)
+		hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+	}
+	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
+	m.projectPickerOverlay.SetSkippedRepoHints(hints)
 	// The re-armed form names the root the rebuilt ROW carries — the read the
 	// picker installs — so the message and the retry's expected root always
 	// describe the same record. A record gone from the snapshot falls back to

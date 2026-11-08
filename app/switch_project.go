@@ -47,6 +47,16 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 		skippedIDs = append(skippedIDs, s.RepoID)
 	}
 	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
+	// Carry each skipped repo's reason-specific repair hint (#4742) so the D
+	// path's refusal names the highlighted project's applicable remedy
+	// directly: a skipped project the operator highlighted may not be the
+	// currently active one, so the status bar's skip notice (populated only
+	// from the repo-scoped active snapshot) may hold nothing for it.
+	hints := make(map[string]string, len(skipped))
+	for _, s := range skipped {
+		hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+	}
+	m.projectPickerOverlay.SetSkippedRepoHints(hints)
 	if isRemoteTarget() {
 		// The picker's registry rows come from the LOCAL config.ListProjects
 		// and its path input resolves on THIS filesystem, but a rebind would
@@ -494,9 +504,13 @@ func (m *home) refreshSidebarProjects() {
 // through: it records the applied row set in sidebarProjects (the merge
 // source a session-snapshot failure reads) before rendering it. skipped
 // names the repos the daemon dropped at startup (#4742) so the rendered
-// rows mark a skipped repo's zero count as hidden.
+// rows mark a skipped repo's zero count as hidden. The skip set is also
+// retained (sidebarProjectsSkipped) so a later transient fetch failure can
+// reuse it rather than clearing every Hidden flag rebuilding the preserved
+// rows (#4742 review).
 func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool) {
 	m.sidebarProjects = projects
+	m.sidebarProjectsSkipped = skipped
 	m.projects.SetProjects(m.projectRows(projects, skipped))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
@@ -530,6 +544,13 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	if fetchErr != nil || registryDegraded {
 		if fetchErr != nil {
 			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
+			// Reuse the last-known skip set so a transient fetch failure
+			// (which arrives with a nil skip set) does not clear the Hidden
+			// flag on a previously skipped repo's preserved row while the
+			// merge keeps the row itself (#4742 review).
+			if skipped == nil {
+				skipped = m.sidebarProjectsSkipped
+			}
 		}
 		old := m.sidebarProjects
 		if len(old) == 0 {
@@ -548,13 +569,56 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 		}
 		projects = overlay.MergePreservingSessionRows(old, projects, registryDegraded)
 	}
+	// Preserve last-known rows for skipped IDs the fresh snapshot no longer
+	// represents (#4742 review): an inactive repo discovered only from its
+	// live sessions has no instance once the daemon skips it, so
+	// buildProjectListFrom cannot reconstruct a row and the project would
+	// otherwise disappear from the section and a newly opened picker. Graft
+	// the last-known row for each skipped ID back in; projectRows marks it
+	// Hidden via the skip set, so the section keeps saying "· hidden" instead
+	// of dropping the only degradation marker for the affected project.
+	if len(skipped) > 0 {
+		projects = m.preserveSkippedProjectRows(projects, skipped)
+	}
 	changed := m.projects.SetProjects(m.projectRows(projects, skipped))
 	m.sidebarProjects = projects
+	if fetchErr == nil {
+		// Retain the skip set the next error path reads. A failed fetch
+		// reuses the prior set above, so it must not overwrite the retained
+		// copy with nil.
+		m.sidebarProjectsSkipped = skipped
+	}
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
 	}
 	m.syncProjectsHint()
 	return changed
+}
+
+// preserveSkippedProjectRows grafts last-known rows from sidebarProjects for
+// any skipped repo the fresh project list no longer represents (#4742 review):
+// an inactive repo discovered only from its live sessions has no instance once
+// the daemon skips it, so buildProjectListFrom drops its row. The preserved
+// row is marked Hidden via the skip set by projectRows, so the section keeps
+// surfacing the degradation instead of letting the project vanish. Rows
+// already present (a registry/root_agents/active-root row for the same id)
+// are left untouched.
+func (m *home) preserveSkippedProjectRows(projects []overlay.Project, skipped map[string]bool) []overlay.Project {
+	if len(skipped) == 0 || len(m.sidebarProjects) == 0 {
+		return projects
+	}
+	present := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		present[p.RepoID] = true
+	}
+	for _, old := range m.sidebarProjects {
+		if old.RepoID == "" || !skipped[old.RepoID] || present[old.RepoID] {
+			continue
+		}
+		projects = append(projects, old)
+		present[old.RepoID] = true
+	}
+	return projects
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches
@@ -605,11 +669,21 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// still archived and torn down by the daemon. Gate D on the skip so
 			// the consent copy cannot claim a no-op delete for that project,
 			// without disabling D for every healthy project in the workspace.
+			// Name the highlighted project's applicable repair hint directly —
+			// a skipped project the operator highlighted may not be the active
+			// one, so the status bar's skip notice may hold nothing for it
+			// (#4742 review).
 			if m.projectPickerOverlay.IsRepoSkipped(proj.RepoID) {
-				return m, m.handleNotice(fmt.Errorf(
+				notice := fmt.Sprintf(
 					"cannot delete project %q: its sessions are hidden (the daemon skipped this repo at startup), "+
-						"so its live-session count is incomplete; repair the repo (see the status bar) and reopen the picker (Ctrl+P) to retry",
-					proj.Name))
+						"so its live-session count is incomplete.",
+					proj.Name)
+				if hint := m.projectPickerOverlay.SkippedRepoHint(proj.RepoID); hint != "" {
+					notice += " " + hint + " Reopen the picker (Ctrl+P) to retry."
+				} else {
+					notice += " Repair the repo (see the status bar) and reopen the picker (Ctrl+P) to retry."
+				}
+				return m, m.handleNotice(fmt.Errorf("%s", notice))
 			}
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
 			if m.state == stateConfirm && m.confirmationOverlay != nil {

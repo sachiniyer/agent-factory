@@ -375,6 +375,16 @@ type home struct {
 	// fresh registry truth into what is on screen without this copy (#4888
 	// review). Set only through setSidebarProjects.
 	sidebarProjects []overlay.Project
+	// sidebarProjectsSkipped is the last-known cross-repo skip set (#4742)
+	// the Projects section applied, keyed by RepoID. Retained alongside
+	// sidebarProjects so a transient background fetch failure — which arrives
+	// with a nil skip set while the merge preserves the old project rows —
+	// does not clear every Hidden flag rebuilding those preserved rows, and
+	// so a skipped inactive repo whose row was built only from its live
+	// sessions stays marked hidden until a healthy poll re-reads it (#4742
+	// review). Reused only on the error path; a successful refresh replaces
+	// it.
+	sidebarProjectsSkipped map[string]bool
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

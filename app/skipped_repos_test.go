@@ -79,19 +79,25 @@ func TestSkippedRepoRepairHintForReason(t *testing.T) {
 
 func TestSkippedRepoStandingNotice(t *testing.T) {
 	t.Run("nil returns empty", func(t *testing.T) {
-		assert.Equal(t, "", skippedRepoStandingNotice(nil))
+		assert.Equal(t, "", skippedRepoStandingNotice(nil, "E"))
 	})
 	t.Run("corrupted reason", func(t *testing.T) {
 		s := &daemon.SkippedRepo{RepoID: "repo-1", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}
-		notice := skippedRepoStandingNotice(s)
+		notice := skippedRepoStandingNotice(s, "E")
 		assert.Contains(t, notice, "Sessions in this project are hidden")
 		assert.Contains(t, notice, "its instances.json is corrupted")
 		assert.Contains(t, notice, "Press E for repair steps")
 	})
 	t.Run("rows-failed reason", func(t *testing.T) {
 		s := &daemon.SkippedRepo{RepoID: "repo-2", Reason: daemon.SkippedRepoReasonRowsFailedToLoad, FailedRows: 3}
-		notice := skippedRepoStandingNotice(s)
+		notice := skippedRepoStandingNotice(s, "E")
 		assert.Contains(t, notice, "some sessions could not be loaded")
+	})
+	t.Run("empty details key omits the instruction", func(t *testing.T) {
+		s := &daemon.SkippedRepo{RepoID: "repo-3", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}
+		notice := skippedRepoStandingNotice(s, "")
+		assert.Contains(t, notice, "Sessions in this project are hidden")
+		assert.NotContains(t, notice, "Press", "no key instruction when details cannot be opened")
 	})
 }
 
@@ -112,6 +118,17 @@ func TestSkippedRepoNotice(t *testing.T) {
 		s := &daemon.SkippedRepo{RepoID: "repo-2", Reason: daemon.SkippedRepoReasonRowsFailedToLoad, FailedRows: 3}
 		err := skippedRepoNotice(s)
 		require.NotNil(t, err)
+		assert.Contains(t, err.Error(), rowsFailedRepoRepairHint)
+		// FailedRows is the count the daemon reports for rows-failed-to-load;
+		// the notice includes it so a change from one hidden session to many
+		// is visible, mirroring the CLI and web (#4742 review).
+		assert.Contains(t, err.Error(), "3 session(s) hidden")
+	})
+	t.Run("rows-failed with zero FailedRows omits the count", func(t *testing.T) {
+		s := &daemon.SkippedRepo{RepoID: "repo-3", Reason: daemon.SkippedRepoReasonRowsFailedToLoad}
+		err := skippedRepoNotice(s)
+		require.NotNil(t, err)
+		assert.NotContains(t, err.Error(), "session(s) hidden")
 		assert.Contains(t, err.Error(), rowsFailedRepoRepairHint)
 	})
 }
@@ -734,8 +751,11 @@ func TestApplySkippedRepo_StandingComposesWithWebListener(t *testing.T) {
 // TestApplySkippedRepo_DetailsSurviveTransientOverwrite proves the skip's full
 // repair hint is bound to the skip condition (skippedRepoRetained), not the
 // shared most-recent-notice slot any later transient overwrites (#4742
-// review): `E details` opens the skip's hint for as long as the skip is true,
-// even after an unrelated transient notice fires, and retracts with the skip.
+// review): while the standing skip warning is what the bar shows, `E details`
+// opens the skip's hint; while a later transient is on the bar, `E details`
+// opens THAT notice so the currently displayed failure's clipped content stays
+// reachable instead of being shadowed by the skip's repair text. The skip's
+// hint retracts with the skip.
 func TestApplySkippedRepo_DetailsSurviveTransientOverwrite(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot, h.repoID = "/project", "project"
@@ -744,26 +764,55 @@ func TestApplySkippedRepo_DetailsSurviveTransientOverwrite(t *testing.T) {
 	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
 	require.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint)
 
-	// Drain the skip's transient hint so the shared retained slot is empty.
+	// Drain the skip's transient hint so the standing line is what the bar
+	// shows: no transient notice is up, the skip is active.
 	h.consumeSkippedRepoNotice()
+	h.errBox.Expire()
+	h.errBox.SetSize(200, 1)
 
-	// An unrelated transient notice fires and lands in the shared retained slot.
+	// With the standing skip warning visible, `E details` opens the skip's
+	// hint (skippedRepoRetained), not the shared retained slot.
+	assert.Empty(t, h.errBox.FullError(), "precondition: no transient is on the bar")
+	model, _ := h.showErrorDetails()
+	h = model.(*home)
+	require.Equal(t, stateHelp, h.state, "E details must open the skip's hint when the standing warning is visible")
+	require.NotNil(t, h.textOverlay)
+	assert.Contains(t, h.textOverlay.Render(), "af keeps no backup of these files",
+		"the standing-warning path opens the skip's condition-owned hint")
+	h.state = stateDefault
+	h.textOverlay = nil
+
+	// An unrelated transient notice fires and lands in the shared retained
+	// slot. While it is on the bar, `E details` opens THAT notice so the
+	// displayed failure's clipped content stays reachable; the skip's hint
+	// still lives in skippedRepoRetained for when the transient fades.
 	h.setTransientNotice(errors.New("unrelated transient notice"))
 	shared, _ := h.errBox.RetainedNotice()
 	assert.Contains(t, shared, "unrelated transient notice", "precondition: the shared slot holds the unrelated notice")
-
-	// The skip's details are untouched, and `E details` opens them — not the
-	// unrelated notice — for as long as the skip is true. The shared retained
-	// slot holds the unrelated notice; the skip's hint lives only in the
-	// condition-owned skippedRepoRetained, which showErrorDetails prefers.
+	assert.NotEmpty(t, h.errBox.FullError(), "precondition: the unrelated transient is on the bar")
 	assert.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint,
 		"the skip condition still owns its repair hint after an unrelated transient")
-	assert.Contains(t, shared, "unrelated transient notice",
-		"the shared retained slot holds the unrelated notice, not the skip's hint")
-	model, _ := h.showErrorDetails()
+	model, _ = h.showErrorDetails()
 	h = model.(*home)
-	require.Equal(t, stateHelp, h.state, "E details must open the skip's hint while the skip is active")
-	require.NotNil(t, h.textOverlay, "E details must open the skip's hint")
+	require.Equal(t, stateHelp, h.state, "E details opens the active notice while one is on the bar")
+	require.NotNil(t, h.textOverlay)
+	assert.Contains(t, h.textOverlay.Render(), "unrelated transient notice",
+		"a transient on the bar must keep its own details reachable through E")
+	assert.NotContains(t, h.textOverlay.Render(), "af keeps no backup of these files",
+		"the skip's repair text must not shadow the active notice while it is displayed")
+	h.state = stateDefault
+	h.textOverlay = nil
+
+	// Once the transient fades the standing skip warning reappears, and
+	// `E details` opens the skip's hint again.
+	h.errBox.Expire()
+	assert.Empty(t, h.errBox.FullError(), "precondition: the transient has faded")
+	model, _ = h.showErrorDetails()
+	h = model.(*home)
+	require.Equal(t, stateHelp, h.state)
+	require.NotNil(t, h.textOverlay)
+	assert.Contains(t, h.textOverlay.Render(), "af keeps no backup of these files",
+		"once the transient fades the skip's hint is reachable again")
 
 	// When the skip retracts, its details retract with it.
 	h.applySkippedRepo(nil)
