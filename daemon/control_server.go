@@ -709,6 +709,20 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this daemon's
+	// home before anything resolves it. A still-relative path would resolve against
+	// the DAEMON's working directory and could silently pick a different checkout
+	// (#5743). Every sibling RPC boundary (CreateSession, DeleteProject,
+	// RegisterProject) applies ResolveDaemonHostPath for this reason; DeliverPrompt
+	// resolves repo_path via `git -C <path>` and auto-creates a session bound to it,
+	// so the same guard belongs here (#4821).
+	if strings.TrimSpace(req.RepoPath) != "" {
+		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+		if err != nil {
+			return err
+		}
+		req.RepoPath = resolved
+	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
 	// A committed retained auto-create (#3357) — the absent-target branch
