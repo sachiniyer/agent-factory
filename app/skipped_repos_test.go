@@ -1023,3 +1023,48 @@ func TestUpdateOpenPickerSkipState_DegradedRegistryPreservesRegistryRows(t *test
 	assert.NotEmpty(t, pickerByRoot[betaRoot].RegistryID,
 		"the preserved row keeps its registry identity through the degraded merge")
 }
+
+// TestUpdateOpenPickerSkipState_FailedFetchRetainsSkipMarkers pins the #4742
+// review finding on the open-picker refresh's error path: when Ctrl+P is
+// already showing a skipped repo and the next background all-repos request
+// fails, the picker must NOT clear its known skip IDs and hints — the failed
+// request arrives with a nil skip set yet cannot establish that the
+// persistent skip was repaired, so clearing them would render the row
+// ordinary while the sidebar still marks it hidden. The picker must keep the
+// cached IDs/hints (mirroring applySidebarProjects, which reuses its retained
+// sidebarProjectsSkipped on the same error path) while SnapshotDegraded gates
+// the D path on the global fetch-failure refusal.
+func TestUpdateOpenPickerSkipState_FailedFetchRetainsSkipMarkers(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	healthy := []session.InstanceData{
+		{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}},
+	}
+	projects, degraded := h.buildProjectListFrom(healthy)
+	require.False(t, degraded, "precondition: the registry read is not degraded")
+
+	// Open the picker with alpha already marked skipped (the state a Ctrl+P
+	// opened while the daemon was skipping alpha).
+	h.state = stateSwitchProject
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, h.repoRoot)
+	h.projectPickerOverlay.SetSkippedRepoIDs([]string{h.repoID})
+	h.projectPickerOverlay.SetSkippedRepoHints(map[string]string{h.repoID: "repair alpha"})
+	require.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID), "precondition: alpha is marked skipped")
+	require.Equal(t, "repair alpha", h.projectPickerOverlay.SkippedRepoHint(h.repoID), "precondition: alpha carries its repair hint")
+
+	// Background poll fails. The failed request cannot prove the skip was
+	// repaired, so the picker must retain the last-known skip markers instead
+	// of clearing them; only SnapshotDegraded flips to gate D globally.
+	h.updateOpenPickerSkipState(healthy, nil, errors.New("rpc boom"))
+	assert.True(t, h.projectPickerOverlay.SnapshotDegraded(),
+		"a failed background fetch must set SnapshotDegraded so the D path falls back to the fetch-failure refusal")
+	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
+		"a failed background fetch must not clear a previously skipped repo's marker")
+	assert.Equal(t, "repair alpha", h.projectPickerOverlay.SkippedRepoHint(h.repoID),
+		"a failed background fetch must not clear a previously skipped repo's repair hint")
+}

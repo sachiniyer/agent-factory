@@ -221,9 +221,14 @@ func skippedRepoHintSet(skipped []daemon.SkippedRepo) map[string]string {
 // and fetch status into a picker that is still open (#4742 review): a repo that
 // becomes skipped while Ctrl+P stays open must mark its row hidden and gate the
 // D path for it, instead of retaining the skip set captured when the picker
-// opened. A failed background fetch drops the set and sets SnapshotDegraded so
-// the picker's D gate falls back to the global fetch-failure refusal, mirroring
-// the conflict-refresh path. No-op when no picker is open.
+// opened. A failed background fetch sets SnapshotDegraded so the picker's D
+// gate falls back to the global fetch-failure refusal, but RETAINS the
+// picker's last-known skip IDs and hints: the failed request arrives with a
+// nil skip set yet cannot establish that a previously skipped repo was
+// repaired, so clearing them would render the row ordinary while the sidebar
+// still marks it hidden (#4742 review). Mirrors applySidebarProjects, which
+// reuses its retained sidebarProjectsSkipped on the same error path. No-op
+// when no picker is open.
 //
 // A successful fetch also refreshes the picker's ROWS from the same snapshot:
 // the D path reads the row counts, so clearing the degraded guard (or a
@@ -238,7 +243,13 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	}
 	m.projectPickerOverlay.SetSnapshotDegraded(fetchErr != nil)
 	if fetchErr != nil {
-		m.projectPickerOverlay.SetSkippedRepoIDs(nil)
+		// Keep the picker's last-known skip IDs/hints (captured at open time
+		// or the last successful poll): the failed request cannot establish
+		// that a previously skipped repo was repaired, so clearing them
+		// would render the row ordinary while the sidebar still marks it
+		// hidden. SnapshotDegraded(true) above already gates the D path on
+		// the global fetch-failure refusal, so deletion stays disabled
+		// (#4742 review).
 		return
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
