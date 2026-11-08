@@ -223,15 +223,23 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	m.projectPickerOverlay.SetSnapshotDegraded(msg.fetchErr != nil)
 	// Carry the skip set so the D gate refuses for the highlighted project
 	// and the row renders the hidden marker, mirroring the fresh picker
-	// (#4742 review).
-	skippedIDs := make([]string, 0, len(skipped))
-	hints := make(map[string]string, len(skipped))
-	for _, s := range skipped {
-		skippedIDs = append(skippedIDs, s.RepoID)
-		hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+	// (#4742 review). A failed conflict-time fetch cannot establish that a
+	// previously skipped repo was repaired, so the picker must RETAIN its
+	// last-known skip IDs/hints instead of clearing them — the same retain
+	// the background-refresh path (updateOpenPickerSkipState) and
+	// applySidebarProjects take on their fetch-failure paths. SnapshotDegraded
+	// above already gates the D path on the global fetch-failure refusal, so
+	// deletion stays disabled (#4742 review).
+	if msg.fetchErr == nil {
+		skippedIDs := make([]string, 0, len(skipped))
+		hints := make(map[string]string, len(skipped))
+		for _, s := range skipped {
+			skippedIDs = append(skippedIDs, s.RepoID)
+			hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+		}
+		m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
+		m.projectPickerOverlay.SetSkippedRepoHints(hints)
 	}
-	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
-	m.projectPickerOverlay.SetSkippedRepoHints(hints)
 	// The re-armed form names the root the rebuilt ROW carries — the read the
 	// picker installs — so the message and the retry's expected root always
 	// describe the same record. A record gone from the snapshot falls back to

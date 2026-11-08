@@ -422,3 +422,47 @@ func TestRebindConflictRefreshCarriesSnapshotHealthToTheDeleteGate(t *testing.T)
 		})
 	}
 }
+
+// TestRebindConflictRefresh_FailedFetchRetainsPickerSkipMarkers pins the #4742
+// review finding on the conflict-refresh error path: when Ctrl+P is already
+// showing a skipped repo and the conflict-time all-repos request fails, the
+// picker must NOT clear its known skip IDs and hints — the failed request
+// arrives with a nil skip set yet cannot establish that the persistent skip
+// was repaired, so clearing them would render the row ordinary while the
+// sidebar still marks it hidden. The picker must keep the cached IDs/hints
+// (mirroring updateOpenPickerSkipState and applySidebarProjects on their
+// fetch-failure paths) while SnapshotDegraded gates the D path on the global
+// fetch-failure refusal.
+func TestRebindConflictRefresh_FailedFetchRetainsPickerSkipMarkers(t *testing.T) {
+	h, id := activeRebindHome(t)
+	displayed := h.projectPickerOverlay
+	_, err := config.RebindProject(id, initTestGitRepo(t)) // another client, meanwhile
+	require.NoError(t, err)
+	stubRebindCAS(t)
+
+	// The picker opened with alpha already marked skipped (the state a Ctrl+P
+	// opened while the daemon was skipping alpha).
+	displayed.SetSkippedRepoIDs([]string{h.repoID})
+	displayed.SetSkippedRepoHints(map[string]string{h.repoID: "repair alpha"})
+	require.True(t, displayed.IsRepoSkipped(h.repoID), "precondition: alpha is marked skipped")
+	require.Equal(t, "repair alpha", displayed.SkippedRepoHint(h.repoID), "precondition: alpha carries its repair hint")
+
+	// The conflict-time fetch fails. The failed request cannot prove the skip
+	// was repaired, so the picker must retain the last-known skip markers
+	// instead of clearing them; only SnapshotDegraded flips to gate D globally.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, errors.New("daemon snapshot unavailable")
+	}))
+
+	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	require.NotNil(t, cmd)
+	h.Update(cmd())
+
+	require.False(t, displayed.RebindPending(), "precondition: the conflict reply was applied")
+	assert.True(t, displayed.SnapshotDegraded(),
+		"a failed conflict-time fetch must set SnapshotDegraded so the D path falls back to the fetch-failure refusal")
+	assert.True(t, displayed.IsRepoSkipped(h.repoID),
+		"a failed conflict-time fetch must not clear a previously skipped repo's marker")
+	assert.Equal(t, "repair alpha", displayed.SkippedRepoHint(h.repoID),
+		"a failed conflict-time fetch must not clear a previously skipped repo's repair hint")
+}
