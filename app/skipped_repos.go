@@ -7,6 +7,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // This file is the TUI's half of the skipped-repos incompleteness channel the
@@ -222,7 +223,15 @@ func skippedRepoHintSet(skipped []daemon.SkippedRepo) map[string]string {
 // opened. A failed background fetch drops the set and sets SnapshotDegraded so
 // the picker's D gate falls back to the global fetch-failure refusal, mirroring
 // the conflict-refresh path. No-op when no picker is open.
-func (m *home) updateOpenPickerSkipState(skipped []daemon.SkippedRepo, fetchErr error) {
+//
+// A successful fetch also refreshes the picker's ROWS from the same snapshot:
+// the D path reads the row counts, so clearing the degraded guard (or a
+// repaired repo's skip gate) must be backed by fresh counts. Without this, a
+// picker opened during a failed fetch (or while a repo was skipped) keeps
+// stale zero counts after a successful poll clears the guard, and the D path
+// can build a "no live sessions" confirmation for a project whose sessions the
+// successful poll just reported (#4742 review).
+func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) {
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
 		return
 	}
@@ -231,6 +240,9 @@ func (m *home) updateOpenPickerSkipState(skipped []daemon.SkippedRepo, fetchErr 
 		m.projectPickerOverlay.SetSkippedRepoIDs(nil)
 		return
 	}
+	projects, registryDegraded := m.buildProjectListFrom(data)
+	m.projectPickerOverlay.RefreshRows(projects)
+	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	skippedIDs := make([]string, 0, len(skipped))
 	hints := make(map[string]string, len(skipped))
 	for _, s := range skipped {

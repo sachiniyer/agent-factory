@@ -93,9 +93,20 @@ func (m *home) showErrorDetails() (tea.Model, tea.Cmd) {
 	// a later clipped notice or failure the bar is currently displaying keeps
 	// its own details reachable through E instead of being shadowed by the
 	// skip's repair text until the skip clears (#4742 review).
-	if m.errBox.FullError() == "" && m.skippedRepo != nil {
-		if full := m.skippedRepoRetained; full != "" {
-			m.textOverlay = overlay.NewTextOverlay("Last notice" + "\n\n" + m.errBox.SanitizeNoticeText(full))
+	//
+	// The skip's own transient repair hint counts as "the bar is showing the
+	// skip": consumeSkippedRepoNotice paints the full repair text as a SetHint
+	// (which never lands in the shared retained slot) for the first three
+	// seconds after the skip fires, before the standing notice takes over. A
+	// clipped copy of that transient advertises `E details`, so pressing it in
+	// that window must open the skip's repair steps — not the older unrelated
+	// notice (or "No recent error") the shared retained slot holds (#4742
+	// review). Distinguish the skip-owned transient from an unrelated active
+	// notice by comparing the bar's current text to the skip's retained hint.
+	if m.skippedRepo != nil && m.skippedRepoRetained != "" {
+		skipDetails := m.errBox.SanitizeNoticeText(m.skippedRepoRetained)
+		if m.errBox.FullError() == "" || m.errBox.FullError() == skipDetails {
+			m.textOverlay = overlay.NewTextOverlay("Last notice" + "\n\n" + skipDetails)
 			m.textOverlayDismissAnyKey = false
 			m.textOverlayDismissPolicy = nil
 			m.textOverlayPendingSeenMask = 0

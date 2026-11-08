@@ -244,6 +244,41 @@ func (p *ProjectPickerOverlay) SkippedRepoHint(repoID string) string {
 	return p.skippedRepoHints[repoID]
 }
 
+// RefreshRows replaces the picker's project rows from a background snapshot
+// poll, reseating the cursor onto the same project so a successful poll does
+// not yank the highlight. The destructive D path reads the row counts, so the
+// rows must be as fresh as the skip/degraded state the same poll just set:
+// without this, a picker opened during a failed fetch (or while a repo was
+// skipped) keeps stale zero counts after a successful poll clears the
+// degraded guard or a repaired repo's skip gate, and the D path can build a
+// "no live sessions" confirmation for a project whose sessions the successful
+// poll just reported (#4742 review). No-op while the add/rebind path-input
+// form is active: those modes consume every key so D is unreachable, and
+// rebuilding the form's target mid-entry would disrupt the typing; the next
+// list-mode poll refreshes instead.
+func (p *ProjectPickerOverlay) RefreshRows(projects []Project) {
+	if p.adding || p.rebinding {
+		return
+	}
+	var highlightedID, highlightedRoot string
+	if cur, ok := p.HighlightedProject(); ok {
+		highlightedID = cur.RepoID
+		highlightedRoot = cur.Root
+	}
+	p.all = projects
+	for i, proj := range p.all {
+		if (highlightedID != "" && proj.RepoID == highlightedID) ||
+			(highlightedRoot != "" && proj.Root == highlightedRoot) {
+			p.selectedIdx = i
+			return
+		}
+	}
+	// len(p.all) is the trailing add-project row — still a valid cursor spot.
+	if p.selectedIdx > len(p.all) {
+		p.selectedIdx = len(p.all)
+	}
+}
+
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {
 	p.maxWidth = width

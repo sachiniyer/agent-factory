@@ -130,7 +130,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// would otherwise keep the stale skip set captured at open time, so its
 		// row stays unmarked and the D gate can still offer deletion from
 		// incomplete counts (#4742 review).
-		m.updateOpenPickerSkipState(msg.allReposSkipped, msg.allReposErr)
+		m.updateOpenPickerSkipState(msg.allRepos, msg.allReposSkipped, msg.allReposErr)
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
 		// Drain a skip-state transition's full repair hint as a transient notice
