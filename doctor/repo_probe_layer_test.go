@@ -1,6 +1,7 @@
 package doctor
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -366,4 +367,78 @@ func TestCheckAgentBinaries_AnsweredGitFailure_SurfacesGitStderr(t *testing.T) {
 		"the finding must surface git's own stderr diagnostic, not just the exit status")
 	require.NotContains(t, row.Detail, "exit status 128",
 		"the bare exit-status text is not git's diagnostic and must not stand in for it")
+}
+
+// ---------------------------------------------------------------------------
+// repoHeader / checkWorktreeMode: the repo header and worktree-mode row that
+// checkConfigAndStorage emits BEFORE checkAgentBinaries runs.
+// ---------------------------------------------------------------------------
+
+// repoHeaderValue returns the value of the "repo" header line, or "" if absent.
+func repoHeaderValue(r *Report) string {
+	for _, h := range r.Header {
+		if h.Label == "repo" {
+			return h.Value
+		}
+	}
+	return ""
+}
+
+// TestRepoHeader_AnsweredGitFailure_ClassifiesAsNotInspectable pins the #6995
+// review fix: when the repo probe fails with an answered git refusal (NOT
+// ErrNotGitRepository), the repo header and the worktree-mode row must NOT
+// report "not inside a git repository" / "run from inside a git repository" —
+// that contradicts the agent-config finding checkAgentBinaries emits for the
+// same probe and sends a user with dubious ownership toward the wrong remedy.
+// The header says "repo not inspectable" and the worktree row stays advisory.
+func TestRepoHeader_AnsweredGitFailure_ClassifiesAsNotInspectable(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	repo := setupDoctorRepo(t)
+	chdir(t, repo)
+	restore := answeredFailureRepo(t, repo)
+	defer restore()
+
+	_, repoErr := currentRepoRoot()
+	require.Error(t, repoErr)
+	require.False(t, errors.Is(repoErr, config.ErrNotGitRepository),
+		"fixture: the answered refusal must not be the not-a-repo verdict")
+
+	require.Equal(t, "n/a (repo not inspectable)", repoHeader("", repoErr, ""),
+		"an answered refusal is not a not-a-repo verdict; the header must say the repo was not inspectable")
+
+	rep := &Report{}
+	checkWorktreeMode(&scanContext{opts: Options{ConfigDir: t.TempDir()}}, rep, "", repoErr, "")
+	row := findCheck(t, rep, "worktrees")
+	require.Equal(t, StatusWarn, row.Status, "the worktree row stays advisory — the actionable finding is checkAgentBinaries'")
+	require.Contains(t, row.Detail, "repo not inspectable",
+		"the worktree row must say the repo was not inspectable, not that the doctor is not inside a repository")
+	require.NotContains(t, row.Remediation, "inside a git repository",
+		"advising the user to run from inside a repository contradicts an answered refusal the doctor already tried")
+	require.False(t, row.Problem, "the worktree row must not double-count the probe's actionable finding")
+}
+
+// TestRepoHeader_GenuineNonRepo_StillClassifiesAsNotInsideARepo is the regression
+// lock for the genuine non-repo case: a plain directory with no .git must keep
+// the "not inside a git repository" header and "run from inside a git
+// repository" advice. The distinction the fix introduces must not soften the
+// true non-repo verdict.
+func TestRepoHeader_GenuineNonRepo_StillClassifiesAsNotInsideARepo(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	binDir := t.TempDir()
+	linkRealGitInto(t, binDir)
+	t.Setenv("PATH", binDir)
+	chdir(t, t.TempDir()) // a directory that is not a git repository
+
+	_, repoErr := currentRepoRoot()
+	require.Error(t, repoErr)
+	require.True(t, errors.Is(repoErr, config.ErrNotGitRepository),
+		"fixture: a plain directory must be the genuine not-a-repo verdict")
+	require.Equal(t, "n/a (not inside a git repository)", repoHeader("", repoErr, ""),
+		"a genuine non-repo must still be reported as not inside a git repository")
+
+	rep := &Report{}
+	checkWorktreeMode(&scanContext{opts: Options{ConfigDir: t.TempDir()}}, rep, "", repoErr, "")
+	row := findCheck(t, rep, "worktrees")
+	require.Contains(t, row.Remediation, "inside a git repository",
+		"a genuine non-repo must still advise running from inside a git repository")
 }

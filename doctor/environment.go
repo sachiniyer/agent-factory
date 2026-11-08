@@ -227,15 +227,36 @@ func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
 
 func repoHeader(repoRoot string, repoErr error, mode string) string {
 	if repoErr != nil {
-		return "n/a (not inside a git repository)"
+		// Only ErrNotGitRepository is a verdict that the path is outside git;
+		// an answered git refusal or an unanswered probe says the repo could
+		// not be inspected, not that there is none (#6995 review). Reporting
+		// "not inside a git repository" for those would contradict the
+		// agent-config finding checkAgentBinaries emits for the same probe.
+		if errors.Is(repoErr, config.ErrNotGitRepository) {
+			return "n/a (not inside a git repository)"
+		}
+		return "n/a (repo not inspectable)"
 	}
 	return fmt.Sprintf("%s (worktree_root: %s)", repoRoot, mode)
 }
 
 func checkWorktreeMode(ctx *scanContext, report *Report, repoRoot string, repoErr error, mode string) {
 	if repoErr != nil {
-		report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: "+repoErr.Error(),
-			"run `af doctor` from inside a git repository", false)
+		if errors.Is(repoErr, config.ErrNotGitRepository) {
+			report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: "+repoErr.Error(),
+				"run `af doctor` from inside a git repository", false)
+			return
+		}
+		// An answered git refusal or an unanswered probe is not a not-a-repo
+		// verdict (#6995 review): the worktree mode cannot be determined until
+		// git is addressed, so advise addressing git — not running from inside
+		// a repository the doctor already tried. Keep this advisory
+		// (problem=false): the actionable finding for the same probe is
+		// recorded by checkAgentBinaries (default profile) or checkGit (setup
+		// profile), and a second actionable row here would double-count one
+		// underlying failure.
+		report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: repo not inspectable: "+repoErr.Error(),
+			"address the git error above, then rerun `af doctor`", false)
 		return
 	}
 
