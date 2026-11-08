@@ -601,8 +601,19 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 	if err != nil {
 		// Push and/or teardown failed. Roll the fence back to Lost so the session
 		// stays recovery-eligible, persist that, and surface the failure.
+		//
+		// The durable write IS the mitigation here, exactly as the local route's
+		// rollback treats it (the archiveTeardown failure path below):
+		// ArchiveSandbox records the pushed branch only in memory, so a swallowed
+		// persist failure leaves the on-disk row with an empty branch — and a
+		// restart's Lost re-provision then clones the repo's default branch,
+		// stranding the pushed work (#1781/#3335). Surface the persist failure so
+		// the operator knows the recovery record (including the pushed branch)
+		// may not survive a restart.
 		_ = instance.Transition(session.AbortArchiveToLost())
-		m.persistInstance(repoID, instance)
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return "", fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); pushed branch %q is on origin but the session record may not name it — inspect the repo on origin before restarting the daemon: %w", title, perr, branch, err)
+		}
 		return "", fmt.Errorf("failed to archive session %q: %w", title, err)
 	}
 
@@ -660,8 +671,17 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 func (m *Manager) archiveRemotePreserving(repoID string, instance *session.Instance, title string) (string, error) {
 	loc, err := instance.ArchiveSandboxPreserving()
 	if err != nil {
+		// Stop failed. Roll the fence back to Lost so the session stays
+		// recovery-eligible, persist that, and surface the failure. The durable
+		// write IS the mitigation here, exactly as the push route above and the
+		// local route treat it: a swallowed persist failure leaves the on-disk
+		// row without the Lost rollback, so a restart may re-provision against a
+		// stale record. Surface the persist failure so the operator knows the
+		// recovery record may not survive a restart.
 		_ = instance.Transition(session.AbortArchiveToLost())
-		m.persistInstance(repoID, instance)
+		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
+			return "", fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); the session record may not reflect its Lost rollback — inspect it before restarting the daemon: %w", title, perr, err)
+		}
 		return "", fmt.Errorf("failed to archive session %q: %w", title, err)
 	}
 	_ = instance.Transition(session.CommitArchive())
