@@ -633,6 +633,23 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 			"the row must take the record's instant: got %v", observations[0].ResetAt)
 	})
 
+	t.Run("a distinct wall's record never lowers a later claim", func(t *testing.T) {
+		// #6975 review: the timed observation row is keyed by account and
+		// claim KIND — a second, distinct wall on the same account shares
+		// it. An authoritative sighting may correct the row's own wall in
+		// either direction, but for a different clause the row is a
+		// different wall's claim and the stricter bound stands — else a
+		// five-hour record would erase a still-active weekly deadline and
+		// release the account early.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, "reset Monday at 9am", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(paneReset, "resets 9:40am", LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the earlier record for a different clause must not lower the later claim: got %v", observations[0].ResetAt)
+	})
+
 	t.Run("a changed-evidence sighting still corrects the untimed row", func(t *testing.T) {
 		// #6975 review: the park filed the never-expires claim on an
 		// unparseable banner; a wider capture then exposes the clause —

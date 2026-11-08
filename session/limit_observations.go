@@ -100,10 +100,16 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		// re-uses a phrase (the next day's identical "reset at 3pm")
 		// still tightens the row to its own instant (#6959).
 		retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-		if authoritative {
-			// The record's instant is the wall's truth — it
-			// corrects a pane-derived bound in both directions
-			// rather than only tightening.
+		if authoritative && (observation.ResetAt.IsZero() ||
+			(evidence != "" && observation.Evidence == evidence)) {
+			// The record's instant corrects a bound in either direction
+			// ONLY when the row is provably the sighting's own wall: an
+			// adopted zero-kind row filed no instant to lower, and a timed
+			// row whose evidence matches the sighting's clause is the same
+			// wall's claim. A timed row carrying a DIFFERENT clause is a
+			// distinct wall, and lowering it to the record's earlier
+			// instant would release the account while that wall still
+			// stands (#6975 review) — the stricter bound stands instead.
 			retained = resetAt
 		}
 		if wasParked && observation.ResetAt.Equal(retained) &&
