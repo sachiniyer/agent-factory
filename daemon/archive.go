@@ -612,7 +612,17 @@ func (m *Manager) archiveRemoteSession(repoID string, instance *session.Instance
 		// may not survive a restart.
 		_ = instance.Transition(session.AbortArchiveToLost())
 		if perr := m.persistInstanceErr(repoID, instance); perr != nil {
-			return "", fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v); pushed branch %q is on origin but the session record may not name it — inspect the repo on origin before restarting the daemon: %w", title, perr, branch, err)
+			// Only name and recommend inspecting the pushed branch when one
+			// actually reached origin: ArchiveSandbox returns an empty branch
+			// when it fails before completing the push (no live client, push
+			// error), and claiming an empty branch is on origin gives wrong
+			// recovery guidance during exactly the incident this diagnostic
+			// clarifies.
+			branchClause := ""
+			if branch != "" {
+				branchClause = fmt.Sprintf("; pushed branch %q is on origin but the session record may not name it — inspect the repo on origin before restarting the daemon", branch)
+			}
+			return "", fmt.Errorf("failed to archive session %q AND could not record its recovered state on disk (%v)%s: %w", title, perr, branchClause, err)
 		}
 		return "", fmt.Errorf("failed to archive session %q: %w", title, err)
 	}
