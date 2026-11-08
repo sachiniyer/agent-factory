@@ -264,6 +264,20 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 		old := registryBackedRows(m.projectPickerOverlay.Projects())
 		projects = overlay.MergePreservingSessionRows(old, projects, true)
 	}
+	// Preserve last-known rows for skipped IDs the fresh snapshot no longer
+	// represents (#4742 review): an inactive repo discovered only from its
+	// live sessions has no instance once the daemon skips it, so
+	// buildProjectListFrom drops its row and a wholesale RefreshRows would
+	// remove it from the picker before the skip marker is installed — the
+	// skipped project would vanish instead of being shown as hidden. Graft
+	// the picker's last-known row for each skipped ID back in (mirrors
+	// preserveSkippedProjectRows for the Projects section); the skip set
+	// installed below marks the grafted row hidden.
+	skippedIDSet := make(map[string]bool, len(skipped))
+	for _, s := range skipped {
+		skippedIDSet[s.RepoID] = true
+	}
+	projects = preserveSkippedPickerRows(projects, m.projectPickerOverlay.Projects(), skippedIDSet)
 	m.projectPickerOverlay.RefreshRows(projects)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	skippedIDs := make([]string, 0, len(skipped))
@@ -274,4 +288,31 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	}
 	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
 	m.projectPickerOverlay.SetSkippedRepoHints(hints)
+}
+
+// preserveSkippedPickerRows grafts last-known rows from the open picker for
+// any skipped repo the fresh project list no longer represents (#4742 review):
+// an inactive repo discovered only from its live sessions has no instance
+// once the daemon skips it, so buildProjectListFrom drops its row and a
+// wholesale RefreshRows would remove it from the picker before the skip
+// marker is installed — the project vanishes instead of being shown as
+// hidden. Mirrors preserveSkippedProjectRows for the Projects section; rows
+// already present (a registry/root_agents/active-root row for the same id)
+// are left untouched.
+func preserveSkippedPickerRows(projects, oldRows []overlay.Project, skipped map[string]bool) []overlay.Project {
+	if len(skipped) == 0 || len(oldRows) == 0 {
+		return projects
+	}
+	present := make(map[string]bool, len(projects))
+	for _, p := range projects {
+		present[p.RepoID] = true
+	}
+	for _, old := range oldRows {
+		if old.RepoID == "" || !skipped[old.RepoID] || present[old.RepoID] {
+			continue
+		}
+		projects = append(projects, old)
+		present[old.RepoID] = true
+	}
+	return projects
 }

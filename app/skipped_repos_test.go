@@ -1068,3 +1068,79 @@ func TestUpdateOpenPickerSkipState_FailedFetchRetainsSkipMarkers(t *testing.T) {
 	assert.Equal(t, "repair alpha", h.projectPickerOverlay.SkippedRepoHint(h.repoID),
 		"a failed background fetch must not clear a previously skipped repo's repair hint")
 }
+
+// TestUpdateOpenPickerSkipState_PreservesSessionOnlySkippedRows pins the #4742
+// review finding on the open-picker refresh: when a project represented ONLY
+// by its live snapshot sessions becomes skipped while Ctrl+P stays open, the
+// daemon drops its instance, so buildProjectListFrom cannot reconstruct a row
+// and a wholesale RefreshRows would remove it before the skip marker is
+// installed — the skipped project would vanish from the picker instead of
+// being shown as hidden. The picker must graft its last-known row for each
+// skipped ID back in (mirroring preserveSkippedProjectRows for the Projects
+// section) so the row stays, marked hidden, with its repair hint.
+func TestUpdateOpenPickerSkipState_PreservesSessionOnlySkippedRows(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	// alpha is the active project (registered, with a live session). gamma is
+	// a separate git repo whose ONLY presence is a live snapshot session — not
+	// registered, not a root agent, not the active root — so the row a healthy
+	// snapshot produces is session-derived and disappears once the daemon skips
+	// gamma and drops its instance.
+	alphaRoot := initTestGitRepo(t)
+	gammaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+	gammaID := config.RepoIDFromRoot(gammaRoot)
+
+	healthy := []session.InstanceData{
+		{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}},
+		{Worktree: session.GitWorktreeData{RepoPath: gammaRoot}},
+	}
+	projects, degraded := h.buildProjectListFrom(healthy)
+	require.False(t, degraded, "precondition: the registry read is not degraded")
+	byID := map[string]overlay.Project{}
+	for _, p := range projects {
+		byID[p.RepoID] = p
+	}
+	require.Contains(t, byID, gammaID, "precondition: the session-only gamma appears on a healthy snapshot")
+	require.Empty(t, byID[gammaID].RegistryID, "precondition: gamma's row is session-only, not registry-backed")
+
+	// Open the picker on the healthy rows (the state a Ctrl+P opened before the
+	// daemon skipped gamma).
+	h.state = stateSwitchProject
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, h.repoRoot)
+	require.Contains(t, rowByID(t, h.projectPickerOverlay.Projects()), gammaID,
+		"precondition: the picker holds gamma's session-only row")
+
+	// The daemon now skips gamma and drops its instance: the fresh snapshot
+	// carries only alpha's session, and gamma appears in the skip set. Without
+	// the preserving graft, the picker's rows are replaced wholesale and gamma
+	// vanishes; with it, gamma's last-known row survives, marked hidden.
+	h.updateOpenPickerSkipState(
+		[]session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		[]daemon.SkippedRepo{{RepoID: gammaID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+		nil)
+
+	pickerByRoot := map[string]overlay.Project{}
+	for _, p := range h.projectPickerOverlay.Projects() {
+		pickerByRoot[p.Root] = p
+	}
+	require.Contains(t, pickerByRoot, gammaRoot,
+		"a session-only repo the daemon skipped must stay in an open picker instead of vanishing")
+	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(gammaID),
+		"the preserved session-only row is marked skipped so it renders hidden and D is gated")
+	require.NotEmpty(t, h.projectPickerOverlay.SkippedRepoHint(gammaID),
+		"the preserved row carries the daemon's repair hint for the skip reason")
+}
+
+func rowByID(t *testing.T, rows []overlay.Project) map[string]overlay.Project {
+	t.Helper()
+	out := make(map[string]overlay.Project, len(rows))
+	for _, p := range rows {
+		out[p.RepoID] = p
+	}
+	return out
+}
