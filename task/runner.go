@@ -616,14 +616,6 @@ func WaitForReadyOn(ctx context.Context, target ReadinessTarget) error {
 	return waitForReadyOn(ctx, target, wallReadinessClock, false)
 }
 
-// WaitForReadyOnFreshRuntime is WaitForReadyOn for a wait running against a
-// pane the caller just launched: that pane can never carry the row's recorded
-// limit emission, so a lookalike banner there is a new wall, never residue —
-// the residue verdict is refused before the pins are even consulted (#6972).
-func WaitForReadyOnFreshRuntime(ctx context.Context, target ReadinessTarget) error {
-	return waitForReadyOn(ctx, target, wallReadinessClock, true)
-}
-
 func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readinessClock, freshRuntime bool) error {
 	if ctx == nil {
 		ctx = context.Background()
