@@ -307,6 +307,16 @@ func TestClaudeResetClauseEndsAtContinuationIndent(t *testing.T) {
 			wantReset: &nineFortyHere,
 			wantEv:    "resets 9:40am",
 		},
+		{
+			// #6975 review: the clause's lead grammar bounds the FRONT as
+			// well as the back — "at some point soon" ends the reset lead
+			// with no clock, so the second sentence's clock on the same
+			// indent is never this wall's deadline.
+			name: "a clock in later prose on the same indent is not the clause's",
+			content: "  ⎿  Claude usage limit reached. Your limit will reset at some point soon\n" +
+				"     Tip: meet Monday at 2pm (America/New_York)",
+			wantReset: nil,
+		},
 	}
 
 	det := NewLimitDetector(nil)

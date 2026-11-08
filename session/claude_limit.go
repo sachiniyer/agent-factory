@@ -92,8 +92,20 @@ func (i *Instance) ClaudeActiveLimitReset(now time.Time, banner string) (time.Ti
 		return time.Time{}, false
 	}
 	claim, ok := i.newestClaudeLimitClaim(configDir, dirs, convID, banner, now)
-	if !ok || claim.verdict != quota.ClaudeLimitParsed ||
-		claim.record.ResetsAt == nil || !claim.record.ResetsAt.After(now) {
+	if !ok || claim.verdict != quota.ClaudeLimitParsed || claim.record.ResetsAt == nil {
+		return time.Time{}, false
+	}
+	if !claim.record.ResetsAt.After(now) {
+		// The record's deadline is spent. When it is ALSO the deadline this
+		// row already recorded from it, the consult keeps answering it —
+		// the same-wall dedupe then leaves the stored instant alone instead
+		// of the pane's reset-less re-sight erasing it one tick before the
+		// auto-resume scheduler's grace can consume it (#6975 review). A
+		// spent record the row does not carry proves nothing: it may be an
+		// older wall's residue.
+		if stored, ok := i.LimitResetAt(); ok && stored.Equal(*claim.record.ResetsAt) {
+			return *claim.record.ResetsAt, true
+		}
 		return time.Time{}, false
 	}
 	return *claim.record.ResetsAt, true

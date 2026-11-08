@@ -386,6 +386,15 @@ var (
 	// weekday matches a leading weekday name for the claude weekly variant
 	// when it names a day rather than a date.
 	weekday = regexp.MustCompile(`(?i)\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b`)
+	// claudeResetLead matches the longest run of reset-clause lead grammar:
+	// "at"/"on"/"the"/"day", weekday and month names, day-of-month and year
+	// numbers, with comma/whitespace separators. Every token must terminate
+	// at a period (abbreviation), a separator, or the tail's end — that last
+	// constraint is what keeps \d{1,2} from matching the "9" of "9am" or the
+	// "20" of "2026"-adjacent digits. A token outside this grammar ends the
+	// clause's provable lead: whatever clock follows it belongs to a later
+	// sentence on the same indent, not to the reset clause (#6975 review).
+	claudeResetLead = regexp.MustCompile(`^(?i)(?:[\s,]*(?:(?:sun|mon|tue|wed|thu|fri|sat|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|at|on|the|day|\d{4}|\d{1,2}(?:st|nd|rd|th)?)(?:\.|[\s,]+|$))*`)
 
 	monthIndex = map[string]time.Month{
 		"jan": time.January, "feb": time.February, "mar": time.March,
@@ -530,6 +539,14 @@ func claudeResetTailEnd(tail string) int {
 	m := clockTime.FindStringIndex(tail)
 	if m == nil {
 		return len(tail)
+	}
+	if lead := claudeResetLead.FindString(tail); len(lead) < m[0] {
+		// The clock sits behind prose the reset grammar cannot own — a
+		// later sentence's "meet Monday at 2pm" riding the same indent
+		// after "reset at some point soon" ended the clause's lead without
+		// a clock. Bound where the grammar ends so the tail proves no
+		// reset rather than borrowing the prose's clock (#6975 review).
+		return len(lead)
 	}
 	end := m[1]
 	for {

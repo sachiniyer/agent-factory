@@ -176,6 +176,37 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 		require.False(t, ok, "the newest refusal says the wall already ended")
 	})
 
+	t.Run("a spent deadline the row already recorded keeps being answered", func(t *testing.T) {
+		// #6975 review: a reset-less banner ("Usage limit reached") gives
+		// the pane nothing to re-sight once the deadline passes — the
+		// consult stopping the instant resetsAt expires lets the degraded
+		// re-sight erase the stored deadline one tick before the
+		// scheduler's grace consumes it. When the stored deadline IS the
+		// freshest claim's instant, the record still proves it.
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, staleUnix))
+
+		// A row that parked on exactly the record's instant keeps it...
+		stale := time.Unix(staleUnix, 0)
+		require.True(t, inst.SetLimitReachedAtEpoch(stale, "", LimitBanner{}, inst.stateEpoch))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok, "the recorded deadline is still the record's instant")
+		require.True(t, resetAt.Equal(stale), "resetAt = %v, want %v", resetAt, stale)
+
+		// ...while a row parked on a DIFFERENT instant owns no such proof.
+		inst2, workDir2 := claudeLimitInstance(t, "")
+		require.True(t, inst2.SetLimitReachedAtEpoch(stale.Add(45*time.Minute), "", LimitBanner{}, inst2.stateEpoch))
+		configDir2 := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir2, workDir2, "6a5d0e5f-1111-2222-3333-444455556666",
+			claudeLimitRecord(t, recorded, staleUnix))
+		_, ok = inst2.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "a spent record matching no stored deadline supplies nothing")
+	})
+
 	t.Run("a refusal publishing no reset supplies nothing", func(t *testing.T) {
 		inst, workDir := claudeLimitInstance(t, "")
 		home := t.TempDir()
