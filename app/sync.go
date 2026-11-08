@@ -479,8 +479,20 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 		// one for the now-repaired repo, and the next handler would otherwise
 		// drain it onto a healthy project as a stale transient claiming its
 		// sessions are hidden (#4742 review).
+		outgoing := m.skippedRepoRetained
 		m.skippedRepoRetained = ""
 		m.pendingSkippedRepoNotice = ""
+		// If the skip's own repair-hint transient is still painted on the bar
+		// (consumeSkippedRepoNotice paints the full hint for three seconds
+		// before the standing notice takes over), retracting the condition
+		// must drop it too — otherwise a switch to a healthy project (or a
+		// repaired repo) within that window leaves the old "sessions are
+		// hidden" hint visibly painted until its timer expires. Only retract
+		// when the painted text IS the skip's hint, so an unrelated notice
+		// the bar is showing stays untouched (#4742 review).
+		if outgoing != "" {
+			m.errBox.RetractTransient(outgoing)
+		}
 		m.applyStandingNotice()
 		return true
 	}

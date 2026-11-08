@@ -64,6 +64,23 @@ func (e *ErrBox) SetNotice(err error) { e.set(err, false) }
 // than opening "Last notice" on the hint's own text (#5351 review).
 func (e *ErrBox) SetHint(err error) { e.err = err }
 
+// RetractTransient drops the painted notice when it matches the given text, for
+// a condition-owned transient (a skipped repo's repair hint) whose source just
+// became false. Unlike Expire it clears the bar immediately rather than waiting
+// for the timer, and unlike Clear it leaves the shared retained slot alone so an
+// unrelated notice stays reachable through `E details`. No-op when the bar is
+// showing something else or nothing at all, so a healthy-project switch or a
+// repaired repo retracts its own fading "sessions are hidden" hint without
+// touching an unrelated notice that happened to be up (#4742 review).
+func (e *ErrBox) RetractTransient(text string) {
+	if e.err == nil {
+		return
+	}
+	if sanitizeError(e.err.Error()) == sanitizeError(text) {
+		e.err = nil
+	}
+}
+
 // SetStanding shows a persistent one-line condition on the bar whenever no
 // notice is up, until it is set to "". Used for a state that is true now and
 // stays true (the daemon's web listener is unbound, #6386) rather than for

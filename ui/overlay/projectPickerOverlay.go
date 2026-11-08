@@ -256,16 +256,32 @@ func (p *ProjectPickerOverlay) SkippedRepoHint(repoID string) string {
 // form is active: those modes consume every key so D is unreachable, and
 // rebuilding the form's target mid-entry would disrupt the typing; the next
 // list-mode poll refreshes instead.
+//
+// The trailing "+ Add project…" row is a SENTINEL, not a numeric slot: when a
+// background refresh removes the highlighted project, retaining the stale
+// index would land the cursor on whichever unrelated project shifted into
+// that slot, and the next Enter or `D` would act on it. Likewise a cursor
+// parked on the add row must stay there when the list grows, instead of
+// silently sliding onto a newly appended project. Remember the add row
+// explicitly and, when a highlighted project disappears, park on the add row
+// rather than retaining the stale index (#4742 review).
 func (p *ProjectPickerOverlay) RefreshRows(projects []Project) {
 	if p.adding || p.rebinding {
 		return
 	}
+	addRow := p.addRowSelected()
 	var highlightedID, highlightedRoot string
-	if cur, ok := p.HighlightedProject(); ok {
-		highlightedID = cur.RepoID
-		highlightedRoot = cur.Root
+	if !addRow {
+		if cur, ok := p.HighlightedProject(); ok {
+			highlightedID = cur.RepoID
+			highlightedRoot = cur.Root
+		}
 	}
 	p.all = projects
+	if addRow {
+		p.selectedIdx = len(p.all)
+		return
+	}
 	for i, proj := range p.all {
 		if (highlightedID != "" && proj.RepoID == highlightedID) ||
 			(highlightedRoot != "" && proj.Root == highlightedRoot) {
@@ -273,10 +289,10 @@ func (p *ProjectPickerOverlay) RefreshRows(projects []Project) {
 			return
 		}
 	}
-	// len(p.all) is the trailing add-project row — still a valid cursor spot.
-	if p.selectedIdx > len(p.all) {
-		p.selectedIdx = len(p.all)
-	}
+	// The highlighted project disappeared — park on the neutral trailing
+	// add-project row instead of retaining the stale index and silently
+	// landing on whichever unrelated project shifted into that slot.
+	p.selectedIdx = len(p.all)
 }
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.

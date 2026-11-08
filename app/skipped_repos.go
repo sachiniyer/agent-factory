@@ -8,6 +8,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
 // This file is the TUI's half of the skipped-repos incompleteness channel the
@@ -241,6 +242,17 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 		return
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
+	// A degraded registry read omits registry-only projects from the fresh
+	// list; passing it to RefreshRows wholesale would drop them from the
+	// open picker until another poll succeeds, taking their switch/rebind
+	// actions with them. The Projects section handles the same condition by
+	// merging its previous registry-backed rows; mirror that here so Ctrl+P
+	// keeps the registered-but-sessionless projects through the degradation
+	// (#4742 review).
+	if registryDegraded {
+		old := registryBackedRows(m.projectPickerOverlay.Projects())
+		projects = overlay.MergePreservingSessionRows(old, projects, true)
+	}
 	m.projectPickerOverlay.RefreshRows(projects)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	skippedIDs := make([]string, 0, len(skipped))

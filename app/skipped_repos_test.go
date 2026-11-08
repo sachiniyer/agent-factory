@@ -3,6 +3,8 @@ package app
 import (
 	"context"
 	"errors"
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/charmbracelet/x/ansi"
@@ -13,6 +15,7 @@ import (
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/layout"
+	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
 // -- Helper function tests --
@@ -850,4 +853,120 @@ func TestRefreshSidebarProjectsFromSnapshot_MarksSkippedRepoHidden(t *testing.T)
 	h.projects.SetRect(layout.Rect{X: 0, Y: 0, W: 60, H: 8})
 	assert.NotContains(t, ansi.Strip(h.projects.String()), "· hidden",
 		"the section must not render the hidden marker once the repo is no longer skipped")
+}
+
+// TestApplySkippedRepo_ClearRetractsPaintedTransient pins the #4742 review
+// finding on the retraction path: when the skip's full repair-hint transient
+// has already been consumed onto the bar (consumeSkippedRepoNotice paints it
+// for three seconds before the standing notice takes over), clearing the skip
+// within that window must drop the painted transient too — otherwise a switch
+// to a healthy project (or a repaired repo) leaves the old "sessions are
+// hidden" hint visibly painted until its timer expires. The retraction must
+// not touch an unrelated notice the bar happens to be showing.
+func TestApplySkippedRepo_ClearRetractsPaintedTransient(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	// Fire the skip and drain its full repair-hint transient onto the bar —
+	// the bar now shows the skip's hint (consumeSkippedRepoNotice uses
+	// SetHint, so the retained slot is untouched).
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.NotEmpty(t, h.pendingSkippedRepoNotice)
+	cmd := h.consumeSkippedRepoNotice()
+	require.NotNil(t, cmd)
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, h.errBox.FullError(), corruptedRepoRepairHint,
+		"precondition: the skip's repair-hint transient is painted on the bar")
+	require.NotEmpty(t, h.errBox.FullError(), "precondition: a transient is on the bar")
+
+	// Within the three-second window the repo is repaired (or the user
+	// switches to a healthy project): clearing the skip must retract the
+	// painted transient so the bar stops advertising a condition that is
+	// no longer true.
+	h.applySkippedRepo(nil)
+	h.errBox.SetSize(200, 1)
+	assert.Empty(t, h.errBox.FullError(), "clearing the skip must drop its painted repair-hint transient")
+	assert.NotContains(t, ansi.Strip(h.errBox.String()), "hidden",
+		"the bar must not render the retracted skip condition")
+
+	// An unrelated notice on the bar survives a skip retraction: the skip's
+	// own transient was never painted onto the bar, so clearing the skip has
+	// nothing matching to retract and must leave the unrelated notice alone.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.NotEmpty(t, h.skippedRepoRetained, "precondition: the skip owns a retained hint")
+	h.setTransientNotice(errors.New("unrelated transient notice"))
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, ansi.Strip(h.errBox.String()), "unrelated transient notice")
+	h.applySkippedRepo(nil)
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, ansi.Strip(h.errBox.String()), "unrelated transient notice",
+		"an unrelated notice the bar is showing must survive a skip retraction")
+}
+
+// TestUpdateOpenPickerSkipState_DegradedRegistryPreservesRegistryRows pins the
+// #4742 review finding on the open-picker refresh: when a successful background
+// snapshot coincides with a degraded registry read, buildProjectListFrom omits
+// registry-only projects, but the picker must not lose them — Ctrl+P would
+// temporarily drop those projects and their switch/rebind actions until another
+// poll succeeds. The picker must merge its previous registry-backed rows (the
+// same preserving merge the Projects section takes) instead of replacing the
+// rows wholesale.
+func TestUpdateOpenPickerSkipState_DegradedRegistryPreservesRegistryRows(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	// Two registered git repos. alpha is the active project and has a live
+	// session; beta is registered but sessionless — the row only the registry
+	// vouches for, so a degraded registry read drops it from the fresh list.
+	alphaRoot := initTestGitRepo(t)
+	betaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(betaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	alphaSnapshot := []session.InstanceData{
+		{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}},
+	}
+
+	// Healthy tick: the registry reads, so both alpha (live session + active
+	// root) and beta (registry-only) appear, both carrying a RegistryID.
+	healthy, degraded := h.buildProjectListFrom(alphaSnapshot)
+	require.False(t, degraded, "precondition: the healthy registry read is not degraded")
+	byRoot := map[string]overlay.Project{}
+	for _, p := range healthy {
+		byRoot[p.Root] = p
+	}
+	require.Contains(t, byRoot, betaRoot, "precondition: the registered sessionless project appears on a healthy read")
+	require.NotEmpty(t, byRoot[betaRoot].RegistryID, "precondition: beta's row is registry-backed")
+
+	// Open the picker on the healthy rows (the state a Ctrl+P opened before the
+	// registry degraded).
+	h.state = stateSwitchProject
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay(healthy, h.repoRoot)
+	require.Len(t, h.projectPickerOverlay.Projects(), len(healthy), "precondition: the picker holds the healthy rows")
+
+	// Degrade the registry: a stray file makes the strict read fail, so
+	// buildProjectListFrom drops every registered-but-sessionless project.
+	dir, err := config.ProjectRegistryDir()
+	require.NoError(t, err)
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "stray"), []byte("not a record"), 0o644))
+	_, err = config.ListProjects()
+	require.Error(t, err, "fixture: the strict registry read must fail")
+
+	// Background poll lands a successful snapshot for alpha while the registry
+	// is degraded. Without the preserving merge, the picker's rows are replaced
+	// wholesale and beta vanishes; with it, beta's registry-backed row survives.
+	h.updateOpenPickerSkipState(alphaSnapshot, nil, nil)
+	pickerRows := h.projectPickerOverlay.Projects()
+	pickerByRoot := map[string]overlay.Project{}
+	for _, p := range pickerRows {
+		pickerByRoot[p.Root] = p
+	}
+	require.Contains(t, pickerByRoot, betaRoot,
+		"a degraded registry read must not drop a registered sessionless project from an open picker")
+	assert.NotEmpty(t, pickerByRoot[betaRoot].RegistryID,
+		"the preserved row keeps its registry identity through the degraded merge")
 }
