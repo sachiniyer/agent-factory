@@ -34,7 +34,7 @@ import (
 // session) once per second for as long as the session stayed parked.
 // Caller holds i.mu.
 func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool) {
-	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, evidence, wasParked, false, instanceNow().UTC())
+	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, evidence, wasParked, false, "", instanceNow().UTC())
 }
 
 // recordAccountLimitObservationAtLocked is recordAccountLimitObservationLocked
@@ -49,7 +49,15 @@ func (i *Instance) recordAccountLimitObservationLocked(agent, account string, re
 // because the later-only merge would otherwise pin a bound the record
 // disproved — and the row feeds account exclusion plus the postdate
 // boundary a retraction must beat (#6944 review).
-func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool, authoritative bool, sightedAt time.Time) {
+//
+// sameWallEvidence carries the provenance a timed-row correction needs: the
+// parked wall's own clause when the sighting IS that wall's re-read (its
+// banner is the parked banner — the caller proves it; a wider capture may
+// have enriched the clause's text, so the sighting's own evidence cannot be
+// the match), and "" when no such proof holds. A timed row matches it to be
+// corrected; "" never matches — an untimed row needs no provenance, it has
+// no instant to lower (#6975 review).
+func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool, authoritative bool, sameWallEvidence string, sightedAt time.Time) {
 	if agent == "" || account == "" {
 		return
 	}
@@ -101,12 +109,15 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		// still tightens the row to its own instant (#6959).
 		retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
 		if authoritative && (observation.ResetAt.IsZero() ||
-			(evidence != "" && observation.Evidence == evidence)) {
+			(sameWallEvidence != "" && observation.Evidence == sameWallEvidence)) {
 			// The record's instant corrects a bound in either direction
 			// ONLY when the row is provably the sighting's own wall: an
 			// adopted zero-kind row filed no instant to lower, and a timed
-			// row whose evidence matches the sighting's clause is the same
-			// wall's claim. A timed row carrying a DIFFERENT clause is a
+			// row carrying the parked wall's own clause — while the
+			// sighting re-reads that wall's banner — is that wall's claim.
+			// The row's stored clause, not the sighting's, is the match:
+			// a wider capture legitimately rewrites the clause text for
+			// the same wall. A timed row carrying a DIFFERENT clause is a
 			// distinct wall, and lowering it to the record's earlier
 			// instant would release the account while that wall still
 			// stands (#6975 review) — the stricter bound stands instead.

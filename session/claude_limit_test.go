@@ -416,7 +416,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 				Name: agentTabName, Kind: TabKindAgent,
 				Conversation: AgentConversationData{Agent: "claude", ID: ownID},
 			}}
-			resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your weekly limit")
 			require.True(t, ok)
 			require.True(t, resetAt.Equal(weeklyReset),
 				"resetAt = %v; the sibling's sooner %v must never win", resetAt, siblingReset)
@@ -442,6 +442,65 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 			require.False(t, ok)
 			_, ok = inst.ClaudeActiveLimitReset(now, "")
 			require.False(t, ok, "no conversation id and no banner: nothing can prove the wall")
+		})
+	})
+
+	t.Run("a known conversation's old record cannot override a different displayed limit", func(t *testing.T) {
+		// #6975 review (Codex): owning the file is not wall identity — the
+		// conversation rolled from a five-hour wall into a weekly one whose
+		// own refusal record is not yet readable. Its file's freshest claim
+		// is the OLD wall's still-future record, and letting it answer
+		// would resume the session on a wall it already passed. A record
+		// whose named limit contradicts the displayed banner's is skipped.
+		ownID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		fiveHourReset := now.Add(time.Hour) // the old wall — still in the future
+		weeklyBanner := "You've hit your weekly limit"
+
+		build := func(t *testing.T, record []byte) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			inst.Tabs = []*Tab{{
+				Name: agentTabName, Kind: TabKindAgent,
+				Conversation: AgentConversationData{Agent: "claude", ID: ownID},
+			}}
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, ownID, record)
+			return inst
+		}
+
+		t.Run("a text-named contradiction supplies nothing", func(t *testing.T) {
+			inst := build(t, claudeLimitRecord(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339), fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, weeklyBanner)
+			require.False(t, ok,
+				"the old five-hour record must not answer for the displayed weekly wall")
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			require.True(t, ok, "the same record answers a displayed five-hour wall")
+			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+
+		t.Run("a structural rateLimitType alone names the limit", func(t *testing.T) {
+			// The record's text names nothing; rateLimitType still carries
+			// the kind — the contradiction check reads either carrier.
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"Usage limit reached", "five_hour", fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, weeklyBanner)
+			require.False(t, ok,
+				"a record typed five_hour must not answer a displayed weekly wall")
+		})
+
+		t.Run("an unnamed side cannot contradict", func(t *testing.T) {
+			// A record carrying no kind still answers an unnamed banner —
+			// file ownership plus a fresh refusal is all the proof there
+			// is when nothing names the limit.
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"Usage limit reached", "", fiveHourReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "Usage limit reached")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(fiveHourReset))
 		})
 	})
 
@@ -648,6 +707,45 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 		require.Len(t, observations, 1)
 		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
 			"the earlier record for a different clause must not lower the later claim: got %v", observations[0].ResetAt)
+	})
+
+	t.Run("the same wall's enriched clause still corrects its timed row", func(t *testing.T) {
+		// #6975 review (Codex): a wider capture can expose the zone on the
+		// parked banner — the clause gains text while the wall and its
+		// banner stay the same. Keying the timed-row correction on
+		// identical evidence would reject it and keep the disproved pane
+		// bound excluding the account; the row's stored clause plus the
+		// banner anchor are the same-wall proof instead.
+		banner := LimitBanner{Prefix: "pane text above the banner\n⎿  ", Count: 1}
+		latePane := transcriptReset.Add(3 * time.Hour) // the 22:00 pane guess
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset),
+			"the live claim takes the record's instant: got %v", reset)
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must correct the parked wall's row, not retain the disproved pane bound: got %v",
+			observations[0].ResetAt)
+	})
+
+	t.Run("a different banner's record cannot correct the parked wall's row", func(t *testing.T) {
+		// The changed-evidence sighting anchored on a NEW banner is a
+		// different wall's claim — its record instant must not lower the
+		// row the parked wall filed even when it arrives earlier.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, "reset Monday at 9am",
+			LimitBanner{Prefix: "the weekly wall's context\n⎿  ", Count: 1}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(paneReset, "resets 9:40am",
+			LimitBanner{Prefix: "a newly printed wall's context\n⎿  ", Count: 1}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"a different wall's earlier record must not lower the parked wall's claim: got %v",
+			observations[0].ResetAt)
 	})
 
 	t.Run("a changed-evidence sighting still corrects the untimed row", func(t *testing.T) {

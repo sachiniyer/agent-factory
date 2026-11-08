@@ -179,7 +179,7 @@ func (i *Instance) setLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 					i.lastLimitWall.resetAt = resetAt
 					i.limitWallUnpersisted = true
 				}
-				i.recordAccountLimitObservationAtLocked(i.limitAgent, i.Account, resetAt, evidence, true, authoritative, instanceNow().UTC())
+				i.recordAccountLimitObservationAtLocked(i.limitAgent, i.Account, resetAt, evidence, true, authoritative, i.limitResetEvidence, instanceNow().UTC())
 				// The reset moved — the epoch tracks it like every other
 				// writer, or a stale AtEpoch observation stays eligible
 				// to clear the corrected park (#6944 review).
@@ -322,6 +322,16 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	resetAt, evidence, promptSent := i.originalLimitResetLocked(agent, resetAt, evidence, banner,
 		i.liveness == LiveLimitReached, false, time.Time{}, time.Time{})
 	lv, op, prevReset := i.lifecycleStateLocked()
+	// The provenance the ledger merge below needs: the sighting is the
+	// parked wall's own re-read — a wider capture re-exposing its clause —
+	// only when it anchors on the banner the park recorded; a banner the
+	// wall printed afterward is a different wall's sighting and must not
+	// correct that wall's row (#6975 review). Captured before the claim
+	// fields below move to the sighting's.
+	sameWallEvidence := ""
+	if i.liveness == LiveLimitReached && i.sameLiveLimitBannerLocked(banner) {
+		sameWallEvidence = i.limitResetEvidence
+	}
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.limitResetEvidence = evidence
@@ -337,7 +347,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	i.limitWallRuntimeGen = i.agentRuntimeGeneration
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, authoritative, instanceNow().UTC())
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, authoritative, sameWallEvidence, instanceNow().UTC())
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }

@@ -57,6 +57,10 @@ type ClaudeLimitRecord struct {
 	Text string
 	// SessionID is the conversation the record belongs to.
 	SessionID string
+	// RateLimitType is the wall kind the record names —
+	// apiErrorParams.rate_limit_info.rateLimitType ("five_hour",
+	// "seven_day", …) — "" when the record publishes none.
+	RateLimitType string
 }
 
 // ParseClaudeLimitRecordLine classifies one Claude transcript JSONL line
@@ -88,6 +92,13 @@ func ParseClaudeLimitRecordLine(line []byte) (ClaudeLimitVerdict, ClaudeLimitRec
 		out.SessionID = id
 	}
 	out.Text = claudeRecordText(rec["message"])
+	if params, isObj := rec["apiErrorParams"].(map[string]any); isObj {
+		if info, isObj := params["rate_limit_info"].(map[string]any); isObj {
+			// Optional metadata af does not interpret — an absent or
+			// non-string value reads as unnamed, never a malformed claim.
+			out.RateLimitType, _ = info["rateLimitType"].(string)
+		}
+	}
 
 	resetsAt, ok := claudeResetsAt(rec["apiErrorParams"], "rate_limit_info")
 	if !ok {

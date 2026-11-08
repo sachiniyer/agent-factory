@@ -184,7 +184,15 @@ func claudeLimitSnapshot() (handoff.Snapshot, error) {
 // it supplies nothing itself, but outranks a matching older claim rather
 // than letting it stand. A record stamped in the future cannot describe the
 // live wall and is skipped outright.
+//
+// File ownership is NOT wall identity either: the own file's freshest claim
+// can be an EARLIER wall's refusal — a still-future five-hour record left
+// behind when the conversation rolled into a weekly wall whose own record
+// is not yet readable (#6975 review). On either path a parsed claim whose
+// named limit (its rateLimitType, else its text) contradicts the displayed
+// banner's is skipped; an unnamed side cannot contradict.
 func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convID, banner string, now time.Time) (claudeLimitClaim, bool) {
+	bannerKind := claudeLimitKindOf(banner)
 	snap, snapErr := claudeLimitSnapshot()
 	if snapErr == nil && configDir != "" && snap.AccountUntrusted(configDir) {
 		return claudeLimitClaim{}, false
@@ -260,6 +268,15 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convI
 					// live wall — its claimed timestamp is not evidence
 					// (#6975 review).
 					continue
+				}
+				if claim.verdict == quota.ClaudeLimitParsed && bannerKind != "" {
+					if kind := claudeLimitRecordKind(claim.record); kind != "" && kind != bannerKind {
+						// The record provably names a different limit
+						// than the wall on screen — its refusal belongs
+						// to a wall this conversation already passed
+						// (#6975 review).
+						continue
+					}
 				}
 				if own == "" && claim.verdict == quota.ClaudeLimitParsed &&
 					!claudeLimitTextMatches(claim.record.Text, banner) {
@@ -357,6 +374,38 @@ func claudeLimitNormText(s string) string {
 // limit (#6975 review).
 func claudeLimitTextMatches(recordText, banner string) bool {
 	return strings.Contains(claudeLimitNormText(recordText), banner)
+}
+
+// claudeLimitKindOf names the limit a text advertises — Claude's display
+// language ("5-hour limit", "weekly limit") and its structural
+// rateLimitType spellings share the same vocabulary here so either side of
+// a contradiction check can come from either carrier. "" means the text
+// names no limit kind af recognizes: it cannot contradict anything.
+func claudeLimitKindOf(text string) string {
+	lower := strings.ToLower(text)
+	switch {
+	case strings.Contains(lower, "5-hour"), strings.Contains(lower, "5 hour"),
+		strings.Contains(lower, "5_hour"), strings.Contains(lower, "five-hour"),
+		strings.Contains(lower, "five hour"), strings.Contains(lower, "five_hour"):
+		return "five_hour"
+	case strings.Contains(lower, "week"), strings.Contains(lower, "7-day"),
+		strings.Contains(lower, "7 day"), strings.Contains(lower, "7_day"),
+		strings.Contains(lower, "seven-day"), strings.Contains(lower, "seven day"),
+		strings.Contains(lower, "seven_day"):
+		return "seven_day"
+	}
+	return ""
+}
+
+// claudeLimitRecordKind is the limit kind a refusal record names: its
+// structural rateLimitType when af recognizes it, else its display text's —
+// the refusal record and the pane banner render the same wall's language
+// (#6975 review).
+func claudeLimitRecordKind(record quota.ClaudeLimitRecord) string {
+	if kind := claudeLimitKindOf(record.RateLimitType); kind != "" {
+		return kind
+	}
+	return claudeLimitKindOf(record.Text)
 }
 
 // claudeClaimTimestamp extracts a transcript line's own timestamp to order a
