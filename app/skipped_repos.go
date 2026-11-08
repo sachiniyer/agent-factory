@@ -117,8 +117,11 @@ func skippedRepoNotice(s *daemon.SkippedRepo) error {
 }
 
 // skippedRepoNoticeChanged reports whether two skip entries differ in a way that
-// should re-fire the transient notice: a nil-to-non-nil transition, a reason
-// change, or a FailedRows change. A same-entry poll does not re-fire.
+// should re-fire the transient notice: a nil-to-non-nil transition, a RepoID
+// change, a reason change, or a FailedRows change. A same-entry poll does not
+// re-fire. The RepoID is part of the comparison so switching directly between
+// two skipped projects (same reason/FailedRows) still re-fires for the incoming
+// project instead of retaining the outgoing one's entry.
 func skippedRepoNoticeChanged(prev, cur *daemon.SkippedRepo) bool {
 	if prev == nil && cur == nil {
 		return false
@@ -126,7 +129,7 @@ func skippedRepoNoticeChanged(prev, cur *daemon.SkippedRepo) bool {
 	if prev == nil || cur == nil {
 		return true
 	}
-	return prev.Reason != cur.Reason || prev.FailedRows != cur.FailedRows
+	return prev.RepoID != cur.RepoID || prev.Reason != cur.Reason || prev.FailedRows != cur.FailedRows
 }
 
 // consumeSkippedRepoNotice drains a skip-state transition's pending repair-hint

@@ -139,6 +139,11 @@ func TestSkippedRepoNoticeChanged(t *testing.T) {
 		cur := &daemon.SkippedRepo{RepoID: "a", Reason: "rows-failed-to-load", FailedRows: 2}
 		assert.True(t, skippedRepoNoticeChanged(prev, cur))
 	})
+	t.Run("repo id change re-fires", func(t *testing.T) {
+		prev := &daemon.SkippedRepo{RepoID: "a", Reason: "corrupted", FailedRows: 0}
+		cur := &daemon.SkippedRepo{RepoID: "b", Reason: "corrupted", FailedRows: 0}
+		assert.True(t, skippedRepoNoticeChanged(prev, cur), "switching between two skipped projects must re-fire")
+	})
 }
 
 // -- Cold start path tests --
