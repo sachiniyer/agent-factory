@@ -5,10 +5,12 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
 	"net/url"
 	"os"
 	"strconv"
+	"strings"
 	"sync"
 	"time"
 
@@ -509,10 +511,35 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 	}
 }
 
-// keepalivePTY pings the subscriber every wsKeepaliveInterval; a missed pong
-// within the same interval drops this (dead) subscriber. Dropping never touches
-// the PTY/session or other subscribers.
+// keepalivePTY pings the subscriber every wsKeepaliveInterval and drops it only
+// when the peer has genuinely STOPPED RESPONDING — a ping that was written but
+// never answered with a pong within the interval — or when the connection is
+// closed. Dropping never touches the PTY/session or other subscribers.
+//
+// It must NOT drop a subscriber merely because the ping's WRITE failed. The
+// pinned github.com/coder/websocket v1.8.15 wraps every Conn.Ping call's context
+// with a hidden 5s write-path deadline and must acquire the same write mutex a
+// data-frame Write holds for its whole duration; a single subscriber frame can
+// be up to the full 256KB ring (session/ptybroker_sub.go delivers a lagging
+// subscriber's cursor→head span as ONE event), so a slow-but-healthy subscriber
+// that is reading every byte can still hold that mutex for 5-10s. A ping issued
+// during such a write fails with "failed to acquire lock: context deadline
+// exceeded" even though the peer is alive — treating that as "dead" (the
+// pre-fix behavior) disconnected exactly the slow-but-healthy clients the
+// keepalive is documented to keep alive, churning them through reconnect +
+// backlog replay. So a ping WRITE failure is retried on the next tick.
+//
+// A truly wedged client that has stopped reading is dropped by the writer
+// goroutine's wsWriteTimeout on the next data frame, and a broken transport is
+// torn down by the reader goroutine; retrying write-path failures is therefore
+// bounded by those paths, not by the keepalive.
 func keepalivePTY(ctx context.Context, conn *websocket.Conn) {
+	keepaliveLoop(ctx, conn.Ping)
+}
+
+// keepaliveLoop is keepalivePTY with an injectable ping function so the
+// drop-vs-retry decision is unit-testable without a live *websocket.Conn.
+func keepaliveLoop(ctx context.Context, ping func(context.Context) error) {
 	ticker := time.NewTicker(wsKeepaliveInterval)
 	defer ticker.Stop()
 	for {
@@ -521,13 +548,59 @@ func keepalivePTY(ctx context.Context, conn *websocket.Conn) {
 			return
 		case <-ticker.C:
 			pctx, pcancel := context.WithTimeout(context.Background(), wsKeepaliveInterval)
-			err := conn.Ping(pctx)
+			err := ping(pctx)
 			pcancel()
-			if err != nil {
+			switch classifyPingError(err) {
+			case keepaliveContinue:
+			case keepaliveDrop:
 				return
+			case keepaliveRetry:
+				// Write-path failure (e.g. the library's hidden 5s write-lock
+				// timeout contending with a slow data-frame write): the peer
+				// may still be alive and reading, so try again on the next
+				// tick instead of dropping. The writer's wsWriteTimeout drops
+				// a wedged client that has actually stopped reading.
 			}
 		}
 	}
+}
+
+// keepaliveDecision is the outcome of classifying one Conn.Ping result.
+type keepaliveDecision int
+
+const (
+	keepaliveContinue keepaliveDecision = iota // pong arrived; subscriber is alive
+	keepaliveDrop                              // peer stopped responding (missed pong) or the connection is closed
+	keepaliveRetry                             // ping WRITE failed (write-lock contention/timeout); the peer may still be live
+)
+
+// classifyPingError distinguishes a dead peer from a ping whose WRITE failed.
+//
+// coder/websocket v1.8.15's Conn.Ping routes errors through two paths:
+//   - the ping was written but no pong arrived before the caller's context
+//     expired → "failed to wait for pong: ...". Only THIS proves the peer
+//     stopped responding; it is the documented "dead subscriber" signal.
+//   - the ping's WRITE failed before it ever left the process → "failed to
+//     write control frame opPing: failed to acquire lock: ..." when the
+//     connection's write mutex is held past the library's hidden 5s cap by a
+//     slow data-frame Write. The peer may still be alive and reading, so this
+//     must NOT drop.
+//
+// A closed connection (net.ErrClosed, surfaced by either path once the library
+// has torn the transport down) is a definitive "gone" → drop. The pong-wait
+// failure is detected by message because coder/websocket does not export a
+// typed error for it (v1.8.15); the string is stable in the pinned version.
+func classifyPingError(err error) keepaliveDecision {
+	if err == nil {
+		return keepaliveContinue
+	}
+	if errors.Is(err, net.ErrClosed) {
+		return keepaliveDrop
+	}
+	if strings.Contains(err.Error(), "failed to wait for pong") {
+		return keepaliveDrop
+	}
+	return keepaliveRetry
 }
 
 // streamInfoResponse tells a client WHERE a session's PTY stream is reachable —
