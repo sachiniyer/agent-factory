@@ -217,12 +217,16 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// This off-loop fetch can take up to rebindConflictRefreshTimeout (10s) to
 	// answer; a regular background poll may apply a NEWER cross-repo snapshot
 	// — and thus a newer skip set — while it is in flight. If so, this reply's
-	// skip set is stale: applying it would replace sidebarProjectsSkipped with
-	// the older set and, if the daemon began skipping a repo between the two
-	// reads, briefly clear that repo's Hidden gate and expose stale counts
-	// until another poll lands. Retain the sidebar's current skip set and
-	// hints instead, so the newer poll's hidden markers survive (#4742
-	// review). The conflict's fresh rows/counts still apply via the merge.
+	// skip set AND rows are stale: applying them would replace
+	// sidebarProjectsSkipped with the older set and, if the daemon began
+	// skipping a repo between the two reads, briefly clear that repo's Hidden
+	// gate and expose stale counts until another poll lands; and it would also
+	// replace the Projects section's rows with the older conflict fresh, so a
+	// newer poll that observed a newly created session regresses to a zero
+	// count whose D path can build an inaccurate "no live sessions"
+	// confirmation. Retain the sidebar's current rows, skip set, and hints
+	// instead, so the newer poll's rows and hidden markers survive — the same
+	// retention the picker path below applies (#4742 review).
 	staleSkip := msg.fetchErr == nil && m.crossRepoSnapshotSeq > msg.snapshotSeq
 	var skipSet map[string]bool
 	var hintSet map[string]string
@@ -233,7 +237,9 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		skipSet = skippedRepoIDSet(skipped)
 		hintSet = skippedRepoHintSet(skipped)
 	}
-	m.applySidebarProjects(fresh, degraded, skipSet, hintSet, msg.fetchErr)
+	if !staleSkip {
+		m.applySidebarProjects(fresh, degraded, skipSet, hintSet, msg.fetchErr)
+	}
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
@@ -336,6 +342,17 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		merged := overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true)
 		if len(skippedIDSet) > 0 {
 			merged = preserveSkippedPickerRows(merged, m.projectPickerOverlay.Projects(), skippedIDSet)
+			// A skipped repo the conflict snapshot first discovered this reply,
+			// that has no registry/root_agents/active row and no cached picker
+			// row to graft (preserveSkippedPickerRows only grafts old rows),
+			// would still be absent from the rebuilt picker even though the
+			// sidebar synthesizes it from the same snapshot — and background
+			// refreshes are deferred while the rebind form stays active, so the
+			// row would not appear until the form closes. Synthesize an
+			// ID-level degraded row for any skipped ID the picker still does not
+			// represent, mirroring updateOpenPickerSkipState and the sidebar
+			// (#4742 review).
+			merged = ensureSkippedRows(merged, skippedIDSet)
 		}
 		m.projectPickerOverlay.SetRebindConflict(text, merged)
 		return m, nil
@@ -353,6 +370,16 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	if staleSkip {
 		m.projectPickerOverlay.SetRebindConflict(text, m.projectPickerOverlay.Projects())
 		return m, nil
+	}
+	if len(skippedIDSet) > 0 {
+		// Synthesize an ID-level degraded row for any skipped repo this conflict
+		// snapshot first discovered that has no registry/root_agents/active row
+		// and no cached picker row to graft — preserveSkippedPickerRows above
+		// only grafts old rows, so without this the picker would install the
+		// skip ID but no visible row, and background refreshes are deferred
+		// while the rebind form stays active. Mirrors updateOpenPickerSkipState
+		// and the sidebar (#4742 review).
+		fresh = ensureSkippedRows(fresh, skippedIDSet)
 	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)
 	return m, nil

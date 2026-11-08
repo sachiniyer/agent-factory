@@ -270,17 +270,16 @@ func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []
 	// closes (#4742 review).
 	if m.projectPickerOverlay.FormActive() {
 		// Defer the full update to the next poll after the form closes —
-		// BUT a poll that newly reports a skipped repo or a failed fetch
-		// would otherwise leave the picker with SnapshotDegraded == false
-		// and no skip ID for the new condition, so the user could close the
-		// form and press D against the stale counts (deletion enabled on
-		// counts the form-suppressed refresh never installed) before the
-		// next poll lands. Set a conservative degraded guard now so D stays
-		// disabled until a post-form poll installs fresh counts and skip
-		// IDs; the next poll restores the precise flag (#4742 review).
-		if fetchErr != nil || len(skipped) > 0 {
-			m.projectPickerOverlay.SetSnapshotDegraded(true)
-		}
+		// BUT the rows stay stale for as long as the form is open, so any
+		// poll (successful or failed, skip-bearing or not) that suppresses the
+		// row refresh must leave SnapshotDegraded set: otherwise a successful
+		// poll with no skipped repos leaves the guard false, and if another
+		// client created sessions after the form opened the user can press Esc
+		// and immediately press D before the next poll, producing deletion
+		// consent from the stale zero count. Set the conservative guard on
+		// every form-suppressed refresh; the next post-form poll restores the
+		// precise flag (#4742 review).
+		m.projectPickerOverlay.SetSnapshotDegraded(true)
 		return
 	}
 	m.projectPickerOverlay.SetSnapshotDegraded(fetchErr != nil)

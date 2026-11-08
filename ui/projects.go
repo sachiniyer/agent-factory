@@ -125,11 +125,17 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 	changed := !reflect.DeepEqual(p.projects, projects)
 
 	// Remember which project the cursor pointed at (by root), plus its old row,
-	// before the swap.
+	// before the swap. A synthesized skipped row (#4742) carries only a RepoID
+	// and an empty Root, so the root match below would miss it and the cursor
+	// would fall back to the numeric index — sliding onto an unrelated healthy
+	// row when a poll inserts, removes, or reorders another project. Track
+	// RepoID too so a synthesized row keeps a stable selection identity.
 	oldIndex := p.selected
 	var selectedRoot string
+	var selectedRepoID string
 	if oldIndex >= 0 && oldIndex < len(p.projects) {
 		selectedRoot = p.projects[oldIndex].Root
+		selectedRepoID = p.projects[oldIndex].RepoID
 	}
 
 	p.projects = projects
@@ -141,6 +147,18 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 	if selectedRoot != "" {
 		for i, proj := range projects {
 			if proj.Root == selectedRoot {
+				p.selected = i
+				break
+			}
+		}
+	}
+	if p.selected < 0 && selectedRepoID != "" {
+		// The selected row had no Root (a synthesized skipped row): re-locate
+		// it by RepoID so a refresh that reorders the list keeps the cursor on
+		// the same skipped repo instead of sliding onto a neighbor (#4742
+		// review).
+		for i, proj := range projects {
+			if proj.RepoID == selectedRepoID {
 				p.selected = i
 				break
 			}
