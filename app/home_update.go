@@ -124,6 +124,14 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
 		cmds := []tea.Cmd{tickRefreshExternalCmd}
+		// Drain a skip-state transition's full repair hint as a transient notice
+		// so `E details` can open it (#4742). The standing notice on the bar
+		// already names the condition; this sets the retained slot the details
+		// overlay reads. Queued by applySkippedRepo (a nil-to-non-nil or reason
+		// change), not on every poll, so the 750ms cadence never churns the bar.
+		if cmd := m.consumeSkippedRepoNotice(); cmd != nil {
+			cmds = append(cmds, cmd)
+		}
 		// A save since the last poll dropped a draft whose task was deleted;
 		// say so once (#4798). Do not consume the notice while the recovery
 		// screen shadows the notice bar: the save that drops a draft can

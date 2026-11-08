@@ -115,8 +115,8 @@ func armDeleteProjectDialog(t *testing.T, data []session.InstanceData) (*home, s
 func armDeleteProjectDialogAt(t *testing.T, data []session.InstanceData, w, hgt int) (*home, string) {
 	t.Helper()
 	h := newTestHome(t)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return data, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return data, nil, nil
 	}))
 	resizeHome(h, w, hgt)
 
@@ -382,8 +382,8 @@ func TestDeleteActiveProjectLeavesStaleScopeAndZombieRow(t *testing.T) {
 	// One live session for the active project, pointing its identity at the
 	// active root so the live-session row merges with the line-288 pre-seed.
 	live := []session.InstanceData{deleteProjectSession("alpha", false)}
-	restoreFetcher := SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return live, nil
+	restoreFetcher := SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return live, nil, nil
 	})
 	t.Cleanup(restoreFetcher)
 
@@ -420,7 +420,7 @@ func TestDeleteActiveProjectLeavesStaleScopeAndZombieRow(t *testing.T) {
 	// remain, which buildProjectListFrom skips (IsArchivedData, line 148). The
 	// registry row is gone. The only remaining source for the repoID is the
 	// line-288 active pre-seed.
-	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) { return nil, nil, nil })
 
 	model, _ = h.handleProjectDeleted(done)
 	h = model.(*home)
@@ -462,8 +462,8 @@ func TestDeleteActiveProjectClosesOpenPanes(t *testing.T) {
 	h.repoRoot = deleteProjectTestRoot
 	h.repoID = repoID
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil, nil
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()
@@ -489,7 +489,7 @@ func TestDeleteActiveProjectClosesOpenPanes(t *testing.T) {
 	t.Cleanup(func() { deleteProjectThroughDaemon = prev })
 	// Post-delete: the daemon archived the project's sessions, so the snapshot
 	// the next refreshSidebarProjects reads carries nothing for this repoID.
-	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) { return nil, nil, nil })
 
 	done := projectDeletedMsg{root: deleteProjectTestRoot, repoID: repoID, name: "acme", archived: 1}
 	model, _ := h.handleProjectDeleted(done)
@@ -527,8 +527,8 @@ func TestDeleteActiveProjectFromSidebarRescopes(t *testing.T) {
 			RepoPath: decoyRoot, WorktreePath: decoyRoot, SessionName: "decoy",
 		},
 	}
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{deleteProjectSession("alpha", false), decoySession}, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false), decoySession}, nil, nil
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()
@@ -562,8 +562,8 @@ func TestDeleteActiveProjectFromSidebarRescopes(t *testing.T) {
 	// Post-delete snapshot: the daemon archived the active project's sessions;
 	// the decoy's session survives, so the section still holds the decoy row —
 	// and the re-scope must have removed the active row, not the whole section.
-	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{decoySession}, nil
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{decoySession}, nil, nil
 	})
 
 	// `y` confirms; the overlay forwards startDeleteProjectMsg into the loop.
@@ -610,7 +610,7 @@ func TestDeleteNonActiveProjectLeavesActiveScopeIntact(t *testing.T) {
 
 	deletedRoot := "/repos/to-delete"
 	deletedID := config.RepoIDFromRoot(deletedRoot)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 		return []session.InstanceData{{
 			Title: "beta",
 			Worktree: session.GitWorktreeData{
@@ -618,7 +618,7 @@ func TestDeleteNonActiveProjectLeavesActiveScopeIntact(t *testing.T) {
 				WorktreePath: deletedRoot,
 				SessionName:  "beta",
 			},
-		}}, nil
+		}}, nil, nil
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()
@@ -638,7 +638,7 @@ func TestDeleteNonActiveProjectLeavesActiveScopeIntact(t *testing.T) {
 	t.Cleanup(func() { deleteProjectThroughDaemon = prev })
 	// Post-delete: the daemon archived the to-delete project's sessions, so the
 	// snapshot no longer carries it; the active project's pre-seed is unaffected.
-	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) { return nil, nil, nil })
 
 	done := projectDeletedMsg{root: deletedRoot, repoID: deletedID, name: "to-delete", archived: 1}
 	model, _ := h.handleProjectDeleted(done)
@@ -679,8 +679,8 @@ func TestDeleteActiveProjectReScopesOnCommittedWarning(t *testing.T) {
 	h.repoRoot = deleteProjectTestRoot
 	h.repoID = repoID
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil, nil
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()
@@ -697,7 +697,7 @@ func TestDeleteActiveProjectReScopesOnCommittedWarning(t *testing.T) {
 	// longer carries it; the registry entry may or may not be gone (the
 	// committed warning's whole point is that the non-transactional follow-up
 	// failed), but the re-scope fires identically either way.
-	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) { return nil, nil })
+	SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) { return nil, nil, nil })
 
 	startMsg := startDeleteProjectMsg{root: deleteProjectTestRoot, repoID: repoID, name: "acme"}
 	done, ok := h.deleteProjectCmd(startMsg)().(projectDeletedMsg)
@@ -747,8 +747,8 @@ func armDeleteProjectDialogFor(t *testing.T) *home {
 	h.repoRoot = deleteProjectTestRoot
 	h.repoID = repoID
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, errors.New("daemon unavailable")
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, errors.New("daemon unavailable")
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()
@@ -833,8 +833,8 @@ func TestDeleteProjectPickerProceedsWhenSnapshotFetchSucceeds(t *testing.T) {
 
 	// Healthy fetch: one ordinary session on the active root — the case the
 	// consent copy MUST print "1 session archived — restorable" for.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false)}, nil, nil
 	}))
 	resizeHome(h, 120, 45)
 	h.refreshSidebarProjects()

@@ -167,8 +167,8 @@ func TestProjectsSection_SnapshotRefreshUpdatesRowsLive(t *testing.T) {
 	h := newTestHome(t)
 	// The pane's rows come from the poll's carried all-repos data, not this
 	// fetcher — keep it inert so a stray call can't interfere.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, nil
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
 	h.repoRoot = "/repos/active"

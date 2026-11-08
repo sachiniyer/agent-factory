@@ -90,7 +90,7 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 	// its expiry lands in the same snapshotDegraded path as any failed fetch.
 	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
 	defer cancel()
-	data, err := allReposSnapshotFetcher(ctx)
+	data, skipped, err := allReposSnapshotFetcher(ctx)
 	snapshotDegraded := false
 	if err != nil {
 		if ctx.Err() != nil {
@@ -99,6 +99,14 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil
+	}
+	// A skipped repo's zero count is incomplete, not "no sessions" (#4742): the
+	// daemon dropped it at startup and its sessions are hidden. Marking the
+	// picker degraded gates the destructive D path on the same evidence the
+	// CLI's refusal uses — a fetch that answered but whose counts are not
+	// trustworthy for a project the daemon could not load.
+	if len(skipped) > 0 {
+		snapshotDegraded = true
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
 	return projects, registryDegraded, snapshotDegraded
@@ -709,8 +717,10 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// fetch failure (a wedged or unreachable daemon, common against a remote
 	// target) must abort here, leaving the current project exactly as it was,
 	// rather than stranding the TUI on the new repoID with an empty sidebar
-	// (#1788).
-	data, err := m.fetchColdStartSnapshot(repo.ID)
+	// (#1788). The skip set rides the same fetch so a project the daemon skipped
+	// at startup (#4742) raises its standing notice on the switch, not a clean
+	// empty sidebar.
+	data, skipped, err := m.fetchColdStartSnapshot(repo.ID)
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
 	}
@@ -801,6 +811,11 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// arrive on this snapshot too. Materializing cannot fail as a whole: an
 	// unrestorable record is skipped, so the switch is committed from here on.
 	m.materializeSnapshot(data)
+	// Surface the skipped-repo incompleteness channel for the incoming project
+	// (#4742): a repo the daemon dropped at startup must not cold-start the
+	// switch as a clean empty sidebar. applySkippedRepo raises the standing
+	// notice and queues the full repair hint for `E details`.
+	m.applySkippedRepo(skippedRepoForRepoID(skipped, repo.ID))
 
 	if tasks, err := m.activeTasks(repo.Root, repo.ID); err != nil {
 		log.WarningLog.Printf("switch project: failed to load tasks for %s: %v", repo.Root, err)

@@ -215,8 +215,8 @@ func TestFetchSnapshotCmdUsesKnownRepoIDForTaskScope(t *testing.T) {
 	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
 		return daemon.SnapshotResponse{}, nil
 	}
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, nil
 	}))
 
 	binDir := t.TempDir()

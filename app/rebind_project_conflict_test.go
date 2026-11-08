@@ -14,6 +14,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
@@ -164,9 +165,9 @@ func TestRebindConflictRefreshRunsOffTheEventLoop(t *testing.T) {
 	stubRebindCAS(t)
 
 	fetched := make(chan struct{}, 1)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 		fetched <- struct{}{}
-		return nil, errors.New("daemon snapshot unavailable")
+		return nil, nil, errors.New("daemon snapshot unavailable")
 	}))
 
 	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
@@ -224,8 +225,8 @@ func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	require.NoError(t, err)
 	stubRebindCAS(t)
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, errors.New("daemon snapshot unavailable")
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, errors.New("daemon snapshot unavailable")
 	}))
 
 	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
@@ -278,9 +279,9 @@ func TestRebindConflictRefreshTimeoutReArmsTheForm(t *testing.T) {
 	rebindConflictRefreshTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { rebindConflictRefreshTimeout = old })
 
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(ctx context.Context) ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(ctx context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 		<-ctx.Done() // the daemon accepted and never answers; only the deadline frees the read
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}))
 
 	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
@@ -346,8 +347,8 @@ func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
 	live := session.InstanceData{Title: "live", CreatedAt: time.Now()}
 	live.Path = liveRepo
 	live.Worktree.RepoPath = liveRepo
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return []session.InstanceData{live}, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{live}, nil, nil
 	}))
 	dir, err := config.ProjectRegistryDir()
 	require.NoError(t, err)
@@ -407,8 +408,8 @@ func TestRebindConflictRefreshCarriesSnapshotHealthToTheDeleteGate(t *testing.T)
 			_, err := config.RebindProject(id, initTestGitRepo(t)) // another client, meanwhile
 			require.NoError(t, err)
 			stubRebindCAS(t)
-			t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-				return nil, tc.fetchErr
+			t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+				return nil, nil, tc.fetchErr
 			}))
 
 			_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())

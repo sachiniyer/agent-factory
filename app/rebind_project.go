@@ -172,7 +172,7 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
-		data, err := fetch(ctx)
+		data, _, err := fetch(ctx)
 		if err != nil && ctx.Err() != nil {
 			err = fmt.Errorf(
 				"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",

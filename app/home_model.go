@@ -27,6 +27,19 @@ type home struct {
 	snapshotFailureSince *time.Time
 	snapshotClock        func() time.Time // nil uses time.Now; injected by snapshot recovery tests.
 	ctx                  context.Context
+	// skippedRepo is the current repo's entry in the daemon's startup skip set
+	// (#4742), or nil when the repo is not skipped. applySkippedRepo updates it
+	// on each poll and raises a standing notice when non-nil so the operator can
+	// tell "no sessions" from "sessions are hidden" — the same incompleteness
+	// channel the CLI's list/get/whoami refuse on and the web shows a persistent
+	// notice for (#5413). A nil-to-non-nil or reason change queues a pending
+	// transient notice (pendingSkippedRepoNotice) with the full repair hint.
+	skippedRepo *daemon.SkippedRepo
+	// pendingSkippedRepoNotice is a one-shot repair-hint message a skip-state
+	// transition queued for the next frame that can show it (the snapshotFetchedMsg
+	// handler drains it as a tea.Cmd so `E details` can open the full hint). The
+	// standing notice takes over after the transient fades.
+	pendingSkippedRepoNotice string
 
 	// -- Storage and Configuration --
 

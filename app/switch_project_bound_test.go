@@ -7,6 +7,7 @@ import (
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -21,9 +22,9 @@ func TestProjectListSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 	oldTimeout := projectSnapshotFetchTimeout
 	projectSnapshotFetchTimeout = 50 * time.Millisecond
 	t.Cleanup(func() { projectSnapshotFetchTimeout = oldTimeout })
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(ctx context.Context) ([]session.InstanceData, error) {
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(ctx context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 		<-ctx.Done()
-		return nil, ctx.Err()
+		return nil, nil, ctx.Err()
 	}))
 
 	type result struct{ degraded bool }

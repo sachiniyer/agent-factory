@@ -100,8 +100,8 @@ func newTestHome(t *testing.T) *home {
 	// default reaches EnsureDaemon, so close this seam even when polling is
 	// incidental. An error preserves rows a test preloaded; an empty success
 	// would reconcile them away. Tests needing fresh rows override this seam.
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, errTestFetcherUnstubbed
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, errTestFetcherUnstubbed
 	}))
 
 	// The live-termpane bind would dial a real WS PTY stream (#1592 PR6). Default

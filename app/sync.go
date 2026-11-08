@@ -53,6 +53,16 @@ type snapshotFetchedMsg struct {
 	// it is a field of the one authoritative Snapshot response, not a separate
 	// subsystem; handleSnapshot mirrors it into the alarm banner state.
 	alarms []daemon.DeliveryAlarm
+	// skippedRepos carries the daemon's startup-skipped repo set for this scope
+	// (#4742): repos whose instances.json was corrupted, unreadable, written by a
+	// newer schema, or had rows that fail to load, so the daemon dropped them at
+	// startup and the snapshot's Instances list is incomplete. handleSnapshot
+	// raises a standing notice when the set names m.repoID so the TUI never
+	// presents the partial list as complete — the same incompleteness channel the
+	// CLI's list/get/whoami refuse on and the web shows a persistent notice for
+	// (#5413). Routed the same way DeliveryAlarms travels: a field of the one
+	// authoritative Snapshot response, mirrored into operator-facing state.
+	skippedRepos []daemon.SkippedRepo
 	// allRepos is the daemon's cross-repo session list (RepoID:"") fetched on the
 	// same poll, off-loop, so the always-visible bottom Projects section can
 	// refresh its per-repo counts live when sessions change in ANOTHER repo
@@ -137,10 +147,15 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		allReposData, allReposErr := allRepos(context.Background())
+		// The cross-repo skip set is consumed by the project picker's own fetch
+		// (buildProjectListWithSnapshotStatus), not this poll, so it is discarded
+		// here — the repo-scoped skip set (resp.SkippedRepos) is what the
+		// handleSnapshot notice reads.
+		allReposData, _, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
+			skippedRepos: resp.SkippedRepos,
+			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposErr: allReposErr,
 		}
 	}
@@ -166,13 +181,17 @@ var coldStartWarmupWait = 2 * time.Minute
 // never aborting the whole cold start. Returns an error only on a hard
 // (non-warming) daemon failure. Startup renders recovery and keeps normal
 // snapshot polling alive; unavailable data is never presented as an empty list.
+// When the daemon skipped this repo at startup (#4742), a standing notice is
+// raised so the operator can tell "no sessions" from "sessions are hidden" —
+// the same incompleteness channel the CLI and web surface.
 func (m *home) coldStartFromSnapshot() error {
-	data, err := m.fetchColdStartSnapshot(m.repoID)
+	data, skipped, err := m.fetchColdStartSnapshot(m.repoID)
 	m.snapshotUnavailable = err != nil
 	if err != nil {
 		return err
 	}
 	m.materializeSnapshot(data)
+	m.applySkippedRepo(skippedRepoForRepoID(skipped, m.repoID))
 	return nil
 }
 
@@ -279,16 +298,19 @@ func buildSnapshotInstances(data []session.InstanceData, workers int) []*session
 // post-#782 the daemon is always-on, so there is no degraded standalone path.
 // The repoID is passed explicitly rather than read from m.repoID so switchProject
 // can fetch the INCOMING project's snapshot before it re-scopes the model (#1788).
-func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, error) {
+// Returns the skip set alongside the instances so the caller can raise the
+// skipped-repo notice (#4742) — a repo the daemon dropped at startup cold-starts
+// as a clean empty sidebar without it.
+func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
 		resp, err := m.snapshotFetcher(repoID)
 		if err == nil {
-			return resp.Instances, nil
+			return resp.Instances, resp.SkippedRepos, nil
 		}
 		if !daemon.IsDaemonStartingErr(err) {
-			return nil, err
+			return nil, nil, err
 		}
 		if !announced {
 			// Pre-TUI stdout, matching newHome's other startup messages: tell the
@@ -297,7 +319,7 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, er
 			announced = true
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
+			return nil, nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
 		}
 		time.Sleep(coldStartWarmupPoll)
 	}
@@ -358,6 +380,20 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	if m.repoID != "" {
 		changed = m.reconcileSnapshot(msg.data) || changed
 	}
+	// Surface the skipped-repo incompleteness channel (#4742): when the daemon
+	// dropped this repo at startup, the snapshot's Instances list is truncated and
+	// must not be presented as complete. applySkippedRepo raises a standing notice
+	// (persistent one-line condition on the status bar) so the operator can tell
+	// "no sessions" from "sessions are hidden", and queues a transient notice with
+	// the full repair hint so `E details` can open it. Routed the same way
+	// applyDeliveryAlarms travels — a field of the one authoritative Snapshot
+	// response, mirrored into operator-facing state. Not gated on m.repoID: a
+	// skipped repo in the cross-repo snapshot still hides sessions the Projects
+	// section counts, and the notice names the repo so the operator knows which
+	// project is affected.
+	if m.applySkippedRepo(skippedRepoForRepoID(msg.skippedRepos, m.repoID)) {
+		changed = true
+	}
 	if m.applyDeliveryAlarms(msg.alarms) {
 		changed = true
 	}
@@ -392,6 +428,43 @@ func (m *home) applyDeliveryAlarms(alarms []daemon.DeliveryAlarm) bool {
 		m.relayout()
 	}
 	return changed
+}
+
+// applySkippedRepo mirrors the snapshot's skipped-repo incompleteness channel
+// (#4742) into the TUI's operator-facing notice state. When the current repo is
+// in the daemon's startup skip set, a standing notice is raised on the status bar
+// so the operator can tell "no sessions" from "sessions are hidden" — the same
+// incompleteness the CLI's list/get/whoami refuse on and the web shows a
+// persistent notice for (#5413). When the repo is no longer skipped (the daemon
+// re-read the file on a polling refresh, #603), the standing notice is retracted.
+//
+// A transition into a skipped state — or a reason/FailedRows change — queues a
+// pending transient notice (pendingSkippedRepoNotice) carrying the full
+// reason-specific repair hint, which the caller drains as a tea.Cmd so `E
+// details` can open it. The standing notice takes over after the transient fades.
+// A same-entry poll does not re-fire, so the 750ms cadence never churns the bar.
+//
+// Returns whether the visible state changed (the caller repaints on a diff).
+// Only ever called on a successful snapshot: a transient RPC error leaves the
+// last-known notice up rather than clearing a real skip on a hiccup, matching
+// applyDeliveryAlarms.
+func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
+	if !skippedRepoNoticeChanged(m.skippedRepo, cur) {
+		return false
+	}
+	m.skippedRepo = cur
+	if cur == nil {
+		// The repo was skipped and is now repaired (the daemon re-read its
+		// instances.json on a polling refresh). Retract the standing notice so
+		// the bar stops naming a condition that is no longer true.
+		m.errBox.SetStanding("")
+		return true
+	}
+	// Raise the standing notice for the persistent condition and queue the full
+	// repair hint as a transient notice so `E details` can open it.
+	m.errBox.SetStanding(skippedRepoStandingNotice(cur))
+	m.pendingSkippedRepoNotice = skippedRepoNotice(cur).Error()
+	return true
 }
 
 // refreshTasks mirrors an out-of-band tasks.json change (a CLI/daemon `af tasks

@@ -165,8 +165,8 @@ func TestNewHomeSeedsTheLaunchResolvedDefault(t *testing.T) {
 
 	tmp := testguard.SocketTempDir(t)
 	t.Setenv("AGENT_FACTORY_HOME", tmp)
-	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
-		return nil, nil
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, nil, nil
 	}))
 
 	h := newHome(context.Background(), "", tmux.ProgramCodex, nil)
