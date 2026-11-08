@@ -2,6 +2,7 @@ package app
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -418,9 +419,11 @@ func (m *home) buildProjectListFromCounted(data []session.InstanceData) ([]overl
 // projectRows maps the discovered project list into Projects-section rows,
 // marking the active project so the section highlights where the rail is scoped.
 // skipped names the repos the daemon dropped at startup (#4742); a row whose
-// RepoID is in the set is marked Hidden so the section shows "· hidden" instead
-// of presenting the skipped repo's zero count as a clean "no sessions".
-func (m *home) projectRows(projects []overlay.Project, skipped map[string]bool) []ui.SidebarProject {
+// RepoID is in the set is marked Hidden and carries the matching repair hint
+// from hints so the section shows "· hidden" and the D refusal names the
+// applicable remedy instead of presenting the skipped repo's zero count as a
+// clean "no sessions".
+func (m *home) projectRows(projects []overlay.Project, skipped map[string]bool, hints map[string]string) []ui.SidebarProject {
 	rows := make([]ui.SidebarProject, 0, len(projects))
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
@@ -431,23 +434,10 @@ func (m *home) projectRows(projects []overlay.Project, skipped map[string]bool) 
 			InPlaceCount: p.InPlaceCount,
 			Active:       p.Root == m.repoRoot,
 			Hidden:       skipped != nil && skipped[p.RepoID],
+			SkippedHint:  hints[p.RepoID],
 		})
 	}
 	return rows
-}
-
-// skippedRepoIDSet converts the daemon's startup-skip set (#4742) into the
-// RepoID lookup the Projects-section row builder uses to mark a skipped repo's
-// zero count as hidden rather than absent.
-func skippedRepoIDSet(skipped []daemon.SkippedRepo) map[string]bool {
-	if len(skipped) == 0 {
-		return nil
-	}
-	out := make(map[string]bool, len(skipped))
-	for _, s := range skipped {
-		out[s.RepoID] = true
-	}
-	return out
 }
 
 // sidebarProjectRows is projectRows' inverse for the merge fallback in
@@ -490,14 +480,33 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 	return registry
 }
 
+// errSidebarSnapshotDegraded is the sentinel refreshSidebarProjects hands to
+// applySidebarProjects when its synchronous all-repos fetch failed, so the
+// section takes the same preserving merge the background error path takes
+// instead of replacing the last-known rows with the incomplete result
+// (#4742 review). The message is for the warning log only; the picker's own
+// snapshotDegraded flag is the user-visible signal.
+var errSidebarSnapshotDegraded = errors.New("sidebar projects: cross-repo snapshot fetch failed")
+
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
 // cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
 // launch and on project switch (paths that fetch synchronously). The cross-repo
 // skip set (#4742) travels through so a skipped repo's row is marked hidden
 // rather than presented as a clean "no sessions".
 func (m *home) refreshSidebarProjects() {
-	projects, registryDegraded, _, skipped := m.buildProjectListWithSnapshotStatus()
-	m.setSidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped))
+	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListWithSnapshotStatus()
+	if snapshotDegraded {
+		// A failed synchronous all-repos fetch lands with a nil skip set and
+		// zeroed counts. Route it through applySidebarProjects' preserving
+		// merge (the same path the background error path takes) so the
+		// last-known Hidden markers and session-only rows survive instead
+		// of being replaced by the incomplete result — the Projects section
+		// would otherwise offer deletion using zero counts for a repo whose
+		// sessions remain hidden (#4742 review).
+		m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), errSidebarSnapshotDegraded)
+		return
+	}
+	m.setSidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped))
 }
 
 // setSidebarProjects is the funnel every Projects-section update flows
@@ -507,11 +516,15 @@ func (m *home) refreshSidebarProjects() {
 // rows mark a skipped repo's zero count as hidden. The skip set is also
 // retained (sidebarProjectsSkipped) so a later transient fetch failure can
 // reuse it rather than clearing every Hidden flag rebuilding the preserved
-// rows (#4742 review).
-func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool) {
+// rows (#4742 review). hints carries each skipped repo's reason-specific
+// repair hint so the D refusal names the applicable remedy for a hidden row
+// instead of pointing at a status bar that may hold no skip notice for it
+// (#4742 review); it is retained alongside the skip set for the same reuse.
+func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool, hints map[string]string) {
 	m.sidebarProjects = projects
 	m.sidebarProjectsSkipped = skipped
-	m.projects.SetProjects(m.projectRows(projects, skipped))
+	m.sidebarProjectsSkippedHints = hints
+	m.projects.SetProjects(m.projectRows(projects, skipped, hints))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
 }
@@ -526,7 +539,7 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 // Returns whether the visible rows changed.
 func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) bool {
 	projects, registryDegraded := m.buildProjectListFrom(data)
-	return m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), fetchErr)
+	return m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), fetchErr)
 }
 
 // applySidebarProjects pushes an already-built project list into the Projects
@@ -538,9 +551,10 @@ func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, s
 // moved a record between polls would otherwise leave the old root on screen
 // indefinitely while the poll stays unhealthy (#4888 review). skipped names
 // the repos the daemon dropped at startup (#4742) so the rendered rows mark
-// a skipped repo's zero count as hidden. Returns whether the visible rows
-// changed.
-func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool, fetchErr error) bool {
+// a skipped repo's zero count as hidden; hints carries each skipped repo's
+// reason-specific repair hint so the D refusal names the applicable remedy
+// for a hidden row (#4742 review). Returns whether the visible rows changed.
+func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded bool, skipped map[string]bool, hints map[string]string, fetchErr error) bool {
 	if fetchErr != nil || registryDegraded {
 		if fetchErr != nil {
 			log.WarningLog.Printf("failed to refresh projects section: %v", fetchErr)
@@ -550,6 +564,10 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 			// merge keeps the row itself (#4742 review).
 			if skipped == nil {
 				skipped = m.sidebarProjectsSkipped
+				// Reuse the prior hints too so a hidden preserved row keeps
+				// its applicable repair guidance on the D refusal (#4742
+				// review).
+				hints = m.sidebarProjectsSkippedHints
 			}
 		}
 		old := m.sidebarProjects
@@ -580,13 +598,14 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	if len(skipped) > 0 {
 		projects = m.preserveSkippedProjectRows(projects, skipped)
 	}
-	changed := m.projects.SetProjects(m.projectRows(projects, skipped))
+	changed := m.projects.SetProjects(m.projectRows(projects, skipped, hints))
 	m.sidebarProjects = projects
 	if fetchErr == nil {
 		// Retain the skip set the next error path reads. A failed fetch
 		// reuses the prior set above, so it must not overwrite the retained
 		// copy with nil.
 		m.sidebarProjectsSkipped = skipped
+		m.sidebarProjectsSkippedHints = hints
 	}
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true

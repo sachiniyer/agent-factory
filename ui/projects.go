@@ -37,6 +37,12 @@ type SidebarProject struct {
 	// "no sessions" — the same incompleteness channel the CLI and web surface
 	// for a skipped repo.
 	Hidden bool
+	// SkippedHint is the reason-specific one-line repair hint for a Hidden
+	// row (#4742 review): the Projects-section D refusal names it directly so
+	// a skipped project the operator highlighted receives the applicable
+	// remedy instead of a pointer at the status bar, which may hold no skip
+	// notice for an inactive project. Empty when the row is not skipped.
+	SkippedHint string
 }
 
 // projectsTitleStyle / projectsTitleDimStyle paint the section header — the

@@ -229,13 +229,13 @@ func TestProjectsSection_FailedSnapshotMergesFreshRegistryRows(t *testing.T) {
 	h.setSidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/old/alpha", RepoID: "repo-old", RegistryID: "prj_aaa", RegistryRoot: "/old/alpha", SessionCount: 4, InPlaceCount: 1},
 		{Name: "sessions", Root: "/repos/sessions", RepoID: "repo-sess", SessionCount: 3},
-	}, false, nil)
+	}, false, nil, nil)
 
 	// The poll's session half failed; its registry half read fine and shows
 	// the alpha record rebound to a different repo (RepoID changed).
 	changed := h.applySidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/new/alpha", RepoID: "repo-new", RegistryID: "prj_aaa", RegistryRoot: "/new/alpha"},
-	}, false, nil, errors.New("daemon snapshot unavailable"))
+	}, false, nil, nil, errors.New("daemon snapshot unavailable"))
 	require.True(t, changed, "fresh registry truth still reaches the section")
 
 	rows := map[string]ui.SidebarProject{}
@@ -270,14 +270,14 @@ func TestProjectsSection_DegradedRegistryKeepsRegistryRows(t *testing.T) {
 	h.setSidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", RegistryID: "prj_aaa", RegistryRoot: "/repos/alpha", RegistryCheckoutID: "chk_old", SessionCount: 4},
 		{Name: "gone", Root: "/repos/gone", RepoID: "repo-gone", RegistryID: "prj_ggg", RegistryRoot: "/repos/gone", SessionCount: 2},
-	}, false, nil)
+	}, false, nil, nil)
 
 	// The poll's registry half failed; its session half read fine and reports
 	// live counts — alpha's sessions grew, and the repo-gone row has no live
 	// counterpart.
 	changed := h.applySidebarProjects([]overlay.Project{
 		{Name: "alpha", Root: "/repos/alpha", RepoID: "repo-alpha", SessionCount: 5},
-	}, true, nil, nil)
+	}, true, nil, nil, nil)
 	require.True(t, changed, "fresh session truth still reaches the section")
 
 	rows := map[string]ui.SidebarProject{}

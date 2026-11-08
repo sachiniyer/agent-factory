@@ -385,6 +385,14 @@ type home struct {
 	// review). Reused only on the error path; a successful refresh replaces
 	// it.
 	sidebarProjectsSkipped map[string]bool
+	// sidebarProjectsSkippedHints is the reason-specific repair hint for each
+	// repo in sidebarProjectsSkipped (#4742 review), keyed by RepoID. Retained
+	// alongside the skip set so a transient background fetch failure reuses
+	// the prior hints the way it reuses the prior skip set, and the
+	// Projects-section D refusal can name the applicable remedy for a hidden
+	// row instead of pointing at a status bar that may hold no skip notice
+	// for it.
+	sidebarProjectsSkippedHints map[string]string
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

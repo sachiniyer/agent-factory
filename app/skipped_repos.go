@@ -185,3 +185,58 @@ func (m *home) consumeSkippedRepoNotice() tea.Cmd {
 	id := m.setTransientHint(errors.New(notice))
 	return m.clearTransientMessageAfterDelay(id)
 }
+
+// skippedRepoIDSet converts the daemon's startup-skip set (#4742) into the
+// RepoID lookup the Projects-section row builder uses to mark a skipped repo's
+// zero count as hidden rather than absent.
+func skippedRepoIDSet(skipped []daemon.SkippedRepo) map[string]bool {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make(map[string]bool, len(skipped))
+	for _, s := range skipped {
+		out[s.RepoID] = true
+	}
+	return out
+}
+
+// skippedRepoHintSet converts the daemon's startup-skip set (#4742) into the
+// RepoID → repair-hint map the Projects-section row builder carries so the D
+// refusal names each hidden row's applicable remedy directly, mirroring the
+// picker's SetSkippedRepoHints (#4742 review).
+func skippedRepoHintSet(skipped []daemon.SkippedRepo) map[string]string {
+	if len(skipped) == 0 {
+		return nil
+	}
+	out := make(map[string]string, len(skipped))
+	for _, s := range skipped {
+		out[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+	}
+	return out
+}
+
+// updateOpenPickerSkipState propagates a background poll's cross-repo skip set
+// and fetch status into a picker that is still open (#4742 review): a repo that
+// becomes skipped while Ctrl+P stays open must mark its row hidden and gate the
+// D path for it, instead of retaining the skip set captured when the picker
+// opened. A failed background fetch drops the set and sets SnapshotDegraded so
+// the picker's D gate falls back to the global fetch-failure refusal, mirroring
+// the conflict-refresh path. No-op when no picker is open.
+func (m *home) updateOpenPickerSkipState(skipped []daemon.SkippedRepo, fetchErr error) {
+	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
+		return
+	}
+	m.projectPickerOverlay.SetSnapshotDegraded(fetchErr != nil)
+	if fetchErr != nil {
+		m.projectPickerOverlay.SetSkippedRepoIDs(nil)
+		return
+	}
+	skippedIDs := make([]string, 0, len(skipped))
+	hints := make(map[string]string, len(skipped))
+	for _, s := range skipped {
+		skippedIDs = append(skippedIDs, s.RepoID)
+		hints[s.RepoID] = skippedRepoRepairHintForReason(s.Reason)
+	}
+	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
+	m.projectPickerOverlay.SetSkippedRepoHints(hints)
+}

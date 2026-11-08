@@ -244,12 +244,22 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 			// does for a genuinely empty project. The picker has its own skip-
 			// specific refusal; this parallel Projects-section path needs the
 			// same gate so it cannot claim there are no live sessions before
-			// archiving or tearing down the hidden ones.
+			// archiving or tearing down the hidden ones. Name the highlighted
+			// project's applicable repair hint directly — a skipped project the
+			// operator highlighted may not be the active one, so the status
+			// bar's skip notice (populated only from the repo-scoped active
+			// snapshot) may hold nothing for it (#4742 review).
 			if proj.Hidden {
-				return m, m.handleNotice(fmt.Errorf(
+				notice := fmt.Sprintf(
 					"cannot delete project %q: its sessions are hidden (the daemon skipped this repo at startup), "+
-						"so its live-session count is incomplete; repair the repo (see the status bar) and retry",
-					proj.Name)), true
+						"so its live-session count is incomplete.",
+					proj.Name)
+				if hint := proj.SkippedHint; hint != "" {
+					notice += " " + hint + " Retry once repaired."
+				} else {
+					notice += " Repair the repo (see the status bar) and retry."
+				}
+				return m, m.handleNotice(fmt.Errorf("%s", notice)), true
 			}
 			mod, cmd := m.handleDeleteProject(proj)
 			return mod, cmd, true

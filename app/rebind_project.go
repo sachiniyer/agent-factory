@@ -208,7 +208,7 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	if msg.fetchErr != nil {
 		skipped = nil
 	}
-	m.applySidebarProjects(fresh, degraded, skippedRepoIDSet(skipped), msg.fetchErr)
+	m.applySidebarProjects(fresh, degraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), msg.fetchErr)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {
 		return m, nil
