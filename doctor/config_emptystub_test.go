@@ -54,6 +54,11 @@ func TestMissingConfigKeepsDefaultAgentBinaryAdvisory(t *testing.T) {
 	pathDir := t.TempDir()
 	linkRealGitInto(t, pathDir)
 	t.Setenv("PATH", pathDir)
+	// Probe a controlled non-repo instead of the ambient checkout so the
+	// repo probe returns ErrNotGitRepository hermetically and checkAgentBinaries
+	// falls back to the synthetic global cfg without overlaying a developer's
+	// in-repo/personal-project config (#6995 review).
+	chdir(t, t.TempDir())
 
 	ctx := &scanContext{opts: Options{ConfigDir: home}}
 	report := &Report{}

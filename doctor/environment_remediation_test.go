@@ -139,6 +139,8 @@ func TestCheckAgentBinaries_NotFound_LeadsWithInstall(t *testing.T) {
 	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	cfg := &config.Config{DefaultProgram: tmux.ProgramClaude}
 	rep := &Report{}
@@ -180,6 +182,8 @@ func TestCheckAgentBinaries_PresentBinaryStillPasses(t *testing.T) {
 	fakeClaude := writeExecutable(t, binDir, "claude", "#!/bin/sh\nexit 0\n")
 	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	cfg := &config.Config{
 		DefaultProgram:   tmux.ProgramClaude,
@@ -207,6 +211,8 @@ func TestCheckAgentBinaries_UnconfiguredAgentIsWarnNotFail(t *testing.T) {
 	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	// Default program is claude; codex is neither defaulted nor overridden, so
 	// when its binary is absent it is an advisory WARN, not a FAIL.
@@ -235,6 +241,8 @@ func TestCheckAgentBinaries_NilConfigIsAdvisoryForEveryAgent(t *testing.T) {
 	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
 	t.Setenv("HOME", t.TempDir())
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	rep := &Report{}
 	checkAgentBinaries(nil, rep)
