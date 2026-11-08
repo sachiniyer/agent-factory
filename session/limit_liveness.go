@@ -85,7 +85,7 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setLimitReachedLocked(resetAt, evidence, banner, freshRuntime)
+	i.setLimitReachedLocked(resetAt, evidence, banner, freshRuntime, false)
 }
 
 // SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
@@ -188,7 +188,7 @@ func (i *Instance) setLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			return true
 		}
 	}
-	if !i.setLimitReachedLocked(resetAt, evidence, banner, false) {
+	if !i.setLimitReachedLocked(resetAt, evidence, banner, false, authoritative) {
 		return false
 	}
 	return true
@@ -232,16 +232,16 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 	// recorded banner is gone (#6972, Codex).
 	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount ||
 		!i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) {
 		return true
 	}
 	if i.limitResetEvidence != "" && strings.Contains(banner.Prefix, i.limitResetEvidence) {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if i.limitBannerCount > 0 && banner.Count > i.limitBannerCount {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if i.inFlightOp != OpNone {
 		return false
@@ -305,7 +305,7 @@ func (i *Instance) sameLiveLimitBannerLocked(banner LimitBanner) bool {
 // without a phrase passes "" — the slot is cleared rather than left describing
 // a reset it did not produce. banner carries the sighting's anchor (#6823);
 // a caller that observed no pane passes the zero LimitBanner.
-func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) bool {
+func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime, authoritative bool) bool {
 	if i.inFlightOp != OpNone {
 		return false
 	}
@@ -337,7 +337,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	i.limitWallRuntimeGen = i.agentRuntimeGeneration
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, false, instanceNow().UTC())
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, authoritative, instanceNow().UTC())
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }

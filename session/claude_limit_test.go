@@ -632,4 +632,22 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
 			"the row must take the record's instant: got %v", observations[0].ResetAt)
 	})
+
+	t.Run("a changed-evidence sighting still corrects the untimed row", func(t *testing.T) {
+		// #6975 review: the park filed the never-expires claim on an
+		// unparseable banner; a wider capture then exposes the clause —
+		// evidence the dedupe cannot match — while the transcript supplies
+		// the deadline. The sighting falls THROUGH the same-evidence arm
+		// into the ordinary park path, and authority must travel with it
+		// or the unknown-reset row keeps excluding the account beside the
+		// new timed one.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1,
+			"the changed-evidence park must still correct the unknown-reset row in place")
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the row must take the record's instant: got %v", observations[0].ResetAt)
+	})
 }
