@@ -40,7 +40,7 @@ func TestControlServer_DeliverPrompt_RefusesRelativePath(t *testing.T) {
 	require.NoError(t, err)
 	cs := &controlServer{manager: manager}
 
-	for _, rel := range []string{".", "sub/../.", "relative/path"} {
+	for _, rel := range []string{".", "sub/../.", "relative/path", "   ", "\t"} {
 		var resp DeliverPromptResponse
 		err := cs.DeliverPrompt(DeliverPromptRequest{
 			Title:    "worker",

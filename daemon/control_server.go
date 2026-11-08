@@ -715,8 +715,11 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	// (#5743). Every sibling RPC boundary (CreateSession, DeleteProject,
 	// RegisterProject) applies ResolveDaemonHostPath for this reason; DeliverPrompt
 	// resolves repo_path via `git -C <path>` and auto-creates a session bound to it,
-	// so the same guard belongs here (#4821).
-	if strings.TrimSpace(req.RepoPath) != "" {
+	// so the same guard belongs here (#4821). Unlike CreateSession, where an
+	// empty RepoPath means "no project", DeliverPrompt requires a RepoPath, so a
+	// whitespace-only value is still a (relative) path and must be refused here
+	// rather than slipped past the guard to `git -C` against the daemon's cwd.
+	if req.RepoPath != "" {
 		resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
 		if err != nil {
 			return err
