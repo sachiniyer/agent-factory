@@ -88,7 +88,7 @@ replacement pane because the mission may already have landed. If it did, retire
 the mission without resending it — **Mark delivered** in the TUI's `c` picker,
 **Mark delivered** in the web pane header, or
 `af sessions retry-limit <title> --delivered`; resending would double-deliver a
-mission that already landed. If it did not, resend it — **Try send** in the TUI
+mission that already landed. If it did not, resend it — **Retry send** in the TUI
 `c` picker, **Retry handoff** in the web pane header, or run
 `af sessions retry-limit <title>`. af never retries this ambiguous submission on
 its own, and later prompts do not change that decision.
