@@ -261,6 +261,26 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 				}
 				return m, m.handleNotice(fmt.Errorf("%s", notice)), true
 			}
+			// The repo-scoped and cross-repo snapshots are independent
+			// requests, so the scoped cold-start/poll can set m.skippedRepo
+			// while the following cross-repo refresh fails — especially at
+			// cold start, where there is no retained cross-repo skip set to
+			// mark this row Hidden. The Hidden gate above would pass and D
+			// would open a confirmation from absent or stale counts even
+			// though the daemon still archives or tears down the hidden
+			// sessions. Refuse when the highlighted row is the active
+			// scoped skip too (#4742 review). The scoped skip carries its
+			// own reason, so the refusal names the applicable remedy
+			// directly instead of pointing at a status bar that may hold
+			// nothing for a row the cross-repo skip set never reached.
+			if m.skippedRepo != nil && m.skippedRepo.RepoID == proj.RepoID {
+				notice := fmt.Sprintf(
+					"cannot delete project %q: its sessions are hidden (the daemon skipped this repo at startup), "+
+						"so its live-session count is incomplete.",
+					proj.Name)
+				notice += " " + skippedRepoRepairHintForReason(m.skippedRepo.Reason) + " Retry once repaired."
+				return m, m.handleNotice(fmt.Errorf("%s", notice)), true
+			}
 			mod, cmd := m.handleDeleteProject(proj)
 			return mod, cmd, true
 		}

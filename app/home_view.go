@@ -290,6 +290,17 @@ func (m *home) View() string {
 	hint, hideHint := m.noticeDetailsHint()
 	m.errBox.SetDetailsHint(hint)
 	m.errBox.HideDetailsHint(hideHint)
+	// Recompose the standing notice from the current input state every frame
+	// (#4742 review): the standing text carries a details-key suffix ("Press E
+	// for repair steps.") that is frozen into ErrBox.standing only when the
+	// skip/listener condition changes, not when m.state, interactive mode, or
+	// Projects focus changes. A skip detected while Ctrl+P is open would omit
+	// the repair key and still omit it after the picker closes; conversely a
+	// notice composed in the default state would keep advertising E inside an
+	// overlay where that key is unavailable. Recomputing here (the same place
+	// noticeDetailsHint is recomputed for the clipped-notice hint) keeps the
+	// suffix honest against the state this frame renders.
+	m.applyStandingNotice()
 	viewParts = append(viewParts, top, m.statusBar.View())
 	mainView := layout.JoinVertical(viewParts...)
 

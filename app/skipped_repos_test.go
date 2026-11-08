@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/x/ansi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -1143,4 +1144,215 @@ func rowByID(t *testing.T, rows []overlay.Project) map[string]overlay.Project {
 		out[p.RepoID] = p
 	}
 	return out
+}
+
+// TestShowProjectPickerOverlay_PreservesSessionOnlySkippedRows pins the #4742
+// review finding on the fresh-picker open path: when a project represented ONLY
+// by its live snapshot sessions is skipped, applySidebarProjects keeps its
+// last-known row in m.sidebarProjects (marked hidden), but the fresh picker
+// built solely from buildProjectListWithSnapshotStatus cannot reconstruct it
+// (its instance is gone), so closing and reopening Ctrl+P would drop the row
+// even while the Projects section still shows it as hidden. The picker must
+// graft the retained sidebar row for each skipped ID before creating the
+// overlay (mirrors preserveSkippedPickerRows for the background refresh and
+// preserveSkippedProjectRows for the sidebar).
+func TestShowProjectPickerOverlay_PreservesSessionOnlySkippedRows(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	gammaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+	gammaID := config.RepoIDFromRoot(gammaRoot)
+
+	// Seed m.sidebarProjects with gamma's session-only row (the state a
+	// healthy poll left before the daemon skipped gamma), so the fresh
+	// picker has a last-known row to graft.
+	h.setSidebarProjects([]overlay.Project{
+		{RepoID: h.repoID, Name: filepath.Base(alphaRoot), Root: alphaRoot, RegistryID: "prj-alpha"},
+		{RepoID: gammaID, Name: filepath.Base(gammaRoot), Root: gammaRoot, SessionCount: 2},
+	}, false, nil, nil)
+	require.Contains(t, rowByID(t, h.sidebarProjects), gammaID, "precondition: the sidebar retains gamma's session-only row")
+
+	// The daemon now skips gamma and drops its instance: the fresh cross-repo
+	// snapshot carries only alpha's session, and gamma appears in the skip
+	// set. Without the graft, the picker opens without gamma; with it,
+	// gamma's last-known row survives, marked hidden.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+			[]daemon.SkippedRepo{{RepoID: gammaID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+			nil
+	}))
+
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	pickerByRoot := map[string]overlay.Project{}
+	for _, p := range h.projectPickerOverlay.Projects() {
+		pickerByRoot[p.Root] = p
+	}
+	require.Contains(t, pickerByRoot, gammaRoot,
+		"a session-only repo the daemon skipped must survive a fresh Ctrl+P open instead of vanishing")
+	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(gammaID),
+		"the preserved session-only row is marked skipped so it renders hidden and D is gated")
+	require.NotEmpty(t, h.projectPickerOverlay.SkippedRepoHint(gammaID),
+		"the preserved row carries the daemon's repair hint for the skip reason")
+}
+
+// TestHandleProjectsFocus_RefusesDeleteOnActiveScopedSkip pins the #4742 review
+// finding (P1) on the Projects-section D path: the repo-scoped and cross-repo
+// snapshots are independent requests, so the scoped cold-start/poll can set
+// m.skippedRepo while the following cross-repo refresh fails — especially at
+// cold start, where there is no retained cross-repo skip set to mark the row
+// Hidden. The Hidden gate alone would pass and D would open a confirmation
+// from absent or stale counts even though the daemon still archives or tears
+// down the hidden sessions. D must also refuse when the highlighted row's
+// RepoID matches the active scoped skip.
+func TestHandleProjectsFocus_RefusesDeleteOnActiveScopedSkip(t *testing.T) {
+	h := newTestHome(t)
+	repoID := config.RepoIDFromRoot(deleteProjectTestRoot)
+	h.repoRoot = deleteProjectTestRoot
+	h.repoID = repoID
+
+	// A healthy cross-repo fetch (no skip set) so the active row is NOT marked
+	// Hidden — the gap: the scoped skip is set below, but the cross-repo skip
+	// set the Hidden flag is built from never arrived. A decoy session makes
+	// the Projects section hold 2 rows so the grid keeps it visible and
+	// focusable (a single project reserves no rail rows).
+	decoyRoot := "/tmp/af-delete-project-decoy/zzz-decoy"
+	decoySession := session.InstanceData{
+		Title: "decoy",
+		Worktree: session.GitWorktreeData{
+			RepoPath: decoyRoot, WorktreePath: decoyRoot, SessionName: "decoy",
+		},
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{deleteProjectSession("alpha", false), decoySession}, nil, nil
+	}))
+	resizeHome(h, 120, 45)
+	h.refreshSidebarProjects()
+	h.relayout()
+	require.Len(t, h.projects.Projects(), 2, "precondition: active + decoy so the Projects section is visible")
+	activeRow := h.projects.Projects()[0]
+	require.True(t, activeRow.Active)
+	require.False(t, activeRow.Hidden, "precondition: the cross-repo skip set never arrived, so the row is NOT hidden")
+	require.Equal(t, repoID, activeRow.RepoID)
+
+	// The repo-scoped snapshot, independently, reports this repo skipped —
+	// the cold-start state where m.skippedRepo is set before any cross-repo
+	// skip set exists.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.NotNil(t, h.skippedRepo, "precondition: the active scoped skip is set")
+	require.False(t, h.projects.Projects()[0].Hidden,
+		"precondition: the scoped skip does NOT mark the cross-repo row Hidden")
+
+	// Focus the Projects section and press D on the active (skipped) row.
+	h.focusRegion(layout.RegionProjects)
+	require.Equal(t, layout.RegionProjects, h.ring.Active())
+	model, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	require.True(t, consumed, "`D` must be consumed by the Projects-section handler")
+	h = model.(*home)
+	require.NotEqual(t, stateConfirm, h.state,
+		"D on an actively skipped project must NOT open the delete confirmation")
+	require.Nil(t, h.confirmationOverlay,
+		"no consent dialog may be opened against an actively skipped project's incomplete count")
+	notice := h.errBox.FullError()
+	require.NotEmpty(t, notice, "the refuse must surface a user-visible notice")
+	assert.Contains(t, notice, "cannot delete project")
+	assert.Contains(t, notice, "sessions are hidden")
+	assert.NotContains(t, notice, "no live sessions",
+		"the refusal must never claim a no-op delete")
+}
+
+// TestApplyStandingNotice_RecomputesDetailsKeyOnStateChange pins the #4742
+// review finding on the standing notice: the details-key suffix ("Press E for
+// repair steps.") was frozen into ErrBox.standing only when the skip/listener
+// condition changed, not when m.state changed — so a skip composed in the
+// default state kept advertising E inside an overlay where that key is
+// unavailable, and a skip detected while an overlay was open omitted the
+// repair key and still omitted it after the overlay closed. View() recomposes
+// the standing notice every frame (the same place it recomputes the
+// clipped-notice hint), so the suffix always matches the input state.
+func TestApplyStandingNotice_RecomputesDetailsKeyOnStateChange(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	// Default state: the standing notice advertises the E key.
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	h.errBox.Expire()
+	h.errBox.SetSize(200, 1)
+	require.Contains(t, ansi.Strip(h.errBox.String()), "Press", "precondition: the standing notice advertises the details key in the default state")
+
+	// Entering an overlay where E does not open the details (stateSearch owns
+	// the keyboard): recomposing the standing notice must drop the suffix so
+	// the bar stops advertising a dead key. View() does this recomposition;
+	// call applyStandingNotice the same way View does.
+	h.state = stateSearch
+	h.applyStandingNotice()
+	h.errBox.SetSize(200, 1)
+	rendered := ansi.Strip(h.errBox.String())
+	assert.Contains(t, rendered, "hidden", "the skip condition still names itself")
+	assert.NotContains(t, rendered, "Press",
+		"the standing notice must not advertise a details key that does not open in this state")
+
+	// Returning to the default state re-adds the suffix.
+	h.state = stateDefault
+	h.applyStandingNotice()
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, ansi.Strip(h.errBox.String()), "Press",
+		"the standing notice re-advertises the details key once the default state returns")
+}
+
+// TestConsumeSkippedRepoNotice_DoesNotOverwriteNewerTransient pins the #4742
+// review finding on the drain path: a cold start or project switch can queue
+// pendingSkippedRepoNotice before the snapshot handler drains it, and another
+// operation may raise a transient in that interval. An unconditional SetHint
+// would paint the older skip guidance over the newer message, and
+// showErrorDetails would then route E to the skip's hint while the overwritten
+// failure stays marooned in the shared retained slot for as long as the repo
+// stays skipped. The drain must leave a different transient on the bar alone;
+// the skip's standing notice and condition-owned retained slot still carry the
+// repair guidance.
+func TestConsumeSkippedRepoNotice_DoesNotOverwriteNewerTransient(t *testing.T) {
+	h := newTestHome(t)
+	h.repoRoot, h.repoID = "/project", "project"
+	resizeHome(h, 200, 36)
+
+	// Queue the skip's repair-hint notice (the state a cold start / switch
+	// leaves before the snapshot handler drains it).
+	h.applySkippedRepo(&daemon.SkippedRepo{RepoID: "project", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON})
+	require.NotEmpty(t, h.pendingSkippedRepoNotice)
+	require.Contains(t, h.skippedRepoRetained, corruptedRepoRepairHint)
+
+	// A different operation raises a newer transient on the bar in the
+	// interval before the drain.
+	h.setTransientFailure(errors.New("newer transient failure"))
+	require.Equal(t, "newer transient failure", h.errBox.FullError(), "precondition: a newer transient is on the bar")
+
+	// The drain must not overwrite the newer transient with the skip hint.
+	cmd := h.consumeSkippedRepoNotice()
+	assert.Nil(t, cmd, "the drain must not schedule a clear timer when it did not paint the skip hint")
+	assert.Empty(t, h.pendingSkippedRepoNotice, "the pending notice is drained regardless")
+	assert.Equal(t, "newer transient failure", h.errBox.FullError(),
+		"the newer transient on the bar must survive the skip-notice drain")
+
+	// The skip's standing notice and condition-owned retained slot still
+	// carry the repair guidance, so E details and the standing line remain
+	// correct after the drain skipped.
+	assert.NotEmpty(t, h.skippedRepoRetained, "the skip condition still owns its repair hint")
+	h.errBox.Expire()
+	h.errBox.SetSize(200, 1)
+	assert.Contains(t, ansi.Strip(h.errBox.String()), "hidden", "the standing skip notice still names the condition")
+
+	// Control: with no newer transient on the bar, the drain paints the skip
+	// hint as before.
+	h.pendingSkippedRepoNotice = h.skippedRepoRetained
+	h.errBox.Expire() // drop any transient so the bar is clear
+	cmd = h.consumeSkippedRepoNotice()
+	require.NotNil(t, cmd, "with no newer transient the drain paints the skip hint")
+	assert.Contains(t, h.errBox.FullError(), corruptedRepoRepairHint,
+		"the skip hint paints on the bar when nothing newer is up")
 }

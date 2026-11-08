@@ -178,12 +178,28 @@ func (m *home) skippedRepoStandingDetailsKey() string {
 // pending, so the caller appends it unconditionally. The pending text is
 // cleared regardless: a caller that cannot show it (recovery screen up) does
 // not re-queue it forever.
+//
+// A newer transient raised between the queue and the drain (a cold start or
+// project switch can queue this before the snapshot handler drains it, and
+// another operation may raise an error or notice in that interval) must not be
+// overwritten by the older skip guidance: an unconditional SetHint would paint
+// the skip hint over the newer message, and showErrorDetails would then route
+// E to the skip's hint while the overwritten failure stays marooned in the
+// shared retained slot for as long as the repo stays skipped (#4742 review).
+// Skip painting when a different transient is already on the bar; the skip's
+// standing notice and its condition-owned retained slot still carry the repair
+// guidance, so E details and the standing line remain correct.
 func (m *home) consumeSkippedRepoNotice() tea.Cmd {
 	if m.pendingSkippedRepoNotice == "" {
 		return nil
 	}
 	notice := m.pendingSkippedRepoNotice
 	m.pendingSkippedRepoNotice = ""
+	skipDetails := m.errBox.SanitizeNoticeText(notice)
+	if bar := m.errBox.FullError(); bar != "" && bar != skipDetails {
+		// A newer transient is on the bar; leave it alone.
+		return nil
+	}
 	id := m.setTransientHint(errors.New(notice))
 	return m.clearTransientMessageAfterDelay(id)
 }

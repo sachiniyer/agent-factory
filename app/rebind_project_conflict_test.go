@@ -466,3 +466,78 @@ func TestRebindConflictRefresh_FailedFetchRetainsPickerSkipMarkers(t *testing.T)
 	assert.Equal(t, "repair alpha", displayed.SkippedRepoHint(h.repoID),
 		"a failed conflict-time fetch must not clear a previously skipped repo's repair hint")
 }
+
+// TestRebindConflictRefresh_PreservesSessionOnlySkippedRows pins the #4742
+// review finding on the conflict-rebuild path: when an open picker holds a
+// session-only skipped project and a rebind of another registered project
+// receives a "rebound elsewhere" conflict, fresh (built from the conflict
+// snapshot) cannot reconstruct the skipped project because its instances are
+// absent. Installing only the skipped ID and hint, then replacing the row set
+// wholesale via SetRebindConflict, would drop the hidden project — and later
+// background refreshes would no longer have an old picker row to graft back.
+// The picker must preserve skipped rows from projectPickerOverlay.Projects()
+// before rebuilding the conflict list (mirrors preserveSkippedPickerRows for
+// the background refresh).
+func TestRebindConflictRefresh_PreservesSessionOnlySkippedRows(t *testing.T) {
+	h, id := activeRebindHome(t)
+	root, ok := registeredProjectRoot(id)
+	require.True(t, ok)
+	var recordedCheckout string
+	projects, err := config.ListProjects()
+	require.NoError(t, err)
+	for _, p := range projects {
+		if p.ID == id {
+			recordedCheckout = p.CheckoutID
+		}
+	}
+	require.NotEmpty(t, recordedCheckout)
+
+	// gamma is a separate git repo whose ONLY presence is a live snapshot
+	// session — not registered, not a root agent, not the active root — so the
+	// row a healthy snapshot produces is session-derived and disappears once
+	// the daemon skips gamma and drops its instance.
+	gammaRoot := initTestGitRepo(t)
+	gammaID := config.RepoIDFromRoot(gammaRoot)
+	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
+		{Name: "active", Root: root, RepoID: h.repoID, RegistryID: id, RegistryRoot: root, RegistryCheckoutID: recordedCheckout, MissingPath: true, SessionCount: 4, InPlaceCount: 1},
+		{Name: "gamma", Root: gammaRoot, RepoID: gammaID, SessionCount: 3},
+	}, h.repoRoot)
+	h.projectPickerOverlay.SetMaxSize(80, 24)
+	// The picker already marks gamma skipped (the state a Ctrl+P opened while
+	// the daemon was skipping gamma).
+	h.projectPickerOverlay.SetSkippedRepoIDs([]string{gammaID})
+	h.projectPickerOverlay.SetSkippedRepoHints(map[string]string{gammaID: "repair gamma"})
+	displayed := h.projectPickerOverlay
+	require.True(t, displayed.IsRepoSkipped(gammaID), "precondition: gamma is marked skipped in the picker")
+
+	// Another client rebinds the active project, so this rebind conflicts.
+	_, err = config.RebindProject(id, initTestGitRepo(t))
+	require.NoError(t, err)
+	stubRebindCAS(t)
+
+	// The conflict refresh answers: alpha's session survives, gamma's does
+	// not (the daemon skipped it), and gamma appears in the skip set.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: root}}},
+			[]daemon.SkippedRepo{{RepoID: gammaID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+			nil
+	}))
+
+	_, cmd := h.Update(submitPickerRebind(t, h, initTestGitRepo(t))())
+	require.NotNil(t, cmd)
+	h.Update(cmd())
+	require.False(t, displayed.RebindPending(), "precondition: the conflict reply was applied")
+
+	// gamma's session-only row must survive the conflict rebuild marked
+	// hidden, instead of vanishing before the skip marker is installed.
+	byRoot := map[string]overlay.Project{}
+	for _, p := range displayed.Projects() {
+		byRoot[p.Root] = p
+	}
+	require.Contains(t, byRoot, gammaRoot,
+		"a session-only repo the daemon skipped must survive a conflict rebuild instead of vanishing")
+	assert.True(t, displayed.IsRepoSkipped(gammaID),
+		"the preserved session-only row is marked skipped so it renders hidden and D is gated")
+	assert.Equal(t, corruptedRepoRepairHint, displayed.SkippedRepoHint(gammaID),
+		"the preserved row carries the daemon's reason-specific repair hint for the skip reason")
+}

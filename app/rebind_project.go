@@ -260,9 +260,25 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// the registry-side union, so rebuilding wholesale would drop every
 		// session-derived row and zero the counts the daemon still runs. Keep
 		// the picker's session-derived rows and re-attach their counts; only
-		// registry truth replaces registry truth (#4888 review).
+		// registry truth replaces registry truth (#4888 review). skipped is
+		// nil on this path (set above only when fetchErr == nil), so there is
+		// no session-only skipped row to preserve here.
 		m.projectPickerOverlay.SetRebindConflictPreserving(text, fresh, degraded)
 		return m, nil
+	}
+	// Preserve last-known rows for skipped IDs the fresh conflict list no
+	// longer represents (#4742 review): an inactive repo discovered only
+	// from its live sessions has no instance once the daemon skips it, so
+	// buildProjectListFrom drops its row and the wholesale SetRebindConflict
+	// below would remove it before the skip marker is installed — the
+	// skipped project would vanish and later background refreshes would
+	// have no old picker row to graft back. Graft the picker's last-known
+	// row for each skipped ID (mirrors preserveSkippedPickerRows for the
+	// background refresh and preserveSkippedProjectRows for the sidebar);
+	// the skip set installed above marks the grafted row hidden.
+	skippedIDSet := skippedRepoIDSet(skipped)
+	if len(skippedIDSet) > 0 {
+		fresh = preserveSkippedPickerRows(fresh, m.projectPickerOverlay.Projects(), skippedIDSet)
 	}
 	if degraded {
 		// The mirror image: the SESSION half landed but the registry read
@@ -273,8 +289,14 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		// truth against only the picker's registry-backed rows; the degraded
 		// flag preserves each record whose absence was never established, and
 		// the merge grafts a same-repo session row onto the stale identity.
-		m.projectPickerOverlay.SetRebindConflict(text,
-			overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true))
+		// preserveSkippedPickerRows ran against fresh above, but the merge
+		// below drops a session-only skipped row (it is not in
+		// registryBackedRows), so graft again onto the merged result.
+		merged := overlay.MergePreservingSessionRows(registryBackedRows(m.projectPickerOverlay.Projects()), fresh, true)
+		if len(skippedIDSet) > 0 {
+			merged = preserveSkippedPickerRows(merged, m.projectPickerOverlay.Projects(), skippedIDSet)
+		}
+		m.projectPickerOverlay.SetRebindConflict(text, merged)
 		return m, nil
 	}
 	m.projectPickerOverlay.SetRebindConflict(text, fresh)
