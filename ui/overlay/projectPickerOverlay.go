@@ -146,6 +146,12 @@ type ProjectPickerOverlay struct {
 	// archive and tear down, consent obtained on copy the data behind it
 	// never confirmed (#1973 / #1985).
 	snapshotDegraded bool
+	// skippedRepoIDs names the repos the daemon dropped at startup (#4742):
+	// a skipped repo's zero count is incomplete, not "no sessions", but only
+	// for the repo it names. The D path gates on IsRepoSkipped(highlighted)
+	// instead of the global snapshotDegraded flag so one corrupt project does
+	// not disable D for every healthy project in a multi-project workspace.
+	skippedRepoIDs map[string]bool
 }
 
 // NewProjectPickerOverlay creates a picker over the given projects (already
@@ -185,6 +191,29 @@ func (p *ProjectPickerOverlay) SetSnapshotDegraded(degraded bool) { p.snapshotDe
 // than render a consent dialog whose session counts the data behind it never
 // confirmed (#1973 / #1985).
 func (p *ProjectPickerOverlay) SnapshotDegraded() bool { return p.snapshotDegraded }
+
+// SetSkippedRepoIDs records the repos the daemon skipped at startup (#4742)
+// so the destructive D path can gate on the HIGHLIGHTED project being skipped.
+// A skipped repo's zero count is incomplete, but the incompleteness is scoped
+// to that project — the global SnapshotDegraded flag is reserved for an actual
+// failed fetch whose counts are unknown for every project.
+func (p *ProjectPickerOverlay) SetSkippedRepoIDs(ids []string) {
+	if len(ids) == 0 {
+		p.skippedRepoIDs = nil
+		return
+	}
+	p.skippedRepoIDs = make(map[string]bool, len(ids))
+	for _, id := range ids {
+		p.skippedRepoIDs[id] = true
+	}
+}
+
+// IsRepoSkipped reports whether the daemon dropped repoID at startup, so the D
+// path can refuse delete-project for the highlighted project whose live count
+// is incomplete without disabling D for every other healthy project.
+func (p *ProjectPickerOverlay) IsRepoSkipped(repoID string) bool {
+	return p.skippedRepoIDs != nil && p.skippedRepoIDs[repoID]
+}
 
 // SetMaxSize sets the maximum outer size the rendered overlay may occupy.
 func (p *ProjectPickerOverlay) SetMaxSize(width, height int) {

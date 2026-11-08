@@ -887,3 +887,62 @@ func TestDeleteProjectPickerRefuseKeepsSelectionForEsc(t *testing.T) {
 	require.Equal(t, stateDefault, h.state,
 		"Esc after a refused D must return the model to default state, not strand it")
 }
+
+// TestDeleteProjectPickerRefusesWhenProjectSkipped pins the per-project skip
+// gate (#4742): when the cross-repo snapshot fetch ANSWERED but the daemon
+// skipped the highlighted project at startup, that project's zero count is
+// incomplete (its sessions are hidden, not absent) — the consent copy must
+// not claim a no-op delete against them. The gate is scoped to the skipped
+// project: the fetch did not fail, so the picker must NOT render the global
+// "Snapshot failed" notice, and D is refused with a skip-specific notice.
+func TestDeleteProjectPickerRefusesWhenProjectSkipped(t *testing.T) {
+	h := newTestHome(t)
+	repoID := config.RepoIDFromRoot(deleteProjectTestRoot)
+	h.repoRoot = deleteProjectTestRoot
+	h.repoID = repoID
+
+	// The fetch answers, but the daemon skipped the active project: its count
+	// is zero (the active-root pre-seed still surfaces the row).
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return nil, []daemon.SkippedRepo{{RepoID: repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}}, nil
+	}))
+	resizeHome(h, 120, 45)
+	h.refreshSidebarProjects()
+	h.relayout()
+
+	require.NotEmpty(t, h.projects.Projects(), "the active-root pre-seed must surface the project row")
+	require.Equal(t, 0, h.projects.Projects()[0].SessionCount,
+		"a skipped repo's count is zero — the state the consent copy would lie about without the gate")
+
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	require.False(t, h.projectPickerOverlay.SnapshotDegraded(),
+		"a fetch that answered must not set the global degraded flag — the skip is per-project")
+	require.True(t, h.projectPickerOverlay.IsRepoSkipped(repoID),
+		"the picker must carry the skip set for the highlighted project")
+
+	// The picker must NOT announce a fetch failure it did not have.
+	pickerText := dialogText(h.projectPickerOverlay.Render())
+	assert.NotContains(t, pickerText, "Snapshot failed",
+		"a per-project skip must not render the global fetch-failure notice")
+	assert.NotContains(t, pickerText, "D disabled",
+		"D is gated per-project here, not globally disabled")
+
+	// Pressing D refuses the destructive action for the skipped project: the
+	// picker stays open, no confirmation dialog opens against the zero count,
+	// and a skip-specific notice tells the operator the sessions are hidden.
+	model, cmd := h.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("D")})
+	h = model.(*home)
+	require.Equal(t, stateSwitchProject, h.state,
+		"D on a skipped project must NOT open the delete confirmation")
+	require.Nil(t, h.confirmationOverlay,
+		"no consent dialog may be opened against a skipped project's incomplete count")
+	notice := h.errBox.FullError()
+	require.NotEmpty(t, notice, "the refuse must surface a user-visible notice")
+	assert.Contains(t, notice, "cannot delete project")
+	assert.Contains(t, notice, "sessions are hidden",
+		"the notice must name the skip — not a fetch failure the fetch did not have")
+	assert.NotContains(t, notice, "no live sessions",
+		"the refusal must never claim a no-op delete")
+	_ = cmd
+}

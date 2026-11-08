@@ -604,6 +604,43 @@ func TestProjectPickerSnapshotDegradedNotice(t *testing.T) {
 	}
 }
 
+// TestProjectPickerSkippedRepoIDs pins the per-project skip gate (#4742): a
+// skipped repo's zero count is incomplete, but only for the repo it names, so
+// IsRepoSkipped answers for the HIGHLIGHTED project rather than the global
+// snapshotDegraded flag (which would disable D for every healthy project in a
+// multi-project workspace). The notice stays the global "Snapshot failed" one
+// unless the fetch actually failed — a fetch that answered must not claim it
+// failed.
+func TestProjectPickerSkippedRepoIDs(t *testing.T) {
+	projects := []Project{
+		{Name: "alpha", Root: "/repos/alpha", RepoID: "alpha"},
+		{Name: "beta", Root: "/repos/beta", RepoID: "beta"},
+	}
+	p := NewProjectPickerOverlay(projects, "/repos/alpha")
+	p.SetMaxSize(60, 20)
+
+	if p.IsRepoSkipped("alpha") || p.IsRepoSkipped("beta") {
+		t.Fatalf("a freshly created picker must not mark any repo skipped")
+	}
+	// A skipped fetch (beta dropped) must not render the global "Snapshot
+	// failed" notice: the fetch answered and only beta's count is incomplete.
+	p.SetSkippedRepoIDs([]string{"beta"})
+	if !p.IsRepoSkipped("beta") {
+		t.Fatalf("SetSkippedRepoIDs must mark beta skipped")
+	}
+	if p.IsRepoSkipped("alpha") {
+		t.Fatalf("alpha is healthy and must not be skipped")
+	}
+	if out := renderedText(p.Render()); strings.Contains(out, "Snapshot failed") || strings.Contains(out, "D disabled") {
+		t.Fatalf("a per-project skip must not render the global fetch-failure notice, got:\n%s", out)
+	}
+
+	p.SetSkippedRepoIDs(nil)
+	if p.IsRepoSkipped("beta") {
+		t.Fatalf("SetSkippedRepoIDs(nil) must clear the skip set")
+	}
+}
+
 // TestProjectPickerSnapshotDegradedNoticeDistinctFromRegistry pins that a
 // snapshot-fetch failure and a registry-read failure are SEPARATE degraded
 // states: a watcher reading the notices should be able to tell which half(es)

@@ -423,12 +423,14 @@ func TestConsumeSkippedRepoNotice_NoPendingReturnsNil(t *testing.T) {
 
 // -- Project picker tests --
 
-// TestBuildProjectListWithSnapshotStatus_SkippedReposDegrades proves the project
-// picker marks itself degraded when the cross-repo snapshot carries a skip set
-// (#4742): a skipped repo's zero count is incomplete, not "no sessions", and the
-// degraded flag gates the destructive D path on the same evidence the CLI's
-// refusal uses.
-func TestBuildProjectListWithSnapshotStatus_SkippedReposDegrades(t *testing.T) {
+// TestBuildProjectListWithSnapshotStatus_SkippedReposCarriesSkipSet proves the
+// project picker carries the daemon's startup-skip set (#4742) so the
+// destructive D path can gate on the HIGHLIGHTED project being skipped. A
+// skipped repo's zero count is incomplete, but the incompleteness is scoped to
+// the affected project: a fetch that answered must NOT set the global
+// snapshotDegraded flag (which would disable D for every healthy project in a
+// multi-project workspace); the skip set travels as the fourth return instead.
+func TestBuildProjectListWithSnapshotStatus_SkippedReposCarriesSkipSet(t *testing.T) {
 	h := newTestHome(t)
 	h.repoRoot, h.repoID = "/project", "project"
 	resizeHome(h, 200, 36)
@@ -439,8 +441,10 @@ func TestBuildProjectListWithSnapshotStatus_SkippedReposDegrades(t *testing.T) {
 		}, nil
 	}))
 
-	_, _, snapshotDegraded := h.buildProjectListWithSnapshotStatus()
-	assert.True(t, snapshotDegraded, "a non-empty skip set must degrade the picker")
+	_, _, snapshotDegraded, skipped := h.buildProjectListWithSnapshotStatus()
+	assert.False(t, snapshotDegraded, "a fetch that answered must not set the global degraded flag")
+	require.Len(t, skipped, 1, "the skip set must travel so the picker can gate D on the highlighted project")
+	assert.Equal(t, "project", skipped[0].RepoID)
 }
 
 // TestBuildProjectListWithSnapshotStatus_NoSkipNotDegraded proves the project
@@ -454,8 +458,9 @@ func TestBuildProjectListWithSnapshotStatus_NoSkipNotDegraded(t *testing.T) {
 		return nil, nil, nil
 	}))
 
-	_, _, snapshotDegraded := h.buildProjectListWithSnapshotStatus()
+	_, _, snapshotDegraded, skipped := h.buildProjectListWithSnapshotStatus()
 	assert.False(t, snapshotDegraded)
+	assert.Empty(t, skipped)
 }
 
 // -- allReposSnapshotFetcher return signature test --

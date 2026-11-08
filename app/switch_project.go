@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
@@ -26,7 +27,7 @@ import (
 // registering a new repo on the fly. The picker navigates like the instances
 // rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
-	projects, registryDegraded, snapshotDegraded := m.buildProjectListWithSnapshotStatus()
+	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListWithSnapshotStatus()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	// Surface the snapshot-fetch failure as a first-class degraded state so
@@ -35,6 +36,17 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	// dialog could otherwise claim "no live sessions" for a project whose
 	// live sessions the daemon will still archive and tear down (#1973/#1985).
 	m.projectPickerOverlay.SetSnapshotDegraded(snapshotDegraded)
+	// Carry the daemon's startup-skipped repo IDs (#4742) so the D path gates
+	// only on the HIGHLIGHTED project being skipped: a skipped repo's zero
+	// count is incomplete, but the incompleteness is scoped to that project,
+	// not every healthy project in a multi-project workspace. The picker's
+	// refuse notice names the skip rather than a fetch failure the fetch did
+	// not have.
+	skippedIDs := make([]string, 0, len(skipped))
+	for _, s := range skipped {
+		skippedIDs = append(skippedIDs, s.RepoID)
+	}
+	m.projectPickerOverlay.SetSkippedRepoIDs(skippedIDs)
 	if isRemoteTarget() {
 		// The picker's registry rows come from the LOCAL config.ListProjects
 		// and its path input resolves on THIS filesystem, but a rebind would
@@ -60,7 +72,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 // the registry read; the picker's own snapshot-fetch failure is reported by
 // buildProjectListWithSnapshotStatus.
 func (m *home) buildProjectList() ([]overlay.Project, bool) {
-	projects, registryDegraded, _ := m.buildProjectListWithSnapshotStatus()
+	projects, registryDegraded, _, _ := m.buildProjectListWithSnapshotStatus()
 	return projects, registryDegraded
 }
 
@@ -72,16 +84,24 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 var projectSnapshotFetchTimeout = 3 * time.Second
 
 // buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
-// the picker's cross-repo session snapshot fetch FAILED. The failure is a
-// first-class degraded state, distinct from the registry read's: the union
-// still renders (registry, active root, root_agents), but every project's
-// SessionCount/InPlaceCount in it is silently zeroed, so a confirm dialog built
-// from those counts can claim "It has no live sessions" for a project whose
-// live sessions the daemon will still archive and tear down (#1973/#1985). The
-// picker's destructive D path gates on this third return; callers that are not
-// destructive consumers of the counts (refreshSidebarProjects) drop it via
-// buildProjectList.
-func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
+// the picker's cross-repo session snapshot fetch FAILED, and the daemon's
+// startup-skipped repo set (#4742). The failure is a first-class degraded
+// state, distinct from the registry read's: the union still renders (registry,
+// active root, root_agents), but every project's SessionCount/InPlaceCount in
+// it is silently zeroed, so a confirm dialog built from those counts can claim
+// "It has no live sessions" for a project whose live sessions the daemon will
+// still archive and tear down (#1973/#1985). The picker's destructive D path
+// gates on this third return; callers that are not destructive consumers of
+// the counts (refreshSidebarProjects) drop it via buildProjectList.
+//
+// A skipped repo's zero count is incomplete, not "no sessions" (#4742), but the
+// incompleteness is scoped to the affected project: the fetch answered and every
+// OTHER project's counts are trustworthy. The global snapshotDegraded flag is
+// reserved for an actual failed fetch whose counts are unknown for every
+// project; the skipped set travels as the fourth return so the picker can gate
+// D only when the HIGHLIGHTED project is skipped, instead of disabling D for
+// every healthy project in a multi-project workspace.
+func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool, []daemon.SkippedRepo) {
 	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
 	// add/delete/rebind completion), and the local daemon transport bounds only
 	// the dial, so a daemon that accepts the connection and never answers would
@@ -99,17 +119,13 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil
-	}
-	// A skipped repo's zero count is incomplete, not "no sessions" (#4742): the
-	// daemon dropped it at startup and its sessions are hidden. Marking the
-	// picker degraded gates the destructive D path on the same evidence the
-	// CLI's refusal uses — a fetch that answered but whose counts are not
-	// trustworthy for a project the daemon could not load.
-	if len(skipped) > 0 {
-		snapshotDegraded = true
+		// A failed fetch knows nothing about any project's counts, so the skip
+		// set is not actionable here either — drop it so the picker's D gate
+		// falls back to the global fetch-failure refusal.
+		skipped = nil
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
-	return projects, registryDegraded, snapshotDegraded
+	return projects, registryDegraded, snapshotDegraded, skipped
 }
 
 // buildProjectListFrom derives the project list from an already-fetched cross-repo
@@ -555,6 +571,17 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 				return m, m.handleNotice(fmt.Errorf(
 					"cannot delete project %q: live-session counts are unavailable (the cross-repo snapshot fetch failed); "+
 						"close the picker (Esc) and reopen it (Ctrl+P) to retry",
+					proj.Name))
+			}
+			// A project the daemon skipped at startup (#4742) has a zero count
+			// that is incomplete, not "no sessions": its hidden sessions are
+			// still archived and torn down by the daemon. Gate D on the skip so
+			// the consent copy cannot claim a no-op delete for that project,
+			// without disabling D for every healthy project in the workspace.
+			if m.projectPickerOverlay.IsRepoSkipped(proj.RepoID) {
+				return m, m.handleNotice(fmt.Errorf(
+					"cannot delete project %q: its sessions are hidden (the daemon skipped this repo at startup), "+
+						"so its live-session count is incomplete; repair the repo (see the status bar) and reopen the picker (Ctrl+P) to retry",
 					proj.Name))
 			}
 			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
