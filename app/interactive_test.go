@@ -23,6 +23,11 @@ import (
 // keystrokes (including Tab) to the pane's attachment; Ctrl-] — and only
 // Ctrl-] — returns to nav mode; `o` keeps the full-screen attach; bindings
 // that cannot embed fall back to full-screen.
+//
+// The nav→interactive transition key is classified under #4722 Option 3: a
+// plain printable character switches AND types itself (#1576's "start typing
+// immediately"), while Enter and every other non-printable trigger are
+// consumed by the transition and never reach the PTY.
 // ----------------------------------------------------------------------------
 
 // interactiveTestHome is liveTestHome with the first-time interactive help
@@ -65,17 +70,14 @@ func runHermeticCmd(t *testing.T, h *home, cmd tea.Cmd, depth int) {
 }
 
 // enterInteractive presses Enter on the focused pane and drives the deferred
-// activation to completion. That entry Enter is itself forwarded into the pane
-// (#1576) — TestFirstEnterOnFocusedPaneForwardsIntoPane pins that behavior. The
-// recorded keys are reset here so callers can assert on the keystrokes they
-// send NEXT without the entry Enter sitting in front of them.
+// activation to completion. The entry Enter is consumed by the mode switch and
+// never reaches the pane (#4722) — TestEnterOnFocusedPaneNeverReachesPTY pins
+// that — so the fake's recorded keys afterwards are exactly the keystrokes the
+// test sends next, with no entry key sitting in front of them.
 func enterInteractive(t *testing.T, h *home) {
 	t.Helper()
 	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	runHermeticCmd(t, h, cmd, 0)
-	if lt := focusedFake(h); lt != nil {
-		lt.keys = nil
-	}
 }
 
 func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
@@ -92,34 +94,177 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 	assert.Contains(t, h.menu.String(), "ctrl+]", "the status bar must show the escape hatch")
 }
 
-// TestFirstEnterOnFocusedPaneForwardsIntoPane is the #1576 regression: with the
-// interactive help already seen (every established user), pressing Enter on an
-// already-focused pane must both enter interactive mode AND forward that first
-// Enter into the pane — the transition key is the pane's first in-pane
-// keystroke and must not be swallowed. Before the fix only the once-ever
-// first-run help path replayed the entry key, so every later entry dropped it.
-func TestFirstEnterOnFocusedPaneForwardsIntoPane(t *testing.T) {
+// TestEnterOnFocusedPaneNeverReachesPTY is the #4722 regression: the Enter that
+// switches a focused pane from nav to interactive mode is consumed by the mode
+// switch and must NOT reach the pane's PTY. Forwarding it submits whatever sits
+// on the input line — a half-typed shell command executes, or an agent's draft
+// prompt is sent — and appends a phantom empty prompt line on every entry.
+// Driven through the real Update path (handleKeyPress → dispatch → handleEnter →
+// the deferred enterInteractiveMsg activation), not the handler directly.
+func TestEnterOnFocusedPaneNeverReachesPTY(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 
-	// Drive the entry WITHOUT the key-resetting enterInteractive helper so the
-	// forwarded entry keystroke is observable.
-	_, cmd := h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyEnter})
 	runHermeticCmd(t, h, cmd, 0)
 
 	require.True(t, h.interactive, "Enter on a focused pane must enter interactive mode")
 	require.Len(t, *fakes, 1)
-	assert.Equal(t, []string{"enter"}, (*fakes)[0].keys,
-		"the Enter that enters a focused pane must forward into the pane, not be swallowed (#1576)")
+	assert.Empty(t, (*fakes)[0].keys,
+		"the nav→interactive Enter is a mode-switch key: it must be consumed, never forwarded (#4722)")
 
-	// And the pane keeps forwarding normally afterwards.
+	// Once the mode is live, keystrokes forward normally — including the NEXT
+	// Enter, which is real pane input, not a transition.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
-	assert.Equal(t, []string{"enter", "z"}, (*fakes)[0].keys,
-		"subsequent keystrokes must forward on top of the entry Enter")
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	assert.Equal(t, []string{"z", "enter"}, (*fakes)[0].keys,
+		"keys typed while interactive still forward — only the transition key is consumed")
 }
 
-// TestEnterFromTreeDoesNotForwardIntoPane guards the other half of #1576: a
-// navigation Enter (tree/sidebar selection) opens+enters the pane but must NOT
-// type into the agent — only an already-focused-pane Enter forwards.
+// TestUnboundLetterOnFocusedPaneSwitchesAndTypes is the #1576 half #4722
+// Option 3 keeps: an unbound printable key pressed in nav mode on a focused
+// pane is an implicit switch — it enters interactive mode AND types itself, so
+// starting to type at a pane just works. Driven through the real Update path
+// (handleKeyPress → dispatchKeyAction's unbound-key branch → enterPane → the
+// deferred enterInteractiveMsg replay).
+func TestUnboundLetterOnFocusedPaneSwitchesAndTypes(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	require.False(t, h.interactive)
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive,
+		"an unbound letter at a focused pane must enter interactive mode (#1576)")
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"z"}, (*fakes)[0].keys,
+		"the letter that switched modes must also be typed into the pane (#1576 kept under #4722)")
+
+	// Typing then continues in-mode as usual.
+	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
+	assert.Equal(t, []string{"z", "Z"}, (*fakes)[0].keys)
+}
+
+// TestUnboundLetterNeedsFocusedPane pins the letter switch's scope: with the
+// tree focused there is no pane to type into, so the same unbound letter stays
+// inert rather than inventing a target.
+func TestUnboundLetterNeedsFocusedPane(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	h.focusRegion(layout.RegionTree)
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	assert.False(t, h.interactive)
+	assert.Empty(t, *fakes, "no pane was entered: no attachment may be created")
+}
+
+// TestNavBoundKeyKeepsItsMeaningOnFocusedPane pins the no-stolen-shortcuts
+// rule: the letter switch takes only keys the nav keymap does NOT own. A
+// printable key that IS a nav binding keeps its nav action — `x` hides the
+// focused pane instead of typing into it.
+func TestNavBoundKeyKeepsItsMeaningOnFocusedPane(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+	require.NotNil(t, h.focusedOpenPane())
+
+	// The cmd (selectionChanged's refresh dispatches) is deliberately not
+	// drained: hidePane itself is synchronous, and those cmds are not hermetic.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+
+	assert.False(t, h.interactive, "x is the hide-pane verb, not pane input")
+	assert.Zero(t, h.store.NumOpenPanes(), "the focused pane must be hidden")
+	assert.Empty(t, *fakes, "no attachment bound: nothing may be typed into")
+}
+
+// TestNonPrintableSwitchKeysStayInertOnFocusedPane pins the consumption side of
+// #4722 Option 3 in nav mode: an unbound key that is NOT a plain printable
+// character — a control chord, an alt-modified rune, esc, a function key, a
+// paste — is not a typing gesture, so it stays inert rather than switching or
+// leaking bytes into the pane.
+func TestNonPrintableSwitchKeysStayInertOnFocusedPane(t *testing.T) {
+	cases := []struct {
+		name string
+		msg  tea.KeyMsg
+	}{
+		{"ctrl chord", tea.KeyMsg{Type: tea.KeyCtrlZ}},
+		{"alt-modified rune", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z"), Alt: true}},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
+		{"function key", tea.KeyMsg{Type: tea.KeyF5}},
+		{"paste", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("pasted"), Paste: true}},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			h, _, fakes := interactiveTestHome(t)
+
+			_, cmd := h.Update(c.msg)
+			runHermeticCmd(t, h, cmd, 0)
+
+			assert.False(t, h.interactive, "%s must not switch modes", c.name)
+			assert.Empty(t, *fakes, "%s must not create an attachment", c.name)
+		})
+	}
+}
+
+// TestEntryLetterSurfacingHelpIsNotDoubleForwarded pins the override rule in
+// requestInteractive's contract on the letter path: when an unbound letter
+// triggers the entry and the first-run help intercepts it, that letter was
+// spent surfacing the overlay — the DISMISS key becomes the pane's first input
+// instead, so the entry letter is never double-forwarded.
+func TestEntryLetterSurfacingHelpIsNotDoubleForwarded(t *testing.T) {
+	h, _ := liveTestHome(t) // interactive help NOT seen
+	fakes, _ := stubLiveTermFactory(t)
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	runHermeticCmd(t, h, cmd, 0)
+	require.Equal(t, stateHelp, h.state,
+		"the entry letter must surface the first-run help, not type around it")
+	require.False(t, h.interactive)
+	require.Empty(t, *fakes, "no attachment before the help is dismissed")
+
+	_, cmd = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive)
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"q"}, (*fakes)[0].keys,
+		"only the dismiss key types — the entry letter that merely surfaced the help is not forwarded")
+}
+
+// TestUnboundLetterOnRemotePaneDoesNotAttach pins the letter switch's edge on a
+// pane that cannot embed (a remote workspace has no daemon PTY stream): there
+// is nothing to type into, so the typing gesture is consumed in place rather
+// than falling back to the full-screen attach an Enter would fire.
+func TestUnboundLetterOnRemotePaneDoesNotAttach(t *testing.T) {
+	h := newTestHome(t)
+	require.NoError(t, h.appState.SetHelpScreensSeen(
+		helpTypeInteractive{}.mask()|helpTypeInstanceAttach{}.mask()))
+	inst := instanceWithFakeBackend(t, "remote-inst")
+	inst.SetBackend(remoteFakeBackend{session.NewFakeBackend()})
+	inst.SetStatusForTest(session.Running)
+	selectInstance(h, inst)
+	resizeHome(h, 120, 40)
+	pane := openTestPane(t, h, inst, 0)
+	require.NotNil(t, h.focusedOpenPane())
+	require.Equal(t, "", liveSessionName(inst, pane.Tab()),
+		"precondition: the remote pane cannot embed")
+
+	attached := 0
+	swapAttachOverlayCallbackFn(t, func(m *home, target sessionActionTarget, label, traceSuffix string, _ func() (chan struct{}, error)) tea.Cmd {
+		attached++
+		return nil
+	})
+	fakes, _ := stubLiveTermFactory(t)
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	assert.False(t, h.interactive, "a letter must not enter interactive on a pane that cannot embed")
+	assert.Equal(t, 0, attached, "a letter is pane input, not an attach verb — no full-screen attach")
+	assert.Empty(t, *fakes)
+}
+
+// TestEnterFromTreeDoesNotForwardIntoPane guards the other half of the same
+// contract: a navigation Enter (tree/sidebar selection) opens+enters the pane
+// but must NOT type into the agent.
 func TestEnterFromTreeDoesNotForwardIntoPane(t *testing.T) {
 	h := newTestHome(t)
 	require.NoError(t, h.appState.SetHelpScreensSeen(helpTypeInteractive{}.mask()))
@@ -141,6 +286,11 @@ func TestEnterFromTreeDoesNotForwardIntoPane(t *testing.T) {
 		"a tree/nav select Enter opens the pane but must not type into the agent (#1576)")
 }
 
+// TestFirstRunInteractiveHelpForwardsDismissKey pins the printable half of the
+// dismiss-key contract (#1576 kept under #4722 Option 3): a dismiss key that is
+// a plain printable character is pane input — it both completes the entry and
+// types itself. The non-printable half lives in
+// TestFirstRunInteractiveHelpConsumesNonPrintableDismissKeys.
 func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
@@ -157,9 +307,12 @@ func TestFirstRunInteractiveHelpForwardsDismissKey(t *testing.T) {
 	require.True(t, h.interactive, "dismissing first-run help should enter interactive mode")
 	require.Len(t, *fakes, 1)
 	assert.Equal(t, []string{"q"}, (*fakes)[0].keys,
-		"the key that dismisses the first-run interactive help must reach the pane")
+		"a printable dismiss key is pane input — it must reach the pane (#1576)")
 }
 
+// TestFirstRunInteractiveHelpForwardsNavigationKey: a rune that also names a
+// nav binding is still a printable character, so dismissing with it types it —
+// the overlay owns the keyboard, the nav meaning never runs.
 func TestFirstRunInteractiveHelpForwardsNavigationKey(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
@@ -174,7 +327,7 @@ func TestFirstRunInteractiveHelpForwardsNavigationKey(t *testing.T) {
 	require.True(t, h.interactive, "j must dismiss first-run help rather than scroll it")
 	require.Len(t, *fakes, 1)
 	assert.Equal(t, []string{"j"}, (*fakes)[0].keys,
-		"the navigation key that dismisses first-run help must reach the pane")
+		"a printable dismiss key is pane input — it must reach the pane (#1576)")
 }
 
 func TestInteractiveForwardsAllKeysIncludingTab(t *testing.T) {
@@ -422,9 +575,9 @@ func TestEnterWithFocusedPaneTargetsFocusNotSidebarSelection(t *testing.T) {
 	// FOCUSED pane routes keystrokes.
 	require.Len(t, *fakes, 2)
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
-	// The entry Enter forwards into focused pane A (#1576), then Z on top — both
-	// land on A's attachment, never sidebar-selected B's.
-	assert.Equal(t, []string{"enter", "Z"}, focusedFake(h).keys,
+	// The entry Enter was consumed by the mode switch (#4722); Z lands on A's
+	// attachment alone, never sidebar-selected B's.
+	assert.Equal(t, []string{"Z"}, focusedFake(h).keys,
 		"keystrokes route to the focused pane's attachment")
 }
 
@@ -584,6 +737,8 @@ func TestClickToInteractOnPreviewingPaneBindsInsteadOfFallingBack(t *testing.T) 
 	// to the session the pane used to show.
 	assert.Equal(t, previewed, p.Instance(), "the click enters the previewed target")
 	assert.Nil(t, h.panePreviewTxn, "entering a pane resolves its preview")
+	assert.Empty(t, focusedFake(h).keys,
+		"click-to-interact writes nothing to the pane's input — same #4722 contract as Enter")
 }
 
 // TestActivateInteractiveDropsStaleActivationUnderAttachHelp is the #598 fence on

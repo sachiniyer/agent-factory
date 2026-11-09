@@ -10,23 +10,24 @@ import (
 	"github.com/sachiniyer/agent-factory/keys"
 )
 
-// TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive is #2413.
+// TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive is #2413,
+// re-pinned under #4722 Option 3's classification.
 //
-// The first-run interactive help is dismissed by ANY key, and the dismiss key is
-// then replayed into the pane so it is not swallowed (#1576). The overlay's last
-// line reads "Press ctrl+] to navigate." — so ctrl+] is the key the
-// screen puts in front of the user, and pressing it is the most natural thing to
-// do while reading.
+// The first-run interactive help is dismissed by ANY key. The overlay's last
+// line reads "Press ctrl+] to navigate." — so ctrl+] is the key the screen
+// puts in front of the user, and pressing it is the most natural thing to do
+// while reading.
 //
-// Replaying it ran it through handleInteractiveKey, where ctrl+] is the one
-// host-reserved key: it exits interactive mode. So a first-time user who
-// dismissed the help with the key the help named landed back in nav mode
-// instantly, having never typed a character — interactive mode looked simply
-// broken, on the one run where the user is least equipped to tell a bug from
-// their own mistake.
+// A dismiss key that is a plain printable character is replayed into the pane
+// (#1576); anything else — ctrl+] included — is consumed by the transition
+// (#4722). Replaying ctrl+] ran it through handleInteractiveKey, where it is
+// the one host-reserved key: it exits interactive mode, so a first-time user
+// who dismissed the help with the key the help named landed back in nav mode
+// instantly, having never typed a character. The printable-only classification
+// keeps that fixed by construction — ctrl+] can never qualify.
 //
-// The existing coverage (TestFirstRunInteractiveHelpForwardsDismissKey) dismisses
-// with `q`, which forwards harmlessly, so nothing caught this.
+// The sibling coverage (TestFirstRunInteractiveHelpForwardsDismissKey)
+// dismisses with `q`, which forwards harmlessly, so nothing caught this.
 func TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive(t *testing.T) {
 	h, _ := liveTestHome(t)
 	fakes, _ := stubLiveTermFactory(t)
@@ -58,27 +59,32 @@ func TestFirstRunInteractiveHelpDismissedWithExitKeyStaysInteractive(t *testing.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyCtrlCloseBracket})
 	assert.False(t, h.interactive,
 		"ctrl+] pressed inside interactive mode must still return to navigation — the fix "+
-			"suppresses the REPLAY, never the key itself")
+			"suppresses the transition key, never the key itself")
 	assert.Equal(t, []string{"z"}, (*fakes)[0].keys,
 		"the exit ctrl+] must not be forwarded to the pane either")
 }
 
-// TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys guards the
-// behavior #1576 added and #2413 must not cost: every dismiss key that is NOT
-// the host-reserved exit key still reaches the pane, so the keystroke the user
-// typed is not silently eaten.
-func TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys(t *testing.T) {
+// TestFirstRunInteractiveHelpConsumesNonPrintableDismissKeys pins the #4722
+// consumption half on the first-run help path: a dismiss key that is NOT a
+// plain printable character — Enter, a control chord, Tab, Esc — is spent on
+// the dismissal and must NOT be typed into the pane it just entered. A
+// forwarded Enter submits whatever sits on the input line (#4722's leak); a
+// forwarded ctrl+c would interrupt an agent the user never addressed. The
+// printable half — letters switch AND type — is pinned by
+// TestFirstRunInteractiveHelpForwardsDismissKey (#1576).
+func TestFirstRunInteractiveHelpConsumesNonPrintableDismissKeys(t *testing.T) {
 	cases := []struct {
 		name string
 		msg  tea.KeyMsg
-		want string
 	}{
-		{"letter", tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("q")}, "q"},
-		{"enter", tea.KeyMsg{Type: tea.KeyEnter}, "enter"},
+		{"enter", tea.KeyMsg{Type: tea.KeyEnter}},
 		// ctrl+c is deliberately pane input inside interactive mode (it interrupts
 		// the agent, not af) — TestInteractiveForwardsAllKeysIncludingTab pins
-		// that, and the #2413 guard must not widen to it.
-		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}, "ctrl+c"},
+		// that. But the keypress that dismisses the overlay is spent on the
+		// dismissal, so it must not reach the pane as an interrupt either.
+		{"ctrl+c", tea.KeyMsg{Type: tea.KeyCtrlC}},
+		{"tab", tea.KeyMsg{Type: tea.KeyTab}},
+		{"esc", tea.KeyMsg{Type: tea.KeyEsc}},
 	}
 
 	for _, c := range cases {
@@ -95,8 +101,8 @@ func TestFirstRunInteractiveHelpStillForwardsOrdinaryDismissKeys(t *testing.T) {
 
 			require.True(t, h.interactive, "dismissing first-run help enters interactive mode")
 			require.Len(t, *fakes, 1)
-			assert.Equal(t, []string{c.want}, (*fakes)[0].keys,
-				"the key that dismisses the first-run interactive help must reach the pane (#1576)")
+			assert.Empty(t, (*fakes)[0].keys,
+				"a non-printable dismiss key is consumed by the overlay, never forwarded (#4722)")
 		})
 	}
 }
