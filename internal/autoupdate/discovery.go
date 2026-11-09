@@ -151,24 +151,115 @@ func unusablePreviewReleases(releases []Release) error {
 		"retrying will not help — fix the tag", published, len(releases))
 }
 
+// The release-lookup retry policy. The lookup is deliberately unauthenticated
+// (#2306 pins that), so a shared runner IP or NAT'd LAN can be over GitHub's
+// per-IP quota through no fault of af — and a 403/429 is the only shape that
+// has. Those answers are retried; everything else returns on first sight.
+const (
+	// maxReleaseLookupAttempts bounds the whole loop: one try plus retries.
+	maxReleaseLookupAttempts = 4
+	// releaseLookupRetryBase is the wait before the first retry when the
+	// response carries no timing hint; it doubles each attempt.
+	releaseLookupRetryBase = 500 * time.Millisecond
+	// maxReleaseLookupWait caps a single wait. These calls run in front of
+	// `af upgrade` and the launch path, so a wait measured in minutes is
+	// reported to the user, never slept through.
+	maxReleaseLookupWait = 20 * time.Second
+)
+
+// Injectable for tests: the retry loop's clock and sleep.
+var (
+	releaseLookupNow   = time.Now
+	releaseLookupSleep = time.Sleep
+)
+
+// getJSON fetches url into out. timeout bounds the WHOLE lookup — every
+// attempt and every wait — because the launch path has a blink's worth of
+// patience and `af upgrade` a user's.
+//
+// A 403 or 429 is a quota answer, not necessarily a final one: the
+// unauthenticated budget is per-source-IP, so retrying is the only in-process
+// remedy. The wait honours Retry-After and X-RateLimit-Reset up to
+// maxReleaseLookupWait, and a server-named wait beyond that cap is reported
+// rather than slept — GitHub's primary quota resets on an hourly boundary no
+// interactive command can wait out, so the honest answer is the reset time,
+// not a clamped nap that retries into a quota that is still empty.
 func getJSON(url string, timeout time.Duration, out any) error {
+	deadline := releaseLookupNow().Add(timeout)
+	var status int
+	for attempt := 0; ; attempt++ {
+		if attempt > 0 && deadline.Sub(releaseLookupNow()) <= 0 {
+			return fmt.Errorf("GitHub API returned %d — still rate-limited when the %s lookup budget ran out; retry `af upgrade` shortly", status, timeout)
+		}
+		remaining := deadline.Sub(releaseLookupNow())
+		var header http.Header
+		var err error
+		status, header, err = getOnce(url, remaining, out)
+		switch {
+		case err == nil:
+			return nil
+		case status != http.StatusForbidden && status != http.StatusTooManyRequests:
+			return err
+		case attempt+1 >= maxReleaseLookupAttempts:
+			return fmt.Errorf("GitHub API returned %d — still rate-limited after %d attempts; "+
+				"the release lookup is unauthenticated by design and shares GitHub's per-IP quota, "+
+				"so retry `af upgrade` after the limit resets", status, attempt+1)
+		}
+		now := releaseLookupNow()
+		wait, hinted := releaseLookupRetryDelay(header, attempt, now)
+		if hinted && wait > maxReleaseLookupWait {
+			return fmt.Errorf("GitHub API returned %d — rate-limited with a server-named reset about %s out; retry `af upgrade` after the reset", status, wait.Round(time.Second))
+		}
+		if wait > maxReleaseLookupWait {
+			wait = maxReleaseLookupWait
+		}
+		if wait >= deadline.Sub(now) {
+			return fmt.Errorf("GitHub API returned %d — still rate-limited; retry `af upgrade` shortly", status)
+		}
+		releaseLookupSleep(wait)
+	}
+}
+
+// getOnce performs a single GET, returning the status and response headers so
+// the retry loop can read quota hints. Non-200 bodies are not decoded.
+func getOnce(url string, timeout time.Duration, out any) (int, http.Header, error) {
 	client := &http.Client{Timeout: timeout}
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	req.Header.Set("Accept", "application/vnd.github.v3+json")
 
 	resp, err := client.Do(req)
 	if err != nil {
-		return err
+		return 0, nil, err
 	}
 	defer resp.Body.Close()
 
 	if resp.StatusCode != http.StatusOK {
-		return fmt.Errorf("GitHub API returned %d", resp.StatusCode)
+		return resp.StatusCode, resp.Header, fmt.Errorf("GitHub API returned %d", resp.StatusCode)
 	}
-	return json.NewDecoder(resp.Body).Decode(out)
+	return resp.StatusCode, resp.Header, json.NewDecoder(resp.Body).Decode(out)
+}
+
+// releaseLookupRetryDelay decides the wait before retrying a quota-class
+// response. Server timing hints win: Retry-After (seconds or HTTP-date), then
+// X-RateLimit-Reset (unix epoch). hinted reports whether the wait came from
+// the server — a hinted wait beyond maxReleaseLookupWait is surfaced to the
+// user rather than slept, so the caller needs to know which case it is in.
+func releaseLookupRetryDelay(header http.Header, attempt int, now time.Time) (wait time.Duration, hinted bool) {
+	if retryAfter := strings.TrimSpace(header.Get("Retry-After")); retryAfter != "" {
+		if secs, err := strconv.Atoi(retryAfter); err == nil && secs >= 0 {
+			return time.Duration(secs) * time.Second, true
+		}
+		if when, err := http.ParseTime(retryAfter); err == nil {
+			return max(when.Sub(now), 0), true
+		}
+	}
+	if epoch, err := strconv.ParseInt(strings.TrimSpace(header.Get("X-RateLimit-Reset")), 10, 64); err == nil {
+		return max(time.Unix(epoch, 0).Sub(now), 0), true
+	}
+	return releaseLookupRetryBase << attempt, false
 }
 
 // PickLatestReleaseTag returns the version-newest non-draft release tag on

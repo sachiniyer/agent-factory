@@ -211,12 +211,17 @@ Two guards keep that honest:
   `AF_LIFECYCLE_ALLOW_PARTIAL=1` is set. `make lifecycle-container` sets it (a
   dev-box container genuinely cannot host a service manager) and prints a
   PARTIAL COVERAGE banner naming what went untested. The native CI leg also
-  permits an explicit external-release-availability skip; its dedicated check
-  below still makes assertion #4 non-skippable;
-* the CI native leg requires all three positive assertion-4 PASS records. It
-  **fails the job** if assertion #4 skips or scenario B stops before reaching
-  it — a green run that quietly stopped testing supervision is the exact lie
-  this gate exists to prevent.
+  permits an explicit external-release-availability skip;
+* the CI native leg requires all three positive assertion-4 PASS records per
+  upgrade mode. It **fails the job** if a mode is missing proof for any reason
+  other than the named release-lookup unavailability — and the `::error::`
+  says exactly what is missing. When every unproven mode skipped specifically
+  because the GitHub release lookup was unavailable, supervision could not run
+  at all, so the step emits a `::warning::` naming that cause and passes
+  ([#6983](https://github.com/sachiniyer/agent-factory/issues/6983)). The
+  excuse is per-mode: supervision stays enforced wherever the lookup worked,
+  and a green run that quietly stopped testing supervision for any other
+  reason is still the exact lie this gate exists to prevent.
 
 ## The audit: "what would make this pass without testing anything?"
 

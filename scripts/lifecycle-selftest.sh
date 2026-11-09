@@ -307,6 +307,112 @@ else
     ok "native supervision proof is required independently for every upgrade mode"
 fi
 
+printf '\n=== the native verdict excuses ONLY the named release-lookup cause (#6983) ===\n'
+
+# lc_emit_supervision_verdict is the step's tri-state: 0 proven, 2 every gap
+# excused by the named release-lookup SKIP (a ::warning::, not red), 1 a mode
+# missing proof for any other reason (an ::error:: that names it).
+
+# Full proof: passes with no annotation at all.
+verdict_rc=0
+verdict_out="$(lc_emit_supervision_verdict "$proof_log" 2>&1)" || verdict_rc=$?
+if [ "$verdict_rc" = 0 ] && ! printf '%s' "$verdict_out" | grep -q '::\(warning\|error\)::'; then
+    ok "a fully proven log passes the verdict silently"
+else
+    no "a fully proven log returned rc=$verdict_rc with output: $verdict_out"
+fi
+
+# The #6983 incident: BOTH modes skipped because the release lookup was
+# unavailable. A warning naming the cause, and the step passes.
+both_skipped_log="$SELFTEST_TMP/both-modes-lookup-skipped.log"
+printf '%s\n' \
+    '[lifecycle]   SKIP  scenario-b/upgrade-cmd: could not verify the upgrade — GitHub release lookup unavailable or rate-limited' \
+    '[lifecycle]   SKIP  scenario-b/launch: could not verify the upgrade — GitHub release lookup unavailable or rate-limited' \
+    '[lifecycle] 22 PASS, 0 FAIL, 2 SKIP' \
+    >"$both_skipped_log"
+verdict_rc=0
+verdict_out="$(lc_emit_supervision_verdict "$both_skipped_log" 2>&1)" || verdict_rc=$?
+if [ "$verdict_rc" = 2 ] && printf '%s' "$verdict_out" | grep -q '::warning::' &&
+    printf '%s' "$verdict_out" | grep -q 'release lookup'; then
+    ok "both modes lookup-skipped => rc 2 and a ::warning:: naming the cause"
+else
+    no "an all-lookup-skipped log returned rc=$verdict_rc (want 2) output: $verdict_out"
+fi
+# Both modes must be named, so the annotation cannot hide a gap in one.
+if printf '%s' "$verdict_out" | grep -q 'upgrade-cmd' &&
+    printf '%s' "$verdict_out" | grep -q 'launch'; then
+    ok "the warning names every excused mode"
+else
+    no "the warning did not name both excused modes: $verdict_out"
+fi
+
+# The OTHER availability skip — the harness's own release-boundary resolution —
+# names the same cause and must excuse identically.
+boundary_skipped_log="$SELFTEST_TMP/boundary-skipped.log"
+printf '%s\n' \
+    '[lifecycle]   SKIP  scenario-b/upgrade-cmd: could not verify the release boundary — GitHub release API unavailable or rate-limited' \
+    '[lifecycle]   SKIP  scenario-b/launch: could not verify the release boundary — GitHub release API unavailable or rate-limited' \
+    >"$boundary_skipped_log"
+verdict_rc=0
+lc_emit_supervision_verdict "$boundary_skipped_log" >/dev/null 2>&1 || verdict_rc=$?
+if [ "$verdict_rc" = 2 ]; then
+    ok "the release-boundary SKIP is the same named excuse"
+else
+    no "a boundary-skip log returned rc=$verdict_rc, want 2"
+fi
+
+# Partial coverage: one mode proved, the other excused. The excused mode still
+# warns, and the leg passes — supervision IS enforced wherever the lookup ran.
+verdict_rc=0
+verdict_out="$(lc_emit_supervision_verdict "$mixed_log" 2>&1)" || verdict_rc=$?
+if [ "$verdict_rc" = 2 ] && printf '%s' "$verdict_out" | grep -q '::warning::'; then
+    ok "one proven + one lookup-skipped mode warns and passes"
+else
+    no "a mixed proven/skipped log returned rc=$verdict_rc (want 2) output: $verdict_out"
+fi
+
+# Any OTHER missing proof still fails, and the error names what is absent.
+no_records_log="$SELFTEST_TMP/no-supervision-records.log"
+printf '%s\n' \
+    '[lifecycle]   FAIL  scenario-b/launch: the upgrade step itself failed' \
+    '[lifecycle] 20 PASS, 1 FAIL, 0 SKIP' \
+    >"$no_records_log"
+verdict_rc=0
+verdict_out="$(lc_emit_supervision_verdict "$no_records_log" 2>&1)" || verdict_rc=$?
+if [ "$verdict_rc" = 1 ] && printf '%s' "$verdict_out" | grep -q '::error::' &&
+    printf '%s' "$verdict_out" | grep -q 'scenario-b/launch'; then
+    ok "a mode missing proof without the excuse FAILS, naming the mode"
+else
+    no "an unexcused gap returned rc=$verdict_rc (want 1) output: $verdict_out"
+fi
+if printf '%s' "$verdict_out" | grep -q 'upgrade-cmd.*missing'; then
+    ok "the error also names the mode that stopped before supervision"
+else
+    no "the error did not name the silently-absent mode: $verdict_out"
+fi
+
+# A skip for any OTHER reason is not the named excuse.
+other_skip_log="$SELFTEST_TMP/other-skip.log"
+printf '%s\n' \
+    '[lifecycle]   SKIP  scenario-b/launch: no user service manager here (container has no systemd)' \
+    >"$other_skip_log"
+verdict_rc=0
+lc_emit_supervision_verdict "$other_skip_log" >/dev/null 2>&1 || verdict_rc=$?
+if [ "$verdict_rc" = 1 ]; then
+    ok "a non-lookup SKIP cannot masquerade as the release-lookup excuse"
+else
+    no "an unrelated skip returned rc=$verdict_rc, want 1"
+fi
+
+# No log at all cannot prove anything.
+verdict_rc=0
+verdict_out="$(lc_emit_supervision_verdict "$SELFTEST_TMP/absent.log" 2>&1)" || verdict_rc=$?
+if [ "$verdict_rc" = 1 ] && printf '%s' "$verdict_out" | grep -q '::error::'; then
+    ok "a missing log fails the verdict with an ::error::"
+else
+    no "a missing log returned rc=$verdict_rc (want 1) output: $verdict_out"
+fi
+
 printf '\n=== the kill path refuses an empty home ===\n'
 
 # lc_daemon_pids feeds lc_teardown_home, which SIGKILLs what it returns. With an
