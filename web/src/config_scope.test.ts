@@ -173,3 +173,32 @@ test("the explain note says when the trace is project-scoped", async () => {
   const note = rowPart(pane, "default_program", ".af-config-explain-note")?.textContent ?? "";
   assert.match(note, / · project scope/);
 });
+
+// A project read must never cost a row: the web always has a selected project,
+// so a key that vanished in project scope would vanish for everyone. Every tier,
+// every control kind, marked and unmarked rows alike — including an unknown
+// scope — renders, and the set of rows equals the global render's.
+test("every key renders in project scope, exactly as in global scope", () => {
+  const rows: ConfigEntry[] = [
+    entry({ key: "default_program", tier: 1, enum: ["claude", "codex"], value: "codex", scope: "project", global_value: "claude" }),
+    entry({ key: "auto_update", tier: 1, type: "bool", value: "true" }),
+    entry({ key: "appearance", tier: 1, enum: ["light", "dark", "system"], value: "system" }),
+    entry({ key: "vscode_server_binary", tier: 2, tier_name: "common", value: "" }),
+    entry({ key: "program_overrides", tier: 2, tier_name: "common", type: "table", value: "{}", scope: "project+personal", global_value: "{}" }),
+    entry({ key: "branch_prefix", tier: 3, tier_name: "advanced", value: "af/", scope: "personal-ignored", global_value: "af/" }),
+    entry({ key: "on_archive_command", tier: 3, tier_name: "advanced", value: "x", scope: "team", global_value: "" }),
+    entry({ key: "network.listen_addr", tier: 3, tier_name: "advanced", value: "127.0.0.1:8443" }),
+  ];
+  const rendered = (scope: ConfigScope): string[] => {
+    const pane = render(rows, scope);
+    // The advanced tier folds by default; open it so every tier is in the DOM.
+    el(pane).querySelector(".af-config-toggle")!.click();
+    return el(pane).querySelectorAll(".af-config-list .af-config-row[data-key]").map((r) => r.getAttribute("data-key") ?? "");
+  };
+  const project = rendered(PROJECT);
+  assert.deepEqual(project, rows.map((e) => e.key), "every key, in manifest order, in project scope");
+  assert.deepEqual(project, rendered(GLOBAL), "a project read renders the same rows as the global read");
+  for (const scope of [{ requested: "/srv/gone", root: "", error: "not a git repository: /srv/gone" }, { requested: "/srv/app", root: "", error: "" }]) {
+    assert.deepEqual(rendered(scope), project, "a degraded or too-old read keeps every row too");
+  }
+});

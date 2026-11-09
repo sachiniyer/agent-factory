@@ -236,3 +236,32 @@ func TestEditorEntriesForRepoRefusesAMissingGlobalSnapshot(t *testing.T) {
 }
 
 func mustEntries(entries []ConfigEntry, _ string) []ConfigEntry { return entries }
+
+// TestEditorEntriesForRepoKeepsEveryGlobalKey: the web always reads with a
+// selected project, so a key a project read dropped would vanish from the
+// Config view for everyone. With overrides in every project layer, the rows
+// are exactly the manifest's — same keys, same order — and only the three
+// value fields may differ from the global row.
+func TestEditorEntriesForRepoKeepsEveryGlobalKey(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	writeGlobalTOML(t, home, "default_program = \"codex\"\nauto_update = false\nschema_version = 1\n\n[root_agent]\nenabled = true\n")
+	writeInRepoTomlConfig(t, repoRoot, "default_program = \"aider\"\n[program_overrides]\ncodex = \"repo-codex\"\n")
+	writePersonalConfig(t, project.ID, "branch_prefix = \"local/\"\n[root_agent]\nenabled = false\n")
+
+	entries, _ := editorEntriesFor(t, repoRoot)
+	global, err := LoadConfig()
+	require.NoError(t, err)
+	want := ManifestWithValues(global)
+	require.Len(t, entries, len(want), "a project read must return every global key")
+	marked := 0
+	for i := range want {
+		got := entries[i]
+		require.Equal(t, want[i].Key, got.Key, "row %d: the project read must keep the manifest's keys and order", i)
+		if got.Scope != "" {
+			marked++
+			got.Value, got.Scope, got.GlobalValue = want[i].Value, "", ""
+		}
+		assert.Equal(t, want[i], got, "row %q: only value, scope and global_value may differ in project scope", want[i].Key)
+	}
+	assert.GreaterOrEqual(t, marked, 4, "fixture: default_program, program_overrides, branch_prefix and root_agent are marked")
+}
