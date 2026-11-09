@@ -214,12 +214,11 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// fully sufficient.
 		return m.handleMouse(msg)
 	case tea.KeyMsg:
-		dismissed, endInput := m.beginUserInput()
-		defer endInput()
-		if dismissed {
-			return m, nil
+		// A burst of keys from one terminal read is handled key by key (#7015).
+		if burst := m.splitNavKeyBurst(msg); burst != nil {
+			return m.handleKeyBurst(msg, burst)
 		}
-		return m.handleKeyPress(msg)
+		return m.handleKeyInput(msg)
 	case tea.WindowSizeMsg:
 		return m, m.updateHandleWindowSizeEvent(msg)
 	case error:
@@ -790,6 +789,9 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// (no shortcut is stolen), and an unbound non-printable stays inert —
 		// it is not a typing gesture, and on a pane that cannot embed there is
 		// nothing to type into (enterPane drops it before the attach fallback).
+		// A burst of runes from one read never gets here as one key: Update
+		// splits it first (handleKeyBurst, #7015). So a miss here is a key that
+		// really is unbound, never a burst of bound ones like "kk".
 		if p := m.focusedOpenPane(); p != nil && isSwitchTypingKey(msg) {
 			return m.enterPane(p, &msg)
 		}
