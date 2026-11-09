@@ -129,6 +129,13 @@ const migrateRootAgentsProbeBudget = 30 * time.Second
 // (legacyRootAgentsManualStep); these name a cause to fix and a re-run.
 const migrateRootAgentsAmbiguousStep = "could not be migrated safely — resolve the cause named beside each entry, then run `af config migrate` again"
 
+// errMovedCheckoutAmbiguous is returned by verifyTwoIdentitySafety when a
+// moved-but-unrebound project's two daemon identities would not both keep
+// their pre-migration effective profile. It is NOT a write failure: the check
+// runs before any personal write, so the caller leaves the legacy keys in
+// place and reports the cause under migrateRootAgentsAmbiguousStep.
+var errMovedCheckoutAmbiguous = errors.New("project is recorded at a moved-away path and the daemon serves it under two repo identities until it is rebound")
+
 // legacyMigrateGroup is every root_agents key proven to name ONE registered
 // project, plus the identity the daemon uses to find the entry that applies —
 // the resolved repository identity, or the project's recorded root for a path
@@ -137,6 +144,19 @@ type legacyMigrateGroup struct {
 	project Project
 	repoID  string
 	keys    []string
+	// recordedRootKey reports that a key spelling the project's recorded
+	// (now-determinately-free) root was merged into this resolving group via
+	// findResolvingGroupByProjectIdentity — the moved-but-unrebound state: a
+	// checkout moved (its marker traveled, so the moved key resolves under a NEW
+	// repo identity) while the record still points at the moved-away path. The
+	// daemon then serves the project under TWO identities — the group's repoID
+	// (the moved checkout) and the project's recorded identity (the durable
+	// RepoID the snapshot keys the personal layer and the unresolved record
+	// under). The group carries only the moved identity, so a one-identity
+	// check would silently flip the recorded identity's profile and leave the
+	// moved identity with no applying entry; a group carrying this flag must be
+	// verified under both before any write (verifyTwoIdentitySafety).
+	recordedRootKey bool
 }
 
 // lookupLegacyEntry answers the question a migrated group must agree with the
@@ -147,6 +167,119 @@ func (g *legacyMigrateGroup) lookupLegacyEntry(ctx context.Context, cfg *Config)
 		return LegacyRootAgentForRepoContext(ctx, cfg, g.repoID)
 	}
 	return LegacyRootAgentForRecordedRootContext(ctx, cfg, g.project.Root)
+}
+
+// spansTwoDaemonIdentities reports whether this group's keys are served by the
+// daemon under two distinct repo identities — the moved-but-unrebound state a
+// recordedRootKey merge creates. The group's repoID is the moved checkout's
+// identity (the key resolved); the project's recorded identity
+// (ReconciledRepoIDForProject) is the durable RepoID the daemon keys the
+// personal layer and the unresolved record under while the recorded root does
+// not resolve. They differ exactly when the checkout moved to a new identity
+// and the record has not yet been rebound; a same-identity move (the recorded
+// root's hash equals repoID, or an un-rebased record whose recorded root still
+// resolves to repoID) keeps one identity and is not a two-identity case.
+func (g *legacyMigrateGroup) spansTwoDaemonIdentities() bool {
+	return g.recordedRootKey && g.repoID != "" && ReconciledRepoIDForProject(g.project) != g.repoID
+}
+
+// legacyEntryForRecordedIdentity is the legacy root_agents entry the daemon
+// applies under the project's RECORDED identity — the same lookup
+// rootAgentMaterializeVerdictFor runs for an unresolved project: first
+// LegacyRootAgentForRepoContext (whose path-hash fallback reaches a key that
+// spells the recorded root once that root no longer resolves), then the
+// recorded-root leg as a last resort. nil means no entry applies there.
+func (g *legacyMigrateGroup) legacyEntryForRecordedIdentity(ctx context.Context, cfg *Config) (*RootAgentConfig, error) {
+	recordedID := ReconciledRepoIDForProject(g.project)
+	entry, _, err := LegacyRootAgentForRepoContext(ctx, cfg, recordedID)
+	if err != nil {
+		return nil, err
+	}
+	if entry != nil {
+		return entry, nil
+	}
+	entry, _, err = LegacyRootAgentForRecordedRootContext(ctx, cfg, g.project.Root)
+	return entry, err
+}
+
+// postWriteLayer models the personal [root_agent] layer after the migration's
+// patch lands — the fields `before` needed that `dropped` would lose are set,
+// everything else from layer is preserved — without committing the write. It
+// is the same merge rootAgentMigratePatch + scalarWrite applyProject performs,
+// computed in memory so verifyTwoIdentitySafety can evaluate the post-write
+// profile under the recorded identity before any file is touched.
+func postWriteLayer(layer *RootAgentLayer, before, dropped RootAgent) *RootAgentLayer {
+	patch := rootAgentMigratePatch(before, dropped)
+	if len(patch) == 0 {
+		return layer
+	}
+	var updated RootAgentLayer
+	if layer != nil {
+		updated = *layer
+	}
+	if _, ok := patch["enabled"]; ok {
+		updated.EnabledSet = true
+		updated.Value.Enabled = before.Enabled
+	}
+	if _, ok := patch["program"]; ok {
+		updated.Value.Program = before.Program
+	}
+	return &updated
+}
+
+// verifyTwoIdentitySafety checks the migration's invariant — a project's
+// effective root-agent profile is never silently altered — under BOTH repo
+// identities a moved-but-unrebound project is served by, since the group's
+// one-identity check (before/dropped over the moved checkout) cannot. It runs
+// inside the personal file lock, before any write, using the freshly-read
+// layer, so the answer is ordered against the write it gates.
+//
+// Recorded identity: the personal layer this write lands in is keyed here, so
+// the recorded identity's post-write profile is the modeled post-write layer
+// (with the legacy entries gone). It must equal the recorded identity's
+// pre-migration profile — its own legacy entry (the stale recorded-root key,
+// reached by the path-hash fallback) plus the personal layer — or the
+// migration silently flips which program the recorded identity resolves to.
+//
+// Moved identity: no personal layer is keyed here while the recorded root is
+// unresolved, so removing the legacy entry drops it to whatever the global
+// layer alone produces. The moved winner's pre-migration profile must already
+// equal that, or the moved checkout — the one the user actually works in —
+// silently loses its root agent ("not configured") after the next daemon
+// start.
+//
+// Returns nil when both identities keep their profile, errMovedCheckoutAmbiguous
+// when either would change, and any lookup error otherwise.
+func (g *legacyMigrateGroup) verifyTwoIdentitySafety(
+	ctx context.Context,
+	globalLayer *RootAgentLayer,
+	cfg, postCfg *Config,
+	layer *RootAgentLayer,
+	winner, remainingEntry *RootAgentConfig,
+	before, dropped RootAgent,
+) error {
+	if !g.spansTwoDaemonIdentities() {
+		return nil
+	}
+	recordedLegacyPre, err := g.legacyEntryForRecordedIdentity(ctx, cfg)
+	if err != nil {
+		return fmt.Errorf("the recorded identity's legacy entry could not be established: %w", err)
+	}
+	recordedPre := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: recordedLegacyPre, Personal: layer}).RootAgent
+	recordedLegacyPost, err := g.legacyEntryForRecordedIdentity(ctx, postCfg)
+	if err != nil {
+		return fmt.Errorf("the recorded identity's post-removal legacy entry could not be established: %w", err)
+	}
+	recordedPost := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: recordedLegacyPost, Personal: postWriteLayer(layer, before, dropped)}).RootAgent
+	if recordedPre != recordedPost {
+		return errMovedCheckoutAmbiguous
+	}
+	movedPre := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: winner, Personal: nil}).RootAgent
+	movedPost := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: nil}).RootAgent
+	if movedPre != movedPost {
+		return errMovedCheckoutAmbiguous
+	}
+	return nil
 }
 
 // nonResolvingLegacyKey is a root_agents key whose path did not resolve to a
@@ -276,6 +409,7 @@ func classifyLegacyRootAgents(ctx context.Context, paths []string) (groups []*le
 		default:
 			if g := findResolvingGroupByProjectIdentity(resolving, spelled); g != nil {
 				g.keys = append(g.keys, pending.key)
+				g.recordedRootKey = true
 			} else {
 				groups = append(groups, &legacyMigrateGroup{project: *spelled, keys: []string{pending.key}})
 			}
@@ -451,6 +585,17 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 			}
 			before = ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: p.winner, Personal: layer}).RootAgent
 			dropped := ResolveRootAgent(RootAgentInputs{Global: globalLayer, Legacy: remainingEntry, Personal: layer}).RootAgent
+			// A moved-but-unrebound project is served by the daemon under two
+			// repo identities; the before/dropped check above models only the
+			// group's repoID (the moved checkout). The personal write lands under
+			// the RECORDED identity, so it would silently adopt the moved
+			// winner's profile there, and the moved identity keys no personal
+			// layer so it would drop to "not configured" once its legacy entry
+			// is removed. Verify both identities keep their pre-migration
+			// profile before touching the file, or leave the keys in place.
+			if err := p.group.verifyTwoIdentitySafety(ctx, globalLayer, cfg, &postCfg, layer, p.winner, remainingEntry, before, dropped); err != nil {
+				return err
+			}
 			patch := rootAgentMigratePatch(before, dropped)
 			if len(patch) == 0 {
 				return nil
@@ -479,7 +624,11 @@ func migrateLegacyRootAgents(ctx context.Context, content string, cfg *Config, s
 			return nil
 		})
 		if writeErr != nil {
-			leftGroup(p.group, "its personal [root_agent] could not be updated safely: "+writeErr.Error())
+			if errors.Is(writeErr, errMovedCheckoutAmbiguous) {
+				leftGroup(p.group, "project "+p.group.project.ID+" is recorded at the moved-away path "+p.group.project.Root+"; the daemon serves it under two repo identities until it is rebound — run `af projects rebind "+p.group.project.ID+" <moved-checkout-path>`, then re-run `af config migrate`")
+			} else {
+				leftGroup(p.group, "its personal [root_agent] could not be updated safely: "+writeErr.Error())
+			}
 			continue
 		}
 		for _, key := range p.group.keys {

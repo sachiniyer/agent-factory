@@ -1,6 +1,7 @@
 package config
 
 import (
+	"context"
 	"os"
 	"path/filepath"
 	"strings"
@@ -408,83 +409,214 @@ func TestMigrateRootAgentsCoversEveryProfileField(t *testing.T) {
 	assert.Equal(t, RootAgent{Enabled: true}, after)
 }
 
-// TestMigrateRootAgentsMovedCheckoutPreservesWinner covers the split that
-// classifyLegacyRootAgents can produce after a registered project's checkout is
-// moved: the moved path resolves (checkout marker travels with the move) while
-// the stale recorded-root key does not. Before the fix these two keys of the
-// SAME project landed in two separate groups — the recorded-root group's
-// personal write masked the resolving group's winner (personal > legacy in
-// ResolveRootAgent), silently reprogramming the project's root agent. The fix
-// merges both keys into one group so the daemon's actual winner is carried once.
-func TestMigrateRootAgentsMovedCheckoutPreservesWinner(t *testing.T) {
+// TestMigrateRootAgentsMovedCheckoutReportsAmbiguity covers the split that
+// classifyLegacyRootAgents produces after a registered project's checkout is
+// moved but NOT yet rebound: the moved path resolves (the checkout marker
+// traveled with the move) under a NEW repo identity, while the stale
+// recorded-root key does not resolve and is merged into the same group by
+// project ID. The daemon then serves the project under TWO identities — the
+// group's repoID (the moved checkout) and the recorded identity (the durable
+// RepoID the snapshot keys the personal layer and the unresolved record under).
+//
+// Migrating such a group under the one-identity model would, after the next
+// daemon start, silently flip the recorded identity's effective profile to the
+// moved winner (the personal write lands under the recorded identity) AND drop
+// the moved identity's coverage entirely (no personal layer is keyed there and
+// the legacy entry is removed). The fix leaves both keys in place and reports
+// the cause, telling the user to rebind first — restoring the file's own stated
+// invariant that an entry whose post-write resolution would differ is left in
+// place, not moved, and that an ambiguous entry is never guessed at.
+func TestMigrateRootAgentsMovedCheckoutReportsAmbiguity(t *testing.T) {
 	for _, tc := range []struct {
 		name         string
 		oldProgram   string
 		movedProgram string
 	}{
-		{name: "old=opus moved=sonic preserves sonic", oldProgram: "opus", movedProgram: "sonic"},
-		{name: "old=sonic moved=opus preserves opus", oldProgram: "sonic", movedProgram: "opus"},
+		{name: "old=opus moved=sonic", oldProgram: "opus", movedProgram: "sonic"},
+		{name: "old=sonic moved=opus", oldProgram: "sonic", movedProgram: "opus"},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			home, repoRoot, project := registeredTestProject(t)
-			// The moved path must sort AFTER the recorded root so the
-			// recorded-root group is processed first — the order that lets
-			// its personal write mask the resolving group's winner. The
-			// registered repo lives at "<base>/repo"; "zmoved" sorts after
-			// "repo" deterministically.
+			// "zmoved" sorts after "repo" deterministically; the checkout
+			// marker travels with the rename, so the moved key resolves.
 			moved := filepath.Join(filepath.Dir(repoRoot), "zmoved")
 			require.NoError(t, os.Rename(repoRoot, moved))
 
 			body := "[root_agents.'" + repoRoot + "']\nprogram = '" + tc.oldProgram + "'\n\n[root_agents.'" + moved + "']\nprogram = '" + tc.movedProgram + "'\n"
 			configPath := writeMigrateConfig(t, home, body)
 
-			// The daemon's pre-migration winner is the moved checkout's entry:
-			// it resolves (the checkout marker traveled with the rename) while
-			// the stale recorded-root key does not, so LegacyRootAgentForRepoContext
-			// attributes the moved key's program.
-			beforeGlobal := loadedGlobalLayer(t, configPath)
-			beforePersonal := loadedPersonalLayer(t, project.ID)
-			before, err := parseConfigTOML([]byte(body), configPath)
-			require.NoError(t, err)
-			movedEntry := before.RootAgents[moved]
-			wantEffective := effectiveRootAgent(beforeGlobal, beforePersonal, &movedEntry)
+			// The recorded identity is the durable RepoID set at registration
+			// (the pre-move path); the moved checkout resolves under a new one.
+			recordedID := RepoIDFromRoot(repoRoot)
+			movedID := RepoIDFromRoot(moved)
+			require.Equal(t, recordedID, project.RepoID,
+				"fixture: the project's recorded RepoID is the pre-move identity")
+			require.NotEqual(t, recordedID, movedID,
+				"fixture: the move must change the repo identity")
 
 			result, err := MigrateGlobalConfig()
 			require.NoError(t, err)
 
-			// Both keys are migrated; nothing is left behind.
-			require.Len(t, result.MigratedRootAgents, 2, "every spelling of the project's opt-in must move")
-			paths := []string{result.MigratedRootAgents[0].Path, result.MigratedRootAgents[1].Path}
-			assert.ElementsMatch(t, []string{repoRoot, moved}, paths)
-			assert.Empty(t, result.Left, "no entry may be reported left when both spellings moved")
-
-			// The effective profile is identical to the pre-migration winner —
-			// the core guarantee: a project's root agent is never silently altered.
-			gotEffective := effectiveRootAgent(loadedGlobalLayer(t, configPath), loadedPersonalLayer(t, project.ID), nil)
-			assert.Equal(t, wantEffective, gotEffective,
-				"the project's effective root-agent profile must not change after a checkout move")
-
-			// The personal layer carries the daemon's actual winner (the moved
-			// checkout's program), not the stale recorded-root entry's.
-			personal := loadedPersonalLayer(t, project.ID)
-			require.NotNil(t, personal)
-			assert.True(t, personal.Value.Enabled)
-			assert.Equal(t, tc.movedProgram, personal.Value.Program,
-				"the personal profile must carry the moved checkout's winner, not the stale recorded root's")
-
-			// Every migrated entry reports the same effective profile and that
-			// a personal write was needed to carry it.
-			for _, m := range result.MigratedRootAgents {
-				assert.Equal(t, wantEffective, m.Profile,
-					"every migrated entry must report the project's effective profile")
-				assert.True(t, m.PersonalWritten,
-					"a personal write was needed to carry the winner")
+			// Nothing moved: both keys are left in place under the ambiguous
+			// step, each naming the cause and the rebind remedy.
+			assert.Empty(t, result.MigratedRootAgents,
+				"a moved-but-unrebound project must not be migrated — the recorded identity would flip and the moved identity would lose coverage")
+			require.Len(t, result.Left, 1)
+			assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
+			assert.Equal(t, migrateRootAgentsAmbiguousStep, result.Left[0].Step)
+			require.Len(t, result.Left[0].Detail, 2)
+			for _, detail := range result.Left[0].Detail {
+				assert.Contains(t, detail, repoRoot,
+					"the reported cause names the moved-away recorded root")
+				assert.Contains(t, detail, project.ID,
+					"the reported cause names the project to rebind")
+				assert.Contains(t, detail, "af projects rebind",
+					"the reported remedy is to rebind before re-running migration")
 			}
 
-			// Both keys are gone from the global file.
+			// No personal [root_agent] was written: nothing had to be, and a
+			// write here is exactly the silent flip the fix prevents.
+			assert.Nil(t, loadedPersonalLayer(t, project.ID),
+				"no personal layer may be written for a project left in place")
+
+			// The global file is untouched — both keys remain exactly where
+			// they were, so the pre-migration resolution the daemon serves is
+			// preserved on both identities.
 			globalData := readFile(t, configPath)
-			assert.NotContains(t, globalData, repoRoot)
-			assert.NotContains(t, globalData, moved)
+			assert.Contains(t, globalData, "[root_agents.'"+repoRoot+"']")
+			assert.Contains(t, globalData, "[root_agents.'"+moved+"']")
+
+			// Self-justification: demonstrate the very change the fix prevents.
+			// Pre-migration, the recorded identity resolves through the stale
+			// key's program (the path-hash fallback reaches it), and the moved
+			// identity resolves through the moved key. The migration would
+			// remove both and write the moved winner into the personal layer
+			// keyed under the recorded identity — so the recorded identity's
+			// profile would flip to the moved program and the moved identity
+			// would drop to "not configured". Both differ from pre-migration,
+			// which is why leaving the keys is the correct call.
+			ctx := context.Background()
+			beforeCfg, err := parseConfigTOML([]byte(body), configPath)
+			require.NoError(t, err)
+			globalLayer := loadedGlobalLayer(t, configPath)
+			recordedLegacyPre, _, err := LegacyRootAgentForRepoContext(ctx, beforeCfg, recordedID)
+			require.NoError(t, err)
+			require.NotNil(t, recordedLegacyPre,
+				"the stale recorded-root key reaches the recorded identity by the path-hash fallback")
+			require.Equal(t, tc.oldProgram, recordedLegacyPre.Program)
+			movedLegacyPre, _, err := LegacyRootAgentForRepoContext(ctx, beforeCfg, movedID)
+			require.NoError(t, err)
+			require.NotNil(t, movedLegacyPre)
+			require.Equal(t, tc.movedProgram, movedLegacyPre.Program)
+
+			recordedPre := effectiveRootAgent(globalLayer, nil, recordedLegacyPre)
+			recordedPost := effectiveRootAgent(globalLayer, &RootAgentLayer{
+				EnabledSet: true, Value: RootAgent{Enabled: true, Program: tc.movedProgram},
+			}, nil)
+			assert.NotEqual(t, recordedPre, recordedPost,
+				"the recorded identity's effective profile WOULD flip to the moved winner — the migration must not run")
+
+			movedPre := effectiveRootAgent(globalLayer, nil, movedLegacyPre)
+			movedPost := effectiveRootAgent(globalLayer, nil, nil)
+			assert.NotEqual(t, movedPre, movedPost,
+				"the moved identity WOULD lose coverage (its legacy entry removed, no personal layer keyed there) — the migration must not run")
 		})
 	}
+}
+
+// TestMigrateRootAgentsMovedCheckoutSameProgramStillAmbiguous pins the
+// coverage-loss half of the two-identity check: even when the stale and moved
+// entries carry the SAME program (so the recorded identity would NOT flip), the
+// moved identity still loses its root agent after the next daemon start, because
+// the personal write is keyed under the recorded identity only and both legacy
+// keys are removed. The migration must still leave the keys in place.
+func TestMigrateRootAgentsMovedCheckoutSameProgramStillAmbiguous(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	moved := filepath.Join(filepath.Dir(repoRoot), "zmoved")
+	require.NoError(t, os.Rename(repoRoot, moved))
+
+	// Both entries carry the same program, so the recorded identity's profile
+	// would be unchanged by the flip — but the moved identity still loses the
+	// legacy entry that covered it.
+	const program = "sameprog"
+	body := "[root_agents.'" + repoRoot + "']\nprogram = '" + program + "'\n\n[root_agents.'" + moved + "']\nprogram = '" + program + "'\n"
+	configPath := writeMigrateConfig(t, home, body)
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	assert.Empty(t, result.MigratedRootAgents,
+		"even with matching programs, the moved identity loses coverage, so the group must not migrate")
+	require.Len(t, result.Left, 1)
+	assert.Equal(t, migrateRootAgentsAmbiguousStep, result.Left[0].Step)
+	require.Len(t, result.Left[0].Detail, 2)
+	assert.Nil(t, loadedPersonalLayer(t, project.ID), "no personal layer may be written")
+
+	globalData := readFile(t, configPath)
+	assert.Contains(t, globalData, "[root_agents.'"+repoRoot+"']")
+	assert.Contains(t, globalData, "[root_agents.'"+moved+"']")
+}
+
+// TestMigrateRootAgentsMovedCheckoutAfterRebindMigratesSafely confirms the
+// remedy the ambiguity report names: once the project is rebound to the moved
+// checkout (`af projects rebind <project> <moved-path>`), the record's root and
+// durable RepoID both move to the moved checkout's identity, so the daemon
+// serves the project under ONE identity again and the migration is safe. The
+// moved key migrates into the personal [root_agent] (profile identical either
+// side of the write), and the stale recorded-root key — which no longer names
+// any registered project's recorded root — is reported under the manual recipe,
+// not the ambiguous step.
+func TestMigrateRootAgentsMovedCheckoutAfterRebindMigratesSafely(t *testing.T) {
+	home, repoRoot, project := registeredTestProject(t)
+	moved := filepath.Join(filepath.Dir(repoRoot), "zmoved")
+	require.NoError(t, os.Rename(repoRoot, moved))
+
+	// Rebind the record to the moved checkout. After this the record's Root is
+	// the moved path and its RepoID is the moved checkout's identity, so the
+	// daemon serves the project under a single identity again.
+	rebound, err := RebindProject(project.ID, moved)
+	require.NoError(t, err)
+	require.Equal(t, filepath.Clean(moved), rebound.Root)
+	require.Equal(t, RepoIDFromRoot(moved), rebound.RepoID)
+
+	body := "[root_agents.'" + repoRoot + "']\nprogram = 'stale'\n\n[root_agents.'" + moved + "']\nprogram = 'movedprog'\n"
+	configPath := writeMigrateConfig(t, home, body)
+
+	beforeGlobal := loadedGlobalLayer(t, configPath)
+	beforePersonal := loadedPersonalLayer(t, project.ID)
+	before, err := parseConfigTOML([]byte(body), configPath)
+	require.NoError(t, err)
+	movedEntry := before.RootAgents[moved]
+	wantEffective := effectiveRootAgent(beforeGlobal, beforePersonal, &movedEntry)
+
+	result, err := MigrateGlobalConfig()
+	require.NoError(t, err)
+
+	// The moved key migrated; the stale recorded-root key is now unregistered
+	// (no project's recorded root spells the moved-away path) and is reported
+	// under the manual recipe, not the ambiguous step.
+	require.Len(t, result.MigratedRootAgents, 1)
+	assert.Equal(t, moved, result.MigratedRootAgents[0].Path)
+	assert.True(t, result.MigratedRootAgents[0].PersonalWritten)
+	assert.Equal(t, wantEffective, result.MigratedRootAgents[0].Profile)
+	require.Len(t, result.Left, 1)
+	assert.Equal(t, LegacyRootAgentsKey, result.Left[0].Key)
+	assert.Equal(t, legacyRootAgentsManualStep, result.Left[0].Step)
+	assert.Equal(t, []string{repoRoot}, result.Left[0].Detail)
+
+	// The moved key is gone; the stale key remains (it is unregistered, so the
+	// migration leaves it for the manual recipe).
+	globalData := readFile(t, configPath)
+	assert.NotContains(t, globalData, "[root_agents.'"+moved+"']")
+	assert.Contains(t, globalData, "[root_agents.'"+repoRoot+"']")
+
+	// The project's effective profile is identical either side of the move —
+	// the core guarantee, now under the single (rebound) identity.
+	personal := loadedPersonalLayer(t, project.ID)
+	require.NotNil(t, personal)
+	assert.True(t, personal.Value.Enabled)
+	assert.Equal(t, "movedprog", personal.Value.Program)
+	assert.Equal(t, wantEffective,
+		effectiveRootAgent(loadedGlobalLayer(t, configPath), personal, nil),
+		"the project's effective root-agent profile must not change after a rebind + migration")
 }
