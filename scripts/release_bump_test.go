@@ -621,3 +621,106 @@ func TestStableReleaseRefusesABuildOffMasterBeforeThePreflight(t *testing.T) {
 		t.Fatalf("validate's guard must check github.sha, the commit everything is built from:\n%s", steps[guard].body)
 	}
 }
+
+// TestReleaseBumpRefusesADirtyCheckout: the script commits the index and, on a
+// failing exit, force-checks-out the built commit — both are only safe on a
+// tree whose tracked files hold nothing but the script's own edit. A run in a
+// checkout with uncommitted tracked changes (a maintainer trying it locally)
+// must refuse before touching anything: on master the staged file would ride
+// into the release commit, and off master the failure cleanup would wipe the
+// edits. Untracked files — the workflow's dist/ — are not changes to the build
+// and stay allowed, untouched.
+func TestReleaseBumpRefusesADirtyCheckout(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	for _, onMaster := range []bool{true, false} {
+		name := "on master"
+		if !onMaster {
+			name = "not on master"
+		}
+		t.Run(name, func(t *testing.T) {
+			base := t.TempDir()
+			env := isolatedGitEnv(filepath.Join(base, "home"))
+			origin, _ := seedReleaseRemote(t, base, env, "1.0.0")
+			built := landOnMaster(t, base, env, origin, "readme", "README.md", "original\n", "docs: readme")
+			work := checkoutBuild(t, base, env, origin, "build", built)
+			if !onMaster {
+				writeFile(t, filepath.Join(work, "SIDE.md"), "side\n")
+				runGitEnv(t, work, env, "add", "SIDE.md")
+				runGitEnv(t, work, env, "commit", "-q", "-m", "feat: side")
+			}
+			head := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+			before := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master")
+
+			writeFile(t, filepath.Join(work, "README.md"), "edited, not committed\n")
+			writeFile(t, filepath.Join(work, "NEW.md"), "staged, not committed\n")
+			runGitEnv(t, work, env, "add", "NEW.md")
+			status := gitOutEnv(t, work, env, "status", "--porcelain")
+
+			out, timedOut, err := runReleaseScript(t, work, env, "1.0.1")
+			if timedOut {
+				t.Fatalf("release-bump.sh did not terminate\n%s", out)
+			}
+			if err == nil {
+				t.Fatalf("released from a checkout with uncommitted tracked changes:\n%s", out)
+			}
+			if got := readFile(t, filepath.Join(work, "README.md")); got != "edited, not committed\n" {
+				t.Fatalf("the uncommitted README.md edit was lost: %q\n%s", got, out)
+			}
+			if got := gitOutEnv(t, work, env, "status", "--porcelain"); got != status {
+				t.Fatalf("the refusal changed the checkout:\nbefore:\n%s\nafter:\n%s", status, got)
+			}
+			if !strings.Contains(out, "uncommitted changes") {
+				t.Fatalf("the refusal does not name the uncommitted changes:\n%s", out)
+			}
+			if got := gitOutEnv(t, work, env, "rev-parse", "HEAD"); got != head {
+				t.Fatalf("HEAD moved from %s to %s", head, got)
+			}
+			if tip := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master"); tip != before {
+				t.Fatalf("master moved from %s to %s", before, tip)
+			}
+		})
+	}
+
+	t.Run("untracked files only", func(t *testing.T) {
+		base := t.TempDir()
+		env := isolatedGitEnv(filepath.Join(base, "home"))
+		origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+		built := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+		writeFile(t, filepath.Join(work, "dist", "agent-factory-linux-amd64.tar.gz"), "artifact\n")
+
+		runBump(t, work, env, "1.0.1")
+		assertTagIsTheBuild(t, work, origin, env, built, "1.0.1")
+		if got := readFile(t, filepath.Join(work, "dist", "agent-factory-linux-amd64.tar.gz")); got != "artifact\n" {
+			t.Fatalf("the untracked artifact changed: %q", got)
+		}
+	})
+}
+
+// TestReleaseBumpAlreadyBumpedBuildOnAMovedMaster: a fresh dispatch whose
+// built commit already carries the version makes no commit and tags the build
+// itself. If master moved during that build, the push is rejected and the
+// fetch finds the build already in master's history — and no earlier run
+// landed anything, so the log must not say one did.
+func TestReleaseBumpAlreadyBumpedBuildOnAMovedMaster(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	env := isolatedGitEnv(filepath.Join(base, "home"))
+	origin, work := seedReleaseRemote(t, base, env, "1.0.1")
+	built := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+	midBuild := landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed mid-build\n", "feat: merged during build")
+
+	out := runBump(t, work, env, "1.0.1")
+	if tag := assertTagIsTheBuild(t, work, origin, env, built, "1.0.1"); tag != built {
+		t.Fatalf("an already-bumped build tagged %s, want the built commit %s", tag, built)
+	}
+	if tip := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master"); tip != midBuild {
+		t.Fatalf("master moved from %s to %s; there was nothing to push", midBuild, tip)
+	}
+	if !strings.Contains(out, "master already contains") || strings.Contains(out, "earlier run") {
+		t.Fatalf("the log does not say plainly that master already contains the build:\n%s", out)
+	}
+}
