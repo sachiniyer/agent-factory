@@ -121,8 +121,31 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// switch. Its own error path leaves the last-known rows intact. The
 		// cross-repo skip set travels with it so a skipped repo's row is marked
 		// hidden instead of presented as a clean "no sessions" (#4742).
-		if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposSkipped, msg.allReposErr) {
-			changed = true
+		//
+		// A background poll that started BEFORE Ctrl+P opened predates the
+		// picker's newer synchronous cross-repo fetch, which already refreshed
+		// the sidebar (applyPickerSnapshotToSidebar on a non-degraded open).
+		// Applying the older poll would regress the sidebar's rows and skip set
+		// to counts the picker's fetch already superseded — and after Esc the
+		// section's D path could build deletion consent from the regressed
+		// counts before another poll lands. Reject the stale sidebar refresh on
+		// the same picker-open generation check the picker update below uses; a
+		// poll that started after the open carries allReposSeq >= pickerOpenSeq
+		// and refreshes the section normally (#4742 review).
+		if !m.sidebarRefreshStaleRelativeToPickerOpen(msg.allReposSeq) {
+			if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposSkipped, msg.allReposErr) {
+				changed = true
+			}
+			// Record the cross-repo snapshot generation actually APPLIED to the
+			// sidebar (on a successful read) so a rebind-conflict refresh can
+			// tell a genuinely newer poll has landed, not merely started: a
+			// poll that started after a conflict but is still in flight when
+			// the conflict reply arrives must not make that reply look stale
+			// and leave the sidebar with data older than both requests
+			// (#4742 review). A fetch error leaves the prior value intact.
+			if msg.allReposErr == nil {
+				m.lastAppliedCrossRepoSeq = msg.crossRepoSeq
+			}
 		}
 		// A picker left open while a background snapshot lands must see the same
 		// skip set and fetch status the section just applied: a repo that became

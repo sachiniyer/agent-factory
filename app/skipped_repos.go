@@ -421,6 +421,27 @@ func (m *home) recordPickerOpenSeq() {
 	m.pickerOpenSeq = m.pickerSnapshotSeq
 }
 
+// sidebarRefreshStaleRelativeToPickerOpen reports whether a background poll's
+// cross-repo fetch (whose allReposSeq was captured at fetch-start) predates
+// the snapshot the currently-open project picker was built from (#4742
+// review). Mirrors the generation check updateOpenPickerSkipState applies to
+// the picker, extended to the always-visible Projects section: a poll that
+// started before Ctrl+P lands after the picker's newer synchronous cross-repo
+// fetch, which already refreshed the sidebar (applyPickerSnapshotToSidebar).
+// Applying the older poll would regress the sidebar's rows and skip set to
+// counts the picker's fetch superseded, and after Esc the section's D path
+// could build deletion consent from the regressed counts before another poll
+// lands. False when no picker is open (the sidebar refresh is unconditional
+// then), when the message carries no captured seq (a test/legacy caller), or
+// when the poll started at or after the open — those refresh the section
+// normally.
+func (m *home) sidebarRefreshStaleRelativeToPickerOpen(allReposSeq uint64) bool {
+	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
+		return false
+	}
+	return allReposSeq > 0 && allReposSeq < m.pickerOpenSeq
+}
+
 // setPickerSkippedIDsAndHints installs the daemon's startup-skipped repo IDs
 // and reason-specific repair hints into an open picker (#4742), so the D path
 // gates only on the HIGHLIGHTED project being skipped and the refusal names

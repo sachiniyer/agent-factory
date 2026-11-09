@@ -224,7 +224,8 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// This off-loop fetch can take up to rebindConflictRefreshTimeout (10s) to
 	// answer; a regular background poll that STARTED after this conflict
 	// refresh advanced crossRepoSnapshotSeq (bumped at each fetch's start)
-	// past the value this reply captured at open, so it carries a NEWER
+	// past the value this reply captured at open, AND has since APPLIED to the
+	// sidebar (advancing lastAppliedCrossRepoSeq), so it carries a NEWER
 	// cross-repo snapshot — and thus a newer skip set. If so, this reply's
 	// skip set AND rows are stale: applying them would replace
 	// sidebarProjectsSkipped with the older set and, if the daemon began
@@ -235,11 +236,15 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// count whose D path can build an inaccurate "no live sessions"
 	// confirmation. Retain the sidebar's current rows, skip set, and hints
 	// instead, so the newer poll's rows and hidden markers survive — the same
-	// retention the picker path below applies (#4742 review). Ordering by start
-	// (not arrival) means a poll that started BEFORE this conflict but applied
-	// while it was in flight no longer bumps the counter past this reply's
-	// captured value, so this genuinely newer conflict reply is not discarded.
-	staleSkip := msg.fetchErr == nil && m.crossRepoSnapshotSeq > msg.snapshotSeq
+	// retention the picker path below applies (#4742 review). Ordering by
+	// APPLIED generation (lastAppliedCrossRepoSeq), not merely START
+	// (crossRepoSnapshotSeq), means a poll that started after this conflict
+	// but is still in flight when this reply arrives does NOT make this reply
+	// look stale: the sidebar still holds data older than both requests, so
+	// this reply installs its snapshot until the newer poll actually lands,
+	// keeping the section's D path guarded instead of leaving stale counts
+	// exposed while a newer fetch is merely pending (#4742 review).
+	staleSkip := msg.fetchErr == nil && m.lastAppliedCrossRepoSeq > msg.snapshotSeq
 	var skipSet map[string]bool
 	var hintSet map[string]string
 	if staleSkip {
@@ -251,6 +256,15 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	}
 	if !staleSkip {
 		m.applySidebarProjects(fresh, degraded, skipSet, hintSet, msg.fetchErr)
+		// This reply's snapshot is now the newest applied to the sidebar (on a
+		// successful read); record its generation so a later conflict refresh
+		// that started before it cannot overwrite it, and a later regular
+		// poll that started after it is correctly recognized as newer
+		// (#4742 review). A fetch error leaves the prior value intact, the
+		// same retain applySidebarProjects takes for the skip set.
+		if msg.fetchErr == nil {
+			m.lastAppliedCrossRepoSeq = msg.snapshotSeq
+		}
 	}
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||
 		!m.projectPickerOverlay.OwnsRebindReply(msg.token) {

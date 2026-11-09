@@ -406,6 +406,22 @@ type home struct {
 	// skip set instead of letting the stale reply clear a Hidden gate the newer
 	// fetch correctly set.
 	crossRepoSnapshotSeq uint64
+	// lastAppliedCrossRepoSeq is the crossRepoSnapshotSeq value of the most
+	// recent cross-repo snapshot actually APPLIED to the Projects section
+	// (#4742 review). crossRepoSnapshotSeq orders fetches by START time, but a
+	// fetch that started is not a fetch that landed: a regular poll that
+	// started after a conflict refresh can still be in flight when the
+	// (genuinely newer) conflict reply arrives, and comparing the conflict's
+	// captured seq against crossRepoSnapshotSeq would discard the conflict
+	// reply even though the sidebar still holds data older than both requests
+	// — leaving the section's D path unguarded until the pending poll lands.
+	// Comparing against lastAppliedCrossRepoSeq instead lets the conflict
+	// reply install its snapshot until a newer poll has actually APPLIED, so
+	// the sidebar is never left with stale counts while a newer fetch is
+	// merely pending. Bumped on each successful sidebar apply (the regular
+	// poll and the conflict reply); a fetch error leaves the prior value
+	// intact, matching the retain-on-error applySidebarProjects already takes.
+	lastAppliedCrossRepoSeq uint64
 	// pickerSnapshotSeq is a monotonic sequence bumped each time the project
 	// picker opens (after its synchronous cross-repo fetch constructs the
 	// picker's rows), so a background snapshotFetchedMsg whose all-repo fetch

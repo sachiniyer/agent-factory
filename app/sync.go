@@ -80,6 +80,16 @@ type snapshotFetchedMsg struct {
 	// IDs and SnapshotDegraded flag to the older counts. Zero for test/legacy
 	// callers that build a snapshotFetchedMsg directly and must not be gated.
 	allReposSeq uint64
+	// crossRepoSeq is the value of home.crossRepoSnapshotSeq immediately after
+	// this poll bumped it at fetch-START (#4742 review). The conflict refresh
+	// bumps and captures the same counter at its open, so a conflict reply can
+	// order itself against the snapshot APPLIED to the sidebar (via
+	// lastAppliedCrossRepoSeq) rather than merely against fetches that have
+	// started: a regular poll that started after a conflict but is still in
+	// flight when the conflict reply arrives must not make the genuinely newer
+	// conflict reply look stale and leave the sidebar with data older than
+	// both requests. Captured at fetch-start so arrival order cannot fake age.
+	crossRepoSeq uint64
 	// allReposSkipped is the daemon's startup-skipped repo set for the CROSS-repo
 	// (RepoID:"") snapshot (#4742): the repos the daemon dropped at startup, whose
 	// zero count in allRepos is incomplete, not "no sessions". The background
@@ -141,6 +151,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	// the bump at start, only a fetch that started AFTER the conflict advances
 	// the counter past the value it captured (#4742 review).
 	m.crossRepoSnapshotSeq++
+	crossRepoSeq := m.crossRepoSnapshotSeq
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -189,7 +200,8 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 			skippedRepos: resp.SkippedRepos,
 			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposErr: allReposErr, allReposSkipped: allReposSkipped,
-			allReposSeq: allReposSeq,
+			allReposSeq:  allReposSeq,
+			crossRepoSeq: crossRepoSeq,
 		}
 	}
 }
@@ -551,22 +563,16 @@ func (m *home) applySkippedRepo(cur *daemon.SkippedRepo) bool {
 // separate home fields so a 15-second listener poll cannot overwrite the
 // skip's hidden-sessions warning and a skip retraction cannot erase a still-
 // valid listener warning; both are re-applied here whenever either changes
-// (#4742 review). When both are up they are joined with " · " — the bar's own
-// separator for multi-line notices — so a watcher can still tell which
-// condition(s) hold, truncated by the standing line's width math.
+// (#4742 review). Each condition is installed into its OWN ErrBox standing
+// slot (primary/secondary) so the standing-line truncation reserves space for
+// an indicator from each — joining them into one string would let the skip's
+// already-wide notice truncate the listener warning out of view at narrow
+// widths, hiding a still-active condition (#4742 review).
 func (m *home) applyStandingNotice() {
 	skip := skippedRepoStandingNotice(m.skippedRepo, m.skippedRepoStandingDetailsKey())
 	listener := m.webListenerStanding
-	switch {
-	case skip != "" && listener != "":
-		m.errBox.SetStanding(skip + " · " + listener)
-	case skip != "":
-		m.errBox.SetStanding(skip)
-	case listener != "":
-		m.errBox.SetStanding(listener)
-	default:
-		m.errBox.SetStanding("")
-	}
+	m.errBox.SetStanding(skip)
+	m.errBox.SetStandingSecondary(listener)
 }
 
 // refreshTasks mirrors an out-of-band tasks.json change (a CLI/daemon `af tasks

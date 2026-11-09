@@ -666,3 +666,57 @@ func TestErrBoxStandingConditionPersistsAndYieldsToNotices(t *testing.T) {
 		t.Fatalf("retracted standing text must leave the bar empty, got %q", got)
 	}
 }
+
+// TestErrBoxStandingSecondaryKeepsBothConditionsVisible pins the #4742 review
+// fix: when a skip notice (primary) and a web-listener warning (secondary) are
+// both standing at once, the bar must keep an indicator from EACH condition
+// even at narrow widths. Joining them into one string and truncating the tail
+// let the already-wide skip notice erase the listener warning entirely; the
+// two-slot standing line splits the bar's budget so neither condition
+// vanishes behind the other (#4742 review).
+func TestErrBoxStandingSecondaryKeepsBothConditionsVisible(t *testing.T) {
+	e := NewErrBox()
+	e.SetStanding("Press E for repair steps · Sessions in this project are hidden — its instances.json is corrupted.")
+	e.SetStandingSecondary("web listener unbound")
+
+	// At a wide width both fit whole and the listener text must appear intact.
+	e.SetSize(200, 1)
+	wide := stripANSI(e.String())
+	if !strings.Contains(wide, "web listener unbound") {
+		t.Fatalf("wide bar must show the listener condition in full, got %q", wide)
+	}
+	if !strings.Contains(wide, "hidden") {
+		t.Fatalf("wide bar must show the skip condition, got %q", wide)
+	}
+
+	// At a narrow width where the joined text would not fit, each condition
+	// must still contribute a visible fragment — the listener must not be
+	// truncated out of view just because the skip is wider.
+	e.SetSize(60, 1)
+	narrow := stripANSI(e.String())
+	for i, line := range strings.Split(narrow, "\n") {
+		if w := runewidth.StringWidth(line); w > 60 {
+			t.Fatalf("narrow standing line %d measures %d cells, over the 60-cell bar: %q", i, w, line)
+		}
+	}
+	if !strings.Contains(narrow, "web listener") {
+		t.Fatalf("narrow bar must keep the listener condition visible, got %q", narrow)
+	}
+	if !strings.Contains(narrow, "Press") {
+		t.Fatalf("narrow bar must keep the skip condition visible, got %q", narrow)
+	}
+
+	// Retracting the primary leaves the secondary standing on its own.
+	e.SetStanding("")
+	e.SetSize(60, 1)
+	onlySecondary := stripANSI(e.String())
+	if !strings.Contains(onlySecondary, "web listener unbound") {
+		t.Fatalf("secondary alone must render when the primary retracts, got %q", onlySecondary)
+	}
+
+	// Retracting the secondary too empties the bar.
+	e.SetStandingSecondary("")
+	if got := strings.TrimSpace(stripANSI(e.String())); got != "" {
+		t.Fatalf("both conditions retracted must leave the bar empty, got %q", got)
+	}
+}

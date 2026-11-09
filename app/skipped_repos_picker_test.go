@@ -227,3 +227,81 @@ func TestUpdateOpenPickerSkipState_RejectsPollOlderThanPickerOpen(t *testing.T) 
 	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
 		"a zero seq is never gated so legacy direct callers keep applying")
 }
+
+// TestSnapshotFetchedMsg_RejectsStalePollForSidebar pins the #4742 review
+// finding (P1): a background snapshotFetchedMsg whose all-repo fetch started
+// BEFORE Ctrl+P can be delivered AFTER showProjectPickerOverlay completes its
+// newer synchronous fetch, which already refreshed the Projects section
+// (applyPickerSnapshotToSidebar). Applying the older poll unconditionally to
+// the sidebar (refreshSidebarProjectsFromSnapshot) would regress the
+// section's rows and skip set to counts the picker's fetch superseded, and
+// after Esc the section's D path could build deletion consent from the
+// regressed counts before another poll lands. The sidebar refresh must
+// reject any reply whose captured allReposSeq is below the picker's open-time
+// value, mirroring updateOpenPickerSkipState's picker gate.
+func TestSnapshotFetchedMsg_RejectsStalePollForSidebar(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	// The picker opens with alpha reported skipped, so applyPickerSnapshotToSidebar
+	// marks alpha hidden in the Projects section (sidebarProjectsSkipped).
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+			[]daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+			nil
+	}))
+	// Seed the picker-open counter above 1 so an "older poll" (openSeq-1) is
+	// still a non-zero value and exercises the gate's < branch rather than the
+	// zero-means-legacy short-circuit.
+	h.pickerSnapshotSeq = 5
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	require.True(t, h.sidebarProjectsSkipped[h.repoID],
+		"precondition: the picker open applied its snapshot to the sidebar, marking alpha skipped")
+	openSeq := h.pickerOpenSeq
+	require.Greater(t, openSeq, uint64(0), "precondition: the picker recorded an open-time seq")
+
+	// A background poll whose fetch started BEFORE the open (captured seq is
+	// below the open-time value) reports alpha healthy. It must NOT refresh
+	// the sidebar: the sidebar keeps the skip marker the picker's newer fetch
+	// installed.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     openSeq - 1,
+	})
+	assert.True(t, h.sidebarProjectsSkipped[h.repoID],
+		"a poll older than the picker's open must not regress the sidebar's skip set")
+
+	// A poll whose fetch started AT the open-time seq is the normal post-open
+	// refresh and must still apply — alpha healthy clears the sidebar's skip
+	// marker.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     openSeq,
+	})
+	assert.False(t, h.sidebarProjectsSkipped[h.repoID],
+		"a poll at/after the open-time seq refreshes the sidebar normally")
+
+	// With no picker open, even a zero-seq legacy caller refreshes the sidebar
+	// (the gate is picker-open-only).
+	h.projectPickerOverlay = nil
+	h.state = stateDefault
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: []daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+		allReposSeq:     0,
+	})
+	assert.True(t, h.sidebarProjectsSkipped[h.repoID],
+		"with no picker open a zero-seq legacy caller still refreshes the sidebar")
+}

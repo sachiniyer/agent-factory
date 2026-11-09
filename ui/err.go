@@ -40,6 +40,13 @@ type ErrBox struct {
 	// (SetStanding("")): it paints only while no notice is on the bar, never
 	// lands in retained, and is not reachable through `E details`.
 	standing string
+	// standingSecondary is a second concurrent standing condition (the web
+	// listener warning composed alongside a skipped-repo notice, #4742). Kept
+	// separate from standing so the standing-line truncation can reserve space
+	// for an indicator from EACH condition instead of letting the primary eat
+	// the secondary at narrow widths — both stay true at once, so neither may
+	// vanish behind the other's text (#4742 review).
+	standingSecondary string
 }
 
 var errStyle = lipgloss.NewStyle().Foreground(activeTheme.Dead)
@@ -86,6 +93,13 @@ func (e *ErrBox) RetractTransient(text string) {
 // stays true (the daemon's web listener is unbound, #6386) rather than for
 // the outcome of an action.
 func (e *ErrBox) SetStanding(text string) { e.standing = sanitizeError(text) }
+
+// SetStandingSecondary sets a second concurrent standing condition (#4742).
+// Composed with the primary in standingLine, where each is given its own share
+// of the bar so a long primary can no longer truncate the secondary out of
+// view while both remain true. SetStanding("") retracts the primary; pass ""
+// here to retract the secondary.
+func (e *ErrBox) SetStandingSecondary(text string) { e.standingSecondary = sanitizeError(text) }
 
 // SanitizeNoticeText returns raw with the same control/ANSI/newline stripping
 // the bar applies to a notice, so a caller binding condition-owned details
@@ -160,7 +174,7 @@ func (e *ErrBox) String() string {
 	switch {
 	case e.err != nil:
 		err = e.statusLine()
-	case e.standing != "":
+	case e.standing != "", e.standingSecondary != "":
 		err = e.standingLine()
 	}
 	style := theme.Styles().Body
@@ -171,10 +185,39 @@ func (e *ErrBox) String() string {
 }
 
 func (e *ErrBox) standingLine() string {
-	if layout.Cells(e.standing) <= e.width {
-		return e.standing
+	switch {
+	case e.standingSecondary == "":
+		if layout.Cells(e.standing) <= e.width {
+			return e.standing
+		}
+		return truncateStatusText(e.standing, e.width)
+	case e.standing == "":
+		// Only the secondary condition is active; render it alone (its own
+		// truncation, no separator).
+		if layout.Cells(e.standingSecondary) <= e.width {
+			return e.standingSecondary
+		}
+		return truncateStatusText(e.standingSecondary, e.width)
 	}
-	return truncateStatusText(e.standing, e.width)
+	// Both the primary and the secondary standing conditions are true. Joining
+	// them into one string and truncating the tail would let the primary —
+	// already wider than the supported 40-column bar on its own — erase the
+	// secondary entirely at ordinary widths, hiding a still-active condition
+	// (#4742 review). Reserve space for an indicator from EACH: split the
+	// budget (minus the " · " separator) between the two and truncate each to
+	// its share, so both conditions stay visible even when neither fits whole.
+	const sep = " · "
+	sepW := layout.Cells(sep)
+	budget := e.width - sepW
+	if budget < 2 {
+		// Too narrow to hold both halves; the primary alone is the most
+		// actionable (it names the active project's skip), so keep it.
+		return truncateStatusText(e.standing, e.width)
+	}
+	half := budget / 2
+	primary := truncateStatusText(e.standing, half)
+	secondary := truncateStatusText(e.standingSecondary, budget-half)
+	return primary + sep + secondary
 }
 
 func (e *ErrBox) statusLine() string {
