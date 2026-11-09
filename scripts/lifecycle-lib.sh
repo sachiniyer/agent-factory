@@ -41,6 +41,15 @@ lc_skip() {
     printf '[lifecycle]   SKIP  %s\n' "$*" >&2
 }
 
+# lc_supervision_mode_proven <log> <mode> — true only when this scenario-B
+# mode produced all three positive assertion-4 records.
+lc_supervision_mode_proven() {
+    local log="$1" mode="$2"
+    grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the unit is still active (= active)" "$log" &&
+        grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: af still sees the autostart unit (= true)" "$log" &&
+        grep -Fq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the running daemon IS the unit's child " "$log"
+}
+
 # lc_log_proves_supervision <log> — true only when the native lifecycle leg
 # produced every positive assertion-4 record for BOTH upgrade paths. Looking
 # only for an explicit "SKIP assertion #4" is insufficient: release lookup can
@@ -51,10 +60,76 @@ lc_log_proves_supervision() {
     [ -r "$log" ] || return 1
     local mode
     for mode in upgrade-cmd launch; do
-        grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the unit is still active (= active)" "$log" || return 1
-        grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: af still sees the autostart unit (= true)" "$log" || return 1
-        grep -Fq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the running daemon IS the unit's child " "$log" || return 1
+        lc_supervision_mode_proven "$log" "$mode" || return 1
     done
+}
+
+# lc_supervision_mode_lookup_skipped <log> <mode> — true only when this mode
+# recorded the SKIP whose named cause is GitHub release-lookup unavailability.
+# Both scenario-B availability records use "could not verify … unavailable or
+# rate-limited" — one for the harness's own boundary resolution
+# (lc_release_http_unavailable), one for the N-1 binary's lookup
+# (lc_release_lookup_unavailable) — and each is emitted only after those
+# classifiers answered could-not-verify, so matching them inherits their
+# precision: a mode that failed for a product reason never lands here.
+lc_supervision_mode_lookup_skipped() {
+    local log="$1" mode="$2"
+    grep -Eq "^\[lifecycle\]   SKIP  scenario-b/$mode: could not verify .*(unavailable|rate-limited)" "$log"
+}
+
+# lc_supervision_missing_detail <log> <mode> — names which assertion-4
+# records this mode never produced, so the failure text says what is missing
+# rather than just that something is.
+lc_supervision_missing_detail() {
+    local log="$1" mode="$2" missing=""
+    grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the unit is still active (= active)" "$log" ||
+        missing="${missing:+$missing; }'the unit is still active'"
+    grep -Fxq "[lifecycle]   PASS  scenario-b/$mode assertion 4: af still sees the autostart unit (= true)" "$log" ||
+        missing="${missing:+$missing; }'af still sees the autostart unit'"
+    grep -Fq "[lifecycle]   PASS  scenario-b/$mode assertion 4: the running daemon IS the unit's child " "$log" ||
+        missing="${missing:+$missing; }'the running daemon IS the unit's child'"
+    printf '%s\n' "$missing"
+}
+
+# lc_emit_supervision_verdict <log> — the native leg's assertion-4 gate.
+# Emits GitHub annotations and returns:
+#   0 — every scenario-B mode produced its full assertion-4 proof;
+#   2 — every unproven mode skipped specifically because the GitHub release
+#       lookup was unavailable (#6983): supervision genuinely went unverified
+#       there, a named ::warning:: rather than a red leg;
+#   1 — a mode is missing proof for ANY OTHER reason (an ::error:: naming
+#       what is missing), or the log itself cannot be read.
+#
+# The excuse is per-mode on purpose: supervision stays enforced wherever the
+# release lookup worked, so a proven mode never rescues an unexcused one and
+# an excused skip never needs company to be believed.
+lc_emit_supervision_verdict() {
+    local log="${1:-}" mode
+    if [ ! -r "$log" ]; then
+        printf '::error::no readable lifecycle log at %s — supervision proof cannot be checked\n' "$log" >&2
+        return 1
+    fi
+    local excused=() unexcused=()
+    for mode in upgrade-cmd launch; do
+        if lc_supervision_mode_proven "$log" "$mode"; then
+            :
+        elif lc_supervision_mode_lookup_skipped "$log" "$mode"; then
+            excused+=("$mode")
+        else
+            unexcused+=("$mode")
+        fi
+    done
+    for mode in ${unexcused[@]+"${unexcused[@]}"}; do
+        printf '::error::scenario-b/%s produced no assertion-4 proof — missing %s\n' \
+            "$mode" "$(lc_supervision_missing_detail "$log" "$mode")" >&2
+    done
+    [ "${#unexcused[@]}" -gt 0 ] && return 1
+    if [ "${#excused[@]}" -gt 0 ]; then
+        printf '::warning::assertion #4 (unit stays the supervisor) went unverified for scenario-b mode(s) %s — the GitHub release lookup was unavailable, so the upgrade never ran (#6983). Supervision coverage was skipped, not disproven; this is not a product failure.\n' \
+            "$(IFS=,; printf '%s' "${excused[*]}")" >&2
+        return 2
+    fi
+    return 0
 }
 
 # lc_release_http_unavailable <status> — true only for HTTP outcomes where the

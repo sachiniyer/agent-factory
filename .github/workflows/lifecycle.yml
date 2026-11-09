@@ -150,14 +150,30 @@ jobs:
         # place it runs, so require its positive proof records independently
         # for both upgrade modes. Merely checking for no explicit assertion-4
         # SKIP is vacuous when one mode stops before supervision.
+        #
+        # One named exception (#6983): a mode that skipped specifically because
+        # the GitHub release lookup was unavailable could never reach
+        # supervision — the upgrade never ran. That is an availability event,
+        # not a product signal, so the verdict warns instead of failing. A mode
+        # missing proof for ANY OTHER reason still fails, and the error names
+        # what is missing.
         if: ${{ always() && github.event.inputs.inject == '' }}
         run: |
           . scripts/lifecycle-lib.sh
-          if ! lc_log_proves_supervision "$RUNNER_TEMP/lifecycle.log"; then
-            echo "::error::missing per-mode positive proof for assertion #4 (unit stays the supervisor) on the native leg. A Scenario B mode may have stopped before supervision or the systemd checks may not have completed."
+          rc=0
+          lc_emit_supervision_verdict "$RUNNER_TEMP/lifecycle.log" || rc=$?
+          case "$rc" in
+          0)
+            echo "all assertion #4 supervision checks passed for both upgrade modes on this leg."
+            ;;
+          2)
+            echo "supervision coverage acknowledged as release-lookup-unavailable; see the ::warning:: above."
+            ;;
+          *)
+            echo "::error::missing per-mode positive proof for assertion #4 (unit stays the supervisor) on the native leg."
             exit 1
-          fi
-          echo "all assertion #4 supervision checks passed for both upgrade modes on this leg."
+            ;;
+          esac
 
       - name: Upload the run log
         if: always()

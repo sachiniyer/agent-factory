@@ -102,6 +102,204 @@ func TestDownloadURLIsTagAddressed(t *testing.T) {
 	}
 }
 
+// retryClock stubs the lookup's clock and sleep so the retry loop runs
+// instantly and deterministically: the fake now only moves when the loop
+// sleeps, and every wait is recorded.
+func retryClock(t *testing.T) (sleeps *[]time.Duration, now *time.Time) {
+	t.Helper()
+	recorded := []time.Duration{}
+	fake := time.Date(2026, 11, 8, 12, 0, 0, 0, time.UTC)
+	prevSleep, prevNow := releaseLookupSleep, releaseLookupNow
+	releaseLookupSleep = func(d time.Duration) {
+		recorded = append(recorded, d)
+		fake = fake.Add(d)
+	}
+	releaseLookupNow = func() time.Time { return fake }
+	t.Cleanup(func() {
+		releaseLookupSleep = prevSleep
+		releaseLookupNow = prevNow
+	})
+	return &recorded, &fake
+}
+
+// TestGetJSONRetriesQuotaResponses is the #6983 product half: an
+// unauthenticated release lookup that hits a 403/429 quota answer must retry
+// with backoff instead of failing on the first response — a shared runner IP
+// can be over budget through no fault of af.
+func TestGetJSONRetriesQuotaResponses(t *testing.T) {
+	sleeps, _ := retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls <= 2 {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(Release{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	tag, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second)
+	if err != nil {
+		t.Fatalf("403, 403, 200 must resolve, got error: %v", err)
+	}
+	if tag != "v1.9.9" {
+		t.Fatalf("tag = %q, want v1.9.9", tag)
+	}
+	if calls != 3 {
+		t.Fatalf("calls = %d, want 3", calls)
+	}
+	if len(*sleeps) != 2 || (*sleeps)[0] != releaseLookupRetryBase || (*sleeps)[1] != 2*releaseLookupRetryBase {
+		t.Fatalf("unhinted retries must back off exponentially, got waits %v", *sleeps)
+	}
+}
+
+func TestGetJSONQuotaRetriesAreBounded(t *testing.T) {
+	retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusTooManyRequests)
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	_, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second)
+	if err == nil {
+		t.Fatal("an always-429 lookup must fail")
+	}
+	if calls != maxReleaseLookupAttempts {
+		t.Fatalf("calls = %d, want the bounded %d", calls, maxReleaseLookupAttempts)
+	}
+	// The lifecycle harness classifies the failure from this text: keep the
+	// "GitHub API returned <status>" contract and say what to do next.
+	if !strings.Contains(err.Error(), "GitHub API returned 429") {
+		t.Fatalf("error must keep the 'GitHub API returned <status>' contract, got: %v", err)
+	}
+	if !strings.Contains(err.Error(), "retry") {
+		t.Fatalf("a quota-exhausted error must say what to do next, got: %v", err)
+	}
+}
+
+func TestGetJSONHonoursRetryAfter(t *testing.T) {
+	sleeps, _ := retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("Retry-After", "3")
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(Release{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	if _, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second); err != nil {
+		t.Fatalf("Retry-After then 200 must resolve, got: %v", err)
+	}
+	if len(*sleeps) != 1 || (*sleeps)[0] != 3*time.Second {
+		t.Fatalf("Retry-After must set the wait, got %v", *sleeps)
+	}
+}
+
+func TestGetJSONHonoursRateLimitReset(t *testing.T) {
+	sleeps, now := retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		if calls == 1 {
+			w.Header().Set("X-RateLimit-Reset", fmt.Sprint(now.Add(7*time.Second).Unix()))
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		if err := json.NewEncoder(w).Encode(Release{TagName: "v1.9.9"}); err != nil {
+			t.Errorf("encode latest release: %v", err)
+		}
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	if _, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second); err != nil {
+		t.Fatalf("X-RateLimit-Reset then 200 must resolve, got: %v", err)
+	}
+	if len(*sleeps) != 1 || (*sleeps)[0] != 7*time.Second {
+		t.Fatalf("X-RateLimit-Reset must set the wait, got %v", *sleeps)
+	}
+}
+
+// A server-named reset beyond the cap must fail fast naming the reset, not
+// clamp to a shorter nap that retries into a still-empty quota.
+func TestGetJSONRefusesABeyondCapReset(t *testing.T) {
+	_, now := retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("X-RateLimit-Reset", fmt.Sprint(now.Add(40*time.Minute).Unix()))
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	_, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second)
+	if err == nil {
+		t.Fatal("a reset 40m out must not be waited through")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 — an unwaitable reset must fail without retrying", calls)
+	}
+	if !strings.Contains(err.Error(), "reset") {
+		t.Fatalf("the error must tell the user about the reset, got: %v", err)
+	}
+}
+
+// A wait that cannot fit inside the caller's budget must not be slept: the
+// launch path's lookup cannot stall a blink longer than it did before.
+func TestGetJSONNeverWaitsPastTheBudget(t *testing.T) {
+	retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.Header().Set("Retry-After", "2")
+		w.WriteHeader(http.StatusForbidden)
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	// 3s budget: the first Retry-After fits (2<3), the second does not.
+	_, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 3*time.Second)
+	if err == nil {
+		t.Fatal("persistent 403s inside a 3s budget must fail")
+	}
+	if calls != 2 {
+		t.Fatalf("calls = %d, want 2 — a wait past the budget must end the loop", calls)
+	}
+}
+
+func TestGetJSONDoesNotRetryOtherStatuses(t *testing.T) {
+	retryClock(t)
+	calls := 0
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		calls++
+		w.WriteHeader(http.StatusNotFound)
+	}))
+	t.Cleanup(srv.Close)
+
+	discovery := Discovery{LatestReleaseURL: srv.URL}
+	if _, err := discovery.LatestReleaseTag(config.UpdateChannelStable, 30*time.Second); err == nil {
+		t.Fatal("a 404 must remain an error")
+	}
+	if calls != 1 {
+		t.Fatalf("calls = %d, want 1 — a 404 is a broken release, not a quota answer", calls)
+	}
+}
+
 // TestPreviewChannelNamesWhichConditionFailed is the #3392 sibling case, raised
 // on the issue: the preview channel collapsed three causes into one sentence
 // ("no published release with a parseable version tag found on the preview
