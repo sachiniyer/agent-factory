@@ -25,7 +25,7 @@ func newTestConfigPane(t *testing.T) *ConfigPane {
 	// start failing because a key scrolled off, which reads as "the manifest
 	// drifted" when nothing drifted at all.
 	c.SetSize(100, 200)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -82,7 +82,7 @@ func TestConfigPaneRendersEveryManifestKey(t *testing.T) {
 func TestConfigPaneRendersEveryTierAndFoldsAdvanced(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(100, 40)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 
 	folded := c.String()
@@ -409,7 +409,7 @@ const paneHeight = 20
 func TestConfigPaneKeepsTheSelectionVisible(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(64, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -460,7 +460,7 @@ func TestConfigPaneKeepsTheSelectionVisible(t *testing.T) {
 func TestConfigPaneWindowSaysWhatIsHidden(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(64, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -504,7 +504,7 @@ func TestConfigPaneClosingClearsTheLastWritesStatus(t *testing.T) {
 	}
 
 	// Reopen the way showConfigEditor reopens it.
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 
 	view := c.String()
@@ -558,7 +558,7 @@ func TestConfigPaneNeverRendersALineWiderThanThePane(t *testing.T) {
 	const w = 72
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -603,7 +603,7 @@ func openPaneOn(t *testing.T, path, key string) *ConfigPane {
 	}
 	c := NewConfigPane()
 	c.SetSize(72, paneHeight)
-	c.SetEntries(config.ManifestWithValues(cfg), path)
+	c.SetEntries(config.ManifestWithValues(cfg), path, nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1014,7 +1014,7 @@ func TestConfigPaneWindowsWithAZeroBudget(t *testing.T) {
 	for _, h := range []int{1, 2, 5, 8} {
 		c := NewConfigPane()
 		c.SetSize(72, h)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 		c.SetFocus(true)
 		c.showAdvanced = true
 		c.rebuildRows()
@@ -1054,7 +1054,7 @@ func TestConfigPaneWindowsWithAZeroBudget(t *testing.T) {
 // of zero. It must not panic, and it must not hide anything.
 func TestConfigPaneUnsizedRendersEverything(t *testing.T) {
 	c := NewConfigPane()
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1099,7 +1099,7 @@ func TestConfigPaneFitsItsBoxAtEveryWidth(t *testing.T) {
 		t.Run(fmt.Sprintf("w=%d", w), func(t *testing.T) {
 			c := NewConfigPane()
 			c.SetSize(w, paneHeight)
-			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml")
+			c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "~/.agent-factory/config.toml", nil)
 			c.SetFocus(true)
 			c.showAdvanced = true
 			c.rebuildRows()
@@ -1140,7 +1140,7 @@ func TestConfigPaneHintsAlwaysAdvertiseTheExit(t *testing.T) {
 	for _, w := range append([]int{4, 9, 12, 20, 23, 32, 43}, configPaneSweepWidths...) {
 		c := NewConfigPane()
 		c.SetSize(w, paneHeight)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 		c.SetFocus(true)
 		c.rebuildRows()
 
@@ -1173,7 +1173,7 @@ func TestConfigPaneEditFieldFitsItsRowWithoutClipping(t *testing.T) {
 	for _, w := range configPaneSweepWidths {
 		c := NewConfigPane()
 		c.SetSize(w, paneHeight)
-		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+		c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 		c.SetFocus(true)
 		c.showAdvanced = true
 		c.rebuildRows()
@@ -1227,7 +1227,7 @@ func TestConfigPaneDisplayRowsStayOneLine(t *testing.T) {
 
 	c := NewConfigPane()
 	c.SetSize(72, paneHeight)
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1265,7 +1265,7 @@ func TestConfigPaneEditFieldSurvivesTheTightestRow(t *testing.T) {
 	)
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(config.DefaultConfig()), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1367,7 +1367,7 @@ func TestConfigPaneEditFieldReflowsOnResize(t *testing.T) {
 
 			c := NewConfigPane()
 			c.SetSize(72, paneHeight)
-			c.SetEntries(entries, "/tmp/config.toml")
+			c.SetEntries(entries, "/tmp/config.toml", nil)
 			c.SetFocus(true)
 			c.showAdvanced = true
 			c.rebuildRows()
@@ -1418,7 +1418,7 @@ func TestConfigPaneEditFieldUnboundedWhileUnsized(t *testing.T) {
 
 	// No SetSize at all.
 	c := NewConfigPane()
-	c.SetEntries(entries, "/tmp/config.toml")
+	c.SetEntries(entries, "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -1481,7 +1481,7 @@ func TestConfigPaneNeverOverflowsOnWideCharacterValues(t *testing.T) {
 
 	c := NewConfigPane()
 	c.SetSize(w, paneHeight)
-	c.SetEntries(entries, "~/.agent-factory/config.toml")
+	c.SetEntries(entries, "~/.agent-factory/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()

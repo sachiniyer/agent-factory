@@ -307,7 +307,15 @@ See [Tasks and automation](tasks.md) for scheduling semantics.
 ### Config view
 
 Choose **Config** to edit global settings on the daemon's host. The header names
-the `config.toml` being written; switching projects does not change this scope.
+the `config.toml` being written, and every edit writes that global file.
+
+The values shown are the selected project's: what af uses for sessions there,
+the same values `af config get --repo <path>` prints. A banner under the header
+names the project. A row whose value comes from a project or personal override
+carries a line saying so, with the value the project uses, while the field
+above it holds — and edits — the global value. Switching projects re-reads the
+values. If the daemon cannot resolve the project, the banner says why and the
+rows show global values.
 
 <figure markdown>
 ![Config view with common settings, the advanced settings toggle, and Accounts registration and login controls](assets/web/config-accounts.png#only-light)
@@ -316,7 +324,8 @@ the `config.toml` being written; switching projects does not change this scope.
 </figure>
 
 Settings are grouped in the daemon's tier order. Each row explains the key's
-purpose and shows its current value. **Show N advanced settings** expands the
+purpose and shows its current value. Click a key to see which config layer
+supplied the value; for a selected project, the trace is that project's. **Show N advanced settings** expands the
 advanced tier; **Hide advanced settings** folds it again.
 
 Checkboxes and dropdowns save when changed. For text or structured values, edit

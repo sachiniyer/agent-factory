@@ -600,6 +600,14 @@ export interface ConfigEntry {
   /** True for every key today: a successful save carries the writer's exact
    *  per-key effect notice (live now, next daemon start, or next af launch). */
   requires_restart: boolean;
+  /** Set on a project read (#7009) when a non-global layer supplied `value`:
+   *  "project", "personal", "project+personal", or "personal-ignored". An OPEN
+   *  set — any other non-empty value still means "not the global value", and
+   *  must render as such rather than be dropped. */
+  scope?: string;
+  /** The global file's value when `scope` is set (absent means unset). It is
+   *  what a save writes, so it is the control's baseline — see editBaseline. */
+  global_value?: string;
 }
 
 /** GetConfigResponse (daemon/control_types.go). */
@@ -608,6 +616,11 @@ export interface ConfigResponse {
   /** The config.toml the values were read from, so the UI can name the file it
    *  is editing rather than leaving an AF_HOME user guessing. */
   path: string;
+  /** The project root a `repo_path` read resolved (#7009); "" otherwise. */
+  project_root?: string;
+  /** Why a `repo_path` read fell back to global values; "" otherwise. Names
+   *  only the path that was sent. */
+  project_error?: string;
 }
 
 /** config.SetResult (config/configset.go), as returned by SetConfigValue. */
@@ -753,9 +766,10 @@ export interface ResolvedValue {
 
 /** daemon.ExplainConfigResponse (daemon/control_types.go, #4803) — the shared
  *  provenance explanation the CLI renders from `af config get --explain`,
- *  served to clients that cannot resolve in-process. Global scope only; the
- *  daemon deliberately does not consult its running config snapshot
- *  (`running_value_checked`), so the trace describes on-disk sources. */
+ *  served to clients that cannot resolve in-process. `scope` is "global", or
+ *  "project" for a `repo_path` explain (#7009); the daemon deliberately does
+ *  not consult its running config snapshot (`running_value_checked`), so the
+ *  trace describes on-disk sources. */
 export interface ExplainConfigResponse {
   explanation: ResolvedValue;
   scope: string;

@@ -614,6 +614,63 @@ operator to wonder why the workspace is missing its setup. See
 [backends.md](backends.md#session-setup-hook-setup_commands) for the hook
 contract.
 
+### Config reads
+
+`POST /v1/GetConfig` returns every user-facing config key as a `ConfigEntry`
+row — `key`, `type`, `default`, `purpose`, `value`, and the rest — plus `path`,
+the global `config.toml`. `POST /v1/ExplainConfig` explains one `key`: every
+source candidate and why it won, was shadowed, was absent, or is disallowed.
+Both read on-disk config fresh on every call.
+
+Both accept an optional **`repo_path`**: a project on the **daemon's host**,
+absolute or starting with `~/` (expanded against the daemon host's home). A
+relative path is refused, because the daemon has no access to your working
+directory. A linked worktree resolves to its main checkout, the same project
+`af config get --repo <path>` reads.
+
+Without `repo_path`, both routes answer exactly as they always have; the
+response does not carry any of the fields below. With it:
+
+- **`GetConfig` returns the project's effective values** — what af uses for
+  sessions in that project, the same values `af config get --repo` prints.
+  Each row a non-global layer supplies carries two more fields:
+  - **`scope`** (string, omitted on global rows) names that layer: `project` (the
+    checked-in `.agent-factory/config.toml` or the legacy per-repo file, or a
+    `root_agent` the project resolves itself), `personal` (the machine-local
+    per-project layer `af config set --project` writes), `project+personal` (a
+    table whose entries came from both), or `personal-ignored` (a personal value
+    is stored but not applied, so `value` is still the global value — today only
+    `branch_prefix`). **This is an open set.** Treat any value you do not
+    recognize as "the effective value comes from a non-global layer" rather
+    than rejecting it, so a layer af adds later does not break your client.
+  - **`global_value`** (string) is the global file's value in the same form —
+    the value `POST /v1/SetConfigValue` writes. It is omitted when the global
+    value is empty, so read a missing `global_value` on a scoped row as `""`.
+
+  A row without `scope` is the global row, exactly as a read without
+  `repo_path` returns it. The response also carries **`project_root`**, the
+  repository root the daemon resolved: the scope the rows were actually read
+  in.
+- **If the project cannot be resolved**, `GetConfig` still succeeds: the rows
+  are the global ones, `project_root` is absent, and **`project_error`** says
+  why — for example `not a git repository: /srv/app`. The message names only
+  the path you sent, never other paths on the daemon's host. If you sent
+  `repo_path` and get neither `project_root` nor `project_error`, the daemon
+  predates the field and the rows are global.
+- **`ExplainConfig` explains the key in that project** and sets the response's
+  `scope` to `project` (it is `global` otherwise). An explain that cannot
+  resolve the project is refused with the same requested-path-only message
+  rather than answering with a global trace.
+
+Writes stay global. `SetConfigValue` and `UnsetConfigValue` always edit the
+global file, so an edit on a scoped row changes `global_value`. It changes
+`value` only where the project still inherits from the global file — another
+entry of a merged table such as `program_overrides`, or a `personal-ignored`
+row — so read `GetConfig` with the same `repo_path` again after a write rather
+than assuming either way. Seed an edit field from `global_value` on a scoped
+row, and say on screen that the edit is global. The TUI's `,` editor and the
+web Config view both do this.
+
 ## Examples
 
 Health check:

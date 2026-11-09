@@ -3659,6 +3659,23 @@ body[data-project-color] [data-af-theme="dark"] {
   margin-top: var(--af-space-1);
 }
 
+/* A project read's marker line (#7009): under the control, because the control
+ * edits the GLOBAL value and the line is what says the project uses another. */
+.af-config-scope {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
+
+/* Which scope the rows were read in — and, when the daemon fell back, why. */
+.af-config-banner {
+  padding: var(--af-space-2) var(--af-space-3);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
+
 /* The Accounts section of the config view (#3385).
  *
  * It sits INSIDE the config view and must not read as part of it: an account is a

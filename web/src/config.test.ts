@@ -259,7 +259,7 @@ test("explainConfig posts only the key — the daemon owns resolution", async ()
   const resp = await explainConfig("default_program", "tok");
 
   assert.equal(cap.url, "/v1/ExplainConfig");
-  assert.deepEqual(cap.body, { key: "default_program" }, "no scope flag: the route is global-only");
+  assert.deepEqual(cap.body, { key: "default_program" }, "no repo_path without a project: the global explain");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(resp.explanation.candidates.length, 2);
   assert.equal(resp.explanation.candidates[1].result, "winner");
@@ -507,4 +507,34 @@ test("a save for another key never closes the field being edited", () => {
   );
   assert.equal(shouldCloseSavedField(okStatus("auto_update"), null, true), false);
   assert.equal(shouldCloseSavedField(null, "network.listen_addr", true), false);
+});
+
+// --- project-scoped reads (#7009) ---------------------------------------------
+
+test("getConfig names the selected project only when there is one", async () => {
+  const cap = stubFetch({ entries: [entry()], path: "/p", project_root: "/srv/app" });
+  const resp = await getConfig("tok", "/srv/app");
+  assert.deepEqual(cap.body, { repo_path: "/srv/app" });
+  assert.equal(resp.project_root, "/srv/app", "the daemon's echo of the project it resolved is passed through");
+  assert.equal(resp.project_error, "");
+
+  const global = stubFetch({ entries: [entry()], path: "/p" });
+  const plain = await getConfig("tok", "");
+  assert.deepEqual(global.body, {}, "no project selected keeps today's empty request");
+  assert.equal(plain.project_root, "", "an older daemon's missing field reads as empty, never undefined");
+});
+
+test("getConfig passes the daemon's project error through", async () => {
+  stubFetch({ entries: [entry()], path: "/p", project_error: "not a git repository: /srv/gone" });
+  const resp = await getConfig("tok", "/srv/gone");
+  assert.equal(resp.project_error, "not a git repository: /srv/gone");
+  assert.equal(resp.project_root, "");
+});
+
+test("explainConfig names the project only when one was honored", async () => {
+  const cap = stubFetch({ explanation: { key: "k", value: "v", merge: "replace", precedence: [], candidates: [] }, scope: "project", running_value_checked: false });
+  await explainConfig("default_program", "tok", "/srv/app");
+  assert.deepEqual(cap.body, { key: "default_program", repo_path: "/srv/app" });
+  await explainConfig("default_program", "tok");
+  assert.deepEqual(cap.body, { key: "default_program" });
 });

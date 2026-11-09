@@ -55,22 +55,28 @@ import (
 // daemon this af session is attached to. It returns the manifest rows zipped
 // with live values, and the location label the pane puts in its header.
 //
+// repo is the active project (nil outside one). Its rows show the project's
+// EFFECTIVE values with scope markers (#7009) — the edit still writes the global
+// file. scope is the scope the rows were actually read in: repo when it was
+// honored, nil when the read fell back to global values, so the pane's explain
+// cannot answer for a different scope than its rows show.
+//
 // The app calls it (rather than the pane calling it itself) so the app keeps
 // deciding WHEN to re-read: reopening the editor must show the file as it is
 // now, including a hand-edit or an `af config set` made since the TUI started.
-func ReadConfigForEditor() ([]config.ConfigEntry, string, error) {
+func ReadConfigForEditor(repo *config.RepoContext) (entries []config.ConfigEntry, location string, scope *config.RepoContext, err error) {
 	if !apiclient.IsRemoteTarget() {
-		return localConfigForEditor()
+		return localConfigForEditor(repo)
 	}
 	client, err := apiclient.NewTargeted()
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
 	defer client.CloseIdleConnections()
 
-	resp, err := client.GetConfig(daemon.GetConfigRequest{})
+	resp, err := client.GetConfig(daemon.GetConfigRequest{RepoPath: repo.WorkspacePath()})
 	if err != nil {
-		return nil, "", remoteConfigRefusal(client, "read config from", "GetConfig", "Nothing was read", err)
+		return nil, "", nil, remoteConfigRefusal(client, "read config from", "GetConfig", "Nothing was read", err)
 	}
 	// A real daemon always answers with the whole manifest — GetConfig takes no
 	// key filter. But a REMOTE target is whatever answers the URL, and an empty
@@ -78,34 +84,67 @@ func ReadConfigForEditor() ([]config.ConfigEntry, string, error) {
 	// to edit, on a machine the operator cannot see, is worse than a refusal that
 	// says the URL may not name an af daemon.
 	if len(resp.Entries) == 0 {
-		return nil, "", fmt.Errorf("the config editor read no config keys from the daemon at %s; "+
+		return nil, "", nil, fmt.Errorf("the config editor read no config keys from the daemon at %s; "+
 			"check that the URL names an af daemon", apiclient.RemoteTargetURL())
 	}
-	return resp.Entries, remoteConfigLocation(resp.Path), nil
+	location = remoteConfigLocation(resp.Path)
+	switch {
+	case repo == nil:
+		return resp.Entries, location, nil, nil
+	case resp.ProjectRoot != "":
+		return resp.Entries, location + " · project " + resp.ProjectRoot, repo, nil
+	case resp.ProjectError != "":
+		return resp.Entries, location + " · " + resp.ProjectError, nil, nil
+	}
+	// The daemon dropped repo_path without a word: it predates the field. Its
+	// rows are global, and saying so is what keeps them from passing as the
+	// project's.
+	return resp.Entries, location + " · this daemon is too old to resolve project values — the rows are global", nil, nil
 }
 
-// localConfigForEditor is the unchanged local read, moved here verbatim from
-// app.showConfigEditor so both halves of the target decision sit together.
+// rereadConfigForEditor is the pane's re-resolve seam: the same read the app
+// opens the editor with, so a scoped row refreshed after a save is resolved
+// exactly as the rows around it were.
+func rereadConfigForEditor(repo *config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+	entries, _, honored, err := ReadConfigForEditor(repo)
+	return entries, honored, err
+}
+
+// localConfigForEditor is the in-process read, the local half of the target
+// decision.
 //
 // A config that will not load is surfaced rather than swallowed: opening an
 // editor onto a broken file and letting the user "fix" one key would write the
-// rest of the broken state back.
-func localConfigForEditor() ([]config.ConfigEntry, string, error) {
+// rest of the broken state back. A project that will not resolve is not that:
+// the global rows are still the file the editor writes, so it opens on them and
+// the header says why the project values are missing — the same degrade the
+// daemon answers a remote pane with.
+func localConfigForEditor(repo *config.RepoContext) ([]config.ConfigEntry, string, *config.RepoContext, error) {
 	cfg, err := config.LoadConfig()
 	if err != nil {
-		return nil, "", fmt.Errorf("cannot open the config editor: %w", err)
+		return nil, "", nil, fmt.Errorf("cannot open the config editor: %w", err)
 	}
 	configDir, err := config.GetConfigDir()
 	if err != nil {
-		return nil, "", err
+		return nil, "", nil, err
 	}
-	return config.ManifestWithValues(cfg), filepath.Join(configDir, config.TomlConfigFileName), nil
+	path := filepath.Join(configDir, config.TomlConfigFileName)
+	if repo == nil {
+		return config.ManifestWithValues(cfg), path, nil, nil
+	}
+	entries, root, err := config.EditorEntriesForRepo(repo, cfg)
+	if err != nil {
+		return config.ManifestWithValues(cfg), path + " · " + config.ProjectScopeError(repo.WorkspacePath(), err), nil, nil
+	}
+	return entries, path + " · project " + root, repo, nil
 }
 
 // ExplainConfigForEditor resolves one key's provenance on whichever daemon this
 // af session is attached to — the explain half of the editor's read surface
 // (#4803). The pane's rows say WHAT a value is; this says WHERE it came from,
-// through the same config.ExplainGlobalValue `af config get --explain` resolves.
+// through the same resolver `af config get --explain` uses. repo is the scope the
+// rows were read in (nil for global), so a project row is explained in its
+// project.
 //
 // The split is the editor's own, for the editor's reason: a remote target never
 // falls back to the local file, so the local branch resolves in-process (the
@@ -113,9 +152,15 @@ func localConfigForEditor() ([]config.ConfigEntry, string, error) {
 // targeted daemon — explaining machine B from machine A's file would answer
 // about a config the user is not looking at, the exact failure the read and the
 // write already route together to prevent.
-func ExplainConfigForEditor(key string) (*config.ResolvedValue, error) {
+func ExplainConfigForEditor(key string, repo *config.RepoContext) (*config.ResolvedValue, error) {
 	if !apiclient.IsRemoteTarget() {
-		value, err := config.ExplainGlobalValue(key)
+		var value config.ResolvedValue
+		var err error
+		if repo == nil {
+			value, err = config.ExplainGlobalValue(key)
+		} else {
+			value, err = config.ExplainRepoValue(repo, key)
+		}
 		if err != nil {
 			return nil, err
 		}
@@ -127,7 +172,7 @@ func ExplainConfigForEditor(key string) (*config.ResolvedValue, error) {
 	}
 	defer client.CloseIdleConnections()
 
-	resp, err := client.ExplainConfig(daemon.ExplainConfigRequest{Key: key})
+	resp, err := client.ExplainConfig(daemon.ExplainConfigRequest{Key: key, RepoPath: repo.WorkspacePath()})
 	if err != nil {
 		return nil, remoteConfigRefusal(client, "explain config on", "ExplainConfig", "Nothing was read", err)
 	}

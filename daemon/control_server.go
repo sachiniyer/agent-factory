@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -233,7 +234,13 @@ func (s *controlServer) ReloadTasks(_ ReloadTasksRequest, resp *ReloadTasksRespo
 // would appear to revert.
 //
 // The gap between those two is exactly why every entry carries RequiresRestart.
-func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) error {
+//
+// A RepoPath read (#7009) returns the project's effective values with scope
+// markers instead. A project that will not resolve degrades rather than fails:
+// the editor still opens on the global rows it can edit, and ProjectError says
+// why the markers are missing — a refused read would leave the user unable to
+// edit anything because one selected project went away.
+func (s *controlServer) GetConfig(req GetConfigRequest, resp *GetConfigResponse) error {
 	cfg, err := config.LoadConfig()
 	if err != nil {
 		return fmt.Errorf("cannot read config: %w", err)
@@ -242,9 +249,43 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 	if err != nil {
 		return err
 	}
-	resp.Entries = config.ManifestWithValues(cfg)
 	resp.Path = filepath.Join(configDir, config.TomlConfigFileName)
+	if req.RepoPath == "" {
+		resp.Entries = config.ManifestWithValues(cfg)
+		return nil
+	}
+	entries, root, err := projectEditorEntries(req.RepoPath, cfg)
+	if err != nil {
+		resp.Entries = config.ManifestWithValues(cfg)
+		resp.ProjectError = config.ProjectScopeError(req.RepoPath, err)
+		return nil
+	}
+	resp.Entries = entries
+	resp.ProjectRoot = root
 	return nil
+}
+
+// projectEditorEntries resolves a caller-supplied project path on this host and
+// reads its editor rows against the global snapshot GetConfig already loaded,
+// so the markers and global_value describe the same generation as Path.
+func projectEditorEntries(requested string, global *config.Config) ([]config.ConfigEntry, string, error) {
+	repo, err := configProjectFromRequest(requested)
+	if err != nil {
+		return nil, "", err
+	}
+	return config.EditorEntriesForRepo(repo, global)
+}
+
+// configProjectFromRequest turns a config read's repo_path into the repository
+// it names. The path is normalized the way every RPC-boundary path is — the
+// daemon has no caller cwd, so a relative path is refused rather than resolved
+// against the daemon's own (#4821).
+func configProjectFromRequest(requested string) (*config.RepoContext, error) {
+	path, err := config.ResolveDaemonHostPath(requested)
+	if err != nil {
+		return nil, fmt.Errorf("%w: %w", config.ErrProjectPathUnusable, err)
+	}
+	return config.RepoFromPath(path)
 }
 
 // ExplainConfig returns one global config key's provenance — the same
@@ -259,13 +300,36 @@ func (s *controlServer) GetConfig(_ GetConfigRequest, resp *GetConfigResponse) e
 // answer stays available while the daemon warms up. That is also why
 // RunningValueChecked reports false: the explanation is about the FILE the user
 // edits, the same contract the CLI prints ("running daemon value not checked").
+//
+// A RepoPath explain that cannot resolve the project is refused, unlike
+// GetConfig's degrade: the rows can honestly fall back to global values under a
+// banner, but a global trace answering a project question would be a wrong
+// answer presented as the right one.
 func (s *controlServer) ExplainConfig(req ExplainConfigRequest, resp *ExplainConfigResponse) error {
-	value, err := config.ExplainGlobalValue(req.Key)
+	if req.RepoPath == "" {
+		value, err := config.ExplainGlobalValue(req.Key)
+		if err != nil {
+			return err
+		}
+		resp.Explanation = value
+		resp.Scope = "global"
+		return nil
+	}
+	repo, err := configProjectFromRequest(req.RepoPath)
 	if err != nil {
-		return err
+		return errors.New(config.ProjectScopeError(req.RepoPath, err))
+	}
+	value, err := config.ExplainRepoValue(repo, req.Key)
+	if err != nil {
+		// An unknown key is the caller's own input and safe to echo; anything
+		// else came out of the resolver and may name host paths.
+		if errors.Is(err, config.ErrUnknownConfigKey) {
+			return err
+		}
+		return errors.New(config.ProjectScopeError(req.RepoPath, err))
 	}
 	resp.Explanation = value
-	resp.Scope = "global"
+	resp.Scope = "project"
 	return nil
 }
 

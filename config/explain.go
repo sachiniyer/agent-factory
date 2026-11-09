@@ -2,6 +2,7 @@ package config
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -115,6 +116,25 @@ func ExplainGlobalValue(keyPath string) (ResolvedValue, error) {
 		return RootAgentExplainValue("", keyPath, false)
 	}
 	resolved, err := ResolveGlobalConfig()
+	if err != nil {
+		return ResolvedValue{}, err
+	}
+	value, ok := resolved.ResolvedValuePath(keyPath)
+	if !ok {
+		return ResolvedValue{}, UnknownConfigKeyError(keyPath)
+	}
+	return value, nil
+}
+
+// ExplainRepoValue resolves one key's project-scoped explanation — the same
+// ResolvedValue `af config get <key> --explain --repo <path>` prints. It is the
+// explain half of EditorEntriesForRepo: an editor showing a project's rows must
+// explain them in that project, or the trace contradicts the row it opened from.
+func ExplainRepoValue(repo *RepoContext, keyPath string) (ResolvedValue, error) {
+	if IsRootAgentExplainKey(keyPath) {
+		return RootAgentExplainValue(repo.WorkspacePath(), keyPath, false)
+	}
+	resolved, err := ResolveConfigForRepoInspection(repo)
 	if err != nil {
 		return ResolvedValue{}, err
 	}
@@ -264,15 +284,28 @@ func commaJoinStringList(key string, v any) (string, bool) {
 	return joined, true
 }
 
+// ErrUnknownConfigKey matches every refusal UnknownConfigKeyError builds. A
+// caller that must not echo arbitrary resolver errors to a remote client — the
+// daemon's project explain — can still echo this one, because it names only
+// the key the caller sent.
+var ErrUnknownConfigKey = errors.New("unknown config key")
+
+// unknownConfigKeyError tags a key refusal with ErrUnknownConfigKey without
+// changing its text or hiding the retired-key error it carries.
+type unknownConfigKeyError struct{ err error }
+
+func (e *unknownConfigKeyError) Error() string   { return e.err.Error() }
+func (e *unknownConfigKeyError) Unwrap() []error { return []error{e.err, ErrUnknownConfigKey} }
+
 // UnknownConfigKeyError reports a key no manifest entry or root_agent leaf can
 // explain, keeping the retired-key hints alongside the generic message so a
 // user typing a removed spelling is told where it went rather than just "unknown".
 func UnknownConfigKeyError(key string) error {
 	if err := RetiredThemeKeyError(key); err != nil {
-		return err
+		return &unknownConfigKeyError{err}
 	}
 	if key == "auto_yes" {
-		return RemovedAutoYesError()
+		return &unknownConfigKeyError{RemovedAutoYesError()}
 	}
-	return fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)
+	return &unknownConfigKeyError{fmt.Errorf("unknown config key %q; run `af config list` to see all keys", key)}
 }

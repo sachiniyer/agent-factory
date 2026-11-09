@@ -41,6 +41,10 @@ type ConfigPane struct {
 	// (#3708). Not a path, therefore, and neither the order nor the absence of a
 	// `~` abbreviation is incidental — see remoteConfigLocation for both.
 	location string
+	// project is the scope the rows were read in (#7009): the active project
+	// when its effective values were honored, nil for a global read or one that
+	// fell back to global. Explain answers in this scope, never another.
+	project *config.RepoContext
 
 	// rows is the flattened, currently-visible list: tier headings interleaved
 	// with entries, rebuilt whenever the advanced toggle or the entries change.
@@ -103,7 +107,16 @@ type ConfigPane struct {
 	// NewConfigPane wires ExplainConfigForEditor, which resolves in-process
 	// locally and through the targeted daemon's ExplainConfig under a remote
 	// target. The rows say WHAT a value is; this answers WHERE it came from.
-	explain func(key string) (*config.ResolvedValue, error)
+	explain func(key string, repo *config.RepoContext) (*config.ResolvedValue, error)
+
+	// reread re-resolves the project's rows after a global save (#7009),
+	// injected on the same terms: NewConfigPane wires rereadConfigForEditor,
+	// the same read the app opens the pane with. A global write can move a
+	// project's effective value in ways no single row predicts — a merged map
+	// inherits the entries the project does not override, and a global-only
+	// key such as root_agents feeds another row's layer — so only a fresh read
+	// knows what the project uses now. honored is the scope the read got.
+	reread func(repo *config.RepoContext) (entries []config.ConfigEntry, honored *config.RepoContext, err error)
 
 	// editHosts is the hosts_edit write path (#5571 W10.5), injected on the
 	// same terms as save: NewConfigPane wires applyingHostsEdit, which routes
@@ -224,18 +237,21 @@ func NewConfigPane() *ConfigPane {
 		input:     in,
 		save:      applyingConfigSet,
 		explain:   ExplainConfigForEditor,
+		reread:    rereadConfigForEditor,
 		editHosts: applyingHostsEdit,
 	}
 }
 
-// SetEntries loads the manifest rows and the location they were read from. The
-// caller supplies them (rather than the pane reading config itself) so the app
-// decides when to re-read — reopening the editor shows config as it is now,
-// including a hand-edit made since — and so the pane stays a form regardless of
-// which daemon answered (ReadConfigForEditor).
-func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string) {
+// SetEntries loads the manifest rows, the location they were read from, and the
+// project scope they were read in (nil for global). The caller supplies them
+// (rather than the pane reading config itself) so the app decides when to
+// re-read — reopening the editor shows config as it is now, including a
+// hand-edit made since — and so the pane stays a form regardless of which daemon
+// answered (ReadConfigForEditor).
+func (c *ConfigPane) SetEntries(entries []config.ConfigEntry, location string, project *config.RepoContext) {
 	c.entries = visibleAppearanceEntries(entries)
 	c.location = location
+	c.project = project
 	c.rebuildRows()
 }
 
@@ -513,7 +529,9 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 // beginEdit opens the value field for the selected key, pre-filled with the
 // live value — the value config.CurrentValue rendered, which the write path is
 // proven to accept back unchanged (TestCurrentValueRoundTripsThroughConfigSet),
-// so saving an untouched field is a no-op rather than a corruption.
+// so saving an untouched field is a no-op rather than a corruption. A
+// scope-marked row opens on its GLOBAL value (editSeedValue): that is the value
+// the field writes.
 func (c *ConfigPane) beginEdit() {
 	entry := c.selectedEntry()
 	if entry == nil {
@@ -526,7 +544,7 @@ func (c *ConfigPane) beginEdit() {
 	// textinput.SetValue runs a sanitizer that folds newlines/tabs to spaces,
 	// so seeding with the raw multi-line value would flatten it inside the
 	// field and let commitEdit's guard read the untouched field as edited.
-	c.input.SetValue(flattenToOneLine(entry.Value))
+	c.input.SetValue(flattenToOneLine(editSeedValue(*entry)))
 	// Read the seed back AFTER the sanitizer runs: it drops not just
 	// whitespace but every unicode.IsControl rune (e.g. ESC from a TOML
 	// \u001b escape), so a flatten-only seed would diverge from the field
@@ -593,7 +611,7 @@ func (c *ConfigPane) commitEdit() {
 	// and would write straight through this check.
 	//
 	// Two no-op signals, either sufficient:
-	//   - value == entry.Value: the field holds the raw stored value again,
+	//   - value == editSeedValue(*entry): the field holds the raw stored value again,
 	//     a true no-op even when dirty is true (e.g. the user edited a
 	//     sanitizer-stable single-line value and restored it — without this
 	//     arm that would run the config writer / daemon apply path for no
@@ -608,7 +626,7 @@ func (c *ConfigPane) commitEdit() {
 	//     changes, lets that write through. A multi-line entry.Value can
 	//     never equal the single-line field, so the first arm does not weaken
 	//     this. See TestConfigPaneMultiLineValueUntouchedSaveIsNoOp and TestConfigPaneEditRestoreIsNoOp.
-	if value == entry.Value || (!c.dirty && value == c.editSeed) {
+	if value == editSeedValue(*entry) || (!c.dirty && value == c.editSeed) {
 		c.cancelEdit()
 		return
 	}
@@ -628,21 +646,18 @@ func (c *ConfigPane) commitEdit() {
 	}
 
 	c.cancelEdit()
+	// Reflect the write back into the rows so the list shows what af uses, not
+	// what was typed: the canonical value on a global row, and a fresh project
+	// read when the rows are a project's (see reread).
+	if stale := c.refreshAfterSave(result.Key, result.Value, entry.Scope != ""); stale != "" {
+		notice = joinNotices(notice, stale)
+	}
 	// Echo what was actually written, from the write path's own result — not
 	// from what this pane believes it sent. Same contract as `af config set`
 	// and the config agent. The per-key effect notice (#2480) rides along:
 	// live now, next daemon start, or next af launch — the honest answer for
 	// THIS key, computed by the write path.
 	c.setStatus(fmt.Sprintf("set %s = %s", result.Key, result.Value), false, notice)
-
-	// Reflect the canonical value back into the row so the list shows what the
-	// file holds, not what was typed.
-	entry.Value = result.Value
-	for i := range c.entries {
-		if c.entries[i].Key == result.Key {
-			c.entries[i].Value = result.Value
-		}
-	}
 	// The `hosts`/`default_host` rows remain editable keys AND feed the Hosts
 	// section (#5571 W10.5): rebuild so a hand-edited table row re-derives the
 	// section's rows instead of leaving last save's destinations on screen.
@@ -788,6 +803,59 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		}
 	}
 	return lines, selStart, selEnd
+}
+
+// editSeedValue is the value the edit field opens on and compares against: the
+// write target. The editor writes the global file, so a scope-marked row's
+// baseline is its global value — seeding it with the project's effective value
+// would make an untouched-looking save copy the override into the global file.
+func editSeedValue(e config.ConfigEntry) string {
+	if e.Scope != "" {
+		return e.GlobalValue
+	}
+	return e.Value
+}
+
+// staleProjectValueNote is what a project pane's save says when the project
+// could not be re-read: the write landed, but project values may be out of date.
+const staleProjectValueNote = "could not re-read this project's value — reopen the editor to see it"
+
+// refreshAfterSave brings the rows up to date after key's global value became
+// written. A global pane needs only the written value on its row. A project
+// pane re-reads every row, since the write may have moved any of them; when
+// that read fails or falls back to global rows (which cannot say what the
+// project uses), the written value lands on the edited row's global half and
+// the returned note says the project values may be stale. scoped reports
+// whether the edited row carried a marker, so a marker without a project to
+// re-read is never left looking current either.
+func (c *ConfigPane) refreshAfterSave(key, written string, scoped bool) string {
+	if c.project != nil {
+		if entries, honored, err := c.reread(c.project); err == nil && honored != nil {
+			c.entries = visibleAppearanceEntries(entries)
+			return ""
+		}
+	}
+	for i := range c.entries {
+		if c.entries[i].Key != key {
+			continue
+		}
+		if c.entries[i].Scope != "" {
+			c.entries[i].GlobalValue = written
+		} else {
+			c.entries[i].Value = written
+		}
+	}
+	if c.project != nil || scoped {
+		return staleProjectValueNote
+	}
+	return ""
+}
+
+func joinNotices(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + " · " + b
 }
 
 func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }

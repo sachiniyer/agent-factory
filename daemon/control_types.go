@@ -800,13 +800,30 @@ type ReapConfigAgentResponse struct{}
 // values — every user-facing global key, whether it is settable, and what it is
 // set to now. There is no key filter: the manifest is ~20 entries and the editor
 // renders all of them.
-type GetConfigRequest struct{}
+type GetConfigRequest struct {
+	// RepoPath optionally names a project on the daemon's host (absolute, or
+	// ~/-relative) whose EFFECTIVE values the rows should show (#7009) — what
+	// `af config get --repo` reports. It exists because the daemon cannot learn
+	// the web's or a remote TUI's active project any other way. Empty is today's
+	// global read, byte for byte.
+	RepoPath string `json:"repo_path,omitempty"`
+}
 type GetConfigResponse struct {
 	Entries []config.ConfigEntry `json:"entries"`
 	// Path is the config.toml the values were read from, so the UI can tell the
 	// user which file it is editing (a user with AF_HOME set is otherwise left
-	// guessing).
+	// guessing). It stays the global file under a project read: edits always
+	// write it.
 	Path string `json:"path"`
+	// ProjectRoot is the canonical repository root a RepoPath read resolved — the
+	// scope the entries were actually read in, which can differ from the path
+	// sent (a linked worktree resolves to its main checkout).
+	ProjectRoot string `json:"project_root,omitempty"`
+	// ProjectError says why a RepoPath read fell back to global entries. It names
+	// only the requested path (config.ProjectScopeError): this string reaches
+	// remote clients, and the resolver's own error can name host paths they did
+	// not send.
+	ProjectError string `json:"project_error,omitempty"`
 }
 
 // ExplainConfigRequest asks for one global config key's layer-by-layer
@@ -819,15 +836,18 @@ type ExplainConfigRequest struct {
 	// Key is the manifest key to explain — a top-level key or a dotted leaf
 	// (root_agent resolves through its specialized four-layer trace).
 	Key string `json:"key"`
+	// RepoPath optionally explains Key in a project on the daemon's host, the
+	// same path GetConfigRequest.RepoPath takes (#7009), so an editor showing
+	// project rows explains them in that project. Empty is the global explain.
+	RepoPath string `json:"repo_path,omitempty"`
 }
 type ExplainConfigResponse struct {
 	// Explanation is config.ResolvedValue verbatim: effective value, default,
 	// merge policy, precedence, every source candidate with its result and
 	// reason, and per-leaf origins for composite values.
 	Explanation config.ResolvedValue `json:"explanation"`
-	// Scope names the scope the explanation describes. "global" is the only
-	// scope served: project-scoped provenance follows the project-config read
-	// surface, the same staging as config.read-project's UI half.
+	// Scope names the scope the explanation describes: "global", or "project"
+	// when the request named a RepoPath the daemon resolved.
 	Scope string `json:"scope"`
 	// RunningValueChecked is always false: the trace resolves on-disk sources
 	// fresh per call, never the running daemon's in-memory config — the same

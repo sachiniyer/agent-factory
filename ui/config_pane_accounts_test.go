@@ -26,7 +26,7 @@ func accountsPane(t *testing.T, accounts []AccountRow, agents []string) *ConfigP
 	pane.SetSize(100, 40)
 	pane.SetEntries([]config.ConfigEntry{{
 		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
-	}}, "/tmp/config.toml")
+	}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(accounts, agents, nil)
 	pane.SetFocus(true)
 	return pane
@@ -237,7 +237,7 @@ func TestAccountsRegisterRefusesAnEmptyNameLocally(t *testing.T) {
 func TestAccountsSectionReportsAFailedReadRatherThanLookingEmpty(t *testing.T) {
 	pane := NewConfigPane()
 	pane.SetSize(100, 40)
-	pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Tier: 1}}, "/tmp/config.toml")
+	pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Tier: 1}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(nil, nil, errors.New("the daemon did not answer"))
 	pane.SetFocus(true)
 
@@ -255,7 +255,7 @@ func TestAccountsSectionReportsAFailedReadRatherThanLookingEmpty(t *testing.T) {
 func TestAccountsSectionIsAbsentUntilLoaded(t *testing.T) {
 	pane := NewConfigPane()
 	pane.SetSize(100, 40)
-	pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Tier: 1}}, "/tmp/config.toml")
+	pane.SetEntries([]config.ConfigEntry{{Key: "default_program", Value: "claude", Tier: 1}}, "/tmp/config.toml", nil)
 	pane.SetFocus(true)
 	if strings.Contains(pane.String(), accountsHeading) {
 		t.Fatalf("the Accounts heading rendered before any account was loaded:\n%s", pane.String())
@@ -384,7 +384,7 @@ func openRegisterFieldAt(t *testing.T, w, h int, agent, name string) *ConfigPane
 	c.SetSize(w, h)
 	c.SetEntries([]config.ConfigEntry{{
 		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
-	}}, "/tmp/config.toml")
+	}}, "/tmp/config.toml", nil)
 	c.SetAccounts(nil, []string{agent}, nil)
 	c.SetFocus(true)
 	selectAccount(t, c, agent, "")
@@ -545,7 +545,7 @@ func TestAccountsRegisterFieldUnboundedWhileUnsized(t *testing.T) {
 	c := NewConfigPane()
 	c.SetEntries([]config.ConfigEntry{{
 		Key: "default_program", Value: "claude", Tier: 1,
-	}}, "/tmp/config.toml")
+	}}, "/tmp/config.toml", nil)
 	c.SetAccounts(nil, []string{"claude"}, nil)
 	c.SetFocus(true)
 	selectAccount(t, c, "claude", "")

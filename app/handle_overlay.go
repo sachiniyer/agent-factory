@@ -528,11 +528,19 @@ func (m *home) showConfigEditor() (tea.Model, tea.Cmd) {
 	m.accountGeneration++   // discard account results from an earlier opening
 	m.quotaGeneration++     // discard usage results from an earlier opening
 	m.hostCheckGeneration++ // discard host probes from an earlier opening
-	entries, location, err := ui.ReadConfigForEditor()
+	// The active project's effective values, not the global file's (#7009): the
+	// same identity reseedHooksFromDisk builds. Under a remote target these are
+	// the target's registry paths — paths on the daemon's host, which is exactly
+	// what repo_path means there.
+	var repo *config.RepoContext
+	if m.repoRoot != "" {
+		repo = &config.RepoContext{Root: m.repoRoot, IdentityRoot: m.repoIdentityRoot, ID: m.repoID}
+	}
+	entries, location, scope, err := ui.ReadConfigForEditor(repo)
 	if err != nil {
 		return m, m.handleError(err)
 	}
-	m.configPane.SetEntries(entries, location)
+	m.configPane.SetEntries(entries, location, scope)
 	// The Accounts section (#3385), read on every open for the same reason the
 	// config is: an account registered from the CLI, or logged in from the web,
 	// since this TUI started must show as it is now rather than as af remembers.
