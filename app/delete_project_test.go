@@ -442,7 +442,7 @@ func TestDeleteActiveProjectLeavesStaleScopeAndZombieRow(t *testing.T) {
 	}
 
 	// (d) A followup snapshot poll does not heal the zombie either. (FAILS today.)
-	h.refreshSidebarProjectsFromSnapshot(nil, nil)
+	h.refreshSidebarProjectsFromSnapshot(nil, nil, nil)
 	for _, r := range h.projects.Projects() {
 		if r.RepoID == repoID {
 			t.Errorf("BUG (d): snapshot poll re-derived the zombie row repoID %s Active=%v SessionCount=%d", repoID, r.Active, r.SessionCount)

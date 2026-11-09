@@ -172,7 +172,7 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
 		defer cancel()
-		data, err := fetch(ctx)
+		data, skipped, err := fetch(ctx)
 		if err != nil && ctx.Err() != nil {
 			err = fmt.Errorf(
 				"rebind conflict refresh timed out after %s — the form re-arms on the daemon's refusal alone",
@@ -183,6 +183,7 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 			projectID: msg.projectID,
 			refusal:   msg.err,
 			data:      data,
+			skipped:   skipped,
 			fetchErr:  err,
 		}
 	}
@@ -195,6 +196,11 @@ func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 // A picker closed or swapped in between keeps nothing of this reply; the form
 // it re-arms would name a root nobody is waiting on.
 func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.Model, tea.Cmd) {
+	// The conflict-time reply's skipped set applies with its rows (#6986): a
+	// successful fetch rewrites the retained set, a failed one leaves it.
+	if msg.fetchErr == nil {
+		m.applySkippedRepos(msg.skipped)
+	}
 	fresh, degraded := m.buildProjectListFrom(msg.data)
 	m.applySidebarProjects(fresh, degraded, msg.fetchErr)
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject ||

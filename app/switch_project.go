@@ -11,6 +11,7 @@ import (
 	tea "github.com/charmbracelet/bubbletea"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/projectclone"
 	"github.com/sachiniyer/agent-factory/log"
@@ -90,7 +91,7 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 	// its expiry lands in the same snapshotDegraded path as any failed fetch.
 	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
 	defer cancel()
-	data, err := allReposSnapshotFetcher(ctx)
+	data, skipped, err := allReposSnapshotFetcher(ctx)
 	snapshotDegraded := false
 	if err != nil {
 		if ctx.Err() != nil {
@@ -99,6 +100,12 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
 		snapshotDegraded = true
 		data = nil
+	} else {
+		// The all-repos reply's skipped set is the completeness witness for the
+		// very counts this list displays (#6986): carry it into the retained
+		// set, from the same response the rows came from. A failed fetch keeps
+		// the last set — over-cautious beats claiming a partial list is whole.
+		m.applySkippedRepos(skipped)
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
 	return projects, registryDegraded, snapshotDegraded
@@ -460,10 +467,17 @@ func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded b
 // session snapshot the background poll already fetched off-loop, so the always-
 // visible counts stay live when sessions change in ANOTHER repo — without a
 // second on-loop daemon RPC. A fetch error leaves the last-known rows intact
-// (like handleSnapshot/refreshTasks). Returns whether the visible rows changed.
-func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, fetchErr error) bool {
+// (like handleSnapshot/refreshTasks). The reply's skipped set rides the same
+// response (#6986): on success it replaces the retained set — rows and their
+// completeness verdict from one snapshot — and on error the last set stands,
+// never cleared by a hiccup. Returns whether the visible rows changed.
+func (m *home) refreshSidebarProjectsFromSnapshot(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) bool {
+	changed := false
+	if fetchErr == nil {
+		changed = m.applySkippedRepos(skipped)
+	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
-	return m.applySidebarProjects(projects, registryDegraded, fetchErr)
+	return m.applySidebarProjects(projects, registryDegraded, fetchErr) || changed
 }
 
 // applySidebarProjects pushes an already-built project list into the Projects
@@ -710,10 +724,14 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	// target) must abort here, leaving the current project exactly as it was,
 	// rather than stranding the TUI on the new repoID with an empty sidebar
 	// (#1788).
-	data, err := m.fetchColdStartSnapshot(repo.ID)
+	data, skipped, err := m.fetchColdStartSnapshot(repo.ID)
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("failed to load sessions for %s: %w", filepath.Base(repo.Root), err))
 	}
+	// Fold the incoming project's skipped set into the retained set before the
+	// scope flips (#6986): rows and skip state came from the one response, and
+	// a skipped project just entered must never look like a clean empty one.
+	m.mergeSkippedReposFor(repo.ID, skipped)
 
 	// Persist the OUTGOING project's pane/selection state under its still-current
 	// repoID before anything changes.

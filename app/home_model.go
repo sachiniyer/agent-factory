@@ -28,6 +28,21 @@ type home struct {
 	snapshotClock        func() time.Time // nil uses time.Now; injected by snapshot recovery tests.
 	ctx                  context.Context
 
+	// skippedRepos is the latest successful snapshot's report of repos the
+	// daemon could not load (#6986): while non-empty the bar carries a
+	// standing incomplete-list notice naming them and their remedy, and
+	// delete-project refuses — ONE guard on the newest set, no per-consumer
+	// freshness proofs. Written only by a successful snapshot, so a failed
+	// fetch retains the last set (over-cautious beats a partial view rendered
+	// as complete). skippedReposNoticeQueued latches the one transient
+	// announcement per distinct set, drained by the poll. webListenerNotice is
+	// the web-listener refusal's half of the same standing line — the two are
+	// composed by applyStandingNotice, the slot's only writer, so neither
+	// condition erases the other.
+	skippedRepos             []daemon.SkippedRepo
+	skippedReposNoticeQueued bool
+	webListenerNotice        string
+
 	// -- Storage and Configuration --
 
 	programChoice

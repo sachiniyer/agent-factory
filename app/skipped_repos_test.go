@@ -39,13 +39,15 @@ func pollSnapshotReply(t *testing.T, h *home, resp daemon.SnapshotResponse, err 
 	_, _ = h.Update(msg)
 }
 
-// skippedRepoBar asserts the standing notice on the bar. The skipped set
-// survives a transient notice's fade — String() paints the standing line
-// whenever no transient is up — so it is read through String(), not FullError().
+// requireSkippedRepoNotice asserts the STANDING notice on the bar: it expires
+// any transient so String() renders the standing line — the piece that must
+// survive a transient's fade. The notice must name the condition (the list is
+// incomplete), not just a bare flag.
 func requireSkippedRepoNotice(t *testing.T, h *home) string {
 	t.Helper()
+	h.errBox.Expire()
 	bar := h.errBox.String()
-	require.Contains(t, bar, "hidden", "a skipped repo must surface as an incomplete-list notice")
+	require.Contains(t, bar, "hidden", "a skipped repo must leave a standing incomplete-list notice on the bar")
 	return bar
 }
 
@@ -150,6 +152,7 @@ func TestSkippedRepoClearsOnHealthySnapshot(t *testing.T) {
 	requireSkippedRepoNotice(t, h)
 
 	pollSnapshotReply(t, h, daemon.SnapshotResponse{}, nil)
+	h.errBox.Expire() // the earlier transient lingers for its fade; the standing must not
 	assert.NotContains(t, h.errBox.String(), "hidden",
 		"a healthy snapshot must retract the incomplete-list notice")
 }
@@ -334,6 +337,6 @@ func TestSkippedRepoSwitchProject(t *testing.T) {
 
 	_, _ = h.switchProject(repoB)
 	bar := requireSkippedRepoNotice(t, h)
-	assert.Contains(t, bar, repoB.ID,
-		"the notice must name the skipped repo the switch just entered")
+	assert.Contains(t, bar, repoBRoot,
+		"the notice names the skipped repo by its root, which the switch just registered")
 }

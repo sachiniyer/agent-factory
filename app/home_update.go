@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -119,7 +120,7 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// cross-repo snapshot fetched on the same poll (#1590), so a session
 		// created/removed in another repo updates the rows without a project
 		// switch. Its own error path leaves the last-known rows intact.
-		if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposErr) {
+		if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposSkipped, msg.allReposErr) {
 			changed = true
 		}
 		detachTrace(tickStart, "snapshotFetchedMsg-reconcile-returned")
@@ -153,6 +154,17 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			combined := strings.TrimSpace(strings.Join(notices, " "))
 			if combined != "" {
 				cmds = append(cmds, m.showTransientMessage(combined))
+			}
+			// Announce a changed skipped set once: the standing line already
+			// carries the condition — this transient lands the FULL text in the
+			// retained notice `E details` reads (#6986). Queued by any writer
+			// (poll, picker refresh, project switch) that saw the set change;
+			// identical polls do not re-fire it.
+			if m.skippedReposNoticeQueued {
+				m.skippedReposNoticeQueued = false
+				if text := m.skippedReposNoticeText(); text != "" {
+					cmds = append(cmds, m.handleNotice(errors.New(text)))
+				}
 			}
 		}
 		if changed {
@@ -284,7 +296,12 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m.handleInstanceRestored(msg)
 	case startDeleteProjectMsg:
 		// Delete-project confirmed; run the daemon archive-then-remove off the
-		// event loop (#1735), mirroring the archive dispatch.
+		// event loop (#1735), mirroring the archive dispatch. Re-check the one
+		// view-completeness guard here too (#6986): a skip that landed between
+		// the confirm opening and its answer still refuses the run.
+		if err := m.skippedReposGuardRefusal(); err != nil {
+			return m, m.handleNotice(fmt.Errorf("delete of project %q refused: %w", msg.name, err))
+		}
 		return m, m.deleteProjectCmd(msg)
 	case projectDeletedMsg:
 		return m.handleProjectDeleted(msg)

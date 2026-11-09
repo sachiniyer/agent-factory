@@ -71,8 +71,12 @@ func webListenerNoticeCmd(ctx context.Context, fetch func() string, delay time.D
 }
 
 // handleWebListenerNotice applies one read and re-arms the poll. It reports the
-// state on the bar, and nothing more: no retained notice, no log spam.
+// state on the bar, and nothing more: no retained notice, no log spam. The
+// notice is recorded on the model and the standing line is recomposed — never
+// written straight into ErrBox's single standing slot, where a concurrent
+// skipped-repo condition (#6986) would be erased, or erase it in turn.
 func (m *home) handleWebListenerNotice(msg webListenerNoticeMsg) (tea.Model, tea.Cmd) {
-	m.errBox.SetStanding(msg.notice)
+	m.webListenerNotice = msg.notice
+	m.applyStandingNotice()
 	return m, webListenerNoticeCmd(m.ctx, m.webListenerFetcher, webListenerPollInterval)
 }
