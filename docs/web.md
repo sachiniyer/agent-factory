@@ -776,7 +776,7 @@ af sessions tab-create my-session --kind vscode --name editor
     agent-server running there — not on the daemon's machine — so the `PATH`
     search runs on the workspace host: install `code-server`/`openvscode-server`
     there, and the daemon only relays the editor's socket to the browser (see
-    [Remote hooks](remote-hooks.md#capabilities-the-agent-server)). The
+    [Remote hooks](remote-hooks.md#capabilities-and-the-agent-server)). The
     `vscode_server_binary` override is read from the host's
     `~/.agent-factory/config.toml` only by an agent-server launched **without**
     the install policy — a launch-style remote hook. The built-in `docker`,

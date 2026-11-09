@@ -6,7 +6,7 @@ anything you can provision.
 
 Agent Factory ships first-class off-box backends — [`docker`, `ssh`, and `sandbox`](backends.md) — that need zero scripting. The **remote-hook backend** is the escape hatch for infrastructure those don't model (Kubernetes, Modal, Daytona, a bespoke orchestrator): you provide two shell scripts and `af` runs your session on whatever you provision.
 
-Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill. The off-box capabilities are all version-gated on the agent-server's build: shell/process tabs need a current agent-server advertising `tab-api` (older hosts keep the daemon-side-worktree refusal), and a VS Code tab and a loopback web preview likewise require a current agent-server — the editor relay needs the `editor` health feature (the tab is still created, because the backend admits it, but on an older host its pane shows the update error instead of the editor) and the loopback relay has no compatibility fallback — so a `launch_cmd` that returns an older agent-server gets the older behavior for each rather than the lift described here. External HTTPS web tabs that pass the web-target host checks are metadata-only and are admitted (see [Capabilities & the agent-server](#capabilities-the-agent-server)).
+Since **#1592 Phase 4 PR7** the hook backend follows the same **provision-and-expose** contract as `docker`/`ssh`: your `launch_cmd` starts an [`af agent-server`](backends.md) in the remote workspace and echoes its authed URL; the daemon then drives the session over that `ws://` stream. A remote-hook session matches a local one on attach, type, resize, preview, archive/restore, and kill. The off-box capabilities are all version-gated on the agent-server's build: shell/process tabs need a current agent-server advertising `tab-api` (older hosts keep the daemon-side-worktree refusal), and a VS Code tab and a loopback web preview likewise require a current agent-server — the editor relay needs the `editor` health feature (the tab is still created, because the backend admits it, but on an older host its pane shows the update error instead of the editor) and the loopback relay has no compatibility fallback — so a `launch_cmd` that returns an older agent-server gets the older behavior for each rather than the lift described here. External HTTPS web tabs that pass the web-target host checks are metadata-only and are admitted (see [Capabilities and the agent-server](#capabilities-and-the-agent-server)).
 
 > **Transport:** the `af agent-server` serves **plain HTTP** (no TLS — af terminates none of its own). The URL must be `http://` (or `ws://`), and the bearer token travels over the connection, so your `launch_cmd` must make the agent-server reachable from the daemon over a private network or tunnel it controls (a container's published loopback port, an SSH forward, a tailnet address).
 
@@ -162,7 +162,7 @@ Provisions the workspace on your infrastructure, starts an `af agent-server` the
 | `--name <slug>` | Stable session slug (also passed to `delete_cmd`). |
 | `--title <title>` | The session title — pass it to `af agent-server --title` so the daemon dials the right workspace. |
 | `--repo <url>` | The repo's `origin` URL to clone the workspace from (GitHub is the durable store). |
-| `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive & restore](#archive-restore)). Absent on a fresh create. |
+| `--branch <branch>` | **Only on restore** — the archived branch to materialize (see [Archive and restore](#archive-and-restore)). Absent on a fresh create. |
 | `--program <p>` | The agent program to run (optional; forward to `af agent-server --program`). |
 | `--program-resolved` | Present with `--program`; forward it to `af agent-server` so the cloned repo cannot apply a second `program_overrides` lookup. |
 | `--session-env <name>` | Repeated for each global `session_env_passthrough` name; forward each one to `af agent-server --session-env`. Values are never command arguments. |
@@ -254,7 +254,7 @@ A script that exceeds its budget is killed and the operation fails.
 
 This applies only to a `launch_cmd` that **just failed**, where everything it started is garbage by definition. It never applies to one that succeeded — see [Backgrounding a tunnel](#backgrounding-a-tunnel-is-supported-redirect-its-stdout) — and it does not apply on kill or archive, where the launch ended long ago. Making `delete_cmd` idempotent is still worthwhile, and a `launch_cmd` that cleans up after itself on `EXIT`/`TERM` is still good practice.
 
-### Backgrounding a tunnel is supported — redirect its stdout
+### Backgrounding a tunnel is supported: redirect its stdout
 
 Many `launch_cmd`s must leave a process running to make the agent-server reachable — an `ssh -L` forward, a `kubectl port-forward`, a tunnel client. That process is not a leak: it is the thing af then dials. af treats it as **yours** and never touches it.
 
@@ -280,7 +280,7 @@ Two rules, and they are the whole contract:
 
 > **Also fixed earlier.** A `launch_cmd` that backgrounded a process holding stdout once **hung the provision**: af waited for the output pipe to close and the tunnel held it open indefinitely, so the 5-minute budget never applied. That is long fixed — output goes to files now — so the redirect above is about the *content* of stdout, not about avoiding a hang.
 
-## Capabilities & the agent-server
+## Capabilities and the agent-server
 
 Because the session is driven through a real `af agent-server`, a remote-hook session matches local and docker/ssh on the capabilities listed below — with shell/process tabs version-gated on the agent-server's build, and one exception: handoff in place is offered for `ssh` and `sandbox` sessions only (`handoffInPlaceBackend`), so a hook session cannot hand off its agent in place:
 
@@ -288,7 +288,7 @@ Because the session is driven through a real `af agent-server`, a remote-hook se
 - **Preview / liveness / prompt delivery** go over the same REST surface.
 - The agent-server drives the terminal surface, so a remote session gets its Agent tab with no per-config gating. A current agent-server advertises a `tab-api` feature, which lifts `TabManagement` for the remote workspace and runs **shell and process tabs on the session's host** (the daemon keeps a tmux-less roster row whose data plane is the id-addressed stream); only an older host lacking that advertisement keeps the daemon-side-worktree refusal for those PTY-backed kinds. A VS Code tab runs on the session's host and is relayed to the daemon (needs the `editor` health feature); an external HTTPS web tab is metadata-only and is admitted; a **loopback** web target is admitted through the agent-server's port relay (`--port` previews the workspace's own loopback). The remaining refusals are the web-target checks that precede the scheme test: browser-loopback shorthands such as `http://127.1` and unspecified addresses such as `http://0.0.0.0` are refused (an HTTPS variant of either is refused too, because the host check runs before the scheme), and beyond those only external **plain-HTTP** targets remain refused (see [backends.md](backends.md)).
 
-## Archive & restore
+## Archive and restore
 
 Durability lives in **GitHub, not the sandbox** (the epic's push/pull-branch model), identical to docker (an `ssh`/`sandbox` session preserves its workspace by default instead):
 

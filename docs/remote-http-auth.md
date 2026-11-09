@@ -38,7 +38,7 @@ pick the first one unless you have a specific reason not to.
 
 ---
 
-## Option 1 — SSH (recommended)
+## Option 1: SSH (recommended)
 
 SSH already solves "authenticated, encrypted access to a remote machine" with
 keys you already manage. Lean on it instead of minting a new credential.
@@ -74,14 +74,14 @@ ssh -N -L 8443:127.0.0.1:8443 you@workstation
 ```
 
 Now a client on your laptop can talk to `http://127.0.0.1:8443` (see
-[Option 2](#option-2-direct-tcp-token) for the flags). The token still applies,
+[Option 2](#option-2-direct-tcp-and-token) for the flags). The token still applies,
 and the encrypted SSH channel carries the traffic — so even though af itself
 speaks plain HTTP, nothing rides the wire in the clear, and the port is never
 reachable from the network.
 
 ---
 
-## Option 2 — Direct TCP + token
+## Option 2: Direct TCP and token
 
 Enable this when SSH isn't an option — most importantly, to serve the browser
 web client. It opens a **plain-HTTP** TCP listener on the daemon, gated by an
