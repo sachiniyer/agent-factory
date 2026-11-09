@@ -6,10 +6,13 @@ import (
 	"strings"
 )
 
-// NotFoundError reports that no task with ID exists in the store. Its text is
-// the store's long-standing `task with id "<id>" not found` message, which the
-// CLI prints and the daemon returns verbatim, so the type changes nothing a
-// user or script sees.
+// NotFoundError reports that no task with ID exists in the store. Every store
+// entry point that looks a task up by ID returns it for a missing one, so an
+// in-process caller tells "the task is gone" from a store failure with
+// errors.As rather than by reading text (#7042). Its text is the store's
+// long-standing `task with id "<id>" not found` message, which the CLI prints
+// and the daemon returns verbatim, so the type changes nothing a user or script
+// sees.
 type NotFoundError struct {
 	ID string
 }

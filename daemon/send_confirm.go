@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"context"
+	"errors"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
@@ -185,7 +186,8 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 			// verdict may not be on the record yet — the arm precedes the
 			// caller's delivery-settle write — so a promotion refused now must
 			// retry on later captures, and the fired flag holds the evidence
-			// until it applies or the window closes (#6592 review).
+			// until it applies, its task is removed (#7042), or the window
+			// closes (#6592 review).
 			entry.fired = true
 		}
 		retries = append(retries, taskID)
@@ -203,22 +205,41 @@ func (m *Manager) noteUnverifiedSendEvidence(key string, instance *session.Insta
 		entry := m.unverifiedSendWatches[key][taskID]
 		still := entry != nil && entry.fired && entry.attemptedAt.Equal(retryAt[taskID])
 		m.pausedMu.Unlock()
-		if !still || !m.promoteUnverifiedTaskSend(taskID, instance.Title, retryAt[taskID]) {
+		if !still {
 			continue
 		}
-		m.pausedMu.Lock()
-		// A re-send may have replaced the entry meanwhile — remove only the
-		// send this promotion belonged to.
-		if byTask := m.unverifiedSendWatches[key]; byTask != nil {
-			if e := byTask[taskID]; e != nil && e.fired && e.attemptedAt.Equal(retryAt[taskID]) {
-				delete(byTask, taskID)
-			}
-			if len(byTask) == 0 {
-				delete(m.unverifiedSendWatches, key)
-			}
+		outcome := m.promoteUnverifiedTaskSend(taskID, instance.Title, retryAt[taskID])
+		if outcome == promotionRetry {
+			continue
 		}
-		m.pausedMu.Unlock()
+		// Only the call that actually removes the watch reports a removed
+		// task, so two poll paths racing on the same capture still log one
+		// line per watch (#7042).
+		if m.retireUnverifiedSendWatch(key, taskID, retryAt[taskID]) && outcome == promotionTaskGone {
+			m.info().Printf("task %s: removed while its delivery to %q was being re-verified; the re-verification retires (#7042)", taskID, instance.Title)
+		}
 	}
+}
+
+// retireUnverifiedSendWatch removes the fired watch for exactly the send bound
+// to attemptedAt and reports whether it did. A re-send may have replaced the
+// entry since the promotion was attempted; that newer watch is left alone.
+func (m *Manager) retireUnverifiedSendWatch(key, taskID string, attemptedAt time.Time) bool {
+	m.pausedMu.Lock()
+	defer m.pausedMu.Unlock()
+	byTask := m.unverifiedSendWatches[key]
+	if byTask == nil {
+		return false
+	}
+	removed := false
+	if e := byTask[taskID]; e != nil && e.fired && e.attemptedAt.Equal(attemptedAt) {
+		delete(byTask, taskID)
+		removed = true
+	}
+	if len(byTask) == 0 {
+		delete(m.unverifiedSendWatches, key)
+	}
+	return removed
 }
 
 // unverifiedVerdictWriteSlack bounds how far after a send's attempt instant
@@ -236,6 +257,22 @@ func reverifiableRunStatus(status string) bool {
 	return status == TaskStatusSentUnverified || status == TaskStatusSentUnconfirmed
 }
 
+// unverifiedPromotion is what one promotion attempt leaves a fired watch with.
+type unverifiedPromotion int
+
+const (
+	// promotionRetry: the compare-and-set refused — the send's verdict may not
+	// be on the record yet (#6592 review) — or the store failed in a way that
+	// says nothing about the task. The banked evidence waits for a later
+	// capture.
+	promotionRetry unverifiedPromotion = iota
+	// promotionApplied: the verdict is promoted and the watch is done.
+	promotionApplied
+	// promotionTaskGone: the task no longer exists, so no retry can ever
+	// apply and the watch retires (#7042).
+	promotionTaskGone
+)
+
 // promoteUnverifiedTaskSend applies a fired re-verification watch: the task's
 // recorded unproven verdict — sent-unverified or sent-unconfirmed — becomes
 // sent. The compare-and-set IS the safety property — it re-reads the row under
@@ -247,7 +284,12 @@ func reverifiableRunStatus(status string) bool {
 // rather than clobbered (#6590, #6592 review). last_run_at is passed nil: the
 // promotion is not a new occurrence, and rewriting the stamp would hide missed
 // fires from the overdue derivation.
-func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) bool {
+//
+// A task that no longer exists is told apart from every other store error by
+// the store's typed *task.NotFoundError, never by its text: only that answer
+// retires the watch, and it logs nothing here — the caller logs the retirement
+// once. Any other error keeps the evidence banked and retries (#7042).
+func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt time.Time) unverifiedPromotion {
 	var promoted string
 	_, applied, err := task.UpdateTaskStatusIf(taskID, nil, taskSendStatus(session.PromptDelivered), func(cur task.Task) bool {
 		if !reverifiableRunStatus(cur.LastRunStatus) || cur.LastRunAt == nil {
@@ -261,13 +303,18 @@ func (m *Manager) promoteUnverifiedTaskSend(taskID, title string, attemptedAt ti
 		return true
 	})
 	if err != nil {
+		var nf *task.NotFoundError
+		if errors.As(err, &nf) && nf.ID == taskID {
+			return promotionTaskGone
+		}
 		m.warn().Printf("task %s: could not promote its unproven delivery to %q: %v", taskID, title, err)
-		return false
+		return promotionRetry
 	}
-	if applied {
-		m.info().Printf("task %s: %s delivery to %q promoted to sent; the agent's turn began after the send (#6590, #6819)", taskID, promoted, title)
+	if !applied {
+		return promotionRetry
 	}
-	return applied
+	m.info().Printf("task %s: %s delivery to %q promoted to sent; the agent's turn began after the send (#6590, #6819)", taskID, promoted, title)
+	return promotionApplied
 }
 
 // unverifiedSendWatchPending reports whether the session has a task send still

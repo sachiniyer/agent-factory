@@ -1,7 +1,6 @@
 package task
 
 import (
-	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -166,7 +165,7 @@ func RecordTaskTrigger(taskID string, actor Actor) error {
 				return saveTasks(tasks)
 			}
 		}
-		return fmt.Errorf("task with id %q not found", taskID)
+		return &NotFoundError{ID: taskID}
 	})
 }
 
