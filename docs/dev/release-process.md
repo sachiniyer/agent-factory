@@ -78,6 +78,13 @@ The release deploy key bypasses the branch ruleset that otherwise requires a
 linear history. A re-run of the same build reproduces the same bump commit,
 finds it already on `master`, and pushes nothing.
 
+Because that merge brings the tagged commit's history into `master`, a
+release must be built from a commit already on `master`. A dispatch from
+another branch is refused by the first step of validation, before the
+preflight runs, and again just before the bump is pushed. On any failure
+after that point, the publish job's checkout goes back to the built commit,
+so its cleanup step runs that commit's scripts.
+
 Releasing the current preview base as-is (e.g. `1.0.138` while
 `1.0.138-preview-9` exists) is supported — it "promotes" what the preview
 channel has been testing, and subsequent previews move to `1.0.139-preview-1`.

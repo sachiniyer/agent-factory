@@ -41,9 +41,21 @@ jobs:
     # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
     runs-on: ubuntu-24.04
     steps:
+    # Full history, for the ancestry check below: a shallow checkout cannot
+    # show whether github.sha is on master.
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
+        fetch-depth: 0
+
+    # Publishing merges the tagged commit's history into master (#7018), so a
+    # dispatch from a branch master does not contain is refused. The publish job
+    # refuses it too (release-bump.sh runs this same script before pushing),
+    # but only after the preflight and four builds; fail here first.
+    - name: Require a commit on master
+      env:
+        BUILT: ${{ github.sha }}
+      run: .github/scripts/require-on-master.sh "$BUILT"
 
     - name: Set up Go
       uses: actions/setup-go@v6
@@ -196,9 +208,9 @@ jobs:
     runs-on: ubuntu-24.04
     steps:
     # Full history is required: release-bump.sh checks the built commit is on
-    # origin/master, and merges the bump commit into whatever master became
-    # during the build (#1927, #7018) — neither can work in a one-commit
-    # checkout.
+    # origin/master (require-on-master.sh refuses a shallow checkout), and
+    # merges the bump commit into whatever master became during the build
+    # (#1927, #7018) — neither can work in a one-commit checkout.
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
