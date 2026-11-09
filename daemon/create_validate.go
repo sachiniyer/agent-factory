@@ -41,6 +41,22 @@ func validateCreateFirst(req CreateSessionRequest) error {
 			return err
 		}
 	}
+	// The host pick is a record-independent refusal knowable from cfg.Hosts —
+	// exactly the class #5744 moved ahead of the reservation. reserveCreate can
+	// rename an archived session holding the requested title (relocating its
+	// worktree and rewriting its durable record) to free the name, and an
+	// unlisted host fails only later inside sshRuntime.Provision, after that
+	// rename has run. The local CLI already gives this refusal client-side
+	// (localCreateInputs); the daemon owns the same list here, so this is the
+	// one check the hook's doc comment promises. An empty host is "no pick"
+	// and is not an error, matching localCreateInputs and ValidateHostPick's
+	// own contract. A whitespace-only value is treated as absent for the same
+	// reason the account is trimmed above.
+	if host := strings.TrimSpace(req.Host); host != "" {
+		if err := config.ValidateHostPick(cfg.Hosts, host); err != nil {
+			return err
+		}
+	}
 	local, err := createNeedsDaemonHostPrereqs(req, repo.WorkspacePath())
 	if err != nil {
 		return err
