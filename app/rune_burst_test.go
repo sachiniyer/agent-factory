@@ -179,3 +179,45 @@ func TestRuneBurstOnTreeMovesTheCursorPerKey(t *testing.T) {
 		"a burst of j must move the cursor as far as separate j presses do, not be dropped")
 	assert.Equal(t, layout.RegionTree, h.ring.Active())
 }
+
+// TestRuneBurstAcrossTheFirstRunHelpReachesThePane is Codex's first finding on
+// #7020. With the first-run help unseen, "zxx" on a focused pane works like
+// this: `z` opens the help, and the next key dismisses it, but the switch into
+// keyboard mode lands later, as a deferred message. A split that kept running
+// each key through nav dispatch ran the second `x` as hide-pane in that window,
+// closing the pane the keys were meant for. Once a key leaves nav dispatch, the
+// rest of the burst goes over whole: it dismisses the help and is typed.
+func TestRuneBurstAcrossTheFirstRunHelpReachesThePane(t *testing.T) {
+	h, _ := liveTestHome(t) // first-run interactive help NOT seen
+	fakes, _ := stubLiveTermFactory(t)
+	require.Equal(t, 1, h.store.NumOpenPanes())
+
+	_, cmd := h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("zxx")})
+	runHermeticCmd(t, h, cmd, 0)
+
+	require.True(t, h.interactive, "dismissing the help completes the switch into keyboard mode")
+	assert.Equal(t, 1, h.store.NumOpenPanes(), "no x after the help may run as the hide-pane verb")
+	assert.Equal(t, "xx", typedBytes(*fakes),
+		"z only surfaced the help; the keys after it dismiss the help and are typed into the pane")
+}
+
+// TestRuneBurstDisarmsTheQuitDiscardBetweenKeys is Codex's second finding on
+// #7020. A refused quit (a save failed) arms a discard confirmation that any
+// input other than another quit disarms (#5898). Separate `j` and `q` presses
+// therefore refuse the quit again and keep the edit. A "jq" burst must do the
+// same: each split key is its own input event, so the `j` disarms the
+// confirmation before the `q` arrives.
+func TestRuneBurstDisarmsTheQuitDiscardBetweenKeys(t *testing.T) {
+	h := dirtyHooksHome(t)
+	stubHooksSaveFailure(t)
+	h.state = stateDefault // nav mode, with the hooks edit still unsaved in memory
+
+	pressRunes(h, "q")
+	require.False(t, h.quitting, "precondition: the first quit is refused")
+	require.NotEmpty(t, h.quitSaveFailure, "precondition: the refusal arms the discard confirmation")
+
+	pressRunes(h, "jq") // j, then q, in one terminal read
+
+	assert.False(t, h.quitting, "the j between the quits disarms the discard, as it does when typed separately")
+	assert.True(t, h.hooksPane.IsDirty(), "the unsaved hooks edit must be kept")
+}
