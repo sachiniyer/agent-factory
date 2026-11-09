@@ -657,6 +657,28 @@ func (m *home) handleKeyPress(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		return m.handleInteractiveKey(msg)
 	}
 
+	// Printable keys that arrived in one terminal read are the separate keys the
+	// user pressed, not one key (#7015). Bubble Tea delivers such a burst as a
+	// single message ("kk"). Nav dispatch resolves keys by their exact string, so
+	// the burst matched no binding: on the tree it was dropped, and on a focused
+	// pane it read as an unbound letter. That switches into keyboard mode and
+	// types (#4722 Option 3), so a user who pressed `k` twice to move the cursor
+	// typed into the agent. Each rune re-enters here on its own. If one of them
+	// enters keyboard mode or opens an overlay, the rest of the burst goes where
+	// a separately typed key would go: pane input, or the overlay. Only nav mode
+	// splits. Keyboard mode forwards the burst whole (handled above), and an
+	// overlay's text input takes it whole.
+	if m.state == stateDefault {
+		if burst := keys.SplitRuneBurst(msg); burst != nil {
+			cmds := make([]tea.Cmd, 0, len(burst))
+			for _, k := range burst {
+				_, c := m.handleKeyPress(k)
+				cmds = append(cmds, c)
+			}
+			return m, tea.Batch(cmds...)
+		}
+	}
+
 	highlight, returnEarly := m.handleMenuHighlighting(msg)
 	if returnEarly {
 		return m, highlight
@@ -790,6 +812,9 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 		// (no shortcut is stolen), and an unbound non-printable stays inert —
 		// it is not a typing gesture, and on a pane that cannot embed there is
 		// nothing to type into (enterPane drops it before the attach fallback).
+		// A burst of runes from one read never gets here as one key:
+		// handleKeyPress splits it first (#7015). So a miss here is a key that
+		// really is unbound, never a burst of bound ones like "kk".
 		if p := m.focusedOpenPane(); p != nil && isSwitchTypingKey(msg) {
 			return m.enterPane(p, &msg)
 		}
