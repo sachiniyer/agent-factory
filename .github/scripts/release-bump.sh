@@ -27,6 +27,20 @@ set -eu
 NEW_VERSION="${1:?usage: release-bump.sh <version>}"
 BUILT=$(git rev-parse HEAD)
 
+# Only a clean checkout of the build: no uncommitted change to a tracked file,
+# staged or not. The script commits the index — a staged file would ride into
+# the release commit — and the failure trap below force-checks-out the built
+# commit, which would discard such edits. Refusing here, before the trap is
+# installed, means everything the trap can discard is the script's own work.
+# Untracked files (the workflow's dist/) are not changes to the build; they
+# are allowed, and neither the commit nor the trap touches them.
+dirty=$(git status --porcelain --untracked-files=no)
+if [ -n "$dirty" ]; then
+	echo "::error::The checkout has uncommitted changes to tracked files; release-bump.sh runs only on a clean checkout of the built commit, so nothing was changed:"
+	printf '%s\n' "$dirty"
+	exit 1
+fi
+
 # Every failing exit puts the checkout back on the built commit, clean. The
 # workflow's `if: failure()` step runs release-forget-version.sh from this
 # working tree, and every job pins github.sha; without this a run that died
@@ -136,11 +150,12 @@ while :; do
 	# ambiguous once origin also has a tag of that name — the push fails
 	# "matches more than one" and the fetch could take the tag for the branch.
 	git fetch origin refs/heads/master
-	# A re-run of a build whose bump an earlier run already landed: the release
-	# commit is reproduced exactly (see the commit date above), so it is
-	# already in master's history and there is nothing left to push.
+	# The release commit can already be in master's history: a re-run of a
+	# build whose bump an earlier run landed (the commit is reproduced exactly,
+	# see the commit date above), or a build that already carried the version
+	# and so made no commit — the built commit itself, still on master.
 	if git merge-base --is-ancestor "$TAG" FETCH_HEAD; then
-		echo "master already has the release commit ${TAG} (an earlier run of this build landed it); nothing to push"
+		echo "master already contains ${TAG}; nothing to push"
 		break
 	fi
 	echo "Merging the release commit ${TAG} into master's new tip $(git rev-parse --short FETCH_HEAD), then pushing again…"

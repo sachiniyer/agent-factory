@@ -276,7 +276,7 @@ func TestReleaseBumpRerunReproducesTheTag(t *testing.T) {
 			// The log says what the re-run does: finds the commit landed — git's
 			// own "up-to-date" when master is still on it, the script's line when
 			// master moved on since — and never claims to be merging.
-			landedMsg := strings.Contains(out, "already has the release commit") || strings.Contains(out, "Everything up-to-date")
+			landedMsg := strings.Contains(out, "master already contains") || strings.Contains(out, "Everything up-to-date")
 			if !landedMsg || strings.Contains(out, "erging") {
 				t.Fatalf("the re-run's log does not say it found the release commit already landed:\n%s", out)
 			}
