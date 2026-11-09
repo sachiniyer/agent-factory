@@ -1063,7 +1063,9 @@ SCREEN
 _expect_altscreen_commit_renders() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
     local marker='AF_ALT_7037_TOP' tab_re bin script n header deadline rc=0
-    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+altscreen'
+    # A process tab's label is its kind glyph and its name ("› altscreen", see
+    # ui/tree/labels.go), after the tree's jump-slot number.
+    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+(› )?altscreen([[:space:]]|$)'
     bin="$(_af_resolve_bin)"
     mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
     script="$AF_DRIVER_STATE_DIR/altscreen-idle.sh"
