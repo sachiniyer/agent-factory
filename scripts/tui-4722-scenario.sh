@@ -333,6 +333,18 @@ claude = "bash"'
         af_capture >"$EVID/$label-7-letter-in-nav.txt"
     fi
 
+    # Echo the evidential captures to stdout: the sandbox is ephemeral, so the
+    # transcript is the only durable copy of the screens the asserts judged.
+    local cap
+    for cap in "$EVID/$label-4-before-transition.txt" \
+        "$EVID/$label-5-after-transition.txt" \
+        "$EVID/$label-7-letter-in-nav.txt"; do
+        [ -f "$cap" ] || continue
+        printf '%s\n' "----- $label: $(basename "$cap") -----"
+        cat "$cap"
+        printf '%s\n' "----- end $(basename "$cap") -----"
+    done
+
     af_quit || return 1
 }
 
