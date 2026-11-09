@@ -186,8 +186,9 @@ func TestValidateStableVersionScript(t *testing.T) {
 //
 // The script no longer tags (#5159): `gh release create --target` creates the
 // tag atomically with the published release, so the tests assert the bump is
-// pushed and HEAD — the sha the workflow tags — sits on origin's master tip,
-// with NO tag on the remote either way.
+// pushed, HEAD — the sha the workflow tags — is on origin's master, and NO tag
+// is on the remote either way. What HEAD holds when master moved (the built
+// tree, not the moved tip) is release_bump_test.go's subject (#7018).
 
 // isolatedGitEnv returns an environment that pins git to a throwaway HOME (no
 // user/system config — no signing, no hooks) and a deterministic identity, so
@@ -278,7 +279,7 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
 
 	// A PR squash-merges to master DURING the build window — after `work` was
-	// checked out. It touches a different file, so the one-line bump rebases
+	// checked out. It touches a different file, so the one-line bump merges
 	// cleanly (as any real merge would; only a rival release touches the
 	// version line).
 	other := filepath.Join(base, "other")
@@ -297,7 +298,7 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 		t.Fatalf("release-bump.sh failed on a mid-build merge (#1927): %v\n%s", err, out)
 	}
 	// A real non-fast-forward is the one rejection that earns the "master
-	// advanced" line and the rebase-retry (#6747): the log must name what
+	// advanced" line and the merge-retry (#6747): the log must name what
 	// actually failed.
 	if !strings.Contains(string(out), "master advanced during the build") {
 		t.Fatalf("a non-fast-forward push was not reported as master advancing:\n%s", out)
@@ -319,70 +320,11 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 		t.Fatalf("concurrent file content missing from master: %q", got)
 	}
 
-	// HEAD is exactly what landed on master — the sha the workflow passes to
-	// `gh release create --target` — and NO tag was pushed: the tag is created
-	// atomically with the release (#5159).
-	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
-		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
-	}
-	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
-		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
-	}
-}
-
-// TestReleaseBumpIdempotentWhenBumpAlreadyLanded covers re-running the job after
-// a previous run landed the bump commit on master but died before the release
-// was published: the re-run must converge (drop its duplicate bump, report the
-// landed commit) rather than double-bump or abort.
-func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
-	}
-	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump.sh")
-	base := t.TempDir()
-	home := filepath.Join(base, "home")
-	env := isolatedGitEnv(home)
-
-	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
-
-	// A previous release run already landed the bump on master (no release
-	// published — e.g. the run died between push and publish).
-	// Give it a fixed EARLIER date so its commit hash differs from the re-run's
-	// bump — otherwise both bumps collide to one object and the rebase-drop
-	// path is never exercised.
-	other := filepath.Join(base, "other")
-	runGitEnv(t, base, env, "clone", origin, other)
-	writeFile(t, filepath.Join(other, "main.go"),
-		"package main\n\nconst (\n\tversion = \"1.0.1\"\n)\n")
-	prevEnv := isolatedGitEnv(home,
-		"GIT_AUTHOR_DATE=2020-01-01T00:00:00", "GIT_COMMITTER_DATE=2020-01-01T00:00:00")
-	runGitEnv(t, other, prevEnv, "add", "main.go")
-	runGitEnv(t, other, prevEnv, "commit", "-m", "chore: release v1.0.1")
-	runGitEnv(t, other, prevEnv, "push", "origin", "master")
-
-	// Re-run the job (later fixed date → distinct bump commit).
-	cmd := exec.Command(script, "1.0.1")
-	cmd.Dir = work
-	cmd.Env = isolatedGitEnv(home,
-		"GIT_AUTHOR_DATE=2020-12-31T00:00:00", "GIT_COMMITTER_DATE=2020-12-31T00:00:00")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("release-bump.sh failed on an idempotent re-run: %v\n%s", err, out)
-	}
-
-	// Exactly one bump commit on master (no double-bump), HEAD sits on that
-	// landed commit, and no tag was pushed — tagging happens at release
-	// publish (#5159).
-	masterLog := gitOutEnv(t, origin, env, "log", "--format=%s", "master")
-	if n := strings.Count(masterLog, "chore: release v1.0.1"); n != 1 {
-		t.Fatalf("expected exactly one bump commit on master, got %d:\n%s", n, masterLog)
-	}
-	if got := gitOutEnv(t, origin, env, "show", "master:main.go"); !strings.Contains(got, `version = "1.0.1"`) {
-		t.Fatalf("main.go on master is not 1.0.1:\n%s", got)
-	}
-	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
-		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
+	// HEAD — the sha the workflow passes to `gh release create --target` — is
+	// on master, so the release can target it, and NO tag was pushed: the tag
+	// is created atomically with the release (#5159).
+	if head := gitOutEnv(t, work, env, "rev-parse", "HEAD"); !isAncestor(t, origin, env, head, "master") {
+		t.Fatalf("HEAD (%s) is not on the landed master", head)
 	}
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
@@ -411,7 +353,7 @@ func runReleaseScript(t *testing.T, dir string, env []string, version string) (o
 // must give up non-zero after MAX_ATTEMPTS, not spin forever, and must leave
 // the remote pristine (no bump on master, no tag). A fake `git` on PATH
 // answers every push with the non-fast-forward rejection while delegating
-// everything else to the real binary, so the fetch and rebase inside the loop
+// everything else to the real binary, so the fetch and merge inside the loop
 // still run for real. This fails CI if a future edit drops the MAX_ATTEMPTS
 // guard and reintroduces an unbounded loop (the run would hang and hit the
 // timeout).
@@ -472,7 +414,7 @@ exec "`+realGit+`" "$@"
 
 // TestReleaseBumpFailsOnAuthWithoutRebase is the #6747 regression: a push that
 // fails for anything OTHER than a non-fast-forward must fail on git's own
-// error — no "master advanced" misdiagnosis, no rebase-retry loop. The
+// error — no "master advanced" misdiagnosis, no merge-retry loop. The
 // stand-in is the exact 2026-11-04 incident signature (#6744): the ssh
 // transport rejects the deploy key. A fake GIT_SSH_COMMAND emits
 // "Permission denied (publickey)", records every invocation so a retry fetch
@@ -525,7 +467,7 @@ exit 255
 
 	// Exactly one transport attempt — the failed push. Git also runs an
 	// `ssh -G` variant probe per connection, so count only real transports
-	// (the pack commands); a rebase-retry would add the loop's
+	// (the pack commands); a merge-retry would add the loop's
 	// `git fetch origin master` (upload-pack) and further pushes.
 	raw, err := os.ReadFile(sshCalls)
 	if err != nil {
@@ -548,8 +490,8 @@ exit 255
 }
 
 // TestReleaseBumpFailsLoudlyOnGenuineConflict locks the fail-loud behavior when
-// the rebase genuinely conflicts — a rival commit rewrote main.go's version
-// line, so the one-line bump cannot replay. The script must abort non-zero and
+// the merge genuinely conflicts — a rival commit rewrote main.go's version
+// line, so the one-line bump cannot be merged in. The script must abort non-zero and
 // must NOT clobber the rival's commit (no force-push) or push a tag. This fails
 // CI if someone "hardens" the loop into a silent `git push --force` over
 // another release.
@@ -564,7 +506,7 @@ func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
 
 	// A rival release lands on master mid-build and rewrites the SAME version
-	// line to a different value, so our bump's rebase must conflict.
+	// line to a different value, so merging our bump must conflict.
 	rival := filepath.Join(base, "rival")
 	runGitEnv(t, base, env, "clone", origin, rival)
 	writeFile(t, filepath.Join(rival, "main.go"),

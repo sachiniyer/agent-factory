@@ -11,10 +11,11 @@ name: Stable Release
 # master, and a failure mid-publish must never leave a tag with no release
 # (#5159). All jobs pin github.sha so a master push racing the workflow cannot
 # desync what was validated, what was built, and what gets tagged. The
-# artifacts are built from github.sha while the tag points at the bump commit
-# one ahead; the binaries are identical in behavior because their version
-# comes from -ldflags, and the bump commit only rewrites the main.go fallback
-# string.
+# artifacts are built from github.sha and the tag points at the bump commit
+# parented on github.sha, even when master moved during the build (#7018): the
+# tag's tree is the built tree plus the main.go fallback string the bump
+# rewrites, which the binaries override with -ldflags. A PR that merged
+# mid-build therefore ships in, and is listed by, the next release.
 
 on:
   workflow_dispatch:
@@ -194,9 +195,10 @@ jobs:
     needs: [validate, build]
     runs-on: ubuntu-24.04
     steps:
-    # Full history is required: release-bump.sh rebases the bump commit onto
-    # whatever master became during the build (#1927), and a rebase has no
-    # merge-base to find in a one-commit checkout.
+    # Full history is required: release-bump.sh checks the built commit is on
+    # origin/master, and merges the bump commit into whatever master became
+    # during the build (#1927, #7018) — neither can work in a one-commit
+    # checkout.
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
@@ -214,9 +216,10 @@ jobs:
     - name: Generate checksum manifest
       run: .github/scripts/write-sha256sums.sh dist
 
-    # Lands the bump commit on master and reports the sha that actually
-    # landed (the rebase-retry may rewrite it) — that sha is what the release
-    # tags. Failure here leaves at most an untagged bump commit.
+    # Makes the bump commit on github.sha, lands it on master (as-is, or
+    # merged into a master that moved during the build), and leaves HEAD on
+    # it: that commit, never the merge, is what the release tags (#7018).
+    # Failure here leaves at most an untagged bump on master.
     - name: Bump version and push to master
       id: bump
       env:
@@ -228,7 +231,7 @@ jobs:
     # Immutable releases require all assets to be attached before the release
     # is published: create as draft, upload assets into the draft, then
     # publish. A draft creates no git ref; publishing creates the tag at the
-    # landed bump commit atomically with the release (#5159). Stable releases
+    # bump commit atomically with the release (#5159). Stable releases
     # are marked --latest so the releases/latest redirect (install.sh, fresh
     # installs, the stable update channel) serves them.
     - name: Publish release
