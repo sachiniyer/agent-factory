@@ -395,6 +395,19 @@ func (m *home) graftSkippedSidebarRows(projects []overlay.Project, skipped []dae
 	return preserveSkippedPickerRows(projects, m.sidebarProjects, skippedRepoIDSet(skipped))
 }
 
+// recordPickerOpenSeq bumps the picker-open generation so a background
+// snapshotFetchedMsg whose all-repo fetch started before this Ctrl+P is
+// detected as older than the snapshot the picker was just built from
+// (#4742 review). A poll in flight from before the open carries a lower
+// allReposSeq; updateOpenPickerSkipState ignores it instead of regressing
+// the picker's rows, skip IDs and SnapshotDegraded flag to the older
+// counts. Lives here rather than switch_project.go to keep that file under
+// the file-length lint (#1145).
+func (m *home) recordPickerOpenSeq() {
+	m.pickerSnapshotSeq++
+	m.pickerOpenSeq = m.pickerSnapshotSeq
+}
+
 // setPickerSkippedIDsAndHints installs the daemon's startup-skipped repo IDs
 // and reason-specific repair hints into an open picker (#4742), so the D path
 // gates only on the HIGHLIGHTED project being skipped and the refusal names

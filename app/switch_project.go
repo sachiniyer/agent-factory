@@ -25,8 +25,7 @@ import (
 // showProjectPickerOverlay opens the project switcher (#1461): every repo af has
 // seen — the current project, repos with tracked sessions, and the root_agents
 // opt-ins — each with its session count, plus a "+ Add project…" affordance for
-// registering a new repo on the fly. The picker navigates like the instances
-// rail (up/k, down/j over the full list); there is no search.
+// registering a new repo on the fly. Navigates like the instances rail (up/k, down/j); no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	projects, registryDegraded, snapshotDegraded, skipped := m.buildProjectListForPicker()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
@@ -58,14 +57,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
-	// Bump the picker-open generation so a background snapshotFetchedMsg
-	// whose all-repo fetch started before this Ctrl+P is detected as older
-	// than the snapshot the picker was just built from (#4742 review). A poll
-	// in flight from before the open carries a lower allReposSeq;
-	// updateOpenPickerSkipState ignores it instead of regressing the picker's
-	// rows, skip IDs and SnapshotDegraded flag to the older counts.
-	m.pickerSnapshotSeq++
-	m.pickerOpenSeq = m.pickerSnapshotSeq
+	m.recordPickerOpenSeq() // #4742: reject background polls older than this open
 	return m, nil
 }
 
