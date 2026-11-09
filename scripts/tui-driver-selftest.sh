@@ -1292,7 +1292,7 @@ _expect_task_overlay_marker_context() {
 
     # No title row here on purpose: the edit title is a marker of its own, and
     # this fixture must prove the OUTER footer survives the nested box.
-    nested_edit=$'╭────────────────────────────────────────────╮\n│  Prompt: ╭────────╮                        │\n│          │ inner  │                        │\n│          ╰────────╯                        │\n│  tab×2 → r/x/D · esc list                  │\n╰────────────────────────────────────────────╯'
+    nested_edit=$'╭────────────────────────────────────────────╮\n│  Prompt: ╭────────╮                        │\n│          │ inner  │                        │\n│          ╰────────╯                        │\n│  tab next · esc list                       │\n╰────────────────────────────────────────────╯'
     if ! printf '%s\n' "$nested_edit" | _af_tasks_overlay_visible; then
         _af_fail 'a task prompt containing a rounded box displaced the outer frame marker'
         return 1
@@ -1322,7 +1322,7 @@ _expect_task_overlay_marker_context() {
         return 1
     fi
 
-    scrolled_edit=$'╭────────────────────────────────────────────────────╮\n│  ↑ more                                            │\n│  Name: focused                                     │\n│  tab → r run now · x toggle · D delete · esc list  │\n╰────────────────────────────────────────────────────╯'
+    scrolled_edit=$'╭────────────────────────────────────────────────────╮\n│  ↑ more                                            │\n│  Name: focused                                     │\n│  type to edit · tab next · esc list                │\n╰────────────────────────────────────────────────────╯'
     if ! printf '%s\n' "$scrolled_edit" | _af_tasks_overlay_visible; then
         _af_fail 'a windowed edit dialog without its title did not satisfy the pinned-footer marker'
         return 1
@@ -1330,13 +1330,13 @@ _expect_task_overlay_marker_context() {
 }
 
 # --- #5538 (landed by #5549): the editor's action row is contextual and tiered ---
-# A focused text field names the verbs only as the destination of the tab steps,
-# and the row compacts as the overlay narrows: "tab → r run now · x toggle · …"
-# at 80x10 but "tab → r/x/D · esc list" at the 40x10 floor. Neither compact tier
-# says "x toggle", the fragment the recognizer used to key on, so the live 40x10
-# step timed out on master (CI run 40566933350) while every stub fixture above
-# still passed: they all carried footers the renderer no longer prints. The
-# fixtures below pin every rung of the ladder in ui/task_pane_edit.go, no TUI.
+# The row compacts as the overlay narrows, and a compact tier need not say
+# "x toggle", the fragment the recognizer used to key on: the live 40x10 step
+# once timed out on master (CI run 40566933350) while every stub fixture above
+# still passed, because they all carried footers the renderer no longer printed.
+# Since #6400 a focused text field lists no verb at all, only
+# "type to edit · tab next · esc list" and its shorter rungs. The fixtures below
+# pin every rung of the ladder in ui/task_pane_edit.go, no TUI.
 
 # _task_dialog_frame <inner-width> <row>... — a rounded dialog the way the tasks
 # overlay paints one: a blank padding row above and below, two-cell gutters, and
@@ -1369,11 +1369,12 @@ _task_dialog_frame() {
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_task_editor_footer_ladder() {
-    local frame prefix rung footer
+    local frame footer
 
-    # The 40x10 floor exactly as CI captured it from the failing run: the editor
-    # opens on the Name text field, so the pinned row is the compact tab path.
-    frame=$'╭──────────────────────────────────────╮\n│                                      │\n│  Edit task 3a6e4e3b                  │\n│                                      │\n│  Essentials                          │\n│  Name:    > selftest-task         …  │\n│    ↓ more                            │\n│  tab → r/x/D · esc list              │\n│                                      │\n╰──────────────────────────────────────╯'
+    # The 40x10 floor as CI captured it in that run, with the pinned row in its
+    # #6400 wording: the editor opens on the Name text field, so the row names
+    # only typing, tab and esc's destination.
+    frame=$'╭──────────────────────────────────────╮\n│                                      │\n│  Edit task 3a6e4e3b                  │\n│                                      │\n│  Essentials                          │\n│  Name:    > selftest-task         …  │\n│    ↓ more                            │\n│  type to edit · tab next · esc list  │\n│                                      │\n╰──────────────────────────────────────╯'
     if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
         _af_fail 'the compact task editor at the 40x10 floor was not recognized (#5549)'
         return 1
@@ -1381,27 +1382,20 @@ _expect_task_editor_footer_ladder() {
 
     # Footer path alone: no title row, as when the form scrolls it away at 80x10,
     # so only the pinned action row identifies the dialog. Every rung of
-    # renderEditMode's ladder — the tab-path rungs under each tab count the
-    # renderer can print, then the rungs a selector or button stop shows.
-    for prefix in 'tab → ' 'tab×2 → ' 'tab×3 → '; do
-        for rung in \
-            'r run now · x toggle · D delete · esc list' \
-            'r run · x toggle · D del · esc list' \
-            'r/x/D · esc list' \
-            'x toggle · D delete · esc list' \
-            'x toggle · D del · esc list' \
-            'x/D · esc list'; do
-            footer="${prefix}${rung}"
-            frame="$(_task_dialog_frame 56 'Name:    > selftest-task' "$footer")"
-            if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
-                _af_fail "the task editor footer '${footer}' was not recognized"
-                printf '%s\n' "$frame" >&2
-                return 1
-            fi
-        done
+    # renderEditMode's ladder: the rungs a text stop shows, then the rungs a
+    # selector or button stop shows.
+    for footer in \
+        'type to edit · tab next · esc list' \
+        'tab next · esc list' \
+        'esc list'; do
+        frame="$(_task_dialog_frame 56 'Name:    > selftest-task' "$footer")"
+        if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
+            _af_fail "the task editor footer '${footer}' was not recognized"
+            printf '%s\n' "$frame" >&2
+            return 1
+        fi
     done
     for footer in \
-        'esc list' \
         'r run now · x toggle · D delete · esc list' \
         'r run · x toggle · D del · esc list' \
         'r run · x toggle · D del · esc' \
@@ -1427,12 +1421,12 @@ _expect_task_editor_footer_ladder() {
     # The anchors must not leak. `esc list` is evidence only on a complete
     # rounded dialog's own row, at a word boundary...
     local square_pane outside_frame decoy
-    square_pane=$'┌──────────────────────────────┐\n│ tab → r/x/D · esc list       │\n└──────────────────────────────┘'
+    square_pane=$'┌──────────────────────────────┐\n│ tab next · esc list          │\n└──────────────────────────────┘'
     if printf '%s\n' "$square_pane" | _af_tasks_overlay_visible; then
         _af_fail 'esc list inside a square-cornered pane satisfied the task-overlay marker'
         return 1
     fi
-    outside_frame=$'╭───────╮\n│ agent │ tab → r/x/D · esc list │\n╰───────╯'
+    outside_frame=$'╭───────╮\n│ agent │ tab next · esc list │\n╰───────╯'
     if printf '%s\n' "$outside_frame" | _af_tasks_overlay_visible; then
         _af_fail 'esc list outside the candidate frame satisfied the task-overlay marker'
         return 1
@@ -1498,9 +1492,24 @@ _expect_task_run_action() {
     screen="$(af_capture)"
     if _af_tasks_list_visible <<<"$screen"; then
         af_send '?'
+    elif ! grep -qE -- "$_AF_TASKS_RUN_HINT" <<<"$screen"; then
+        # The editor opens on Name, a text field, whose footer lists no verb
+        # (#6400). The run action shows from the Trigger selector, one Tab on.
+        af_send Tab
     fi
     af_wait_for "$_AF_TASKS_RUN_HINT" "$AF_DRIVER_TIMEOUT" 'task-overlay run action' || return 1
     af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
+}
+
+# #6400: the editor opens on Name, and a text field's footer lists no verb key,
+# because r, x and D type into it there. The play-test pressed the "r run now"
+# that the Name footer used to show and renamed the task. Wait for the
+# text-stop footer first, so the refute reads the painted editor rather than a
+# frame from before it opened.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_task_editor_name_footer_has_no_verb() {
+    af_wait_for "$_AF_TASKS_TEXT_STOP_HINT" "$AF_DRIVER_TIMEOUT" 'task editor text-stop footer' || return 1
+    af_refute_screen "$_AF_TASKS_RUN_HINT" 'a run verb on the Name field footer (#6400)'
 }
 
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
@@ -1781,6 +1790,8 @@ step "reveal and assert the task run action"                _expect_task_run_act
 step "close the tasks overlay"                              af_close_tasks
 step "reopen tasks list"                                    _open_tasks_list_for_selftest
 step "open the selected task editor"                        af_send Enter
+step "Name footer offers no verb that would type into it (#6400)" _expect_task_editor_name_footer_has_no_verb
+step "tab to the Trigger selector, where the verbs fire"    af_send Tab
 step "task editor run action recognized (#1757)"             af_wait_for "$_AF_TASKS_RUN_HINT" 10
 step "assert the task editor shows the run action"          af_assert_screen "$_AF_TASKS_RUN_HINT" 'task-overlay run action'
 step "close the explicitly opened task editor"              af_close_tasks
