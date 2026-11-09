@@ -750,6 +750,10 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 	m.repoRoot = repo.Root
 	m.repoIdentityRoot = repo.IdentityRoot
 	m.sidebar.SetProjectName(filepath.Base(repo.Root))
+	// The skipped-repo standing line was composed under the outgoing scope —
+	// its labels resolve through m.repoID, which only now points at the
+	// incoming project. Recompose so an incoming skipped repo names its root.
+	m.applyStandingNotice()
 
 	// Re-resolve the new project's default program for future sessions.
 	// BranchPrefix and other machine preferences are global-only, so they do not
