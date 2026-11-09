@@ -467,6 +467,12 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 		return fmt.Errorf("session %q is busy (%v)", i.Title, i.inFlightOp)
 	}
 	lv, op, resetAt := i.lifecycleStateLocked()
+	// The evidence retires the record: stamp the conversation answer onto
+	// the trailing ledger entry first, exactly as ClearPendingAccountSwap
+	// and ConfirmPendingAccountSwapDelivery do (#6768). A no-op for
+	// automatic swaps: stampHandoffConversationLocked early-returns when
+	// !pending.Manual, and automatic swaps append no ledger entry.
+	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
 	i.accountSwapLaunch = nil
 	i.taskRunIdleEdgeHeld = false
