@@ -2,6 +2,7 @@ package main
 
 import (
 	"errors"
+	"os"
 	"os/exec"
 	"path/filepath"
 	"runtime"
@@ -39,6 +40,15 @@ func isAncestor(t *testing.T, dir string, env []string, a, b string) bool {
 	return false
 }
 
+func readFile(t *testing.T, path string) string {
+	t.Helper()
+	b, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatalf("read %s: %v", path, err)
+	}
+	return string(b)
+}
+
 // landOnMaster commits file=content on origin's current master from a fresh
 // clone named name, the way a PR squash-merge lands, and returns the new sha.
 func landOnMaster(t *testing.T, base string, env []string, origin, name, file, content, msg string) string {
@@ -48,7 +58,7 @@ func landOnMaster(t *testing.T, base string, env []string, origin, name, file, c
 	writeFile(t, filepath.Join(clone, file), content)
 	runGitEnv(t, clone, env, "add", file)
 	runGitEnv(t, clone, env, "commit", "-q", "-m", msg)
-	runGitEnv(t, clone, env, "push", "-q", "origin", "master")
+	runGitEnv(t, clone, env, "push", "-q", "origin", "HEAD:refs/heads/master")
 	return gitOutEnv(t, clone, env, "rev-parse", "HEAD")
 }
 
@@ -93,10 +103,43 @@ func assertTagIsTheBuild(t *testing.T, dir, origin string, env []string, built, 
 	if got := gitOutEnv(t, dir, env, "show", tag+":main.go"); !strings.Contains(got, `version = "`+version+`"`) {
 		t.Fatalf("the tagged main.go does not carry %s:\n%s", version, got)
 	}
-	if !isAncestor(t, origin, env, tag, "master") {
+	if !isAncestor(t, origin, env, tag, "refs/heads/master") {
 		t.Fatalf("the tagged commit %s is not reachable from master: previews and GitHub's generated notes would not find the new stable", tag)
 	}
 	return tag
+}
+
+// assertLandedAsMerge checks how the bump reached a master that moved: one
+// merge commit whose FIRST parent is the tip it found and whose SECOND parent
+// is the tagged commit. The order is load-bearing — master's first-parent line
+// must stay master's own history, with the release joined in from the side.
+func assertLandedAsMerge(t *testing.T, origin string, env []string, tip, tag string) {
+	t.Helper()
+	parents := strings.Fields(gitOutEnv(t, origin, env, "rev-list", "--parents", "-n", "1", "refs/heads/master"))
+	if len(parents) != 3 || parents[1] != tip || parents[2] != tag {
+		t.Fatalf("master's tip is not a merge of (%s, %s) in that order: commit and parents %v", tip, tag, parents)
+	}
+	if merges := strings.Fields(gitOutEnv(t, origin, env, "rev-list", "--merges", "refs/heads/master")); len(merges) != 1 {
+		t.Fatalf("want exactly one merge commit on master, got %v", merges)
+	}
+	if diff := gitOutEnv(t, origin, env, "diff", "--name-only", tip, "refs/heads/master"); diff != "main.go" {
+		t.Fatalf("landing the bump changed more than main.go on master:\n%s", diff)
+	}
+}
+
+// assertCheckoutOnBuild checks a FAILED run put the checkout back on the built
+// commit, clean. The workflow's `if: failure()` step runs
+// release-forget-version.sh from this working tree, and every job pins
+// github.sha: a run that died on master's tip or on its own bump commit would
+// run some other commit's scripts.
+func assertCheckoutOnBuild(t *testing.T, dir string, env []string, built string) {
+	t.Helper()
+	if head := gitOutEnv(t, dir, env, "rev-parse", "HEAD"); head != built {
+		t.Fatalf("the failed run left the checkout on %s, not on the built commit %s", head, built)
+	}
+	if status := gitOutEnv(t, dir, env, "status", "--porcelain"); status != "" {
+		t.Fatalf("the failed run left the checkout dirty:\n%s", status)
+	}
 }
 
 // TestReleaseBumpTagsTheBuiltCommitWhenMasterMoves is the #7018 regression,
@@ -122,10 +165,15 @@ func TestReleaseBumpTagsTheBuiltCommitWhenMasterMoves(t *testing.T) {
 		t.Fatalf("a non-fast-forward push was not reported as master advancing:\n%s", out)
 	}
 
+	if !strings.Contains(out, "Merging the release commit") {
+		t.Fatalf("the log does not say the bump is being merged into the moved master:\n%s", out)
+	}
+
 	tag := assertTagIsTheBuild(t, work, origin, env, built, "1.0.1")
 	if isAncestor(t, origin, env, midBuild, tag) {
 		t.Fatalf("the mid-build commit %s is in the tagged history (#7018)", midBuild)
 	}
+	assertLandedAsMerge(t, origin, env, midBuild, tag)
 
 	// --generate-notes lists previous..tag. It must name what was built and
 	// nothing that merged after the build started.
@@ -224,7 +272,14 @@ func TestReleaseBumpRerunReproducesTheTag(t *testing.T) {
 
 			rerun := checkoutBuild(t, base, env, origin, "rerun", built)
 			rerunEnv := isolatedGitEnv(home, "GIT_AUTHOR_DATE=2021-06-01T00:00:00", "GIT_COMMITTER_DATE=2021-06-01T00:00:00")
-			runBump(t, rerun, rerunEnv, "1.0.1")
+			out := runBump(t, rerun, rerunEnv, "1.0.1")
+			// The log says what the re-run does: finds the commit landed — git's
+			// own "up-to-date" when master is still on it, the script's line when
+			// master moved on since — and never claims to be merging.
+			landedMsg := strings.Contains(out, "already has the release commit") || strings.Contains(out, "Everything up-to-date")
+			if !landedMsg || strings.Contains(out, "erging") {
+				t.Fatalf("the re-run's log does not say it found the release commit already landed:\n%s", out)
+			}
 			if tag := assertTagIsTheBuild(t, rerun, origin, env, built, "1.0.1"); tag != firstTag {
 				t.Fatalf("the re-run tags %s, the first run tagged %s: a re-run must reproduce the release commit", tag, firstTag)
 			}
@@ -268,6 +323,7 @@ func TestReleaseBumpRefusesABuildThatIsNotOnMaster(t *testing.T) {
 			writeFile(t, filepath.Join(work, "SIDE.md"), "never reviewed\n")
 			runGitEnv(t, work, env, "add", "SIDE.md")
 			runGitEnv(t, work, env, "commit", "-q", "-m", "feat: unreviewed side work")
+			side := gitOutEnv(t, work, env, "rev-parse", "HEAD")
 			if moved {
 				landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed mid-build\n", "feat: merged during build")
 			}
@@ -286,6 +342,282 @@ func TestReleaseBumpRefusesABuildThatIsNotOnMaster(t *testing.T) {
 			if tip := gitOutEnv(t, origin, env, "rev-parse", "master"); tip != before {
 				t.Fatalf("master moved from %s to %s for a build that is not on master", before, tip)
 			}
+			assertCheckoutOnBuild(t, work, env, side)
 		})
+	}
+}
+
+// TestReleaseBumpRetriesAMasterThatMovesAgain is a second real race: master
+// moves during the build, and again between the merge and its push. The retry
+// must merge into the NEWEST tip — the first, never-pushed merge is discarded —
+// so master ends with one merge whose parents are that tip and the tag. A fake
+// `git` lands the second racer just before the second push, then hands the
+// push to the real binary, which the remote rejects for real.
+func TestReleaseBumpRetriesAMasterThatMovesAgain(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	home := filepath.Join(base, "home")
+	env := isolatedGitEnv(home)
+
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+	built := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+	first := landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed mid-build\n", "feat: merged during build")
+
+	realGit, err := exec.LookPath("git")
+	if err != nil {
+		t.Fatalf("locate real git: %v", err)
+	}
+	pushes := filepath.Join(base, "pushes")
+	writeFile(t, pushes, "0\n")
+	racer := filepath.Join(base, "racer")
+	fakeBin := filepath.Join(base, "fakebin")
+	writeExecutable(t, filepath.Join(fakeBin, "git"), `#!/bin/sh
+if [ "$1" = "push" ]; then
+	n=$(cat "$FAKE_PUSHES")
+	n=$((n + 1))
+	echo "$n" > "$FAKE_PUSHES"
+	if [ "$n" -eq 2 ]; then
+		"$REAL_GIT" clone -q "$FAKE_ORIGIN" "$FAKE_RACER" &&
+		echo "second race" > "$FAKE_RACER/RACE2.md" &&
+		"$REAL_GIT" -C "$FAKE_RACER" add RACE2.md &&
+		"$REAL_GIT" -C "$FAKE_RACER" commit -q -m "feat: merged during the retry" &&
+		"$REAL_GIT" -C "$FAKE_RACER" push -q origin HEAD:refs/heads/master || exit 99
+	fi
+fi
+exec "$REAL_GIT" "$@"
+`)
+
+	runBump(t, work, isolatedGitEnv(home,
+		"REAL_GIT="+realGit,
+		"FAKE_PUSHES="+pushes,
+		"FAKE_ORIGIN="+origin,
+		"FAKE_RACER="+racer,
+		"PATH="+fakeBin+string(os.PathListSeparator)+os.Getenv("PATH")), "1.0.1")
+
+	second := gitOutEnv(t, racer, env, "rev-parse", "HEAD")
+	tag := assertTagIsTheBuild(t, work, origin, env, built, "1.0.1")
+	assertLandedAsMerge(t, origin, env, second, tag)
+	if !isAncestor(t, origin, env, first, "refs/heads/master") {
+		t.Fatalf("the first mid-build commit %s was lost from master", first)
+	}
+	if n := strings.TrimSpace(readFile(t, pushes)); n != "3" {
+		t.Fatalf("want 3 pushes (rejected, rejected, landed), got %s", n)
+	}
+}
+
+// TestReleaseBumpQualifiesMastersRef: the fetch and push must name
+// refs/heads/master. With a tag named `master` on origin, a bare `master` is
+// ambiguous — the push fails "matches more than one", and a fetch could take
+// the tag for the branch.
+func TestReleaseBumpQualifiesMastersRef(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	env := isolatedGitEnv(filepath.Join(base, "home"))
+
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+	built := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+	runGitEnv(t, work, env, "tag", "master", built)
+	runGitEnv(t, work, env, "push", "-q", "origin", "refs/tags/master")
+	midBuild := landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed mid-build\n", "feat: merged during build")
+
+	runBump(t, work, env, "1.0.1")
+	tag := assertTagIsTheBuild(t, work, origin, env, built, "1.0.1")
+	assertLandedAsMerge(t, origin, env, midBuild, tag)
+	if got := gitOutEnv(t, origin, env, "rev-parse", "refs/tags/master"); got != built {
+		t.Fatalf("the tag named master moved to %s", got)
+	}
+}
+
+// TestReleaseBumpConflictNextToTheVersionLine: git conflicts on ADJACENT lines,
+// not only the same one, and in the real main.go the version line is followed
+// by `rootCommand = commands.NewRootCommand`. A mid-build PR that edits only
+// that line fails the release; the error must not blame a rival version bump,
+// and the checkout must go back to the build.
+func TestReleaseBumpConflictNextToTheVersionLine(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	env := isolatedGitEnv(filepath.Join(base, "home"))
+
+	origin, _ := seedReleaseRemote(t, base, env, "1.0.0")
+	mainGo := func(root string) string {
+		return "package main\n\nvar (\n\tversion     = \"1.0.0\"\n\trootCommand = " + root + "\n)\n"
+	}
+	built := landOnMaster(t, base, env, origin, "shape", "main.go", mainGo("commands.NewRootCommand"), "refactor: the real main.go shape")
+	work := checkoutBuild(t, base, env, origin, "build", built)
+	midBuild := landOnMaster(t, base, env, origin, "other", "main.go", mainGo("commands.NewRootCommandWithOptions"), "refactor: rename the root command")
+
+	out, timedOut, err := runReleaseScript(t, work, env, "1.0.1")
+	if timedOut {
+		t.Fatalf("release-bump.sh did not terminate\n%s", out)
+	}
+	if err == nil {
+		t.Fatalf("an adjacent-line conflict merged cleanly?\n%s", out)
+	}
+	if !strings.Contains(out, "at or next to the version line") || strings.Contains(out, "rival") {
+		t.Fatalf("the conflict error does not describe an edit next to the version line:\n%s", out)
+	}
+	if tip := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master"); tip != midBuild {
+		t.Fatalf("master moved from %s to %s on a conflict", midBuild, tip)
+	}
+	assertCheckoutOnBuild(t, work, env, built)
+}
+
+// TestReleaseBumpRefusesWhatItCannotCheck: the not-on-master guard fails
+// closed, before pushing anything, when the checkout cannot answer the
+// question — and says why, rather than claiming the build is off master.
+func TestReleaseBumpRefusesWhatItCannotCheck(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
+	}
+	cases := []struct {
+		name string
+		// prepare returns the checkout to run in, standing in for a job whose
+		// actions/checkout lost the history the check needs.
+		prepare func(t *testing.T, base string, env []string, origin, work string) string
+		want    string
+	}{
+		{
+			name: "no origin/master",
+			prepare: func(t *testing.T, _ string, env []string, _, work string) string {
+				runGitEnv(t, work, env, "update-ref", "-d", "refs/remotes/origin/master")
+				return work
+			},
+			want: "has no refs/remotes/origin/master",
+		},
+		{
+			// A depth-1 checkout whose origin/master was also fetched at depth
+			// 1: the ancestry walk stops at a grafted-away parent, and "not an
+			// ancestor" would be the shallow history's answer, not master's.
+			name: "shallow checkout",
+			prepare: func(t *testing.T, base string, env []string, origin, _ string) string {
+				shallow := filepath.Join(base, "shallow")
+				runGitEnv(t, base, env, "clone", "-q", "--depth", "1", "file://"+origin, shallow)
+				runGitEnv(t, shallow, env, "checkout", "-q", "--detach", "HEAD")
+				landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed mid-build\n", "feat: merged during build")
+				runGitEnv(t, shallow, env, "fetch", "-q", "--depth", "1", "origin")
+				return shallow
+			},
+			want: "shallow",
+		},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			base := t.TempDir()
+			env := isolatedGitEnv(filepath.Join(base, "home"))
+			origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+			dir := c.prepare(t, base, env, origin, work)
+			built := gitOutEnv(t, dir, env, "rev-parse", "HEAD")
+			before := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master")
+
+			out, timedOut, err := runReleaseScript(t, dir, env, "1.0.1")
+			if timedOut {
+				t.Fatalf("release-bump.sh did not terminate\n%s", out)
+			}
+			if err == nil {
+				t.Fatalf("released from a checkout that cannot prove the build is on master:\n%s", out)
+			}
+			if !strings.Contains(out, c.want) || strings.Contains(out, "is not on master") {
+				t.Fatalf("the refusal does not name the cause (%q):\n%s", c.want, out)
+			}
+			if tip := gitOutEnv(t, origin, env, "rev-parse", "refs/heads/master"); tip != before {
+				t.Fatalf("master moved from %s to %s", before, tip)
+			}
+			assertCheckoutOnBuild(t, dir, env, built)
+		})
+	}
+}
+
+// TestRequireOnMasterScript drives the guard the validate job runs on its own,
+// before the preflight, with github.sha as the argument (#7018 follow-up).
+func TestRequireOnMasterScript(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("require-on-master.sh is POSIX sh; not run on Windows")
+	}
+	base := t.TempDir()
+	env := isolatedGitEnv(filepath.Join(base, "home"))
+	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
+	behind := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+	landOnMaster(t, base, env, origin, "other", "CONCURRENT.md", "landed\n", "feat: later")
+	runGitEnv(t, work, env, "fetch", "-q", "origin")
+	writeFile(t, filepath.Join(work, "SIDE.md"), "side\n")
+	runGitEnv(t, work, env, "add", "SIDE.md")
+	runGitEnv(t, work, env, "commit", "-q", "-m", "feat: side")
+	side := gitOutEnv(t, work, env, "rev-parse", "HEAD")
+
+	script := filepath.Join(repoRoot(t), ".github", "scripts", "require-on-master.sh")
+	for _, c := range []struct {
+		name, commit, want string
+		ok                 bool
+	}{
+		{name: "a commit master has moved past", commit: behind, ok: true},
+		{name: "master's tip", commit: "origin/master", ok: true},
+		{name: "a commit off master", commit: side, want: "is not on master"},
+	} {
+		cmd := exec.Command(script, c.commit)
+		cmd.Dir = work
+		cmd.Env = env
+		out, err := cmd.CombinedOutput()
+		if ok := err == nil; ok != c.ok {
+			t.Errorf("%s: ok=%v, want %v\n%s", c.name, ok, c.ok, out)
+		}
+		if c.want != "" && !strings.Contains(string(out), c.want) {
+			t.Errorf("%s: output missing %q:\n%s", c.name, c.want, out)
+		}
+	}
+}
+
+// workflowJob returns the lines of one job under `jobs:`, from its `  <name>:`
+// key to the next job key, prefixed with "jobs:" so workflowSteps can split it.
+func workflowJob(text, name string) string {
+	var out []string
+	in := false
+	for _, line := range strings.Split(text, "\n") {
+		isKey := strings.HasPrefix(line, "  ") && !strings.HasPrefix(line, "   ") &&
+			strings.HasSuffix(strings.TrimSpace(line), ":") && !strings.HasPrefix(strings.TrimSpace(line), "#")
+		if isKey {
+			in = strings.TrimSpace(line) == name+":"
+		}
+		if in {
+			out = append(out, line)
+		}
+	}
+	return "jobs:\n" + strings.Join(out, "\n")
+}
+
+// TestStableReleaseRefusesABuildOffMasterBeforeThePreflight: publish refuses
+// a build that is not on master, but only after the 30-minute preflight and
+// four builds. The validate job runs the same check first, on a checkout with
+// the history it needs.
+func TestStableReleaseRefusesABuildOffMasterBeforeThePreflight(t *testing.T) {
+	text := readFile(t, filepath.Join(repoRoot(t), ".github", "workflows", "stable-release.yml"))
+	steps := workflowSteps(workflowJob(text, "validate"))
+	checkout, guard, preflight := -1, -1, -1
+	for i, s := range steps {
+		switch {
+		case strings.Contains(s.title, "actions/checkout") && checkout < 0:
+			checkout = i
+		case strings.Contains(s.body, ".github/scripts/require-on-master.sh"):
+			guard = i
+		case s.title == "- name: Release preflight":
+			preflight = i
+		}
+	}
+	if checkout < 0 || preflight < 0 {
+		t.Fatalf("the validate job lost its checkout (%d) or preflight (%d) step", checkout, preflight)
+	}
+	if guard < 0 || guard < checkout || guard > preflight {
+		t.Fatalf("validate must run require-on-master.sh after its checkout and before the preflight (checkout %d, guard %d, preflight %d)", checkout, guard, preflight)
+	}
+	if !strings.Contains(steps[checkout].body, "fetch-depth: 0") {
+		t.Fatalf("validate's checkout must fetch full history for the ancestry check:\n%s", steps[checkout].body)
+	}
+	if !strings.Contains(steps[guard].body, "github.sha") {
+		t.Fatalf("validate's guard must check github.sha, the commit everything is built from:\n%s", steps[guard].body)
 	}
 }
