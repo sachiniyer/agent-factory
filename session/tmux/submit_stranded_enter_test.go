@@ -66,6 +66,10 @@ type stagedDraftPane struct {
 	// poll and the Enter boundary, so the polls classify absent while the
 	// boundary binds the whole draft.
 	pollPartial bool
+	// placeholder is the hint an agent draws inside its EMPTY input row (Devin's
+	// "Guide Devin while it works"). It shows only while the composer holds
+	// nothing, the way the real agents draw it (#7023).
+	placeholder string
 }
 
 func (m *stagedDraftPane) glyphOr() string {
@@ -82,7 +86,7 @@ func (m *stagedDraftPane) rowsLocked() (rows []string, cursorRow int) {
 	}
 	composer := m.composer
 	if len(composer) == 0 {
-		composer = []string{""}
+		composer = []string{m.placeholder}
 	}
 	for i, c := range composer {
 		line := "  " + c
