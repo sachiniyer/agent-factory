@@ -1039,6 +1039,109 @@ SCREEN
     )
 }
 
+# _expect_altscreen_commit_renders — the LIVE half of #7037. A committed pane is a
+# viewer: it keeps the tab's real size and crops it into its box (#4480). On the
+# alternate screen a full-screen program parks its cursor wherever it likes —
+# `watch` leaves it in the bottom-right corner, below three rows of content — and a
+# crop anchored on that cursor showed only blank rows, so the pane stayed empty
+# until something resized the tab.
+#
+# The program here enters the alternate screen, draws one marker row at the top,
+# parks the cursor in the bottom-right corner and then idles. It never draws
+# again, so the pane can show the marker only if binding the pane does — there is
+# no later repaint to wait for. The tab is created through the CLI, which spawns it
+# at tmux's default 80x24, and the TUI is shrunk first so the pane box is shorter
+# than that: the crop is in play, as it was in the play-test that found this.
+#
+# The flow is the reported one: tree-focused number key → transient preview,
+# then `S` commits it as a pane alongside. The preview is capture-backed and
+# rendered the marker before the fix too, so it is asserted as the control. The
+# commit's assertion settles past the live attachment's bind before it looks,
+# because the new pane can show a capture for a moment before the live grid
+# replaces it; the marker must then hold, not merely flash.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_altscreen_commit_renders() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    local marker='AF_ALT_7037_TOP' tab_re bin script n header deadline rc=0
+    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+altscreen'
+    bin="$(_af_resolve_bin)"
+    mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
+    script="$AF_DRIVER_STATE_DIR/altscreen-idle.sh"
+    # The marker lives only in the script, never in the tab's command line, so
+    # nothing but the program's own screen can put it on the TUI.
+    cat >"$script" <<'EOF' || return 1
+#!/bin/sh
+printf '\033[?1049h\033[2J\033[1;1HAF_ALT_7037_TOP idle alternate screen\033[999;999H'
+exec sleep 100000
+EOF
+    if ! AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions tab-create cycle \
+        --repo "$AF_DRIVER_REPO" --command "sh '$script'" --name altscreen >/dev/null; then
+        _af_fail "af sessions tab-create could not add the alternate-screen tab"
+        return 1
+    fi
+
+    af_resize "$saved_cols" 20 || return 1
+    af_select cycle || rc=1
+    if [ "$rc" -eq 0 ]; then
+        af_wait_for "$tab_re" 15 'the CLI-created altscreen tab reaches the tree' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        n="$(af_capture | grep -E -- "$tab_re" | head -1 | grep -oE '[0-9]+' | head -1)"
+        [ -n "$n" ] || { _af_fail 'could not read the altscreen tab number from the tree'; rc=1; }
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_focus_tree || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send "$n"
+        # The pane header names a transient preview `<session> · <tab> · preview`.
+        af_wait_for 'altscreen.*· preview' 10 'the number key previews the altscreen tab' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_wait_for "$marker" 10 'control: the capture-backed preview renders the program' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send S
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        while :; do
+            header="$(_af_pane_header_row)"
+            if printf '%s\n' "$header" | grep -qE -- 'altscreen' \
+                && ! printf '%s\n' "$header" | grep -qE -- 'preview'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "S did not commit the preview (pane headers: '$header')"
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        sleep 3   # past the live attachment's bind: see the comment above
+        af_wait_for "$marker" 10 'the committed pane renders the alternate screen (#7037)' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        deadline=$(( $(_af_now) + 2 ))
+        while [ "$(_af_now)" -lt "$deadline" ]; do
+            if ! af_capture | grep -qE -- "$marker"; then
+                _af_fail 'the committed pane showed the alternate screen, then went blank (#7037)'
+                af_capture >&2
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        printf '\n=== committed alternate-screen pane: %sx20 ===\n' "$saved_cols"
+        af_capture
+    fi
+
+    af_resize "$saved_cols" "$saved_rows" || return 1
+    return "$rc"
+}
+
 # _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
 # enough sessions for the current row density and select the last: the rail scrolls,
 # the header is gone, and the boot gate has to read the frame as booted anyway.
@@ -1882,6 +1985,11 @@ step "cycle: add a shell-2 tab (t)"                         af_new_tab
 step "cycle: open the active tab as a pane"                 af_open_pane
 step "cycle: pane number-jumps land and STAY (#1885)"       _expect_cycle_jumps_land
 step "cycle: confirmed w deletes the VIEWED tab, not the tree's (#1884)" _expect_cycle_w_closes_viewed
+
+# --- #7037: a committed pane on an alternate-screen tab renders the tab's screen ---
+# Runs on the 'cycle' instance the steps above leave with a pane open: the
+# transient preview it commits needs an owner pane.
+step "a committed pane on an idle alternate-screen tab renders it (#7037)" _expect_altscreen_commit_renders
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
