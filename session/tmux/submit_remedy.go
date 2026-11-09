@@ -232,12 +232,52 @@ func isComposerGlyphRow(norm string) bool {
 		strings.HasPrefix(norm, ">")
 }
 
-// bareComposerGlyphRow reports whether a row is an empty composer prompt — the
-// bare glyph a composer repaints after a submit, and nothing else. A user's
-// ">quote" row is not bare: it carries content.
+// busyComposerHints are the hints an agent draws inside its EMPTY input row
+// while it takes input mid-turn, normalized and keyed by that agent's composer
+// glyph. capture-pane -p carries no attributes, so a dim hint reads exactly
+// like typed text. Without this table, a busy agent's emptied composer read as
+// a repaint holding foreign content. That was the withheld-remedy warning on
+// 252 of the 537 deliveries production logged in #7023.
+//
+// An entry matches only the whole row, and only under its own glyph. A row
+// that adds, drops or changes a character is content, and so are the same
+// words under another agent's glyph. Idle hints are left out, both Devin's
+// ("Ask Devin to build features…") and Codex's, which it draws idle and busy
+// alike. An idle hint is also what a composer that dropped the prompt would
+// show (#4200), so it stays unattributable.
+//
+// This is not composer_draft.go's composerPlaceholders. That table answers
+// "does the composer hold a draft that blocks an account handoff", and for
+// that question a queued message is still input the agent has not run.
+var busyComposerHints = map[string][]string{
+	// Claude Code, a message queued behind a running turn.
+	claudeComposerGlyph: {normalizeDelivery("Press up to edit queued messages")},
+	// Devin mid-turn.
+	"❭": {normalizeDelivery("Guide Devin while it works")},
+}
+
+// bareComposerGlyphRow reports whether a row is an empty composer prompt: the
+// bare glyph a composer repaints after a submit, or that glyph with the
+// agent's own mid-turn hint (busyComposerHints), and nothing else. A user's
+// ">quote" row is not bare, because it carries content.
 func bareComposerGlyphRow(row string) bool {
 	norm := normalizeDelivery(row)
-	return norm == "›" || norm == claudeComposerGlyph || norm == "❭"
+	for _, glyph := range []string{"›", claudeComposerGlyph, "❭"} {
+		rest, ok := strings.CutPrefix(norm, glyph)
+		if !ok {
+			continue
+		}
+		if rest == "" {
+			return true
+		}
+		for _, hint := range busyComposerHints[glyph] {
+			if rest == hint {
+				return true
+			}
+		}
+		return false
+	}
+	return false
 }
 
 // blankComposerRow is a row holding nothing but whitespace and the vertical
@@ -288,22 +328,38 @@ func composerRegion(rows []string, anchor int) []string {
 // user's ">quote" — is a composer shape we can no longer attribute, so the
 // draft conservatively still counts as staged.
 func boundStillStaged(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) bool {
+	return stagedReading(pane, probe, bound, boundaryAnchor) != ""
+}
+
+// stagedReading is boundStillStaged's verdict with its reason. It names which
+// of the staged readings fired, or returns "" when the draft left the live
+// composer. The withheld-remedy warning prints it. A draft our Enter left in
+// the composer and a repaint we cannot attribute are different failures, and a
+// log line that named neither could not tell production's 537 warnings apart
+// (#7023).
+func stagedReading(pane string, probe deliveryProbe, bound stagedEvidence, boundaryAnchor int) string {
 	rows := paneGridRows(pane)
 	anchor := lastComposerGlyphRow(rows)
 	if anchor < 0 {
-		return false
+		return ""
 	}
 	lower := normalizeDelivery(strings.Join(rows[anchor:], ""))
 	if bound.tail && strings.Contains(lower, probe.completion) {
-		return true
+		return "this prompt's bound text is still in the live composer"
 	}
 	if bound.chip && strings.Contains(lower, bound.chipText) {
-		return true
+		return "this prompt's bound chip is still in the live composer"
 	}
 	if anchor == boundaryAnchor {
-		return false
+		return ""
 	}
-	return anchor < boundaryAnchor || !bareComposerGlyphRow(rows[anchor])
+	if anchor < boundaryAnchor {
+		return "the composer was repainted above its row at the Enter boundary, so what it holds cannot be attributed"
+	}
+	if !bareComposerGlyphRow(rows[anchor]) {
+		return "the composer was repainted holding content that is neither this prompt nor an empty composer"
+	}
+	return ""
 }
 
 // stillChipComposer is the stillness+position proof for the one remediable
@@ -464,7 +520,8 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		return observation
 	}
 	unverified := deliveryObservation{outcome: deliveryObservedUnverified, pane: pane}
-	if !boundStillStaged(pane, probe, bound, boundaryAnchor) {
+	reading := stagedReading(pane, probe, bound, boundaryAnchor)
+	if reading == "" {
 		return observation
 	}
 
@@ -477,10 +534,10 @@ func (t *TmuxSession) remedyStrandedSubmit(probe deliveryProbe, observation deli
 		stillChip, why = stillChipComposer(stripped, pane, cursor, bound.chipText)
 	}
 	if !stillChip {
-		log.WarningLog.Printf("submit: session %q still shows this prompt's bound evidence staged in the composer after Enter, "+
+		log.WarningLog.Printf("submit: session %q reads as still staged after Enter (%s), "+
 			"but it is not a still, single-chip composer this delivery can prove is only ours (%s); "+
 			"withholding the remedy Enter and reporting sent-unverified (#4200). Pane tail: %s",
-			t.sanitizedName, why, oneLineTail(pane))
+			t.sanitizedName, reading, why, oneLineTail(pane))
 		return unverified
 	}
 
