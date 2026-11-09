@@ -1293,30 +1293,26 @@ func TestTaskPaneCreateModeEnterInPromptInsertsNewline(t *testing.T) {
 		"enter in the prompt must insert a newline")
 }
 
-func TestTaskPaneCreateModeCompactFooterShowsQuitKey(t *testing.T) {
-	require.NoError(t, keys.ApplyOverrides(nil))
-	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+// TestTaskPaneCreateModeFooterNeverAdvertisesQuit pins the create form to the
+// keys that fire in it (#6400). The quit key is gated on !IsCreating in
+// handleStateTasks (#1961), so in this form it types into the focused field
+// and does nothing elsewhere. The footer used to offer "q quit" anyway, the
+// same trap as the editor's "r run now" on Name. That holds for a rebound
+// quit key too.
+func TestTaskPaneCreateModeFooterNeverAdvertisesQuit(t *testing.T) {
+	for _, quit := range []string{"q", "Q"} {
+		require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {quit}}))
+		t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
-	tp := NewTaskPane()
-	tp.SetSize(40, 10)
-	tp.EnterCreateMode(newGitRepo(t))
+		tp := NewTaskPane()
+		tp.SetSize(40, 10)
+		tp.EnterCreateMode(newGitRepo(t))
 
-	lines := strings.Split(tp.String(), "\n")
-	assert.Contains(t, lines[len(lines)-1], "esc cancel", "cancel remains visible")
-	assert.Contains(t, lines[len(lines)-1], "q quit", "configured quit key stays visible in the compact form footer")
-}
-
-func TestTaskPaneCreateModeFooterUsesReboundQuitKey(t *testing.T) {
-	require.NoError(t, keys.ApplyOverrides(map[string][]string{"quit": {"Q"}}))
-	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
-
-	tp := NewTaskPane()
-	tp.SetSize(40, 10)
-	tp.EnterCreateMode(newGitRepo(t))
-
-	lines := strings.Split(tp.String(), "\n")
-	assert.Contains(t, lines[len(lines)-1], "Q quit", "form footer must derive the quit hint from the keymap")
-	assert.NotContains(t, lines[len(lines)-1], "q quit", "the old default quit key must not be advertised after rebinding")
+		lines := strings.Split(tp.String(), "\n")
+		footer := lines[len(lines)-1]
+		assert.Contains(t, footer, "esc cancel", "cancel remains visible")
+		assert.NotContainsf(t, footer, "quit", "quit key %q types into the form, so it is never offered: %q", quit, footer)
+	}
 }
 
 func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
@@ -1339,11 +1335,11 @@ func TestTaskPaneListCompactFooterShowsRunNow(t *testing.T) {
 }
 
 // TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys pins the compact edit
-// footer to the keys that actually fire there (#5538): a text stop names the
-// verb path behind "tab →" — the glyphs type into the field (#4838), so the
-// run-now path stays discoverable (#1288) without reading as a live key, and
-// the quit key is gated on !IsEditing (#1961) — while a selector stop
-// advertises the abbreviated verbs directly.
+// footer to the keys that actually fire there (#5538, #6400). A text stop
+// lists no verb, since the glyphs type into the field (#4838). It names
+// typing, tab and esc's destination, the list. The quit key is gated on
+// !IsEditing (#1961). A selector stop advertises the abbreviated verbs
+// directly.
 func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -1366,8 +1362,8 @@ func TestTaskPaneEditModeCompactActionFooterKeepsLiveKeys(t *testing.T) {
 		lines := strings.Split(stripANSI(tp.String()), "\n")
 		return lines[len(lines)-1]
 	}
-	assert.Equal(t, "tab → r/x/D · esc list", strings.TrimSpace(lastLine()),
-		"a text stop names the verb path behind tab, keeping esc's label")
+	assert.Equal(t, "type to edit · tab next · esc list", strings.TrimSpace(lastLine()),
+		"a text stop names what works in the field and keeps esc's label")
 	tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab}) // Name -> Trigger selector
 	row := lastLine()
 	assert.Contains(t, row, "esc list", "list escape remains visible on the compact verb row")

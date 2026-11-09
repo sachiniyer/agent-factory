@@ -1,7 +1,7 @@
 package ui
 
 import (
-	"strconv"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -13,16 +13,15 @@ import (
 	"github.com/sachiniyer/agent-factory/task"
 )
 
-// TestTaskPaneEditActionFooterFollowsFocus pins #5538: the action row may only
-// advertise keys as live where they fire. At a text stop r/x/D (and q) are
-// typed input — #4838 routes the verb glyphs into the field — so the row
-// names them only as the destination of the tab step ("tab → …"), the same
-// honesty the Trigger selector's "←/→ switch" follows by appearing only while
-// focused. That path name also keeps #1288's contract: the overlay opens
-// straight onto Name, so the first screen must still say how to reach run-now.
-// At a selector/button stop the verbs are live and lose the qualifier. The
-// configured quit key is gated on !IsEditing in handleStateTasks (#1961), so
-// it is dead at EVERY edit stop — text or selector — and never advertised.
+// TestTaskPaneEditActionFooterFollowsFocus pins #5538 as #6400 narrowed it:
+// the action row advertises a key only where it fires. At a text stop r/x/D
+// (and q) are typed input, since #4838 routes the verb glyphs into the field,
+// so the row lists no verb at all. It used to name them as the destination of
+// the tab step ("tab → r run now · …"), and play-testers read that as "press
+// r" and renamed the task. At a selector/button stop the verbs are live and
+// are listed. The configured quit key is gated on !IsEditing in
+// handleStateTasks (#1961), so it is dead at every edit stop and never
+// advertised.
 func TestTaskPaneEditActionFooterFollowsFocus(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -50,15 +49,15 @@ func TestTaskPaneEditActionFooterFollowsFocus(t *testing.T) {
 		tp.updateEditFocus()
 		row := footer()
 		if textStop[stop] {
-			assert.Truef(t, strings.HasPrefix(row, "tab"),
-				"stop %d is a text field: verbs are a path, not live keys — row must open with the tab qualifier: %q", stop, row)
-			assert.Containsf(t, row, "→ r run",
-				"stop %d: the run-now path stays discoverable on first entry (#1288)", stop)
-			assert.Containsf(t, row, "esc list",
-				"stop %d: esc still exits to the list and stays advertised", stop)
-		} else {
+			assert.NotRegexpf(t, verbKeyToken, row,
+				"stop %d is a text field: a verb key here types into it (#6400): %q", stop, row)
 			assert.NotContainsf(t, row, "→",
-				"stop %d routes the verbs live — no path qualifier belongs here", stop)
+				"stop %d: no verb path either — it read as a live key (#6400): %q", stop, row)
+			assert.Containsf(t, row, "tab next",
+				"stop %d: tab moves on to the next stop and stays advertised: %q", stop, row)
+			assert.Containsf(t, row, "esc list",
+				"stop %d: esc still exits to the list, where n and r are live: %q", stop, row)
+		} else {
 			assert.Containsf(t, row, "r run",
 				"stop %d routes the verbs — they must be advertised", stop)
 			assert.Containsf(t, row, "x toggle", "stop %d routes the verbs", stop)
@@ -116,57 +115,189 @@ func TestTaskPaneEditActionFooterKeepsEscLabelWhereItFits(t *testing.T) {
 	assert.NotContains(t, narrow, "…", "the row must fit, not clip: %q", narrow)
 }
 
-// TestTaskPaneEditFooterTabCountReachesVerbStop pins the path qualifier's
-// honesty at EVERY text stop: several text stops sit between selectors
-// (TriggerValue → Prompt → Target are three in a row), so the advertised tab
-// count must be the real distance, not a constant one. For each text stop the
-// test reads the count off the rendered row — "tab →" means one press,
-// "tab×N →" means N — sends that many Tab keys, and requires the landing
-// stop to route the verbs (a non-text stop whose row advertises them with no
-// qualifier). An undercount would land on another typing field where r/x/D
-// insert characters.
-func TestTaskPaneEditFooterTabCountReachesVerbStop(t *testing.T) {
+// verbKeyToken matches a task verb or quit key standing as a key in a hint:
+// r, x, D, n or q as its own word, or a slash-joined run of them ("r/x/D").
+// Prose such as "type to edit" never matches, because no verb glyph stands
+// alone in it.
+var verbKeyToken = regexp.MustCompile(`(^|[\s·→])[rxDnq](/[rxDnq])*(\s|$)`)
+
+// footerFixture is one shape of the task form: a cron task's editor, a watch
+// task's editor (whose trigger value is a free-text command, not the schedule
+// picker), and the create form.
+type footerFixture struct {
+	name string
+	open func(t *testing.T, width int) *TaskPane
+}
+
+func footerFixtures(t *testing.T) []footerFixture {
+	t.Helper()
+	repo := newGitRepo(t)
+	edit := func(tsk task.Task) func(*testing.T, int) *TaskPane {
+		return func(t *testing.T, width int) *TaskPane {
+			tp := NewTaskPane()
+			// Tall enough that the form never windows: every hint row stays in
+			// view, not only the pinned last one.
+			tp.SetSize(width, 60)
+			tsk.ProjectPath = repo
+			tp.SetTasks([]task.Task{tsk})
+			tp.SetFocus(true)
+			tp.EnterEditSelected()
+			require.True(t, tp.IsEditing())
+			return tp
+		}
+	}
+	return []footerFixture{
+		{"cron editor", edit(task.Task{ID: "abc", Name: "nightly", Prompt: "do it",
+			CronExpr: "0 0 * * *", Program: "claude", Enabled: true})},
+		{"watch editor", edit(task.Task{ID: "w1", Name: "tailer", Prompt: "do it",
+			WatchCmd: "tail -f log", Program: "claude", Enabled: true})},
+		{"create form", func(t *testing.T, width int) *TaskPane {
+			tp := NewTaskPane()
+			tp.SetSize(width, 60)
+			tp.SetFocus(true)
+			tp.EnterCreateMode(repo)
+			fillCreateForm(t, tp, "draft")
+			require.True(t, tp.IsCreating())
+			return tp
+		}},
+	}
+}
+
+// footerRows returns the form's hint rows: everything below the blank line
+// that follows the Save/Create button. The editor prints two (the form-wide
+// row and the contextual action row), the create form one.
+func footerRows(tp *TaskPane) []string {
+	lines := strings.Split(strings.TrimRight(stripANSI(tp.String()), "\n"), "\n")
+	last := len(lines) - 1
+	for last >= 0 && strings.TrimSpace(lines[last]) != "" {
+		last--
+	}
+	return lines[last+1:]
+}
+
+// focusTextStop puts focus on stop and reports whether it is a text stop for
+// this form's shape.
+func focusTextStop(tp *TaskPane, stop int) bool {
+	tp.focusIndex = stop
+	tp.updateEditFocus()
+	return textStopAt(stop, tp.capApplies())
+}
+
+// TestTaskPaneTextStopFooterListsNoVerbKey is the #6400 regression, stated as
+// the copy property. While a text field has focus, the footer must not list a
+// key that types into that field. The play-test pressed the footer's r on the
+// Name field and renamed the task to "hello-echor". It holds at every text
+// stop, in every form shape, at every width tier the rows step down through.
+func TestTaskPaneTextStopFooterListsNoVerbKey(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
 
-	tp := NewTaskPane()
-	tp.SetSize(80, 24)
-	tp.SetTasks([]task.Task{{
-		ID: "abc", Name: "nightly", Prompt: "do it", CronExpr: "0 0 * * *",
-		ProjectPath: newGitRepo(t), Program: "claude", Enabled: true,
-	}})
-	tp.SetFocus(true)
-	tp.EnterEditSelected()
-
-	footer := func() string {
-		lines := strings.Split(stripANSI(tp.String()), "\n")
-		return lines[len(lines)-1]
+	for _, fx := range footerFixtures(t) {
+		for _, width := range []int{80, 52, 40, 34, 25, 20, 12} {
+			for stop := 0; stop < taskFocusCount; stop++ {
+				tp := fx.open(t, width)
+				if !focusTextStop(tp, stop) {
+					continue
+				}
+				rows := footerRows(tp)
+				require.NotEmptyf(t, rows, "%s, width %d, stop %d: no hint rows rendered", fx.name, width, stop)
+				for _, row := range rows {
+					assert.NotRegexpf(t, verbKeyToken, row,
+						"%s, width %d, stop %d is a text field: a verb key here types into it: %q",
+						fx.name, width, stop, row)
+					assert.NotContainsf(t, row, "→",
+						"%s, width %d, stop %d: a verb path reads as a live key: %q", fx.name, width, stop, row)
+				}
+			}
+		}
 	}
-	for stop := 0; stop < taskFocusCount; stop++ {
-		if !textStopAt(stop, tp.capApplies()) {
+}
+
+// focusedFieldText is the text of the focused text stop: what a stray key
+// would corrupt.
+func focusedFieldText(tp *TaskPane) string {
+	switch tp.focusIndex {
+	case taskFocusName:
+		return tp.editName.Value()
+	case taskFocusTriggerValue:
+		return tp.schedule.Cron() + "|" + tp.editWatch.Value()
+	case taskFocusPrompt:
+		return tp.editPrompt.Value()
+	case taskFocusTarget:
+		return tp.editTarget.Value()
+	case taskFocusMaxRuns:
+		return tp.editMaxRuns.Value()
+	case taskFocusHost:
+		return tp.editHost.Value()
+	case taskFocusPath:
+		return tp.editPath.Value()
+	}
+	return ""
+}
+
+// advertisedKeys reads the keys a hint row offers: the leading token of each
+// "·"-separated fragment, with slash-joined runs ("tab/shift+tab", "r/x/D")
+// split into their keys. Prose fragments ("type to edit") offer no key.
+func advertisedKeys(row string) []string {
+	var out []string
+	for _, frag := range strings.Split(row, "·") {
+		fields := strings.Fields(frag)
+		if len(fields) == 0 || fields[0] == "type" {
 			continue
 		}
-		tp.focusIndex = stop
-		tp.updateEditFocus()
-		row := footer()
-		presses := 1
-		if rest, ok := strings.CutPrefix(row, "tab×"); ok {
-			n, err := strconv.Atoi(strings.SplitN(rest, " ", 2)[0])
-			require.NoErrorf(t, err, "stop %d: unparseable tab count in %q", stop, row)
-			presses = n
-		} else {
-			require.Truef(t, strings.HasPrefix(row, "tab → "),
-				"stop %d is a text field — the row must open with a tab path: %q", stop, row)
+		out = append(out, strings.Split(fields[0], "/")...)
+	}
+	return out
+}
+
+func keyMsgFor(t *testing.T, k string) tea.KeyMsg {
+	t.Helper()
+	switch {
+	case k == "tab" || strings.HasPrefix(k, "tab×"):
+		return tea.KeyMsg{Type: tea.KeyTab}
+	case k == "shift+tab":
+		return tea.KeyMsg{Type: tea.KeyShiftTab}
+	case k == "enter":
+		return tea.KeyMsg{Type: tea.KeyEnter}
+	case k == "esc":
+		return tea.KeyMsg{Type: tea.KeyEsc}
+	case len([]rune(k)) == 1:
+		return tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(k)}
+	}
+	t.Fatalf("hint advertises %q, which this test cannot press: teach keyMsgFor the key", k)
+	return tea.KeyMsg{}
+}
+
+// TestTaskPaneTextStopFooterKeysNeverTypeIntoTheField is the same property
+// checked by behaviour rather than by spelling. At every text stop it presses
+// each key the footer advertises, on a fresh form, and requires the focused
+// field's text to come out unchanged. The footer used to offer x and D on
+// Name (they type), "enter save" on the prompt (Enter types a newline there)
+// and, on the create form, "q quit" (q is typed since #1961).
+func TestTaskPaneTextStopFooterKeysNeverTypeIntoTheField(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	for _, fx := range footerFixtures(t) {
+		for _, width := range []int{80, 30} {
+			for stop := 0; stop < taskFocusCount; stop++ {
+				probe := fx.open(t, width)
+				if !focusTextStop(probe, stop) {
+					continue
+				}
+				for _, row := range footerRows(probe) {
+					for _, k := range advertisedKeys(row) {
+						tp := fx.open(t, width)
+						focusTextStop(tp, stop)
+						before := focusedFieldText(tp)
+						tp.HandleKeyPress(keyMsgFor(t, k))
+						tp.focusIndex = stop
+						assert.Equalf(t, before, focusedFieldText(tp),
+							"%s, width %d, stop %d: the footer offers %q (row %q), and pressing it typed into the field",
+							fx.name, width, stop, k, row)
+					}
+				}
+			}
 		}
-		for i := 0; i < presses; i++ {
-			tp.HandleKeyPress(tea.KeyMsg{Type: tea.KeyTab})
-		}
-		assert.Falsef(t, textStopAt(tp.focusIndex, tp.capApplies()),
-			"stop %d advertised %d tab press(es); following them must land where r/x/D fire, not on another typing field", stop, presses)
-		landed := footer()
-		assert.NotContainsf(t, landed, "→",
-			"stop %d → stop %d: the verbs are live here — no path qualifier remains: %q", stop, tp.focusIndex, landed)
-		assert.Containsf(t, landed, "r run",
-			"stop %d → stop %d: the landed stop must advertise the verbs that now fire: %q", stop, tp.focusIndex, landed)
 	}
 }

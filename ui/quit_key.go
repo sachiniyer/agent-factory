@@ -10,7 +10,3 @@ import (
 func configuredQuitKey(msg tea.KeyMsg) bool {
 	return key.Matches(msg, keys.GlobalKeyBindings[keys.KeyQuit])
 }
-
-func configuredQuitHelp() string {
-	return keys.GlobalKeyBindings[keys.KeyQuit].Help().Key
-}

@@ -319,10 +319,12 @@ func automationsConsumesMutationVerb(msg tea.KeyMsg) bool {
 // centered modal overlay, preselecting the in-rail cursor's task and dropping
 // straight into that task's editable config in a single action (#1249) — no
 // second keypress to enter edit mode. The edit form still handles the selected
-// task's list verbs (`r` run now, `x` toggle, `D` delete) and advertises Esc
-// as the way back to the list, so the one-step edit flow does not hide the
-// run-now path (#1288). When there are no tasks the overlay stays in list mode
-// so `n` can create the first one.
+// task's list verbs (`r` run now, `x` toggle, `D` delete) at its selector
+// stops, so the one-step edit flow does not hide the run-now path (#1288). On
+// the Name field it opens on, those letters type, so that footer names only
+// typing, tab and Esc back to the list, where `n` and `r` are live (#6400).
+// When there are no tasks the overlay stays in list mode so `n` can create
+// the first one.
 func (m *home) showTasksOverlay() (tea.Model, tea.Cmd) {
 	sp := m.automations.TaskPane()
 	if idx := m.automations.SelectedTaskIndex(); idx >= 0 {

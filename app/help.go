@@ -339,7 +339,10 @@ func (h helpTypeGeneral) toContentWidth(contentWidth int) string {
 				helpKey(keys.KeySetBackend) + "/" + helpKey(keys.KeySetAccount),
 				"New session: agent · prompt · backend · account"},
 			{helpKey(keys.KeySwitchProject), "Switch projects"},
-			{helpKey(keys.KeyTaskList), "Manage tasks · n create · r run"},
+			// m opens the selected task's edit form with Name focused (#1249),
+			// so n and r there type into the name. They are live in the list,
+			// which esc reaches, and the row says so (#6400).
+			{helpKey(keys.KeyTaskList), "Edit a task · esc for the list: n new · r run"},
 			{helpKey(keys.KeyKill), "Delete session · its af-owned worktree and branch are removed"},
 			{helpKey(keys.KeyHandoff), "Hand off to another agent"},
 			{helpKey(keys.KeySearch), "Search sessions"},

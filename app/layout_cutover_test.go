@@ -214,8 +214,12 @@ func TestLayoutCutover_EnterOpensTaskInEditMode(t *testing.T) {
 		"the overlay opens the cursor's task straight into its edit form")
 	assert.NotContains(t, view, "Edit Task 2")
 	assert.Contains(t, view, "beta-task", "the form is prefilled with the selected task")
-	assert.Contains(t, view, "run now",
-		"the first edit screen must keep the documented run-now path visible (#1288)")
+	// The form opens on Name, a text field, where r types into the name. The
+	// first screen used to advertise "tab → r run now" for #1288, and users
+	// pressed r and renamed the task (#6400). It now names the way to the list
+	// instead, and the verbs show at the stops where they fire.
+	assert.NotContains(t, view, "run now",
+		"the first edit screen lands on Name, where r types: no run verb belongs there (#6400)")
 	assert.Contains(t, view, "esc list",
 		"the edit footer must document how to reach the full list actions")
 

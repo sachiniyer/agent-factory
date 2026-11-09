@@ -133,7 +133,7 @@ stale working file and error envelopes on stderr; they never execute the watch.
 
 ## Task fields
 
-Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane (`m` to open, `n` to create).
+Tasks live in `~/.agent-factory/tasks.json`. Manage them via `af tasks` (JSON CLI) or the TUI Tasks pane: `m` opens the selected task's edit form, and `esc` goes to the list, where `n` creates a task and `r` runs one.
 
 | Field | Meaning |
 |---|---|

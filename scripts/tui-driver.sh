@@ -968,11 +968,19 @@ _af_tab_count() {
 
 # _AF_TASKS_RUN_HINT remains the edit-mode assertion marker. It is deliberately
 # not the open/close anchor: the default list footer hides secondary actions
-# behind `?`, and an empty list has no run action at all (#3995). A focused text
-# field only names the verbs as the destination of the tab steps (#5538), so the
-# editor that opens on Name reads "tab → r run now · …", and below 41 cells that
-# path compacts to "tab → r/x/D ·" — still the run affordance, so both count.
-: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])(r run( now)? ·|r/x/D ·)}"
+# behind `?`, and an empty list has no run action at all (#3995). The editor
+# opens on Name, a text field, and a text field's footer lists no verb at all
+# (#6400): r would type into it. The run action shows from the first selector
+# stop, the Trigger row one Tab on, as "r run now ·" or, below 42 cells,
+# "r run ·".
+: "${_AF_TASKS_RUN_HINT:=(^|[^[:alnum:]])r run( now)? ·}"
+
+# _AF_TASKS_TEXT_STOP_HINT is the editor's footer while a text field has focus:
+# "type to edit · tab next · esc list", which compacts to "tab next · esc list"
+# below 34 cells. Waiting on it proves the editor is up on a text stop before a
+# step refutes the run hint there, so the refute cannot pass on a frame that
+# has not painted yet.
+: "${_AF_TASKS_TEXT_STOP_HINT:=(^|[^[:alnum:]])tab next · esc list}"
 
 # _AF_TASKS_LIST_TITLE is only the list/edit discriminator used by the self-test
 # before revealing secondary list actions. It is NOT the open/close anchor: the
@@ -996,10 +1004,11 @@ _af_tab_count() {
 # task_pane_edit.go; unlike the title, the footer survives the 80x10 form scroll.
 #
 # The edit form's action row is contextual and width-tiered (#5538), so no verb
-# fragment anchors it any more: at a text stop the verbs compact to
-# "tab → r/x/D · esc list" below 41 cells and to "esc list" alone below 22, and
-# neither tier says "x toggle". What every tier at every focus stop keeps is
-# esc's destination, `esc list` — the label the product pins at all nine stops
+# fragment anchors it any more: a text stop lists no verb (#6400), only
+# "type to edit · tab next · esc list", compacting to "tab next · esc list" and
+# then to "esc list" alone, and no tier says "x toggle". What every tier at
+# every focus stop keeps is esc's destination, `esc list`, the label the
+# product pins at all nine stops
 # (TestTaskPaneEditActionFooterFollowsFocus) and one no other built-in dialog
 # prints (they say esc back, esc cancel or esc close), so it anchors the edit
 # form. The one row without it, a selector stop's narrowest
@@ -1291,8 +1300,8 @@ af_close_config() {
 }
 
 # af_add_task <name> — seed a minimal valid cron task through the overlay's
-# create form, so a later af_open_tasks lands on the EDIT-mode overlay whose
-# narrow footer shows `r run` (the #1757 flow). Opens the tasks overlay (list
+# create form, so a later af_open_tasks lands on the EDIT-mode overlay, whose
+# footer shows `r run` one Tab past Name (the #1757 flow). Opens the tasks overlay (list
 # mode when empty), fills name + cron expression + prompt (the path field
 # pre-fills with the launch repo, a valid git repo), submits, and waits for the
 # new task's row to appear. Leaves the overlay open in list mode.

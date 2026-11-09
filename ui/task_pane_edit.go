@@ -116,21 +116,6 @@ func textStopAt(focusIndex int, capApplies bool) bool {
 	return false
 }
 
-// tabsToVerbStop counts the Tab presses from the focused stop to the next
-// selector/button stop where the list verbs fire. It walks the same forward
-// wraparound KeyTab applies in handleEditMode, so the count the footer
-// advertises is derived from the real stop order — it cannot silently lie if
-// a text stop is inserted, removed, or reordered. Only meaningful at text
-// stops; it always terminates because non-text stops exist.
-func (s *TaskPane) tabsToVerbStop() int {
-	for n := 1; n <= taskFocusCount; n++ {
-		if !textStopAt((s.focusIndex+n)%taskFocusCount, s.capApplies()) {
-			return n
-		}
-	}
-	return 0
-}
-
 func (s *TaskPane) handleEditMode(msg tea.KeyMsg) bool {
 	// Retain unsaved form text after a failed refresh, but do not act on the
 	// stale selected task until a successful refresh restores availability.
@@ -538,57 +523,53 @@ func (s *TaskPane) renderEditMode() string {
 	b.WriteString("\n")
 	markEnd(taskFocusSave)
 	b.WriteString("\n")
-	quitHint := configuredQuitHelp() + " quit"
+	// Every hint below names only keys that do what it says at the focused
+	// stop (#6400). Two keys are never advertised for that reason. The
+	// configured quit key is gated on !IsEditing && !IsCreating in
+	// handleStateTasks (#1961), so it types into a text field and is dead at
+	// every other form stop. And Enter types a newline into the prompt
+	// (handleEditMode), so the prompt's hints leave the submit key out.
 	if s.creating {
-		hint := "tab/shift+tab fields · enter create · esc cancel · " + quitHint
-		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "tab fields · enter · esc cancel · " + quitHint
+		tiers := []string{
+			"tab/shift+tab fields · enter create · esc cancel",
+			"tab fields · enter create · esc cancel",
+			"tab fields · esc cancel",
 		}
-		b.WriteString(ActionHint(fitLine(hint, s.width)))
+		if s.focusIndex == taskFocusPrompt {
+			tiers = []string{"tab/shift+tab fields · esc cancel", "tab fields · esc cancel"}
+		}
+		b.WriteString(ActionHint(fitLine(firstFittingTier(tiers, s.width), s.width)))
 	} else if unavailable {
 		b.WriteString(s.unavailableEditNotice())
 		b.WriteString("\n")
 		b.WriteString(ActionHint(fitLine("tab fields · typing · esc back", s.width)))
 	} else {
-		hint := "tab/shift+tab fields · enter save"
-		if s.width > 0 && lipgloss.Width(hint) > s.width {
-			hint = "tab fields · enter save"
+		hint := []string{"tab/shift+tab fields · enter save", "tab fields · enter save"}
+		if s.focusIndex == taskFocusPrompt {
+			hint = []string{"tab/shift+tab fields", "tab fields"}
 		}
-		b.WriteString(ActionHint(fitLine(hint, s.width)))
+		b.WriteString(ActionHint(fitLine(firstFittingTier(hint, s.width), s.width)))
 		b.WriteString("\n")
 		// The action row is contextual (#5538), the same contract the Trigger
 		// selector's "←/→ switch" already follows: r/x/D fire only from
-		// selector/button stops — at a text stop they are typed input (#4838) —
-		// and the configured quit key is gated on !IsEditing in handleStateTasks
-		// (#1961), so it is dead at every edit stop and never advertised.
+		// selector/button stops. At a text stop they are typed input (#4838).
 		var tiers []string
 		if s.textFocusStop() {
-			// A text stop still names the run-now path (#1288: the overlay
-			// opens straight onto Name, and the first screen must say how to
-			// reach the verbs) — but only as the destination of the tab steps,
-			// so nothing reads as a key that fires inside the field. The count
-			// is computed, not fixed at one: several text stops sit between
-			// selectors, so a bare "tab →" would promise a single press that
-			// lands on another typing field.
-			prefix := "tab → "
-			if n := s.tabsToVerbStop(); n > 1 {
-				prefix = fmt.Sprintf("tab×%d → ", n)
-			}
+			// A text stop lists no verb at all, not even as a destination
+			// (#6400). The row used to read "tab → r run now · …", and
+			// play-testers pressed r and renamed the task. It names only
+			// what works in the field: typing, tab to move on, esc for the
+			// list, where n and r are live. The verbs appear on this row at
+			// the stops where they fire. The schedule picker prints its own
+			// per-cell key hint above, and most of its cells take no typing,
+			// so the row leaves the typing claim to that hint.
 			tiers = []string{
-				prefix + "r run now · x toggle · D delete · esc list",
-				prefix + "r run · x toggle · D del · esc list",
-				prefix + "r/x/D · esc list",
+				"type to edit · tab next · esc list",
+				"tab next · esc list",
 				"esc list",
 			}
-			// A watch task can't be manually run (#1758): drop "r run" so the
-			// editor never advertises an action that always fails.
-			if s.selectedTaskIsWatch() {
-				tiers = []string{
-					prefix + "x toggle · D delete · esc list",
-					prefix + "x toggle · D del · esc list",
-					prefix + "x/D · esc list",
-					"esc list",
-				}
+			if s.focusIndex == taskFocusTriggerValue && !s.editTriggerIsWatch {
+				tiers = tiers[1:]
 			}
 		} else {
 			// Three tiers, not two (#3630). The old ladder jumped straight from
@@ -612,17 +593,21 @@ func (s *TaskPane) renderEditMode() string {
 				}
 			}
 		}
-		actions := tiers[len(tiers)-1]
-		for _, tier := range tiers {
-			if s.width <= 0 || lipgloss.Width(tier) <= s.width {
-				actions = tier
-				break
-			}
-		}
-		b.WriteString(ActionHint(fitLine(actions, s.width)))
+		b.WriteString(ActionHint(fitLine(firstFittingTier(tiers, s.width), s.width)))
 	}
 
 	return fitBlockToSize(s.clampFormToHeight(b.String(), focusStart, focusEnd), s.width, 0, 0)
+}
+
+// firstFittingTier returns the first hint in tiers (longest first) that fits
+// width, or the last one when none does. An unsized pane takes the full hint.
+func firstFittingTier(tiers []string, width int) string {
+	for _, tier := range tiers {
+		if width <= 0 || lipgloss.Width(tier) <= width {
+			return tier
+		}
+	}
+	return tiers[len(tiers)-1]
 }
 
 // clampFormToHeight windows the rendered edit form to the pane height, keeping
