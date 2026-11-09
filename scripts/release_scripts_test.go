@@ -186,8 +186,9 @@ func TestValidateStableVersionScript(t *testing.T) {
 //
 // The script no longer tags (#5159): `gh release create --target` creates the
 // tag atomically with the published release, so the tests assert the bump is
-// pushed and HEAD — the sha the workflow tags — sits on origin's master tip,
-// with NO tag on the remote either way.
+// pushed, HEAD — the sha the workflow tags — is on origin's master, and NO tag
+// is on the remote either way. What HEAD holds when master moved (the built
+// tree, not the moved tip) is release_bump_test.go's subject (#7018).
 
 // isolatedGitEnv returns an environment that pins git to a throwaway HOME (no
 // user/system config — no signing, no hooks) and a deterministic identity, so
@@ -319,70 +320,11 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 		t.Fatalf("concurrent file content missing from master: %q", got)
 	}
 
-	// HEAD is exactly what landed on master — the sha the workflow passes to
-	// `gh release create --target` — and NO tag was pushed: the tag is created
-	// atomically with the release (#5159).
-	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
-		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
-	}
-	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
-		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
-	}
-}
-
-// TestReleaseBumpIdempotentWhenBumpAlreadyLanded covers re-running the job after
-// a previous run landed the bump commit on master but died before the release
-// was published: the re-run must converge (drop its duplicate bump, report the
-// landed commit) rather than double-bump or abort.
-func TestReleaseBumpIdempotentWhenBumpAlreadyLanded(t *testing.T) {
-	if runtime.GOOS == "windows" {
-		t.Skip("release-bump.sh is POSIX sh; not run on Windows")
-	}
-	script := filepath.Join(repoRoot(t), ".github", "scripts", "release-bump.sh")
-	base := t.TempDir()
-	home := filepath.Join(base, "home")
-	env := isolatedGitEnv(home)
-
-	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
-
-	// A previous release run already landed the bump on master (no release
-	// published — e.g. the run died between push and publish).
-	// Give it a fixed EARLIER date so its commit hash differs from the re-run's
-	// bump — otherwise both bumps collide to one object and the rebase-drop
-	// path is never exercised.
-	other := filepath.Join(base, "other")
-	runGitEnv(t, base, env, "clone", origin, other)
-	writeFile(t, filepath.Join(other, "main.go"),
-		"package main\n\nconst (\n\tversion = \"1.0.1\"\n)\n")
-	prevEnv := isolatedGitEnv(home,
-		"GIT_AUTHOR_DATE=2020-01-01T00:00:00", "GIT_COMMITTER_DATE=2020-01-01T00:00:00")
-	runGitEnv(t, other, prevEnv, "add", "main.go")
-	runGitEnv(t, other, prevEnv, "commit", "-m", "chore: release v1.0.1")
-	runGitEnv(t, other, prevEnv, "push", "origin", "master")
-
-	// Re-run the job (later fixed date → distinct bump commit).
-	cmd := exec.Command(script, "1.0.1")
-	cmd.Dir = work
-	cmd.Env = isolatedGitEnv(home,
-		"GIT_AUTHOR_DATE=2020-12-31T00:00:00", "GIT_COMMITTER_DATE=2020-12-31T00:00:00")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("release-bump.sh failed on an idempotent re-run: %v\n%s", err, out)
-	}
-
-	// Exactly one bump commit on master (no double-bump), HEAD sits on that
-	// landed commit, and no tag was pushed — tagging happens at release
-	// publish (#5159).
-	masterLog := gitOutEnv(t, origin, env, "log", "--format=%s", "master")
-	if n := strings.Count(masterLog, "chore: release v1.0.1"); n != 1 {
-		t.Fatalf("expected exactly one bump commit on master, got %d:\n%s", n, masterLog)
-	}
-	if got := gitOutEnv(t, origin, env, "show", "master:main.go"); !strings.Contains(got, `version = "1.0.1"`) {
-		t.Fatalf("main.go on master is not 1.0.1:\n%s", got)
-	}
-	if head, tip := gitOutEnv(t, work, env, "rev-parse", "HEAD"),
-		gitOutEnv(t, origin, env, "rev-parse", "master"); head != tip {
-		t.Fatalf("HEAD (%s) does not match landed master tip (%s)", head, tip)
+	// HEAD — the sha the workflow passes to `gh release create --target` — is
+	// on master, so the release can target it, and NO tag was pushed: the tag
+	// is created atomically with the release (#5159).
+	if head := gitOutEnv(t, work, env, "rev-parse", "HEAD"); !isAncestor(t, origin, env, head, "master") {
+		t.Fatalf("HEAD (%s) is not on the landed master", head)
 	}
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed — tagging moved to the release itself (#5159): %q", tags)
