@@ -279,7 +279,7 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
 
 	// A PR squash-merges to master DURING the build window — after `work` was
-	// checked out. It touches a different file, so the one-line bump rebases
+	// checked out. It touches a different file, so the one-line bump merges
 	// cleanly (as any real merge would; only a rival release touches the
 	// version line).
 	other := filepath.Join(base, "other")
@@ -298,7 +298,7 @@ func TestReleaseBumpToleratesMidBuildMerge(t *testing.T) {
 		t.Fatalf("release-bump.sh failed on a mid-build merge (#1927): %v\n%s", err, out)
 	}
 	// A real non-fast-forward is the one rejection that earns the "master
-	// advanced" line and the rebase-retry (#6747): the log must name what
+	// advanced" line and the merge-retry (#6747): the log must name what
 	// actually failed.
 	if !strings.Contains(string(out), "master advanced during the build") {
 		t.Fatalf("a non-fast-forward push was not reported as master advancing:\n%s", out)
@@ -353,7 +353,7 @@ func runReleaseScript(t *testing.T, dir string, env []string, version string) (o
 // must give up non-zero after MAX_ATTEMPTS, not spin forever, and must leave
 // the remote pristine (no bump on master, no tag). A fake `git` on PATH
 // answers every push with the non-fast-forward rejection while delegating
-// everything else to the real binary, so the fetch and rebase inside the loop
+// everything else to the real binary, so the fetch and merge inside the loop
 // still run for real. This fails CI if a future edit drops the MAX_ATTEMPTS
 // guard and reintroduces an unbounded loop (the run would hang and hit the
 // timeout).
@@ -414,7 +414,7 @@ exec "`+realGit+`" "$@"
 
 // TestReleaseBumpFailsOnAuthWithoutRebase is the #6747 regression: a push that
 // fails for anything OTHER than a non-fast-forward must fail on git's own
-// error — no "master advanced" misdiagnosis, no rebase-retry loop. The
+// error — no "master advanced" misdiagnosis, no merge-retry loop. The
 // stand-in is the exact 2026-11-04 incident signature (#6744): the ssh
 // transport rejects the deploy key. A fake GIT_SSH_COMMAND emits
 // "Permission denied (publickey)", records every invocation so a retry fetch
@@ -467,7 +467,7 @@ exit 255
 
 	// Exactly one transport attempt — the failed push. Git also runs an
 	// `ssh -G` variant probe per connection, so count only real transports
-	// (the pack commands); a rebase-retry would add the loop's
+	// (the pack commands); a merge-retry would add the loop's
 	// `git fetch origin master` (upload-pack) and further pushes.
 	raw, err := os.ReadFile(sshCalls)
 	if err != nil {
@@ -490,8 +490,8 @@ exit 255
 }
 
 // TestReleaseBumpFailsLoudlyOnGenuineConflict locks the fail-loud behavior when
-// the rebase genuinely conflicts — a rival commit rewrote main.go's version
-// line, so the one-line bump cannot replay. The script must abort non-zero and
+// the merge genuinely conflicts — a rival commit rewrote main.go's version
+// line, so the one-line bump cannot be merged in. The script must abort non-zero and
 // must NOT clobber the rival's commit (no force-push) or push a tag. This fails
 // CI if someone "hardens" the loop into a silent `git push --force` over
 // another release.
@@ -506,7 +506,7 @@ func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	origin, work := seedReleaseRemote(t, base, env, "1.0.0")
 
 	// A rival release lands on master mid-build and rewrites the SAME version
-	// line to a different value, so our bump's rebase must conflict.
+	// line to a different value, so merging our bump must conflict.
 	rival := filepath.Join(base, "rival")
 	runGitEnv(t, base, env, "clone", origin, rival)
 	writeFile(t, filepath.Join(rival, "main.go"),

@@ -65,6 +65,19 @@ commit in the same call. A failed preflight or build therefore never leaves a
 dangling commit or tag on `master`, and a failure mid-publish leaves at most
 an untagged bump commit, never a tag with no release (#5159).
 
+The bump commit is always parented on the commit the artifacts were built
+from, so the tag's source, its generated release notes and its binaries hold
+the same code (#7018). Merges keep landing while a release builds. When one
+does, the bump reaches `master` through a merge commit of the moved tip and
+the tagged commit: `master` gets only the `main.go` edit, and the stable tag
+stays in `master`'s history, where previews (`latest-released-tag.sh`) and the
+next release's generated notes look for it. A PR that merged during the build
+is therefore not in that release. It ships in the next one, and that
+release's notes list it. This merge is the only non-linear commit on `master`.
+The release deploy key bypasses the branch ruleset that otherwise requires a
+linear history. A re-run of the same build reproduces the same bump commit,
+finds it already on `master`, and pushes nothing.
+
 Releasing the current preview base as-is (e.g. `1.0.138` while
 `1.0.138-preview-9` exists) is supported — it "promotes" what the preview
 channel has been testing, and subsequent previews move to `1.0.139-preview-1`.
