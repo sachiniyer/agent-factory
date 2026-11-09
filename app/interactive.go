@@ -195,6 +195,27 @@ func (m *home) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.setInteractive(false)
 		return m, nil
 	}
+	// While interactive, Esc exits the FOCUSED pane's scroll mode instead of
+	// forwarding into the child, keeping the pane's "Scroll · Esc exits" header
+	// cue truthful (#1748 follow-up). Scroll mode is only reachable over a live
+	// pane whose child is not mouse-tracking (the wheel hand-back), so an Esc
+	// intercepted here is at a primary-screen prompt, never an alt-screen app —
+	// the one class for which intercepting Esc is both safe and matches the
+	// advertised cue. Mirrors the nav-mode scroll-exit handler exactly; a pane
+	// NOT in scroll mode falls through and forwards Esc to the child unchanged.
+	if msg.Type == tea.KeyEsc {
+		if pane, bound := m.focusedContentPane(); pane != nil && pane.IsInScrollMode() {
+			if err := pane.ResetToNormalMode(bound); err != nil {
+				return m, m.handleError(err)
+			}
+			if m.panePreviewTxn != nil {
+				m.suppressActivePanePreview()
+				m.cancelPanePreview(true)
+				return m, m.panesRefresh(m.attached.Load())
+			}
+			return m, m.selectionChanged()
+		}
+	}
 	// The attachment may have died since the last tick (client killed, pane
 	// pruned). Re-check before forwarding; a broken premise drops to nav and
 	// swallows this one keystroke rather than typing into nothing.
