@@ -191,3 +191,93 @@ func TestControlServer_DeliverPrompt_AbsolutePathAutoCreatesInNamedRepoNotCwd(t 
 	assert.JSONEq(t, "[]", string(cwdRaw),
 		"the cwd repo must NOT receive a session from a delivery addressed to an absolute path")
 }
+
+// TestControlServer_DeliverPrompt_TaskOriginPreservesTrailingWhitespace pins
+// that a task fire (TaskOrigin) replays a stored ProjectPath byte-for-byte:
+// ResolveDaemonHostPath trims surrounding whitespace, which would rewrite a
+// trailing-space repo path ("/p/repo ") to its trimmed sibling ("/p/repo") — a
+// different repo — and break the retained-RepoID check for a bound task on every
+// fire (delivery.go:261). A task's RepoID is computed from the raw bytes via
+// RepoFromPath (task.repoIDForPath, no trim), so the boundary must not trim a
+// path a task's retained identity depends on. Mirrors the CLI contract pinned by
+// api.TestTasksUpdate_ProjectPathPreservesWhitespace.
+func TestControlServer_DeliverPrompt_TaskOriginPreservesTrailingWhitespace(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+
+	// Sibling repositories whose names differ only by a trailing space, so the
+	// trimmed spelling resolves to a real — but wrong — repo.
+	parent := filepath.Join(testguard.CanonicalTempDir(t), "parent")
+	trimmedRepoPath := filepath.Join(parent, "repo")
+	spacedRepoPath := filepath.Join(parent, "repo ")
+	cloneRepoTemplate(t, trimmedRepoPath)
+	cloneRepoTemplate(t, spacedRepoPath)
+	require.NotEqual(t, trimmedRepoPath, spacedRepoPath,
+		"the two spellings must be distinct paths")
+	spacedRepo, err := config.RepoFromPath(spacedRepoPath)
+	require.NoError(t, err)
+	trimmedRepo, err := config.RepoFromPath(trimmedRepoPath)
+	require.NoError(t, err)
+	require.NotEqual(t, spacedRepo.ID, trimmedRepo.ID,
+		"the two spellings must be distinct repositories")
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	// Register an existing session in the spaced (trailing-space) repo that the
+	// task fire must deliver into.
+	registerStarted(t, manager, spacedRepo.ID, spacedRepoPath, "worker",
+		session.NewFakeBackend(), true, session.Running)
+
+	cs := &controlServer{manager: manager}
+	var resp DeliverPromptResponse
+	err = cs.DeliverPrompt(DeliverPromptRequest{
+		Title:      "worker",
+		RepoPath:   spacedRepoPath,
+		Program:    "claude",
+		Prompt:     "do something",
+		TaskRepoID: spacedRepo.ID,
+		TaskOrigin: true,
+	}, &resp)
+	require.NoError(t, err,
+		"a task fire must deliver to the trailing-space repo named by the stored path, not be trimmed to the sibling and fail the retained-RepoID check")
+	assert.Equal(t, "sent", resp.Status,
+		"the existing target session in the trailing-space repo received the prompt")
+
+	// The trimmed sibling repo must NOT receive a session from a task fire aimed
+	// at the trailing-space repo.
+	trimmedRaw, err := config.LoadRepoInstances(trimmedRepo.ID)
+	require.NoError(t, err)
+	assert.JSONEq(t, "[]", string(trimmedRaw),
+		"the trimmed sibling repo must not gain a session from a trailing-space task fire")
+}
+
+// TestControlServer_DeliverPrompt_TaskOriginRefusesRelative pins that the
+// task-origin path-preservation branch still refuses a relative path: the
+// daemon resolves repo_path via `git -C <path>` against its own cwd, so a
+// relative task path must be rejected at the boundary even though it is not
+// trimmed.
+func TestControlServer_DeliverPrompt_TaskOriginRefusesRelative(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installInstantBackend(t)
+	cwdRepo := filepath.Join(testguard.CanonicalTempDir(t), "cwd-repo")
+	cloneRepoTemplate(t, cwdRepo)
+	t.Chdir(cwdRepo)
+
+	manager, err := NewManager(config.DefaultConfig())
+	require.NoError(t, err)
+	cs := &controlServer{manager: manager}
+
+	var resp DeliverPromptResponse
+	err = cs.DeliverPrompt(DeliverPromptRequest{
+		Title:      "worker",
+		RepoPath:   ".",
+		Program:    "claude",
+		Prompt:     "do something",
+		TaskRepoID: "anything",
+		TaskOrigin: true,
+	}, &resp)
+	require.Error(t, err, "a relative task RepoPath must be refused, not resolved against the daemon's cwd")
+	assert.Contains(t, err.Error(), "must be absolute",
+		"a relative task RepoPath must produce the actionable refusal")
+	assert.Empty(t, resp.Status, "a refused delivery must not report a status")
+}
