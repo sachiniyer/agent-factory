@@ -46,12 +46,18 @@ func TestSetupDoctorReportsMissingDefaultProgram(t *testing.T) {
 	home := t.TempDir()
 	binDir := t.TempDir()
 	writeExecutable(t, binDir, "tmux", "#!/bin/sh\nif [ \"$1\" = \"-V\" ]; then echo 'tmux 3.4'; exit 0; fi\nexit 0\n")
+	linkRealGitInto(t, binDir)
 
 	t.Setenv("AGENT_FACTORY_HOME", home)
 	t.Setenv("PATH", binDir)
 	require.NoError(t, os.MkdirAll(home, 0o755))
 	require.NoError(t, os.WriteFile(filepath.Join(home, config.TomlConfigFileName),
 		[]byte("default_program = \"claude\"\n\n[program_overrides]\nclaude = \"/missing/claude\"\n"), 0o644))
+	// Probe a controlled non-repo instead of the ambient checkout so the repo
+	// probe returns ErrNotGitRepository hermetically and checkAgentPrograms
+	// falls back to the written global cfg without overlaying a developer's
+	// in-repo/personal-project config (#6995 review).
+	chdir(t, t.TempDir())
 
 	report, err := Run(Options{
 		Setup:     true,
@@ -71,7 +77,10 @@ func TestSetupDoctorReportsMissingDefaultProgram(t *testing.T) {
 func TestDoctorAgentBinaryScanIncludesAmp(t *testing.T) {
 	binDir := t.TempDir()
 	fakeAmp := writeExecutable(t, binDir, "amp", "#!/bin/sh\nexit 0\n")
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	cfg := &config.Config{
 		DefaultProgram:   tmux.ProgramAmp,
@@ -104,7 +113,10 @@ func TestDoctorAgentBinaryScanIncludesAmp(t *testing.T) {
 func TestDoctorAgentBinaryScanIncludesOpencode(t *testing.T) {
 	binDir := t.TempDir()
 	fakeOpencode := writeExecutable(t, binDir, "opencode", "#!/bin/sh\nexit 0\n")
+	linkRealGitInto(t, binDir)
 	t.Setenv("PATH", binDir)
+	// Probe a controlled non-repo instead of the ambient checkout (#6995 review).
+	chdir(t, t.TempDir())
 
 	cfg := &config.Config{
 		DefaultProgram:   tmux.ProgramOpencode,
@@ -155,6 +167,19 @@ func writeExecutable(t *testing.T, dir, name, content string) string {
 	path := filepath.Join(dir, name)
 	require.NoError(t, os.WriteFile(path, []byte(content), 0o755))
 	return path
+}
+
+// linkRealGitInto places a symlink to the real git binary in dir so the repo
+// probe can run when PATH is set to dir only. Tests that replace PATH to
+// control which agent binaries are visible must call this to keep the repo
+// probe functional — otherwise the probe fails with an unanswered "git
+// missing" error that the layer-selection fix correctly classifies as "repo
+// not inspectable", skipping the agent checks the test is exercising.
+func linkRealGitInto(t *testing.T, dir string) {
+	t.Helper()
+	gitPath, err := exec.LookPath("git")
+	require.NoError(t, err, "git must be on PATH for the test to run")
+	require.NoError(t, os.Symlink(gitPath, filepath.Join(dir, "git")))
 }
 
 func chdir(t *testing.T, dir string) {

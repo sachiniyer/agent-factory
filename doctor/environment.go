@@ -1,8 +1,10 @@
 package doctor
 
 import (
+	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"runtime"
 	"strings"
@@ -38,7 +40,11 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 
 	reportConfigValidity(report, load, cfgErr)
 	checkHomeHealth(ctx, report)
-	repoRoot, repoErr := currentRepoRoot()
+	repo, repoErr := ctx.repoProbe()
+	var repoRoot string
+	if repoErr == nil {
+		repoRoot = repo.Root
+	}
 	mode := worktreeMode(cfg, load.Missing, load.EmptyStub)
 	report.AddHeader("repo", repoHeader(repoRoot, repoErr, mode))
 	checkWorktreeMode(ctx, report, repoRoot, repoErr, mode)
@@ -48,7 +54,7 @@ func checkConfigAndStorage(ctx *scanContext, report *Report) *config.Config {
 func checkEnvironment(ctx *scanContext, report *Report, cfg *config.Config) {
 	checkTmuxEnvironment(report)
 	checkTmuxServerState(ctx, report)
-	checkAgentBinaries(cfg, report)
+	checkAgentBinariesImpl(ctx, cfg, report)
 }
 
 func reportConfigValidity(report *Report, load config.ReadOnlyConfigLoad, err error) {
@@ -123,12 +129,39 @@ func checkStorageDir(report *Report, path, name string) {
 	}
 }
 
+// errCurrentDirUnreadable marks a repo probe that failed before reaching git
+// because the process's working directory could not be resolved (e.g. it was
+// removed mid-run). Such a failure is neither "outside a repository" nor a git
+// refusal, so the not-inspectable detail must not label it "git's error" or
+// advise safe.directory — neither can fix a missing cwd (#6995 review).
+var errCurrentDirUnreadable = errors.New("current directory could not be determined")
+
 func currentRepoContext() (*config.RepoContext, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
-		return nil, err
+		// A getwd failure (e.g. the process's working directory was removed
+		// mid-run) happens before git is ever asked anything, so it is neither
+		// "outside a repository" nor a git refusal. Mark it so the
+		// not-inspectable detail does not label it "git's error" or advise
+		// safe.directory — neither can fix a missing cwd (#6995 review).
+		return nil, fmt.Errorf("%w: %v", errCurrentDirUnreadable, err)
 	}
 	return config.RepoFromPath(cwd)
+}
+
+// repoProbe returns the run's single memoized repository-context probe.
+// Sharing one probe across the repo header, the worktree-mode row, and the
+// agent-config row keeps them from disagreeing when the probe is flaky: a
+// first probe that fails while a later one succeeds would otherwise leave the
+// header saying "repo not inspectable" while the agent checks PASS and the run
+// exits 0 — the worktree check skipped on a probe the agent checks never saw
+// fail (#6995 review).
+func (c *scanContext) repoProbe() (*config.RepoContext, error) {
+	if !c.repoProbed {
+		c.repo, c.repoErr = currentRepoContext()
+		c.repoProbed = true
+	}
+	return c.repo, c.repoErr
 }
 
 func currentRepoRoot() (string, error) {
@@ -179,6 +212,43 @@ func isLocalBackend(backend string) bool {
 	return backend == "" || backend == config.BackendLocal
 }
 
+// repoNotInspectableDetail words the finding for a repo probe that failed for
+// any reason OTHER than ErrNotGitRepository: the in-repo config layer and its
+// backend could not be checked, so the doctor must not silently validate the
+// global layer's programs. The unanswered-probe case uses the resolver's claim
+// sentence (config.RepoProbeUnansweredClaim); an answered refusal surfaces
+// git's own error text. rerunCmd is the command the user should rerun after
+// addressing the git error ("af doctor --setup" for the setup profile, "af
+// doctor" for the default profile).
+func repoNotInspectableDetail(cwd string, repoErr error, rerunCmd string) (detail, remediation string) {
+	if errors.Is(repoErr, errCurrentDirUnreadable) {
+		// A getwd failure predates git: safe.directory and "run from inside a
+		// repository" cannot fix a cwd that no longer exists, so name the
+		// real cause and the matching remedy (#6995 review).
+		return fmt.Sprintf("could not determine the current directory: %v; the in-repo config layer and its backend could not be checked", repoErr),
+			"move to a directory that still exists and is readable, then rerun `" + rerunCmd + "`"
+	}
+	if config.RepoProbeUnanswered(repoErr) {
+		return fmt.Sprintf("%s — the in-repo config layer and its backend could not be checked",
+				config.RepoProbeUnansweredClaim("the current directory", cwd)),
+			"rerun `" + rerunCmd + "`; if it persists, check that git runs in this directory"
+	}
+	// Surface git's own diagnostic, not just "exit status 128" (the
+	// *exec.ExitError.Error() text), so the user can pick the matching
+	// remedy — dubious ownership, an unreadable .git, an invalid gitfile —
+	// mirroring checkGit's setup-profile handling (#6954 review, #6995
+	// review).
+	gitErrDetail := fmt.Sprintf("%v", repoErr)
+	var exitErr *exec.ExitError
+	if errors.As(repoErr, &exitErr) {
+		if stderr := strings.TrimSpace(string(exitErr.Stderr)); stderr != "" {
+			gitErrDetail = stderr
+		}
+	}
+	return fmt.Sprintf("could not inspect the repository at %s — git's error: %s; the in-repo config layer and its backend could not be checked", cwd, gitErrDetail),
+		"address the git error above (e.g. `git config --global --add safe.directory <path>` for an ownership refusal), then rerun `" + rerunCmd + "`"
+}
+
 func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
 	if cfg != nil && cfg.WorktreeRoot != "" {
 		return cfg.WorktreeRoot
@@ -195,15 +265,36 @@ func worktreeMode(cfg *config.Config, missingConfig, emptyStub bool) string {
 
 func repoHeader(repoRoot string, repoErr error, mode string) string {
 	if repoErr != nil {
-		return "n/a (not inside a git repository)"
+		// Only ErrNotGitRepository is a verdict that the path is outside git;
+		// an answered git refusal or an unanswered probe says the repo could
+		// not be inspected, not that there is none (#6995 review). Reporting
+		// "not inside a git repository" for those would contradict the
+		// agent-config finding checkAgentBinaries emits for the same probe.
+		if errors.Is(repoErr, config.ErrNotGitRepository) {
+			return "n/a (not inside a git repository)"
+		}
+		return "n/a (repo not inspectable)"
 	}
 	return fmt.Sprintf("%s (worktree_root: %s)", repoRoot, mode)
 }
 
 func checkWorktreeMode(ctx *scanContext, report *Report, repoRoot string, repoErr error, mode string) {
 	if repoErr != nil {
-		report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: "+repoErr.Error(),
-			"run `af doctor` from inside a git repository", false)
+		if errors.Is(repoErr, config.ErrNotGitRepository) {
+			report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: "+repoErr.Error(),
+				"run `af doctor` from inside a git repository", false)
+			return
+		}
+		// An answered git refusal or an unanswered probe is not a not-a-repo
+		// verdict (#6995 review): the worktree mode cannot be determined until
+		// git is addressed, so advise addressing git — not running from inside
+		// a repository the doctor already tried. Keep this advisory
+		// (problem=false): the actionable finding for the same probe is
+		// recorded by checkAgentBinaries (default profile) or checkGit (setup
+		// profile), and a second actionable row here would double-count one
+		// underlying failure.
+		report.Warn(sectionConfig, "worktrees", "repo-scoped worktree checks skipped: repo not inspectable: "+repoErr.Error(),
+			"address the git error above, then rerun `af doctor`", false)
 		return
 	}
 
@@ -247,6 +338,13 @@ func checkTmuxEnvironment(report *Report) {
 }
 
 func checkAgentBinaries(cfg *config.Config, report *Report) {
+	// Thin wrapper for callers (and tests) that resolve agent binaries in
+	// isolation: it runs a self-contained probe. Production code shares one
+	// probe across the default profile via checkAgentBinariesImpl + ctx.
+	checkAgentBinariesImpl(&scanContext{}, cfg, report)
+}
+
+func checkAgentBinariesImpl(ctx *scanContext, cfg *config.Config, report *Report) {
 	// Resolve the effective config the way session launch does: when the doctor
 	// is inside a git repo, merge the in-repo layer over the global config
 	// (config.ResolveConfigForRepoInspectionWithGlobalNonStrict) so the command and
@@ -262,10 +360,28 @@ func checkAgentBinaries(cfg *config.Config, report *Report) {
 	// repo the launch directory cannot be determined, so today's CheckCommand
 	// is kept and any failure is reported with an honest message instead of
 	// install/reinstall guidance (#6487).
-	repo, repoErr := currentRepoContext()
+	repo, repoErr := ctx.repoProbe()
 	workspace := ""
 	if repoErr == nil {
 		workspace = repo.Root
+	}
+	// Classify the repo probe the way checkGit does (#3794's twin): only
+	// ErrNotGitRepository entitles the agent checks to fall back to the
+	// global config layer. An answered git refusal or an unanswered probe
+	// says nothing about whether this is a repository, so the in-repo layer
+	// and its backend could not be inspected — report that as an actionable
+	// config failure instead of silently validating the global layer's
+	// programs, which the repo's sessions will not launch (config/repo.go,
+	// ErrNotGitRepository doc).
+	if repoErr != nil && !errors.Is(repoErr, config.ErrNotGitRepository) {
+		cwd := "<unknown>"
+		if wd, err := os.Getwd(); err == nil {
+			cwd = wd
+		}
+		detail, remediation := repoNotInspectableDetail(cwd, repoErr, "af doctor")
+		report.AddHeader("agents", "n/a (repo not inspectable)")
+		report.Fail(sectionConfig, "agent-config", detail, remediation)
+		return
 	}
 	effective, backend, resolved, resolveErr := resolveEffectiveConfig(cfg, repo)
 	if resolveErr != nil {
