@@ -3,9 +3,10 @@
 This is P0 of [the polish program](https://github.com/sachiniyer/agent-factory/issues/3906),
 implemented by [#3907](https://github.com/sachiniyer/agent-factory/issues/3907).
 Web is the primary surface. The TUI is a smaller operator surface, not a parity target.
-The web remains vanilla TypeScript with no new runtime dependencies. One exception:
-CodeMirror is allowed in the lazy Docs bundle (`web/dist/lazy/docs-editor.js`),
-which loads only when a proposal Docs tab opens. The shell stays dependency-free.
+The web remains vanilla TypeScript with no new runtime dependencies in the
+shell. Lazy chunks under `web/dist/lazy/` (for example CodeMirror in the Docs
+tab's `docs-editor.js`) may carry their own runtime dependencies, loaded
+only when their feature opens. The shell stays dependency-free.
 The only user-facing theme choice will be **Light / Dark / System**: two fixed
 product palettes, with System selecting between them. No per-token overrides,
 custom palettes or colour configuration keys. This document
