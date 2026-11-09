@@ -473,10 +473,10 @@ func TestMouse_DoubleClickTreeRowEntersInteractive(t *testing.T) {
 	clickZone(t, h, zones.TreeInstance(beta.Title))
 	assert.Zero(t, h.store.NumOpenPanes(), "clicks slower than the double-click interval must not enter")
 
-	// Fast second click: the Enter path — pane opens focused; the deferred
-	// activation arrives as enterInteractiveMsg (driven directly: the batched
-	// cmd also carries selectionChanged's capture dispatches, which are not
-	// hermetic — the TestEnterFromTreeOpensPaneAndEntersInteractive pattern).
+	// Fast second click: the Enter path — pane opens focused; with the help
+	// seen, activation is synchronous and a synthetic enterInteractiveMsg on
+	// top is an idempotent re-activation exercising the deferred sink (the
+	// TestEnterFromTreeOpensPaneAndEntersInteractive pattern).
 	clock.advance(time.Second)
 	clickZone(t, h, zones.TreeInstance(beta.Title))
 	clock.advance(50 * time.Millisecond)

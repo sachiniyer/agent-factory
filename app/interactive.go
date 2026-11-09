@@ -53,6 +53,26 @@ type enterInteractiveMsg struct {
 // replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
 // entry key that only surfaced the overlay is never double-forwarded.
 func (m *home) requestInteractive(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
+	// The first-time help defers activation to its dismiss callback, which
+	// runs as a tea.Cmd off the event loop — the pane must travel as an
+	// enterInteractiveMsg so it is re-validated on arrival (#716). With the
+	// help already seen there is no gate to defer THROUGH, and deferring is
+	// a live race: m.interactive stays false until the cmd's msg cycles back
+	// through Update, so a fast follow-up key dispatches as a NAV key in the
+	// window — typing "zx" at a focused pane could hide it via `x` before the
+	// mode owns the keyboard. Activate on the event loop NOW so the next
+	// keystroke is only ever pane input or the mode's own exit. The same
+	// isSwitchTypingKey gate as the enterInteractiveMsg sink applies to the
+	// replay, so the classification lives in exactly one place.
+	interactiveHelpMask := helpTypeInteractive{}.mask()
+	if m.appState.GetHelpScreensSeen()&interactiveHelpMask != 0 {
+		cmd := m.activateInteractive(p)
+		if replayKey != nil && m.interactive && isSwitchTypingKey(*replayKey) {
+			_, replayCmd := m.handleInteractiveKey(*replayKey)
+			cmd = tea.Batch(cmd, replayCmd)
+		}
+		return m, cmd
+	}
 	return m.showHelpScreen(helpTypeInteractive{}, func() tea.Cmd {
 		return func() tea.Msg {
 			msg := enterInteractiveMsg{pane: p}

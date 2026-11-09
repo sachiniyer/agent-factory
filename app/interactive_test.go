@@ -31,8 +31,9 @@ import (
 // ----------------------------------------------------------------------------
 
 // interactiveTestHome is liveTestHome with the first-time interactive help
-// screen marked seen, so Enter activates synchronously through the deferred
-// enterInteractiveMsg instead of parking on the overlay.
+// screen marked seen, so Enter activates synchronously in requestInteractive
+// instead of parking on the overlay (the deferred enterInteractiveMsg is now
+// only the help-dismiss path's payload).
 func interactiveTestHome(t *testing.T) (*home, *session.Instance, *[]*fakeLiveTerm) {
 	t.Helper()
 	h, inst := liveTestHome(t)
@@ -100,7 +101,7 @@ func TestEnterOnFocusedLivePaneEntersInteractive(t *testing.T) {
 // on the input line — a half-typed shell command executes, or an agent's draft
 // prompt is sent — and appends a phantom empty prompt line on every entry.
 // Driven through the real Update path (handleKeyPress → dispatch → handleEnter →
-// the deferred enterInteractiveMsg activation), not the handler directly.
+// requestInteractive's synchronous activation), not the handler directly.
 func TestEnterOnFocusedPaneNeverReachesPTY(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 
@@ -124,8 +125,8 @@ func TestEnterOnFocusedPaneNeverReachesPTY(t *testing.T) {
 // Option 3 keeps: an unbound printable key pressed in nav mode on a focused
 // pane is an implicit switch — it enters interactive mode AND types itself, so
 // starting to type at a pane just works. Driven through the real Update path
-// (handleKeyPress → dispatchKeyAction's unbound-key branch → enterPane → the
-// deferred enterInteractiveMsg replay).
+// (handleKeyPress → dispatchKeyAction's unbound-key branch → enterPane →
+// requestInteractive's synchronous activation + gated replay).
 func TestUnboundLetterOnFocusedPaneSwitchesAndTypes(t *testing.T) {
 	h, _, fakes := interactiveTestHome(t)
 	require.False(t, h.interactive)
@@ -142,6 +143,26 @@ func TestUnboundLetterOnFocusedPaneSwitchesAndTypes(t *testing.T) {
 	// Typing then continues in-mode as usual.
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("Z")})
 	assert.Equal(t, []string{"z", "Z"}, (*fakes)[0].keys)
+}
+
+// TestLetterSwitchOwnsTheNextKeypress pins the activation ordering (Codex on
+// #7010): with the help seen, requestInteractive activates SYNCHRONOUSLY — the
+// mode already owns the keyboard when Update returns, so a fast follow-up key
+// can never squeeze through nav dispatch before it. If activation still rode a
+// deferred msg, the `x` below would dispatch as hide-pane instead of typing.
+func TestLetterSwitchOwnsTheNextKeypress(t *testing.T) {
+	h, _, fakes := interactiveTestHome(t)
+
+	// No runHermeticCmd between the keys: there must be nothing left to
+	// activate — `z` both entered and typed, so `x` is pane input, not the
+	// nav hide-pane verb.
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("z")})
+	_, _ = h.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("x")})
+
+	require.True(t, h.interactive, "the letter switch must flip the mode inside its own Update")
+	assert.Equal(t, 1, h.store.NumOpenPanes(), "x must type into the pane, not hide it")
+	require.Len(t, *fakes, 1)
+	assert.Equal(t, []string{"z", "x"}, (*fakes)[0].keys)
 }
 
 // TestUnboundLetterNeedsFocusedPane pins the letter switch's scope: with the
@@ -421,9 +442,10 @@ func TestEnterFromTreeOpensPaneAndEntersInteractive(t *testing.T) {
 	require.Zero(t, h.store.NumOpenPanes())
 
 	// Enter on the tree row: opens the selection's pane (the `s` semantics),
-	// then enters it. The activation itself arrives as the deferred
-	// enterInteractiveMsg; drive it directly — the batched cmd also carries
-	// selectionChanged's capture dispatches, which are not hermetic.
+	// then enters it. With the help seen, requestInteractive activates
+	// synchronously; driving a synthetic enterInteractiveMsg on top exercises
+	// the deferred sink the help-dismiss path still uses — it re-validates
+	// and re-activates idempotently.
 	_, _ = h.handleDefaultKeyPress(tea.KeyMsg{Type: tea.KeyEnter}, keys.KeyEnter)
 	p := h.store.FindOpenPane(inst, 0)
 	require.NotNil(t, p, "Enter from the tree must open the selection's pane")
