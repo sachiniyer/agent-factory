@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"os"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -143,14 +144,17 @@ func TestCreateRPC_ValidHostWithSurroundingWhitespaceIsTrimmed(t *testing.T) {
 // After the fix the boundary trim makes req.Host "" before validateCreateFirst, so
 // resolveBackendKind resolves from config (default local) rather than being forced
 // to ssh by the whitespace pick: createNeedsDaemonHostPrereqs reports local=true,
-// and LocalSessionPrereqsAt runs BEFORE reserveCreate, refusing the create (the
-// agent CLI is not on this daemon's PATH) ahead of the reservation — so the
-// archived session is left untouched on every surface the rename would have
-// mutated, and the refusal is NOT the post-rename "requires ssh.host" message.
+// and LocalSessionPrereqsAt runs BEFORE reserveCreate, refusing the create (neither
+// tmux nor the agent CLI is on the controlled PATH this test sets after setup) ahead
+// of the reservation — so the archived session is left untouched on every surface
+// the rename would have mutated, and the refusal is NOT the post-rename "requires
+// ssh.host" message.
 //
-// The assumption that the agent CLI (claude) is not on the daemon host's PATH is
-// the same one account_whitespace_create_test.go relies on (it uses a docker
-// backend to AVOID this check); it holds in this sandbox and in CI.
+// The pre-reservation refusal is made hermetic by setting PATH to an empty temp dir
+// after the repo/seed setup: LocalSessionPrereqsAt's CheckTmux/LookPath then fails
+// deterministically regardless of what is installed on the host, so the assertion
+// never depends on the daemon host's real PATH (the fragility account_whitespace
+// _create_test.go avoids by using a docker backend instead).
 func TestCreateRPC_WhitespaceHostDoesNotFailAfterArchivedRename(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	// Empty host list, no repo [ssh] section, no default_host: a non-empty pick is
@@ -170,11 +174,21 @@ func TestCreateRPC_WhitespaceHostDoesNotFailAfterArchivedRename(t *testing.T) {
 	require.NoError(t, err)
 	t.Cleanup(func() { _ = closeServer() })
 
+	// Pin PATH to an empty dir for the create call ONLY: LocalSessionPrereqsAt's
+	// CheckTmux then refuses deterministically (independent of the host's real
+	// PATH, which is the fragility the reviewer flagged). Restore afterward so
+	// assertArchivedUntouched's RestoreArchived can run git against the seeded
+	// archive; t.Cleanup also restores it so a bail between set and restore can
+	// never leak the empty PATH to a later test.
+	origPATH := os.Getenv("PATH")
+	t.Cleanup(func() { os.Setenv("PATH", origPATH) })
+	require.NoError(t, os.Setenv("PATH", t.TempDir()))
+
 	// The exact remote-create shape: ValidateFirst is what routedCreateSession sets
 	// for --daemon-url, Backend "" is the CLI default for `--host` without
 	// `--background`, title colliding with the archived row. Hermetic — after the
-	// fix it is refused at validateCreateFirst's LocalSessionPrereqsAt (claude not
-	// on PATH) before any ssh dialing or archived rename.
+	// fix it is refused at validateCreateFirst's LocalSessionPrereqsAt (nothing on
+	// the controlled PATH) before any ssh dialing or archived rename.
 	var resp CreateSessionResponse
 	createErr := callDaemonNoEnsure("CreateSession", CreateSessionRequest{
 		Title:         "shared",
@@ -183,6 +197,7 @@ func TestCreateRPC_WhitespaceHostDoesNotFailAfterArchivedRename(t *testing.T) {
 		Host:          " ",
 		ValidateFirst: true,
 	}, &resp)
+	require.NoError(t, os.Setenv("PATH", origPATH), "restore PATH for the git-backed archive assertions")
 	require.Error(t, createErr,
 		"the create must be refused: a whitespace host must not place the session on ssh "+
 			"and silently rename an archived session for a create that cannot run")
