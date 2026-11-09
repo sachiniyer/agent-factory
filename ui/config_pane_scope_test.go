@@ -237,8 +237,8 @@ func TestConfigPaneScopeMarkerStaysInsideThePane(t *testing.T) {
 }
 
 // TestConfigPaneScopedSaveShowsTheReReadEffectiveValue pins the seam half of
-// the re-resolve: the fresh read's value, scope and global value replace the
-// row's, and it is asked for the scope the rows were read in.
+// the re-resolve: the fresh read's rows replace the pane's, and it is asked for
+// the scope the rows were read in.
 func TestConfigPaneScopedSaveShowsTheReReadEffectiveValue(t *testing.T) {
 	project := &config.RepoContext{Root: "/srv/app"}
 	c := scopedPane(t, config.ScopeProject, project)
@@ -310,13 +310,45 @@ func TestConfigPaneScopedSaveSaysWhenTheReReadFails(t *testing.T) {
 	}
 }
 
+// TestConfigPaneProjectPaneReReadsAfterAnUnmarkedSave: in a project pane the
+// edited row is not the only one a global write can move (root_agents feeds
+// root_agent's legacy layer), so even an unmarked save re-reads the project.
+func TestConfigPaneProjectPaneReReadsAfterAnUnmarkedSave(t *testing.T) {
+	project := &config.RepoContext{Root: "/srv/app"}
+	c := scopedPane(t, config.ScopeProject, project)
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: k, Value: v}, "", nil
+	}
+	c.reread = func(repo *config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+		fresh := scopedEntries(t, config.ScopeProject)
+		for i := range fresh {
+			if fresh[i].Key == "default_program" {
+				fresh[i].Value = "moved-by-another-key"
+			}
+		}
+		return fresh, repo, nil
+	}
+	selectKey(t, c, "branch_prefix")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("")
+	typeInto(c, "team/")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if got := scopedEntry(t, c).Value; got != "moved-by-another-key" {
+		t.Fatalf("a dependent row kept %q after the project was re-read", got)
+	}
+	if c.restartNotice != "" {
+		t.Errorf("a successful re-read must not claim staleness: %q", c.restartNotice)
+	}
+}
+
 func TestConfigPaneUnmarkedSaveDoesNotReRead(t *testing.T) {
 	c := newTestConfigPane(t)
 	c.save = func(k, v string) (*config.SetResult, string, error) {
 		return &config.SetResult{Key: k, Value: v}, "", nil
 	}
 	c.reread = func(*config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
-		t.Fatal("a global row's value is what was written; there is nothing to re-resolve")
+		t.Fatal("a global pane's row is what was written; there is no project to re-resolve")
 		return nil, nil, nil
 	}
 	selectKey(t, c, "default_program")

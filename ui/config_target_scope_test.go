@@ -271,3 +271,47 @@ func TestConfigPaneGlobalSaveReResolvesAMergedProjectRow(t *testing.T) {
 		t.Errorf("the row still shows the replaced global command: %q", got)
 	}
 }
+
+// TestConfigPaneGlobalSaveReResolvesADependentProjectRow is the second Codex P2
+// on #7017: the edited row need not be the one that moves. root_agents is a
+// global-only map, but an entry keyed by this checkout is the legacy layer of
+// the project's root_agent, so saving it changes a DIFFERENT row's effective
+// value — which must not stay on screen until a reopen.
+func TestConfigPaneGlobalSaveReResolvesADependentProjectRow(t *testing.T) {
+	localTarget(t)
+	localPath, _ := seedLocalConfig(t)
+	repo := localScopeRepo(t, "post_worktree_commands = []\n")
+	legacy := "schema_version = 1\n\n[root_agents]\n\"" + repo.Root + "\" = { program = \"aider\" }\n"
+	if err := os.WriteFile(localPath, []byte(legacy), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	entries, location, scope, err := ReadConfigForEditor(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope == nil {
+		t.Fatalf("fixture: the project read must be honored, got location %q", location)
+	}
+	if got := entryValue(t, entries, "root_agent"); !strings.Contains(got, "aider") {
+		t.Fatalf("fixture: the legacy entry must supply root_agent's program, got %q", got)
+	}
+	c := NewConfigPane()
+	c.SetSize(200, 200)
+	c.SetEntries(entries, location, scope)
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	selectKey(t, c, "root_agents")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("")
+	typeInto(c, `{"`+repo.Root+`":{"program":"codex"}}`)
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if c.statusIsError {
+		t.Fatalf("the global save failed: %s", c.status)
+	}
+
+	if got := entryValue(t, c.entries, "root_agent"); !strings.Contains(got, "codex") || strings.Contains(got, "aider") {
+		t.Errorf("after editing root_agents the project's root_agent row is %q, want the new program codex", got)
+	}
+}
