@@ -84,7 +84,7 @@ With `backend = "docker"`, a session runs entirely inside a container:
 The container is **disposable**: durability lives in GitHub (the workspace is a
 clone of `repo@origin`), not in the container filesystem — so archive pushes the
 branch and reaps the container, and restore re-provisions a fresh container that
-clones the branch back (see [Archive & restore](#archive-restore)).
+clones the branch back (see [Archive and restore](#archive-and-restore)).
 
 ### Configuration
 
@@ -462,7 +462,7 @@ built-in, opinionated version of what a `hook` `launch_cmd` did by hand:
 Like docker, the workspace is **disposable**: durability lives in GitHub (the
 workspace is a clone of `repo@origin`) — archive pushes the branch and reaps the
 remote session, and restore re-provisions a fresh remote that clones the branch
-back (see [Archive & restore](#archive-restore)).
+back (see [Archive and restore](#archive-and-restore)).
 
 ### Configuration
 
@@ -815,7 +815,7 @@ run in the workspace.
    separate upload channel.
 
 An **archived** sandbox that was archived without pushing keeps its workspace on
-the host (see [Archive & restore](#archive-restore)): there is no live agent to
+the host (see [Archive and restore](#archive-and-restore)): there is no live agent to
 ask, so read the files from the host, or restore the session to get the tabs
 back.
 
@@ -1016,7 +1016,7 @@ Not yet built: fanning a refresh out to every live session on the same account
 (providers that rotate refresh tokens log the others out), write-back on a timer or
 after a daemon restart.
 
-## Archive & restore
+## Archive and restore
 
 For the disposable sandbox backends (`docker`, `ssh`, and `sandbox`), a **push**
 archive (`docker`/`hook` by default; `ssh`/`sandbox` with `--push`) is **push/pull
