@@ -118,11 +118,13 @@ type rebindConflictSnapshotMsg struct {
 	// complete and reopening the delete path (#4742 review).
 	skipped  []daemon.SkippedRepo
 	fetchErr error
-	// snapshotSeq is the value of home.crossRepoSnapshotSeq when this off-loop
-	// conflict refresh was OPENED (#4742 review). When the reply lands,
-	// handleRebindConflictSnapshot compares it against the current value: a
-	// newer regular poll applying in between means this reply's skip set is
-	// stale, so the conflict handler retains the sidebar's current skip set
+	// snapshotSeq is the value of home.crossRepoSnapshotSeq immediately after
+	// this off-loop conflict refresh bumped it at OPEN time (#4742 review).
+	// The counter is bumped at each cross-repo fetch's START, so it orders
+	// fetches by start time. When the reply lands, handleRebindConflictSnapshot
+	// compares it against the current value: a newer regular poll that started
+	// after this conflict advanced the counter, so this reply's skip set is
+	// stale and the conflict handler retains the sidebar's current skip set
 	// instead of letting the stale reply clear a Hidden gate the newer poll
 	// set.
 	snapshotSeq uint64

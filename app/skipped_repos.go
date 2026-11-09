@@ -3,6 +3,7 @@ package app
 import (
 	"errors"
 	"fmt"
+	"path/filepath"
 	"sort"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -127,7 +128,19 @@ func skippedRepoStandingNotice(s *daemon.SkippedRepo, detailsKey string) string 
 // RepoID only when the id is too malformed to resolve to a path, which the
 // daemon-reported skips never are — they passed ValidateRepoID when first
 // registered.
+//
+// In remote mode (--daemon-url/AF_DAEMON_URL) the skipped entry describes the
+// TARGET daemon's host, but config.RepoInstancesPath derives the path from this
+// client's local config dir (AGENT_FACTORY_HOME), so resolving it would name an
+// unrelated local instances.json and direct the operator at the wrong machine
+// while the remote sessions stay hidden. Remote mode's own contract
+// (app/remote_mode.go) is that local filesystem answers describe the wrong
+// machine; surface the RepoID alone there so the daemon's own repair hint stays
+// the source of truth (#4742 review).
 func skippedRepoStateFilePath(repoID string) string {
+	if isRemoteTarget() {
+		return repoID
+	}
 	if p, err := config.RepoInstancesPath(repoID); err == nil && p != "" {
 		return p
 	}
@@ -563,4 +576,50 @@ func preserveSkippedPickerRows(projects, oldRows []overlay.Project, skipped map[
 		present[old.RepoID] = true
 	}
 	return projects
+}
+
+// switchToProjectRoot resolves a Projects-section row's repo root and switches
+// the rail to it, reusing the #1461 switchProject path. A root that no longer
+// resolves (repo moved/removed) surfaces an error rather than silently doing
+// nothing. Switching to the already-active project is a no-op inside
+// switchProject. Lives here rather than switch_project.go to keep that file
+// under the file-length lint (#1145).
+//
+// A synthesized skipped row (#4742) has an empty Root and is keyed by its
+// RepoID in the Projects-section mouse zones, so a click decodes that zone key
+// as `root` — the RepoID, not a filesystem path. Passing it onward to
+// RepoFromPath would probe a path named after the ID and, if the working
+// directory happens to hold a Git checkout whose name matches the RepoID,
+// switch to that unrelated checkout. If `root` matches a synthesized row's
+// RepoID, route through that row's empty Root so repoContextForSelection
+// refuses it with the hidden-repo notice instead of opening the wrong project
+// (#4742 review).
+func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
+	for _, p := range m.sidebarProjects {
+		if p.Root == "" && p.RepoID != "" && p.RepoID == root {
+			_, err := m.repoContextForSelection("", p.RepoID)
+			if err != nil {
+				return m, m.handleError(fmt.Errorf("cannot open project %q: %w", p.Name, err))
+			}
+		}
+	}
+	repo, err := m.repoContextForSelection(root, "")
+	if err != nil {
+		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
+	}
+	return m.switchProject(repo)
+}
+
+// applyPickerSnapshotToSidebar mirrors the picker's just-fetched cross-repo
+// snapshot into the always-visible Projects section at Ctrl+P open (#4742
+// review). A repo the synchronous fetch newly reports skipped is otherwise
+// marked hidden only in the picker; closing the picker (Esc) and pressing D on
+// the still-healthy Projects-section row could build an inaccurate "no live
+// sessions" confirmation from the stale count before the next 750 ms poll
+// lands and installs the Hidden gate. The picker's rows are reprocessed through
+// applySidebarProjects' own preserving merge, so the two views agree without a
+// second daemon RPC. Lives here rather than switch_project.go to keep that file
+// under the file-length lint (#1145).
+func (m *home) applyPickerSnapshotToSidebar(projects []overlay.Project, registryDegraded bool, skipped []daemon.SkippedRepo) {
+	m.applySidebarProjects(projects, registryDegraded, skippedRepoIDSet(skipped), skippedRepoHintSet(skipped), nil)
 }

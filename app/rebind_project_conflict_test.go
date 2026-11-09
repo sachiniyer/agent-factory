@@ -547,8 +547,9 @@ func TestRebindConflictRefresh_PreservesSessionOnlySkippedRows(t *testing.T) {
 // overlap a regular background poll. A newer poll that began skipping a repo
 // AFTER the conflict fetch opened must not have its Hidden gate cleared by the
 // stale conflict reply landing later. The conflict handler detects the newer
-// poll (crossRepoSnapshotSeq advanced past the value captured at open time) and
-// retains the sidebar's current skip set and hints instead of replacing them.
+// poll (crossRepoSnapshotSeq — bumped at each fetch's START — advanced past the
+// value this conflict captured at its open) and retains the sidebar's current
+// skip set and hints instead of replacing them.
 func TestRebindConflictRefresh_RetainsSkipSetWhenNewerPollApplied(t *testing.T) {
 	h, id := activeRebindHome(t)
 	root, ok := registeredProjectRoot(id)
@@ -572,12 +573,14 @@ func TestRebindConflictRefresh_RetainsSkipSetWhenNewerPollApplied(t *testing.T) 
 	require.NoError(t, err)
 	stubRebindCAS(t)
 
-	// The conflict fetch opened BEFORE the newer poll (the seq it captured is
-	// 5), and its reply's skip set does NOT include alpha (it was not skipped
-	// yet). A newer regular poll applies while this fetch is in flight,
-	// bumping the seq to 6.
+	// The conflict refresh bumps the seq at its START (5 -> 6) and captures 6,
+	// so it ordered AFTER every fetch that started before it. Its reply's skip
+	// set does NOT include alpha (it was not skipped yet at fetch-open time). A
+	// newer regular poll that started AFTER this conflict then bumps the seq to
+	// 7 while the conflict fetch is still in flight; the conflict reply lands
+	// after that, so 7 > 6 marks it stale.
 	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
-		h.crossRepoSnapshotSeq = 6
+		h.crossRepoSnapshotSeq = 7
 		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: root}}},
 			nil, // stale reply: alpha not yet skipped at fetch-open time
 			nil

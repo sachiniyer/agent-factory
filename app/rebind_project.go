@@ -169,10 +169,17 @@ var rebindConflictRefreshTimeout = 10 * time.Second
 // treats as "session rows unknown, registry truth still applies".
 func (m *home) rebindConflictSnapshotCmd(msg projectReboundMsg) tea.Cmd {
 	fetch := allReposSnapshotFetcher
-	// Capture the cross-repo snapshot sequence at open time so the reply can
-	// detect a newer regular poll that applied while this 10-second off-loop
-	// fetch was in flight, and retain the sidebar's current skip set instead
-	// of clobbering it with a stale one (#4742 review).
+	// Bump the cross-repo snapshot generation at this conflict refresh's START
+	// (on the event loop, before the goroutine runs) and capture the post-bump
+	// value, so the reply can be ordered against other cross-repo fetches by
+	// START time rather than arrival time. A regular background poll that
+	// started before this conflict but applied while it was in flight used to
+	// bump the counter at apply time and make this genuinely newer conflict
+	// reply look stale; with the bump at start, only a fetch that started AFTER
+	// this conflict advances the counter past the value captured here, so a
+	// newer poll still wins and an older poll applying in flight no longer
+	// discards this reply (#4742 review).
+	m.crossRepoSnapshotSeq++
 	openedSeq := m.crossRepoSnapshotSeq
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), rebindConflictRefreshTimeout)
@@ -215,8 +222,10 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 		skipped = nil
 	}
 	// This off-loop fetch can take up to rebindConflictRefreshTimeout (10s) to
-	// answer; a regular background poll may apply a NEWER cross-repo snapshot
-	// — and thus a newer skip set — while it is in flight. If so, this reply's
+	// answer; a regular background poll that STARTED after this conflict
+	// refresh advanced crossRepoSnapshotSeq (bumped at each fetch's start)
+	// past the value this reply captured at open, so it carries a NEWER
+	// cross-repo snapshot — and thus a newer skip set. If so, this reply's
 	// skip set AND rows are stale: applying them would replace
 	// sidebarProjectsSkipped with the older set and, if the daemon began
 	// skipping a repo between the two reads, briefly clear that repo's Hidden
@@ -226,7 +235,10 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// count whose D path can build an inaccurate "no live sessions"
 	// confirmation. Retain the sidebar's current rows, skip set, and hints
 	// instead, so the newer poll's rows and hidden markers survive — the same
-	// retention the picker path below applies (#4742 review).
+	// retention the picker path below applies (#4742 review). Ordering by start
+	// (not arrival) means a poll that started BEFORE this conflict but applied
+	// while it was in flight no longer bumps the counter past this reply's
+	// captured value, so this genuinely newer conflict reply is not discarded.
 	staleSkip := msg.fetchErr == nil && m.crossRepoSnapshotSeq > msg.snapshotSeq
 	var skipSet map[string]bool
 	var hintSet map[string]string

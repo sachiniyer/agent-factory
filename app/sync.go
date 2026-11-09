@@ -132,6 +132,15 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	// picker was built from (#4742 review). Read on the event loop (before the
 	// goroutine runs) to avoid racing a concurrent picker open.
 	allReposSeq := m.pickerSnapshotSeq
+	// Bump the cross-repo snapshot generation at this fetch's START (on the
+	// event loop, before the goroutine runs) so the rebind-conflict refresh —
+	// which captures the same counter when it opens — can order replies by
+	// START time, not arrival time. A poll that started before a conflict
+	// refresh but applied while it was in flight used to bump the counter at
+	// apply time and make the genuinely newer conflict reply look stale; with
+	// the bump at start, only a fetch that started AFTER the conflict advances
+	// the counter past the value it captured (#4742 review).
+	m.crossRepoSnapshotSeq++
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {

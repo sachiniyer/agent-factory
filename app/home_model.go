@@ -393,16 +393,18 @@ type home struct {
 	// row instead of pointing at a status bar that may hold no skip notice
 	// for it.
 	sidebarProjectsSkippedHints map[string]string
-	// crossRepoSnapshotSeq is a monotonic sequence over successful cross-repo
-	// snapshot applications to the Projects section (#4742 review). The
-	// regular background poll and a synchronous picker/conflict refresh both
-	// flow through applySidebarProjects, which bumps this whenever it installs
-	// a fresh skip set. A long-lived off-loop fetch (the 10-second rebind-
-	// conflict refresh) captures the value at open time and, when its reply
-	// lands, compares it against the current value: a newer poll applying in
-	// between means the reply's skip set is stale, so the conflict handler
-	// retains the sidebar's current skip set instead of letting the stale
-	// reply clear a Hidden gate the newer poll correctly set.
+	// crossRepoSnapshotSeq is a monotonic sequence bumped at the START of each
+	// cross-repo snapshot fetch (#4742 review) — the regular background poll
+	// (fetchSnapshotCmd) and the long-lived off-loop rebind-conflict refresh
+	// (rebindConflictSnapshotCmd). Ordering by START time (not arrival/apply
+	// time) means a poll that started before a conflict refresh but applied
+	// while it was in flight no longer makes the genuinely newer conflict reply
+	// look stale. The conflict refresh bumps and captures the post-bump value
+	// at its open, and when its reply lands compares it against the current
+	// value: a fetch that started AFTER it advanced the counter, so the reply's
+	// skip set is stale and the conflict handler retains the sidebar's current
+	// skip set instead of letting the stale reply clear a Hidden gate the newer
+	// fetch correctly set.
 	crossRepoSnapshotSeq uint64
 	// pickerSnapshotSeq is a monotonic sequence bumped each time the project
 	// picker opens (after its synchronous cross-repo fetch constructs the

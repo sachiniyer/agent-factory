@@ -44,6 +44,13 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	// not have. Lives in skipped_repos.go to keep this file under the
 	// file-length lint (#1145).
 	m.setPickerSkippedIDsAndHints(skipped, snapshotDegraded)
+	if !snapshotDegraded {
+		// Mirror the picker's just-fetched snapshot into the always-visible
+		// Projects section so a repo the fetch newly reports skipped is marked
+		// hidden there too, closing the window where Esc + D on the still-
+		// healthy row could delete sessions the picker just saw (#4742 review).
+		m.applyPickerSnapshotToSidebar(projects, registryDegraded, skipped)
+	}
 	if isRemoteTarget() {
 		// The picker's registry rows come from the LOCAL config.ListProjects
 		// and its path input resolves on THIS filesystem, but a rebind would
@@ -599,13 +606,14 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	if fetchErr == nil {
 		// Retain the skip set the next error path reads. A failed fetch
 		// reuses the prior set above, so it must not overwrite the retained
-		// copy with nil. Bump the cross-repo snapshot sequence so a stale
-		// off-loop reply (the 10-second rebind-conflict refresh) can detect
-		// that a newer poll has since applied and retain this set instead
-		// of clobbering it (#4742 review).
+		// copy with nil. The cross-repo snapshot generation is bumped at each
+		// fetch's START (fetchSnapshotCmd / rebindConflictSnapshotCmd) so a
+		// stale off-loop reply (the 10-second rebind-conflict refresh) can
+		// detect a fetch that started after it and retain this set instead of
+		// clobbering it — ordering by start time, not arrival time (#4742
+		// review).
 		m.sidebarProjectsSkipped = skipped
 		m.sidebarProjectsSkippedHints = hints
-		m.crossRepoSnapshotSeq++
 	}
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
@@ -638,19 +646,6 @@ func (m *home) preserveSkippedProjectRows(projects []overlay.Project, skipped ma
 		present[old.RepoID] = true
 	}
 	return projects
-}
-
-// switchToProjectRoot resolves a Projects-section row's repo root and switches
-// the rail to it, reusing the #1461 switchProject path. A root that no longer
-// resolves (repo moved/removed) surfaces an error rather than silently doing
-// nothing. Switching to the already-active project is a no-op inside
-// switchProject.
-func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := m.repoContextForSelection(root, "")
-	if err != nil {
-		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
-	}
-	return m.switchProject(repo)
 }
 
 // handleStateSwitchProject routes key events to the project picker overlay and
