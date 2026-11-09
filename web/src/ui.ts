@@ -76,7 +76,7 @@ import {
 import type { AccountsState } from "./accounts.js";
 import type { HostAddDraft, HostsState } from "./hosts.js";
 import type { QuotaState } from "./quota.js";
-import { ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
+import { type ConfigScope, ConfigPane, type ConfigStatus, type ExplainOutcome } from "./config.js";
 import { docsShortcuts } from "./docs_shortcut.js";
 import { isRenameableTab, tabDisplayLabel, tabIcon, tabLabel } from "./tablabel.js";
 import { insertionIndexAt, reorderTargetIndex } from "./tabreorder.js";
@@ -368,6 +368,9 @@ export interface AppState {
   /** the config.toml the values were read from, named in the config view so an
    *  AF_HOME user knows which file they are editing. */
   configPath: string;
+  /** the project scope `config` was read in (#7009): the selected project it was
+   *  asked for, the root the daemon honored, or why it could not. */
+  configScope: ConfigScope;
   /** the outcome of the last config write — the daemon's echo and restart notice,
    *  or the validator's message when it refused — or null when there is none. */
   configStatus: ConfigStatus | null;
@@ -1636,7 +1639,7 @@ export class AppShell {
     // The config pane mirrors the manifest. Global config is NOT project-scoped —
     // config.toml applies to every repo — so unlike the tasks pane it re-renders on
     // the data alone, with no project in the change check.
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts, state.configScope);
 
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;

@@ -1479,11 +1479,23 @@ export async function removeTask(task: TaskMutationRef, token: string): Promise<
  *  empty list rather than null for a daemon that somehow reports none; throws
  *  ApiError on transport/auth failure so callers share one error path.
  *
+ *  `repoPath` names the selected project (#7009): the rows then carry its
+ *  effective values and scope markers, and `project_root`/`project_error` say
+ *  whether the daemon honored it. Both default to "" so a daemon that predates
+ *  the fields reads as "not honored" rather than undefined.
+ *
  *  The manifest is the ONLY description of config the web UI has — there is no
  *  local key list to fall behind config_types.go. */
-export async function getConfig(token: string): Promise<ConfigResponse> {
-  const resp = await af<ConfigResponse>("GetConfig", {}, token);
-  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+export async function getConfig(token: string, repoPath = ""): Promise<ConfigResponse> {
+  const body: { repo_path?: string } = {};
+  if (repoPath) body.repo_path = repoPath;
+  const resp = await af<ConfigResponse>("GetConfig", body, token);
+  return {
+    entries: resp?.entries ?? [],
+    path: resp?.path ?? "",
+    project_root: resp?.project_root ?? "",
+    project_error: resp?.project_error ?? "",
+  };
 }
 
 /** Sets one global config key, exactly as `af config set key value` does: the
@@ -1546,14 +1558,17 @@ export async function daemonHealth(token: string): Promise<DaemonHealth | null> 
 /** ExplainConfig (#4803): the same `config.ResolvedValue` `af config get
  *  --explain` renders — which on-disk layer supplied the effective value, and
  *  which were shadowed, absent, or disallowed — served to clients that cannot
- *  resolve in-process. Global scope; the daemon reports on-disk sources and
- *  deliberately does not consult its running config snapshot.
+ *  resolve in-process. Global scope unless `repoPath` names a project (#7009);
+ *  the daemon reports on-disk sources and deliberately does not consult its
+ *  running config snapshot.
  *
  *  Throws ApiError carrying the daemon's message on an unknown key or on a
  *  daemon too old to know the route — the view shows it verbatim rather than
  *  fabricating a trace. */
-export async function explainConfig(key: string, token: string): Promise<ExplainConfigResponse> {
-  return af<ExplainConfigResponse>("ExplainConfig", { key }, token);
+export async function explainConfig(key: string, token: string, repoPath?: string): Promise<ExplainConfigResponse> {
+  const body: { key: string; repo_path?: string } = { key };
+  if (repoPath) body.repo_path = repoPath;
+  return af<ExplainConfigResponse>("ExplainConfig", body, token);
 }
 
 // --- config assistant (#2467) ----------------------------------------------

@@ -483,7 +483,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/GetConfig",
-		Description: "List every user-facing global config key with its purpose, type, default, and current value.",
+		Description: "List every user-facing global config key with its purpose, type, default, and current value. Pass repo_path to show a project's effective values instead, with a scope marker and the global value on each overridden key.",
 		requestType: reflect.TypeOf(GetConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.GetConfig) },
 	},
@@ -496,7 +496,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/ExplainConfig",
-		Description: "Explain one global config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed.",
+		Description: "Explain one config key's provenance: every source candidate with its value, location, and the reason it won, was shadowed, was absent, or is disallowed. Global by default; pass repo_path to explain it in a project.",
 		requestType: reflect.TypeOf(ExplainConfigRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.ExplainConfig) },
 	},

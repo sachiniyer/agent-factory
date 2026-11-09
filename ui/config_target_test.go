@@ -191,7 +191,7 @@ func TestConfigEditorReadsTheTargetedDaemon(t *testing.T) {
 		},
 	})
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor(nil)
 	if err != nil {
 		t.Fatalf("ReadConfigForEditor against a remote target: %v", err)
 	}
@@ -229,7 +229,7 @@ func TestConfigEditorRefusesADaemonThatDoesNotServeGetConfig(t *testing.T) {
 	// daemon whose route table predates the route does.
 	d := serveRemoteDaemon(t, "0.9.1", nil)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor(nil)
 	if err == nil {
 		t.Fatalf("a daemon that does not serve GetConfig must be refused; got %d entries at %q", len(entries), location)
 	}
@@ -262,7 +262,7 @@ func TestConfigEditorReadRefusesADaemonServingNoKeys(t *testing.T) {
 		},
 	})
 
-	_, _, err := ReadConfigForEditor()
+	_, _, _, err := ReadConfigForEditor(nil)
 	if err == nil {
 		t.Fatal("a daemon answering with no config keys must be refused, not rendered as an empty form")
 	}
@@ -279,7 +279,7 @@ func TestConfigEditorLocalTargetIsUnchanged(t *testing.T) {
 	localTarget(t)
 	localPath, _ := seedLocalConfig(t)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor(nil)
 	if err != nil {
 		t.Fatalf("ReadConfigForEditor with no remote target: %v", err)
 	}
@@ -300,7 +300,7 @@ func editKeyInPane(t *testing.T, entries []config.ConfigEntry, location, key, va
 	t.Helper()
 	c := NewConfigPane()
 	c.SetSize(100, 200)
-	c.SetEntries(entries, location)
+	c.SetEntries(entries, location, nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -405,7 +405,7 @@ func TestConfigPaneEditWithNoTargetStillWritesThisMachine(t *testing.T) {
 	localTarget(t)
 	localPath, _ := seedLocalConfig(t)
 
-	entries, location, err := ReadConfigForEditor()
+	entries, location, _, err := ReadConfigForEditor(nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -432,7 +432,7 @@ func TestConfigPaneEditWithNoTargetStillWritesThisMachine(t *testing.T) {
 func TestConfigPaneHeaderShowsTheDaemonItIsEditing(t *testing.T) {
 	c := NewConfigPane()
 	c.SetSize(120, 40)
-	c.SetEntries(remoteManifest(), "http://box:8443 · "+remotePath)
+	c.SetEntries(remoteManifest(), "http://box:8443 · "+remotePath, nil)
 	c.SetFocus(true)
 
 	screen := c.String()

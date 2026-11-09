@@ -37,7 +37,7 @@ func pressKey(c *ConfigPane, s string) {
 
 func TestConfigPaneExplainRendersTheCandidateTrace(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(key string) (*config.ResolvedValue, error) {
+	c.explain = func(key string, _ *config.RepoContext) (*config.ResolvedValue, error) {
 		if key != "default_program" {
 			t.Fatalf("explained %q, the selected row's key", key)
 		}
@@ -64,7 +64,7 @@ func TestConfigPaneExplainRendersTheCandidateTrace(t *testing.T) {
 
 func TestConfigPaneExplainSurfacesTheRefusalRatherThanAFabricatedTrace(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(key string) (*config.ResolvedValue, error) {
+	c.explain = func(key string, _ *config.RepoContext) (*config.ResolvedValue, error) {
 		return nil, errors.New("the daemon at http://box:8443 does not serve the ExplainConfig route")
 	}
 	selectKey(t, c, "default_program")
@@ -81,7 +81,7 @@ func TestConfigPaneExplainSurfacesTheRefusalRatherThanAFabricatedTrace(t *testin
 
 func TestConfigPaneExplainEscReturnsToTheRowItExplained(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(key string) (*config.ResolvedValue, error) { return explainFixture(), nil }
+	c.explain = func(key string, _ *config.RepoContext) (*config.ResolvedValue, error) { return explainFixture(), nil }
 	selectKey(t, c, "default_program")
 	pressKey(c, "e")
 	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEsc})
@@ -101,7 +101,7 @@ func TestConfigPaneExplainEscReturnsToTheRowItExplained(t *testing.T) {
 func TestConfigPaneExplainToggleKeyAndEnterAlsoExit(t *testing.T) {
 	for _, key := range []string{"e", "enter"} {
 		c := newTestConfigPane(t)
-		c.explain = func(string) (*config.ResolvedValue, error) { return explainFixture(), nil }
+		c.explain = func(string, *config.RepoContext) (*config.ResolvedValue, error) { return explainFixture(), nil }
 		selectKey(t, c, "default_program")
 		pressKey(c, "e")
 		if !c.explaining {
@@ -120,7 +120,7 @@ func TestConfigPaneExplainToggleKeyAndEnterAlsoExit(t *testing.T) {
 
 func TestConfigPaneExplainIsANoOpOnARowWithNoKey(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(string) (*config.ResolvedValue, error) {
+	c.explain = func(string, *config.RepoContext) (*config.ResolvedValue, error) {
 		t.Fatal("explain must not be called for a row with no config key")
 		return nil, nil
 	}
@@ -146,7 +146,7 @@ func TestConfigPaneExplainStripsControlBytesFromRenderedValues(t *testing.T) {
 	// what it does (the list's truncateConfigPreview strip+flatten, minus the
 	// truncation).
 	c := newTestConfigPane(t)
-	c.explain = func(string) (*config.ResolvedValue, error) {
+	c.explain = func(string, *config.RepoContext) (*config.ResolvedValue, error) {
 		v := explainFixture()
 		v.Value = "echo \x1b[2Jdone\n\twith: control"
 		v.Candidates[1].Value = v.Value
@@ -168,7 +168,7 @@ func TestConfigPaneExplainStripsControlBytesFromRenderedValues(t *testing.T) {
 
 func TestConfigPaneClosingDropsAnOpenExplanation(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(string) (*config.ResolvedValue, error) { return explainFixture(), nil }
+	c.explain = func(string, *config.RepoContext) (*config.ResolvedValue, error) { return explainFixture(), nil }
 	selectKey(t, c, "default_program")
 	pressKey(c, "e")
 	c.SetFocus(false)
@@ -184,7 +184,7 @@ func TestConfigPaneClosingDropsAnOpenExplanation(t *testing.T) {
 // own line math and left parts of the trace unreachable (#4803 review).
 func TestConfigPaneExplainRewrapsOnResize(t *testing.T) {
 	c := newTestConfigPane(t)
-	c.explain = func(string) (*config.ResolvedValue, error) { return explainFixture(), nil }
+	c.explain = func(string, *config.RepoContext) (*config.ResolvedValue, error) { return explainFixture(), nil }
 	selectKey(t, c, "default_program")
 	pressKey(c, "e")
 	if !c.explaining {

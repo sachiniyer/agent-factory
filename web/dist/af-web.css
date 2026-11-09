@@ -2845,6 +2845,18 @@ body[data-project-color] [data-af-theme=dark] {
   color: var(--af-ink-muted);
   margin-top: var(--af-space-1);
 }
+.af-config-scope {
+  grid-column: 1 / -1;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
+.af-config-banner {
+  padding: var(--af-space-2) var(--af-space-3);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  overflow-wrap: anywhere;
+}
 .af-accounts {
   display: flex;
   flex-direction: column;

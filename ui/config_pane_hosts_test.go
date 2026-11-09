@@ -25,7 +25,7 @@ func newHostTestPane(t *testing.T, hosts map[string]config.HostConfig, def strin
 	cfg.DefaultHost = def
 	c := NewConfigPane()
 	c.SetSize(100, 200)
-	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml", nil)
 	c.SetFocus(true)
 	c.showAdvanced = true
 	c.rebuildRows()
@@ -432,7 +432,7 @@ func TestConfigPaneHostVerdictStalesWithEntry(t *testing.T) {
 	changed["box1"] = e
 	cfg := config.DefaultConfig()
 	cfg.Hosts = changed
-	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml")
+	c.SetEntries(config.ManifestWithValues(cfg), "/tmp/config.toml", nil)
 	selectHostRow(t, c, "box1")
 	if strings.Contains(c.String(), "ready (git, tmux and gh answered)") {
 		t.Error("a verdict measured on another destination must stop rendering")

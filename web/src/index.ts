@@ -76,7 +76,7 @@ import {
   triggerTask,
   updateTask,
 } from "./api.js";
-import { createKeyedQueue, type ExplainOutcome, saveNotice } from "./config.js";
+import { createKeyedQueue, type ExplainOutcome, GLOBAL_CONFIG_SCOPE, saveNotice } from "./config.js";
 import {
   bindTerminalFontPersist,
   setTerminalFontSizes,
@@ -186,6 +186,7 @@ const store = new Store<AppState>({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: GLOBAL_CONFIG_SCOPE,
   configStatus: null,
   accounts: emptyAccountsState(),
   hosts: emptyHostsState(),
@@ -2328,14 +2329,24 @@ let configReadCommits = 0;
  *  though it had not taken. */
 const configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The selected project's effective values (#7009). The project is captured
+  // with the request so the committed scope names what THIS read asked for, not
+  // whatever is selected by the time it lands.
+  fetch: (tok: string) => {
+    const requested = store.get().selectedProject ?? "";
+    return getConfig(tok, requested).then((resp) => ({ ...resp, requested }));
+  },
   commit: (resp) => {
     configReadCommits++;
     // Every config read is also the font sizes' update path (#5500): a value
     // stepped from another client lands here on the next read, and our own
     // save's echo refetch is a no-op through the set() change guard.
     setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
-    store.set({ config: resp.entries, configPath: resp.path });
+    store.set({
+      config: resp.entries,
+      configPath: resp.path,
+      configScope: { requested: resp.requested, root: resp.project_root ?? "", error: resp.project_error ?? "" },
+    });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
@@ -2349,6 +2360,21 @@ const configRefetcher = createFencedRefetcher({
 function refreshConfig(): Promise<void> {
   return configRefetcher.refresh();
 }
+
+// An open Config view follows the selected project (#7009): rows read for the
+// previous project would show its overrides under the new one's name. Watching
+// the store rather than switchProject also covers a reconcile that moves the
+// selection because the project disappeared.
+let configProjectSeen: string | null = null;
+store.subscribe((state) => {
+  if (state.selectedProject === configProjectSeen) {
+    return;
+  }
+  configProjectSeen = state.selectedProject;
+  if (state.view === "config") {
+    void refreshConfig();
+  }
+});
 
 /** Backoff for the background reconcile behind a failed connect-time config
  *  read: enough attempts to absorb a brief unavailability window without
@@ -2851,7 +2877,9 @@ function explainConfigValue(key: string): Promise<ExplainOutcome> {
   if (tok === null) {
     return Promise.resolve({ ok: false, error: "not connected to the daemon" });
   }
-  return explainConfig(key, tok).then(
+  // The HONORED root, not the selection: a read that fell back to global rows
+  // explains globally, so the trace always matches the rows beside it.
+  return explainConfig(key, tok, store.get().configScope.root || undefined).then(
     (resp) => ({ ok: true, resp }) as ExplainOutcome,
     (err: unknown) => ({ ok: false, error: errorText(err) }),
   );

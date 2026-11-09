@@ -259,7 +259,7 @@ test("explainConfig posts only the key — the daemon owns resolution", async ()
   const resp = await explainConfig("default_program", "tok");
 
   assert.equal(cap.url, "/v1/ExplainConfig");
-  assert.deepEqual(cap.body, { key: "default_program" }, "no scope flag: the route is global-only");
+  assert.deepEqual(cap.body, { key: "default_program" }, "no repo_path without a project: the global explain");
   assert.equal(cap.auth, "Bearer tok");
   assert.equal(resp.explanation.candidates.length, 2);
   assert.equal(resp.explanation.candidates[1].result, "winner");

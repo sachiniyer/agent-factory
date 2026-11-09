@@ -25,7 +25,7 @@ func quotaPane(t *testing.T, rows []QuotaRow, warnings []string) *ConfigPane {
 	pane.SetSize(100, 40)
 	pane.SetEntries([]config.ConfigEntry{{
 		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
-	}}, "/tmp/config.toml")
+	}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(nil, nil, nil)
 	pane.SetQuota(rows, warnings, "", nil)
 	pane.SetFocus(true)

@@ -96,6 +96,15 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 		b.WriteString(renderConfigInput(&c.input))
 	} else {
 		b.WriteString(valueStyle.Render(c.displayValue(e)))
+		// The marker rides the value it qualifies (#7009): without it a
+		// project-overridden row reads as the global value it replaced.
+		if marker := scopeMarker(e); marker != "" {
+			markerStyle := configLocationStyle
+			if selected {
+				markerStyle = configSelectedStyle
+			}
+			b.WriteString(markerStyle.Render(marker))
+		}
 	}
 	// Clip, do not wrap (#3430). displayValue and sizeEditField already budget
 	// this row, but neither can shrink the KEY: at a narrow pane the key alone
@@ -112,8 +121,61 @@ func (c *ConfigPane) renderEntryRow(i int, row configRow, e config.ConfigEntry) 
 		if len(e.Enum) > 0 && e.Type != "table" {
 			b.WriteString(c.wrapIndented("one of: "+configEnumLabels(e), configHintStyle))
 		}
+		if note := scopeNote(e); note != "" {
+			b.WriteString(c.wrapIndented(note, configHintStyle))
+		}
 	}
 	return b.String()
+}
+
+// scopeMarker is the suffix a project read puts after a row's value (#7009).
+// ConfigEntry.Scope is an open set, so a value this build does not know still
+// gets a marker: the one thing it certainly means is "not the global value".
+func scopeMarker(e config.ConfigEntry) string {
+	switch e.Scope {
+	case "":
+		return ""
+	case config.ScopeProject:
+		return " (project)"
+	case config.ScopePersonal:
+		return " (personal)"
+	case config.ScopeProjectPersonal:
+		return " (project+personal)"
+	case config.ScopePersonalIgnored:
+		return " (personal: stored)"
+	}
+	return " (project-scoped)"
+}
+
+// scopeNoteGlobalBudget bounds the global value quoted in a scope note, so a
+// long table cannot turn the note into a paragraph under the row.
+const scopeNoteGlobalBudget = 40
+
+// scopeNote is the selected row's account of a marker: which layer supplied
+// the value, what the global value is, and that the field edits the global
+// value — the issue's whole complaint was an editor that looked authoritative
+// about a value it would not change.
+func scopeNote(e config.ConfigEntry) string {
+	if e.Scope == "" {
+		return ""
+	}
+	if e.Scope == config.ScopePersonalIgnored {
+		return "a personal override is stored but not applied — this project uses the global value"
+	}
+	global := "(unset)"
+	if e.GlobalValue != "" {
+		global = truncateConfigPreview(e.GlobalValue, scopeNoteGlobalBudget)
+	}
+	label := "project-scoped override"
+	switch e.Scope {
+	case config.ScopeProject:
+		label = "project override"
+	case config.ScopePersonal:
+		label = "personal override"
+	case config.ScopeProjectPersonal:
+		label = "project + personal overrides"
+	}
+	return label + " · global: " + global + " · enter edits the global value"
 }
 
 func (c *ConfigPane) wrapIndented(text string, style lipgloss.Style) string {

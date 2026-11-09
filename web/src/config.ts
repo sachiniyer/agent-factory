@@ -185,6 +185,64 @@ export function canCommit(shown: string, current: string): boolean {
 }
 
 /**
+ * The scope the Config view's rows were read in (#7009): the project the view
+ * asked for (`requested`, "" for none), the root the daemon resolved (`root`),
+ * and why it could not (`error`). `root` is what the explain request carries, so
+ * a trace is never asked for a scope the rows were not read in.
+ */
+export interface ConfigScope {
+  requested: string;
+  root: string;
+  error: string;
+}
+
+export const GLOBAL_CONFIG_SCOPE: ConfigScope = { requested: "", root: "", error: "" };
+
+/**
+ * The value a row's control edits and compares against: the WRITE target. Every
+ * save goes to the global file, so a scope-marked row's baseline is its global
+ * value — seeding the field with the project's effective value would make an
+ * untouched-looking save copy the override into the global file. Exported so the
+ * test locks the rule every control uses.
+ */
+export function editBaseline(e: ConfigEntry): string {
+  return e.scope ? (e.global_value ?? "") : e.value;
+}
+
+/** The marker line under a scope-marked row, or "" for a global row. The scope
+ *  set is open: an unknown value still says the row is not the global value. */
+function scopeLine(e: ConfigEntry): string {
+  if (!e.scope) {
+    return "";
+  }
+  if (e.scope === "personal-ignored") {
+    return "personal override — stored, not applied · this project uses the global value";
+  }
+  const label = e.scope === "project" ? "project override"
+    : e.scope === "personal" ? "personal override"
+      : e.scope === "project+personal" ? "project + personal overrides"
+        : "project-scoped override";
+  const uses = e.value === "" ? "(unset)" : e.value;
+  return `${label} · this project uses: ${uses} · the field above edits the global value`;
+}
+
+/** The banner naming the scope the rows were read in, or "" with no project
+ *  selected. A fallback says so: global rows under a selected project would
+ *  otherwise pass as that project's. */
+function scopeBanner(scope: ConfigScope): string {
+  if (scope.requested === "") {
+    return "";
+  }
+  if (scope.error !== "") {
+    return `project values unavailable: ${scope.error} — showing global values`;
+  }
+  if (scope.root !== "") {
+    return `project ${scope.root} · values shown are what af uses there · edits write the global file`;
+  }
+  return "this daemon is too old to resolve project values — showing global values";
+}
+
+/**
  * Whether a freshly delivered status should CLOSE the field that is open.
  *
  * A save closes the field it came from: the value is committed, and leaving it open
@@ -451,6 +509,8 @@ export class ConfigPane {
   private explainBusy = false;
   private explainGeneration = 0;
 
+  private scope: ConfigScope = GLOBAL_CONFIG_SCOPE;
+  private lastScope: ConfigScope | null = null;
   private lastEntries: ConfigEntry[] | null = null;
   private lastStatus: ConfigStatus | null = null;
   private lastAccounts: AccountsState | null = null;
@@ -513,9 +573,11 @@ export class ConfigPane {
     quota: QuotaState,
     theme: ThemeChoice = this.theme,
     hosts: HostsState = this.hosts,
+    scope: ConfigScope = this.scope,
   ): void {
     if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts
-      && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts) {
+      && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts
+      && this.lastScope === scope) {
       return;
     }
     // Captured before `lastStatus`/`lastEntries` are overwritten below: the
@@ -547,6 +609,8 @@ export class ConfigPane {
     this.lastQuota = quota;
     this.lastTheme = theme;
     this.lastHosts = hosts;
+    this.lastScope = scope;
+    this.scope = scope;
     this.theme = theme;
     // Retired web appearance keys from older daemons are never editable here.
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
@@ -1055,6 +1119,8 @@ export class ConfigPane {
     );
     assistantBtn.addEventListener("click", () => this.actions.openAssistant());
     head.append(assistantBtn);
+    const bannerText = scopeBanner(this.scope);
+    const banner = bannerText === "" ? [] : [h("div", { class: "af-config-banner", role: "status" }, bannerText)];
 
     const sections: HTMLElement[] = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {
@@ -1104,6 +1170,7 @@ export class ConfigPane {
     // would push them below the fold.
     this.el.replaceChildren(
       head,
+      ...banner,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.accountActions, this.registration),
@@ -1186,6 +1253,10 @@ export class ConfigPane {
     );
     row.append(label);
     row.append(this.renderControl(e));
+    const marker = scopeLine(e);
+    if (marker !== "") {
+      row.append(h("div", { class: "af-config-scope" }, marker));
+    }
 
     const status = this.status;
     // A status for a dotted LEAF (web.terminal_font_size_desktop, written by the
@@ -1326,8 +1397,9 @@ export class ConfigPane {
     // The route is explicit about this (running_value_checked): the trace says
     // what the FILES resolve to, which is also what the next start reads — a
     // running daemon's snapshot is a different question.
+    const projectScope = this.explainResp?.scope === "project" ? " · project scope" : "";
     body.append(
-      h("div", { class: "af-config-explain-note" }, "On-disk sources · the running daemon's value was not checked."),
+      h("div", { class: "af-config-explain-note" }, `On-disk sources · the running daemon's value was not checked${projectScope}.`),
     );
     return body;
   }
@@ -1344,7 +1416,7 @@ export class ConfigPane {
 
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
-      box.checked = e.value === "true";
+      box.checked = editBaseline(e) === "true";
       box.setAttribute("aria-label", e.key);
       // A checkbox has no separate commit gesture: toggling IS the edit.
       box.addEventListener("change", () => this.commitSave(e.key, box.checked ? "true" : "false"));
@@ -1359,7 +1431,7 @@ export class ConfigPane {
       // keep the two in agreement.
       for (const v of e.enum ?? []) {
         const opt = h("option", { value: v }, v);
-        if (v === e.value) {
+        if (v === editBaseline(e)) {
           opt.selected = true;
         }
         select.append(opt);
@@ -1371,8 +1443,8 @@ export class ConfigPane {
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
     // The row repaints its own draft when it has one: drafts is a per-key map,
     // so every typed row survives the rebuild — not only the one `editing`
-    // names. A key absent from the map paints the manifest value.
-    input.value = this.drafts.get(e.key) ?? e.value;
+    // names. A key absent from the map paints the edit baseline (editBaseline).
+    input.value = this.drafts.get(e.key) ?? editBaseline(e);
     if (this.editing === e.key) {
       this.editingInput = input;
     }
@@ -1393,7 +1465,7 @@ export class ConfigPane {
     // that finds the row still focused, including the one the post-save refetch
     // triggers, so focus survives both renders. It does not re-open the edit:
     // `editing` stays null and the Save button stays disabled via `canCommit`
-    // against the refreshed `e.value`.
+    // against the refreshed baseline.
     if (this.restoreKey === e.key && this.editingInput === null) {
       this.editingInput = input;
     }
@@ -1410,14 +1482,14 @@ export class ConfigPane {
     // no-op, telling the user something happened when nothing did. Routing both
     // through commit() is what keeps a disabled control actually disabled.
     const commit = () => {
-      if (!canCommit(input.value, e.value)) {
+      if (!canCommit(input.value, editBaseline(e))) {
         return;
       }
       this.commitSave(e.key, input.value);
     };
 
     const syncSave = () => {
-      save.disabled = !canCommit(input.value, e.value);
+      save.disabled = !canCommit(input.value, editBaseline(e));
       dirty.hidden = save.disabled;
     };
 

@@ -125,7 +125,7 @@
       },
       "verdict": "parity",
       "issue": "#4803",
-      "notes": "The CLI's --explain resolution now lives in config/explain.go so every surface renders the SAME config.ResolvedValue rather than growing a second precedence implementation. The daemon serves it over POST /v1/ExplainConfig: the TUI explains in-process locally and through the targeted daemon under --daemon-url/AF_DAEMON_URL (never falling back to the local file), and the web renders the trace in a per-row Explain disclosure. The trace covers on-disk sources only (running_value_checked=false), matching the CLI's 'running daemon value not checked' contract. Project-scoped explanation stays with the project-config work; the route is global-only."
+      "notes": "The CLI's --explain resolution now lives in config/explain.go so every surface renders the SAME config.ResolvedValue rather than growing a second precedence implementation. The daemon serves it over POST /v1/ExplainConfig: the TUI explains in-process locally and through the targeted daemon under --daemon-url/AF_DAEMON_URL (never falling back to the local file), and the web renders the trace in a per-row Explain disclosure. The trace covers on-disk sources only (running_value_checked=false), matching the CLI's 'running daemon value not checked' contract. Since #7009 an optional repo_path explains a key in a project (scope \"project\"); both editors pass the scope their rows were actually read in, so a trace never contradicts the row it opened from."
     },
     {
       "id": "config.read",
@@ -167,20 +167,20 @@
       "id": "config.read-project",
       "title": "Read the effective config for a selected project",
       "tui": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "app/handle_overlay.go showConfigEditor (the active project) -> ui/config_target.go ReadConfigForEditor -> config/editor_entries.go EditorEntriesForRepo in-process, or the targeted daemon's GetConfig repo_path"
       },
       "web": {
-        "status": "no",
-        "pointer": ""
+        "status": "yes",
+        "pointer": "web/src/index.ts configRefetcher (the selected project) -> web/src/api.ts getConfig repo_path -> daemon POST /v1/GetConfig -> web/src/config.ts scopeLine/scopeBanner"
       },
       "cli": {
         "status": "yes",
         "pointer": "commands/configcmd.go config get/list --repo (with deprecated --project alias)"
       },
-      "verdict": "real-gap",
+      "verdict": "parity",
       "issue": "#5289",
-      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. The #2216 epic has closed; TUI/web exposure is in flight as PR #4947, which is also the write half's (#5157) sequencing dependency. UPDATE 2026-11-06: #4947 has been on 'hold' since 2026-09-27 for an owner decision on the three surface questions it raises — a new 'p' scope binding in the TUI config editor, the GetConfig repo_path request field, and a read-only project scope on the web — and it now conflicts with master. The gap itself is real (both editors render the global value for a project-overridden key while looking authoritative), but its implementation shape adds canonical-surface affordances, which is the owner's call; do not re-pick this row until he answers."
+      "notes": "Stage 2 of #2216 added read-only CLI selection of an existing repository path; it neither registers a project nor writes identity state. #2607 aligned that read path with the shared project-context contract: get/list default to the cwd's repository, --repo selects another path, and the old --project spelling remains a compatibility alias. #7009 closed the UI half in the narrow shape approved after #4947's scope picker was declined: both editors read the ACTIVE project's effective values through config.EditorEntriesForRepo (the TUI's current project, the web's selected project), with a scope marker on every row a non-global layer supplies, and every edit still writes the global file. GetConfig gained an optional repo_path (empty is byte-identical to the global read) because the daemon cannot learn the web's or a remote TUI's project any other way; an unresolvable project degrades to global rows, with project_error naming only the requested path. There is no scope picker and no project-scope editing: the write half stays with config.write-project."
     },
     {
       "id": "appearance.select",

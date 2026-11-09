@@ -71,7 +71,8 @@ const GLOBAL: ConfigScope = { requested: "", root: "", error: "" };
 
 function render(entries: ConfigEntry[], scope: ConfigScope = PROJECT, acts: ConfigActions = actions()): ConfigPane {
   const pane = new ConfigPane(acts);
-  pane.update(entries, "/home/u/.agent-factory/config.toml", null,
+  // An empty path keeps the header off `location.host`, which fakedom lacks.
+  pane.update(entries, "", null,
     { ...emptyAccountsState(), loaded: true }, emptyQuotaState(), "system",
     { ...emptyHostsState(), editable: true }, scope);
   return pane;

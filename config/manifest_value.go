@@ -187,6 +187,17 @@ type ConfigEntry struct {
 	// keys such as update_channel are picked up by af's own next launch. The old
 	// per-key boolean could not express those outcomes; the notice does.
 	RequiresRestart bool `json:"requires_restart"`
+	// Scope is set only on a project read (EditorEntriesForRepo) and only for a
+	// row a non-global layer supplies; empty means Value is the global value. It
+	// is an OPEN set — see the Scope* constants — so a client must read an
+	// unknown value as "the effective value comes from a non-global layer"
+	// rather than reject it, or the next layer af adds breaks every client.
+	Scope string `json:"scope,omitempty"`
+	// GlobalValue is the global file's value in editor form, present iff Scope
+	// is set. It is what an edit writes and therefore the edit field's baseline:
+	// the editors write the global file, and while an override stands Value is
+	// not what a save would change.
+	GlobalValue string `json:"global_value,omitempty"`
 }
 
 // ManifestWithValues returns the global Manifest() view zipped with cfg's live

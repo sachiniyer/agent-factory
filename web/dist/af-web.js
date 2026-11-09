@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "3cbeae228d9d";
+var CLIENT_VERSION = "d07bf455bcc0";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7474,9 +7474,16 @@ async function removeTask(task, token2) {
   requireTaskID(task.id, "remove a task");
   await af("RemoveTask", { id: task.id, expect: projectExpectation(task) }, token2);
 }
-async function getConfig(token2) {
-  const resp = await af("GetConfig", {}, token2);
-  return { entries: resp?.entries ?? [], path: resp?.path ?? "" };
+async function getConfig(token2, repoPath = "") {
+  const body = {};
+  if (repoPath) body.repo_path = repoPath;
+  const resp = await af("GetConfig", body, token2);
+  return {
+    entries: resp?.entries ?? [],
+    path: resp?.path ?? "",
+    project_root: resp?.project_root ?? "",
+    project_error: resp?.project_error ?? ""
+  };
 }
 async function setConfigValue(key, value, token2) {
   return af("SetConfigValue", { key, value }, token2);
@@ -7507,8 +7514,10 @@ async function daemonHealth(token2) {
     return null;
   }
 }
-async function explainConfig(key, token2) {
-  return af("ExplainConfig", { key }, token2);
+async function explainConfig(key, token2, repoPath) {
+  const body = { key };
+  if (repoPath) body.repo_path = repoPath;
+  return af("ExplainConfig", body, token2);
 }
 function spawnConfigAssistant(token2) {
   return af("config-assistant", {}, token2);
@@ -8867,6 +8876,33 @@ function controlKind(e) {
 function canCommit(shown, current) {
   return shown !== current;
 }
+var GLOBAL_CONFIG_SCOPE = { requested: "", root: "", error: "" };
+function editBaseline(e) {
+  return e.scope ? e.global_value ?? "" : e.value;
+}
+function scopeLine(e) {
+  if (!e.scope) {
+    return "";
+  }
+  if (e.scope === "personal-ignored") {
+    return "personal override \u2014 stored, not applied \xB7 this project uses the global value";
+  }
+  const label = e.scope === "project" ? "project override" : e.scope === "personal" ? "personal override" : e.scope === "project+personal" ? "project + personal overrides" : "project-scoped override";
+  const uses = e.value === "" ? "(unset)" : e.value;
+  return `${label} \xB7 this project uses: ${uses} \xB7 the field above edits the global value`;
+}
+function scopeBanner(scope) {
+  if (scope.requested === "") {
+    return "";
+  }
+  if (scope.error !== "") {
+    return `project values unavailable: ${scope.error} \u2014 showing global values`;
+  }
+  if (scope.root !== "") {
+    return `project ${scope.root} \xB7 values shown are what af uses there \xB7 edits write the global file`;
+  }
+  return "this daemon is too old to resolve project values \u2014 showing global values";
+}
 function shouldCloseSavedField(status, editing, statusIsNew) {
   return statusIsNew && status !== null && !status.error && status.key === editing;
 }
@@ -9028,6 +9064,8 @@ var ConfigPane = class {
   explainError = "";
   explainBusy = false;
   explainGeneration = 0;
+  scope = GLOBAL_CONFIG_SCOPE;
+  lastScope = null;
   lastEntries = null;
   lastStatus = null;
   lastAccounts = null;
@@ -9059,8 +9097,8 @@ var ConfigPane = class {
   accountActions;
   /** Feeds the pane fresh manifest rows. Re-rendering is skipped when nothing
    *  changed, matching the rest of the shell's patch-in-place model. */
-  update(entries, path, status, accounts, quota, theme = this.theme, hosts = this.hosts) {
-    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts) {
+  update(entries, path, status, accounts, quota, theme = this.theme, hosts = this.hosts, scope = this.scope) {
+    if (this.lastEntries === entries && this.lastStatus === status && this.lastAccounts === accounts && this.lastQuota === quota && this.lastTheme === theme && this.lastHosts === hosts && this.lastScope === scope) {
       return;
     }
     const statusIsNew = status !== this.lastStatus;
@@ -9079,6 +9117,8 @@ var ConfigPane = class {
     this.lastQuota = quota;
     this.lastTheme = theme;
     this.lastHosts = hosts;
+    this.lastScope = scope;
+    this.scope = scope;
     this.theme = theme;
     this.entries = entries.filter((entry) => entry.key !== "theme" && !entry.key.startsWith("theme."));
     this.path = path;
@@ -9353,6 +9393,8 @@ var ConfigPane = class {
     );
     assistantBtn.addEventListener("click", () => this.actions.openAssistant());
     head.append(assistantBtn);
+    const bannerText = scopeBanner(this.scope);
+    const banner = bannerText === "" ? [] : [h("div", { class: "af-config-banner", role: "status" }, bannerText)];
     const sections = [];
     for (const { tier, name } of tiersInOrder(this.entries)) {
       const inTier = this.entries.filter((e) => e.tier === tier);
@@ -9391,6 +9433,7 @@ var ConfigPane = class {
     ];
     this.el.replaceChildren(
       head,
+      ...banner,
       h("div", { class: "af-config-list" }, ...this.renderBrowser(), ...content),
       renderHostsSection(this.entries, this.hosts, this.hostActions, this.hostDisclosure),
       renderAccountsSection(this.accounts, this.accountActions, this.registration),
@@ -9465,6 +9508,10 @@ var ConfigPane = class {
     );
     row.append(label);
     row.append(this.renderControl(e));
+    const marker = scopeLine(e);
+    if (marker !== "") {
+      row.append(h("div", { class: "af-config-scope" }, marker));
+    }
     const status = this.status;
     if (status && (status.key === e.key || status.key.startsWith(`${e.key}.`))) {
       if (status.error !== "") {
@@ -9584,8 +9631,9 @@ var ConfigPane = class {
         );
       }
     }
+    const projectScope = this.explainResp?.scope === "project" ? " \xB7 project scope" : "";
     body.append(
-      h("div", { class: "af-config-explain-note" }, "On-disk sources \xB7 the running daemon's value was not checked.")
+      h("div", { class: "af-config-explain-note" }, `On-disk sources \xB7 the running daemon's value was not checked${projectScope}.`)
     );
     return body;
   }
@@ -9600,7 +9648,7 @@ var ConfigPane = class {
     const kind = controlKind(e);
     if (kind === "checkbox") {
       const box = h("input", { type: "checkbox", class: "af-config-check" });
-      box.checked = e.value === "true";
+      box.checked = editBaseline(e) === "true";
       box.setAttribute("aria-label", e.key);
       box.addEventListener("change", () => this.commitSave(e.key, box.checked ? "true" : "false"));
       return h("div", { class: "af-config-control" }, box);
@@ -9610,7 +9658,7 @@ var ConfigPane = class {
       select.setAttribute("aria-label", e.key);
       for (const v of e.enum ?? []) {
         const opt = h("option", { value: v }, v);
-        if (v === e.value) {
+        if (v === editBaseline(e)) {
           opt.selected = true;
         }
         select.append(opt);
@@ -9619,7 +9667,7 @@ var ConfigPane = class {
       return h("div", { class: "af-config-control" }, select);
     }
     const input = h("input", { type: "text", class: "af-input af-config-input", autocomplete: "off" });
-    input.value = this.drafts.get(e.key) ?? e.value;
+    input.value = this.drafts.get(e.key) ?? editBaseline(e);
     if (this.editing === e.key) {
       this.editingInput = input;
     }
@@ -9630,13 +9678,13 @@ var ConfigPane = class {
     const save = h("button", { type: "button", class: "af-primary af-config-save" }, "Save");
     const dirty = h("span", { class: "af-config-dirty", role: "status" }, "Unsaved");
     const commit = () => {
-      if (!canCommit(input.value, e.value)) {
+      if (!canCommit(input.value, editBaseline(e))) {
         return;
       }
       this.commitSave(e.key, input.value);
     };
     const syncSave = () => {
-      save.disabled = !canCommit(input.value, e.value);
+      save.disabled = !canCommit(input.value, editBaseline(e));
       dirty.hidden = save.disabled;
     };
     input.addEventListener("input", () => {
@@ -20046,7 +20094,7 @@ var AppShell = class {
       this.lastTasksProject = state.selectedProject;
       this.tasksPane.update(state.tasks, state.selectedProject, state.tasksError);
     }
-    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts);
+    this.configPane.update(state.config, state.configPath, state.configStatus, state.accounts, state.quota, state.themeChoice, state.hosts, state.configScope);
     const sessionsChanged = this.lastSessions !== state.sessions;
     const selectionChanged = this.lastSelectedId !== state.selectedId;
     const projectChanged = this.lastSelectedProject !== state.selectedProject;
@@ -21995,6 +22043,7 @@ var store = new Store({
   view: "sessions",
   config: [],
   configPath: "",
+  configScope: GLOBAL_CONFIG_SCOPE,
   configStatus: null,
   accounts: emptyAccountsState(),
   hosts: emptyHostsState(),
@@ -23297,11 +23346,21 @@ function clearTabError() {
 var configReadCommits = 0;
 var configRefetcher = createFencedRefetcher({
   readToken: () => token,
-  fetch: getConfig,
+  // The selected project's effective values (#7009). The project is captured
+  // with the request so the committed scope names what THIS read asked for, not
+  // whatever is selected by the time it lands.
+  fetch: (tok) => {
+    const requested = store.get().selectedProject ?? "";
+    return getConfig(tok, requested).then((resp) => ({ ...resp, requested }));
+  },
   commit: (resp) => {
     configReadCommits++;
     setTerminalFontSizes(terminalFontSizesFromConfig(resp.entries));
-    store.set({ config: resp.entries, configPath: resp.path });
+    store.set({
+      config: resp.entries,
+      configPath: resp.path,
+      configScope: { requested: resp.requested, root: resp.project_root ?? "", error: resp.project_error ?? "" }
+    });
   },
   // Surfaced, not swallowed: an empty config screen would read as "you have no
   // settings" rather than "the read failed". Under the fence like the commit — an
@@ -23314,6 +23373,16 @@ var configRefetcher = createFencedRefetcher({
 function refreshConfig() {
   return configRefetcher.refresh();
 }
+var configProjectSeen = null;
+store.subscribe((state) => {
+  if (state.selectedProject === configProjectSeen) {
+    return;
+  }
+  configProjectSeen = state.selectedProject;
+  if (state.view === "config") {
+    void refreshConfig();
+  }
+});
 var CONNECT_CONFIG_RETRY_DELAYS_MS = [1e3, 2e3, 4e3, 8e3, 16e3];
 async function reconcileConfigRead(candidate, attempt) {
   const landed = await retryWithBackoff(
@@ -23634,7 +23703,7 @@ function explainConfigValue(key) {
   if (tok === null) {
     return Promise.resolve({ ok: false, error: "not connected to the daemon" });
   }
-  return explainConfig(key, tok).then(
+  return explainConfig(key, tok, store.get().configScope.root || void 0).then(
     (resp) => ({ ok: true, resp }),
     (err) => ({ ok: false, error: errorText(err) })
   );

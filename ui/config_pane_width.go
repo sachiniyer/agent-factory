@@ -244,7 +244,10 @@ func (c *ConfigPane) displayValue(e config.ConfigEntry) string {
 	// 85-cell row, which the overlay frame then wraps — and a wrapped row makes the
 	// height window's line count a lie, so the pane overflows its box (the exact
 	// failure TestConfigPaneNeverRendersALineWiderThanThePane exists to prevent).
-	budget := c.width - lipgloss.Width(e.Key) - 8
+	// A scope marker follows the value on the same line, so the preview yields
+	// it the cells: clipping the marker instead would hide the one fragment that
+	// says the value is not the global one.
+	budget := c.width - lipgloss.Width(e.Key) - 8 - lipgloss.Width(scopeMarker(e))
 	if budget < 12 {
 		budget = 12
 	}

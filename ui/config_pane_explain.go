@@ -30,7 +30,7 @@ func (c *ConfigPane) beginExplain() {
 		// Tier headings and account rows have no config key to explain.
 		return
 	}
-	value, err := c.explain(entry.Key)
+	value, err := c.explain(entry.Key, c.project)
 	if err != nil {
 		// Surface the refusal where a status belongs — the remote daemon does
 		// not know the route (version skew), the key is unknown to it, or it
@@ -87,6 +87,9 @@ func (c *ConfigPane) explainBudget() int {
 // A host explain reads the probe's verdict instead of a key trace (#5571).
 func (c *ConfigPane) renderExplainView() string {
 	title, note := "Explain", "on-disk sources · the running daemon's value was not checked"
+	if c.project != nil {
+		note += " · project values"
+	}
 	if c.explainHost != nil {
 		title = "Host check"
 		note = "the daemon's probe of the saved entry · enter on the row re-runs it"

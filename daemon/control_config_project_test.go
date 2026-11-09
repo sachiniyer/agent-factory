@@ -155,3 +155,16 @@ func TestExplainConfigRefusesAProjectItCannotResolve(t *testing.T) {
 	assert.Contains(t, err.Error(), "not a git repository: "+requested)
 	assert.False(t, strings.Contains(err.Error(), home), "the daemon's AF home never crosses the wire: %v", err)
 }
+
+// TestExplainConfigProjectEchoesAKeyRefusal: the one resolver error that is
+// safe to echo is the caller's own key, and it is far more useful verbatim than
+// folded into the generic project message.
+func TestExplainConfigProjectEchoesAKeyRefusal(t *testing.T) {
+	_, repoRoot := projectConfigFixture(t)
+	cs := &controlServer{}
+
+	var resp ExplainConfigResponse
+	err := cs.ExplainConfig(ExplainConfigRequest{Key: "no_such_key", RepoPath: repoRoot}, &resp)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `unknown config key "no_such_key"`)
+}

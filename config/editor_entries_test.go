@@ -172,6 +172,10 @@ func TestExplainRepoValueAnswersForTheProjectNotTheGlobalFile(t *testing.T) {
 	_, err = ExplainRepoValue(repo, "no_such_key")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unknown config key")
+	assert.ErrorIs(t, err, ErrUnknownConfigKey, "the daemon echoes key refusals and hides every other resolver error")
+	_, err = ExplainRepoValue(repo, "theme")
+	assert.ErrorIs(t, err, ErrUnknownConfigKey, "a retired key is a key refusal too")
+	assert.Contains(t, err.Error(), "retired", "and keeps its own hint")
 }
 
 func TestExplainRepoValueRoutesRootAgentThroughTheFourLayerTrace(t *testing.T) {
