@@ -1,8 +1,6 @@
 package task
 
 import (
-	"fmt"
-
 	"github.com/sachiniyer/agent-factory/config"
 )
 
@@ -68,7 +66,7 @@ func RecoverStaleWatcherStatus(taskID string, armed Task, status string) (bool, 
 			break
 		}
 		if !found {
-			return fmt.Errorf("task with id %q not found", taskID)
+			return &NotFoundError{ID: taskID}
 		}
 		if _, err := writeTasks(tasks); err != nil {
 			return err

@@ -80,7 +80,7 @@ func RecordWatchRateDrops(taskID string, total int, droppedAt time.Time) (Task, 
 			break
 		}
 		if row < 0 {
-			return fmt.Errorf("task with id %q not found", taskID)
+			return &NotFoundError{ID: taskID}
 		}
 
 		generation, err := writeTasks(tasks)

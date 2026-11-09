@@ -574,7 +574,7 @@ func GetTask(id string) (*Task, error) {
 		}
 	}
 
-	return nil, fmt.Errorf("task with id %q not found", id)
+	return nil, &NotFoundError{ID: id}
 }
 
 // randReader is the entropy source for GenerateID. It is a package variable so
@@ -733,7 +733,7 @@ func updateTaskStatusLocked(taskID string, lastRunAt *time.Time, lastRunStatus s
 		}
 
 		if !found {
-			return fmt.Errorf("task with id %q not found", taskID)
+			return &NotFoundError{ID: taskID}
 		}
 		if !applied {
 			return nil
