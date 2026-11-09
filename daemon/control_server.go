@@ -528,6 +528,17 @@ func (s *controlServer) createSession(ctx context.Context, req CreateSessionRequ
 		req.RepoPath = resolved
 	}
 	req.Account = strings.TrimSpace(req.Account) // mirror trimProgramEnumIfBare (#5123)
+	// A whitespace-only host pick is "no pick" — validateCreateFirst already
+	// reads it that way (its own TrimSpace gate skips the host-list check for
+	// one). Normalize once HERE so the rest of the create pipeline reads the
+	// same value the validator did, instead of the raw whitespace every
+	// downstream stage (backendSelection, resolveBackendKind, InPlaceBackendConflict,
+	// chooseListedHost, recordedAccountHost) treats as a real ssh pick — forcing
+	// BackendSSH and persisting " " verbatim — while sshRuntime.Provision trims
+	// it back to absent and can fail only AFTER reserveCreate has already renamed
+	// an archived session holding the requested title (#5744, #6988). The Account
+	// twin is trimmed the same way above; RepoPath is normalized just above that.
+	req.Host = strings.TrimSpace(req.Host)
 	if req.ValidateFirst {
 		if err := validateCreateFirst(req); err != nil {
 			return err
