@@ -234,6 +234,34 @@ func TestGeneralHelpNamesEveryNamingFormField(t *testing.T) {
 	}
 }
 
+// TestGeneralHelpTasksRowSaysWhereNewAndRunWork is the #6400 regression. The
+// tasks key opens the selected task's edit form with Name focused (#1249), so
+// "n" and "r" there type into the name. The row used to read "Manage tasks ·
+// n create · r run", and users who followed it typed into the task's name.
+// It must say what the key opens, and offer n and r only as keys of the list
+// that esc reaches from the form.
+func TestGeneralHelpTasksRowSaysWhereNewAndRunWork(t *testing.T) {
+	require.NoError(t, keys.ApplyOverrides(nil))
+	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
+
+	var desc string
+	for _, line := range strings.Split(xansi.Strip(helpTypeGeneral{}.toContent()), "\n") {
+		if key, rest, ok := strings.Cut(line, "- "); ok && strings.TrimSpace(key) == helpKey(keys.KeyTaskList) {
+			desc = rest
+			break
+		}
+	}
+	require.NotEmpty(t, desc, "the general help must list the tasks key")
+	require.True(t, strings.HasPrefix(desc, "Edit a task"),
+		"the row must say the key opens a task's edit form: %q", desc)
+	list := strings.Index(desc, "esc for the list")
+	require.GreaterOrEqual(t, list, 0, "the row must name esc as the way to the list: %q", desc)
+	for _, verb := range []string{"n new", "r run"} {
+		require.Greaterf(t, strings.Index(desc, verb), list,
+			"%q types into Name on the form, so it may only appear as a list key, after esc: %q", verb, desc)
+	}
+}
+
 // TestInstanceStartHelpRemoteOmitsUnsupportedTabKeys removed — remote (hook)
 // backends now have full local parity including TabManagement, so the
 // instance-start help advertises the same t/w/1-9 tab keys for remote as for
