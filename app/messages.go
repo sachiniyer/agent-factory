@@ -1,6 +1,7 @@
 package app
 
 import (
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 )
 
@@ -110,7 +111,10 @@ type rebindConflictSnapshotMsg struct {
 	projectID string
 	refusal   error
 	data      []session.InstanceData
-	fetchErr  error
+	// skipped is the skipped set on the same all-repos response (#6986): the
+	// retained set is written from it alongside data, never from a later read.
+	skipped  []daemon.SkippedRepo
+	fetchErr error
 }
 
 // instanceArchivedMsg / instanceRestoredMsg report completion of an async

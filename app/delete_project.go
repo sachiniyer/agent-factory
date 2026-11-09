@@ -97,6 +97,15 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 // this message is the entire basis on which the user consents to a destructive
 // action. On confirm it dispatches the async daemon archive-then-remove.
 func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
+	// The one view-completeness guard (#6986): the confirmation's counts come
+	// from the latest snapshot, and while that snapshot reports a skipped repo
+	// any count on screen may be hiding sessions the daemon will still archive
+	// or tear down. The refusal names the skipped set — not a fetch failure —
+	// and re-checks at dispatch in startDeleteProjectMsg for a skip that lands
+	// after this confirm opens.
+	if err := m.skippedReposGuardRefusal(); err != nil {
+		return m, m.handleNotice(fmt.Errorf("cannot delete project %q: %w", proj.Name, err))
+	}
 	if proj.RepoID == "" {
 		return m, m.handleError(fmt.Errorf("cannot delete project %q: repository identity is unavailable", proj.Name))
 	}

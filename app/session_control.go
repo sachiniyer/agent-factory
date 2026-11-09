@@ -678,11 +678,13 @@ func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
 }
 
 // allReposSnapshotFetcher returns the daemon's session list across EVERY repo
-// (RepoID:"" = all repos), used only to build the project-picker's list with a
-// per-project session count (#1461). A package var so the project-switch tests
-// can inject a fake multi-repo snapshot. It is a plain read — the switch itself
-// still re-scopes through home.snapshotFetcher(m.repoID).
-var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, error) {
+// (RepoID:"" = all repos) plus that reply's skipped-repo set (#6986), used to
+// build the project-picker's list with a per-project session count (#1461) and
+// to keep the retained skipped set honest on the poll. A package var so the
+// project-switch tests can inject a fake multi-repo snapshot. It is a plain
+// read — the switch itself still re-scopes through
+// home.snapshotFetcher(m.repoID).
+var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	var resp daemon.SnapshotResponse
 	err := withDaemonHTTP(func(c *apiclient.Client) error {
 		var e error
@@ -690,14 +692,28 @@ var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData,
 		return e
 	})
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
-	return resp.Instances, nil
+	// Rows and the skipped set return from the ONE response (#6986): callers
+	// keep them paired, so the TUI never renders rows from one snapshot against
+	// the completeness verdict of another.
+	return resp.Instances, resp.SkippedRepos, nil
 }
 
 // SetAllReposSnapshotFetcherForTest swaps the all-repos discovery fetcher and
-// returns a restore func. Test-only.
+// returns a restore func. Test-only. A stub that fakes only rows reports a
+// complete (empty) skipped set on a successful fetch — a test exercising the
+// skipped-repo path uses SetAllReposSkippedFetcherForTest to inject it.
 func SetAllReposSnapshotFetcherForTest(f func(context.Context) ([]session.InstanceData, error)) func() {
+	return SetAllReposSkippedFetcherForTest(func(ctx context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		data, err := f(ctx)
+		return data, nil, err
+	})
+}
+
+// SetAllReposSkippedFetcherForTest is SetAllReposSnapshotFetcherForTest with
+// the reply's skipped set too (#6986), and returns a restore func. Test-only.
+func SetAllReposSkippedFetcherForTest(f func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error)) func() {
 	prev := allReposSnapshotFetcher
 	allReposSnapshotFetcher = f
 	return func() { allReposSnapshotFetcher = prev }

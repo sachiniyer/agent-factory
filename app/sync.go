@@ -35,6 +35,11 @@ type snapshotFetchedMsg struct {
 	// for the previous repo is still in flight, and applying its old-repo
 	// sessions/tasks would bleed the previous project into the new view.
 	repoID string
+	// skippedRepos is the daemon's report of repos it could not load, carried
+	// on THIS snapshot's response (#6986) and scoped to repoID exactly like
+	// data is — an empty repoID reports the whole set. Rows and skip state
+	// travel in one response, so they are always from the same snapshot.
+	skippedRepos []daemon.SkippedRepo
 	// tasks is the repo's task list re-read from disk on the same poll (#1168).
 	// Tasks are a disk-backed store shared between the TUI and the daemon — not
 	// solely daemon-owned like sessions (#960) — so an out-of-band `af tasks
@@ -59,8 +64,11 @@ type snapshotFetchedMsg struct {
 	// (#1590). allReposErr is carried separately (like tasksErr) so a failed
 	// cross-repo read leaves the last-known project rows intact rather than
 	// blanking the section on a hiccup.
-	allRepos    []session.InstanceData
-	allReposErr error
+	allRepos []session.InstanceData
+	// allReposSkipped is the skipped set on the same all-repos response —
+	// the completeness witness the retained set is written from (#6986).
+	allReposSkipped []daemon.SkippedRepo
+	allReposErr     error
 }
 
 // -- Ticker commands --
@@ -137,11 +145,12 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 		// always-visible Projects section's per-repo counts stay live (#1590).
 		// Read here (not in the handler) to keep the daemon RPC off the event
 		// loop; its error is carried separately so a hiccup keeps the last rows.
-		allReposData, allReposErr := allRepos(context.Background())
+		allReposData, allReposSkipped, allReposErr := allRepos(context.Background())
 		return snapshotFetchedMsg{
 			data: resp.Instances, alarms: resp.DeliveryAlarms, err: err,
-			tasks: tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
-			allRepos: allReposData, allReposErr: allReposErr,
+			skippedRepos: resp.SkippedRepos,
+			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
+			allRepos: allReposData, allReposSkipped: allReposSkipped, allReposErr: allReposErr,
 		}
 	}
 }
@@ -167,11 +176,15 @@ var coldStartWarmupWait = 2 * time.Minute
 // (non-warming) daemon failure. Startup renders recovery and keeps normal
 // snapshot polling alive; unavailable data is never presented as an empty list.
 func (m *home) coldStartFromSnapshot() error {
-	data, err := m.fetchColdStartSnapshot(m.repoID)
+	data, skipped, err := m.fetchColdStartSnapshot(m.repoID)
 	m.snapshotUnavailable = err != nil
 	if err != nil {
 		return err
 	}
+	// A repo skipped on the launch snapshot must be announced from the first
+	// painted frame (#6986): the empty sidebar behind it is not a healthy
+	// empty repo.
+	m.mergeSkippedReposFor(m.repoID, skipped)
 	m.materializeSnapshot(data)
 	return nil
 }
@@ -279,16 +292,16 @@ func buildSnapshotInstances(data []session.InstanceData, workers int) []*session
 // post-#782 the daemon is always-on, so there is no degraded standalone path.
 // The repoID is passed explicitly rather than read from m.repoID so switchProject
 // can fetch the INCOMING project's snapshot before it re-scopes the model (#1788).
-func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, error) {
+func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	deadline := time.Now().Add(coldStartWarmupWait)
 	announced := false
 	for {
 		resp, err := m.snapshotFetcher(repoID)
 		if err == nil {
-			return resp.Instances, nil
+			return resp.Instances, resp.SkippedRepos, nil
 		}
 		if !daemon.IsDaemonStartingErr(err) {
-			return nil, err
+			return nil, nil, err
 		}
 		if !announced {
 			// Pre-TUI stdout, matching newHome's other startup messages: tell the
@@ -297,7 +310,7 @@ func (m *home) fetchColdStartSnapshot(repoID string) ([]session.InstanceData, er
 			announced = true
 		}
 		if time.Now().After(deadline) {
-			return nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
+			return nil, nil, fmt.Errorf("daemon is still restoring sessions after %s; try again in a moment", coldStartWarmupWait)
 		}
 		time.Sleep(coldStartWarmupPoll)
 	}
@@ -339,6 +352,15 @@ func (m *home) handleSnapshot(msg snapshotFetchedMsg) bool {
 	m.snapshotUnavailable = false
 	m.snapshotFailureSince = nil
 	changed := wasUnavailable
+	// The reply's skipped set rode the same response as data (#6986): fold this
+	// fetch's scope into the retained set so a skipped repo never renders as a
+	// clean empty sidebar. An empty scope is the unscoped read — the reply IS
+	// the whole set — so registry mode takes the same path. Deliberately not
+	// gated on m.repoID below: the skipped set is global completeness state,
+	// not scoped rows.
+	if m.mergeSkippedReposFor(msg.repoID, msg.skippedRepos) {
+		changed = true
+	}
 	// An empty active scope owns no sessions, so there is nothing to reconcile
 	// (#2864). The daemon reads an empty repoID as "every repo" — the same
 	// all-repos answer the cold start deliberately refuses in registry mode
