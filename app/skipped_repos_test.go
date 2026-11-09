@@ -317,6 +317,33 @@ func TestSkippedRepoColdStart(t *testing.T) {
 	requireSkippedRepoNotice(t, h)
 }
 
+// TestSkippedRepoNoticeKeepsPaneNotice: a poll that drains a pending pane
+// notice on the SAME tick a changed skipped set announces must carry BOTH in
+// the one transient — a second SetNotice on the same poll would replace the
+// visible AND retained slots, erasing the pane notice before it renders and
+// before `E details` can hold it (Codex on #7011).
+func TestSkippedRepoNoticeKeepsPaneNotice(t *testing.T) {
+	h := newTestHome(t)
+	h.errBox.SetSize(220, 1)
+	h.pendingPaneNotice = "draft edits for hooks were discarded"
+
+	pollSnapshotReply(t, h, daemon.SnapshotResponse{
+		SkippedRepos: []daemon.SkippedRepo{{
+			RepoID: h.repoID, Reason: daemon.SkippedRepoReasonUnreadableInstancesJSON,
+		}},
+	}, nil)
+
+	current := h.errBox.FullError()
+	require.NotEmpty(t, current, "the poll must raise the combined transient")
+	assert.Contains(t, current, "draft edits for hooks were discarded",
+		"the drained pane notice must not be erased by the skipped-repo announcement")
+	assert.Contains(t, current, "hidden",
+		"the skipped-repo announcement rides the same transient")
+	full, _ := h.errBox.RetainedNotice()
+	assert.Contains(t, full, "draft edits for hooks were discarded",
+		"the pane notice must also survive in the retained slot `E details` reads")
+}
+
 // TestSkippedRepoSwitchProject: switching INTO a project whose snapshot
 // reports a skip must carry the skipped set with the rows — the notice follows
 // the incoming project's state, it does not stay bound to the outgoing repo.
