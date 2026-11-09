@@ -675,10 +675,11 @@ func (t *TermPane) assertSize(stream Stream) {
 //
 // The emulator tracks the pane's REAL size, which a viewer's box need not match
 // (#4480): a taller emulator is cropped to the window ending at the pane's
-// working edge (the cursor row, or the last row holding content if lower — a
-// status bar below the input cursor), so the view shows what the pane is doing
-// rather than stale scrollback or a blank tail; a wider one is clipped with a
-// `…` marker at the cut (renderGridWindow).
+// working edge (on the primary screen the cursor row, or the last row holding
+// content if lower — a status bar below the input cursor; on the alternate
+// screen the last row holding content), so the view shows what the pane is
+// doing rather than stale scrollback or a blank tail; a wider one is clipped
+// with a `…` marker at the cut (renderGridWindow).
 func (t *TermPane) Render(width, height int, showCursor bool) string {
 	t.gridMu.RLock()
 	defer t.gridMu.RUnlock()
@@ -695,16 +696,29 @@ func (t *TermPane) Render(width, height int, showCursor bool) string {
 // viewSourceYLocked picks the emulator row the rendered window starts at when
 // the emulator is taller than the view: the lowest window that still shows the
 // pane's working edge. cursorY is the emulator cursor row (already read by the
-// caller for the overlay). Caller holds gridMu.
+// caller for the overlay). Render and SendMouse both crop through here, so a
+// click always lands on the cell it was painted over. Caller holds gridMu.
 func (t *TermPane) viewSourceYLocked(cursorY, viewH int) int {
 	emuH := t.emu.Height()
 	if emuH <= viewH || viewH <= 0 {
 		return 0
 	}
+	// On the primary screen the cursor is the working edge: it is where a
+	// shell's or an agent's next output lands, so the window never ends above it.
 	bottom := cursorY
-	// Content below the cursor — a status bar, a menu — is part of the pane's
+	if t.emu.IsAltScreen() {
+		// The alternate screen is a full-screen program's canvas, and its cursor
+		// marks nothing — programs park it wherever they like. watch leaves it in
+		// the bottom-right corner below three rows of content, so anchoring on it
+		// cropped a viewer down to blank rows and the pane rendered empty until
+		// something resized the tab (#7037). Anchor on content alone: the window
+		// ends at the last row holding any, which is the rule the capture preview
+		// crops by, so committing a preview keeps the rows it showed.
+		bottom = 0
+	}
+	// Content below the anchor — a status bar, a menu — is part of the pane's
 	// working edge, so the window reaches the last row holding content. Rows
-	// above the cursor can never be the anchor, so the scan stops there.
+	// above the anchor can never move it, so the scan stops there.
 	for y := emuH - 1; y > bottom; y-- {
 		if rowHasContent(t.emu, y, 0) {
 			bottom = y
