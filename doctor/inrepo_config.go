@@ -2,7 +2,6 @@ package doctor
 
 import (
 	"errors"
-	"os"
 	"strings"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -14,7 +13,7 @@ import (
 // file, or when the file fails to load for another reason, it returns nothing:
 // any other load error is reported by the checks that resolve the repo config.
 func defaultInRepoUnknownLeaves() []config.InRepoUnknownLeaf {
-	cwd, err := os.Getwd()
+	cwd, err := readableCurrentDir()
 	if err != nil {
 		return nil
 	}

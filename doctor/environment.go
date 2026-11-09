@@ -136,7 +136,17 @@ func checkStorageDir(report *Report, path, name string) {
 // advise safe.directory — neither can fix a missing cwd (#6995 review).
 var errCurrentDirUnreadable = errors.New("current directory could not be determined")
 
-func currentRepoContext() (*config.RepoContext, error) {
+// readableCurrentDir returns the process's working directory when — and only
+// when — the resolved path still names an existing, readable directory.
+// os.Getwd alone is not that proof: on darwin it can answer with the stale
+// path of a working directory that was already removed (a cached result or a
+// surviving $PWD), where the same removal fails getcwd outright on Linux. The
+// repo probe then runs git against the dead path and reports "cannot change
+// to" — an answered git error the findings would mislabel as git's when the
+// current directory is the thing that is gone. Re-stat and re-open the
+// resolved path so a vanished or unreadable cwd is classified as the cwd
+// failure it is on every platform (#6984).
+func readableCurrentDir() (string, error) {
 	cwd, err := os.Getwd()
 	if err != nil {
 		// A getwd failure (e.g. the process's working directory was removed
@@ -144,7 +154,27 @@ func currentRepoContext() (*config.RepoContext, error) {
 		// "outside a repository" nor a git refusal. Mark it so the
 		// not-inspectable detail does not label it "git's error" or advise
 		// safe.directory — neither can fix a missing cwd (#6995 review).
-		return nil, fmt.Errorf("%w: %v", errCurrentDirUnreadable, err)
+		return "", fmt.Errorf("%w: %v", errCurrentDirUnreadable, err)
+	}
+	info, statErr := os.Stat(cwd)
+	switch {
+	case statErr != nil:
+		return "", fmt.Errorf("%w: %v", errCurrentDirUnreadable, statErr)
+	case !info.IsDir():
+		return "", fmt.Errorf("%w: %s is not a directory", errCurrentDirUnreadable, cwd)
+	}
+	d, openErr := os.Open(cwd)
+	if openErr != nil {
+		return "", fmt.Errorf("%w: %v", errCurrentDirUnreadable, openErr)
+	}
+	_ = d.Close()
+	return cwd, nil
+}
+
+func currentRepoContext() (*config.RepoContext, error) {
+	cwd, err := readableCurrentDir()
+	if err != nil {
+		return nil, err
 	}
 	return config.RepoFromPath(cwd)
 }
@@ -375,7 +405,7 @@ func checkAgentBinariesImpl(ctx *scanContext, cfg *config.Config, report *Report
 	// ErrNotGitRepository doc).
 	if repoErr != nil && !errors.Is(repoErr, config.ErrNotGitRepository) {
 		cwd := "<unknown>"
-		if wd, err := os.Getwd(); err == nil {
+		if wd, err := readableCurrentDir(); err == nil {
 			cwd = wd
 		}
 		detail, remediation := repoNotInspectableDetail(cwd, repoErr, "af doctor")

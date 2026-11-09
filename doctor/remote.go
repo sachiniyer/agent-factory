@@ -20,7 +20,7 @@ import (
 // repo, or the repo configures no remote backend. This is the production
 // resolver; tests inject their own via Options.remoteConfig to stay hermetic.
 func defaultRemoteConfig() (*config.RemoteHooks, string, error) {
-	cwd, err := os.Getwd()
+	cwd, err := readableCurrentDir()
 	if err != nil {
 		return nil, "", err
 	}
