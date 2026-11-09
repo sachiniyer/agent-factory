@@ -663,10 +663,13 @@ response does not carry any of the fields below. With it:
   rather than answering with a global trace.
 
 Writes stay global. `SetConfigValue` and `UnsetConfigValue` always edit the
-global file, so while a project override stands, an edit changes
-`global_value` and leaves `value` — what the project uses — as it was. Seed an
-edit field from `global_value` on a scoped row, and say on screen that the edit
-is global. The TUI's `,` editor and the web Config view both do this.
+global file, so an edit on a scoped row changes `global_value`. It changes
+`value` only where the project still inherits from the global file — another
+entry of a merged table such as `program_overrides`, or a `personal-ignored`
+row — so read `GetConfig` with the same `repo_path` again after a write rather
+than assuming either way. Seed an edit field from `global_value` on a scoped
+row, and say on screen that the edit is global. The TUI's `,` editor and the
+web Config view both do this.
 
 ## Examples
 

@@ -102,6 +102,14 @@ func ReadConfigForEditor(repo *config.RepoContext) (entries []config.ConfigEntry
 	return resp.Entries, location + " · this daemon is too old to resolve project values — the rows are global", nil, nil
 }
 
+// rereadConfigForEditor is the pane's re-resolve seam: the same read the app
+// opens the editor with, so a scoped row refreshed after a save is resolved
+// exactly as the rows around it were.
+func rereadConfigForEditor(repo *config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+	entries, _, honored, err := ReadConfigForEditor(repo)
+	return entries, honored, err
+}
+
 // localConfigForEditor is the in-process read, the local half of the target
 // decision.
 //

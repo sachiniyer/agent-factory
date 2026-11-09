@@ -8,6 +8,8 @@ import (
 	"strings"
 	"testing"
 
+	tea "github.com/charmbracelet/bubbletea"
+
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
@@ -221,5 +223,51 @@ func TestConfigEditorLocalReadDegradesToGlobalWithTheReason(t *testing.T) {
 	}
 	if want := localPath + " · af could not read the project config for " + repo.Root; !strings.HasPrefix(location, want) {
 		t.Errorf("header location = %q, want it to start %q", location, want)
+	}
+}
+
+// TestConfigPaneGlobalSaveReResolvesAMergedProjectRow is the Codex P2 on #7017:
+// a scope marker does not mean the effective value is independent of the global
+// file. program_overrides merges per agent, so a project overriding only codex
+// still inherits the global claude command — a global save of that row changes
+// what the project uses, and the row must show it without a reopen.
+func TestConfigPaneGlobalSaveReResolvesAMergedProjectRow(t *testing.T) {
+	localTarget(t)
+	localPath, _ := seedLocalConfig(t)
+	if err := os.WriteFile(localPath, []byte("[program_overrides]\nclaude = \"global-claude\"\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	repo := localScopeRepo(t, "[program_overrides]\ncodex = \"repo-codex\"\n")
+
+	entries, location, scope, err := ReadConfigForEditor(repo)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if scope == nil {
+		t.Fatalf("fixture: the project read must be honored, got location %q", location)
+	}
+	c := NewConfigPane()
+	c.SetSize(200, 200)
+	c.SetEntries(entries, location, scope)
+	c.SetFocus(true)
+	c.showAdvanced = true
+	c.rebuildRows()
+	selectKey(t, c, "program_overrides")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("")
+	typeInto(c, `{"claude":"new-claude"}`)
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if c.statusIsError {
+		t.Fatalf("the global save failed: %s", c.status)
+	}
+
+	got := entryValue(t, c.entries, "program_overrides")
+	for _, want := range []string{"new-claude", "repo-codex"} {
+		if !strings.Contains(got, want) {
+			t.Errorf("after the global save the project's effective program_overrides is %q, want it to contain %q", got, want)
+		}
+	}
+	if strings.Contains(got, "global-claude") {
+		t.Errorf("the row still shows the replaced global command: %q", got)
 	}
 }

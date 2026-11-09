@@ -2,6 +2,7 @@ package ui
 
 import (
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 
@@ -140,9 +141,10 @@ func TestConfigPaneScopedUntouchedSaveWritesNothing(t *testing.T) {
 	}
 }
 
-// TestConfigPaneScopedSaveRefreshesTheGlobalValueNotTheEffectiveOne: a global
-// write does not change what the project uses while its override stands, so
-// the row keeps the effective value and only the global half moves.
+// TestConfigPaneScopedSaveRefreshesTheGlobalValueNotTheEffectiveOne: with no
+// project to re-read, the pane cannot know whether the global write moved the
+// project's value, so it records the global half, keeps the effective value
+// it last read, and says it may be stale rather than guessing.
 func TestConfigPaneScopedSaveRefreshesTheGlobalValueNotTheEffectiveOne(t *testing.T) {
 	c := scopedPane(t, config.ScopeProject, nil)
 	var wrote string
@@ -231,5 +233,98 @@ func TestConfigPaneScopeMarkerStaysInsideThePane(t *testing.T) {
 		if width >= 60 && !strings.Contains(c.String(), "(project+personal)") {
 			t.Fatalf("width %d: the marker was clipped off a long value:\n%s", width, c.String())
 		}
+	}
+}
+
+// TestConfigPaneScopedSaveShowsTheReReadEffectiveValue pins the seam half of
+// the re-resolve: the fresh read's value, scope and global value replace the
+// row's, and it is asked for the scope the rows were read in.
+func TestConfigPaneScopedSaveShowsTheReReadEffectiveValue(t *testing.T) {
+	project := &config.RepoContext{Root: "/srv/app"}
+	c := scopedPane(t, config.ScopeProject, project)
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: k, Value: v}, "", nil
+	}
+	var asked *config.RepoContext
+	c.reread = func(repo *config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+		asked = repo
+		fresh := scopedEntries(t, config.ScopeProjectPersonal)
+		for i := range fresh {
+			if fresh[i].Key == "default_program" {
+				fresh[i].Value, fresh[i].GlobalValue = "re-read", "gemini"
+			}
+		}
+		return fresh, repo, nil
+	}
+	selectKey(t, c, "default_program")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("")
+	typeInto(c, "gemini")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+	if asked != project {
+		t.Fatalf("the re-read was asked for %+v, want the rows' scope %+v", asked, project)
+	}
+	e := scopedEntry(t, c)
+	if e.Value != "re-read" || e.Scope != config.ScopeProjectPersonal || e.GlobalValue != "gemini" {
+		t.Fatalf("the row is %+v, want the re-read value, scope and global value", e)
+	}
+}
+
+// TestConfigPaneScopedSaveSaysWhenTheReReadFails: the write landed, so it is
+// not an error — but the row's effective value may now be stale, and the pane
+// says so rather than presenting it as current.
+func TestConfigPaneScopedSaveSaysWhenTheReReadFails(t *testing.T) {
+	for name, reread := range map[string]func(*config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error){
+		"error": func(*config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+			return nil, nil, errors.New("the daemon did not answer")
+		},
+		// A read that fell back to global rows cannot say what the project uses.
+		"degraded": func(*config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+			return config.ManifestWithValues(config.DefaultConfig()), nil, nil
+		},
+	} {
+		t.Run(name, func(t *testing.T) {
+			c := scopedPane(t, config.ScopeProject, &config.RepoContext{Root: "/srv/app"})
+			c.save = func(k, v string) (*config.SetResult, string, error) {
+				return &config.SetResult{Key: k, Value: v}, "", nil
+			}
+			c.reread = reread
+			selectKey(t, c, "default_program")
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			c.input.SetValue("")
+			typeInto(c, "gemini")
+			c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+
+			if c.statusIsError {
+				t.Fatalf("the save itself succeeded and must not read as an error: %s", c.status)
+			}
+			e := scopedEntry(t, c)
+			if e.GlobalValue != "gemini" {
+				t.Errorf("the written global value must still be recorded, got %q", e.GlobalValue)
+			}
+			if !strings.Contains(c.restartNotice, "could not re-read this project's value") {
+				t.Errorf("the pane must say the shown project value may be stale; notice = %q", c.restartNotice)
+			}
+		})
+	}
+}
+
+func TestConfigPaneUnmarkedSaveDoesNotReRead(t *testing.T) {
+	c := newTestConfigPane(t)
+	c.save = func(k, v string) (*config.SetResult, string, error) {
+		return &config.SetResult{Key: k, Value: v}, "", nil
+	}
+	c.reread = func(*config.RepoContext) ([]config.ConfigEntry, *config.RepoContext, error) {
+		t.Fatal("a global row's value is what was written; there is nothing to re-resolve")
+		return nil, nil, nil
+	}
+	selectKey(t, c, "default_program")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	c.input.SetValue("")
+	typeInto(c, "gemini")
+	c.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if got := entryValue(t, c.entries, "default_program"); got != "gemini" {
+		t.Fatalf("default_program = %q, want the written value", got)
 	}
 }

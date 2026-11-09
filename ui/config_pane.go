@@ -109,6 +109,14 @@ type ConfigPane struct {
 	// target. The rows say WHAT a value is; this answers WHERE it came from.
 	explain func(key string, repo *config.RepoContext) (*config.ResolvedValue, error)
 
+	// reread re-resolves the rows in a project scope after a global save of a
+	// scope-marked row (#7009), injected on the same terms: NewConfigPane wires
+	// rereadConfigForEditor, the same read the app opens the pane with. A
+	// marker does not mean the project ignores the global file — a merged map
+	// still inherits its other entries — so only a fresh read knows what the
+	// project uses now. honored is the scope the read actually got.
+	reread func(repo *config.RepoContext) (entries []config.ConfigEntry, honored *config.RepoContext, err error)
+
 	// editHosts is the hosts_edit write path (#5571 W10.5), injected on the
 	// same terms as save: NewConfigPane wires applyingHostsEdit, which routes
 	// the local daemon.EditGlobalHosts or the remote health-gated
@@ -228,6 +236,7 @@ func NewConfigPane() *ConfigPane {
 		input:     in,
 		save:      applyingConfigSet,
 		explain:   ExplainConfigForEditor,
+		reread:    rereadConfigForEditor,
 		editHosts: applyingHostsEdit,
 	}
 }
@@ -636,23 +645,28 @@ func (c *ConfigPane) commitEdit() {
 	}
 
 	c.cancelEdit()
+	// Reflect the canonical value back into the row so the list shows what the
+	// file holds, not what was typed. A scope-marked row's effective value is
+	// the project's, which a global write may or may not move (a merged map
+	// inherits the entries the project does not override), so it is re-read
+	// rather than guessed.
+	if entry.Scope != "" {
+		if stale := c.reresolveScopedEntry(result.Key, result.Value); stale != "" {
+			notice = joinNotices(notice, stale)
+		}
+	} else {
+		for i := range c.entries {
+			if c.entries[i].Key == result.Key {
+				c.entries[i].Value = result.Value
+			}
+		}
+	}
 	// Echo what was actually written, from the write path's own result — not
 	// from what this pane believes it sent. Same contract as `af config set`
 	// and the config agent. The per-key effect notice (#2480) rides along:
 	// live now, next daemon start, or next af launch — the honest answer for
 	// THIS key, computed by the write path.
 	c.setStatus(fmt.Sprintf("set %s = %s", result.Key, result.Value), false, notice)
-
-	// Reflect the canonical value back into the row so the list shows what the
-	// file holds, not what was typed. A scope-marked row keeps its effective
-	// value: a global write does not change what the project uses while its
-	// override stands, so only the global half moves.
-	reflectSavedValue(entry, result.Value)
-	for i := range c.entries {
-		if c.entries[i].Key == result.Key {
-			reflectSavedValue(&c.entries[i], result.Value)
-		}
-	}
 	// The `hosts`/`default_host` rows remain editable keys AND feed the Hosts
 	// section (#5571 W10.5): rebuild so a hand-edited table row re-derives the
 	// section's rows instead of leaving last save's destinations on screen.
@@ -811,13 +825,50 @@ func editSeedValue(e config.ConfigEntry) string {
 	return e.Value
 }
 
-// reflectSavedValue records a committed global write on a row.
-func reflectSavedValue(e *config.ConfigEntry, written string) {
-	if e.Scope != "" {
-		e.GlobalValue = written
-		return
+// staleProjectValueNote is what a scoped save says when the project could not
+// be re-read: the write landed, but the row's project value may be out of date.
+const staleProjectValueNote = "could not re-read this project's value — reopen the editor to see it"
+
+// reresolveScopedEntry refreshes one scope-marked row from a fresh project read
+// after its global value was written. It returns "" when the row is current,
+// or staleProjectValueNote when it could not be re-read; the written global
+// value is recorded either way. A read that fell back to global rows counts as
+// a failure — it cannot say what the project uses.
+func (c *ConfigPane) reresolveScopedEntry(key, written string) string {
+	var fresh *config.ConfigEntry
+	if c.project != nil {
+		if entries, honored, err := c.reread(c.project); err == nil && honored != nil {
+			for i := range entries {
+				if entries[i].Key == key {
+					fresh = &entries[i]
+					break
+				}
+			}
+		}
 	}
-	e.Value = written
+	for i := range c.entries {
+		if c.entries[i].Key != key {
+			continue
+		}
+		if fresh == nil {
+			c.entries[i].GlobalValue = written
+			continue
+		}
+		c.entries[i].Value = fresh.Value
+		c.entries[i].Scope = fresh.Scope
+		c.entries[i].GlobalValue = fresh.GlobalValue
+	}
+	if fresh == nil {
+		return staleProjectValueNote
+	}
+	return ""
+}
+
+func joinNotices(a, b string) string {
+	if a == "" {
+		return b
+	}
+	return a + " · " + b
 }
 
 func (c *ConfigPane) SetEditValueForTest(v string) { c.input.SetValue(v) }
