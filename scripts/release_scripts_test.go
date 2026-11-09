@@ -410,6 +410,7 @@ exec "`+realGit+`" "$@"
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed despite the push never landing: %q", tags)
 	}
+	assertCheckoutOnBuild(t, work, env, masterBefore)
 }
 
 // TestReleaseBumpFailsOnAuthWithoutRebase is the #6747 regression: a push that
@@ -487,6 +488,7 @@ exit 255
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed despite the auth failure: %q", tags)
 	}
+	assertCheckoutOnBuild(t, work, env, masterBefore)
 }
 
 // TestReleaseBumpFailsLoudlyOnGenuineConflict locks the fail-loud behavior when
@@ -515,6 +517,7 @@ func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	runGitEnv(t, rival, env, "commit", "-m", "chore: release v2.0.0")
 	runGitEnv(t, rival, env, "push", "origin", "master")
 	rivalTip := gitOutEnv(t, origin, env, "rev-parse", "master")
+	built := gitOutEnv(t, work, env, "rev-parse", "HEAD")
 
 	out, timedOut, err := runReleaseScript(t, work, env, "1.0.1")
 	if timedOut {
@@ -538,6 +541,7 @@ func TestReleaseBumpFailsLoudlyOnGenuineConflict(t *testing.T) {
 	if tags := gitOutEnv(t, origin, env, "tag", "-l", "v*"); tags != "" {
 		t.Fatalf("a tag was pushed despite the conflict: %q", tags)
 	}
+	assertCheckoutOnBuild(t, work, env, built)
 }
 
 // --- latest-released-tag.sh: a stranded tag is not a baseline (#5159) -------

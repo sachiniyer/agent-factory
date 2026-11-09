@@ -27,15 +27,40 @@ set -eu
 NEW_VERSION="${1:?usage: release-bump.sh <version>}"
 BUILT=$(git rev-parse HEAD)
 
-# Landing the bump brings the tagged commit's history into master, so that
-# history must already be master's: a dispatch from another branch would
-# otherwise push that branch's unreviewed commits to master. The checkout's own
-# view of master is enough — master only moves forward, so a commit on master
-# when the run was dispatched is still on it.
-if ! git merge-base --is-ancestor "$BUILT" refs/remotes/origin/master 2>/dev/null; then
-	echo "::error::The release was built from ${BUILT}, which is not on master (or the checkout has no origin/master to check against) — refusing to land it"
+# Only a clean checkout of the build: no uncommitted change to a tracked file,
+# staged or not. The script commits the index — a staged file would ride into
+# the release commit — and the failure trap below force-checks-out the built
+# commit, which would discard such edits. Refusing here, before the trap is
+# installed, means everything the trap can discard is the script's own work.
+# Untracked files (the workflow's dist/) are not changes to the build; they
+# are allowed, and neither the commit nor the trap touches them.
+dirty=$(git status --porcelain --untracked-files=no)
+if [ -n "$dirty" ]; then
+	echo "::error::The checkout has uncommitted changes to tracked files; release-bump.sh runs only on a clean checkout of the built commit, so nothing was changed:"
+	printf '%s\n' "$dirty"
 	exit 1
 fi
+
+# Every failing exit puts the checkout back on the built commit, clean. The
+# workflow's `if: failure()` step runs release-forget-version.sh from this
+# working tree, and every job pins github.sha; without this a run that died
+# mid-merge or out of retries would leave it on master's tip, or on the bump
+# commit, and the cleanup would run that commit's scripts instead.
+restore_build() {
+	status=$?
+	if [ "$status" -ne 0 ]; then
+		git merge --abort >/dev/null 2>&1 || :
+		git checkout -q -f --detach "$BUILT" ||
+			echo "::warning::Could not put the checkout back on the built commit ${BUILT}"
+	fi
+	exit "$status"
+}
+trap restore_build EXIT
+
+# Landing the bump brings the tagged commit's history into master, so that
+# history must already be master's. The validate job ran this same check
+# before the preflight; it runs again here, right before anything is pushed.
+"$(dirname "$0")/require-on-master.sh" "$BUILT"
 
 # Extract the current value of main.go's `version` fallback string. POSIX BRE,
 # tolerant of the gofmt alignment whitespace around the `=`.
@@ -98,13 +123,13 @@ TAG=$(git rev-parse HEAD)
 # Any other failed push (auth, network, a protected-branch refusal) prints
 # git's own error and fails on its own terms: naming it "master advanced" would
 # point a reader at the #1927 race instead of the real cause (#6747, #6744),
-# and merging cannot fix it. A genuine conflict — only a rival version bump
-# touches that line — fails the merge loudly instead of force-pushing over
-# another release.
+# and merging cannot fix it. A genuine conflict — a commit that changed
+# main.go at or next to the version line, a rival version bump among them —
+# fails the merge loudly instead of force-pushing over it.
 MAX_ATTEMPTS="${RELEASE_PUSH_MAX_ATTEMPTS:-5}"
 attempt=1
 while :; do
-	if push_out=$(git push origin HEAD:master 2>&1); then
+	if push_out=$(git push origin HEAD:refs/heads/master 2>&1); then
 		printf '%s\n' "$push_out"
 		break
 	fi
@@ -120,19 +145,27 @@ while :; do
 		echo "::error::Version bump push rejected after ${MAX_ATTEMPTS} attempts (master kept moving)"
 		exit 1
 	fi
-	echo "Push rejected — master advanced during the build; merging the release commit into origin/master and retrying (attempt ${attempt}/${MAX_ATTEMPTS})…"
-	git fetch origin master
-	# A re-run of a build whose bump an earlier run already landed: the release
-	# commit is reproduced exactly (see the commit date above), so it is
-	# already in master's history and there is nothing left to push.
+	echo "Push rejected — master advanced during the build (attempt ${attempt}/${MAX_ATTEMPTS}); fetching it…"
+	# refs/heads/master in full, here and in the push: a bare `master` is
+	# ambiguous once origin also has a tag of that name — the push fails
+	# "matches more than one" and the fetch could take the tag for the branch.
+	git fetch origin refs/heads/master
+	# The release commit can already be in master's history: a re-run of a
+	# build whose bump an earlier run landed (the commit is reproduced exactly,
+	# see the commit date above), or a build that already carried the version
+	# and so made no commit — the built commit itself, still on master.
 	if git merge-base --is-ancestor "$TAG" FETCH_HEAD; then
-		echo "master already has the release commit ${TAG}; nothing to push"
+		echo "master already contains ${TAG}; nothing to push"
 		break
 	fi
+	echo "Merging the release commit ${TAG} into master's new tip $(git rev-parse --short FETCH_HEAD), then pushing again…"
 	git checkout -q --detach FETCH_HEAD
 	if ! git merge --no-edit -m "chore: merge release v${NEW_VERSION} into master" "$TAG"; then
-		git merge --abort || :
-		echo "::error::Merging the release commit into master conflicted — a rival commit changed main.go's version line; not forcing over it"
+		conflicted=$(git diff --name-only --diff-filter=U | tr '\n' ' ')
+		# git conflicts on adjacent lines as well as the same one, and the
+		# version line has neighbours, so this is not necessarily a rival
+		# version bump — say only what is known.
+		echo "::error::Merging the release commit into master conflicted in: ${conflicted}— a commit merged during the build changed main.go at or next to the version line. Nothing was pushed; re-dispatch the release from master's new tip"
 		exit 1
 	fi
 	attempt=$((attempt + 1))
