@@ -564,7 +564,7 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 		// A click on the already-focused pane's body enters THAT pane — the
 		// click named it, so enter it directly rather than the sidebar selection
 		// keyboard Enter resolves (#1233, §2.5). No replay key: a click is not a
-		// keystroke, so nothing is forwarded into the pane on entry (#1576).
+		// keystroke, so nothing is forwarded into the pane on entry (#1576/#4722).
 		return m.enterPane(p, nil)
 	}
 	if taskID, ok := zones.AutoTaskID(id); ok {

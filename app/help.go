@@ -575,9 +575,11 @@ func (m *home) showHelpScreen(helpType helpText, onDismiss func() tea.Cmd) (tea.
 			m.textOverlayDismissPolicy = attachHelpDismissPolicy
 		case helpTypeInteractive:
 			// The one screen that stays a press-any-key gate: its dismiss
-			// keystroke is deliberately the user's first pane input and gets
-			// replayed into the pane (#1576/#2413). An overflowing overlay still
-			// narrows that to the dismiss keys — see handleHelpState.
+			// keystroke is the entry's transition key — a printable dismiss key
+			// types itself into the pane (#1576), a non-printable one (Enter
+			// included) is consumed by the mode switch it completes (#4722).
+			// An overflowing overlay still narrows that to the dismiss keys —
+			// see handleHelpState.
 			m.replayHelpDismissKey = true
 		}
 		m.layoutTextOverlay()
