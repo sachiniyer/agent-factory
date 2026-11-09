@@ -26,20 +26,29 @@ import (
 // to its dismiss callback, which runs as a tea.Cmd — off the event loop,
 // where model state must not be touched (#716 capture discipline: the pane
 // is captured at Enter-press time, then re-validated on arrival).
+//
+// replayKey carries the keystroke that triggered the entry when there is one:
+// the unbound letter that implicitly switched, or the key that dismissed the
+// first-run help. The Update handler forwards it iff isSwitchTypingKey holds
+// (#4722 Option 3) — a plain printable character both switches and types,
+// while Enter and every other non-printable trigger are consumed by the
+// transition, so a mode switch can never submit whatever sits on the input
+// line.
 type enterInteractiveMsg struct {
 	pane      *store.OpenPane
 	replayKey tea.KeyMsg
 	replay    bool
 }
 
-// requestInteractive routes Enter-on-a-live-eligible-pane through the
+// requestInteractive routes an entry into a live-eligible pane through the
 // first-time interactive help screen (seen-bitmask, like the attach help)
 // into activation. A non-nil replayKey is the keystroke that triggered the
-// entry (an already-focused pane's Enter): it is forwarded into the pane on
-// activation so the transition key is not swallowed (#1576) — the same
-// contract the first-run help path already honors by replaying its dismiss
-// key. The tree/nav select path and the mouse click pass nil: a navigation
-// Enter opens the pane without also typing into the agent, and a click has no
+// entry when that keystroke is itself pane input — the unbound printable rune
+// typed at the focused pane. It reaches the pane only if it is a plain
+// printable character (isSwitchTypingKey): letters switch AND type (#1576),
+// while Enter and every other non-printable trigger are consumed by the
+// transition (#4722). The focused-pane Enter, the tree/nav select path and
+// the mouse click pass nil: Enter is a pure mode switch, and a click has no
 // keystroke to forward. When the first-run help IS shown, the dismiss key
 // replay (replayKeyAfterInteractiveHelpDismiss) overrides this key, so the
 // entry key that only surfaced the overlay is never double-forwarded.
@@ -114,15 +123,31 @@ func (m *home) activateInteractive(p *store.OpenPane) tea.Cmd {
 	return nil
 }
 
+// isSwitchTypingKey reports whether a nav→interactive transition key is ALSO
+// pane input: a plain printable character — a rune or a space — with no
+// modifier and no paste flag (#4722 Option 3). That is the one class of switch
+// key the pane may see, and it is #1576's "start typing immediately" kept:
+// typing a letter at a focused pane enters interactive mode and types the
+// letter. Every other switch key — Enter above all, plus Tab, Esc, arrows,
+// control/alt-modified keys, function keys, and pastes — is consumed by the
+// transition and never reaches the PTY, where a forwarded Enter would submit
+// whatever sits on the input line.
+func isSwitchTypingKey(msg tea.KeyMsg) bool {
+	if msg.Alt || msg.Paste {
+		return false
+	}
+	switch msg.Type {
+	case tea.KeyRunes:
+		return len(msg.Runes) > 0
+	case tea.KeySpace:
+		return true
+	}
+	return false
+}
+
 // isInteractiveExitKey reports whether msg is keys.KeyExitInteractive (Ctrl-]),
 // the ONE host-reserved key inside interactive mode. Everything else forwards to
 // the agent/shell.
-//
-// It is the single definition of that key for the app package, because two
-// places need to agree on it and they are not adjacent: handleInteractiveKey
-// acts on it, and the enterInteractiveMsg replay must refuse to feed it back in
-// (#2413). A second literal tea.KeyCtrlCloseBracket comparison drifting from
-// this one is exactly how that bug came back.
 func isInteractiveExitKey(msg tea.KeyMsg) bool {
 	return msg.Type == tea.KeyCtrlCloseBracket
 }

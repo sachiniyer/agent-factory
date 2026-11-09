@@ -217,20 +217,18 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// Deferred by the first-time interactive help screen's dismiss cmd
 		// (#1089 PR 2); the pane pointer is re-validated inside.
 		cmd := m.activateInteractive(msg.pane)
-		// The replay exists to forward the transition keystroke INTO the pane
-		// rather than swallow it (#1576). The host-reserved exit key is the one
-		// key that is not pane input, so replaying it here would run the mode we
-		// just entered straight back out.
-		//
-		// That is #2413, and the first-run help is what walks users into it: any
-		// key dismisses that overlay, and its last line reads "Press ctrl+] to
-		// return to navigation" — so the key the screen names is the key most
-		// likely to be pressed while reading it, and pressing it made interactive
-		// mode look broken on the very first try. Guarding at this sink rather
-		// than at either producer means no future replay source can reintroduce
-		// it. The key keeps working as the exit once the user is actually in the
-		// mode; only the synthetic replay of it is dropped.
-		if msg.replay && m.interactive && !isInteractiveExitKey(msg.replayKey) {
+		// The replay forwards the transition keystroke INTO the pane when — and
+		// only when — that key is a plain printable character (#4722 Option 3).
+		// Typing a letter at a focused pane enters interactive mode AND types
+		// the letter, which is #1576's "start typing immediately" intent kept.
+		// Enter — the explicit switch key — is not printable, so it is consumed
+		// by the transition and can never again submit whatever sits on the
+		// input line. Guarding at this sink rather than at each producer means
+		// no future replay source can leak a non-printable key: the
+		// host-reserved exit key, control chords and pastes all fail the same
+		// check by construction, so the #2413 class (the overlay's own named
+		// key replayed into the mode it exits) cannot re-enter here either.
+		if msg.replay && m.interactive && isSwitchTypingKey(msg.replayKey) {
 			_, replayCmd := m.handleInteractiveKey(msg.replayKey)
 			cmd = tea.Batch(cmd, replayCmd)
 		}
@@ -762,6 +760,17 @@ func (m *home) dispatchKeyAction(msg tea.KeyMsg) (mod tea.Model, cmd tea.Cmd) {
 
 	name, ok := keys.GlobalKeyStringsMap[msg.String()]
 	if !ok {
+		// An unbound key that is a plain printable character is an implicit
+		// switch into the focused pane's interactive mode — and it types itself
+		// on the way in (#4722 Option 3). This keeps #1576's "start typing
+		// immediately" for every unbound rune while the explicit switch key,
+		// Enter, is consumed. Every bound key already ran its nav action above
+		// (no shortcut is stolen), and an unbound non-printable stays inert —
+		// it is not a typing gesture, and on a pane that cannot embed there is
+		// nothing to type into (enterPane drops it before the attach fallback).
+		if p := m.focusedOpenPane(); p != nil && isSwitchTypingKey(msg) {
+			return m.enterPane(p, &msg)
+		}
 		return m, nil
 	}
 

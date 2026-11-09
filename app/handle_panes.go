@@ -593,15 +593,18 @@ func (m *home) focusTreeForNav() {
 }
 
 // enterPane enters interactive mode on a SPECIFIC pane — the keyboard
-// focused-pane target and the mouse click-to-interact target (§2.5). Tree-focus
-// Enter still resolves through the sidebar selection; callers that already have
-// a pane binding enter that pane directly. Remote/non-embeddable panes fall
-// back to the full-screen attach of the pane's tab, mirroring handleEnter's
-// remote branch; guard errors surface the same way. A non-nil replayKey is the
-// keystroke that triggered the entry and is forwarded into the pane once
-// interactive mode is live (#1576) — the keyboard focused-pane Enter passes it
-// so the first Enter reaches the agent; the mouse click passes nil (no
-// keystroke to forward).
+// focused-pane Enter, the implicit unbound-letter switch, and the mouse
+// click-to-interact target (§2.5). Tree-focus Enter still resolves through the
+// sidebar selection; callers that already have a pane binding enter that pane
+// directly. Remote/non-embeddable panes fall back to the full-screen attach of
+// the pane's tab, mirroring handleEnter's remote branch — EXCEPT for a typing
+// trigger: a rune is pane input, not an attach verb, and a pane that cannot
+// embed has nothing to type into, so it is consumed in place (#4722). Guard
+// errors surface the same way. A non-nil replayKey is the keystroke that
+// triggered the entry; it reaches the pane only if it is a plain printable
+// character (isSwitchTypingKey) — the letter switch passes its rune so the
+// first keystroke types itself (#1576 kept under #4722 Option 3), while Enter
+// and the click pass nil (a mode switch and no keystroke at all).
 func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if p == nil {
 		return m, nil
@@ -649,7 +652,15 @@ func (m *home) enterPane(p *store.OpenPane, replayKey *tea.KeyMsg) (tea.Model, t
 		return m, tea.Batch(commitCmd, m.handleNotice(webErr))
 	}
 	if liveSessionName(p.Instance(), p.Tab()) == "" {
-		// Not embeddable (remote): the full-screen attach of this pane's tab.
+		// Not embeddable (remote, or a tab with no PTY): Enter and the click
+		// fall back to this pane's full-screen attach — they are interact
+		// verbs. A typed rune is pane INPUT, not a verb: for a pane that
+		// cannot embed there is nothing to type into, so the switch consumes
+		// it in place rather than surprising the user with a full-screen
+		// attach on a stray keystroke (#4722).
+		if replayKey != nil && isSwitchTypingKey(*replayKey) {
+			return m, commitCmd
+		}
 		mod, attachCmd := m.handleEnterPane(p)
 		return mod, tea.Batch(commitCmd, attachCmd)
 	}
