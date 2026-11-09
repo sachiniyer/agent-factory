@@ -799,6 +799,138 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 			observations[0].ResetAt)
 	})
 
+	// The next four subtests pin the anchorless variants of the same
+	// correction (#6975 review): a banner matched at byte zero, one preceded
+	// only by a blank/marker row, and a pane-free (zero-anchor) park each
+	// record a stored prefix that carries no distinguishing bytes, so
+	// sameLiveLimitBannerLocked's positional compare structurally cannot
+	// succeed. Without an anchorless fallback the live claim corrects while
+	// the durable row keeps the disproved later pane guess, and the two
+	// durable facts diverge permanently. Each variant must correct the row.
+	t.Run("a byte-zero banner park's enriched clause still corrects its timed row", func(t *testing.T) {
+		banner := LimitBanner{Prefix: "", Count: 1}
+		latePane := transcriptReset.Add(3 * time.Hour) // the 22:00 pane guess
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset),
+			"the live claim takes the record's instant: got %v", reset)
+		require.True(t, i.LimitReached(),
+			"the correction is the same wall — liveness stands")
+		require.Equal(t, "reset at 2pm (America/New_York)", i.ToInstanceData().LimitResetEvidence,
+			"the live evidence adopts the wider capture's enriched clause")
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.Equal(t, "named", observations[0].Account)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must take the record's instant, not keep the disproved later pane bound: got %v",
+			observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence,
+			"the ledger's evidence follows the reset it now carries, not the stale narrow clause")
+	})
+
+	t.Run("a whitespace-only prefix park's enriched clause still corrects its timed row", func(t *testing.T) {
+		banner := LimitBanner{Prefix: "\n", Count: 1}
+		latePane := transcriptReset.Add(3 * time.Hour) // the 22:00 pane guess
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset),
+			"the live claim takes the record's instant: got %v", reset)
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must take the record's instant, not keep the disproved later pane bound: got %v",
+			observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence,
+			"the ledger's evidence follows the reset it now carries, not the stale narrow clause")
+	})
+
+	t.Run("a zero-anchor park's enriched clause still corrects its timed row", func(t *testing.T) {
+		// The committed-account-swap park (#6915) records no pane anchor at
+		// all — every discriminating read (position, count) is unavailable,
+		// so a same-phrase authoritative re-read's correction must reach the
+		// row through the anchorless fallback.
+		banner := LimitBanner{}
+		latePane := transcriptReset.Add(3 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset),
+			"the live claim takes the record's instant: got %v", reset)
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must take the record's instant, not keep the disproved later pane bound: got %v",
+			observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence,
+			"the ledger's evidence follows the reset it now carries, not the stale narrow clause")
+	})
+
+	t.Run("a later authoritative instant corrects an earlier parked bound forward", func(t *testing.T) {
+		// #6975 review: the correction is "in either direction" — the
+		// disproved-later-pane-guess case (above) is the fail-open direction;
+		// the forward direction (an authoritative record LATER than a too-
+		// eager pane guess) must also move the row, or the account is
+		// released early and an active wall stops excluding it.
+		banner := LimitBanner{Prefix: "", Count: 1}
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must take the record's later instant, not keep the earlier pane guess: got %v",
+			observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence)
+	})
+
+	t.Run("an unrelated clause on an anchorless park cannot lower the row", func(t *testing.T) {
+		// Conservative guard: the clause-extension key rejects a sighting
+		// whose evidence is NOT an extension of the parked clause — a
+		// distinct wall's record may not lower the parked wall's row even
+		// when both anchors are non-distinguishing (the same shape the
+		// fallback exists for).
+		banner := LimitBanner{Prefix: "", Count: 1}
+		latePane := transcriptReset.Add(3 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"resets 9:40am", banner, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(latePane),
+			"a distinct wall's non-extending clause must not lower the parked wall's row: got %v",
+			observations[0].ResetAt)
+	})
+
+	t.Run("a grown-count anchorless sighting does not correct the parked wall's row", func(t *testing.T) {
+		// Conservative guard: a banner printed BELOW the recorded one
+		// arrives with a HIGHER match count — positional evidence of a new
+		// wall (#6959). The unchanged-count guard in the fallback rejects
+		// it even when the wider evidence is an extension of the parked
+		// clause, so the new wall's earlier record may not lower the row.
+		parked := LimitBanner{Prefix: "", Count: 1}
+		grown := LimitBanner{Prefix: "", Count: 2}
+		latePane := transcriptReset.Add(3 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", parked, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", grown, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(latePane),
+			"a grown-count sighting is a new wall; its earlier record must not lower the parked wall's row: got %v",
+			observations[0].ResetAt)
+	})
+
 	t.Run("a different banner's record cannot correct the parked wall's row", func(t *testing.T) {
 		// The changed-evidence sighting anchored on a NEW banner is a
 		// different wall's claim — its record instant must not lower the
