@@ -1,13 +1,13 @@
 package app
 
 import (
-	"errors"
 	"fmt"
 	"strings"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/sachiniyer/agent-factory/keys"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
@@ -151,20 +151,25 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.automations.TaskPane().TakeCrossRepoRetargetNotice(),
 				m.takePendingPaneNotice(),
 			}
-			combined := strings.TrimSpace(strings.Join(notices, " "))
-			if combined != "" {
-				cmds = append(cmds, m.showTransientMessage(combined))
-			}
 			// Announce a changed skipped set once: the standing line already
 			// carries the condition — this transient lands the FULL text in the
-			// retained notice `E details` reads (#6986). Queued by any writer
-			// (poll, picker refresh, project switch) that saw the set change;
+			// retained notice `E details` reads (#6986). It goes INTO the same
+			// combined message, not a second SetNotice: SetNotice replaces the
+			// visible AND retained slots at once, so a separate notice on this
+			// poll would erase the pane notices the Takes just drained before
+			// either renders (Codex on #7011). Queued by any writer (poll,
+			// picker refresh, project switch) that saw the set change;
 			// identical polls do not re-fire it.
 			if m.skippedReposNoticeQueued {
 				m.skippedReposNoticeQueued = false
 				if text := m.skippedReposNoticeText(); text != "" {
-					cmds = append(cmds, m.handleNotice(errors.New(text)))
+					log.InfoLog.Printf("%s", text)
+					notices = append(notices, text)
 				}
+			}
+			combined := strings.TrimSpace(strings.Join(notices, " "))
+			if combined != "" {
+				cmds = append(cmds, m.showTransientMessage(combined))
 			}
 		}
 		if changed {
