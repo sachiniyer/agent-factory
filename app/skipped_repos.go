@@ -180,11 +180,16 @@ func (m *home) skippedRepoHints() string {
 	return strings.Join(hints, " ")
 }
 
-// skippedRepoLabel names a skipped repo by its project root when the Projects
-// list knows it (a repoID is a short hash, not a path — the web resolves the
-// same way through RegisteredProject.repo_id), else by its instances.json
-// path — the file to repair — else the bare id.
+// skippedRepoLabel names a skipped repo by its project root — the active
+// scope's root is the surest mapping the TUI holds (a switched-into project
+// needs no sidebar row to be named), then the Projects list's registration
+// (a repoID is a short hash, not a path — the web resolves the same way
+// through RegisteredProject.repo_id), else by its instances.json path — the
+// file to repair — else the bare id.
 func (m *home) skippedRepoLabel(repoID string) string {
+	if repoID == m.repoID && m.repoRoot != "" {
+		return m.repoRoot
+	}
 	for _, p := range m.sidebarProjects {
 		if p.RepoID == repoID && p.Root != "" {
 			return p.Root
