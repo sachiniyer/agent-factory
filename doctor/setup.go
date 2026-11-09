@@ -132,7 +132,7 @@ func checkGit(report *Report) {
 	}
 	report.Pass(sectionEnvironment, "git", fmt.Sprintf("available at %s", gitPath))
 
-	cwd, err := os.Getwd()
+	cwd, err := readableCurrentDir()
 	if err != nil {
 		report.addActionableFinding(Finding{
 			Check:  "git-repo",
@@ -273,7 +273,7 @@ func checkAgentPrograms(cfg *config.Config, report *Report) {
 			return
 		}
 		cwd := "<unknown>"
-		if wd, err := os.Getwd(); err == nil {
+		if wd, err := readableCurrentDir(); err == nil {
 			cwd = wd
 		}
 		detail, remediation := repoNotInspectableDetail(cwd, repoErr, "af doctor --setup")

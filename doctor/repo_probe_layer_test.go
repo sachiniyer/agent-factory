@@ -581,6 +581,47 @@ func TestCheckAgentBinaries_CwdUnreadable_NotLabeledAsGitError(t *testing.T) {
 		"safe.directory cannot fix a missing cwd and must not be suggested for it")
 }
 
+// TestReadableCurrentDir_RemovedCwd_ReportsCwdFailure pins the helper's
+// contract directly: whether os.Getwd fails outright (Linux) or answers with
+// the stale path of a working directory that was already removed (darwin,
+// where getcwd can answer from a cached result or a surviving $PWD), the
+// result must be the cwd failure — never a path git would then be asked to
+// inspect (#6984).
+func TestReadableCurrentDir_RemovedCwd_ReportsCwdFailure(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	gone := t.TempDir()
+	chdir(t, gone)
+	require.NoError(t, os.Remove(gone))
+
+	_, err := readableCurrentDir()
+	require.Error(t, err)
+	require.True(t, errors.Is(err, errCurrentDirUnreadable),
+		"a removed working directory must be reported as the cwd failure, not handed to git: %v", err)
+}
+
+// TestCheckGit_CwdUnreadable_NotLabeledAsGitError is the setup-profile twin of
+// the default-profile test above: checkGit's own cwd resolution must classify
+// a vanished working directory as the cwd failure, not run `git -C <gone>`
+// and label git's "cannot change to" answer as git's error — which is exactly
+// what a darwin Getwd returning the stale path produces (#6984).
+func TestCheckGit_CwdUnreadable_NotLabeledAsGitError(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	gone := t.TempDir()
+	chdir(t, gone)
+	require.NoError(t, os.Remove(gone))
+
+	rep := &Report{}
+	checkGit(rep)
+
+	findings := findByCheck(rep, "git-repo")
+	require.NotEmpty(t, findings,
+		"a cwd-resolution failure must produce a git-repo finding, not silence")
+	require.Contains(t, findings[0].Detail, "could not determine current directory",
+		"the finding must name the cwd failure, not attribute it to git")
+	require.NotContains(t, findings[0].Detail, "git's error",
+		"a getwd failure is not a git error and must not be labeled as one")
+}
+
 // mustReadFile reads path or fails the test.
 func mustReadFile(t *testing.T, path string) []byte {
 	t.Helper()
