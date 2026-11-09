@@ -931,6 +931,41 @@ func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
 			observations[0].ResetAt)
 	})
 
+	t.Run("a same-instant enriched sighting still persists the ledger's enriched clause", func(t *testing.T) {
+		// #6975 review (Codex): when the first authoritative enriched
+		// sighting resolves to the SAME instant the row already stores,
+		// the merge must still adopt the enriched clause and mark the row
+		// dirty. Otherwise the live claim carries the enriched phrase
+		// while the durable row keeps the narrow one, and a later same-
+		// wall downward correction — keyed on the enriched phrase — no
+		// longer matches the row and falls back to later-wins, leaving the
+		// durable bound stale.
+		banner := LimitBanner{Prefix: "pane text above the banner\n⎿  ", Count: 1}
+		earlier := transcriptReset.Add(-1 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, "reset at 2pm", banner, i.stateEpoch))
+		// Same instant, enriched clause: the ledger must adopt the
+		// enrichment even though the bound does not move.
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the same-instant enrichment must not move the row's bound: got %v", observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence,
+			"the ledger must adopt the enriched clause even when the instant is unchanged")
+		// A later same-wall downward correction keyed on the enriched
+		// phrase must now lower the row, not fall back to later-wins.
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(earlier,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		observations = i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(earlier),
+			"the enriched ledger row must take the later same-wall downward correction: got %v",
+			observations[0].ResetAt)
+		require.Equal(t, "reset at 2pm (America/New_York)", observations[0].Evidence)
+	})
+
 	t.Run("a different banner's record cannot correct the parked wall's row", func(t *testing.T) {
 		// The changed-evidence sighting anchored on a NEW banner is a
 		// different wall's claim — its record instant must not lower the
