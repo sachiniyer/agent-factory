@@ -224,6 +224,12 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convI
 	live := make(map[string]claudeLimitScanEntry, len(cache))
 	var best claudeLimitClaim
 	found := false
+	// On the unknown-id path each file is a different conversation, and the
+	// generic lead ("Claude usage limit reached.") cannot tell which one's
+	// wall the pane shows: two files whose freshest eligible claims name
+	// DIFFERENT limits are a provable ambiguity — fall back to the pane
+	// rather than answer for the wrong wall (#6975 review).
+	namedKinds := map[string]struct{}{}
 	for _, dir := range dirs {
 		transcripts, err := claudeProjectTranscripts(dir)
 		if err != nil {
@@ -262,6 +268,11 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convI
 				}
 			}
 			live[path] = entry
+			// Claims within one file are one conversation's sequential
+			// walls — the freshest eligible speaks for it; its kind counts
+			// toward the cross-file ambiguity check.
+			var fileBest claudeLimitClaim
+			fileFound := false
 			for _, claim := range entry.claims {
 				if claim.sortAt.After(now) {
 					// A record stamped in the future cannot describe the
@@ -282,13 +293,27 @@ func (i *Instance) newestClaudeLimitClaim(configDir string, dirs []string, convI
 					!claudeLimitTextMatches(claim.record.Text, banner) {
 					continue
 				}
-				if !found || claim.sortAt.After(best.sortAt) {
-					best, found = claim, true
+				if !fileFound || claim.sortAt.After(fileBest.sortAt) {
+					fileBest, fileFound = claim, true
 				}
+			}
+			if !fileFound {
+				continue
+			}
+			if fileBest.verdict == quota.ClaudeLimitParsed {
+				if kind := claudeLimitRecordKind(fileBest.record); kind != "" {
+					namedKinds[kind] = struct{}{}
+				}
+			}
+			if !found || fileBest.sortAt.After(best.sortAt) {
+				best, found = fileBest, true
 			}
 		}
 	}
 	i.claudeLimitScan = live
+	if found && own == "" && len(namedKinds) > 1 {
+		return claudeLimitClaim{}, false
+	}
 	return best, found
 }
 
@@ -377,13 +402,19 @@ func claudeLimitTextMatches(recordText, banner string) bool {
 }
 
 // claudeLimitKindOf names the limit a text advertises — Claude's display
-// language ("5-hour limit", "weekly limit") and its structural
-// rateLimitType spellings share the same vocabulary here so either side of
-// a contradiction check can come from either carrier. "" means the text
-// names no limit kind af recognizes: it cannot contradict anything.
+// language ("5-hour limit", "Opus limit", "weekly limit") and its
+// structural rateLimitType spellings share the same vocabulary here so
+// either side of a contradiction check can come from either carrier. The
+// model-specific kinds check first: a "seven_day_opus" type or an "Opus
+// weekly" banner is the opus pool, not the plain weekly one. "" means the
+// text names no limit kind af recognizes: it cannot contradict anything.
 func claudeLimitKindOf(text string) string {
 	lower := strings.ToLower(text)
 	switch {
+	case strings.Contains(lower, "opus"):
+		return "opus"
+	case strings.Contains(lower, "sonnet"):
+		return "sonnet"
 	case strings.Contains(lower, "5-hour"), strings.Contains(lower, "5 hour"),
 		strings.Contains(lower, "5_hour"), strings.Contains(lower, "five-hour"),
 		strings.Contains(lower, "five hour"), strings.Contains(lower, "five_hour"):

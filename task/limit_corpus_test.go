@@ -81,6 +81,13 @@ func TestClaudeResetCorpusReplay(t *testing.T) {
 		"⎿  Claude usage limit reached. Your limit will reset Mon\n     day at 9am (America/New_York).",
 		"⎿  Claude usage limit reached. Your limit will reset at Nov.\n     6, 2026 9am (America/New_York).",
 		"⎿  Claude usage limit reached. Your limit will reset at 2p\n     m (America/New_York).",
+		// A zone token cut at the row's end leaves an open '(' with no
+		// ')' — the banner named a zone af cannot prove: a rejected
+		// candidate like any unreadable name, never the host zone (#6975
+		// review — the unclosed-paren host-zone read resumed five hours
+		// early).
+		"Claude usage limit reached. Your limit will reset at 2pm (America/\nNew_York).",
+		"⎿  Claude usage limit reached. Your limit will reset at 2pm (America/\n     New_York).",
 	}
 	for i, content := range degraded {
 		hit, _, hasReset, evidence := det.Check(content, tmux.ProgramClaude, now)
@@ -143,22 +150,10 @@ func TestClaudeResetCorpusReplay(t *testing.T) {
 			evidence: "reset at 2pm",
 		},
 		{
-			name:     "an unclosed paren proves no zone",
-			content:  "Claude usage limit reached. Your limit will reset at 2pm (America/\nNew_York).",
-			want:     time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(),
-			evidence: "reset at 2pm (America/",
-		},
-		{
 			name:     "guttered row, mismatched continuation indent",
 			content:  "⎿  Claude usage limit reached. Your limit will reset at 2pm\n     (America/New_York).",
 			want:     time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(),
 			evidence: "reset at 2pm",
-		},
-		{
-			name:     "guttered row, mid-paren mismatched indent",
-			content:  "⎿  Claude usage limit reached. Your limit will reset at 2pm (America/\n     New_York).",
-			want:     time.Date(2026, 7, 4, 14, 0, 0, 0, loc).UTC(),
-			evidence: "reset at 2pm (America/",
 		},
 	}
 	for _, tc := range rowBound {

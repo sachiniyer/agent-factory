@@ -403,7 +403,7 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 			configDir := claudeLimitConfigDir(t, home, "")
 			// The session's own conversation: weekly limit, OLDER timestamp.
 			writeClaudeTranscript(t, configDir, workDir, ownID,
-				claudeLimitRecordWith(t, recorded, weeklyText, "opus", weeklyReset.Unix()))
+				claudeLimitRecordWith(t, recorded, weeklyText, "seven_day", weeklyReset.Unix()))
 			// A sibling conversation's 5-hour refusal, stamped later.
 			writeClaudeTranscript(t, configDir, workDir, siblingID,
 				claudeLimitRecord(t, now.Add(-5*time.Second).UTC().Format(time.RFC3339), siblingReset.Unix()))
@@ -501,6 +501,73 @@ func TestClaudeActiveLimitReset(t *testing.T) {
 			resetAt, ok := inst.ClaudeActiveLimitReset(now, "Usage limit reached")
 			require.True(t, ok)
 			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+
+		t.Run("an Opus banner rejects the old five-hour record", func(t *testing.T) {
+			// Captain's re-review: the pane shows "You've hit your Opus
+			// limit" while the own file holds only the earlier five-hour
+			// refusal — a model-named kind is a distinct pool, so the old
+			// record must not answer for it.
+			inst := build(t, claudeLimitRecord(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339), fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, "You've hit your Opus limit")
+			require.False(t, ok,
+				"a five-hour record must not answer a displayed Opus wall")
+		})
+
+		t.Run("an Opus-typed record answers the Opus banner", func(t *testing.T) {
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"You've hit your Opus limit", "opus", fiveHourReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your Opus limit")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+	})
+
+	t.Run("differently-typed matches under the generic lead are ambiguous", func(t *testing.T) {
+		// #6975 review: with the conversation id unknown and only the
+		// classic "Claude usage limit reached." lead in both records, two
+		// files' freshest claims naming different rateLimitTypes cannot
+		// tell which conversation's wall the pane shows — fall back to
+		// the pane rather than answer for the wrong wall.
+		fiveHourReset := now.Add(time.Hour)
+		weeklyReset := now.Add(48 * time.Hour)
+
+		build := func(t *testing.T) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "five_hour", fiveHourReset.Unix()))
+			writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "seven_day", weeklyReset.Unix()))
+			return inst
+		}
+
+		t.Run("two kinds across files supply nothing", func(t *testing.T) {
+			inst := build(t)
+			_, ok := inst.ClaudeActiveLimitReset(now, "Claude usage limit reached.")
+			require.False(t, ok,
+				"a five_hour file and a seven_day file under the same generic lead is ambiguity, not an answer")
+		})
+
+		t.Run("one kind across files still answers", func(t *testing.T) {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "five_hour", fiveHourReset.Unix()))
+			writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+				claudeLimitRecordWith(t,
+					now.Add(-5*time.Second).UTC().Format(time.RFC3339),
+					"Claude usage limit reached.", "five_hour", weeklyReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "Claude usage limit reached.")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"same-kind records are not ambiguous — the freshest answers: got %v", resetAt)
 		})
 	})
 

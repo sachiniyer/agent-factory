@@ -327,6 +327,24 @@ func TestClaudeResetClauseEndsAtContinuationIndent(t *testing.T) {
 				"     Tip: your password will reset at 2pm (America/New_York)",
 			wantReset: nil,
 		},
+		{
+			// #6975 review (Captain's re-review): the zone token cut at the
+			// row's end leaves an open '(' with no ')' — the banner named a
+			// zone af cannot prove, so the fragment is a rejected candidate
+			// like any unreadable name: NO reset, never the host-zone read
+			// that resumed a session five hours early.
+			name: "an unclosed paren after the clock is a rejected zone",
+			content: "  ⎿  You've hit your 5-hour limit · resets 9:40am\n" +
+				"     (America/New_",
+			wantReset: nil,
+		},
+		{
+			// The same cut on a column-0 banner — the clause cannot leave
+			// its row, and the paren it ends on never closed.
+			name:      "an unclosed paren at a column-0 row's end is a rejected zone",
+			content:   "⎿  You've hit your 5-hour limit · resets 9:40am (America/New_",
+			wantReset: nil,
+		},
 	}
 
 	det := NewLimitDetector(nil)

@@ -561,8 +561,9 @@ func claudeClauseEnd(tail string) int {
 // no punctuation boundary to stop it: a tip row's "(Europe/Berlin)" or a
 // later clause's "resets Mon 9am" would otherwise supply this wall's zone
 // or weekday (#6975 review). An unclosed paren keeps the rest — it is
-// adjacent to the clock but proves nothing, so the bound stays open rather
-// than guessing where it ends.
+// adjacent to the clock, and the open fragment it carries is what
+// parseClaudeReset reads as a rejected zone candidate, so the bound stays
+// open rather than guessing where the named zone ends.
 func claudeResetTailEnd(tail string) int {
 	m := clockTime.FindStringIndex(tail)
 	if m == nil {
@@ -631,25 +632,37 @@ func parseClaudeReset(rowLead, content string, now time.Time) (time.Time, string
 
 	loc := now.Location()
 	candidates := parenTZ.FindAllStringSubmatch(reset, -1)
+	zoneSeen := false
 	var rejected []string
 	for _, m := range candidates {
 		if l, err := time.LoadLocation(m[1]); err == nil {
 			loc = l
+			zoneSeen = true
 			break
 		}
 		rejected = append(rejected, m[1])
+	}
+	// A paren character outside every "(…)" span is an unreadable zone
+	// fragment — "(America/New_" from a hard wrap that split the token, or a
+	// capture that cut it, or a lone ')' whose '(' never arrived. The banner
+	// named a zone af cannot prove: the fragment is a rejected candidate like
+	// any unreadable name, never license for the host-zone fallback (#6975
+	// review — the unclosed-paren host-zone read resumed five hours early).
+	if unmatched := parenTZ.ReplaceAllString(reset, ""); strings.ContainsAny(unmatched, "()") {
+		rejected = append(rejected, strings.Join(strings.Fields(unmatched), " "))
 	}
 	hour, minute, ok := parseClockTime(reset)
 	if !ok {
 		return time.Time{}, "", false
 	}
-	if len(rejected) > 0 && len(rejected) == len(candidates) {
+	if len(rejected) > 0 && !zoneSeen {
 		// The banner carried a parenthesized zone and every candidate failed
 		// to load — a hard-split rejoins spaced ("(America/New_ York)"), an
-		// unknown name is unknown, and neither can prove the zone the banner
-		// named. The wall records no reset rather than a host-zone guess
-		// (#6975 review: a rejected zone candidate resolving in the host
-		// zone resumed one session five hours early).
+		// unclosed paren is a cut fragment, an unknown name is unknown, and
+		// none can prove the zone the banner named. The wall records no reset
+		// rather than a host-zone guess (#6975 review: a rejected zone
+		// candidate resolving in the host zone resumed one session five
+		// hours early).
 		warnClaudeTimezoneOnce(content, rejected)
 		return time.Time{}, "", false
 	}
