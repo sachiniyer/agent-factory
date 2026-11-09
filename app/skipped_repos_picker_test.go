@@ -293,7 +293,8 @@ func TestSnapshotFetchedMsg_RejectsStalePollForSidebar(t *testing.T) {
 		"a poll at/after the open-time seq refreshes the sidebar normally")
 
 	// With no picker open, even a zero-seq legacy caller refreshes the sidebar
-	// (the gate is picker-open-only).
+	// (a zero-seq caller is never gated, and the picker-open watermark does not
+	// gate post-open polls once it has applied).
 	h.projectPickerOverlay = nil
 	h.state = stateDefault
 	h.Update(snapshotFetchedMsg{
@@ -304,4 +305,77 @@ func TestSnapshotFetchedMsg_RejectsStalePollForSidebar(t *testing.T) {
 	})
 	assert.True(t, h.sidebarProjectsSkipped[h.repoID],
 		"with no picker open a zero-seq legacy caller still refreshes the sidebar")
+}
+
+// TestSnapshotFetchedMsg_RejectsStalePollForSidebarAfterPickerClose pins the
+// #4742 review finding (P1): the picker-open watermark must stay effective
+// AFTER Ctrl+P closes, not just while the overlay is visible. A background poll
+// whose all-repo fetch started before the picker's synchronous cross-repo fetch
+// can land after Esc closes the picker; the prior state-conditional gate
+// disabled the check the instant the overlay closed, so the older poll would
+// undo applyPickerSnapshotToSidebar and expose the Projects section's D path
+// to regressed counts or a missing hidden marker. The watermark
+// (pickerOpenSeq) persists across close, so a stale poll (allReposSeq below
+// the open-time value) is rejected even with the overlay gone, while a
+// post-open poll (allReposSeq at/after the open) refreshes the section
+// normally.
+func TestSnapshotFetchedMsg_RejectsStalePollForSidebarAfterPickerClose(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	// The picker opens with alpha reported skipped, so
+	// applyPickerSnapshotToSidebar marks alpha hidden in the Projects section.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+			[]daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+			nil
+	}))
+	// Seed the picker-open counter above 1 so an "older poll" (openSeq-1) is
+	// still a non-zero value and exercises the gate's < branch rather than the
+	// zero-means-legacy short-circuit.
+	h.pickerSnapshotSeq = 5
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	require.True(t, h.sidebarProjectsSkipped[h.repoID],
+		"precondition: the picker open applied its snapshot to the sidebar, marking alpha skipped")
+	openSeq := h.pickerOpenSeq
+	require.Greater(t, openSeq, uint64(0), "precondition: the picker recorded an open-time seq")
+
+	// Close the picker (Esc): the overlay is gone and the state returns to
+	// default, exactly when the prior state-conditional gate disabled itself.
+	h.closeProjectPicker()
+	require.Nil(t, h.projectPickerOverlay, "precondition: the picker is closed")
+	require.NotEqual(t, stateSwitchProject, h.state, "precondition: the picker state is cleared")
+
+	// A background poll whose fetch started BEFORE the open (captured seq is
+	// below the open-time value) reports alpha healthy. It must NOT refresh the
+	// sidebar even though the picker is closed: the watermark persists across
+	// close, so the sidebar keeps the skip marker the picker's newer fetch
+	// installed.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     openSeq - 1,
+	})
+	assert.True(t, h.sidebarProjectsSkipped[h.repoID],
+		"a poll older than the picker's open must not regress the sidebar's skip set after the picker closes")
+
+	// A poll whose fetch started AT the open-time seq is the normal post-open
+	// refresh and must still apply even with the picker closed — alpha healthy
+	// clears the sidebar's skip marker.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     openSeq,
+	})
+	assert.False(t, h.sidebarProjectsSkipped[h.repoID],
+		"a poll at/after the open-time seq refreshes the sidebar normally after the picker closes")
 }

@@ -423,7 +423,7 @@ func (m *home) recordPickerOpenSeq() {
 
 // sidebarRefreshStaleRelativeToPickerOpen reports whether a background poll's
 // cross-repo fetch (whose allReposSeq was captured at fetch-start) predates
-// the snapshot the currently-open project picker was built from (#4742
+// the snapshot the most recent project picker open was built from (#4742
 // review). Mirrors the generation check updateOpenPickerSkipState applies to
 // the picker, extended to the always-visible Projects section: a poll that
 // started before Ctrl+P lands after the picker's newer synchronous cross-repo
@@ -431,15 +431,41 @@ func (m *home) recordPickerOpenSeq() {
 // Applying the older poll would regress the sidebar's rows and skip set to
 // counts the picker's fetch superseded, and after Esc the section's D path
 // could build deletion consent from the regressed counts before another poll
-// lands. False when no picker is open (the sidebar refresh is unconditional
-// then), when the message carries no captured seq (a test/legacy caller), or
-// when the poll started at or after the open — those refresh the section
-// normally.
+// lands. The watermark stays effective AFTER the picker closes too: a poll
+// that started before the open can land after Esc, and the early return the
+// prior state check applied would let it undo applyPickerSnapshotToSidebar
+// the instant the overlay closed — the same regression the open-time gate
+// prevents. pickerOpenSeq persists across close (it is overwritten only on
+// the next open), and any poll that started at or after the open carries
+// allReposSeq >= pickerOpenSeq, so post-open polls refresh normally and the
+// watermark becomes inert once one has applied (#4742 review). False when no
+// picker has ever opened (pickerOpenSeq is the zero value), when the message
+// carries no captured seq (a test/legacy caller), or when the poll started at
+// or after the open — those refresh the section normally.
 func (m *home) sidebarRefreshStaleRelativeToPickerOpen(allReposSeq uint64) bool {
-	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
-		return false
-	}
 	return allReposSeq > 0 && allReposSeq < m.pickerOpenSeq
+}
+
+// regularPollStaleRelativeToAppliedConflict reports whether a regular
+// background poll's cross-repo snapshot (whose crossRepoSeq was captured at
+// fetch-start) predates the cross-repo snapshot most recently APPLIED to the
+// Projects section by a rebind-conflict refresh (#4742 review). The conflict
+// handler orders its reply against lastAppliedCrossRepoSeq (the generation
+// actually applied) rather than crossRepoSnapshotSeq (fetches merely
+// started), so a conflict reply with generation N+1 can apply before a
+// regular poll with generation N that started earlier but is still in flight.
+// When that delayed poll lands here, applying it would overwrite the
+// conflict snapshot's rows and skip state and move the applied watermark
+// backward to N; after closing the rebind picker the section's D path could
+// then act on stale counts or a missing hidden marker. Ignore such a
+// successful poll and leave lastAppliedCrossRepoSeq at the newer value; a
+// failed read leaves the prior rows intact and does not move the watermark,
+// so it is not gated (the retain-on-error applySidebarProjects already
+// takes). False before any conflict has applied (lastAppliedCrossRepoSeq is
+// the zero value) or when the poll's generation is at or after the latest
+// applied generation — those refresh the section normally.
+func (m *home) regularPollStaleRelativeToAppliedConflict(crossRepoSeq uint64, allReposErr error) bool {
+	return allReposErr == nil && crossRepoSeq > 0 && crossRepoSeq < m.lastAppliedCrossRepoSeq
 }
 
 // setPickerSkippedIDsAndHints installs the daemon's startup-skipped repo IDs

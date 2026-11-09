@@ -132,7 +132,21 @@ func (m *home) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		// the same picker-open generation check the picker update below uses; a
 		// poll that started after the open carries allReposSeq >= pickerOpenSeq
 		// and refreshes the section normally (#4742 review).
-		if !m.sidebarRefreshStaleRelativeToPickerOpen(msg.allReposSeq) {
+		//
+		// The opposite arrival order against an applied conflict snapshot is
+		// symmetric: a regular poll that started BEFORE a rebind-conflict
+		// refresh (crossRepoSeq below the conflict's captured value) can land
+		// AFTER the conflict reply already applied to the sidebar (advancing
+		// lastAppliedCrossRepoSeq past this poll's captured value). Applying it
+		// would overwrite the conflict snapshot's rows and skip state and move
+		// the applied watermark backward, so after closing the rebind picker the
+		// section's D path could act on stale counts or a missing hidden marker.
+		// Reject a successful regular poll whose generation is older than the
+		// latest applied cross-repo generation; a failed read leaves the prior
+		// rows intact and does not move the watermark, so it is not gated
+		// (#4742 review).
+		if !m.sidebarRefreshStaleRelativeToPickerOpen(msg.allReposSeq) &&
+			!m.regularPollStaleRelativeToAppliedConflict(msg.crossRepoSeq, msg.allReposErr) {
 			if m.refreshSidebarProjectsFromSnapshot(msg.allRepos, msg.allReposSkipped, msg.allReposErr) {
 				changed = true
 			}

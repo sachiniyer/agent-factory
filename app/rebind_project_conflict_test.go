@@ -668,3 +668,87 @@ func TestRebindConflictRefresh_AppliesWhenNewerPollStartedButNotApplied(t *testi
 	require.Equal(t, 6, int(h.lastAppliedCrossRepoSeq),
 		"the conflict reply advances lastAppliedCrossRepoSeq to its captured seq")
 }
+
+// TestSnapshotFetchedMsg_RejectsRegularPollOlderThanAppliedConflict pins the
+// #4742 review finding (P1) on the regular background-poll path: a regular poll
+// that started BEFORE a rebind-conflict refresh (crossRepoSeq below the
+// conflict's captured value) can land AFTER the conflict reply already
+// applied to the sidebar (advancing lastAppliedCrossRepoSeq past this poll's
+// captured value). The snapshotFetchedMsg handler previously applied such a
+// poll unconditionally (only the picker-open generation check gated the
+// sidebar), overwriting the conflict snapshot's rows and skip state and
+// moving the applied watermark backward — so after closing the rebind picker
+// the Projects section's D path could act on stale counts or a missing
+// hidden marker. The handler must ignore a successful regular poll whose
+// generation is older than the latest applied cross-repo generation, leaving
+// lastAppliedCrossRepoSeq at the newer value; a newer poll must still apply
+// and advance the watermark.
+func TestSnapshotFetchedMsg_RejectsRegularPollOlderThanAppliedConflict(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	const alphaID = "alpha-skipped-id"
+	// A rebind-conflict refresh with generation 7 has already APPLIED to the
+	// sidebar, marking alpha skipped and advancing lastAppliedCrossRepoSeq
+	// past every fetch that started before it.
+	h.sidebarProjectsSkipped = map[string]bool{alphaID: true}
+	h.sidebarProjectsSkippedHints = map[string]string{alphaID: "repair alpha"}
+	h.lastAppliedCrossRepoSeq = 7
+
+	// A regular background poll that started BEFORE the conflict (captured
+	// crossRepoSeq 5) reports alpha healthy — at its fetch-open time alpha was
+	// not yet skipped. It must NOT refresh the sidebar: the conflict's newer
+	// snapshot already applied, and applying the older poll would overwrite
+	// the conflict's skip set and move the applied watermark backward.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     5,
+		crossRepoSeq:    5,
+	})
+	assert.True(t, h.sidebarProjectsSkipped[alphaID],
+		"a regular poll older than the applied conflict must not overwrite the conflict's skip set")
+	assert.Equal(t, "repair alpha", h.sidebarProjectsSkippedHints[alphaID],
+		"a regular poll older than the applied conflict must not overwrite the conflict's repair hint")
+	require.Equal(t, 7, int(h.lastAppliedCrossRepoSeq),
+		"a regular poll older than the applied conflict must not move the applied watermark backward")
+
+	// A regular poll whose generation is at/after the latest applied
+	// generation (8 > 7) is the normal newer refresh and must still apply —
+	// alpha healthy clears the sidebar's skip marker and advances the
+	// applied watermark.
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		allReposSkipped: nil,
+		allReposSeq:     8,
+		crossRepoSeq:    8,
+	})
+	assert.False(t, h.sidebarProjectsSkipped[alphaID],
+		"a regular poll newer than the applied conflict refreshes the sidebar normally")
+	require.Equal(t, 8, int(h.lastAppliedCrossRepoSeq),
+		"a newer regular poll advances lastAppliedCrossRepoSeq to its captured seq")
+
+	// A failed read is not gated: it leaves the prior rows intact and does
+	// not move the applied watermark, so a stale-but-failed poll must not be
+	// rejected (the retain-on-error applySidebarProjects already takes).
+	h.Update(snapshotFetchedMsg{
+		repoID:          h.repoID,
+		allRepos:        nil,
+		allReposSkipped: nil,
+		allReposErr:     errors.New("daemon hiccup"),
+		allReposSeq:     5,
+		crossRepoSeq:    5,
+	})
+	assert.False(t, h.sidebarProjectsSkipped[alphaID],
+		"a failed stale poll retains the prior (healthy) skip state without regressing it")
+	require.Equal(t, 8, int(h.lastAppliedCrossRepoSeq),
+		"a failed stale poll does not move the applied watermark")
+}
