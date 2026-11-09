@@ -106,9 +106,12 @@ func (m *Manager) setLimitReached(instance *session.Instance, resetAt time.Time,
 	instance.SetLimitReachedAtEvidence(resetAt, evidence, banner, false)
 }
 
-func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner, epoch uint64) bool {
+func (m *Manager) setLimitReachedAtEpoch(instance *session.Instance, resetAt time.Time, evidence string, banner session.LimitBanner, epoch uint64, authoritative bool) bool {
 	m.accountLimitMu.Lock()
 	defer m.accountLimitMu.Unlock()
+	if authoritative {
+		return instance.SetLimitReachedAtEpochAuthoritative(resetAt, evidence, banner, epoch)
+	}
 	return instance.SetLimitReachedAtEpoch(resetAt, evidence, banner, epoch)
 }
 

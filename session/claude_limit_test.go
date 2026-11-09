@@ -1,0 +1,835 @@
+package session
+
+import (
+	"encoding/json"
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/sachiniyer/agent-factory/handoff"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/stretchr/testify/require"
+)
+
+// These tests pin #6944's structural reset source: the Claude transcript
+// record a refused request leaves behind
+// (apiError="usage_limit_reached", apiErrorParams.rate_limit_info.resetsAt).
+// ClaudeActiveLimitReset must read it ONLY from the transcripts of the
+// session's CURRENT account and launch directory — Captain's scoping
+// requirement — and must treat the epoch resetsAt as the wall's instant
+// rather than trusting the record's display text, which a narrow pane wraps
+// into an unparseable shape and which can omit the day entirely (weekly).
+
+// claudeLimitRecord builds one refusal record line, the real shape Claude
+// writes (fabricated content — no real transcript data).
+func claudeLimitRecord(t *testing.T, timestamp string, resetsAt any) []byte {
+	t.Helper()
+	return claudeLimitRecordWith(t, timestamp,
+		"You've hit your 5-hour limit · resets 9:40am (America/Los_Angeles)",
+		"five_hour", resetsAt)
+}
+
+// claudeLimitRecordWith builds a refusal record carrying its own display text
+// and rateLimitType — the shape a two-conversation fixture needs when the
+// sibling's wall is a DIFFERENT limit than the session's (#6975 review).
+func claudeLimitRecordWith(t *testing.T, timestamp, text, rateLimitType string, resetsAt any) []byte {
+	t.Helper()
+	rec := map[string]any{
+		"type":      "assistant",
+		"timestamp": timestamp,
+		"message": map[string]any{
+			"model": "<synthetic>",
+			"role":  "assistant",
+			"content": []any{
+				map[string]any{"type": "text", "text": text},
+			},
+		},
+		"apiError": "usage_limit_reached",
+		"apiErrorParams": map[string]any{
+			"rate_limit_info": map[string]any{"status": "rejected", "rateLimitType": rateLimitType},
+		},
+		"isApiErrorMessage": true,
+		"session_id":        "28e1b947-ba23-4588-988b-3c688b6f241c",
+	}
+	if resetsAt != nil {
+		rec["apiErrorParams"].(map[string]any)["rate_limit_info"].(map[string]any)["resetsAt"] = resetsAt
+	}
+	line, err := json.Marshal(rec)
+	if err != nil {
+		t.Fatalf("marshal fixture record: %v", err)
+	}
+	return line
+}
+
+// claudeFiveHourBanner is the detect-match lead for the fixture's 5-hour
+// record text — the banner the pane's LimitSighting carries when that wall
+// shows (#6975 review: only a record whose text carries it can be the wall).
+const claudeFiveHourBanner = "You've hit your 5-hour limit"
+
+// claudeLimitInstance returns a claude instance rooted at a temp worktree, and
+// the worktree path Claude encodes into its project directory name.
+func claudeLimitInstance(t *testing.T, account string) (*Instance, string) {
+	t.Helper()
+	repo := initTempGitRepo(t)
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, repo, "limit", "main", "", false, true)
+	require.NoError(t, err)
+	inst := &Instance{
+		ID:      "claude-limit",
+		Title:   "claude-limit",
+		Path:    repo,
+		Program: "claude",
+		Account: account,
+		backend: &LocalBackend{},
+	}
+	inst.gitWorktree = gw
+	return inst, gw.GetWorktreePath()
+}
+
+// writeClaudeTranscript drops a transcript file under configDir for workDir,
+// in the same layout Claude uses: projects/<encoded-workdir>/<uuid>.jsonl.
+func writeClaudeTranscript(t *testing.T, configDir, workDir, conversationID string, lines ...[]byte) string {
+	t.Helper()
+	dir := filepath.Join(configDir, "projects", claudeProjectName(workDir))
+	require.NoError(t, os.MkdirAll(dir, 0o755))
+	path := filepath.Join(dir, conversationID+".jsonl")
+	var content []byte
+	for _, line := range lines {
+		content = append(content, line...)
+		content = append(content, '\n')
+	}
+	require.NoError(t, os.WriteFile(path, content, 0o600))
+	return path
+}
+
+// claudeLimitConfigDir returns the Claude config dir the instance's
+// transcripts must come from: $HOME/.claude for the default account, or
+// <AFHOME>/accounts/claude/<account> for a named one. It creates the account
+// registration directory so agentaccount.Selected accepts it.
+func claudeLimitConfigDir(t *testing.T, home, account string) string {
+	t.Helper()
+	if account == "" {
+		return filepath.Join(home, ".claude")
+	}
+	afHome := testguard.CanonicalTempDir(t)
+	t.Setenv("AGENT_FACTORY_HOME", afHome)
+	dir := filepath.Join(afHome, "accounts", "claude", account)
+	require.NoError(t, os.MkdirAll(dir, 0o700))
+	return dir
+}
+
+func TestClaudeActiveLimitReset(t *testing.T) {
+	now := time.Date(2026, 11, 7, 17, 0, 0, 0, time.UTC)
+	future := now.Add(2 * time.Hour)
+	stale := now.Add(-time.Hour)
+	futureUnix := future.Unix()
+	staleUnix := stale.Unix()
+	recorded := now.Add(-time.Minute).UTC().Format(time.RFC3339)
+
+	t.Run("refusal record supplies the epoch reset, not the display text", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok, "a current refusal record must supply the reset")
+		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
+	})
+
+	t.Run("stale refusal record supplies nothing", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, staleUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "an expired wall must not supply a reset")
+	})
+
+	t.Run("the LATEST refusal record answers for the wall", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		later := now.Add(4 * time.Hour)
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix),
+			claudeLimitRecord(t, now.Add(-30*time.Second).UTC().Format(time.RFC3339), later.Unix()))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok)
+		require.True(t, resetAt.Equal(later), "resetAt = %v, want the newest refusal's %v", resetAt, later)
+	})
+
+	t.Run("a newest record with an expired reset supersedes an older future one", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, now.Add(-3*time.Hour).UTC().Format(time.RFC3339), futureUnix),
+			claudeLimitRecord(t, recorded, staleUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "the newest refusal says the wall already ended")
+	})
+
+	t.Run("a spent deadline the row already recorded keeps being answered", func(t *testing.T) {
+		// #6975 review: a reset-less banner ("Usage limit reached") gives
+		// the pane nothing to re-sight once the deadline passes — the
+		// consult stopping the instant resetsAt expires lets the degraded
+		// re-sight erase the stored deadline one tick before the
+		// scheduler's grace consumes it. When the stored deadline IS the
+		// freshest claim's instant, the record still proves it.
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, staleUnix))
+
+		// A row that parked on exactly the record's instant keeps it...
+		stale := time.Unix(staleUnix, 0)
+		require.True(t, inst.SetLimitReachedAtEpoch(stale, "", LimitBanner{}, inst.stateEpoch))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok, "the recorded deadline is still the record's instant")
+		require.True(t, resetAt.Equal(stale), "resetAt = %v, want %v", resetAt, stale)
+
+		// ...while a row parked on a DIFFERENT instant owns no such proof.
+		inst2, workDir2 := claudeLimitInstance(t, "")
+		require.True(t, inst2.SetLimitReachedAtEpoch(stale.Add(45*time.Minute), "", LimitBanner{}, inst2.stateEpoch))
+		configDir2 := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir2, workDir2, "6a5d0e5f-1111-2222-3333-444455556666",
+			claudeLimitRecord(t, recorded, staleUnix))
+		_, ok = inst2.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "a spent record matching no stored deadline supplies nothing")
+	})
+
+	t.Run("a refusal publishing no reset supplies nothing", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, nil))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok)
+	})
+
+	t.Run("transcript in a different project directory is out of scope", func(t *testing.T) {
+		inst, _ := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		other := filepath.Join(testguard.CanonicalTempDir(t), "elsewhere")
+		writeClaudeTranscript(t, configDir, other, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "another worktree's transcript must not supply this session's wall")
+	})
+
+	t.Run("an account the session swapped away from cannot supply the reset", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		// Register BOTH account dirs, but put the refusal record only in the
+		// account the session swapped AWAY from.
+		for _, account := range []string{"old", "new"} {
+			require.NoError(t, os.MkdirAll(filepath.Join(afHome, "accounts", "claude", account), 0o700))
+		}
+		oldDir := filepath.Join(afHome, "accounts", "claude", "old")
+		writeClaudeTranscript(t, oldDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "the previous account's transcript must not supply the reset")
+	})
+
+	t.Run("the current account's transcript supplies the reset after a swap", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		for _, account := range []string{"old", "new"} {
+			require.NoError(t, os.MkdirAll(filepath.Join(afHome, "accounts", "claude", account), 0o700))
+		}
+		writeClaudeTranscript(t, filepath.Join(afHome, "accounts", "claude", "old"), workDir,
+			"28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, stale.Add(-2*time.Hour).Unix()))
+		writeClaudeTranscript(t, filepath.Join(afHome, "accounts", "claude", "new"), workDir,
+			"28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok)
+		require.True(t, resetAt.Equal(future), "resetAt = %v, want %v", resetAt, future)
+	})
+
+	t.Run("a carried transcript's covered prefix is the source account's", func(t *testing.T) {
+		// An account swap copies the conversation transcript wholesale
+		// into the NEW account's home (#6944 review): its first covered
+		// bytes are the swapped-away account's records, and only the
+		// durable carried-prefix watermark tells them apart — directory
+		// scoping alone would adopt the old account's wall. The new
+		// account's own appends past the mark still count.
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		path := writeClaudeTranscript(t, configDir, workDir,
+			"28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+
+		// The carry's watermark covers every byte the copy installed.
+		info, err := os.Stat(path)
+		require.NoError(t, err)
+		store := handoff.NewStore(filepath.Join(afHome, "instances", handoff.StateFileName))
+		require.NoError(t, store.RecordCarriedPrefix(path, info.Size()))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "carried bytes describe the swapped-away account's wall")
+
+		// The new account's own refusal lands past the mark and counts.
+		own := now.Add(3 * time.Hour)
+		f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0)
+		require.NoError(t, err)
+		_, err = f.Write(append(claudeLimitRecord(t,
+			now.Add(-time.Second).UTC().Format(time.RFC3339), own.Unix()), '\n'))
+		require.NoError(t, err)
+		require.NoError(t, f.Close())
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok, "the current account's record past the watermark must count")
+		require.True(t, resetAt.Equal(own), "resetAt = %v, want %v", resetAt, own)
+	})
+
+	t.Run("a carried conversation without a watermark supplies nothing", func(t *testing.T) {
+		// A carry that predates Claude watermarks left no durable
+		// boundary — but the session row still marks the conversation
+		// carried. Its records cannot be attributed to either account,
+		// so the file is skipped entirely; a DIFFERENT conversation's
+		// transcript in the same project still counts.
+		carriedID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		inst.Tabs = []*Tab{{
+			Name: agentTabName, Kind: TabKindAgent,
+			Conversation: AgentConversationData{
+				Agent: "claude", ID: carriedID, CaptureKind: ConversationCaptureCarried,
+			},
+		}}
+		writeClaudeTranscript(t, configDir, workDir, carriedID,
+			claudeLimitRecord(t, recorded, futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "an unattributable carried file must supply no reset")
+
+		// The known conversation names its file: a sibling's transcript is
+		// out of scope even when the own file is poisoned — its records are
+		// never this wall's to claim (#6975 review).
+		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+			claudeLimitRecord(t, recorded, staleUnix),
+			claudeLimitRecord(t, now.UTC().Format(time.RFC3339), now.Add(90*time.Minute).Unix()))
+		_, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "a sibling transcript can never prove the own conversation's wall")
+	})
+
+	t.Run("a quarantined account home supplies nothing", func(t *testing.T) {
+		// #6975 review: an unrecorded carry that overflows the 256-entry
+		// quarantine flags the ACCOUNT (handoff.Rails.QuarantinedAccounts),
+		// not a per-file prefix — EffectiveCarriedPrefixes never sees it.
+		// The home then cannot name which transcript is poison, so no
+		// record under it may prove the reset (#6852 fail-closed, the
+		// same rule internal/quotaobs applies to wall retraction).
+		inst, workDir := claudeLimitInstance(t, "new")
+		afHome := testguard.CanonicalTempDir(t)
+		t.Setenv("AGENT_FACTORY_HOME", afHome)
+		configDir := filepath.Join(afHome, "accounts", "claude", "new")
+		require.NoError(t, os.MkdirAll(configDir, 0o700))
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+
+		// Flag the account home the way an overflowing unrecorded carry
+		// does; the transcript itself still holds a valid future refusal.
+		instances := filepath.Join(afHome, "instances")
+		require.NoError(t, os.MkdirAll(instances, 0o700))
+		rails, err := json.Marshal(handoff.Rails{
+			SchemaVersion: 1,
+			QuarantinedAccounts: map[string]handoff.AccountQuarantine{
+				filepath.Clean(configDir): {At: time.Now()},
+			},
+		})
+		require.NoError(t, err)
+		require.NoError(t, os.WriteFile(filepath.Join(instances, handoff.RailsFileName), rails, 0o600))
+
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "a quarantined home cannot prove any reset")
+	})
+
+	t.Run("the newest refusal across the project's transcripts answers for the wall", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		// A second conversation in the same worktree on the same account: the
+		// account's wall is shared, so the freshest refusal statement wins —
+		// here it says the wall already ended, superseding the older future
+		// reset in the other transcript. Both records carry the 5-hour
+		// banner's text, so either is provably that wall (#6975 review).
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+			claudeLimitRecord(t, now.Add(-10*time.Second).UTC().Format(time.RFC3339), staleUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok, "the freshest refusal statement says the wall ended")
+	})
+
+	t.Run("a sibling conversation's different limit can never override the wall", func(t *testing.T) {
+		// #6975 review (Captain's reproduction): the dir-level scan took the
+		// freshest refusal across ALL conversations, so a sibling's five_hour
+		// refusal — stamped later, resetting sooner — overrode the session's
+		// weekly wall and resumed the session five hours early. Two
+		// conversations, same account and worktree, different rateLimitTypes.
+		ownID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		siblingID := "11111111-2222-3333-4444-555555555555"
+		weeklyReset := now.Add(48 * time.Hour) // Monday — the real wall
+		siblingReset := now.Add(time.Hour)     // the sibling's 5-hour wall
+		weeklyText := "You've hit your weekly limit · resets Mon 9am (America/Los_Angeles)"
+
+		build := func(t *testing.T) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			// The session's own conversation: weekly limit, OLDER timestamp.
+			writeClaudeTranscript(t, configDir, workDir, ownID,
+				claudeLimitRecordWith(t, recorded, weeklyText, "seven_day", weeklyReset.Unix()))
+			// A sibling conversation's 5-hour refusal, stamped later.
+			writeClaudeTranscript(t, configDir, workDir, siblingID,
+				claudeLimitRecord(t, now.Add(-5*time.Second).UTC().Format(time.RFC3339), siblingReset.Unix()))
+			return inst
+		}
+
+		t.Run("the known conversation narrows the scan to its own file", func(t *testing.T) {
+			inst := build(t)
+			inst.Tabs = []*Tab{{
+				Name: agentTabName, Kind: TabKindAgent,
+				Conversation: AgentConversationData{Agent: "claude", ID: ownID},
+			}}
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your weekly limit")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"resetAt = %v; the sibling's sooner %v must never win", resetAt, siblingReset)
+		})
+
+		t.Run("the pane's banner names which wall a record can prove", func(t *testing.T) {
+			inst := build(t)
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your weekly limit")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"the weekly banner must take the weekly record's reset: got %v", resetAt)
+			resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(siblingReset),
+				"the 5-hour banner can take the sibling's record — same limit, same wall")
+		})
+
+		t.Run("a banner no record carries supplies nothing", func(t *testing.T) {
+			inst := build(t)
+			// The wait-UI banner carries no limit name, so no record is
+			// provably its wall — the pane parse stands instead.
+			_, ok := inst.ClaudeActiveLimitReset(now, "Usage limit reached")
+			require.False(t, ok)
+			_, ok = inst.ClaudeActiveLimitReset(now, "")
+			require.False(t, ok, "no conversation id and no banner: nothing can prove the wall")
+		})
+	})
+
+	t.Run("a known conversation's old record cannot override a different displayed limit", func(t *testing.T) {
+		// #6975 review (Codex): owning the file is not wall identity — the
+		// conversation rolled from a five-hour wall into a weekly one whose
+		// own refusal record is not yet readable. Its file's freshest claim
+		// is the OLD wall's still-future record, and letting it answer
+		// would resume the session on a wall it already passed. A record
+		// whose named limit contradicts the displayed banner's is skipped.
+		ownID := "28e1b947-ba23-4588-988b-3c688b6f241c"
+		fiveHourReset := now.Add(time.Hour) // the old wall — still in the future
+		weeklyBanner := "You've hit your weekly limit"
+
+		build := func(t *testing.T, record []byte) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			inst.Tabs = []*Tab{{
+				Name: agentTabName, Kind: TabKindAgent,
+				Conversation: AgentConversationData{Agent: "claude", ID: ownID},
+			}}
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, ownID, record)
+			return inst
+		}
+
+		t.Run("a text-named contradiction supplies nothing", func(t *testing.T) {
+			inst := build(t, claudeLimitRecord(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339), fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, weeklyBanner)
+			require.False(t, ok,
+				"the old five-hour record must not answer for the displayed weekly wall")
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+			require.True(t, ok, "the same record answers a displayed five-hour wall")
+			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+
+		t.Run("a structural rateLimitType alone names the limit", func(t *testing.T) {
+			// The record's text names nothing; rateLimitType still carries
+			// the kind — the contradiction check reads either carrier.
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"Usage limit reached", "five_hour", fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, weeklyBanner)
+			require.False(t, ok,
+				"a record typed five_hour must not answer a displayed weekly wall")
+		})
+
+		t.Run("an unnamed side cannot contradict", func(t *testing.T) {
+			// A record carrying no kind still answers an unnamed banner —
+			// file ownership plus a fresh refusal is all the proof there
+			// is when nothing names the limit.
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"Usage limit reached", "", fiveHourReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "Usage limit reached")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+
+		t.Run("an Opus banner rejects the old five-hour record", func(t *testing.T) {
+			// Captain's re-review: the pane shows "You've hit your Opus
+			// limit" while the own file holds only the earlier five-hour
+			// refusal — a model-named kind is a distinct pool, so the old
+			// record must not answer for it.
+			inst := build(t, claudeLimitRecord(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339), fiveHourReset.Unix()))
+			_, ok := inst.ClaudeActiveLimitReset(now, "You've hit your Opus limit")
+			require.False(t, ok,
+				"a five-hour record must not answer a displayed Opus wall")
+		})
+
+		t.Run("an Opus-typed record answers the Opus banner", func(t *testing.T) {
+			inst := build(t, claudeLimitRecordWith(t,
+				now.Add(-5*time.Minute).UTC().Format(time.RFC3339),
+				"You've hit your Opus limit", "opus", fiveHourReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "You've hit your Opus limit")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(fiveHourReset))
+		})
+	})
+
+	t.Run("differently-typed matches under the generic lead are ambiguous", func(t *testing.T) {
+		// #6975 review: with the conversation id unknown and only the
+		// classic "Claude usage limit reached." lead in both records, two
+		// files' freshest claims naming different rateLimitTypes cannot
+		// tell which conversation's wall the pane shows — fall back to
+		// the pane rather than answer for the wrong wall.
+		fiveHourReset := now.Add(time.Hour)
+		weeklyReset := now.Add(48 * time.Hour)
+
+		build := func(t *testing.T) *Instance {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "five_hour", fiveHourReset.Unix()))
+			writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "seven_day", weeklyReset.Unix()))
+			return inst
+		}
+
+		t.Run("two kinds across files supply nothing", func(t *testing.T) {
+			inst := build(t)
+			_, ok := inst.ClaudeActiveLimitReset(now, "Claude usage limit reached.")
+			require.False(t, ok,
+				"a five_hour file and a seven_day file under the same generic lead is ambiguity, not an answer")
+		})
+
+		t.Run("one kind across files still answers", func(t *testing.T) {
+			inst, workDir := claudeLimitInstance(t, "")
+			home := t.TempDir()
+			t.Setenv("HOME", home)
+			configDir := claudeLimitConfigDir(t, home, "")
+			writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+				claudeLimitRecordWith(t, recorded, "Claude usage limit reached.", "five_hour", fiveHourReset.Unix()))
+			writeClaudeTranscript(t, configDir, workDir, "11111111-2222-3333-4444-555555555555",
+				claudeLimitRecordWith(t,
+					now.Add(-5*time.Second).UTC().Format(time.RFC3339),
+					"Claude usage limit reached.", "five_hour", weeklyReset.Unix()))
+			resetAt, ok := inst.ClaudeActiveLimitReset(now, "Claude usage limit reached.")
+			require.True(t, ok)
+			require.True(t, resetAt.Equal(weeklyReset),
+				"same-kind records are not ambiguous — the freshest answers: got %v", resetAt)
+		})
+	})
+
+	t.Run("a record stamped in the future cannot describe the live wall", func(t *testing.T) {
+		// #6975 review: the freshest refusal must have been issued for the
+		// wall on screen — a record claiming a future timestamp did not
+		// happen yet and cannot speak for it.
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		earlier := now.Add(3 * time.Hour)
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, earlier.Unix()),
+			claudeLimitRecord(t, now.Add(30*time.Second).UTC().Format(time.RFC3339), futureUnix))
+		resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.True(t, ok)
+		require.True(t, resetAt.Equal(earlier),
+			"the future-stamped record is skipped; the older claim answers: got %v", resetAt)
+	})
+
+	t.Run("a file whose only claim is future-stamped supplies nothing", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, now.Add(30*time.Second).UTC().Format(time.RFC3339), futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok)
+	})
+
+	t.Run("no transcript supplies nothing", func(t *testing.T) {
+		inst, _ := claudeLimitInstance(t, "")
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok)
+	})
+
+	t.Run("non-claude session supplies nothing", func(t *testing.T) {
+		inst, workDir := claudeLimitInstance(t, "")
+		inst.Program = "codex"
+		home := t.TempDir()
+		t.Setenv("HOME", home)
+		configDir := claudeLimitConfigDir(t, home, "")
+		writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+			claudeLimitRecord(t, recorded, futureUnix))
+		_, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+		require.False(t, ok)
+	})
+}
+
+// TestClaudeLimitScanMemoization pins the per-file claim memo (#6975 review):
+// an unchanged transcript's verdict must replay without re-reading its tail —
+// the poll consults the scan on every idle tick while a banner shows — while a
+// file that actually changed re-scans and re-judges its freshest claim.
+func TestClaudeLimitScanMemoization(t *testing.T) {
+	now := time.Date(2026, 11, 7, 17, 0, 0, 0, time.UTC)
+	future := now.Add(2 * time.Hour)
+	recorded := now.Add(-time.Minute).UTC().Format(time.RFC3339)
+
+	inst, workDir := claudeLimitInstance(t, "")
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	configDir := claudeLimitConfigDir(t, home, "")
+	path := writeClaudeTranscript(t, configDir, workDir, "28e1b947-ba23-4588-988b-3c688b6f241c",
+		claudeLimitRecord(t, recorded, future.Unix()))
+
+	resetAt, ok := inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+	require.True(t, ok)
+	require.True(t, resetAt.Equal(future))
+
+	// The fingerprint is unchanged, so the memo must serve the claim even
+	// with the file unreadable: a re-read would error and drop it.
+	require.NoError(t, os.Chmod(path, 0o000))
+	resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+	require.True(t, ok, "an unchanged transcript must replay its memoized claim")
+	require.True(t, resetAt.Equal(future))
+	require.NoError(t, os.Chmod(path, 0o600))
+
+	// A transcript that changed re-scans: the appended newer refusal is the
+	// wall's freshest statement and answers instead.
+	later := now.Add(4 * time.Hour)
+	f, err := os.OpenFile(path, os.O_APPEND|os.O_WRONLY, 0o600)
+	require.NoError(t, err)
+	_, err = f.Write(append(claudeLimitRecord(t, now.Add(-10*time.Second).UTC().Format(time.RFC3339), later.Unix()), '\n'))
+	require.NoError(t, err)
+	require.NoError(t, f.Close())
+	resetAt, ok = inst.ClaudeActiveLimitReset(now, claudeFiveHourBanner)
+	require.True(t, ok)
+	require.True(t, resetAt.Equal(later), "a changed transcript must re-scan to its newest claim")
+}
+
+// TestSetLimitReachedAtEpochAuthoritative pins the correction arm (#6975
+// review): a transcript instant is not a pane re-parse, so a row already
+// parked on the same wall claim takes the record's instant as a correction —
+// never losing the wall's identity (same evidence, same banner anchor, same
+// liveness) while the stored deadline becomes real.
+func TestSetLimitReachedAtEpochAuthoritative(t *testing.T) {
+	paneReset := time.Date(2026, 7, 4, 14, 0, 0, 0, time.UTC)
+	transcriptReset := time.Date(2026, 7, 4, 19, 0, 0, 0, time.UTC)
+	phrase := "reset at 2pm"
+
+	t.Run("a parked pane guess is corrected to the record's instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		reset, ok := i.LimitResetAt()
+		require.True(t, ok)
+		require.True(t, reset.Equal(transcriptReset),
+			"the record's instant must correct the stored pane guess: got %v", reset)
+		require.True(t, i.LimitReached())
+		require.Equal(t, phrase, i.ToInstanceData().LimitResetEvidence,
+			"the correction is the same wall — its evidence phrase stands")
+	})
+
+	t.Run("a reset-less park acquires the record's instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		// The first authoritative sighting carries the record's instant with
+		// the pane's still-empty evidence — the same wall's claim, completed.
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, "", LimitBanner{}, i.stateEpoch))
+		reset, ok := i.LimitResetAt()
+		require.True(t, ok)
+		require.True(t, reset.Equal(transcriptReset))
+	})
+
+	t.Run("a pane re-read still cannot move the stored instant", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset.Add(3*time.Hour), phrase, LimitBanner{}, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(paneReset),
+			"the dedupe's first-parse rule stands for an ordinary sighting")
+	})
+
+	t.Run("an authoritative sighting matching the stored instant is a no-op", func(t *testing.T) {
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset))
+	})
+
+	t.Run("the durable account observation takes the correction too", func(t *testing.T) {
+		// #6975 review: a pane guess LATER than the record's instant must
+		// not survive in the account ledger — RetainedAccountLimitReset
+		// keeps the later bound, which would leave the account excluded
+		// past the wall's real end and gate retraction on a deadline the
+		// provider's record disproved.
+		latePane := transcriptReset.Add(24 * time.Hour)
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, phrase, LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.Equal(t, "named", observations[0].Account)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must hold the record's instant, not the disproved pane bound: got %v",
+			observations[0].ResetAt)
+	})
+
+	t.Run("a correction advances the lifecycle epoch", func(t *testing.T) {
+		// #6975 review: the reset time is epoch-tracked state — a
+		// correction that moves it must bump the epoch or a stale
+		// AtEpoch observation stays eligible to clear the parked row.
+		i := &Instance{Program: "claude"}
+		require.True(t, i.SetLimitReachedAtEpoch(paneReset, phrase, LimitBanner{}, i.stateEpoch))
+		_, epoch := i.InFlightOpAndEpoch()
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, epoch))
+		_, after := i.InFlightOpAndEpoch()
+		require.NotEqual(t, epoch, after,
+			"a moved reset is a tracked-state change — the epoch must advance")
+	})
+
+	t.Run("an untimed park's observation is replaced, not duplicated", func(t *testing.T) {
+		// #6975 review: the park filed a never-expires claim because the
+		// banner would not parse; the record proving a deadline corrects
+		// THAT row — an appended timed row beside it would leave the
+		// unknown-reset claim excluding the account forever.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, "", LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1,
+			"the corrected wall's unknown-reset row must be replaced, not duplicated")
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the row must take the record's instant: got %v", observations[0].ResetAt)
+	})
+
+	t.Run("a distinct wall's record never lowers a later claim", func(t *testing.T) {
+		// #6975 review: the timed observation row is keyed by account and
+		// claim KIND — a second, distinct wall on the same account shares
+		// it. An authoritative sighting may correct the row's own wall in
+		// either direction, but for a different clause the row is a
+		// different wall's claim and the stricter bound stands — else a
+		// five-hour record would erase a still-active weekly deadline and
+		// release the account early.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, "reset Monday at 9am", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(paneReset, "resets 9:40am", LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the earlier record for a different clause must not lower the later claim: got %v", observations[0].ResetAt)
+	})
+
+	t.Run("the same wall's enriched clause still corrects its timed row", func(t *testing.T) {
+		// #6975 review (Codex): a wider capture can expose the zone on the
+		// parked banner — the clause gains text while the wall and its
+		// banner stay the same. Keying the timed-row correction on
+		// identical evidence would reject it and keep the disproved pane
+		// bound excluding the account; the row's stored clause plus the
+		// banner anchor are the same-wall proof instead.
+		banner := LimitBanner{Prefix: "pane text above the banner\n⎿  ", Count: 1}
+		latePane := transcriptReset.Add(3 * time.Hour) // the 22:00 pane guess
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(latePane, "reset at 2pm", banner, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset,
+			"reset at 2pm (America/New_York)", banner, i.stateEpoch))
+		reset, _ := i.LimitResetAt()
+		require.True(t, reset.Equal(transcriptReset),
+			"the live claim takes the record's instant: got %v", reset)
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the ledger must correct the parked wall's row, not retain the disproved pane bound: got %v",
+			observations[0].ResetAt)
+	})
+
+	t.Run("a different banner's record cannot correct the parked wall's row", func(t *testing.T) {
+		// The changed-evidence sighting anchored on a NEW banner is a
+		// different wall's claim — its record instant must not lower the
+		// row the parked wall filed even when it arrives earlier.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(transcriptReset, "reset Monday at 9am",
+			LimitBanner{Prefix: "the weekly wall's context\n⎿  ", Count: 1}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(paneReset, "resets 9:40am",
+			LimitBanner{Prefix: "a newly printed wall's context\n⎿  ", Count: 1}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1)
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"a different wall's earlier record must not lower the parked wall's claim: got %v",
+			observations[0].ResetAt)
+	})
+
+	t.Run("a changed-evidence sighting still corrects the untimed row", func(t *testing.T) {
+		// #6975 review: the park filed the never-expires claim on an
+		// unparseable banner; a wider capture then exposes the clause —
+		// evidence the dedupe cannot match — while the transcript supplies
+		// the deadline. The sighting falls THROUGH the same-evidence arm
+		// into the ordinary park path, and authority must travel with it
+		// or the unknown-reset row keeps excluding the account beside the
+		// new timed one.
+		i := &Instance{Program: "claude", Account: "named"}
+		require.True(t, i.SetLimitReachedAtEpoch(time.Time{}, "", LimitBanner{}, i.stateEpoch))
+		require.True(t, i.SetLimitReachedAtEpochAuthoritative(transcriptReset, phrase, LimitBanner{}, i.stateEpoch))
+		observations := i.AccountLimitObservations()
+		require.Len(t, observations, 1,
+			"the changed-evidence park must still correct the unknown-reset row in place")
+		require.True(t, observations[0].ResetAt.Equal(transcriptReset),
+			"the row must take the record's instant: got %v", observations[0].ResetAt)
+	})
+}

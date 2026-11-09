@@ -463,8 +463,11 @@ func (c *conversationCarry) copy() error {
 // commitCarriedPrefix records the carry's watermark durably: the first
 // covered bytes of the carried rollout are the source account's records, and
 // the usage indexer must skip claims whose line begins below that mark
-// (internal/rateindex reads handoff.State.CarriedPrefixes). Only codex
-// writes usage claims into its rollout files, so other carries copy nothing
+// (internal/rateindex reads handoff.State.CarriedPrefixes). Codex writes
+// rate_limits usage claims into its rollout files, and Claude writes
+// usage_limit_reached refusal records into its transcripts — both agents
+// carry files a usage reader can mistake for the target account's records
+// (#6944 review), so both leave the watermark. Other carries copy nothing
 // the reader would quarantine.
 //
 // A failure here does not unwind the copy (#6776 review): the caller
@@ -472,10 +475,10 @@ func (c *conversationCarry) copy() error {
 // marker instead, so the file's claims stay untrusted for usage proof
 // while the conversation still carries.
 func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error {
-	if c.agent != tmux.ProgramCodex || outcome.covered == 0 {
+	if !carriesUsageClaims(c.agent) || outcome.covered == 0 {
 		return nil
 	}
-	path := c.carriedCodexRolloutPath()
+	path := c.carriedTranscriptPath()
 	if c.dstRoot.base == "" || path == "" {
 		return carryFailure("the carried-prefix watermark has no AF home to land in", nil)
 	}
@@ -523,7 +526,7 @@ func (c *conversationCarry) commitCarriedPrefix(outcome carryFileOutcome) error 
 // evidence: an installed copy must then be unwound rather than
 // committed (#6852 round-2 review).
 func (c *conversationCarry) quarantineUnrecorded(cause error, covered int64) error {
-	path := c.carriedCodexRolloutPath()
+	path := c.carriedTranscriptPath()
 	if c.dstRoot.base == "" || path == "" {
 		err := fmt.Errorf("the rollout cannot be named for quarantine")
 		log.WarningLog.Printf("account swap carried %s conversation %s without its watermark (%v), and %s — its usage claims are unquarantined",
@@ -734,6 +737,23 @@ func (i *Instance) stampHandoffConversationLocked() {
 // carried rollout, so capture never mistakes it for a newly minted thread.
 func (c *conversationCarry) carriedCodexRolloutPath() string {
 	if c == nil || c.agent != tmux.ProgramCodex {
+		return ""
+	}
+	return filepath.Join(c.dstHome, c.transcript)
+}
+
+// carriesUsageClaims reports whether the carried file can hold provider
+// usage records a reader would attribute to the target account: codex
+// rollouts carry rate_limits claims and Claude transcripts carry
+// usage_limit_reached records. Both need the carried-prefix watermark.
+func carriesUsageClaims(agent string) bool {
+	return agent == tmux.ProgramCodex || agent == tmux.ProgramClaude
+}
+
+// carriedTranscriptPath is the carried file's absolute path under the new
+// account's home — the key the carried-prefix watermark records against.
+func (c *conversationCarry) carriedTranscriptPath() string {
+	if c == nil || !carriesUsageClaims(c.agent) {
 		return ""
 	}
 	return filepath.Join(c.dstHome, c.transcript)

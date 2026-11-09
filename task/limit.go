@@ -5,6 +5,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	xansi "github.com/charmbracelet/x/ansi"
 
@@ -55,28 +56,41 @@ type agentLimitMatcher struct {
 	lead *regexp.Regexp
 	// parseReset extracts and parses the reset timestamp from content starting
 	// at detect's match, returning an absolute UTC reset time and the reset
-	// phrase it consumed. The phrase is the parse's durable identity: a poll
-	// that re-reads an unchanged banner re-derives the same phrase, so the
-	// session can tell "same evidence re-read" from "new reset observation"
-	// and keep the first (nearest-to-the-wall) instant (#6765). It returns
-	// ok=false — and no evidence — when no reset time is present or it cannot
-	// be parsed; detection still stands. now is the injected clock used to
-	// resolve relative and time-of-day-only forms into an absolute instant —
-	// the tested path never calls time.Now() itself, so tests are
-	// deterministic. nil for a detect-only (surface-only) agent — devin
-	// (#2411), whose exhaustion banner is recognizable but whose reset format
-	// is uncharacterized.
-	parseReset func(content string, now time.Time) (resetAt time.Time, evidence string, ok bool)
+	// phrase it consumed. rowLead is the capture's text from the matched row's
+	// start to the match — the gutter a wrapped banner's continuation rows
+	// align under (#6944); a parser that does not rejoin rows ignores it. The
+	// phrase is the parse's durable identity: a poll that re-reads an
+	// unchanged banner re-derives the same phrase, so the session can tell
+	// "same evidence re-read" from "new reset observation" and keep the first
+	// (nearest-to-the-wall) instant (#6765). It returns ok=false — and no
+	// evidence — when no reset time is present or it cannot be parsed;
+	// detection still stands. now is the injected clock used to resolve
+	// relative and time-of-day-only forms into an absolute instant — the
+	// tested path never calls time.Now() itself, so tests are deterministic.
+	// nil for a detect-only (surface-only) agent — devin (#2411), whose
+	// exhaustion banner is recognizable but whose reset format is
+	// uncharacterized.
+	parseReset func(rowLead, content string, now time.Time) (resetAt time.Time, evidence string, ok bool)
 }
 
 var (
-	// claudeLimitDetect matches Claude Code's stall banner on its invariant
-	// lead sentence, e.g.
+	// claudeLimitDetect matches Claude Code's stall banners on their invariant
+	// lead sentences. Two eras co-exist: the classic
 	//   Claude usage limit reached. Your limit will reset at 2pm (America/New_York)
-	// Detection keys only on "Claude usage limit reached." so a reworded reset
-	// clause still surfaces as a hit; parseClaudeReset separately scans for the
-	// "reset at <tail>" phrase, symmetric with the codex detect/parse split.
-	claudeLimitDetect = regexp.MustCompile(`Claude usage limit reached\.`)
+	// and the current refusal message Claude records (and renders) per limit
+	// name, "You've hit your 5-hour limit · resets 9:40am (…)", "You've hit
+	// your weekly limit · …". The third alternative is the native wait UI's
+	// status text ("Usage limit reached"), which carries no clause of its own
+	// but still marks the wall — the transcript's refusal record supplies the
+	// reset either way (#6944). Detection never depends on the reset clause
+	// parsing, so a reworded or wrapped clause still surfaces as a hit;
+	// parseClaudeReset separately scans for the reset phrase, symmetric with
+	// the codex detect/parse split.
+	// Word gaps admit at most ONE newline plus horizontal whitespace: a
+	// continuation break can land inside the banner's own words on a very
+	// narrow pane, but a paragraph gap — or any row that is not a
+	// continuation — cannot masquerade as the banner's.
+	claudeLimitDetect = regexp.MustCompile(`Claude[ \t\r]*\n?[ \t]*usage[ \t\r]*\n?[ \t]*limit[ \t\r]*\n?[ \t]*reached\.|You['’]ve[ \t\r]*\n?[ \t]*hit[ \t\r]*\n?[ \t]*your[ \t\r]*\n?[ \t]*[\w-]+[ \t\r]*\n?[ \t]*limit\b|Usage[ \t\r]*\n?[ \t]*limit[ \t\r]*\n?[ \t]*reached\b`)
 
 	// codexLimitDetect matches Codex's stall banner. Keep the full leading
 	// sentence: captured panes can contain ordinary prose using "hit your usage
@@ -221,6 +235,13 @@ type LimitSighting struct {
 	// legitimately hold several (a retry trips the limit again before the
 	// first banner scrolls off); more than were recorded means a newer banner.
 	BannerCount int
+	// BannerText is the whitespace-normalized text of the LAST banner match —
+	// the lead the detector anchored on ("You've hit your 5-hour limit"). It
+	// names WHICH wall the pane shows, which is what lets a transcript
+	// refusal record prove it is the same wall's: a record whose own text
+	// does not carry the banner names a different limit's wall and can never
+	// supply this one's reset (#6975 review).
+	BannerText string
 }
 
 // NewLimitDetector builds a detector from per-agent detect-pattern overrides
@@ -295,11 +316,19 @@ func isLimitSighting(content, agent string, matchers map[string]agentLimitMatche
 		return LimitSighting{}
 	}
 	last := matches[len(matches)-1]
-	s := LimitSighting{Hit: true, BannerPrefix: content[:last[0]], BannerCount: len(matches)}
+	s := LimitSighting{
+		Hit:          true,
+		BannerPrefix: content[:last[0]],
+		BannerCount:  len(matches),
+		// The match can span a wrap inside the banner's own words; normalize
+		// so the sighting carries the lead's text, not its layout.
+		BannerText: strings.Join(strings.Fields(xansi.Strip(content[last[0]:last[1]])), " "),
+	}
 	if matcher.parseReset == nil {
 		return s
 	}
-	if reset, phrase, parsed := matcher.parseReset(content[last[0]:], now); parsed {
+	lineStart := strings.LastIndexByte(content[:last[0]], '\n') + 1
+	if reset, phrase, parsed := matcher.parseReset(content[lineStart:last[0]], content[last[0]:], now); parsed {
 		s.ResetAt, s.HasResetTime, s.Evidence = reset.UTC(), true, phrase
 	}
 	return s
@@ -357,6 +386,15 @@ var (
 	// weekday matches a leading weekday name for the claude weekly variant
 	// when it names a day rather than a date.
 	weekday = regexp.MustCompile(`(?i)\b(sun|mon|tue|wed|thu|fri|sat)[a-z]*\b`)
+	// claudeResetLead matches the longest run of reset-clause lead grammar:
+	// "at"/"on"/"the"/"day", weekday and month names, day-of-month and year
+	// numbers, with comma/whitespace separators. Every token must terminate
+	// at a period (abbreviation), a separator, or the tail's end — that last
+	// constraint is what keeps \d{1,2} from matching the "9" of "9am" or the
+	// "20" of "2026"-adjacent digits. A token outside this grammar ends the
+	// clause's provable lead: whatever clock follows it belongs to a later
+	// sentence on the same indent, not to the reset clause (#6975 review).
+	claudeResetLead = regexp.MustCompile(`^(?i)(?:[\s,]*(?:(?:sun|mon|tue|wed|thu|fri|sat|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)[a-z]*|at|on|the|day|\d{4}|\d{1,2}(?:st|nd|rd|th)?)(?:\.|[\s,]+|$))*`)
 
 	monthIndex = map[string]time.Month{
 		"jan": time.January, "feb": time.February, "mar": time.March,
@@ -371,49 +409,262 @@ var (
 	}
 )
 
-// claudeResetAnchor locates Claude's reset clause and captures the tail after
-// "reset " up to end of line, e.g. "2pm (America/New_York)" (5h) or "Monday at
-// 9am (…)" / "Nov 6, 2026 9am (…)" (weekly). The "at" is optional because the
-// weekday variant reads "reset Monday at 9am" — "reset <day>" — while the 5h
-// variant reads "reset at 2pm". Kept separate from detection so a reworded
-// reset clause still detects (hit=true) even when this yields no parse.
-var claudeResetAnchor = regexp.MustCompile(`(?i)reset\s+(?:at\s+)?([^\r\n]+)`)
+// claudeAnchorSentenceNamesLimit reports whether the sentence the reset
+// anchor sits in names the limit — the clause's subject is the wall itself,
+// not another noun the message went on to discuss. Every banner shape
+// re-names it in the clause's own sentence ("Your limit will reset…",
+// "your 5-hour limit · resets…"), so a sentence that opens an anchor without
+// one ("Tip: your password will reset at 2pm" riding the same indent) is a
+// different clause whose deadline this wall cannot adopt (#6975 review).
+// The sentence's left edge is the last sentence-ending punctuation before
+// the anchor — "."/"!"/"?" followed by whitespace, claudeClauseEnd's own
+// convention — else the message's start.
+func claudeAnchorSentenceNamesLimit(joined string, anchorAt int) bool {
+	start := 0
+	for i := 0; i+1 < anchorAt; i++ {
+		if c := joined[i]; c == '.' || c == '!' || c == '?' {
+			if joined[i+1] == ' ' || joined[i+1] == '\t' {
+				start = i + 1
+			}
+		}
+	}
+	return strings.Contains(strings.ToLower(joined[start:anchorAt]), "limit")
+}
 
-// parseClaudeReset scans the detector-matched tail for Claude's "reset at
-// <tail>" clause and resolves the tail, in order: an optional timezone in parens
-// (falling back to now's location when absent or invalid — Claude renders in the account
-// tz, which we cannot know without the paren, so the injected clock's zone is
-// the deterministic stand-in), a required 12-hour clock time, and an optional
-// calendar date or weekday (the weekly variant). Without any date it mints the
-// next occurrence of that clock time strictly after now. The returned evidence
-// is the matched clause itself — "reset at 2pm (…)" — identical whenever the
-// banner is re-read unchanged (#6765). Returns ok=false when there is no reset
-// clause or no clock time in it, so an unrecognized/reworded tail degrades to
-// hit=true, hasResetTime=false.
-func parseClaudeReset(content string, now time.Time) (time.Time, string, bool) {
-	anchor := claudeResetAnchor.FindStringSubmatch(content)
-	if anchor == nil {
+// claudeResetAnchor locates Claude's reset clause and captures the tail after
+// "reset " / "resets " up to end of line, e.g. "2pm (America/New_York)" (5h) or
+// "Monday at 9am (…)" / "Nov 6, 2026 9am (…)" (weekly). The "at" is optional
+// because the weekday variant reads "reset Monday at 9am" — "reset <day>" —
+// while the 5h variant reads "reset at 2pm", and the s is optional because the
+// current banner reads "resets 9:40am". The word boundary keeps a fused token
+// ("preset", "resetting" never a clause opener here) from opening a tail. Kept
+// separate from detection so a reworded reset clause still detects (hit=true)
+// even when this yields no parse.
+var claudeResetAnchor = regexp.MustCompile(`(?i)\bresets?\s+(?:at\s+)?([^\r\n]+)`)
+
+// claudeResetClause rejoins the banner row's own continuation rows — the only
+// rows a wrapped clause may continue into (#6944) — then bounds the reset
+// clause at its sentence end. It returns the whitespace-normalized clause as
+// the parse's evidence and the tail after "reset[s] [at] " the clause carries.
+func claudeResetClause(rowLead, content string) (evidence, tail string) {
+	joined := joinClaudeBannerRows(rowLead, content)
+	var m []int
+	for _, loc := range claudeResetAnchor.FindAllStringSubmatchIndex(joined, -1) {
+		if claudeAnchorSentenceNamesLimit(joined, loc[0]) {
+			m = loc
+			break
+		}
+	}
+	if m == nil {
+		return "", ""
+	}
+	tail = joined[m[2]:]
+	end := claudeClauseEnd(tail)
+	if g := claudeResetTailEnd(tail); g < end {
+		end = g
+	}
+	return strings.Join(strings.Fields(joined[m[0]:m[2]+end]), " "),
+		strings.TrimSpace(tail[:end])
+}
+
+// joinClaudeBannerRows rejoins the screen rows of ONE wrapped banner line into
+// its single logical line. The layout rule, and the only rejoin rule the pane
+// parse may apply: a row continues the banner's line only when it carries the
+// continuation indent Claude's renderer gives it — exactly the gutter's text
+// column, measured on the ANSI-stripped row lead. Any other row (a transcript
+// echo, a user draft, a prompt, prose at column 0 or a different indent) is a
+// different row and ends the clause: whatever clock, weekday, date, or
+// timezone it carries can never supply the reset (#6944).
+//
+// Why this is complete: tmux captures with -J, which already rejoins tmux's
+// own grid-level hard wraps, so the only multi-row banner shapes left in a
+// capture are the renderer's. Claude renders with a word-wrap: a row breaks at
+// a space, and only a token wider than the whole text region splits mid-token.
+// No row shape proves that split, though — a complete word can fill its row
+// exactly, so a full-width single-token row feeding the boundary renders
+// identically to a mid-token fragment: "resets|9:40am" at a six-column wrap
+// is indistinguishable from "(America/New_|York)". Fusing on that guess mints
+// tokens the clause never carried — "resets9:40am" loses the reset outright.
+// Every boundary therefore keeps its space. The cost is the genuine
+// hard-split — the paren zone is the only banner token ever wider than a
+// narrow region — which rejoins spaced; its candidate then fails to load
+// and the clause records NO reset rather than resolving in a guessed host
+// zone (#6975 review). Never a fabrication.
+func joinClaudeBannerRows(rowLead, content string) string {
+	lead := xansi.Strip(rowLead)
+	indent := utf8.RuneCountInString(lead)
+	row0, rest := cutLine(content)
+	row0 = strings.TrimRight(xansi.Strip(row0), " \t\r")
+	if indent == 0 {
+		// A banner at column 0 has no gutter to hang continuations under —
+		// the clause cannot leave its row.
+		return row0
+	}
+	pad := strings.Repeat(" ", indent)
+	rows := []string{row0}
+	for rest != "" {
+		var raw string
+		raw, rest = cutLine(rest)
+		stripped := strings.TrimRight(xansi.Strip(raw), " \t\r")
+		if !strings.HasPrefix(stripped, pad) ||
+			(len(stripped) > indent && stripped[indent] == ' ') {
+			break // not the continuation indent — a different row
+		}
+		text := strings.TrimSpace(stripped)
+		if text == "" {
+			break
+		}
+		rows = append(rows, text)
+	}
+	return strings.Join(rows, " ")
+}
+
+// claudeClauseEnd returns the reset clause's length inside tail: the clause
+// runs to the first sentence-ending period — one at end of text or followed
+// by whitespace then a letter — else to the tail's end. A period inside the
+// clause ("Nov. 6, 2026", "Sept. 6", "v2.1.317") is followed by a digit or a
+// non-space character, so it cannot bound the clause; and once the clause's
+// own sentence has ended, no later sentence on the rejoined line — an
+// indented row carrying its own clock — can reach back into it (#6944).
+func claudeClauseEnd(tail string) int {
+	for i := 0; i < len(tail); i++ {
+		if tail[i] != '.' {
+			continue
+		}
+		j := i + 1
+		if j == len(tail) {
+			return len(tail)
+		}
+		if tail[j] != ' ' && tail[j] != '\t' {
+			continue // mid-token period: a version, decimal, or glued abbrev
+		}
+		for j < len(tail) && (tail[j] == ' ' || tail[j] == '\t') {
+			j++
+		}
+		if j == len(tail) {
+			return len(tail)
+		}
+		if c := tail[j]; c >= 'a' && c <= 'z' || c >= 'A' && c <= 'Z' {
+			return i + 1
+		}
+	}
+	return len(tail)
+}
+
+// claudeResetTailEnd bounds the reset clause's tail at its own grammar: the
+// first 12-hour clock token, an optional RUN of following parenthesized
+// spans (Claude renders "(Pro) (America/New_York)" — plan then zone — so a
+// second adjacent paren is still the clause's own), and an optional
+// sentence-ending period. Anything beyond is text the banner's sentence
+// cannot contain — a following sentence in the same message rides the same
+// continuation indent and, when the banner carries no closing period, has
+// no punctuation boundary to stop it: a tip row's "(Europe/Berlin)" or a
+// later clause's "resets Mon 9am" would otherwise supply this wall's zone
+// or weekday (#6975 review). An unclosed paren keeps the rest — it is
+// adjacent to the clock, and the open fragment it carries is what
+// parseClaudeReset reads as a rejected zone candidate, so the bound stays
+// open rather than guessing where the named zone ends.
+func claudeResetTailEnd(tail string) int {
+	m := clockTime.FindStringIndex(tail)
+	if m == nil {
+		return len(tail)
+	}
+	if lead := claudeResetLead.FindString(tail); len(lead) < m[0] {
+		// The clock sits behind prose the reset grammar cannot own — a
+		// later sentence's "meet Monday at 2pm" riding the same indent
+		// after "reset at some point soon" ended the clause's lead without
+		// a clock. Bound where the grammar ends so the tail proves no
+		// reset rather than borrowing the prose's clock (#6975 review).
+		return len(lead)
+	}
+	end := m[1]
+	for {
+		i := end
+		for i < len(tail) && (tail[i] == ' ' || tail[i] == '\t') {
+			i++
+		}
+		if i >= len(tail) || tail[i] != '(' {
+			break
+		}
+		j := strings.IndexByte(tail[i:], ')')
+		if j < 0 {
+			return len(tail)
+		}
+		end = i + j + 1
+	}
+	if end < len(tail) && tail[end] == '.' &&
+		(end+1 == len(tail) || tail[end+1] == ' ' || tail[end+1] == '\t') {
+		end++
+	}
+	return end
+}
+
+// cutLine returns the first line and the remainder of s, splitting at the
+// first newline.
+func cutLine(s string) (line, rest string) {
+	if i := strings.IndexByte(s, '\n'); i >= 0 {
+		return s[:i], s[i+1:]
+	}
+	return s, ""
+}
+
+// parseClaudeReset scans the banner's rejoined line for Claude's "reset[s]
+// [at] <tail>" clause and resolves the tail, in order: an optional timezone in
+// parens (falling back to now's location when ABSENT — Claude renders in the
+// account tz, which we cannot know without the paren, so the injected clock's
+// zone is the deterministic stand-in — while a candidate that fails to load
+// is a REJECTED zone: the banner named a zone the parse cannot prove, so the
+// clause yields no reset rather than resolving the clock in a guessed host
+// zone — #6975 review), a required 12-hour clock time, and an optional
+// calendar date or weekday (the weekly variant).
+// Without any date it mints the next occurrence of that clock time strictly
+// after now. The returned evidence is the whitespace-normalized clause itself
+// — "reset at 2pm (…)" — identical whenever the banner is re-read unchanged,
+// wrapped or not (#6765). Returns ok=false when there is no reset clause or no
+// clock time in it, so an unrecognized, reworded, or unprovably-cut tail
+// degrades to hit=true, hasResetTime=false (#6944: a clause that cannot prove
+// its extent records what it can prove, never a guess from a neighbor row).
+func parseClaudeReset(rowLead, content string, now time.Time) (time.Time, string, bool) {
+	evidence, reset := claudeResetClause(rowLead, content)
+	if reset == "" {
 		return time.Time{}, "", false
 	}
-	reset := anchor[1]
-	evidence := strings.TrimSpace(anchor[0])
 
 	loc := now.Location()
 	candidates := parenTZ.FindAllStringSubmatch(reset, -1)
+	zoneSeen := false
 	var rejected []string
 	for _, m := range candidates {
 		if l, err := time.LoadLocation(m[1]); err == nil {
 			loc = l
+			zoneSeen = true
 			break
 		}
 		rejected = append(rejected, m[1])
+	}
+	// A paren character outside every "(…)" span is an unreadable zone
+	// fragment — "(America/New_" from a hard wrap that split the token, or a
+	// capture that cut it, or a lone ')' whose '(' never arrived. The banner
+	// named a zone af cannot prove: the fragment is a rejected candidate like
+	// any unreadable name, never license for the host-zone fallback (#6975
+	// review — the unclosed-paren host-zone read resumed five hours early).
+	if unmatched := parenTZ.ReplaceAllString(reset, ""); strings.ContainsAny(unmatched, "()") {
+		rejected = append(rejected, strings.Join(strings.Fields(unmatched), " "))
 	}
 	hour, minute, ok := parseClockTime(reset)
 	if !ok {
 		return time.Time{}, "", false
 	}
-	if len(rejected) > 0 && len(rejected) == len(candidates) {
-		warnClaudeTimezoneOnce(content, rejected, loc)
+	if len(rejected) > 0 && !zoneSeen {
+		// The banner carried a parenthesized zone and every candidate failed
+		// to load — a hard-split rejoins spaced ("(America/New_ York)"), an
+		// unclosed paren is a cut fragment, an unknown name is unknown, and
+		// none can prove the zone the banner named. The wall records no reset
+		// rather than a host-zone guess (#6975 review: a rejected zone
+		// candidate resolving in the host zone resumed one session five
+		// hours early).
+		warnClaudeTimezoneOnce(content, rejected)
+		return time.Time{}, "", false
 	}
 
 	// Scan the reset clause with the parenthesized timezone spans blanked out:
@@ -484,7 +735,7 @@ var (
 // evidence is the matched reset phrase itself — identical whenever the banner
 // is re-read unchanged (#6765). Returns ok=false when neither form is found or
 // parses, so a reworded banner degrades to hit=true, hasResetTime=false.
-func parseCodexReset(content string, now time.Time) (time.Time, string, bool) {
+func parseCodexReset(_ string, content string, now time.Time) (time.Time, string, bool) {
 	if m := codexResetAt.FindStringSubmatch(content); m != nil {
 		if t, ok := parseCodexAbsolute(strings.TrimSpace(m[1]), now); ok {
 			return t, strings.TrimSpace(m[0]), true

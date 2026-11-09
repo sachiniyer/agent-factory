@@ -2,7 +2,6 @@ package session
 
 import (
 	"fmt"
-	"slices"
 	"strings"
 	"time"
 
@@ -86,7 +85,7 @@ func (i *Instance) SetLimitReached(resetAt time.Time) {
 func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setLimitReachedLocked(resetAt, evidence, banner, freshRuntime)
+	i.setLimitReachedLocked(resetAt, evidence, banner, freshRuntime, false)
 }
 
 // SetLimitReachedAtEpoch is SetLimitReached for a decision derived from an
@@ -118,6 +117,23 @@ func (i *Instance) SetLimitReachedAtEvidence(resetAt time.Time, evidence string,
 // can, holds the wall at "unknown reset" without dirtying the durable record
 // rather than guessing.
 func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
+	return i.setLimitReachedAtEpoch(resetAt, evidence, banner, epoch, false)
+}
+
+// SetLimitReachedAtEpochAuthoritative is SetLimitReachedAtEpoch for a sighting
+// whose reset instant came from the wall's own structural record rather than
+// the pane parse (#6944): the transcript's epoch-seconds resetsAt is not a
+// re-read against a later clock, so the "same phrase keeps the first parse"
+// dedupe must not swallow it. When the row already parks on the same wall
+// claim, the recorded instant is CORRECTED to the record's instant — the pane
+// guess it was parked on, the zero an unparseable banner left, or the value a
+// pre-fix build persisted — while evidence, banner anchor, and identity stay
+// put: it is the same wall, finally with its real deadline.
+func (i *Instance) SetLimitReachedAtEpochAuthoritative(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64) bool {
+	return i.setLimitReachedAtEpoch(resetAt, evidence, banner, epoch, true)
+}
+
+func (i *Instance) setLimitReachedAtEpoch(resetAt time.Time, evidence string, banner LimitBanner, epoch uint64, authoritative bool) bool {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.stateEpoch != epoch {
@@ -144,10 +160,35 @@ func (i *Instance) SetLimitReachedAtEpoch(resetAt time.Time, evidence string, ba
 			// does not veto. The runtime pin is checked for the same reason:
 			// a replacement runtime's identical banner is a new emission and
 			// must not keep the dead runtime's tombstone.
+			//
+			// The other provable exception is an authoritative instant the
+			// stored claim does not already carry — a correction, not a
+			// re-read (#6944 review): the provider's own record disproves
+			// the pane parse's instant while every identity the dedupe just
+			// proved — evidence phrase, runtime pin, count — still
+			// describes the same wall.
+			if authoritative && !resetAt.IsZero() && !i.limitResetAt.Equal(resetAt) {
+				lv, op, prevReset := i.lifecycleStateLocked()
+				i.limitResetAt = resetAt
+				if i.lastLimitWall.agent != "" {
+					// The claim mirrors the parked wall — correct its
+					// instant in place so its recorded identity, anchor,
+					// runtime pin and send tombstone stay the same wall's
+					// (#6944 review), and flag the mutation or the poll's
+					// change gate leaves it memory-only (#6972).
+					i.lastLimitWall.resetAt = resetAt
+					i.limitWallUnpersisted = true
+				}
+				i.recordAccountLimitObservationAtLocked(i.limitAgent, i.Account, resetAt, evidence, true, authoritative, i.limitResetEvidence, instanceNow().UTC())
+				// The reset moved — the epoch tracks it like every other
+				// writer, or a stale AtEpoch observation stays eligible
+				// to clear the corrected park (#6944 review).
+				i.noteStateChangeLocked(lv, op, prevReset)
+			}
 			return true
 		}
 	}
-	if !i.setLimitReachedLocked(resetAt, evidence, banner, false) {
+	if !i.setLimitReachedLocked(resetAt, evidence, banner, false, authoritative) {
 		return false
 	}
 	return true
@@ -191,16 +232,16 @@ func (i *Instance) applyDegradedResightLocked(banner LimitBanner) bool {
 	// recorded banner is gone (#6972, Codex).
 	if agent := i.currentAgentNameLocked(); agent != i.limitAgent || i.Account != i.limitAccount ||
 		!i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if sameLimitBannerPosition(i.limitBannerPrefix, banner.Prefix) {
 		return true
 	}
 	if i.limitResetEvidence != "" && strings.Contains(banner.Prefix, i.limitResetEvidence) {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if i.limitBannerCount > 0 && banner.Count > i.limitBannerCount {
-		return i.setLimitReachedLocked(time.Time{}, "", banner, false)
+		return i.setLimitReachedLocked(time.Time{}, "", banner, false, false)
 	}
 	if i.inFlightOp != OpNone {
 		return false
@@ -264,7 +305,7 @@ func (i *Instance) sameLiveLimitBannerLocked(banner LimitBanner) bool {
 // without a phrase passes "" — the slot is cleared rather than left describing
 // a reset it did not produce. banner carries the sighting's anchor (#6823);
 // a caller that observed no pane passes the zero LimitBanner.
-func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime bool) bool {
+func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, banner LimitBanner, freshRuntime, authoritative bool) bool {
 	if i.inFlightOp != OpNone {
 		return false
 	}
@@ -281,6 +322,16 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	resetAt, evidence, promptSent := i.originalLimitResetLocked(agent, resetAt, evidence, banner,
 		i.liveness == LiveLimitReached, false, time.Time{}, time.Time{})
 	lv, op, prevReset := i.lifecycleStateLocked()
+	// The provenance the ledger merge below needs: the sighting is the
+	// parked wall's own re-read — a wider capture re-exposing its clause —
+	// only when it anchors on the banner the park recorded; a banner the
+	// wall printed afterward is a different wall's sighting and must not
+	// correct that wall's row (#6975 review). Captured before the claim
+	// fields below move to the sighting's.
+	sameWallEvidence := ""
+	if i.liveness == LiveLimitReached && i.sameLiveLimitBannerLocked(banner) {
+		sameWallEvidence = i.limitResetEvidence
+	}
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt
 	i.limitResetEvidence = evidence
@@ -296,7 +347,7 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	i.limitWallRuntimeGen = i.agentRuntimeGeneration
 	i.attributeLimitIdentityAsLocked(agent)
 	i.noteLimitWallClaimLocked(agent, resetAt, evidence, banner)
-	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, instanceNow().UTC())
+	i.recordAccountLimitObservationAtLocked(agent, i.Account, resetAt, evidence, lv == LiveLimitReached, authoritative, sameWallEvidence, instanceNow().UTC())
 	i.noteStateChangeLocked(lv, op, prevReset)
 	return true
 }
@@ -447,125 +498,6 @@ func (i *Instance) attributeLimitIdentityAsLocked(agent string) {
 		i.limitAccount = i.Account
 		i.touchLocked()
 	}
-}
-
-// recordAccountLimitObservationLocked writes the named-identity wall into the
-// durable observation list. wasParked says the session was already parked at
-// LiveLimitReached when this observation landed — i.e. the call is a re-read
-// of a banner still displayed, not a fresh wall event.
-//
-// The record mutates only when a FACT changes (#6802 review — re-seeing an
-// unchanged wall must never become a write):
-//   - a first sighting appends a row;
-//   - a re-sight while NOT parked is a new wall event — the account recovered
-//     and hit the limit again — so the same claim's sighting instant advances
-//     and the change is durable;
-//   - a re-sight while parked that tightens the reset claim updates it — "a
-//     new reset" is a changed fact — and re-stamps the sighting.
-//
-// A parked re-sight that changes no field is a NO-OP: the wall's event time
-// is when its fact was first observed, and the stale banner still on screen
-// adds nothing a retraction must beat. Callers re-detecting an unchanged
-// banner every tick would otherwise rewrite the row (and republish the
-// session) once per second for as long as the session stayed parked.
-// Caller holds i.mu.
-func (i *Instance) recordAccountLimitObservationLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool) {
-	i.recordAccountLimitObservationAtLocked(agent, account, resetAt, evidence, wasParked, instanceNow().UTC())
-}
-
-// recordAccountLimitObservationAtLocked is recordAccountLimitObservationLocked
-// with the sighting instant supplied by the caller: a park that copies a wall
-// it did not itself observe stamps the SOURCE's event time, never a later
-// instant — a copy that postdates its source observation outlives every
-// retraction that was already on its way between the source's sighting and the
-// park (#6880). Caller holds i.mu.
-func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, resetAt time.Time, evidence string, wasParked bool, sightedAt time.Time) {
-	if agent == "" || account == "" {
-		return
-	}
-	sighted := sightedAt.UTC()
-	if sighted.IsZero() {
-		// A caller with no instant is observing the wall right now; stamping
-		// zero would write an observation that orders against no retraction at
-		// all — the same wedge the explicit instant exists to close (#6880).
-		sighted = instanceNow().UTC()
-	}
-	for idx := range i.accountLimitObservations {
-		observation := &i.accountLimitObservations[idx]
-		// One row per reset claim KIND, not per identity: merging a
-		// known-reset wall into an unknown one — or the reverse — would
-		// either drop the never-expires property or lower the instant a
-		// retraction must postdate. Distinct claims are distinct facts and
-		// keep their own rows; the strictest one still excludes (#6802
-		// review).
-		if observation.Agent == agent && observation.Account == account &&
-			observation.ResetAt.IsZero() == resetAt.IsZero() {
-			// resetAt arrives already resolved: the caller's
-			// originalLimitResetLocked has judged whether the sighting is the
-			// recorded wall's re-read or a genuinely new fact, so the merge
-			// keeps only the safer bound — a repeated phrase that resolved
-			// to the recorded instant merges in place, and a new wall that
-			// re-uses a phrase (the next day's identical "reset at 3pm")
-			// still tightens the row to its own instant (#6959).
-			retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-			if wasParked && observation.ResetAt.Equal(retained) &&
-				!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
-				return
-			}
-			if !retained.Equal(observation.ResetAt) {
-				observation.ResetAt = retained
-				// The phrase follows the reset it produced: a claim that
-				// tightened the boundary names the phrase that carried it.
-				observation.Evidence = evidence
-			}
-			// The row's newest sighting never rewinds: the instant is when the
-			// row last saw this claim's wall, and a copy stamped with an older
-			// source instant — or a lagging detection clock — must not move it
-			// back below a sighting the row genuinely made, or a proof dated in
-			// the gap would retract a wall S saw AFTER the proof (#6880 review).
-			if sighted.After(observation.ObservedAt) {
-				observation.ObservedAt = sighted
-			}
-			i.accountLimitObsUnpersisted = true
-			i.touchLocked()
-			return
-		}
-	}
-	i.accountLimitObservations = append(i.accountLimitObservations, AccountLimitObservationData{
-		Agent: agent, Account: account, ResetAt: resetAt, Evidence: evidence, ObservedAt: sighted,
-	})
-	i.accountLimitObsUnpersisted = true
-	i.touchLocked()
-}
-
-// reSightCrossesSendAttemptLocked reports whether a parked re-sight of an
-// unchanged claim still earns its stamp: the pending swap's notice send is the
-// recency boundary pendingSwapIncomingWallLocked orders wall freshness against
-// (#6921), so the FIRST sighting landing after the attempt instant is a new
-// fact — the wall genuinely re-observed after the send — while later re-sights
-// of the unchanged claim add nothing and stay the no-op #6802 keeps. A row
-// with no pending send attempt has no boundary to cross. Caller holds i.mu.
-func (i *Instance) reSightCrossesSendAttemptLocked(stored, sighted time.Time) bool {
-	pending := i.pendingAccountSwap
-	if pending == nil || pending.MissionDeliveryAttemptAt.IsZero() ||
-		!sighted.After(pending.MissionDeliveryAttemptAt) {
-		return false
-	}
-	return !stored.After(pending.MissionDeliveryAttemptAt)
-}
-
-// RetainedAccountLimitReset merges two negative quota observations without
-// making the account eligible sooner than either observation permits. An
-// unknown reset dominates because af has no expiry fact; otherwise the later
-// reset is the safer boundary.
-func RetainedAccountLimitReset(prior, observed time.Time) time.Time {
-	if prior.IsZero() || observed.IsZero() {
-		return time.Time{}
-	}
-	if observed.After(prior) {
-		return observed
-	}
-	return prior
 }
 
 // SetLimitResetAt records only the display-only reset time (#1146), leaving both
@@ -802,59 +734,4 @@ func (i *Instance) LimitIdentity() (agent, account string, ok bool) {
 		return "", "", false
 	}
 	return i.limitAgent, i.limitAccount, true
-}
-
-// AccountLimitObservations returns durable named-identity quota evidence. It is
-// independent of the session's current liveness: a successful replacement
-// clears the live wall but cannot make the exhausted account eligible again.
-// The daemon owns expiry policy because it also owns the reset grace window.
-func (i *Instance) AccountLimitObservations() []AccountLimitObservationData {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return append([]AccountLimitObservationData(nil), i.accountLimitObservations...)
-}
-
-// AccountLimitObservationsUnpersisted reports whether the durable observation
-// list changed in memory without a row-write carrying it yet (#6802 review).
-func (i *Instance) AccountLimitObservationsUnpersisted() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.accountLimitObsUnpersisted
-}
-
-// MarkAccountLimitObservationsPersisted records that a whole-row write
-// carrying written has landed. It clears the pending flag only when the
-// observation list written is the one now held: a re-sighting that landed
-// after the written snapshot stays pending and is written on the next tick.
-func (i *Instance) MarkAccountLimitObservationsPersisted(written []AccountLimitObservationData) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	if slices.Equal(written, i.accountLimitObservations) {
-		i.accountLimitObsUnpersisted = false
-	}
-}
-
-// LimitWallUnpersisted reports whether the durable wall record — the parked
-// claim's anchor and tombstone, or the retired shadow — changed in memory
-// without a whole-row write carrying it yet (#6972, Codex). The poll's change
-// gate diffs liveness/reset/evidence only, so without this flag a parked
-// row's claim mutation under an unchanged liveness stays memory-only.
-func (i *Instance) LimitWallUnpersisted() bool {
-	i.mu.RLock()
-	defer i.mu.RUnlock()
-	return i.limitWallUnpersisted
-}
-
-// MarkLimitWallPersisted records that a whole-row write carrying written has
-// landed. It clears the pending flag only when the shadow written is the one
-// now held — a wall mutation that landed after the written snapshot stays
-// pending and is written on the next tick. Both sides compare in restored
-// form so the serialized prefix tail cannot defeat the match.
-func (i *Instance) MarkLimitWallPersisted(written *LimitWallClaimData) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	current := limitWallClaimToData(i.lastLimitWall)
-	if limitWallClaimFromData(written) == limitWallClaimFromData(&current) {
-		i.limitWallUnpersisted = false
-	}
 }

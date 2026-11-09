@@ -139,10 +139,10 @@ func TestLimitPatternOverrideIsNotLineAnchored(t *testing.T) {
 // limitParkError is the startup/task-run path to the same decision.
 func TestLimitParkErrorIgnoresAQuotedBanner(t *testing.T) {
 	det := NewLimitDetector(nil)
-	if err := limitParkError(det, "• see \""+claudeBanner+"\"\n❯ ", tmux.ProgramClaude); err != nil {
+	if err := limitParkError(det, "• see \""+claudeBanner+"\"\n❯ ", tmux.ProgramClaude, nil); err != nil {
 		t.Fatalf("a quoted banner parked a starting session: %v", err)
 	}
-	if err := limitParkError(det, "  ⎿  "+claudeBanner+"\n❯ ", tmux.ProgramClaude); err == nil {
+	if err := limitParkError(det, "  ⎿  "+claudeBanner+"\n❯ ", tmux.ProgramClaude, nil); err == nil {
 		t.Fatal("a real banner did not park a starting session")
 	}
 }
@@ -161,7 +161,7 @@ func TestLimitParkErrorCarriesEvidence(t *testing.T) {
 	t.Cleanup(func() { waitLimitNow = prevNow })
 
 	det := NewLimitDetector(nil)
-	err := limitParkError(det, "■ You've hit your usage limit. Please try again at 6:34 AM.", tmux.ProgramCodex)
+	err := limitParkError(det, "■ You've hit your usage limit. Please try again at 6:34 AM.", tmux.ProgramCodex, nil)
 	if err == nil {
 		t.Fatal("a usage-limit banner must park with *LimitReachedError")
 	}
