@@ -250,8 +250,15 @@ func (m *home) handleRebindConflictSnapshot(msg rebindConflictSnapshotMsg) (tea.
 	// that failed leaves unconfirmed counts (a cross-repo rebind even adds a
 	// zero-count row), and the D gate reads this flag before it lets a
 	// delete-project confirmation claim "no live sessions" (#4888 review). A
-	// fetch that answered rebuilds the counts, so it clears the flag.
-	m.projectPickerOverlay.SetSnapshotDegraded(msg.fetchErr != nil)
+	// fetch that answered rebuilds the counts, so it clears the flag — UNLESS
+	// a newer background poll already applied in between (staleSkip): that
+	// newer poll did not actually refresh the picker either, because
+	// updateOpenPickerSkipState sees the active rebind form, sets the guard
+	// and returns without installing its rows. Clearing the guard here would
+	// re-arm D against the picker's stale pre-form counts. Keep the guard set
+	// for staleSkip until a post-form poll installs current rows (#4742
+	// review).
+	m.projectPickerOverlay.SetSnapshotDegraded(msg.fetchErr != nil || staleSkip)
 	// Carry the skip set so the D gate refuses for the highlighted project
 	// and the row renders the hidden marker, mirroring the fresh picker
 	// (#4742 review). A failed conflict-time fetch cannot establish that a

@@ -71,6 +71,15 @@ type snapshotFetchedMsg struct {
 	// blanking the section on a hiccup.
 	allRepos    []session.InstanceData
 	allReposErr error
+	// allReposSeq is the value of home.pickerSnapshotSeq when this off-loop
+	// poll's all-repo fetch was started (#4742 review). updateOpenPickerSkipState
+	// compares it against the picker's open-time value and ignores any reply
+	// whose fetch predates the snapshot the picker was constructed from: a
+	// background poll started before Ctrl+P can land after the picker's newer
+	// synchronous fetch and would otherwise regress the picker's rows, skip
+	// IDs and SnapshotDegraded flag to the older counts. Zero for test/legacy
+	// callers that build a snapshotFetchedMsg directly and must not be gated.
+	allReposSeq uint64
 	// allReposSkipped is the daemon's startup-skipped repo set for the CROSS-repo
 	// (RepoID:"") snapshot (#4742): the repos the daemon dropped at startup, whose
 	// zero count in allRepos is incomplete, not "no sessions". The background
@@ -118,6 +127,11 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 	fetch := m.snapshotFetcher
 	lifetime := m.ctx
 	remoteSeq := m.remote.seq // the task-mutation count this poll starts from
+	// Capture the picker-open generation at fetch-start so a background poll
+	// started before Ctrl+P can be detected as older than the snapshot the
+	// picker was built from (#4742 review). Read on the event loop (before the
+	// goroutine runs) to avoid racing a concurrent picker open.
+	allReposSeq := m.pickerSnapshotSeq
 	allRepos := allReposSnapshotFetcher
 	liveArming := liveTaskArmingFetcher
 	return func() tea.Msg {
@@ -166,6 +180,7 @@ func (m *home) fetchSnapshotCmd() tea.Cmd {
 			skippedRepos: resp.SkippedRepos,
 			tasks:        tasks, tasksErr: tasksErr, repoID: repoID, remote: remote, remoteSeq: remoteSeq,
 			allRepos: allReposData, allReposErr: allReposErr, allReposSkipped: allReposSkipped,
+			allReposSeq: allReposSeq,
 		}
 	}
 }

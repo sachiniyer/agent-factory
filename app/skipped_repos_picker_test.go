@@ -64,7 +64,7 @@ func TestUpdateOpenPickerSkipState_DeferWhileFormActive(t *testing.T) {
 	// A HEALTHY poll arrives while the form is open. Without the deferral it
 	// would clear SnapshotDegraded and the skip markers; the rows behind them
 	// are stale (RefreshRows no-oped), so the update must defer entirely.
-	h.updateOpenPickerSkipState(healthy, nil, nil)
+	h.updateOpenPickerSkipState(healthy, nil, nil, 0)
 	assert.True(t, h.projectPickerOverlay.SnapshotDegraded(),
 		"a healthy poll while the form is active must not clear the degraded guard")
 	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
@@ -160,4 +160,70 @@ func TestShowProjectPickerOverlay_DegradedOpenReusesRetainedSkipSet(t *testing.T
 		"the degraded open must reuse the retained skip set so beta renders hidden and D is gated")
 	assert.Equal(t, "repair beta", h.projectPickerOverlay.SkippedRepoHint(betaID),
 		"the degraded open must reuse the retained repair hint, not a default derived from a lost reason")
+}
+
+// TestUpdateOpenPickerSkipState_RejectsPollOlderThanPickerOpen pins the #4742
+// review finding (P1): a background snapshotFetchedMsg whose all-repo fetch
+// started BEFORE Ctrl+P can be delivered AFTER showProjectPickerOverlay
+// completes its newer synchronous fetch. Applying it unconditionally would
+// replace the picker's rows/skip IDs and clear SnapshotDegraded with the older
+// poll's counts. updateOpenPickerSkipState must ignore any reply whose
+// captured snapshotSeq is below the picker's open-time value.
+func TestUpdateOpenPickerSkipState_RejectsPollOlderThanPickerOpen(t *testing.T) {
+	h := newTestHome(t)
+	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
+
+	alphaRoot := initTestGitRepo(t)
+	_, err := config.RegisterProject(alphaRoot)
+	require.NoError(t, err)
+	h.repoRoot = alphaRoot
+	h.repoID = config.RepoIDFromRoot(alphaRoot)
+
+	// The picker opens with alpha reported as skipped, so the open-time
+	// picker state has a skip marker and a degraded guard set is NOT the
+	// point — the point is that a poll whose fetch predates the open must not
+	// regress the picker. Seed the picker with a skip marker so a regression
+	// is observable: the older poll reports alpha healthy and would clear it.
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
+		return []session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+			[]daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+			nil
+	}))
+	// Seed the picker-open counter above 1 so an "older poll" (openSeq-1) is
+	// still a non-zero value and exercises the gate's < branch rather than the
+	// zero-means-legacy short-circuit.
+	h.pickerSnapshotSeq = 5
+	h.showProjectPickerOverlay()
+	require.NotNil(t, h.projectPickerOverlay)
+	require.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
+		"precondition: the picker opened with alpha marked skipped")
+	openSeq := h.pickerOpenSeq
+	require.Greater(t, openSeq, uint64(0), "precondition: the picker recorded an open-time seq")
+
+	// A background poll whose fetch started BEFORE the open (captured seq is
+	// below the open-time value) now reports alpha healthy. It must be ignored.
+	h.updateOpenPickerSkipState(
+		[]session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		nil, nil, openSeq-1)
+	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
+		"a poll older than the picker's open must not clear the picker's skip marker")
+	assert.False(t, h.projectPickerOverlay.SnapshotDegraded(),
+		"a poll older than the picker's open must not flip the degraded flag")
+
+	// A poll whose fetch started AT or AFTER the open (captured seq equals the
+	// open-time value) is the normal post-open refresh and must still apply.
+	h.updateOpenPickerSkipState(
+		[]session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		nil, nil, openSeq)
+	assert.False(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
+		"a poll at the open-time seq is the open's own read and must apply")
+
+	// A zero seq (a test/legacy caller that built the message directly) is
+	// never gated, so existing direct-call tests keep applying.
+	h.updateOpenPickerSkipState(
+		[]session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
+		[]daemon.SkippedRepo{{RepoID: h.repoID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
+		nil, 0)
+	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
+		"a zero seq is never gated so legacy direct callers keep applying")
 }

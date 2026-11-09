@@ -58,6 +58,14 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	m.projectPickerOverlay.SetWidth(60)
 	m.layoutProjectPickerOverlay()
 	m.state = stateSwitchProject
+	// Bump the picker-open generation so a background snapshotFetchedMsg
+	// whose all-repo fetch started before this Ctrl+P is detected as older
+	// than the snapshot the picker was just built from (#4742 review). A poll
+	// in flight from before the open carries a lower allReposSeq;
+	// updateOpenPickerSkipState ignores it instead of regressing the picker's
+	// rows, skip IDs and SnapshotDegraded flag to the older counts.
+	m.pickerSnapshotSeq++
+	m.pickerOpenSeq = m.pickerSnapshotSeq
 	return m, nil
 }
 

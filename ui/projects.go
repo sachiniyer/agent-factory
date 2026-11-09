@@ -246,9 +246,21 @@ func (p *ProjectsPane) SelectedProject() (SidebarProject, bool) {
 
 // SelectByRoot moves the cursor onto the project with the given repo root — the
 // click action for a project row. Reports whether the project was found.
+// A synthesized skipped row carries only a RepoID and an empty Root (#4742); its
+// zone is keyed by RepoID so two such rows get distinct mouse identities. Select
+// by Root for ordinary rows, then fall back to RepoID for synthesized rows whose
+// Root is empty.
 func (p *ProjectsPane) SelectByRoot(root string) bool {
+	if root != "" {
+		for i, proj := range p.projects {
+			if proj.Root == root {
+				p.selected = i
+				return true
+			}
+		}
+	}
 	for i, proj := range p.projects {
-		if proj.Root == root {
+		if proj.Root == "" && proj.RepoID != "" && proj.RepoID == root {
 			p.selected = i
 			return true
 		}
@@ -492,7 +504,16 @@ func (p *ProjectsPane) String() string {
 		rowStart := len(lines)
 		lines = append(lines, p.projectRow(p.projects[i], selected))
 		if p.zones != nil {
-			p.zones.Register(zones.Project(p.projects[i].Root), layout.Rect{
+			// A synthesized skipped row (#4742) has an empty Root; key its
+			// zone by RepoID so two such rows register under distinct ids
+			// and a click resolves to the row the user clicked instead of
+			// collapsing onto zones.Project("") and the first empty-Root
+			// row (#4742 review).
+			rowKey := p.projects[i].Root
+			if rowKey == "" {
+				rowKey = p.projects[i].RepoID
+			}
+			p.zones.Register(zones.Project(rowKey), layout.Rect{
 				X: p.rect.X, Y: p.rect.Y + rowStart, W: p.rect.W, H: 1,
 			})
 		}

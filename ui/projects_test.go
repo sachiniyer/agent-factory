@@ -161,6 +161,61 @@ func TestProjectsPaneRegistersZones(t *testing.T) {
 	assert.Equal(t, "/repos/agent-factory", root)
 }
 
+// TestProjectsPaneSynthesizedRowDistinctMouseIdentity pins the #4742 review
+// finding (P2): a skipped repo synthesized into an ID-level row has an empty
+// Root, so two such rows used to register under the same zones.Project("") and
+// a click on either resolved to the first empty-Root row. The zone must now be
+// keyed by RepoID and SelectByRoot must resolve by RepoID for empty-Root rows,
+// so a click lands the cursor on the row the user clicked.
+func TestProjectsPaneSynthesizedRowDistinctMouseIdentity(t *testing.T) {
+	rows := []SidebarProject{
+		{Name: "agent-factory", Root: "/repos/agent-factory", SessionCount: 3, Active: true},
+		{RepoID: "skipped-a", Name: "skipped-a"},
+		{RepoID: "skipped-b", Name: "skipped-b"},
+	}
+	p := newTestProjects(rows)
+	p.SetRect(layout.Rect{X: 0, Y: 0, W: 40, H: 8})
+	p.Focus()
+
+	// A click on "skipped-b" resolves to its RepoID-keyed zone; the cursor
+	// must land on skipped-b, not collapse onto the first synthesized row.
+	require.True(t, p.SelectByRoot("skipped-b"), "SelectByRoot resolves a synthesized row by RepoID")
+	sel, ok := p.SelectedProject()
+	require.True(t, ok)
+	assert.Equal(t, "skipped-b", sel.RepoID, "the click lands on skipped-b, not skipped-a")
+
+	// A click on "skipped-a" lands on skipped-a, proving the two synthesized
+	// rows have distinct mouse identities.
+	require.True(t, p.SelectByRoot("skipped-a"))
+	sel, _ = p.SelectedProject()
+	assert.Equal(t, "skipped-a", sel.RepoID)
+
+	// Ordinary rows still resolve by Root.
+	require.True(t, p.SelectByRoot("/repos/agent-factory"))
+	sel, _ = p.SelectedProject()
+	assert.Equal(t, "/repos/agent-factory", sel.Root)
+
+	// The registered zone for a synthesized row is keyed by its RepoID, so
+	// two synthesized rows register under distinct ids.
+	reg := zones.NewRegistry()
+	reg.Reset()
+	p.SetZoneRegistry(reg)
+	_ = p.String()
+	// Rows: agent-factory (y=1), skipped-a (y=2), skipped-b (y=3) inside the
+	// section whose header is at y=0 and rect.Y=0.
+	idA, _, ok := reg.Resolve(1, 2)
+	require.True(t, ok)
+	keyA, ok := zones.ProjectRoot(idA)
+	require.True(t, ok)
+	assert.Equal(t, "skipped-a", keyA, "synthesized row's zone is keyed by RepoID")
+	idB, _, ok := reg.Resolve(1, 3)
+	require.True(t, ok)
+	keyB, ok := zones.ProjectRoot(idB)
+	require.True(t, ok)
+	assert.Equal(t, "skipped-b", keyB)
+	assert.NotEqual(t, keyA, keyB, "two synthesized rows register under distinct zone keys")
+}
+
 // TestProjectsPaneCompactSummary: the degraded 1-line mode renders the project
 // count only, still fitting its rect.
 func TestProjectsPaneCompactSummary(t *testing.T) {

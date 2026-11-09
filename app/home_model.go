@@ -404,6 +404,26 @@ type home struct {
 	// retains the sidebar's current skip set instead of letting the stale
 	// reply clear a Hidden gate the newer poll correctly set.
 	crossRepoSnapshotSeq uint64
+	// pickerSnapshotSeq is a monotonic sequence bumped each time the project
+	// picker opens (after its synchronous cross-repo fetch constructs the
+	// picker's rows), so a background snapshotFetchedMsg whose all-repo fetch
+	// started BEFORE Ctrl+P can be detected as older than the snapshot the
+	// picker was built from (#4742 review). The off-loop poll captures this
+	// value at fetch-start and updateOpenPickerSkipState ignores any reply
+	// whose captured value is below the picker's open-time value: such a
+	// reply would replace the picker's current rows and skip IDs (and clear
+	// SnapshotDegraded) with counts the older poll read, letting D build a
+	// "no live sessions" confirmation from regressed counts or erase a newly
+	// reported skip. Initialized to 1 in newHome so production polls always
+	// capture a non-zero value (zero is reserved for test/legacy callers that
+	// build a snapshotFetchedMsg directly and must not be gated).
+	pickerSnapshotSeq uint64
+	// pickerOpenSeq is the value of pickerSnapshotSeq at the most recent
+	// picker open. updateOpenPickerSkipState compares a background poll's
+	// captured seq against it to reject replies older than the picker's
+	// constructing snapshot. Stale across picker close/reopen but only read
+	// while a picker is open (updateOpenPickerSkipState no-ops otherwise).
+	pickerOpenSeq uint64
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay
@@ -666,6 +686,10 @@ func newHome(ctx context.Context, program, configuredDefault string, repo *confi
 		registeredProjectIdentities: make(map[string]registeredProjectIdentity),
 		state:                       stateDefault,
 		appState:                    appState,
+		// Start at 1 so production background polls always capture a non-zero
+		// pickerSnapshotSeq; 0 is the zero-value a test-built
+		// snapshotFetchedMsg carries and means "do not gate" (#4742 review).
+		pickerSnapshotSeq: 1,
 	}
 	h.sidebar = ui.NewSidebar(proj)
 	h.wireZoneRegistry()

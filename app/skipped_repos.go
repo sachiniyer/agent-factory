@@ -3,8 +3,10 @@ package app
 import (
 	"errors"
 	"fmt"
+	"sort"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/keys"
 	"github.com/sachiniyer/agent-factory/session"
@@ -118,12 +120,31 @@ func skippedRepoStandingNotice(s *daemon.SkippedRepo, detailsKey string) string 
 		detailsKey, skippedRepoReasonLabel(s.Reason))
 }
 
+// skippedRepoStateFilePath resolves the full instances.json path for a skipped
+// repo's RepoID, mirroring api/skipped_repos.go's corruptedRepoPaths so the
+// TUI's repair details name the actual file the operator must copy, fix, or
+// inspect instead of the opaque RepoID (#4742 review). Falls back to the bare
+// RepoID only when the id is too malformed to resolve to a path, which the
+// daemon-reported skips never are — they passed ValidateRepoID when first
+// registered.
+func skippedRepoStateFilePath(repoID string) string {
+	if p, err := config.RepoInstancesPath(repoID); err == nil && p != "" {
+		return p
+	}
+	return repoID
+}
+
 // skippedRepoNotice is the full repair notice for a skipped repo, carried in the
 // errBox's retained slot so `E details` can open it. It names the repo, the
 // reason, the reason-specific repair hint mirroring api/skipped_repos.go, and —
 // for rows-failed-to-load — the FailedRows count the daemon supplies so a
 // change from one hidden session to many produces a different notice and the
-// operator can see what changed (mirroring the CLI and web, #4742 review).
+// operator can see what changed (mirroring the CLI and web, #4742 review). The
+// repo is named by its full instances.json path (resolved through the same home
+// resolver the CLI uses) so an operator who does not already know the
+// $AGENT_FACTORY_HOME storage layout can still act on the remedy, especially
+// for an inactive or synthesized project whose only visible name is the opaque
+// RepoID (#4742 review).
 // Fired as a transient notice when the skip state changes so retained is set;
 // the standing notice takes over after the transient fades.
 func skippedRepoNotice(s *daemon.SkippedRepo) error {
@@ -134,8 +155,8 @@ func skippedRepoNotice(s *daemon.SkippedRepo) error {
 	if s.Reason == daemon.SkippedRepoReasonRowsFailedToLoad && s.FailedRows > 0 {
 		reason = fmt.Sprintf("%s (%d session(s) hidden)", reason, s.FailedRows)
 	}
-	return fmt.Errorf("Sessions in project %q are hidden — %s.\n%s",
-		s.RepoID, reason, skippedRepoRepairHintForReason(s.Reason))
+	return fmt.Errorf("Sessions in project %q are hidden — %s.\nState file: %s\n%s",
+		s.RepoID, reason, skippedRepoStateFilePath(s.RepoID), skippedRepoRepairHintForReason(s.Reason))
 }
 
 // skippedRepoNoticeChanged reports whether two skip entries differ in a way that
@@ -256,8 +277,24 @@ func skippedRepoHintSet(skipped []daemon.SkippedRepo) map[string]string {
 // stale zero counts after a successful poll clears the guard, and the D path
 // can build a "no live sessions" confirmation for a project whose sessions the
 // successful poll just reported (#4742 review).
-func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error) {
+//
+// snapshotSeq is the pickerSnapshotSeq captured when this background poll's
+// all-repo fetch started. A poll started BEFORE the picker opened (whose
+// snapshotSeq is below the picker's open-time value) is STALE: the picker was
+// built from a newer synchronous fetch, and applying the older poll would
+// replace its rows and skip IDs and clear SnapshotDegraded, letting D build a
+// "no live sessions" confirmation from regressed counts or erase a newly
+// reported skip (#4742 review). Ignore such a reply; a newer poll refreshes
+// the picker on its own. A zero snapshotSeq (a test/legacy caller that built
+// the message directly) is never gated.
+func (m *home) updateOpenPickerSkipState(data []session.InstanceData, skipped []daemon.SkippedRepo, fetchErr error, snapshotSeq uint64) {
 	if m.projectPickerOverlay == nil || m.state != stateSwitchProject {
+		return
+	}
+	if snapshotSeq > 0 && snapshotSeq < m.pickerOpenSeq {
+		// The picker's open-time snapshot is newer than this poll's read; keep
+		// the picker's current rows, skip IDs and degraded flag and let the
+		// next post-open poll refresh them (#4742 review).
 		return
 	}
 	// RefreshRows is a no-op while the add/rebind path-input form is active,
@@ -469,10 +506,19 @@ func ensureSkippedRows(projects []overlay.Project, skipped map[string]bool) []ov
 			present[p.RepoID] = true
 		}
 	}
+	// Collect and sort the missing IDs so the appended synthesized rows land
+	// in a deterministic order after the already-sorted project list. The
+	// background snapshot runs this on every poll; iterating the map directly
+	// would reorder unchanged skipped repos between polls, making rows jump
+	// and churning repaints (#4742 review).
+	missing := make([]string, 0, len(skipped))
 	for id := range skipped {
-		if id == "" || present[id] {
-			continue
+		if id != "" && !present[id] {
+			missing = append(missing, id)
 		}
+	}
+	sort.Strings(missing)
+	for _, id := range missing {
 		projects = append(projects, overlay.Project{RepoID: id, Name: id})
 		present[id] = true
 	}

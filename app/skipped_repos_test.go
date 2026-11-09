@@ -21,6 +21,33 @@ import (
 
 // -- Helper function tests --
 
+func TestEnsureSkippedRowsSortedDeterministically(t *testing.T) {
+	// A skipped set with multiple ID-only repos appends synthesized rows in a
+	// deterministic, sorted order after the already-sorted project list. The
+	// background snapshot runs ensureSkippedRows on every poll; iterating the
+	// map directly would reorder unchanged skipped repos between polls, making
+	// rows jump and churning repaints (#4742 review).
+	projects := []overlay.Project{
+		{RepoID: "alpha", Name: "alpha", Root: "/repos/alpha"},
+	}
+	skipped := map[string]bool{"delta-skipped": true, "beta-skipped": true, "gamma-skipped": true}
+	got := ensureSkippedRows(projects, skipped)
+	require.Len(t, got, 4, "the three skipped IDs each synthesize a row after alpha")
+	assert.Equal(t, "alpha", got[0].RepoID, "the existing sorted project stays first")
+	assert.Equal(t, "beta-skipped", got[1].RepoID)
+	assert.Equal(t, "delta-skipped", got[2].RepoID)
+	assert.Equal(t, "gamma-skipped", got[3].RepoID)
+
+	// A repeated call with the same set produces the same order (no map-iteration churn).
+	got2 := ensureSkippedRows(projects, skipped)
+	assert.Equal(t, got, got2, "synthesized rows are stable across calls")
+
+	// An empty/nil set is a no-op; an already-present RepoID is not duplicated.
+	assert.Equal(t, projects, ensureSkippedRows(projects, nil))
+	dup := ensureSkippedRows(projects, map[string]bool{"alpha": true})
+	assert.Len(t, dup, 1, "a skipped ID already represented is not synthesized again")
+}
+
 func TestSkippedRepoForRepoID(t *testing.T) {
 	skipped := []daemon.SkippedRepo{
 		{RepoID: "alpha", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON},
@@ -109,7 +136,7 @@ func TestSkippedRepoNotice(t *testing.T) {
 	t.Run("nil returns nil", func(t *testing.T) {
 		assert.Nil(t, skippedRepoNotice(nil))
 	})
-	t.Run("corrupted reason includes repo id and hint", func(t *testing.T) {
+	t.Run("corrupted reason includes repo id, state file, and hint", func(t *testing.T) {
 		s := &daemon.SkippedRepo{RepoID: "repo-1", Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}
 		err := skippedRepoNotice(s)
 		require.NotNil(t, err)
@@ -117,6 +144,12 @@ func TestSkippedRepoNotice(t *testing.T) {
 		assert.Contains(t, msg, "repo-1")
 		assert.Contains(t, msg, "its instances.json is corrupted")
 		assert.Contains(t, msg, corruptedRepoRepairHint)
+		// The notice names the actual instances.json path (resolved the same
+		// way the CLI resolves it) instead of only the opaque RepoID, so the
+		// repair details are actionable for a user who does not already know
+		// the $AGENT_FACTORY_HOME storage layout (#4742 review).
+		assert.Contains(t, msg, "State file:")
+		assert.Contains(t, msg, "instances.json")
 	})
 	t.Run("rows-failed reason includes hint", func(t *testing.T) {
 		s := &daemon.SkippedRepo{RepoID: "repo-2", Reason: daemon.SkippedRepoReasonRowsFailedToLoad, FailedRows: 3}
@@ -1013,7 +1046,7 @@ func TestUpdateOpenPickerSkipState_DegradedRegistryPreservesRegistryRows(t *test
 	// Background poll lands a successful snapshot for alpha while the registry
 	// is degraded. Without the preserving merge, the picker's rows are replaced
 	// wholesale and beta vanishes; with it, beta's registry-backed row survives.
-	h.updateOpenPickerSkipState(alphaSnapshot, nil, nil)
+	h.updateOpenPickerSkipState(alphaSnapshot, nil, nil, 0)
 	pickerRows := h.projectPickerOverlay.Projects()
 	pickerByRoot := map[string]overlay.Project{}
 	for _, p := range pickerRows {
@@ -1061,7 +1094,7 @@ func TestUpdateOpenPickerSkipState_FailedFetchRetainsSkipMarkers(t *testing.T) {
 	// Background poll fails. The failed request cannot prove the skip was
 	// repaired, so the picker must retain the last-known skip markers instead
 	// of clearing them; only SnapshotDegraded flips to gate D globally.
-	h.updateOpenPickerSkipState(healthy, nil, errors.New("rpc boom"))
+	h.updateOpenPickerSkipState(healthy, nil, errors.New("rpc boom"), 0)
 	assert.True(t, h.projectPickerOverlay.SnapshotDegraded(),
 		"a failed background fetch must set SnapshotDegraded so the D path falls back to the fetch-failure refusal")
 	assert.True(t, h.projectPickerOverlay.IsRepoSkipped(h.repoID),
@@ -1123,7 +1156,7 @@ func TestUpdateOpenPickerSkipState_PreservesSessionOnlySkippedRows(t *testing.T)
 	h.updateOpenPickerSkipState(
 		[]session.InstanceData{{Worktree: session.GitWorktreeData{RepoPath: alphaRoot}}},
 		[]daemon.SkippedRepo{{RepoID: gammaID, Reason: daemon.SkippedRepoReasonCorruptedInstancesJSON}},
-		nil)
+		nil, 0)
 
 	pickerByRoot := map[string]overlay.Project{}
 	for _, p := range h.projectPickerOverlay.Projects() {
