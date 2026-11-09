@@ -414,6 +414,14 @@ func (m *Manager) createMissingPromptTarget(req DeliverPromptRequest) (_ session
 		return session.InstanceData{}, err
 	}
 	req.Program = trimProgramEnumIfBare(req.Program)
+	// Mirror the host whitespace trim controlServer.createSession applies at its
+	// RPC boundary: this path bypasses that handler and copies req.Host straight
+	// into Manager.CreateSession, so without trimming here a whitespace-only
+	// DeliverPromptRequest.Host would force BackendSSH and reach reserveCreate
+	// (renaming any archived session holding the title) before sshRuntime.Provision
+	// trims it back to absent and fails — the same fail-after-mutation the
+	// boundary trim closes (#5744, #6988).
+	req.Host = strings.TrimSpace(req.Host)
 	managerDelegated = true
 	return m.CreateSession(context.Background(), CreateSessionRequest{
 		Title:      req.Title,
