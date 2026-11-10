@@ -17,6 +17,21 @@
 // The WaitDelay half of a bound deliberately stays with each caller: the
 // right delay is per-command, and os/exec documents its semantics at the
 // field.
+//
+// Callers must meet two requirements that the types do not enforce:
+//
+//   - The command must be built with exec.CommandContext, not exec.Command.
+//     Lead and KillOnCancel install a Cancel, and os/exec's Start refuses a
+//     Cancel on a command with no context: "exec: command with a non-nil
+//     Cancel was not created with CommandContext".
+//   - The child must lead its own process group. Lead arranges that with
+//     Setpgid, and a Setsid child leads one too. KillOnCancel on a child that
+//     stayed in its parent's group is a silent no-op: the negative pid names
+//     no group, the kill answers ESRCH, Cancel reports os.ErrProcessDone, and
+//     nothing is killed. That is safe, because it cannot reach any other
+//     group, but the child outlives the deadline. Only WaitDelay's fallback
+//     Process.Kill ends it, if the caller set a WaitDelay, and that never
+//     reaches anything the child spawned. Reap has the same requirement.
 package execgroup
 
 import (
@@ -29,6 +44,8 @@ import (
 // Lead puts cmd in its own process group (SysProcAttr.Setpgid) and installs
 // KillOnCancel, so a context deadline tears down the whole tree the group
 // holds rather than orphaning a spawned child that still holds the pipes.
+// cmd must come from exec.CommandContext, or Start fails (see the package
+// doc).
 func Lead(cmd *exec.Cmd) {
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	KillOnCancel(cmd)
@@ -43,7 +60,10 @@ func Lead(cmd *exec.Cmd) {
 //
 // Callers whose SysProcAttr differs from Lead's Setpgid still share this
 // Cancel: a Setsid child leads its own group too, so the negative pid names
-// the same tree.
+// the same tree. A child that leads no group of its own gets nothing from
+// it: the kill answers ESRCH and Cancel silently kills nothing. cmd must also
+// come from exec.CommandContext, or Start fails. The package doc states both
+// requirements.
 func KillOnCancel(cmd *exec.Cmd) {
 	cmd.Cancel = func() error {
 		if cmd.Process == nil {
@@ -63,7 +83,8 @@ func KillOnCancel(cmd *exec.Cmd) {
 // grandchild still holding an inherited pipe — on every exit path, normal
 // completion included. The group is led by the already-exited child, so the
 // signal is ESRCH (ignored) in the common case; a nil Process means the
-// command never started and there is nothing to reap.
+// command never started and there is nothing to reap. Like KillOnCancel, it
+// reaches only a group that cmd's child leads.
 func Reap(cmd *exec.Cmd) {
 	if cmd.Process != nil {
 		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
