@@ -56,7 +56,7 @@ func (f *scopeFixture) useScheduler() {
 // addStoreTask writes a task straight to the store and returns it as stored.
 func addStoreTask(t *testing.T, tk task.Task) task.Task {
 	t.Helper()
-	created, err := task.AddTaskChecked(tk, task.ActorCLI, nil)
+	created, err := task.AddTaskChecked(tk, task.ActorCLI, nil, "")
 	require.NoError(t, err)
 	return created
 }

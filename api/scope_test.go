@@ -969,7 +969,7 @@ func TestRequireTaskInScope_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T
 	created, err := task.AddTaskChecked(task.Task{
 		ID: "wtsc0001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: worktree, Program: "claude", Enabled: false,
-	}, task.ActorCLI, nil)
+	}, task.ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
 	retained := created.RepoID
