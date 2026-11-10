@@ -711,7 +711,14 @@ function resolveRoute(): void {
 /** Resolves a deep link to a session the live-only snapshot did not hold: reads it
  *  by id, adopts it when it is an archived row, and re-runs the route against the
  *  list that now has it. An id the daemon does not know is the same "no such
- *  session" the route reported before the archive became lazy. */
+ *  session" the route reported before the archive became lazy. A read that fails
+ *  for a NON-auth reason (transport / 5xx, neither a token problem) is "could not
+ *  check", not "gone" — the distinction adoptSessionsById documents ("Throws when
+ *  the read fails, so the caller can tell 'gone' from 'could not check'") and
+ *  loadArchivedPage's error+Retry path draws: the lookup is left unsettled and the
+ *  #/session/<id> hash is kept, so a refresh or full reconnect (which re-runs
+ *  resolveRoute against location.hash) can re-resolve the still-present fragment
+ *  instead of being false-reported as a deleted session and erased in place. */
 async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
   const tok = token;
   const generation = connectionGeneration;
@@ -724,6 +731,30 @@ async function resolveArchivedRoute(id: string, ticket: number): Promise<void> {
       disconnect(describeError(e), true);
       return;
     }
+    // The daemon never answered (transport failure `ApiError(0, …)` or a 5xx,
+    // neither of which shouldForgetToken covers): this is "could not check", not
+    // "gone". Falling through with `rows === []` would settle the lookup as
+    // missing() — false-reporting the session as deleted, resetting the pane,
+    // and replaceRoute(null)-erasing the #/session/<id> fragment so the shared
+    // deep link is lost on a momentary blip. Instead leave the lookup unsettled
+    // so the hash stays owned until a successful answer, and a refresh or full
+    // reconnect (which re-runs resolveRoute against location.hash) can re-resolve
+    // the still-present fragment. Surface a "could not check" notice so the user
+    // is not left with a silently empty pane — but only while THIS navigation is
+    // still the user's latest: a rail click / new hash / back-forward since the
+    // read was issued (settleLookup's staleness contract) means the user moved
+    // on, and toasting about a session they navigated away from would itself be
+    // a false report. A disconnect during the read already surfaced its own
+    // feedback, so the notice is gated on the connection being unchanged too.
+    if (
+      tok !== null && token === tok && connectionGeneration === generation &&
+      createSelectionIntent.isCurrent(ticket)
+    ) {
+      showTransientNotice(
+        `Could not look up that session: ${errorText(e)} The link is preserved — try again.`,
+      );
+    }
+    return;
   }
   if (token !== tok || connectionGeneration !== generation) return;
   // The one terminal state of an unknown id: the empty pane (the previous
