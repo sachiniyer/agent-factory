@@ -8,8 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // Bounding the factory reset's worktree removal (#3096).
@@ -105,16 +106,7 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// Own process group, so the deadline tears down git AND anything it spawned.
 	// exec.CommandContext's default Cancel SIGKILLs only the direct child, which on
 	// a stalled unlink leaves the work still running against the dead mount.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	// Bound the post-exit wait too: a child inheriting the capture pipes would
 	// otherwise block the read on pipe EOF even after the deadline killed git.
 	cmd.WaitDelay = gitWaitDelay
@@ -126,11 +118,8 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 			"cannot be reaped. af gave up waiting and left it running rather than hanging",
 			ErrWorktreeRemovalTimedOut, strings.Join(args, " "), localGitTimeout+waitAbandonGrace)
 	}
-	if cmd.Process != nil {
-		// Reap a straggler on EVERY path, not just the timeout: the group is led by
-		// git, which has already exited, so this is ESRCH (ignored) in the common case.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	// Reap a straggler on EVERY path, not just the timeout.
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited cleanly — a non-zero exit surfaces as *exec.ExitError, not
 		// this — and only a straggler held the pipe past gitWaitDelay. The output is

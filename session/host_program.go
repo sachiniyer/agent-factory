@@ -10,12 +10,12 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
 	"golang.org/x/sys/unix"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -468,21 +468,10 @@ func execProbeRunner(ctx context.Context, execPath string, argv []string, stdin 
 	if stdin != "" {
 		cmd.Stdin = strings.NewReader(stdin)
 	}
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = hostProgramProbeWaitDelay
 	out, err := cmd.Output()
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The probe's output was complete; a backgrounded rc child merely held
 		// the pipe open (#676 precedent).

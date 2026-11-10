@@ -9,6 +9,7 @@ import (
 	"runtime"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -96,7 +97,7 @@ func probeSessionAs(ctx context.Context, cmdExec cmd.Executor, name string, kind
 		c.Stderr = &stderr
 	}
 	err := cmdExec.Run(c)
-	reapTmuxGroup(c)
+	execgroup.Reap(c)
 	err = normalizeWaitDelay(err)
 	if err == nil {
 		return probeAnswer{exists: true, known: true}
