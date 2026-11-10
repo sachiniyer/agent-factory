@@ -216,10 +216,11 @@ func forkingGroup(then string) string {
 		" & p=$!; kill $p; wait $p; done) & done; echo ready; " + then
 }
 
-// forkTrials is how many times each fork-race test repeats. On macos-15 a
-// single kill(-pgid) missed a mid-fork child in 9 of 20 trials of ONE such
-// loop (#7066), so a kill without the re-signal survives 20 trials of four
-// loops with odds far below one in a million. A trial that passes costs
+// forkTrials is how many times each fork-race test repeats. On macos-15,
+// without killGroup's re-signal, a single group kill left a forkingGroup
+// child holding the pipe in 20 of 20 trials, and both fork-race tests failed
+// on their first trial (#7069's probe runs). The repeats cover a slower or
+// faster runner, where the race lands less often. A trial that passes costs
 // milliseconds.
 const forkTrials = 20
 
