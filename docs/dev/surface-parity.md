@@ -56,7 +56,8 @@ audit (#1937) found gaps pointing in every direction:
 The sharpest way to hold this: on `CreateSession`, **no surface is a superset of
 another**. All three accept different subsets of the same `CreateSession`
 request — the TUI now sends a backend but still cannot send `title_base`, which
-the web does.
+the web does (its naming form refuses a colliding title in-form instead of
+letting the daemon auto-suffix).
 
 | Create option | TUI | Web | CLI |
 |---|---|---|---|

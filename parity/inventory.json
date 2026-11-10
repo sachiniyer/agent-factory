@@ -953,7 +953,7 @@
         "pointer": "api/api.go:649 --name (required)"
       },
       "verdict": "parity",
-      "notes": "TUI/web send title_base so the daemon auto-suffixes collisions; the CLI sends title and errors on collision instead."
+      "notes": "All three surfaces set the title but answer a collision differently: the web sends title_base so the daemon auto-suffixes and returns the resolved title; the TUI's naming form refuses a colliding title before submit (git.TitlesCollide mirrors the daemon's rule, #936) and sends exact title, keeping the user editing; the CLI sends title and errors on collision. The earlier 'TUI/web send title_base' claim was wrong about the TUI — sessionStartRequest.TitleBase was declared and forwarded but never populated, so the wire key was always empty; the dead forward was removed and the absence declared in field_coverage."
     },
     {
       "id": "session.get",
@@ -2543,6 +2543,9 @@
           },
           "in_place": {
             "gap": "session.create.opt.inplace"
+          },
+          "title_base": {
+            "ok": "The naming form refuses a colliding title before submit (git.TitlesCollide mirrors the daemon's rule, #936) and keeps the user editing — an interactive surface surfaces the conflict rather than silently creating '<title>-2', so it sends exact `title` like the CLI. sessionStartRequest.TitleBase was declared and forwarded but never populated, so the wire key was always empty and the audit read the forward as a reach; the dead field was removed so this absence is a real non-send. See session.create.opt.title."
           }
         }
       },
@@ -3012,7 +3015,7 @@
       },
       "CreateSession": {
         "title": {
-          "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) \u2014 the TUI's friendly behavior. See session.create.opt.title."
+          "ok": "The web sends title_base so the daemon auto-suffixes a collision and returns the resolved title (web/src/api.ts:236-238) \u2014 the browser modal has no pre-submit collision check, so it takes the resolved name back from the daemon. See session.create.opt.title."
         },
         "in_place": {
           "gap": "session.create.opt.inplace"
