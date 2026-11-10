@@ -143,9 +143,13 @@ func TestConfigPaneQuota_WarningsRenderUnderTheHeading(t *testing.T) {
 	}
 }
 
-// The section is ordered after Accounts — both are daemon-reported state under
-// the manifest, newest last.
-func TestConfigPaneQuota_RendersAfterAccounts(t *testing.T) {
+// The section is ordered before Accounts — both are daemon-reported state
+// under the manifest, newest last, but Usage's rows take the cursor (the
+// list's only scroll driver), so it must sit AHEAD of Accounts to keep the
+// account register rows the list's last selectable rows. Were Usage after
+// Accounts, navigate-to-bottom would land on a quota row where Enter is a
+// no-op instead of on a register row that opens the inline field.
+func TestConfigPaneQuota_RendersBeforeAccounts(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "claude", Quota: "not reported", Observed: "no sessions", Detail: "no sessions"},
 	}, nil)
@@ -159,7 +163,182 @@ func TestConfigPaneQuota_RendersAfterAccounts(t *testing.T) {
 			quotaIdx = i
 		}
 	}
-	if accountsIdx < 0 || quotaIdx < 0 || quotaIdx < accountsIdx {
-		t.Fatalf("Usage must render after Accounts: accounts at %d, quota at %d", accountsIdx, quotaIdx)
+	if accountsIdx < 0 || quotaIdx < 0 || quotaIdx > accountsIdx {
+		t.Fatalf("Usage must render before Accounts: accounts at %d, quota at %d", accountsIdx, quotaIdx)
+	}
+}
+
+// registerQuotaPane builds a config pane shaped like an ordinary successful open
+// of the config overlay: the manifest tiers, the Accounts section offering a
+// register row for every agent on the roster, and — when withQuota is set — the
+// Usage section the daemon always returns one row per supported agent CLI for.
+// Sized tall so the window does not clip the bottom of the list.
+//
+// This is the shape the bug hid in: every test that exercised the
+// navigate-to-bottom register drive ran against a pane this helper's
+// withQuota=false arm describes, so the Usage section was absent and the
+// register rows were last by accident, not by the ordering the invariant pins.
+func registerQuotaPane(t *testing.T, agents []string, quota []QuotaRow) *ConfigPane {
+	t.Helper()
+	pane := NewConfigPane()
+	pane.SetSize(100, 200)
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
+	}}, "/tmp/config.toml", nil)
+	pane.SetAccounts(nil, agents, nil)
+	if quota != nil {
+		pane.SetQuota(quota, nil, "", nil)
+	}
+	pane.SetFocus(true)
+	return pane
+}
+
+// driveToBottom moves the cursor down until it stops advancing — the
+// navigate-to-bottom drive the register flow relies on (and that
+// app/account_busy_test.go's accountPaneLastRow blind-fires 100 Down keys to
+// park). Returns the index it parked on.
+func driveToBottom(t *testing.T, c *ConfigPane) int {
+	t.Helper()
+	for i := 0; i < 200; i++ {
+		before := c.selectedIdx
+		pressKey(c, "down")
+		if c.selectedIdx == before {
+			break
+		}
+	}
+	return c.selectedIdx
+}
+
+// describeConfigRow labels a row for a failure message, naming the section it
+// belongs to so a wrong last-selectable row reads as the section that owns it
+// rather than an opaque struct dump.
+func describeConfigRow(row configRow) string {
+	switch {
+	case row.account != nil:
+		if row.account.Register {
+			return "register row for " + row.account.Agent
+		}
+		return "account row " + row.account.Agent + "/" + row.account.Name
+	case row.quota != nil:
+		return "quota row " + row.quota.Program
+	case row.host != nil:
+		if row.host.Action != "" {
+			return "host action " + row.host.Action
+		}
+		return "host row " + row.host.Name
+	case row.entry != nil:
+		return "config row " + row.entry.Key
+	case row.heading != "":
+		return "heading " + row.heading
+	}
+	return "empty row"
+}
+
+// TestConfigPaneRegisterRowsAreLastSelectableWithQuota pins the invariant the bug
+// broke: with the Usage section loaded (the default state on a successful open —
+// the daemon reports a row per supported agent CLI), the account register rows
+// must stay the list's last selectable rows. Were Usage appended after Accounts,
+// the last selectable row would be a quota row, where Enter is a silent no-op, and
+// the navigate-to-bottom register drive would dead-end — which is exactly the
+// collision the e7d224c5 commit introduced. Usage therefore sits AHEAD of Accounts.
+func TestConfigPaneRegisterRowsAreLastSelectableWithQuota(t *testing.T) {
+	pane := registerQuotaPane(t,
+		[]string{"codex"},
+		[]QuotaRow{{Program: "claude", Quota: "not reported", Observed: "no sessions", Detail: "none"}},
+	)
+
+	lastSelectable := -1
+	for i, row := range pane.rows {
+		if row.isSelectable() {
+			lastSelectable = i
+		}
+	}
+	if lastSelectable < 0 {
+		t.Fatal("no selectable rows in the pane")
+	}
+	row := pane.rows[lastSelectable]
+	if row.account == nil || !row.account.Register {
+		t.Fatalf("the last selectable row must be a register row — the register flow navigates to the bottom; "+
+			"row %d is %s", lastSelectable, describeConfigRow(row))
+	}
+}
+
+// The invariant must hold at realistic scale too: the daemon's quota report is
+// never empty (one row per supported agent CLI — 7 minimum), so several quota
+// rows below the register rows is the ordinary shape, not an edge case.
+func TestConfigPaneRegisterRowsAreLastSelectableWithManyQuotaRows(t *testing.T) {
+	pane := registerQuotaPane(t,
+		[]string{"codex"},
+		[]QuotaRow{
+			{Program: "claude", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "gemini", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "cursor", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "copilot", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "aider", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+			{Program: "opencode", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+		},
+	)
+
+	lastSelectable := -1
+	for i, row := range pane.rows {
+		if row.isSelectable() {
+			lastSelectable = i
+		}
+	}
+	row := pane.rows[lastSelectable]
+	if row.account == nil || !row.account.Register {
+		t.Fatalf("with seven quota rows the last selectable row must STILL be a register row; "+
+			"row %d is %s", lastSelectable, describeConfigRow(row))
+	}
+}
+
+// TestConfigPaneNavigateToBottomOpensRegisterWithQuota is the end-to-end symptom
+// of the invariant: walking the cursor to the bottom and pressing Enter must
+// land on a register row and open the inline register field. Before the fix
+// this dead-ended on the last quota row, where Enter is a documented no-op while
+// the footer advertised a "↵ edit" verb that did nothing.
+func TestConfigPaneNavigateToBottomOpensRegisterWithQuota(t *testing.T) {
+	pane := registerQuotaPane(t,
+		[]string{"codex"},
+		[]QuotaRow{{Program: "claude", Quota: "not reported", Observed: "no sessions", Detail: "none"}},
+	)
+	pane.selectedIdx = 0
+	driveToBottom(t, pane)
+
+	row := pane.rows[pane.selectedIdx]
+	if row.account == nil || !row.account.Register {
+		t.Fatalf("the bottom selectable row must be a register row, got %s at idx %d",
+			describeConfigRow(row), pane.selectedIdx)
+	}
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !pane.IsEditing() {
+		t.Fatalf("enter at the bottom must open the inline register field; "+
+			"landed on %s (idx %d) and IsEditing stayed false", describeConfigRow(row), pane.selectedIdx)
+	}
+	if !pane.accounts.registering || pane.accounts.registerFor != "codex" {
+		t.Fatalf("the register field opened for the wrong agent: registering=%v registerFor=%q",
+			pane.accounts.registering, pane.accounts.registerFor)
+	}
+}
+
+// The no-quota regression: the navigate-to-bottom register drive worked before
+// the Usage section existed, and the fix must not break it. This is the shape
+// every app-level test runs against (none loads quota rows), so it must stay
+// green.
+func TestConfigPaneNavigateToBottomOpensRegisterWithoutQuota(t *testing.T) {
+	pane := registerQuotaPane(t, []string{"codex"}, nil)
+	pane.selectedIdx = 0
+	driveToBottom(t, pane)
+
+	row := pane.rows[pane.selectedIdx]
+	if row.account == nil || !row.account.Register {
+		t.Fatalf("the bottom selectable row must be a register row, got %s at idx %d",
+			describeConfigRow(row), pane.selectedIdx)
+	}
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if !pane.IsEditing() {
+		t.Fatalf("enter at the bottom must open the inline register field; "+
+			"landed on %s (idx %d) and IsEditing stayed false", describeConfigRow(row), pane.selectedIdx)
 	}
 }

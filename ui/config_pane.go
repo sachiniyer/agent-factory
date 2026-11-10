@@ -357,13 +357,18 @@ func (c *ConfigPane) rebuildRows() {
 	}
 	// Hosts (#5571 W10.5) follows the tiers: it is config content — the
 	// section renders the same `hosts`/`default_host` keys the tiers hold,
-	// so it belongs ahead of the daemon-owned domains. Accounts and Usage
+	// so it belongs ahead of the daemon-owned domains. Usage then Accounts
 	// keep the tail, newest last — and the account register rows stay the
 	// list's last selectable rows, the invariant the register flow's
-	// navigate-to-bottom drives rely on.
+	// navigate-to-bottom drives rely on. Usage sits AHEAD of Accounts for
+	// exactly this reason: its rows take the cursor (selection is the list's
+	// only scroll driver), so appending them after Accounts would make the
+	// last selectable row a quota row, where Enter is a no-op, and the
+	// navigate-to-bottom register drive would dead-end. Putting Usage first
+	// keeps Accounts — and its register rows — at the selectable tail.
 	c.appendHostRows()
-	c.appendAccountRows()
 	c.appendQuotaRows()
+	c.appendAccountRows()
 	if selectedAccount != nil {
 		found := false
 		for i, row := range c.rows {
