@@ -131,9 +131,29 @@ func canonicalizeStructuredValueAgainst(key, raw string, existing map[string]str
 			}
 		}
 		if reseedBuiltIns {
-			for agent := range DefaultConfig().ProgramOverrides {
+			// Seed a tombstone for every agent the built-in provenance layer
+			// can ever contribute, independent of whether the live claude
+			// probe succeeds in this process. DefaultConfig().ProgramOverrides
+			// is only populated when GetClaudeCommand() succeeds, so
+			// iterating ONLY it would drop the tombstone — and the user's
+			// removal — whenever the probe fails (claude transiently
+			// unresolvable at write time). Seed the tombstone whenever the
+			// write omits the agent AND either the built-in layer would
+			// contribute it (the probe succeeded) OR the user is removing a
+			// real (non-empty) override already on disk. The second condition
+			// pins the removal even when the probe fails, so the loader
+			// cannot resurrect the auto-detected command on a later load
+			// where detection succeeds. When neither holds — the agent was
+			// never auto-detected and nothing is on disk — no tombstone is
+			// needed, and seeding one would be a spurious (though
+			// behaviorally inert) addition.
+			for _, agent := range builtInAutoDetectedProgramAgents() {
 				if _, present := requested[agent]; !present {
-					onDisk[agent] = ""
+					_, builtIn := DefaultConfig().ProgramOverrides[agent]
+					existingCommand, hasExisting := existing[agent]
+					if builtIn || (hasExisting && existingCommand != "") {
+						onDisk[agent] = ""
+					}
 				}
 			}
 		}
