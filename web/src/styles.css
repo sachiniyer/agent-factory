@@ -3859,6 +3859,15 @@ body[data-project-color] [data-af-theme="dark"] {
   color: var(--af-ink);
 }
 
+/* Account evidence rows can carry an agent/name identifier near the 64-char
+ * limit; break the unbroken token so it wraps within its grid track instead of
+ * overflowing into the observed/windows columns on a phone-width viewport. */
+.af-quota-account-agent {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  min-width: 0;
+}
+
 .af-quota-cell {
   font-size: var(--af-type-caption);
   color: var(--af-ink);

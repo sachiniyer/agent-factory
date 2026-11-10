@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "5d2815ce9f68";
+var CLIENT_VERSION = "357736e4df2c";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -8494,7 +8494,7 @@ function renderQuotaAccountsSection(state) {
       const row = h(
         "div",
         { class: "af-quota-row" },
-        h("span", { class: "af-quota-agent" }, `${acct.agent}/${acct.name}`),
+        h("span", { class: "af-quota-agent af-quota-account-agent" }, `${acct.agent}/${acct.name}`),
         h("span", { class: "af-quota-cell" }, acct.observed),
         h("span", { class: "af-quota-cell" }, acct.windows)
       );

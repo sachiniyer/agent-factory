@@ -87,7 +87,7 @@ function renderQuotaAccountsSection(state: QuotaState): HTMLElement | null {
       const row = h(
         "div",
         { class: "af-quota-row" },
-        h("span", { class: "af-quota-agent" }, `${acct.agent}/${acct.name}`),
+        h("span", { class: "af-quota-agent af-quota-account-agent" }, `${acct.agent}/${acct.name}`),
         h("span", { class: "af-quota-cell" }, acct.observed),
         h("span", { class: "af-quota-cell" }, acct.windows),
       );

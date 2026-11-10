@@ -2992,6 +2992,11 @@ body[data-project-color] [data-af-theme=dark] {
   font-size: var(--af-type-body);
   color: var(--af-ink);
 }
+.af-quota-account-agent {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  min-width: 0;
+}
 .af-quota-cell {
   font-size: var(--af-type-caption);
   color: var(--af-ink);
