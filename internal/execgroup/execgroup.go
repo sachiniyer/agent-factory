@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // Lead puts cmd in its own process group (SysProcAttr.Setpgid) and installs
@@ -53,7 +54,9 @@ func Lead(cmd *exec.Cmd) {
 
 // KillOnCancel installs on cmd the Cancel that SIGKILLs the process GROUP led
 // by the child — the negative pid reaches every member, not just the direct
-// process exec.CommandContext kills by default. A group already gone (ESRCH)
+// process exec.CommandContext kills by default. On darwin it also re-signals
+// until no member is alive, which reaches a child the group was forking when
+// the kill landed (see killGroup). A group already gone (ESRCH)
 // maps to os.ErrProcessDone, which Wait ignores rather than reporting as a
 // command failure. A nil Process — a command that never started — is a
 // no-op.
@@ -69,13 +72,7 @@ func KillOnCancel(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
+		return killGroup(cmd.Process.Pid)
 	}
 }
 
@@ -84,9 +81,72 @@ func KillOnCancel(cmd *exec.Cmd) {
 // completion included. The group is led by the already-exited child, so the
 // signal is ESRCH (ignored) in the common case; a nil Process means the
 // command never started and there is nothing to reap. Like KillOnCancel, it
-// reaches only a group that cmd's child leads.
+// reaches only a group that cmd's child leads, and on darwin it re-signals
+// the same way.
 func Reap(cmd *exec.Cmd) {
 	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = killGroup(cmd.Process.Pid)
+	}
+}
+
+// resignalBound caps how long killGroup keeps re-signalling a group that
+// still has a live member. A SIGKILLed process is normally a zombie within
+// milliseconds, so the bound only matters for a member stuck in an
+// uninterruptible wait, which no signal ends: without it, Cancel would hold
+// os/exec's Wait for as long as that wait lasts.
+const resignalBound = 2 * time.Second
+
+// resignalPoll is the pause between two reads of the group's membership.
+const resignalPoll = time.Millisecond
+
+// killGroup SIGKILLs every process in the group that pgid leads, including
+// a child the group is forking at that instant. A group already gone (ESRCH)
+// maps to os.ErrProcessDone.
+//
+// One kill(-pgid) is enough on Linux, whose fork is atomic against a group
+// signal: "Process group and session signals need to be delivered to just
+// the parent before the fork or both the parent and the child after the
+// fork" (kernel/fork.c, copy_process). XNU gives no such guarantee. On
+// macos-15, a kill(-pgid, SIGKILL) that landed while a member was forking
+// missed the new child in about half the trials, and never on Linux (#7066).
+// The parent died on its way out of fork, and the child ran on as an orphan,
+// still in the group and still holding every pipe it inherited. A second
+// kill of the group killed it every time.
+//
+// So, where groupHasLiveMember is defined, killGroup re-signals the group
+// until no member of it is alive: every member left is a zombie, or there
+// are none. That condition also means no fork is still in flight. A member
+// that is forking is not a zombie, and by the time it becomes one, its fork
+// has returned and the new child is listed in the group. Where
+// groupHasLiveMember is nil, the kernel gives the guarantee itself and the
+// first kill is all there is.
+func killGroup(pgid int) error {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	if groupHasLiveMember != nil {
+		resignal(pgid, groupHasLiveMember, resignalBound)
+	}
+	return nil
+}
+
+// resignal re-sends SIGKILL to the group pgid leads for as long as live
+// reports a live member in it, and for at most bound. Each re-signal follows
+// a read that found a live member, so the group, and with it the pgid, still
+// exists when it is sent. A failed read ends the loop: the first kill has
+// already gone out, and that kill is everything a kernel with an atomic fork
+// needs.
+func resignal(pgid int, live func(pgid int) (bool, error), bound time.Duration) {
+	deadline := time.Now().Add(bound)
+	for {
+		alive, err := live(pgid)
+		if err != nil || !alive || !time.Now().Before(deadline) {
+			return
+		}
+		_ = syscall.Kill(-pgid, syscall.SIGKILL)
+		time.Sleep(resignalPoll)
 	}
 }
