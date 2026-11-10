@@ -253,6 +253,12 @@ func changedFields(before, after Task) []string {
 //     never run claiming it just did.
 //   - DroppedEvents: watcher-owned delivery history. A forged value would claim
 //     af discarded source events that it never observed.
+//   - SandboxOwner: daemon-stamped provenance (#5571 W3.5). A client-supplied
+//     value would forge which credential a task's deliveries are held to: the
+//     run path refuses a sandbox-created task with no target session forever, and
+//     every delivery is re-authorized against the stored owner. AddTaskChecked
+//     re-stamps the field from its sandboxOwner parameter after this reset, so
+//     only the daemon's credential can supply it.
 //   - CreatedAt: the fallback reference for a task that has never run. Absent, no
 //     verdict can be derived at all and the task reports healthy forever; dated in
 //     the future, detection is off until then.
@@ -274,6 +280,7 @@ func (t *Task) resetStoreOwnedFields(now time.Time) {
 	t.LastRunStatus = ""
 	t.LastRunID, t.LastRunStartedAt = "", nil
 	t.DroppedEvents = 0
+	t.SandboxOwner = ""
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now
 	}

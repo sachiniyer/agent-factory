@@ -356,7 +356,7 @@ func RenderWatchPrompt(prompt, line string) string {
 // calls AddTaskChecked with the surface the request came from; this wrapper
 // exists for callers that genuinely have no surface to name.
 func AddTask(t Task) error {
-	_, err := AddTaskChecked(t, ActorUnknown, nil)
+	_, err := AddTaskChecked(t, ActorUnknown, nil, "")
 	return err
 }
 
@@ -376,13 +376,24 @@ var ErrTaskIDExists = errors.New("a task with this id already exists")
 //
 // actor names the surface the create came from; it is recorded as this task's
 // first audit entry (#3623).
-func AddTaskChecked(t Task, actor Actor, validate func(Task) error) (Task, error) {
+//
+// sandboxOwner is the id of the sandbox session whose credential created this
+// task (#5571 W3.5), or empty for an operator-created task. resetStoreOwnedFields
+// clears any client-supplied value on the embedded Task; this parameter re-stamps
+// the daemon's own value from the credential after the reset, so a client cannot
+// forge which credential a task's deliveries are held to. The daemon's addTask
+// passes the owner from the authenticated context; direct callers pass empty.
+func AddTaskChecked(t Task, actor Actor, validate func(Task) error, sandboxOwner string) (Task, error) {
 	if err := ValidateTaskID(t.ID); err != nil {
 		return Task{}, err
 	}
 	// Everything the STORE owns is reset here, as a class rather than one field
 	// at a time — see resetStoreOwnedFields.
 	t.resetStoreOwnedFields(nowFn())
+	// Re-stamp sandbox provenance after the reset cleared any client-supplied
+	// value. The daemon stamps the owner from the credential; an empty value is
+	// an operator-created task.
+	t.SandboxOwner = sandboxOwner
 	// Canonicalize before validating so validation judges exactly what will be
 	// stored — a whitespace-only target session must not validate as "no target
 	// session" and then behave as one at delivery time (#1892).
