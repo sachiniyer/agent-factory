@@ -9,8 +9,9 @@ import (
 	"os/exec"
 	"strconv"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // AutostartUnitInfo describes the autostart unit installed on this machine:
@@ -643,22 +644,11 @@ func runAutostartProbeCommand(name string, args ...string) probeResult {
 	// Its own process group, so the deadline tears down the whole tree rather
 	// than SIGKILLing the client and orphaning a child still holding the pipe
 	// (the #610/#769/#856 precedent).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = autostartProbeWaitDelay
 
 	out, err := cmd.CombinedOutput()
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
-	}
+	execgroup.Reap(cmd) // reap stragglers
 
 	var exitErr *exec.ExitError
 	switch {

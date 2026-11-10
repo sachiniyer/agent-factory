@@ -12,6 +12,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -219,32 +220,20 @@ func probeClaudeCommand() (string, error) {
 	// before the TUI drew anything (#6396). A new session has no controlling
 	// terminal, so bash cannot stop on one.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
-	cmd.Cancel = func() error {
-		// On the context deadline, SIGKILL the group rather than just the
-		// shell (the default Cancel), so a foreground rc command that is
-		// itself the thing hanging dies along with anything it spawned. A
-		// group already gone (ESRCH) maps to os.ErrProcessDone, which Wait
-		// ignores instead of reporting as a probe failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	// On the context deadline, SIGKILL the group rather than just the
+	// shell (the default Cancel), so a foreground rc command that is
+	// itself the thing hanging dies along with anything it spawned.
+	execgroup.KillOnCancel(cmd)
 	// Bound the post-exit wait: a process backgrounded by the rc file
 	// inherits the stdout/stderr capture pipes, and without a bound Output()
 	// blocks on pipe EOF until that grandchild exits — even after the
 	// context deadline killed the shell (#856).
 	cmd.WaitDelay = probeWaitDelay
 	output, err := cmd.Output()
-	if cmd.Process != nil {
-		// Reap rc-file children that outlived the shell on every exit path —
-		// normal completion or timeout — so the probe never leaks processes
-		// (#769 pattern).
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	// Reap rc-file children that outlived the shell on every exit path —
+	// normal completion or timeout — so the probe never leaks processes
+	// (#769 pattern).
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The shell itself exited successfully, so the probe's output is
 		// already complete on the pipe; a backgrounded rc-file child merely

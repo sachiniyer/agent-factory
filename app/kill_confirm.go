@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -44,26 +43,12 @@ func runKillGit(dir string, args ...string) ([]byte, error) {
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
 	// Own process group so the deadline kills git AND any child together, rather
 	// than exec.CommandContext's default of SIGKILLing only the git process.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Negative pid targets the whole group; a group already gone (ESRCH) maps to
-		// os.ErrProcessDone, which Wait ignores rather than reporting as a failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = killGitWaitDelay
 	out, err := cmd.Output()
-	if cmd.Process != nil {
-		// Reap any child that outlived git on every exit path so a wedged read never
-		// leaks a pipe-holding process; the group is led by the already-exited git,
-		// so this is ESRCH (ignored) in the common case.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	// Reap any child that outlived git on every exit path so a wedged read never
+	// leaks a pipe-holding process.
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited (a non-zero exit surfaces as an *exec.ExitError, not
 		// ErrWaitDelay); only a child held the pipe past killGitWaitDelay and was

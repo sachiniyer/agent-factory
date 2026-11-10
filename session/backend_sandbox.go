@@ -7,14 +7,13 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"os"
 	"os/exec"
 	"strings"
 	"sync"
 	"sync/atomic"
-	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/runtimetoken"
 	"github.com/sachiniyer/agent-factory/log"
 )
@@ -522,19 +521,7 @@ func (p *sandboxProvisioner) buildRunCommand(ctx context.Context, script string,
 	// clone or binary copy keeps running on the sandbox while provisioning starts
 	// cleanup, racing remote work against its own deletion and orphaning local
 	// transport processes. Same shape as boundedTmuxCommand and the hook runtime.
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Negative pid targets the whole group. A group already gone (ESRCH) maps
-		// to os.ErrProcessDone, which Wait ignores rather than reporting as a
-		// command failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	// TRAP 1, with a correction the handoff's rule did not anticipate.
 	//
 	// The recorded guidance was "WaitDelay on the tunnel child, NEVER on the
