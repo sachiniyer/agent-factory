@@ -39,7 +39,6 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
-	"time"
 )
 
 // Lead puts cmd in its own process group (SysProcAttr.Setpgid) and installs
@@ -89,16 +88,6 @@ func Reap(cmd *exec.Cmd) {
 	}
 }
 
-// resignalBound caps how long killGroup keeps re-signalling a group that
-// still has a live member. A SIGKILLed process is normally a zombie within
-// milliseconds, so the bound only matters for a member stuck in an
-// uninterruptible wait, which no signal ends: without it, Cancel would hold
-// os/exec's Wait for as long as that wait lasts.
-const resignalBound = 2 * time.Second
-
-// resignalPoll is the pause between two reads of the group's membership.
-const resignalPoll = time.Millisecond
-
 // killGroup SIGKILLs every process in the group that pgid leads, including
 // a child the group is forking at that instant. A group already gone (ESRCH)
 // maps to os.ErrProcessDone.
@@ -106,19 +95,18 @@ const resignalPoll = time.Millisecond
 // One kill(-pgid) is enough on Linux, whose fork is atomic against a group
 // signal: "Process group and session signals need to be delivered to just
 // the parent before the fork or both the parent and the child after the
-// fork" (kernel/fork.c, copy_process). XNU gives no such guarantee. On
+// fork" (kernel/fork.c, copy_process). XNU gives no such guarantee. A child
+// joins its parent's group while it is still being created, and killpg's
+// walk of the group skips a process that is still being created
+// (pgrp_iterate's proc_find refuses one still marked P_REF_NEW). On
 // macos-15, a kill(-pgid, SIGKILL) that landed while a member was forking
-// missed the new child in about half the trials, and never on Linux (#7066).
-// The parent died on its way out of fork, and the child ran on as an orphan,
-// still in the group and still holding every pipe it inherited. A second
-// kill of the group killed it every time.
+// missed the new child in about half the trials, and never on Linux
+// (#7066). The parent died on its way out of fork, and the child ran on as
+// an orphan, still in the group and still holding every pipe it inherited.
 //
-// So, where groupHasLiveMember is defined, killGroup re-signals the group
-// until no member of it is alive: every member left is a zombie, or there
-// are none. That condition also means no fork is still in flight. A member
-// that is forking is not a zombie, and by the time it becomes one, its fork
-// has returned and the new child is listed in the group. Where
-// groupHasLiveMember is nil, the kernel gives the guarantee itself and the
+// So, where readGroup is defined, killGroup goes on to sweep the group
+// (resignal.go). It returns within resignalBound whatever the sweep does.
+// Where readGroup is nil, the kernel gives the guarantee itself, and the
 // first kill is all there is.
 func killGroup(pgid int) error {
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
@@ -127,32 +115,8 @@ func killGroup(pgid int) error {
 		}
 		return err
 	}
-	if groupHasLiveMember != nil {
-		resignal(pgid, groupHasLiveMember, resignalBound)
+	if readGroup != nil {
+		sweep(pgid, readGroup, syscall.Kill, resignalBound)
 	}
 	return nil
-}
-
-// resignal re-sends SIGKILL to the group pgid leads for as long as live
-// reports a live member in it, and for at most bound. A read that finds a
-// live member does not pin the group. If that member exits and is reaped
-// before the re-signal, and the leader has been reaped too (os/exec's Wait
-// reaps it without waiting for Cancel), the pgid is free when the signal
-// goes out. To hit another group, XNU's sequential pid allocator would then
-// have to wrap round to this exact number, and the process given it would
-// have to lead its own group, all in the microseconds between the read and
-// the kill. Reap's single kill after Wait has always had that same window.
-// darwin offers no handle that pins a group, which is what closing it would
-// take. A failed read ends the loop: the first kill has already gone out,
-// and that kill is everything a kernel with an atomic fork needs.
-func resignal(pgid int, live func(pgid int) (bool, error), bound time.Duration) {
-	deadline := time.Now().Add(bound)
-	for {
-		alive, err := live(pgid)
-		if err != nil || !alive || !time.Now().Before(deadline) {
-			return
-		}
-		_ = syscall.Kill(-pgid, syscall.SIGKILL)
-		time.Sleep(resignalPoll)
-	}
 }

@@ -60,7 +60,9 @@ func TestNilProcessIsNoOp(t *testing.T) {
 const killBound = 10 * time.Second
 
 // holderLife is how long every process a test starts would live on its own.
-// Only a working kill ends them inside killBound.
+// Only a working kill ends them inside killBound. forkingGroup's loops do
+// not end on their own, so its watchdog ends them after holderLife, and what
+// they forked ends holderLife after that.
 const holderLife = "60"
 
 // groupHolders is a command whose whole process group shares one pipe.
@@ -143,6 +145,19 @@ func killOwnGroup(t *testing.T, pgid int) {
 	}
 }
 
+// killHeldGroup kills the group of a leader that has already been waited,
+// when a member still holds the pipe. A member holding it keeps the group,
+// and so its pgid, alive. Once the pipe is released there is nothing left to
+// kill, and the pgid may already name someone else's group.
+func killHeldGroup(t *testing.T, h groupHolders) {
+	t.Helper()
+	select {
+	case <-h.eof:
+	default:
+		killOwnGroup(t, h.pgid)
+	}
+}
+
 // Cancel must reach the whole group, not just the direct child: a grandchild
 // the child forked into its group dies with it. A Cancel that kills only
 // cmd.Process, or nothing at all, leaves the grandchild holding the pipe past
@@ -182,6 +197,7 @@ func TestReapKillsAStragglerHoldingThePipe(t *testing.T) {
 	select {
 	case err := <-waited:
 		if err != nil {
+			killHeldGroup(t, h)
 			t.Fatalf("the leader should exit 0 on its own: %v", err)
 		}
 	case <-time.After(killBound):
@@ -211,8 +227,15 @@ func TestReapKillsAStragglerHoldingThePipe(t *testing.T) {
 // mid-fork in most trials. That is the instant at which XNU's kill(-pgid)
 // misses the new child, which then runs on in the group holding the pipe
 // (#7066).
+//
+// The loops never end on their own, and they run in their own group, which
+// Ctrl-C does not reach. So the script's first fork is a watchdog that
+// SIGKILLs the whole group (kill 0) after holderLife. An interrupted or
+// timed-out test binary then leaves nothing running for longer than that,
+// plus holderLife for a sleep the watchdog's own kill missed mid-fork.
 func forkingGroup(then string) string {
-	return "for i in 1 2 3 4; do (while :; do sleep " + holderLife +
+	return "(sleep " + holderLife + "; kill -9 0) & " +
+		"for i in 1 2 3 4; do (while :; do sleep " + holderLife +
 		" & p=$!; kill $p; wait $p; done) & done; echo ready; " + then
 }
 
@@ -253,6 +276,7 @@ func TestReapKillsAChildAStragglerIsForking(t *testing.T) {
 		select {
 		case err := <-waited:
 			if err != nil {
+				killHeldGroup(t, h)
 				cancel()
 				t.Fatalf("trial %d: the leader should exit 0 on its own: %v", i, err)
 			}
@@ -280,57 +304,5 @@ func TestReapKillsAChildAStragglerIsForking(t *testing.T) {
 		if t.Failed() {
 			return
 		}
-	}
-}
-
-// impossiblePgid names a group no platform can have: it is above Linux's
-// PID_MAX_LIMIT (1<<22) and darwin's PID_MAX (99999), so a kill of it answers
-// ESRCH and touches nothing.
-const impossiblePgid = 1 << 23
-
-// resignal re-reads the group after each re-signal and stops at the first
-// read that finds no live member.
-func TestResignalStopsOnceNoMemberIsLive(t *testing.T) {
-	reads := 0
-	resignal(impossiblePgid, func(pgid int) (bool, error) {
-		if pgid != impossiblePgid {
-			t.Fatalf("read pgid %d, want %d", pgid, impossiblePgid)
-		}
-		reads++
-		return reads <= 3, nil
-	}, time.Minute)
-	if reads != 4 {
-		t.Fatalf("resignal read the group %d times, want 4: three live reads, then the empty one that ends it", reads)
-	}
-}
-
-// A member that never dies (an uninterruptible wait) must not hold Cancel
-// past the bound.
-func TestResignalStopsAtTheBound(t *testing.T) {
-	const bound = 50 * time.Millisecond
-	reads := 0
-	start := time.Now()
-	resignal(impossiblePgid, func(int) (bool, error) {
-		reads++
-		return true, nil
-	}, bound)
-	if took := time.Since(start); took > killBound {
-		t.Fatalf("resignal ran %v against a bound of %v", took, bound)
-	}
-	if reads < 2 {
-		t.Fatalf("resignal read the group %d times before the bound, want at least 2", reads)
-	}
-}
-
-// A membership read that fails ends the loop rather than spinning to the
-// bound: the first kill has already been sent.
-func TestResignalStopsOnAReadError(t *testing.T) {
-	reads := 0
-	resignal(impossiblePgid, func(int) (bool, error) {
-		reads++
-		return true, errors.New("sysctl failed")
-	}, time.Minute)
-	if reads != 1 {
-		t.Fatalf("resignal read the group %d times after a failed read, want 1", reads)
 	}
 }
