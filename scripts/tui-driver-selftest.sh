@@ -1039,6 +1039,77 @@ SCREEN
     )
 }
 
+# _af_cli_tab_slot <session> <tab-name> — print the 1-9 jump number of the
+# session's tab named <tab-name>, read from the daemon rather than from the rail.
+# `af sessions get` lists `.tabs` in tab-bar order (slot 0 is the agent tab; see
+# `af sessions tab-reorder --index`), and the tree's jump numbers are that same
+# order counted from 1 (ui/tree/labels.go TabLabels feeds both).
+#
+# The rail cannot be the source. At a short height it folds the selected
+# session's later tabs into "▼ N more", and how many it folds depends on how many
+# session rows earlier steps left behind. #7064 left one more session, so the
+# #7061 step's tab row was never drawn and its wait for the row timed out on
+# master. A step that reads its number here does not depend on any of that.
+#
+# It polls for up to 15s, in case `sessions get` lists the new tab later than
+# `tab-create` returns. It stops early only on exactly one match.
+# shellcheck disable=SC2317  # called from the #7037 and #7061 steps.
+_af_cli_tab_slot() {
+    local session="$1" tab="$2" bin slots count deadline
+    bin="$(_af_resolve_bin)"
+    deadline=$(( $(_af_now) + 15 ))
+    while :; do
+        slots="$(AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get "$session" --repo "$AF_DRIVER_REPO" 2>/dev/null \
+            | jq -r --arg t "$tab" '[.tabs[].name] | to_entries[] | select(.value == $t) | .key + 1')" || true
+        count="$(printf '%s' "$slots" | grep -c . || true)"
+        [ "$count" -eq 1 ] && break
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "expected exactly one tab named '$tab' in '$session' from af sessions get, found $count"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+    if [ "$slots" -gt 9 ]; then
+        _af_fail "tab '$tab' is slot $slots in '$session'; the 1-9 number keys cannot reach it"
+        return 1
+    fi
+    printf '%s\n' "$slots"
+}
+
+# _af_jump_preview <slot> <tab-name> — with the tree focused, press <slot>'s
+# number key until the screen shows <tab-name>'s transient preview header
+# (`<session> · <tab> · preview`).
+#
+# The tab was created through the CLI, so the first press can reach the TUI
+# before the TUI has the tab: the jump is checked against the TUI's own tab list
+# (app/handle_tabs.go handleTabJump) and does nothing until the tab is in it. So
+# the key is pressed again every 2s. A repeat is harmless: it names the same
+# target, which only refreshes the preview, as the 100ms preview tick does. The
+# header names the tab, so a slot that pointed at any other tab fails here
+# instead of passing. The 25s budget covers both waits it replaces: 15s for the
+# tab row and 10s for the preview.
+# shellcheck disable=SC2317  # called from the #7037 and #7061 steps.
+_af_jump_preview() {
+    local slot="$1" header_re deadline next=0
+    header_re="$(_af_regex_escape "$2").*· preview"
+    deadline=$(( $(_af_now) + 25 ))
+    while :; do
+        if [ "$(_af_now)" -ge "$next" ]; then
+            af_send "$slot"
+            next=$(( $(_af_now) + 2 ))
+        fi
+        sleep "$AF_DRIVER_POLL"
+        if af_capture | grep -qE -- "$header_re"; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "number key $slot did not preview the '$2' tab within 25s"
+            af_capture >&2
+            return 1
+        fi
+    done
+}
+
 # _expect_altscreen_commit_renders — the LIVE half of #7037. A committed pane is a
 # viewer: it keeps the tab's real size and crops it into its box (#4480). On the
 # alternate screen a full-screen program parks its cursor wherever it likes —
@@ -1062,10 +1133,7 @@ SCREEN
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_altscreen_commit_renders() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
-    local marker='AF_ALT_7037_TOP' tab_re bin script n header deadline rc=0
-    # A process tab's label is its kind glyph and its name ("› altscreen", see
-    # ui/tree/labels.go), after the tree's jump-slot number.
-    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+(› )?altscreen([[:space:]]|$)'
+    local marker='AF_ALT_7037_TOP' bin script n header deadline rc=0
     bin="$(_af_resolve_bin)"
     mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
     script="$AF_DRIVER_STATE_DIR/altscreen-idle.sh"
@@ -1085,19 +1153,14 @@ EOF
     af_resize "$saved_cols" 20 || return 1
     af_select cycle || rc=1
     if [ "$rc" -eq 0 ]; then
-        af_wait_for "$tab_re" 15 'the CLI-created altscreen tab reaches the tree' || rc=1
-    fi
-    if [ "$rc" -eq 0 ]; then
-        n="$(af_capture | grep -E -- "$tab_re" | head -1 | grep -oE '[0-9]+' | head -1)"
-        [ -n "$n" ] || { _af_fail 'could not read the altscreen tab number from the tree'; rc=1; }
+        # From the daemon, not the rail: the rail may fold this row (see above).
+        n="$(_af_cli_tab_slot cycle altscreen)" || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_focus_tree || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        af_send "$n"
-        # The pane header names a transient preview `<session> · <tab> · preview`.
-        af_wait_for 'altscreen.*· preview' 10 'the number key previews the altscreen tab' || rc=1
+        _af_jump_preview "$n" altscreen || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_wait_for "$marker" 10 'control: the capture-backed preview renders the program' || rc=1
@@ -1183,8 +1246,7 @@ _af_expect_dead_pane_holds() {
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_dead_tab_pane_renders() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
-    local tab_re bin script n header deadline rc=0
-    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+(› )?oneshot([[:space:]]|$)'
+    local bin script n header deadline rc=0
     bin="$(_af_resolve_bin)"
     mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
     script="$AF_DRIVER_STATE_DIR/oneshot.sh"
@@ -1213,18 +1275,15 @@ EOF
     af_resize "$saved_cols" 20 || return 1
     af_select cycle || rc=1
     if [ "$rc" -eq 0 ]; then
-        af_wait_for "$tab_re" 15 'the CLI-created one-shot tab reaches the tree' || rc=1
-    fi
-    if [ "$rc" -eq 0 ]; then
-        n="$(af_capture | grep -E -- "$tab_re" | head -1 | grep -oE '[0-9]+' | head -1)"
-        [ -n "$n" ] || { _af_fail 'could not read the one-shot tab number from the tree'; rc=1; }
+        # From the daemon, not the rail: this is the row #7064's extra session
+        # folded into "▼ 2 more" at this height (see _af_cli_tab_slot).
+        n="$(_af_cli_tab_slot cycle oneshot)" || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_focus_tree || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        af_send "$n"
-        af_wait_for 'oneshot.*· preview' 10 'the number key previews the one-shot tab' || rc=1
+        _af_jump_preview "$n" oneshot || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_send s
