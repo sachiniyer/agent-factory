@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1baef282db29";
+var CLIENT_VERSION = "5d2815ce9f68";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -22434,6 +22434,12 @@ async function resolveArchivedRoute(id, ticket) {
       disconnect(describeError(e), true);
       return;
     }
+    if (tok !== null && token === tok && connectionGeneration === generation && createSelectionIntent.isCurrent(ticket)) {
+      showTransientNotice(
+        `Could not look up that session: ${errorText(e)} The link is preserved \u2014 try again.`
+      );
+    }
+    return;
   }
   if (token !== tok || connectionGeneration !== generation) return;
   const missing = () => {
