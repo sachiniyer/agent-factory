@@ -1284,6 +1284,63 @@ step "assert alpha is selected"                             af_expect_selected a
 step "select beta"                                          af_select beta
 step "assert beta is selected"                              af_expect_selected beta
 
+# --- #7060 regression: the naming row keeps the selection through a taken title ---
+# Type a prefix of an existing session's title, the exact title, then a free
+# suffix, and submit. The exact match used to auto-expand the EXISTING alpha as
+# if it were the selection; its tab row shifted the rail under the cursor, which
+# committed the row above the naming row (▾ beta) and never came back, so the
+# finished create landed unselected. While the form is open no session row may
+# carry ▾; once the create is ready, the new session must.
+#
+# _af_wait_draft <title> <min-lines> waits for the frame that renders the draft:
+# the naming row prints the bare title, so an exact match of an existing title
+# shows on two rail lines. A drift commits in that same frame (the rail
+# re-derives its rows when it paints), so the refute below reads it.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_af_wait_draft() {
+    local re n deadline screen
+    re="(^|[[:space:]])$(_af_regex_escape "$1")([[:space:]]|\$)"
+    n="$2"
+    deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while :; do
+        screen="$(af_capture)"
+        if [ "$(printf '%s\n' "$screen" | grep -cE -- "$re")" -ge "$n" ]; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT waiting for the naming draft '$1' on $n line(s)"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_naming_row_keeps_selection() {
+    local drifted='▾[[:space:]]+(alpha|beta)([[:space:]]|$)'
+    af_ensure_nav
+    af_focus_tree || return 1
+    af_send n
+    af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'name prompt' || return 1
+    af_send_literal alph
+    _af_wait_draft alph 1 || return 1
+    af_refute_screen "$drifted" 'prefix draft: no session row took the selection' || return 1
+    af_send_literal a
+    _af_wait_draft alpha 2 || return 1
+    af_refute_screen "$drifted" 'exact-title draft: no session row took the selection' || return 1
+    af_send_literal x
+    _af_wait_draft alphax 1 || return 1
+    af_refute_screen "$drifted" 'suffix draft: the selection came back to the form' || return 1
+    af_send Enter
+    af_wait_for 'alphax.*●' "$AF_DRIVER_TIMEOUT" "instance 'alphax' ready" || return 1
+    af_expect_selected alphax || return 1
+    af_refute_screen "$drifted" 'the create landed on the new session, not a neighbour'
+}
+step "naming row keeps the selection through a taken title (#7060)" _expect_naming_row_keeps_selection
+# Later steps act on beta's tab; put the selection back where they expect it.
+step "reselect beta after the #7060 create"                 af_select beta
+step "assert beta is selected again"                        af_expect_selected beta
+
 # --- #1759 regression: af_select must check AFTER the final scan step ---
 # A row that only becomes actionable on the loop's boundary `j` used to be
 # missed (false selection failure). Deterministic stub proof — no live TUI.

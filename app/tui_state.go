@@ -252,7 +252,10 @@ func (m *home) captureTUIViewState() config.TUIRepoViewState {
 
 func (m *home) captureTUISelectedTarget() *config.TUIStateTarget {
 	inst := m.store.GetSelectedInstance()
-	if inst == nil || !m.store.ContainsInstance(inst) {
+	// The row being named is not a session yet, and its title is a draft: saved,
+	// it would restore after a relaunch onto whichever session owns that title
+	// (#7060). There is nothing to restore it to.
+	if inst == nil || !m.store.ContainsInstance(inst) || inst == m.store.Naming() {
 		return nil
 	}
 	tabID, tabName, _ := tabIdentityAt(inst, m.store.ActiveTab())

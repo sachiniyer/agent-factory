@@ -86,6 +86,10 @@ type Projection struct {
 	// removal could drift the cursor, e.g. onto a header while naming — the
 	// #717 reality), and only an explicit re-pin/select moved it back.
 	selectionSeq uint64
+
+	// naming is the row the create form is naming, nil when no form is open. Its
+	// title is a draft, so it carries no title identity — see SameRow (#7060).
+	naming *session.Instance
 }
 
 // NewProjection creates an empty projection.
@@ -152,9 +156,13 @@ func (p *Projection) GetInstanceTitles() map[string]bool {
 // the instance that currently represents the session (#862). It is NOT safe
 // for retained mutation intent: a title can be reused by a different session;
 // those flows capture and resolve sessionActionTarget in app (#2358).
+//
+// The row being named never answers: its title is a draft, not a session's
+// name (#7060). ReplaceInstanceByTitle and RemoveInstanceByTitle resolve
+// through here, so they cannot reach it either.
 func (p *Projection) GetInstanceByTitle(title string) *session.Instance {
 	for _, inst := range p.instances {
-		if inst.Title == title {
+		if inst != p.naming && inst.Title == title {
 			return inst
 		}
 	}
@@ -351,10 +359,8 @@ func (p *Projection) ReplaceInstance(target, replacement *session.Instance) bool
 // in flight, and re-adding the started instance would leave two rows — and
 // two persisted records — with one title (#808).
 func (p *Projection) ReplaceInstanceByTitle(title string, replacement *session.Instance) bool {
-	for _, inst := range p.instances {
-		if inst.Title == title {
-			return p.ReplaceInstance(inst, replacement)
-		}
+	if inst := p.GetInstanceByTitle(title); inst != nil {
+		return p.ReplaceInstance(inst, replacement)
 	}
 	return false
 }
@@ -380,10 +386,8 @@ func (p *Projection) RemoveInstance(target *session.Instance) bool {
 // RemoveInstanceByTitle removes an instance by title without killing it (the
 // external process already cleaned up tmux/worktree).
 func (p *Projection) RemoveInstanceByTitle(title string) bool {
-	for _, inst := range p.instances {
-		if inst.Title == title {
-			return p.RemoveInstance(inst)
-		}
+	if inst := p.GetInstanceByTitle(title); inst != nil {
+		return p.RemoveInstance(inst)
 	}
 	return false
 }

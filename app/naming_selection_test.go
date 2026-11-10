@@ -86,10 +86,12 @@ func stubStartedSession(t *testing.T) {
 func requireNamingRowSelected(t *testing.T, h *home, naming *session.Instance, step string) {
 	t.Helper()
 	_ = h.View()
+	// Pointer checks with titles in the message: require.Same would dump both
+	// whole instances, burying which row the cursor landed on.
 	got := h.sidebar.GetSelectedInstance()
-	require.Samef(t, naming, got, "%s: the rail cursor left the naming row for %q", step, titleOf(got))
+	require.Truef(t, got == naming, "%s: the rail cursor left the naming row for %q", step, titleOf(got))
 	bound := h.store.GetSelectedInstance()
-	require.Samef(t, naming, bound, "%s: the workspace binding left the naming row for %q", step, titleOf(bound))
+	require.Truef(t, bound == naming, "%s: the workspace binding left the naming row for %q", step, titleOf(bound))
 }
 
 func titleOf(inst *session.Instance) string {
@@ -210,4 +212,21 @@ func TestRestoredDraftKeepsSelectionBesideTheSessionItCollidesWith(t *testing.T)
 	}
 	require.True(t, found, "the other client's delta must reach the rail beside the naming row")
 	requireNamingRowSelected(t, h, naming, "snapshot adds the colliding session")
+}
+
+// TestNamingRowIsNotPersistedAsTheSelection covers the relaunch half of the same
+// rule: the saved view state restores its selection by ID and then by title, so
+// saving the naming row's draft would bring a relaunch back onto whichever
+// session owns that title. The naming row is not a session; nothing is saved.
+func TestNamingRowIsNotPersistedAsTheSelection(t *testing.T) {
+	h, _ := namingSelectionHome(t, "alpha", "gamma")
+
+	_, _ = h.startNewInstance()
+	naming := h.namingInstance
+	require.NotNil(t, naming)
+	typeRunes(t, h, "alpha")
+	requireNamingRowSelected(t, h, naming, "exact match of an existing title")
+
+	require.Nil(t, h.captureTUISelectedTarget(),
+		"the naming row's draft title must not be saved as the selection to restore")
 }

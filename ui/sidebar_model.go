@@ -163,10 +163,12 @@ type Sidebar struct {
 	// lastCursor* remember the identity of the last instance-section row the
 	// cursor rested on (tab -1 = the instance row itself). The reconcile's #969
 	// re-pin asserts only the instance; this memo restores the tab sub-selection
-	// too. Stable IDs carry same-session reorders; names cover the same-title
+	// too. lastCursorInst is matched by row identity (store.SameRow), which
+	// follows a same-title replacement but never the naming row's draft title
+	// (#7060). Stable IDs carry same-session reorders; names cover the same-title
 	// replacement domain plus agent/legacy ID-less tabs. Slot is only the final
 	// fallback when the older memo has no usable identity.
-	lastCursorTitle      string
+	lastCursorInst       *session.Instance
 	lastCursorInstanceID string
 	lastCursorTabID      string
 	lastCursorTabName    string
@@ -329,16 +331,16 @@ func (s *Sidebar) structureSig() string {
 }
 
 // instanceExpanded reports whether inst's tab children are currently shown:
-// the display-selected instance auto-expands (matched by title so a #765
-// same-title swap keeps the subtree open) unless it is transient or the user
-// explicitly collapsed it. The collapse override is keyed by session identity
-// so a same-title kill+recreate swap (new ID) drops it — the old session's fold
-// cannot pass through to the replacement — while a pointer swap of the same
-// session keeps it. Everything else is collapsed — the keep-row-
-// count-manageable default for non-selected instances.
+// the display-selected instance auto-expands (matched by row identity,
+// store.SameRow, so a #765 same-title swap keeps the subtree open while a
+// session whose title the naming row merely spells does not, #7060) unless it
+// is transient or the user explicitly collapsed it. The collapse override is
+// keyed by session identity so a same-title kill+recreate swap (new ID) drops
+// it — the old session's fold cannot pass through to the replacement — while a
+// pointer swap of the same session keeps it. Everything else is collapsed — the
+// keep-row-count-manageable default for non-selected instances.
 func (s *Sidebar) instanceExpanded(inst *session.Instance) bool {
-	sel := s.proj.GetSelectedInstance()
-	if sel == nil || inst == nil || sel.Title != inst.Title {
+	if !s.proj.SameRow(s.proj.GetSelectedInstance(), inst) {
 		return false
 	}
 	return tree.Expandable(inst) && !sameSession(s.treeCollapsed, inst)
