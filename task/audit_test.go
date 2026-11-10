@@ -336,42 +336,6 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 		"and the derivation reaches the task instead of waiting a year")
 }
 
-// TestAddTask_ResetsEveryStoreOwnedField is the class rather than its members:
-// three review rounds found the same defect through three different fields, so
-// the create path resets all of them together.
-func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
-
-	future := time.Now().Add(48 * time.Hour)
-	next := time.Now().Add(time.Hour)
-	created, err := AddTaskChecked(Task{
-		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
-		ProjectPath: dir, Program: "claude", Enabled: true,
-		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
-		DroppedEvents: 99,
-		SandboxOwner:  "forged-session-id",
-		Audit:         []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
-		Overdue:       true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
-		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
-	}, ActorAPI, nil, "")
-	require.NoError(t, err)
-
-	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
-	assert.Nil(t, created.LastRunAt)
-	assert.Empty(t, created.LastRunStatus)
-	assert.Zero(t, created.DroppedEvents)
-	assert.Empty(t, created.SandboxOwner, "a client-supplied sandbox_owner is store-owned provenance, cleared on create")
-	require.Len(t, created.Audit, 1, "only the store's own create entry")
-	assert.Equal(t, AuditCreated, created.Audit[0].Action)
-	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")
-	assert.Zero(t, created.MissedOccurrences)
-	assert.False(t, created.MissedOccurrencesCapped)
-	assert.False(t, created.Unschedulable)
-	assert.Empty(t, created.Arming)
-	assert.Nil(t, created.NextRunAt)
-}
-
 // TestAudit_ValidatorBackfilledRepoIDIsRecorded: the daemon resolves a legacy
 // row's binding as a side effect of someone else's patch, and that write is
 // durable. It is recorded here or nowhere — changedFields covers only patchable

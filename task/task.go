@@ -116,12 +116,13 @@ type Task struct {
 	// they are next written anyway.
 	RepoID string `json:"repo_id,omitempty"`
 	// SandboxOwner is the id of the sandbox session whose credential created this
-	// task (#5571 W3.5). It is durable provenance the DAEMON writes — a sandbox's
-	// own value is overwritten — and every delivery re-checks against it: the
-	// target must still be an existing off-box session in the owner's project, and
-	// the delivery never auto-creates. Empty for every operator-created task.
-	// UpdateTask is refused to a sandbox credential, so it cannot be edited away
-	// by the agent it constrains.
+	// task (#5571 W3.5). It is durable provenance the DAEMON writes: AddTaskChecked
+	// clears any client-supplied value and stamps its sandboxOwner parameter, which
+	// the daemon fills from the authenticated credential (#7048). Every delivery
+	// re-checks against it: the target must still be an existing off-box session
+	// in the owner's project, and the delivery never auto-creates. Empty for every
+	// operator-created task. UpdateTask is refused to a sandbox credential, so it
+	// cannot be edited away by the agent it constrains.
 	SandboxOwner  string     `json:"sandbox_owner,omitempty"`
 	Program       string     `json:"program"`
 	Enabled       bool       `json:"enabled"`
@@ -134,7 +135,8 @@ type Task struct {
 	// The task's own TargetSession is config and may have been retargeted since
 	// the verdict was stamped — only the delivery's recorded target can name
 	// the session the send actually went to.
-	// Daemon-owned, never patchable, stamped with a verdict timestamp.
+	// Daemon-owned, never patchable, stamped with a verdict timestamp; a create
+	// clears any client-supplied value (resetStoreOwnedFields, #7059).
 	LastRunTarget string `json:"last_run_target,omitempty"`
 	// LastRunID / LastRunStartedAt identify the run LastRunStatus describes
 	// (see RunKey, RecordRunStatus): daemon-owned, never patchable, and absent on
