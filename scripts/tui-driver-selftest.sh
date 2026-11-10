@@ -1179,7 +1179,7 @@ _af_expect_dead_pane_holds() {
 # waits until the daemon records the exit before the TUI looks at it. The flow
 # is the reported one: tree-focused number key → transient preview, then `s`
 # opens the tab as a pane. It is checked with the pane box shorter than the tab
-# (the crop is in play) and again taller than it.
+# (the crop is in play), taller than it, and at the play-test's 80x24.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_dead_tab_pane_renders() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
@@ -1253,6 +1253,13 @@ EOF
     fi
     if [ "$rc" -eq 0 ]; then
         _af_expect_dead_pane_holds 40 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # The play-test's own geometry: an 80x24 TUI.
+        af_resize 80 24 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        _af_expect_dead_pane_holds 24 || rc=1
     fi
 
     af_resize "$saved_cols" "$saved_rows" || return 1

@@ -115,83 +115,154 @@ func TestPTYBrokerRecoveryReleasesSubscribersOntoTheDeadScreen(t *testing.T) {
 	}
 }
 
-// deadPaneScreen bottom-anchors the buffer to the pane height and guarantees
-// the "Pane is dead" marker as the last line, whether tmux drew it or not —
-// short, exactly-one-screen, and longer captures each show their tail plus the
-// marker (#5330).
+// drawnMarker is the row tmux 3.4 draws on a held dead pane (remain-on-exit-format).
+const drawnMarker = "Pane is dead (status 0, Tue Nov 10 05:17:42 2026)"
+
+// tmuxDeadBuffer builds `capture-pane -p -e -S -` of a held dead pane exactly as
+// tmux returns it (measured on tmux 3.4). capture-pane keeps the visible grid's
+// blank rows, and when tmux draws the marker it first scrolls the grid up one
+// row (server_destroy_pane: cursor to the last row, linefeed, draw), pushing
+// the top row into history. A command that printed `out` and exited on a
+// paneH-row pane therefore leaves its output, blank rows, then the marker:
+// paneH+1 rows while the output fits on the screen.
+func tmuxDeadBuffer(out []string, paneH int) string {
+	rows := append([]string(nil), out...)
+	// The pre-death screen: the output, then blank rows down to the bottom.
+	// Output longer than the pane already scrolled, so there is no blank tail.
+	for len(rows) < paneH {
+		rows = append(rows, "")
+	}
+	if len(out) >= paneH {
+		rows = append(rows, "") // the cursor's row below the last output line
+	}
+	// The draw: scroll the screen up one row (the top row stays in the buffer as
+	// history), then the marker on the last row.
+	rows = append(rows, drawnMarker)
+	return strings.Join(rows, "\n") + "\n"
+}
+
+func deadScreenRows(capture string, paneH int) []string {
+	return strings.Split(strings.TrimSuffix(string(deadPaneScreen(capture, paneH)), "\n"), "\n")
+}
+
+func numbered(n int) []string {
+	out := make([]string, n)
+	for i := range out {
+		out[i] = fmt.Sprintf("line %d", i+1)
+	}
+	return out
+}
+
+// deadPaneScreen shapes a held dead pane's buffer into the screen a subscriber
+// paints (#5330): the command's last output with the "Pane is dead" marker
+// directly beneath it, at most a pane tall, whether tmux drew the marker or not.
+//
+// Directly beneath is the #7061 property. A pane on a dead tab can be any
+// height — a viewer crops the tab's grid into a shorter box (#4480), a taller
+// box shows all of it — and it must show the output AND the marker either way.
+// Only adjacent rows survive every crop. Before #7061 the screen kept the blank
+// rows between them, so a one-line command on an 80x24 tab put its output 23
+// rows above the marker: tmux's own scroll pushed it off the 24-row tail
+// entirely, and a crop that did keep it could not keep the marker too.
 func TestDeadPaneScreen(t *testing.T) {
-	t.Run("short output synthesizes the marker on the last row", func(t *testing.T) {
-		// tmux never drew the marker: the grid is the raw pre-death screen.
-		var buf strings.Builder
-		for i := 1; i <= 3; i++ {
-			fmt.Fprintf(&buf, "line %d\n", i)
+	t.Run("one line that exited, as tmux draws it (#7061)", func(t *testing.T) {
+		// The play-test repro: `./test.sh` prints ok and exits on an 80x24 tab.
+		buf := tmuxDeadBuffer([]string{"ok"}, 24)
+		if n := strings.Count(buf, "\n"); n != 25 {
+			t.Fatalf("fixture: tmux leaves 25 rows (ok in history, 23 blank, marker), built %d", n)
 		}
-		got := string(deadPaneScreen(buf.String(), 5))
-		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
-		if len(lines) != 5 {
-			t.Fatalf("want 5 rows, got %d: %q", len(lines), got)
-		}
-		if lines[4] != "Pane is dead" {
-			t.Fatalf("the marker must sit on the last row, got %q", lines[4])
-		}
-		if lines[0] != "line 1" || lines[2] != "line 3" {
-			t.Fatalf("short output keeps its rows: %q", lines)
+		want := []string{"ok", drawnMarker}
+		if got := deadScreenRows(buf, 24); !slicesEqual(got, want) {
+			t.Fatalf("the output must sit directly above the marker:\n got %q\nwant %q", got, want)
 		}
 	})
 
-	t.Run("exactly one screen keeps its tail plus the marker", func(t *testing.T) {
-		// A full screen of output plus the marker is one row over the pane —
-		// the top row scrolls off, just as tmux's own draw scrolls the grid.
-		var buf strings.Builder
-		for i := 1; i <= 4; i++ {
-			fmt.Fprintf(&buf, "line %d\n", i)
+	t.Run("a few lines that exited keep every line", func(t *testing.T) {
+		// Measured on a 6-row pane: l1 l2 l3 "" "" "" marker — l1 is history.
+		buf := tmuxDeadBuffer([]string{"l1", "l2", "l3"}, 6)
+		want := []string{"l1", "l2", "l3", drawnMarker}
+		if got := deadScreenRows(buf, 6); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
 		}
-		got := string(deadPaneScreen(buf.String(), 4))
-		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
-		want := []string{"line 2", "line 3", "line 4", "Pane is dead"}
-		for i := range want {
-			if lines[i] != want[i] {
-				t.Fatalf("row %d = %q, want %q in %q", i, lines[i], want[i], lines)
-			}
+	})
+
+	t.Run("exactly one screen shows its tail plus the marker", func(t *testing.T) {
+		buf := tmuxDeadBuffer(numbered(4), 4)
+		want := []string{"line 2", "line 3", "line 4", drawnMarker}
+		if got := deadScreenRows(buf, 4); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 
 	t.Run("longer than the pane shows the tail", func(t *testing.T) {
-		var buf strings.Builder
-		for i := 1; i <= 10; i++ {
-			fmt.Fprintf(&buf, "line %d\n", i)
+		buf := tmuxDeadBuffer(numbered(10), 4)
+		want := []string{"line 8", "line 9", "line 10", drawnMarker}
+		if got := deadScreenRows(buf, 4); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
 		}
-		got := string(deadPaneScreen(buf.String(), 4))
-		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
-		if len(lines) != 4 {
-			t.Fatalf("want the last 4 rows, got %d: %q", len(lines), got)
+	})
+
+	t.Run("blank rows inside the output are kept", func(t *testing.T) {
+		buf := tmuxDeadBuffer([]string{"build", "", "PASS"}, 8)
+		want := []string{"build", "", "PASS", drawnMarker}
+		if got := deadScreenRows(buf, 8); !slicesEqual(got, want) {
+			t.Fatalf("only the blank rows below the output go; got %q, want %q", got, want)
 		}
-		want := []string{"line 8", "line 9", "line 10", "Pane is dead"}
-		for i := range want {
-			if lines[i] != want[i] {
-				t.Fatalf("row %d = %q, want %q in %q", i, lines[i], want[i], lines)
-			}
+	})
+
+	t.Run("an undrawn marker is synthesized under the output", func(t *testing.T) {
+		// The lost-SIGCHLD shape (#4682): tmux never collected the pane, so the
+		// buffer is the raw pre-death screen, blank rows and all.
+		buf := "line 1\nline 2\nline 3\n\n\n"
+		want := []string{"line 1", "line 2", "line 3", paneDeadMarker}
+		if got := deadScreenRows(buf, 5); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("an undrawn marker on a full screen takes the last row", func(t *testing.T) {
+		want := []string{"line 2", "line 3", "line 4", paneDeadMarker}
+		if got := deadScreenRows("line 1\nline 2\nline 3\nline 4\n", 4); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
+		}
+	})
+
+	t.Run("output that merely mentions the marker still gets one", func(t *testing.T) {
+		// tmux draws its marker on the last row and nothing follows it, so a row
+		// of output above other output is not the marker.
+		buf := "Pane is dead, said the test\nexit 0\n\n\n"
+		want := []string{"Pane is dead, said the test", "exit 0", paneDeadMarker}
+		if got := deadScreenRows(buf, 5); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
 
 	t.Run("a drawn marker is kept, not doubled", func(t *testing.T) {
-		// tmux already drew its marker (scroll + draw on the last row).
-		buf := "line 2\nline 3\n\n\nPane is dead (status 0, Mon 27 Oct 2025 10:00:00)\n"
-		got := string(deadPaneScreen(buf, 5))
+		got := string(deadPaneScreen(tmuxDeadBuffer([]string{"line 2", "line 3"}, 5), 5))
 		if strings.Count(xansi.Strip(got), "Pane is dead") != 1 {
 			t.Fatalf("a drawn marker must not be duplicated: %q", got)
-		}
-		lines := strings.Split(strings.TrimSuffix(got, "\n"), "\n")
-		if !strings.HasPrefix(lines[4], "Pane is dead") {
-			t.Fatalf("the drawn marker stays on the last row: %q", lines[4])
 		}
 	})
 
 	t.Run("escapes in the capture survive the slice", func(t *testing.T) {
-		buf := "\x1b[31mred output\x1b[0m\n"
-		got := string(deadPaneScreen(buf, 3))
-		if !strings.Contains(got, "\x1b[31mred output\x1b[0m") {
-			t.Fatalf("ANSI content must pass through untouched: %q", got)
+		// capture-pane -e closes each row's styles at the row's end (measured),
+		// so dropping the blank rows below cannot carry a style onto the marker.
+		buf := tmuxDeadBuffer([]string{"\x1b[31mred output\x1b[39m"}, 3)
+		want := []string{"\x1b[31mred output\x1b[39m", drawnMarker}
+		if got := deadScreenRows(buf, 3); !slicesEqual(got, want) {
+			t.Fatalf("got %q, want %q", got, want)
 		}
 	})
+}
+
+func slicesEqual(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	for i := range a {
+		if a[i] != b[i] {
+			return false
+		}
+	}
+	return true
 }
