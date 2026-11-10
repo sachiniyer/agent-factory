@@ -849,6 +849,19 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			selStart, selEnd = start, len(lines)
 		}
 	}
+	// The per-account evidence section's trailing end row (the mover line and the
+	// closing footnote) is non-selectable, so the cursor cannot land on it;
+	// window() scrolls only far enough to reveal the selection, which would
+	// leave the end row hidden behind the "↓ more" cue when the cursor sits on
+	// the last selectable row above it (#6776). Extend the selection span to
+	// include the end row's lines so window() reveals them too — the reach the
+	// empty-table row's own comment already promises.
+	if selStart >= 0 && c.selectedIdx+1 < len(c.rows) {
+		sel := c.rows[c.selectedIdx]
+		if (sel.quotaAccount != nil || sel.quotaAccountsEmpty) && c.rows[c.selectedIdx+1].quotaAccountsEnd {
+			selEnd = len(lines)
+		}
+	}
 	return lines, selStart, selEnd
 }
 

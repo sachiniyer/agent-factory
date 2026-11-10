@@ -229,11 +229,17 @@ func (c *ConfigPane) renderQuotaAccountRow(i int, row QuotaAccountRow) string {
 		nameStyle = configSelectedStyle
 	}
 	b.WriteString(nameStyle.Render(row.Agent + "/" + row.Name))
-	b.WriteString(configValueStyle.Render("  " + row.Observed + " · " + row.Windows))
+	// The row line carries only the agent/name: it is the short identifier a
+	// reader scans first, and clipping it loses at most a long account name.
+	// observed · windows ride on their own wrapped line below rather than the
+	// clipped row line, because at a narrow pane — or a name approaching the
+	// 64-character limit — fitPaneLine truncates from the right and would
+	// discard the verdict and window shares the section exists to show (#6776).
 	line := c.fitPaneLine(b.String())
 	b.Reset()
 	b.WriteString(line)
 	b.WriteString("\n")
+	b.WriteString(c.wrapIndented(row.Observed+" · "+row.Windows, configValueStyle))
 	b.WriteString(c.wrapIndented(row.Detail, configHintStyle))
 	return b.String()
 }

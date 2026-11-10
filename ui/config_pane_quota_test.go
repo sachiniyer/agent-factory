@@ -470,6 +470,115 @@ func TestConfigPaneQuota_NoAccountsSectionWhenAbsentTable(t *testing.T) {
 	}
 }
 
+// The per-account evidence section's trailing end row (mover line + footnote)
+// is non-selectable, so the cursor cannot land on it; selection is the list's
+// only scroll driver, so the end row would sit permanently behind the "↓ more"
+// cue when the cursor rests on the last selectable row above it. The selection
+// span extends through the end row so window() can scroll it into view — the
+// reach the empty-table row's own comment already promises (#6776).
+func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromLastAccountRow(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+		{Agent: "codex", Name: "personal", Observed: "no evidence", Windows: "—", Detail: "no rate_limits claims found"},
+	}, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	var lastAcct, endIdx int = -1, -1
+	for i, row := range pane.rows {
+		if row.quotaAccount != nil {
+			lastAcct = i
+		}
+		if row.quotaAccountsEnd {
+			endIdx = i
+		}
+	}
+	if lastAcct < 0 || endIdx < 0 || endIdx != lastAcct+1 {
+		t.Fatalf("expected the last account row immediately followed by the end row: lastAcct=%d endIdx=%d", lastAcct, endIdx)
+	}
+
+	// Cursor on the last account row: the span must reach the end of all lines
+	// (the end row is last), covering the mover line and footnote so window()
+	// scrolls them into view rather than clipping them behind "↓ more".
+	pane.selectedIdx = lastAcct
+	lines, selStart, selEnd := pane.renderRowLines()
+	if selStart < 0 {
+		t.Fatal("expected a selection span")
+	}
+	if selEnd != len(lines) {
+		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
+	}
+}
+
+// The same reach must hold for the empty-accounts shape: the empty-table row is
+// the only selectable row in the section, and the mover line + footnote ride on
+// the non-selectable end row below it.
+func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromEmptyRow(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	var emptyIdx, endIdx int = -1, -1
+	for i, row := range pane.rows {
+		if row.quotaAccountsEmpty {
+			emptyIdx = i
+		}
+		if row.quotaAccountsEnd {
+			endIdx = i
+		}
+	}
+	if emptyIdx < 0 || endIdx < 0 || endIdx != emptyIdx+1 {
+		t.Fatalf("expected the empty row immediately followed by the end row: emptyIdx=%d endIdx=%d", emptyIdx, endIdx)
+	}
+	pane.selectedIdx = emptyIdx
+	lines, selStart, selEnd := pane.renderRowLines()
+	if selStart < 0 {
+		t.Fatal("expected a selection span")
+	}
+	if selEnd != len(lines) {
+		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
+	}
+}
+
+// At a narrow pane the composed account row once exceeded the pane and
+// fitPaneLine truncated it from the right, discarding the verdict and window
+// shares the section exists to show. observed · windows now ride on a wrapped
+// (non-clipped) line so they survive at any width (#6776). Checked at the
+// renderRowLines level so the list's window does not hide the row's lines
+// behind a "↓ more" cue — the bug is in the row's own rendering, not the
+// window.
+func TestConfigPaneQuota_AccountRowObservedAndWindowsSurviveNarrowWidth(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(30, 40)
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
+	}}, "/tmp/config.toml", nil)
+	pane.SetAccounts(nil, nil, nil)
+	pane.SetQuota([]QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%, secondary 4%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "shadow", nil)
+	pane.SetFocus(true)
+
+	lines, _, _ := pane.renderRowLines()
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	out := b.String()
+	// observed and both window shares must survive — fitPaneLine used to drop
+	// everything right of the name; wrapping keeps each fragment on its own line.
+	for _, want := range []string{"codex/work", "observed", "primary 42%", "secondary 4%"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("narrow pane must not clip away %q:\n%s", want, out)
+		}
+	}
+}
+
 // The per-account evidence section renders AFTER the agent table, matching the
 // CLI's RenderAccountSection (which prints after RenderRows) — a reader who
 // knows `af quota` sees the same shape in the pane.
