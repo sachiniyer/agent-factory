@@ -169,7 +169,7 @@ func serveEvents(hub *eventsHub, conn *websocket.Conn) {
 			}
 		}
 	}()
-	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
+	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, wsKeepaliveInterval) }()
 	closeOverflow := func() {
 		// Send the close frame before canceling the read context. Canceling first
 		// can tear down coder/websocket as a raw EOF and hide the retryable 1013

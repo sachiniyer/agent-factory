@@ -29,17 +29,12 @@ import (
 // pin the fix: only a missed pong (or a closed connection) drops; a write-path
 // failure is retried.
 
-// withKeepalive sets wsKeepaliveInterval for the duration of fn so a keepalive
-// loop ticks in test time, then restores it. wsKeepaliveInterval is a package var
-// ("var so tests can shrink it"), but these tests do not run in parallel so the
-// save/restore is race-free.
-func withKeepalive(t *testing.T, d time.Duration, fn func()) {
-	t.Helper()
-	prev := wsKeepaliveInterval
-	wsKeepaliveInterval = d
-	t.Cleanup(func() { wsKeepaliveInterval = prev })
-	fn()
-}
+// Every test here passes its short keepalive interval as a parameter, to
+// keepaliveLoop or servePTYStreamWithKeepalive. None assigns the package var
+// wsKeepaliveInterval, even with a save and restore. Running tests one after
+// another does not make that safe: a stream's goroutines outlive the test that
+// started them and keep reading the interval. A swap here once raced the
+// keepalive goroutine of TestServePTYStreamTeardownClosesNormally (#7000).
 
 func TestClassifyPingError(t *testing.T) {
 	tests := []struct {
@@ -85,30 +80,29 @@ func TestClassifyPingError(t *testing.T) {
 // the subscriber after a single tick — the documented "dead subscriber" behavior
 // must survive the fix.
 func TestKeepaliveLoopDropsOnMissedPong(t *testing.T) {
-	withKeepalive(t, 20*time.Millisecond, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	const keepalive = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		calls := make(chan struct{}, 16)
-		ping := func(context.Context) error {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
-			return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
-		}
-		done := make(chan struct{})
-		go func() { keepaliveLoop(ctx, ping); close(done) }()
-
+	calls := make(chan struct{}, 16)
+	ping := func(context.Context) error {
 		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("keepaliveLoop did not drop on a missed pong")
+		case calls <- struct{}{}:
+		default:
 		}
-		if n := len(calls); n != 1 {
-			t.Fatalf("expected exactly one ping before dropping, got %d", n)
-		}
-	})
+		return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
+	}
+	done := make(chan struct{})
+	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop did not drop on a missed pong")
+	}
+	if n := len(calls); n != 1 {
+		t.Fatalf("expected exactly one ping before dropping, got %d", n)
+	}
 }
 
 // TestKeepaliveLoopRetriesWriteLockTimeout: the bug case. A ping whose WRITE
@@ -116,104 +110,100 @@ func TestKeepaliveLoopDropsOnMissedPong(t *testing.T) {
 // subscriber; the loop keeps retrying across ticks until the peer's egress
 // frees up (or the writer's wsWriteTimeout drops a truly wedged client).
 func TestKeepaliveLoopRetriesWriteLockTimeout(t *testing.T) {
-	withKeepalive(t, 20*time.Millisecond, func() {
-		ctx, cancel := context.WithCancel(context.Background())
-		defer cancel()
+	const keepalive = 20 * time.Millisecond
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 
-		calls := make(chan struct{}, 1024)
-		ping := func(context.Context) error {
-			select {
-			case calls <- struct{}{}:
-			default:
-			}
-			return fmt.Errorf("failed to acquire lock: %w", context.DeadlineExceeded)
-		}
-		done := make(chan struct{})
-		go func() { keepaliveLoop(ctx, ping); close(done) }()
-
-		// Across several ticks the loop must keep retrying, not drop.
+	calls := make(chan struct{}, 1024)
+	ping := func(context.Context) error {
 		select {
-		case <-done:
-			t.Fatal("keepaliveLoop dropped on a write-lock timeout; should retry")
-		case <-time.After(150 * time.Millisecond):
+		case calls <- struct{}{}:
+		default:
 		}
-		cancel()
-		<-done
-		// No more sends after <-done; len is race-free.
-		if n := len(calls); n < 3 {
-			t.Fatalf("expected at least 3 ping retries across ticks, got %d", n)
-		}
-	})
+		return fmt.Errorf("failed to acquire lock: %w", context.DeadlineExceeded)
+	}
+	done := make(chan struct{})
+	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+
+	// Across several ticks the loop must keep retrying, not drop.
+	select {
+	case <-done:
+		t.Fatal("keepaliveLoop dropped on a write-lock timeout; should retry")
+	case <-time.After(150 * time.Millisecond):
+	}
+	cancel()
+	<-done
+	// No more sends after <-done; len is race-free.
+	if n := len(calls); n < 3 {
+		t.Fatalf("expected at least 3 ping retries across ticks, got %d", n)
+	}
 }
 
 // TestKeepaliveLoopDropsOnClosedConnection: a ping error that wraps net.ErrClosed
 // means the transport is gone; the keepalive must drop (and let the stream
 // teardown close the socket) rather than retry forever.
 func TestKeepaliveLoopDropsOnClosedConnection(t *testing.T) {
-	withKeepalive(t, 20*time.Millisecond, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	const keepalive = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		done := make(chan struct{})
-		ping := func(context.Context) error { return net.ErrClosed }
-		go func() { keepaliveLoop(ctx, ping); close(done) }()
+	done := make(chan struct{})
+	ping := func(context.Context) error { return net.ErrClosed }
+	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
 
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("keepaliveLoop did not drop on a closed connection")
-		}
-	})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop did not drop on a closed connection")
+	}
 }
 
 // TestKeepaliveLoopContinuesOnSuccessThenDropsOnMissedPong: a run of successful
 // pongs must not mask a later genuine dead-peer signal — the loop keeps going
 // while the peer answers and drops as soon as it stops.
 func TestKeepaliveLoopContinuesOnSuccessThenDropsOnMissedPong(t *testing.T) {
-	withKeepalive(t, 20*time.Millisecond, func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+	const keepalive = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
 
-		var n int32
-		ping := func(context.Context) error {
-			if atomic.AddInt32(&n, 1) <= 3 {
-				return nil // first three pongs arrive
-			}
-			return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
+	var n int32
+	ping := func(context.Context) error {
+		if atomic.AddInt32(&n, 1) <= 3 {
+			return nil // first three pongs arrive
 		}
-		done := make(chan struct{})
-		go func() { keepaliveLoop(ctx, ping); close(done) }()
+		return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
+	}
+	done := make(chan struct{})
+	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
 
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("keepaliveLoop did not drop after a later missed pong")
-		}
-		if got := atomic.LoadInt32(&n); got < 4 {
-			t.Fatalf("expected at least 4 pings (3 ok + 1 dead), got %d", got)
-		}
-	})
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop did not drop after a later missed pong")
+	}
+	if got := atomic.LoadInt32(&n); got < 4 {
+		t.Fatalf("expected at least 4 pings (3 ok + 1 dead), got %d", got)
+	}
 }
 
 // TestKeepaliveLoopStopsOnContextDoneBeforeFirstTick: if the stream is torn down
 // before the first tick (e.g. a session end cancels ctx during the initial
 // backlog replay), the keepalive must exit without ever pinging.
 func TestKeepaliveLoopStopsOnContextDoneBeforeFirstTick(t *testing.T) {
-	withKeepalive(t, time.Hour, func() {
-		ctx, cancel := context.WithCancel(context.Background())
-		ping := func(context.Context) error {
-			t.Fatal("ping must not be called before the first tick")
-			return nil
-		}
-		done := make(chan struct{})
-		go func() { keepaliveLoop(ctx, ping); close(done) }()
-		cancel()
-		select {
-		case <-done:
-		case <-time.After(2 * time.Second):
-			t.Fatal("keepaliveLoop did not stop on context cancellation")
-		}
-	})
+	const keepalive = time.Hour
+	ctx, cancel := context.WithCancel(context.Background())
+	ping := func(context.Context) error {
+		t.Fatal("ping must not be called before the first tick")
+		return nil
+	}
+	done := make(chan struct{})
+	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop did not stop on context cancellation")
+	}
 }
 
 // --- end-to-end: servePTYStream with a slow-but-healthy subscriber ---
@@ -328,7 +318,8 @@ func (ls *liveSubscriber) readPump() {
 }
 
 // TestServePTYStreamKeepaliveKeepsSlowSubscriberAlive is the end-to-end
-// regression for the bug. It drives the real servePTYStream path against a
+// regression for the bug. It drives the real stream path
+// (servePTYStreamWithKeepalive, which servePTYStream wraps) against a
 // rate-limited connection: the server ships one 256KB PTYData frame whose
 // underlying Write is held 6.5s (past the library's 5s ping write-path cap), so
 // the keepalive ping that fires during that hold fails with a write-lock
@@ -337,62 +328,61 @@ func (ls *liveSubscriber) readPump() {
 // slow-but-healthy subscriber stays attached.
 func TestServePTYStreamKeepaliveKeepsSlowSubscriberAlive(t *testing.T) {
 	// A 1s keepalive so the first ping lands well inside the 6.5s slow write.
-	withKeepalive(t, 1*time.Second, func() {
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-			if err != nil {
-				return
-			}
-			servePTYStream(&noopPTYInputBinding{}, &singleBigEventPTYSubscription{}, conn)
-		}))
-		listener := &slowLinkPTYListener{Listener: srv.Listener, accepted: make(chan *slowLinkPTYConn, 1)}
-		srv.Listener = listener
-		srv.Start()
-		defer srv.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		clientConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	const keepalive = 1 * time.Second
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
-			t.Fatalf("dial PTY stream: %v", err)
+			return
 		}
-		defer func() { _ = clientConn.Close(websocket.StatusNormalClosure, "") }()
-		clientConn.SetReadLimit(1 << 20)
-		serverConn := <-listener.accepted
+		servePTYStreamWithKeepalive(&noopPTYInputBinding{}, &singleBigEventPTYSubscription{}, conn, keepalive)
+	}))
+	listener := &slowLinkPTYListener{Listener: srv.Listener, accepted: make(chan *slowLinkPTYConn, 1)}
+	srv.Listener = listener
+	srv.Start()
+	defer srv.Close()
 
-		ls := &liveSubscriber{conn: clientConn, ctx: ctx}
-		go ls.readPump()
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+	clientConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial PTY stream: %v", err)
+	}
+	defer func() { _ = clientConn.Close(websocket.StatusNormalClosure, "") }()
+	clientConn.SetReadLimit(1 << 20)
+	serverConn := <-listener.accepted
 
-		// Confirm the slow write engaged (the keepalive's ping target is in
-		// flight and holding the write mutex).
-		select {
-		case <-serverConn.writeStarted:
-		case <-ctx.Done():
-			t.Fatalf("slow data write never engaged: %v", ctx.Err())
-		}
-		// Wait out the hold. During it the first keepalive ping (at t=1s) is
-		// blocked on the write mutex and fails with a write-lock timeout at the
-		// library's 5s cap (~t=6s). With the bug the subscriber would be torn
-		// down around when this hold releases; with the fix the ping is retried.
-		select {
-		case <-serverConn.writeReleased:
-		case <-ctx.Done():
-			t.Fatalf("slow data write never completed: %v", ctx.Err())
-		}
-		// Let the next ping land and succeed now that the mutex is free.
-		time.Sleep(2 * time.Second)
+	ls := &liveSubscriber{conn: clientConn, ctx: ctx}
+	go ls.readPump()
 
-		ls.mu.Lock()
-		closed := ls.closed
-		received := ls.bytes
-		ls.mu.Unlock()
-		if closed {
-			t.Fatal("keepalive dropped a slow-but-healthy subscriber during sustained output (the bug)")
-		}
-		if received < 256<<10 {
-			t.Fatalf("subscriber received %d bytes, want >= 256KB (the slow frame completed)", received)
-		}
-	})
+	// Confirm the slow write engaged (the keepalive's ping target is in
+	// flight and holding the write mutex).
+	select {
+	case <-serverConn.writeStarted:
+	case <-ctx.Done():
+		t.Fatalf("slow data write never engaged: %v", ctx.Err())
+	}
+	// Wait out the hold. During it the first keepalive ping (at t=1s) is
+	// blocked on the write mutex and fails with a write-lock timeout at the
+	// library's 5s cap (~t=6s). With the bug the subscriber would be torn
+	// down around when this hold releases; with the fix the ping is retried.
+	select {
+	case <-serverConn.writeReleased:
+	case <-ctx.Done():
+		t.Fatalf("slow data write never completed: %v", ctx.Err())
+	}
+	// Let the next ping land and succeed now that the mutex is free.
+	time.Sleep(2 * time.Second)
+
+	ls.mu.Lock()
+	closed := ls.closed
+	received := ls.bytes
+	ls.mu.Unlock()
+	if closed {
+		t.Fatal("keepalive dropped a slow-but-healthy subscriber during sustained output (the bug)")
+	}
+	if received < 256<<10 {
+		t.Fatalf("subscriber received %d bytes, want >= 256KB (the slow frame completed)", received)
+	}
 }
 
 // TestServePTYStreamKeepaliveDropsDeadSubscriber pins the no-regression: a
@@ -401,39 +391,38 @@ func TestServePTYStreamKeepaliveKeepsSlowSubscriberAlive(t *testing.T) {
 // attached to a dead peer. Dead-peer drop is the keepalive's documented job and
 // the fix must preserve it.
 func TestServePTYStreamKeepaliveDropsDeadSubscriber(t *testing.T) {
-	withKeepalive(t, 300*time.Millisecond, func() {
-		srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
-			if err != nil {
-				return
-			}
-			servePTYStream(&noopPTYInputBinding{}, &waitingPTYSubscription{}, conn)
-		}))
-		srv.Start()
-		defer srv.Close()
-
-		ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		clientConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	const keepalive = 300 * time.Millisecond
+	srv := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		conn, err := websocket.Accept(w, r, &websocket.AcceptOptions{InsecureSkipVerify: true})
 		if err != nil {
-			t.Fatalf("dial PTY stream: %v", err)
+			return
 		}
-		defer func() { _ = clientConn.Close(websocket.StatusNormalClosure, "") }()
-		clientConn.SetReadLimit(1 << 20)
+		servePTYStreamWithKeepalive(&noopPTYInputBinding{}, &waitingPTYSubscription{}, conn, keepalive)
+	}))
+	srv.Start()
+	defer srv.Close()
 
-		// Drain the leading OpHello so the server is not still mid-handshake when
-		// the keepalive fires. After this the client stops reading, so pings are
-		// written but never answered with a pong → "failed to wait for pong" → drop.
-		if _, _, err := clientConn.Read(ctx); err != nil {
-			t.Fatalf("read stream hello: %v", err)
-		}
-		// Wait out several keepalive cycles (300ms ping + 300ms pong timeout).
-		time.Sleep(1500 * time.Millisecond)
-		// The server closed the dead subscriber: its next read now errors.
-		readCtx, readCancel := context.WithTimeout(context.Background(), 3*time.Second)
-		defer readCancel()
-		if _, _, err := clientConn.Read(readCtx); err == nil {
-			t.Fatal("dead subscriber was not dropped by the keepalive")
-		}
-	})
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	clientConn, _, err := websocket.Dial(ctx, "ws"+strings.TrimPrefix(srv.URL, "http"), nil)
+	if err != nil {
+		t.Fatalf("dial PTY stream: %v", err)
+	}
+	defer func() { _ = clientConn.Close(websocket.StatusNormalClosure, "") }()
+	clientConn.SetReadLimit(1 << 20)
+
+	// Drain the leading OpHello so the server is not still mid-handshake when
+	// the keepalive fires. After this the client stops reading, so pings are
+	// written but never answered with a pong → "failed to wait for pong" → drop.
+	if _, _, err := clientConn.Read(ctx); err != nil {
+		t.Fatalf("read stream hello: %v", err)
+	}
+	// Wait out several keepalive cycles (300ms ping + 300ms pong timeout).
+	time.Sleep(1500 * time.Millisecond)
+	// The server closed the dead subscriber: its next read now errors.
+	readCtx, readCancel := context.WithTimeout(context.Background(), 3*time.Second)
+	defer readCancel()
+	if _, _, err := clientConn.Read(readCtx); err == nil {
+		t.Fatal("dead subscriber was not dropped by the keepalive")
+	}
 }

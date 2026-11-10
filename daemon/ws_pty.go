@@ -45,6 +45,12 @@ import (
 // subscribers. Overridable via AF_WS_KEEPALIVE_INTERVAL so the integration
 // harness can shorten it (the daemon runs as its own process, so a package var
 // alone is not reachable from the harness).
+//
+// It is a var only because its value comes from the environment. Tests must
+// never assign it: a stream's goroutines outlive the test that started them and
+// keep reading the interval, so a later test's write races an earlier test's
+// stream (#7000). A test that needs a short interval passes one to
+// servePTYStreamWithKeepalive or keepaliveLoop instead.
 var wsKeepaliveInterval = envDurationOr("AF_WS_KEEPALIVE_INTERVAL", 15*time.Second)
 
 // streamSeqHeader carries the subscription's starting seq on the WS handshake
@@ -54,9 +60,10 @@ const streamSeqHeader = "X-Af-Stream-Seq"
 
 // wsWriteTimeout bounds a single frame write to a subscriber, so a wedged client
 // that has stopped reading cannot block its writer goroutine forever — the write
-// fails, the subscriber is dropped, and the session is untouched. var so tests
-// can shrink it.
-var wsWriteTimeout = 10 * time.Second
+// fails, the subscriber is dropped, and the session is untouched. A const, so no
+// test can assign it while another test's stream goroutines are still reading it
+// (the race described on wsKeepaliveInterval).
+const wsWriteTimeout = 10 * time.Second
 
 // envDurationOr parses a time.Duration from env key, falling back to def when the
 // variable is unset or unparseable.
@@ -325,6 +332,13 @@ func (d *ptyInputDelivery) current() <-chan error {
 // detach → agent-server), and the keepalive pinger. It owns closing the
 // subscription and the socket.
 func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *websocket.Conn) {
+	servePTYStreamWithKeepalive(binding, sub, conn, wsKeepaliveInterval)
+}
+
+// servePTYStreamWithKeepalive is servePTYStream with the keepalive interval
+// passed in, so a test can run the real stream with a short interval without
+// assigning wsKeepaliveInterval.
+func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscription, conn *websocket.Conn, keepalive time.Duration) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 	defer func() { _ = sub.Close() }()
@@ -339,7 +353,7 @@ func servePTYStream(binding ptyTabBinding, sub session.PTYSubscription, conn *we
 		readerDone <- err
 		cancel()
 	}()
-	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn) }()
+	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, keepalive) }()
 
 	writePTYStream(ctx, sub, conn)
 
@@ -511,10 +525,11 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 	}
 }
 
-// keepalivePTY pings the subscriber every wsKeepaliveInterval and drops it only
-// when the peer has genuinely STOPPED RESPONDING — a ping that was written but
-// never answered with a pong within the interval — or when the connection is
-// closed. Dropping never touches the PTY/session or other subscribers.
+// keepalivePTY pings the subscriber every interval (wsKeepaliveInterval in
+// production) and drops it only when the peer has genuinely STOPPED RESPONDING —
+// a ping that was written but never answered with a pong within the interval —
+// or when the connection is closed. Dropping never touches the PTY/session or
+// other subscribers.
 //
 // It must NOT drop a subscriber merely because the ping's WRITE failed. The
 // pinned github.com/coder/websocket v1.8.15 wraps every Conn.Ping call's context
@@ -533,21 +548,23 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 // goroutine's wsWriteTimeout on the next data frame, and a broken transport is
 // torn down by the reader goroutine; retrying write-path failures is therefore
 // bounded by those paths, not by the keepalive.
-func keepalivePTY(ctx context.Context, conn *websocket.Conn) {
-	keepaliveLoop(ctx, conn.Ping)
+func keepalivePTY(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
+	keepaliveLoop(ctx, interval, conn.Ping)
 }
 
 // keepaliveLoop is keepalivePTY with an injectable ping function so the
-// drop-vs-retry decision is unit-testable without a live *websocket.Conn.
-func keepaliveLoop(ctx context.Context, ping func(context.Context) error) {
-	ticker := time.NewTicker(wsKeepaliveInterval)
+// drop-vs-retry decision is unit-testable without a live *websocket.Conn. The
+// interval is both the ping period and the pong deadline. It is a parameter,
+// not a read of wsKeepaliveInterval, so tests never have to assign the global.
+func keepaliveLoop(ctx context.Context, interval time.Duration, ping func(context.Context) error) {
+	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
 		select {
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
-			pctx, pcancel := context.WithTimeout(context.Background(), wsKeepaliveInterval)
+			pctx, pcancel := context.WithTimeout(context.Background(), interval)
 			err := ping(pctx)
 			pcancel()
 			switch classifyPingError(err) {
