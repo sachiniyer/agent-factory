@@ -247,6 +247,54 @@ func TestKillGroupKeepsASecondEPERMWhenTheReReadFails(t *testing.T) {
 	}
 }
 
+// The re-read after a second EPERM is bounded like every other read. One
+// that blocks proves nothing, and the EPERM stands, within the same
+// deadline: a bare read would hang Cancel, and a fresh deadline would
+// stretch it to resignalBound.
+func TestKillGroupBoundsTheReReadAfterASecondEPERM(t *testing.T) {
+	const bound = 200 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var mu sync.Mutex
+	reads := 0
+	read := func(int) ([]groupMember, error) {
+		mu.Lock()
+		reads++
+		n := reads
+		mu.Unlock()
+		if n == 1 {
+			return []groupMember{zombie(fakePgid), live(7)}, nil
+		}
+		<-release // the re-read blocks
+		return nil, errors.New("released")
+	}
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}}
+	var err error
+	within(t, bound+sweepSlack, "killGroup with its re-read blocked", func() {
+		err = killGroupWith(fakePgid, f.kill, read, bound)
+	})
+	if !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("killGroup whose re-read blocked after a second EPERM = %v, want EPERM", err)
+	}
+}
+
+// When the re-read after a second EPERM finds nobody left running, the group
+// is still swept, which catches a child that shows up afterwards.
+func TestKillGroupSweepsWhenTheReReadFindsNobodyRunning(t *testing.T) {
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}, reads: [][]groupMember{
+		{zombie(fakePgid), live(7)},
+		{zombie(fakePgid), exiting(7)},
+		{zombie(fakePgid), zombie(7), live(9)},
+		{zombie(fakePgid), zombie(7), zombie(9)},
+	}}
+	if err := f.run(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killGroup whose re-read found nobody running = %v, want os.ErrProcessDone", err)
+	}
+	if n := f.killCount(); n != 3 {
+		t.Fatalf("killGroup sent %d kills, want 3: two EPERMs, then the sweep's kill of member 9", n)
+	}
+}
+
 // After a second kill that lands, the group is swept like any other: the
 // sweep must kill a member that shows up afterwards.
 func TestKillGroupSweepsAfterASuccessfulSecondKill(t *testing.T) {
@@ -265,9 +313,18 @@ func TestKillGroupSweepsAfterASuccessfulSecondKill(t *testing.T) {
 
 // Everything after the first kill shares one deadline. The sweep after a
 // second kill must not get a fresh one, which would stretch Cancel's bound.
+//
+// The timings leave at least sweepSlack on both sides, because a flake here
+// on master's Test (macOS) halts the merger. The deadline falls 600ms after
+// the first read returns. The limit sits 600ms past the deadline, and still
+// below firstRead+bound, the least a fresh deadline can take.
 func TestKillGroupKeepsOneDeadlineAcrossTheSecondKill(t *testing.T) {
-	const bound = 600 * time.Millisecond
-	const firstRead = 400 * time.Millisecond
+	const firstRead = 700 * time.Millisecond
+	const bound = firstRead + 600*time.Millisecond
+	const limit = bound + 600*time.Millisecond
+	if bound-firstRead < sweepSlack || limit-bound < sweepSlack || firstRead+bound <= limit {
+		t.Fatalf("timings leave too little margin: firstRead %v, bound %v, limit %v, sweepSlack %v", firstRead, bound, limit, sweepSlack)
+	}
 	release := make(chan struct{})
 	defer close(release)
 	var mu sync.Mutex
@@ -301,7 +358,7 @@ func TestKillGroupKeepsOneDeadlineAcrossTheSecondKill(t *testing.T) {
 		t.Fatalf("killGroup whose second kill landed = %v, want nil", err)
 	}
 	// One deadline: about bound. A fresh one for the sweep: firstRead + bound.
-	if limit := bound + 250*time.Millisecond; took > limit {
+	if took > limit {
 		t.Fatalf("killGroup took %v, past %v: the sweep after the second kill got a deadline of its own", took, limit)
 	}
 }
