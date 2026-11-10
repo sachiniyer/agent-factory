@@ -134,11 +134,17 @@ func killGroup(pgid int) error {
 }
 
 // resignal re-sends SIGKILL to the group pgid leads for as long as live
-// reports a live member in it, and for at most bound. Each re-signal follows
-// a read that found a live member, so the group, and with it the pgid, still
-// exists when it is sent. A failed read ends the loop: the first kill has
-// already gone out, and that kill is everything a kernel with an atomic fork
-// needs.
+// reports a live member in it, and for at most bound. A read that finds a
+// live member does not pin the group. If that member exits and is reaped
+// before the re-signal, and the leader has been reaped too (os/exec's Wait
+// reaps it without waiting for Cancel), the pgid is free when the signal
+// goes out. To hit another group, XNU's sequential pid allocator would then
+// have to wrap round to this exact number, and the process given it would
+// have to lead its own group, all in the microseconds between the read and
+// the kill. Reap's single kill after Wait has always had that same window.
+// darwin offers no handle that pins a group, which is what closing it would
+// take. A failed read ends the loop: the first kill has already gone out,
+// and that kill is everything a kernel with an atomic fork needs.
 func resignal(pgid int, live func(pgid int) (bool, error), bound time.Duration) {
 	deadline := time.Now().Add(bound)
 	for {
