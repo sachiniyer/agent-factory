@@ -216,12 +216,12 @@ func TestSweepReturnsWithinItsBoundWhenAReadBlocks(t *testing.T) {
 		return nil
 	}
 
-	start := time.Now()
-	sweep(fakePgid, read, kill, time.Now().Add(bound))
-	took := time.Since(start)
-	if took < bound || took > bound+sweepSlack {
+	took := within(t, bound+sweepSlack, "sweep with its read blocked", func() {
+		sweep(fakePgid, read, kill, time.Now().Add(bound))
+	})
+	if took < bound {
 		close(release)
-		t.Fatalf("sweep returned after %v with its read blocked, want %v to %v", took, bound, bound+sweepSlack)
+		t.Fatalf("sweep returned after %v with its read blocked, want at least %v", took, bound)
 	}
 
 	// Let the parked read return a live member. Its deadline has passed, so
