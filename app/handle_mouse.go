@@ -362,6 +362,22 @@ func (m *home) forwardInteractiveMouse(msg tea.MouseMsg) bool {
 			return true
 		}
 		lt.SendMouse(msg, local.X, local.Y)
+		return true
+	}
+	// Scroll mode replaces the live terminal with the capture viewport, so
+	// registerZones drops the term zone and the same grid cells now resolve to
+	// the body. Hand a wheel over the body back to routePaneWheel — the same
+	// host/child ownership decision the term-zone path makes — so continued
+	// scrolling reaches host scrollback instead of dying on the second notch
+	// (#1748 regression). The pane's own IsInScrollMode gate keeps a
+	// non-scrolling pane's body wheel suppressed per §2.5; clicks over the
+	// body stay consumed too, since scroll mode renders the capture viewport
+	// rather than the live terminal (a click on scrollback text is no longer a
+	// grid-cell event for the child).
+	if isWheelButton(msg.Button) && kind == zones.PaneKindBody {
+		if w := m.paneWindows[p.ID()]; w != nil && w.IsInScrollMode() && m.routePaneWheel(p, w, msg, local, false) {
+			return false
+		}
 	}
 	return true
 }

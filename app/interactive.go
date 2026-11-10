@@ -5,6 +5,7 @@ import (
 
 	tea "github.com/charmbracelet/bubbletea"
 
+	"github.com/sachiniyer/agent-factory/ui"
 	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/store"
 )
@@ -194,6 +195,31 @@ func (m *home) handleInteractiveKey(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if isInteractiveExitKey(msg) {
 		m.setInteractive(false)
 		return m, nil
+	}
+	// While interactive, Esc exits the FOCUSED pane's scroll mode instead of
+	// forwarding into the child, keeping the pane's "Scroll · Esc exits" header
+	// cue truthful (#1748 follow-up). Resolve the current scroll owner at
+	// input time first — a child that just switched to alt-screen already owns
+	// the terminal even though IsInScrollMode lags until the next
+	// syncLiveTermPane tick, so intercepting Esc in that window would steal it
+	// from the child (e.g. vim). This mirrors the wheel and keyboard-scroll
+	// paths, which recheck ownership before consuming a scroll-mode gesture;
+	// only intercept when the host still owns. A pane NOT in scroll mode falls
+	// through and forwards Esc to the child unchanged.
+	if msg.Type == tea.KeyEsc {
+		if w, bound := m.focusedContentPane(); w != nil && w.IsInScrollMode() {
+			if p := m.focusedOpenPane(); p != nil && m.syncPaneScrollOwner(p, w) == ui.ScrollOwnerHostHistory {
+				if err := w.ResetToNormalMode(bound); err != nil {
+					return m, m.handleError(err)
+				}
+				if m.panePreviewTxn != nil {
+					m.suppressActivePanePreview()
+					m.cancelPanePreview(true)
+					return m, m.panesRefresh(m.attached.Load())
+				}
+				return m, m.selectionChanged()
+			}
+		}
 	}
 	// The attachment may have died since the last tick (client killed, pane
 	// pruned). Re-check before forwarding; a broken premise drops to nav and
