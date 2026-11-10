@@ -214,8 +214,9 @@ func (c *ConfigPane) hostRowsFromEntries() ([]HostRow, string) {
 // the tiers above), so it needs no load and no daemon answer to exist — a
 // pane built from SetEntries alone still shows it. Daemon-reported state
 // (the verdicts) lives on the rows, not on the section's presence, and
-// sitting ahead of Accounts keeps the register rows last — the invariant
-// the register flow's navigate-to-bottom drives rely on.
+// sitting ahead of the daemon-owned Usage and Accounts sections keeps the
+// register rows last — the invariant the register flow's navigate-to-bottom
+// drives rely on.
 func (c *ConfigPane) appendHostRows() {
 	rows, parseError := c.hostRowsFromEntries()
 	c.hosts.parseError = parseError
