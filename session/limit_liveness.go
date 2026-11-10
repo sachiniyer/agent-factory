@@ -331,6 +331,33 @@ func (i *Instance) setLimitReachedLocked(resetAt time.Time, evidence string, ban
 	sameWallEvidence := ""
 	if i.liveness == LiveLimitReached && i.sameLiveLimitBannerLocked(banner) {
 		sameWallEvidence = i.limitResetEvidence
+	} else if authoritative && i.liveness == LiveLimitReached &&
+		i.limitWallRuntimeCurrentLocked(i.limitWallRuntimePID, i.limitWallRuntimeStartID, i.limitWallRuntimeGen) &&
+		!(i.limitBannerCount > 0 && banner.Count > i.limitBannerCount) &&
+		!limitWallPrefixDistinguishing(i.limitBannerPrefix) &&
+		i.limitResetEvidence != "" && strings.HasPrefix(evidence, i.limitResetEvidence) {
+		// Anchorless recorded wall: the stored prefix carries no
+		// distinguishing bytes — a banner matched at byte zero, one
+		// preceded only by a blank/marker row, or a pane-free park that
+		// recorded no anchor at all — so sameLiveLimitBannerLocked's
+		// positional compare structurally cannot succeed, and the
+		// fallback direction the other recorded-anchor consumers
+		// (limitWallAnchorAdmits, limitWallResidueLocked,
+		// sendPathReSightingLocked) already take for a non-distinguishing
+		// prefix belongs here too. A wider capture that only EXTENDS the
+		// parked wall's stored clause (a timezone suffix the narrow pane
+		// wrapped out, e.g. "reset at 2pm" → "reset at 2pm
+		// (America/New_York)") is that wall's re-read, so the ledger merge
+		// below matches the row's stored clause as provenance and corrects
+		// the timed bound in either direction — without it the parked
+		// claim corrects while the row keeps the disproved later pane
+		// guess and the two durable facts diverge across restart. The
+		// runtime pin and unchanged-count guards are the dedupe arm's own
+		// same-wall checks; the clause-extension key preserves the
+		// conservative guards — a distinct wall's unrelated clause does
+		// not extend the recorded one, and a banner printed below arrives
+		// with a grown count — so neither can lower a row (#6975 review).
+		sameWallEvidence = i.limitResetEvidence
 	}
 	i.assignLivenessLocked(LiveLimitReached)
 	i.limitResetAt = resetAt

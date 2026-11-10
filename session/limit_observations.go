@@ -108,8 +108,9 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 		// re-uses a phrase (the next day's identical "reset at 3pm")
 		// still tightens the row to its own instant (#6959).
 		retained := RetainedAccountLimitReset(observation.ResetAt, resetAt)
-		if authoritative && (observation.ResetAt.IsZero() ||
-			(sameWallEvidence != "" && observation.Evidence == sameWallEvidence)) {
+		sameWall := authoritative && (observation.ResetAt.IsZero() ||
+			(sameWallEvidence != "" && observation.Evidence == sameWallEvidence))
+		if sameWall {
 			// The record's instant corrects a bound in either direction
 			// ONLY when the row is provably the sighting's own wall: an
 			// adopted zero-kind row filed no instant to lower, and a timed
@@ -123,7 +124,17 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 			// stands (#6975 review) — the stricter bound stands instead.
 			retained = resetAt
 		}
-		if wasParked && observation.ResetAt.Equal(retained) &&
+		// A proven same-wall enrichment (a wider capture exposing the zone
+		// on the parked banner) is a changed fact even when the resolved
+		// instant coincides with the row's: the live claim's clause already
+		// adopted it, and a later same-wall correction keys on the enriched
+		// phrase, so the ledger must adopt and persist it now rather than
+		// keep a durable row describing a clause the live claim no longer
+		// carries — else that later correction's provenance misses the row
+		// and falls back to later-wins, leaving the durable bound stale
+		// (#6975 review).
+		enriched := sameWall && evidence != observation.Evidence
+		if wasParked && observation.ResetAt.Equal(retained) && !enriched &&
 			!i.reSightCrossesSendAttemptLocked(observation.ObservedAt, sighted) {
 			return
 		}
@@ -131,6 +142,8 @@ func (i *Instance) recordAccountLimitObservationAtLocked(agent, account string, 
 			observation.ResetAt = retained
 			// The phrase follows the reset it produced: a claim that
 			// tightened the boundary names the phrase that carried it.
+			observation.Evidence = evidence
+		} else if enriched {
 			observation.Evidence = evidence
 		}
 		// The row's newest sighting never rewinds: the instant is when the
