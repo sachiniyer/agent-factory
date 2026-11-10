@@ -176,50 +176,63 @@ func buildRepaintSnapshot(snap PaneSnapshot) repaintSnapshot {
 const paneDeadMarker = "Pane is dead"
 
 // deadPaneScreen shapes a held dead pane's full-buffer capture into the screen
-// the repaint should paint (#5330): the bottom-anchored tail of the buffer —
-// at most paneH lines — with the marker guaranteed as the last line.
+// the repaint should paint (#5330): the command's last output with the marker
+// directly beneath it, at most paneH lines.
 //
-// tmux draws that marker itself only after collecting the pane's root
-// (server_destroy_pane): scroll up one row, draw on the last row. On the
-// shapes where it never collected — the Ubuntu lost-SIGCHLD case (#4682), or a
-// pane still dying when the capture ran — the buffer keeps the raw pre-death
-// screen, so the same draw is synthesized here: pad a short buffer to put the
-// marker on the last row tmux would have used, append it, then take the tail.
-// The tail slice is the same bottom-anchor the real draw produces: a buffer
-// longer than the pane shows its last paneH rows.
+// Directly beneath is what lets a pane of any height show both (#7061). The
+// buffer does not have them together: capture-pane keeps the visible grid's
+// blank rows, and tmux draws the marker (server_destroy_pane) by moving to the
+// last row, scrolling the grid up one and drawing there. A command that printed
+// less than a screenful therefore leaves its output, a run of blank rows, then
+// the marker — a pane height plus one, with the output's first row pushed into
+// history. Cutting that to its last paneH rows dropped the output entirely for a
+// one-line command, and any shorter view of what remained (a viewer crops the
+// tab's grid into its box, #4480) could hold the output or the marker, never
+// both. So the blank rows between them go, and the screen is cut from the tail
+// of what is left: a short command's rows start at the top, as a terminal shows
+// them, and a long one keeps its newest rows above the marker.
+//
+// tmux draws the marker only after collecting the pane's root. On the shapes
+// where it never did — the Ubuntu lost-SIGCHLD case (#4682), or a pane still
+// dying when the capture ran — the buffer is the raw pre-death screen and the
+// marker is synthesized in the same place.
 func deadPaneScreen(capture string, paneH int) []byte {
 	lines := strings.Split(strings.TrimSuffix(capture, "\n"), "\n")
 	if paneH <= 0 {
+		// No measured height: the caller passed the visible grid, which is pane
+		// height by construction.
 		paneH = len(lines)
 	}
-	if !deadPaneMarkerPresent(lines) {
-		// The marker owns the LAST row, so the pad reserves it: a short buffer
-		// fills to paneH-1 rows and the marker lands on the row tmux's own draw
-		// uses. A buffer at paneH already needs no pad — the append takes it to
-		// paneH+1 and the tail slice below drops the top row, which is exactly
-		// the scroll the real draw performs.
-		for len(lines) < paneH-1 {
-			lines = append(lines, "")
-		}
-		lines = append(lines, paneDeadMarker)
+	lines = trimBlankRows(lines)
+	marker := paneDeadMarker
+	// tmux draws its marker on the last row and nothing follows it, so only the
+	// last row holding anything can be the marker. Output above it that happens
+	// to open with the same words is output.
+	if n := len(lines); n > 0 && isDeadPaneMarker(lines[n-1]) {
+		marker = lines[n-1]
+		lines = trimBlankRows(lines[:n-1])
 	}
+	lines = append(lines[:len(lines):len(lines)], marker)
 	if len(lines) > paneH {
 		lines = lines[len(lines)-paneH:]
 	}
 	return []byte(strings.Join(lines, "\n") + "\n")
 }
 
-// deadPaneMarkerPresent reports whether the captured rows already carry tmux's
-// dead-pane marker — drawn left-aligned, so a stripped row's leading text is
-// the check. A row of output that happens to open with the same words counts
-// as the marker: the user sees the line either way.
-func deadPaneMarkerPresent(lines []string) bool {
-	for _, line := range lines {
-		if strings.HasPrefix(xansi.Strip(strings.TrimSpace(line)), paneDeadMarker) {
-			return true
-		}
+// trimBlankRows drops the trailing rows that hold nothing visible. capture-pane
+// -e closes each row's styles at the row's end, so a dropped row carries no
+// style state the rows after it depend on.
+func trimBlankRows(lines []string) []string {
+	for len(lines) > 0 && strings.TrimSpace(xansi.Strip(lines[len(lines)-1])) == "" {
+		lines = lines[:len(lines)-1]
 	}
-	return false
+	return lines
+}
+
+// isDeadPaneMarker reports whether a captured row is tmux's dead-pane marker —
+// drawn left-aligned, so the stripped row's leading text is the check.
+func isDeadPaneMarker(line string) bool {
+	return strings.HasPrefix(xansi.Strip(strings.TrimSpace(line)), paneDeadMarker)
 }
 
 // snapshotHasRepaintState keeps authoritative metadata from disappearing merely
