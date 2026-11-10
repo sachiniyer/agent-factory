@@ -367,8 +367,15 @@ jobs:
       # 2026-09-17, so 30m is ~3x the slowest. This job carries no
       # timeout-minutes (GitHub's 360m default), so the Go-side panic and its
       # goroutine dump always land first here regardless.
+      #
+      # AF_EXECGROUP_SUDO_TEST opts this throwaway runner in to the one test that
+      # starts a root process through passwordless sudo (internal/execgroup,
+      # #7074). It runs only with that set and CI=true, so a developer's shell
+      # exporting CI never starts one. test-macos sets it too.
       - name: Run tests
         if: ${{ !inputs.probe }}
+        env:
+          AF_EXECGROUP_SUDO_TEST: "1"
         run: go test -v -race -count=1 -timeout 30m ./...
 
       # A probe's go test (#4563, docs/dev/probe-runs.md). It uses the same flags
@@ -945,9 +952,12 @@ jobs:
       # a report and asks the binary for a goroutine dump (SIGUSR2, handled in
       # internal/testguard). It never kills a binary or fails the step; the next
       # step turns each report into a warning annotation.
+      #
+      # AF_EXECGROUP_SUDO_TEST: see the Linux Test job's Run tests step (#7074).
       - name: Run tests
         env:
           AF_STALL_DIR: ${{ runner.temp }}/stall
+          AF_EXECGROUP_SUDO_TEST: "1"
         run: go test -v -race -count=1 -timeout 30m -exec "$PWD/scripts/ci-test-exec.sh" ./...
 
       - name: Report stalled test binaries

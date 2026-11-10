@@ -56,10 +56,12 @@ func Lead(cmd *exec.Cmd) {
 // by the child — the negative pid reaches every member, not just the direct
 // process exec.CommandContext kills by default. On darwin it also re-signals
 // until no member is alive, which reaches a child the group was forking when
-// the kill landed (see killGroup). A group already gone (ESRCH)
-// maps to os.ErrProcessDone, which Wait ignores rather than reporting as a
-// command failure. A nil Process — a command that never started — is a
-// no-op.
+// the kill landed (see killGroup). A group with nothing left to kill maps to
+// os.ErrProcessDone, which Wait ignores rather than reporting as a command
+// failure: one already gone (ESRCH) and, on darwin, one whose members are all
+// zombies or exiting, which killpg answers with EPERM. Like kill(2), a nil
+// return means the kill reached at least one member. A nil Process — a
+// command that never started — is a no-op.
 //
 // Callers whose SysProcAttr differs from Lead's Setpgid still share this
 // Cancel: a Setsid child leads its own group too, so the negative pid names

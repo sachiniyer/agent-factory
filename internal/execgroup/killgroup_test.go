@@ -28,6 +28,7 @@ type fakeGroup struct {
 	kills   []error         // the i-th kill returns kills[i]; past the end, nil
 	reads   [][]groupMember // the i-th read lists reads[i]; past the end, the last again
 	readErr error           // returned by every read, if set
+	errFrom int             // if set, read number errFrom and later fail
 	block   chan struct{}   // if set, every read waits for it to close
 
 	mu     sync.Mutex
@@ -61,14 +62,24 @@ func (f *fakeGroup) read(pgid int) ([]groupMember, error) {
 	if f.readErr != nil {
 		return nil, f.readErr
 	}
+	if f.errFrom > 0 && f.nReads >= f.errFrom {
+		return nil, errors.New("sysctl failed")
+	}
 	if len(f.reads) == 0 {
 		return nil, nil
 	}
 	return f.reads[min(f.nReads, len(f.reads))-1], nil
 }
 
+// run calls killGroupWith with a minute's bound, and fails the test within
+// five seconds if it has not returned, so a regression that runs a sweep to
+// its deadline fails fast.
 func (f *fakeGroup) run() error {
-	return killGroupWith(fakePgid, f.kill, f.read, time.Minute)
+	var err error
+	within(f.t, 5*time.Second, "killGroup", func() {
+		err = killGroupWith(fakePgid, f.kill, f.read, time.Minute)
+	})
+	return err
 }
 
 func (f *fakeGroup) killCount() int {
@@ -122,8 +133,9 @@ func TestKillGroupSweepsAGroupThatHadNobodyToSignal(t *testing.T) {
 	}
 }
 
-// A live member that is not exiting is one the kill could not signal, such
-// as a setuid child. That EPERM is real, and Cancel must report it.
+// A member still running after a second EPERM is one the kill may not
+// signal: its real and saved uids both differ from ours, as after sudo. That
+// EPERM is real, and Cancel must report it.
 func TestKillGroupKeepsTheEPERMOfAMemberThatRefusedTheSignal(t *testing.T) {
 	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}, reads: [][]groupMember{
 		{zombie(fakePgid), live(7)},
@@ -169,19 +181,157 @@ func TestKillGroupKeepsEPERMWhenTheReadFails(t *testing.T) {
 }
 
 // A read that blocks (an exec on a hung mount) proves nothing either, and it
-// must not hold Cancel past the bound.
+// must not hold Cancel past the bound. The test enforces its own limit, so a
+// regression fails here at once rather than at go test's -timeout.
 func TestKillGroupKeepsEPERMWhenTheReadBlocks(t *testing.T) {
 	const bound = 100 * time.Millisecond
 	f := &fakeGroup{t: t, kills: []error{syscall.EPERM}, block: make(chan struct{}),
 		reads: [][]groupMember{{zombie(fakePgid)}}}
 	defer close(f.block)
-	start := time.Now()
-	err := killGroupWith(fakePgid, f.kill, f.read, bound)
-	if took := time.Since(start); took > bound+sweepSlack {
-		t.Fatalf("killGroup with a blocked read took %v, want at most %v", took, bound+sweepSlack)
-	}
+	var err error
+	within(t, bound+sweepSlack, "killGroup with a blocked membership read", func() {
+		err = killGroupWith(fakePgid, f.kill, f.read, bound)
+	})
 	if !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("killGroup with a blocked membership read = %v, want EPERM", err)
+	}
+}
+
+// within runs fn on its own goroutine and fails the test as soon as limit
+// passes without fn returning, instead of hanging until go test's -timeout.
+// It returns how long fn took. A hung fn stays parked; the test has failed
+// by then.
+func within(t *testing.T, limit time.Duration, what string, fn func()) time.Duration {
+	t.Helper()
+	start := time.Now()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		fn()
+	}()
+	select {
+	case <-done:
+		return time.Since(start)
+	case <-time.After(limit):
+		t.Fatalf("%s did not return within %v", what, limit)
+		return 0
+	}
+}
+
+// The second kill's EPERM is a refusal only if a member is still running
+// after it. Without that check it can be spurious (#7074). An exiting member
+// finishes a fork its other thread was making; the read sees the new child
+// running; then fork() itself terminates that child, because its parent is
+// exiting (kern_fork.c), so the second kill finds nobody either.
+func TestKillGroupDoesNotCountASecondEPERMWithNobodyLeftRunning(t *testing.T) {
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}, reads: [][]groupMember{
+		{exiting(fakePgid), live(8)},
+		{exiting(fakePgid), exiting(8)},
+		{zombie(fakePgid), zombie(8)},
+	}}
+	if err := f.run(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killGroup whose second EPERM left no member running = %v, want os.ErrProcessDone", err)
+	}
+	if n := f.killCount(); n != 2 {
+		t.Fatalf("killGroup sent %d kills, want 2", n)
+	}
+}
+
+// A read after the second EPERM that fails proves nothing, and the first
+// read already showed a member running, so the EPERM stands.
+func TestKillGroupKeepsASecondEPERMWhenTheReReadFails(t *testing.T) {
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}, errFrom: 2,
+		reads: [][]groupMember{{zombie(fakePgid), live(7)}}}
+	if err := f.run(); !errors.Is(err, syscall.EPERM) {
+		t.Fatalf("killGroup whose re-read failed after a second EPERM = %v, want EPERM", err)
+	}
+}
+
+// After a second kill that lands, the group is swept like any other: the
+// sweep must kill a member that shows up afterwards.
+func TestKillGroupSweepsAfterASuccessfulSecondKill(t *testing.T) {
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, nil}, reads: [][]groupMember{
+		{exiting(fakePgid), live(8)},
+		{zombie(fakePgid), live(9)},
+		{zombie(fakePgid), zombie(9)},
+	}}
+	if err := f.run(); err != nil {
+		t.Fatalf("killGroup whose second kill landed = %v, want nil", err)
+	}
+	if n := f.killCount(); n != 3 {
+		t.Fatalf("killGroup sent %d kills, want 3: the first, the second, and the sweep's kill of member 9", n)
+	}
+}
+
+// Everything after the first kill shares one deadline. The sweep after a
+// second kill must not get a fresh one, which would stretch Cancel's bound.
+func TestKillGroupKeepsOneDeadlineAcrossTheSecondKill(t *testing.T) {
+	const bound = 600 * time.Millisecond
+	const firstRead = 400 * time.Millisecond
+	release := make(chan struct{})
+	defer close(release)
+	var mu sync.Mutex
+	reads, kills := 0, 0
+	read := func(int) ([]groupMember, error) {
+		mu.Lock()
+		reads++
+		n := reads
+		mu.Unlock()
+		if n == 1 {
+			time.Sleep(firstRead)
+			return []groupMember{exiting(fakePgid), live(8)}, nil
+		}
+		<-release // every later read blocks
+		return nil, errors.New("released")
+	}
+	kill := func(int, syscall.Signal) error {
+		mu.Lock()
+		defer mu.Unlock()
+		kills++
+		if kills == 1 {
+			return syscall.EPERM
+		}
+		return nil
+	}
+	var err error
+	took := within(t, 5*time.Second, "killGroup", func() {
+		err = killGroupWith(fakePgid, kill, read, bound)
+	})
+	if err != nil {
+		t.Fatalf("killGroup whose second kill landed = %v, want nil", err)
+	}
+	// One deadline: about bound. A fresh one for the sweep: firstRead + bound.
+	if limit := bound + 250*time.Millisecond; took > limit {
+		t.Fatalf("killGroup took %v, past %v: the sweep after the second kill got a deadline of its own", took, limit)
+	}
+}
+
+// A read that answers after its deadline counts as no answer, so nothing
+// acting on it can signal past the deadline.
+func TestReadByCountsALateAnswerAsNone(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	t.Cleanup(func() { readByNow = time.Now })
+	readByNow = func() time.Time { return deadline } // the answer lands at the deadline
+	members, err := readBy(fakePgid, func(int) ([]groupMember, error) {
+		return []groupMember{live(7)}, nil
+	}, deadline)
+	if !errors.Is(err, errReadTimedOut) || members != nil {
+		t.Fatalf("readBy of an answer at its deadline = %v, %v; want nil, errReadTimedOut", members, err)
+	}
+}
+
+// No signal goes out once the deadline has passed, and that includes the
+// second kill. TestReadByCountsALateAnswerAsNone pins the rule
+// deterministically. This drives it through afterEPERM.
+func TestKillGroupSendsNoSecondKillPastTheDeadline(t *testing.T) {
+	// The read answers at once, and the deadline has already passed, so
+	// which of the two readBy sees first is a race. Repeat to cover both.
+	for i := 0; i < 200; i++ {
+		f := &fakeGroup{t: t, reads: [][]groupMember{{live(7)}}}
+		err := afterEPERM(fakePgid, f.kill, f.read, time.Now().Add(-time.Second), syscall.EPERM)
+		if !errors.Is(err, syscall.EPERM) || f.killCount() != 0 {
+			t.Fatalf("trial %d: afterEPERM past its deadline = %v after %d kills, want EPERM after none", i, err, f.killCount())
+		}
 	}
 }
 
@@ -213,8 +363,8 @@ func waitForZombie(t *testing.T, pid int) {
 // A context cancelled after its command already exited has nothing to kill,
 // and Cancel must not report an error for it. On darwin the group kill of a
 // group holding only the unreaped zombie leader answers EPERM, and before
-// #7072 Wait then returned "error sending signal to Cmd: operation not
-// permitted" for a command that had exited 0.
+// #7072 Wait then returned "exec: canceling Cmd: operation not permitted"
+// for a command that had exited 0.
 func TestCancelOfACommandThatAlreadyExitedIsNotAnError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -249,42 +399,69 @@ func TestCancelOfACommandThatAlreadyExitedIsNotAnError(t *testing.T) {
 	}
 }
 
+// sudoTestEnv opts in to the one test here that starts a root process. Like
+// AF_SYSTEMD_LIFECYCLE_TEST, it counts only alongside CI=true, and only the
+// CI steps that run on throwaway runners with passwordless sudo set it. A
+// developer's shell exporting CI is not consent to a root process (#7074).
+const sudoTestEnv = "AF_EXECGROUP_SUDO_TEST"
+
 // A group whose live member we may not signal answers EPERM on every
-// platform, and killGroup must report it, not map it away. A root-owned group
-// stands in for a setuid child. It takes passwordless sudo, so it runs only
-// in CI, where the runners provide it. The root process ends on its own after
-// holderLife, and the test kills its group, by the pgid it printed, sooner.
+// platform, and killGroup must report it, not map it away. A root-owned
+// group, started through sudo, stands in for any process whose real and
+// saved uid both differ from ours.
+//
+// The root process lives exactly as long as the write end of its stdin,
+// which only this test holds: it reads stdin to EOF and exits. The cleanup,
+// registered as soon as the process exists, closes that end and waits for
+// the process to go, so no path out of the test, Fatal included, leaves it
+// running. A test binary that dies outright closes the end too. The alarm is
+// a backstop for a write end something else might hold. No root kill by
+// number is needed.
 func TestKillGroupKeepsTheEPERMOfAGroupItMayNotSignal(t *testing.T) {
-	if os.Getenv("CI") == "" {
-		t.Skip("starts a root-owned process group through sudo; runs only in CI")
-	}
-	if err := exec.Command("sudo", "-n", "true").Run(); err != nil {
-		t.Skipf("needs passwordless sudo: %v", err)
+	if os.Getenv(sudoTestEnv) != "1" || os.Getenv("CI") != "true" {
+		t.Skipf("starts a root-owned process group through sudo; runs only with %s=1 and CI=true", sudoTestEnv)
 	}
 	cmd := exec.Command("sudo", "-n", "perl", "-e",
-		`setpgrp(0,0); $|=1; print "$$\n"; sleep `+holderLife)
-	out, err := cmd.StdoutPipe()
+		`setpgrp(0,0); alarm(`+holderLife+`); $|=1; print getpgrp(), "\n"; 1 while <STDIN>;`)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("StdoutPipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("Start (%s=1 promises passwordless sudo): %v", sudoTestEnv, err)
 	}
-	defer func() { _ = cmd.Wait() }()
-	line, err := bufio.NewReader(out).ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading the root group's pgid: %v", err)
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		select {
+		case <-exited:
+		case <-time.After(killBound):
+			t.Errorf("the root process did not exit within %v of its stdin closing (its alarm ends it after %ss)", killBound, holderLife)
+		}
+	})
+
+	lines := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(stdout).ReadString('\n')
+		lines <- line
+	}()
+	var line string
+	select {
+	case line = <-lines:
+	case <-time.After(killBound):
+		t.Fatalf("the root process printed no pgid within %v", killBound)
 	}
 	pgid, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || pgid <= 1 {
-		t.Fatalf("root group printed pgid %q: %v", line, err)
+		t.Fatalf("the root process printed pgid %q (%v); did sudo -n refuse? (%s=1 promises passwordless sudo)", line, err, sudoTestEnv)
 	}
-	// The perl process leads the group and sleeps, so the pgid stays its own
-	// until this kill, which needs root.
-	defer func() {
-		_ = exec.Command("sudo", "-n", "perl", "-e", `kill "KILL", -$ARGV[0]`, strconv.Itoa(pgid)).Run()
-	}()
-
+	// The root process is alive until the cleanup closes its stdin, so the
+	// pgid is still its group.
 	if err := killGroup(pgid); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("killGroup of a root-owned group = %v, want EPERM", err)
 	}

@@ -52,16 +52,31 @@ type signaller func(pid int, sig syscall.Signal) error
 // member refused the signal and when it found no member it could signal at
 // all, because every member was a zombie or already exiting (#7072).
 //
-// One read of the group tells those apart. A member that is neither a
-// zombie nor exiting either refused the signal (a setuid child, say) or was
-// created after the kill, which killpg skips while a child is still being
-// created. A second kill decides between the two. It succeeds on a new
-// child, and the sweep then runs as after any kill that landed. EPERM again
-// is a real refusal, and afterEPERM returns it. ESRCH means the group is
-// gone. A group of only zombies and exiting members had nobody to signal,
-// so there is nothing left to kill. afterEPERM sweeps it anyway, which waits
-// out the exiting members and catches anything one of them was still
-// forking, and returns os.ErrProcessDone.
+// One read of the group tells those apart. A group of only zombies and
+// exiting members had nobody to signal, so there is nothing left to kill.
+// afterEPERM sweeps it anyway, which waits out the exiting members and
+// catches anything one of them was still forking, and returns
+// os.ErrProcessDone.
+//
+// A member that is neither a zombie nor exiting either refused the signal
+// or was created after the kill, which killpg skips while a child is still
+// being created. A refusal comes from a process whose real and saved uids
+// both differ from ours, as after sudo or su, or from a macOS security
+// policy. A setuid binary we run does not refuse: its real uid is still
+// ours. A second kill decides between the two.
+//   - It succeeds: it reached a new child. The group is swept as after any
+//     kill that landed, and afterEPERM returns nil. As with kill(2), nil
+//     means the kill reached at least one member. A member that refuses
+//     throughout leaves the sweep running to the deadline, and is not
+//     reported.
+//   - ESRCH: the group is gone, so os.ErrProcessDone.
+//   - EPERM again: a refusal only if a member is still running after it,
+//     by a third read within the same deadline (#7074). A child that an
+//     exiting parent was forking is killed by fork() itself (kern_fork.c), so
+//     it can read as running and then be gone before the second kill. When
+//     no member is running afterwards, the group is swept and afterEPERM
+//     returns os.ErrProcessDone. When one is, or the read fails, the EPERM
+//     is returned.
 //
 // The exiting flag can be trusted for this. XNU sets P_LEXIT, which
 // kern.proc reports as P_WEXIT, before P_REF_DEAD, the mark that makes
@@ -69,37 +84,59 @@ type signaller func(pid int, sig syscall.Signal) error
 // killpg skipped for exiting reads as exiting, or is left out of the read
 // entirely.
 //
-// A read that fails, or is still blocked at the deadline, proves nothing,
-// and the EPERM stands.
+// A read that fails, or has not answered by the deadline, proves nothing, and
+// the EPERM stands. Nothing is signalled once the deadline has passed.
 func afterEPERM(pgid int, kill signaller, read groupReader, deadline time.Time, eperm error) error {
 	members, err := readBy(pgid, read, deadline)
 	if err != nil {
 		return eperm
 	}
-	for _, m := range members {
-		if m.zombie || m.exiting {
-			continue
-		}
-		switch err := kill(-pgid, syscall.SIGKILL); {
-		case err == nil:
-			sweep(pgid, read, kill, deadline)
-			return nil
-		case errors.Is(err, syscall.ESRCH):
-			return os.ErrProcessDone
-		default:
-			return err
-		}
+	if !anyRunning(members) {
+		sweep(pgid, read, kill, deadline)
+		return os.ErrProcessDone
+	}
+	err = kill(-pgid, syscall.SIGKILL)
+	switch {
+	case err == nil:
+		sweep(pgid, read, kill, deadline)
+		return nil
+	case errors.Is(err, syscall.ESRCH):
+		return os.ErrProcessDone
+	case !errors.Is(err, syscall.EPERM):
+		return err
+	}
+	after, rerr := readBy(pgid, read, deadline)
+	if rerr != nil || anyRunning(after) {
+		return err
 	}
 	sweep(pgid, read, kill, deadline)
 	return os.ErrProcessDone
 }
+
+// anyRunning reports whether a read lists a member that is neither a zombie
+// nor exiting.
+func anyRunning(members []groupMember) bool {
+	for _, m := range members {
+		if !m.zombie && !m.exiting {
+			return true
+		}
+	}
+	return false
+}
+
+// readByNow is readBy's clock. A test moves it past the deadline to make
+// "the answer arrived late" deterministic; readBy's caller is the only
+// goroutine that reads it.
+var readByNow = time.Now
 
 // errReadTimedOut is readBy's answer for a read still blocked at its
 // deadline.
 var errReadTimedOut = errors.New("execgroup: the membership read was still blocked at its deadline")
 
 // readBy reads the group on its own goroutine and waits for the answer
-// until deadline, for the reason sweep gives: a read can block.
+// until deadline, for the reason sweep gives: a read can block. An answer
+// that arrives at or after the deadline counts as no answer, so that a
+// caller acting on it cannot signal past the deadline.
 func readBy(pgid int, read groupReader, deadline time.Time) ([]groupMember, error) {
 	type answer struct {
 		members []groupMember
@@ -117,6 +154,9 @@ func readBy(pgid int, read groupReader, deadline time.Time) ([]groupMember, erro
 	defer timer.Stop()
 	select {
 	case a := <-done:
+		if !readByNow().Before(deadline) {
+			return nil, errReadTimedOut
+		}
 		return a.members, a.err
 	case <-timer.C:
 		return nil, errReadTimedOut
