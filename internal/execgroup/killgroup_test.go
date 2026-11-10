@@ -249,42 +249,69 @@ func TestCancelOfACommandThatAlreadyExitedIsNotAnError(t *testing.T) {
 	}
 }
 
+// sudoTestEnv opts in to the one test here that starts a root process. Like
+// AF_SYSTEMD_LIFECYCLE_TEST, it counts only alongside CI=true, and only the
+// CI steps that run on throwaway runners with passwordless sudo set it. A
+// developer's shell exporting CI is not consent to a root process (#7074).
+const sudoTestEnv = "AF_EXECGROUP_SUDO_TEST"
+
 // A group whose live member we may not signal answers EPERM on every
-// platform, and killGroup must report it, not map it away. A root-owned group
-// stands in for a setuid child. It takes passwordless sudo, so it runs only
-// in CI, where the runners provide it. The root process ends on its own after
-// holderLife, and the test kills its group, by the pgid it printed, sooner.
+// platform, and killGroup must report it, not map it away. A root-owned
+// group, started through sudo, stands in for any process whose real and
+// saved uid both differ from ours.
+//
+// The root process lives exactly as long as the write end of its stdin,
+// which only this test holds: it reads stdin to EOF and exits. The cleanup,
+// registered as soon as the process exists, closes that end and waits for
+// the process to go, so no path out of the test, Fatal included, leaves it
+// running. A test binary that dies outright closes the end too. The alarm is
+// a backstop for a write end something else might hold. No root kill by
+// number is needed.
 func TestKillGroupKeepsTheEPERMOfAGroupItMayNotSignal(t *testing.T) {
-	if os.Getenv("CI") == "" {
-		t.Skip("starts a root-owned process group through sudo; runs only in CI")
-	}
-	if err := exec.Command("sudo", "-n", "true").Run(); err != nil {
-		t.Skipf("needs passwordless sudo: %v", err)
+	if os.Getenv(sudoTestEnv) != "1" || os.Getenv("CI") != "true" {
+		t.Skipf("starts a root-owned process group through sudo; runs only with %s=1 and CI=true", sudoTestEnv)
 	}
 	cmd := exec.Command("sudo", "-n", "perl", "-e",
-		`setpgrp(0,0); $|=1; print "$$\n"; sleep `+holderLife)
-	out, err := cmd.StdoutPipe()
+		`setpgrp(0,0); alarm(`+holderLife+`); $|=1; print getpgrp(), "\n"; 1 while <STDIN>;`)
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		t.Fatalf("StdinPipe: %v", err)
+	}
+	stdout, err := cmd.StdoutPipe()
 	if err != nil {
 		t.Fatalf("StdoutPipe: %v", err)
 	}
 	if err := cmd.Start(); err != nil {
-		t.Fatalf("Start: %v", err)
+		t.Fatalf("Start (%s=1 promises passwordless sudo): %v", sudoTestEnv, err)
 	}
-	defer func() { _ = cmd.Wait() }()
-	line, err := bufio.NewReader(out).ReadString('\n')
-	if err != nil {
-		t.Fatalf("reading the root group's pgid: %v", err)
+	t.Cleanup(func() {
+		_ = stdin.Close()
+		exited := make(chan error, 1)
+		go func() { exited <- cmd.Wait() }()
+		select {
+		case <-exited:
+		case <-time.After(killBound):
+			t.Errorf("the root process did not exit within %v of its stdin closing (its alarm ends it after %ss)", killBound, holderLife)
+		}
+	})
+
+	lines := make(chan string, 1)
+	go func() {
+		line, _ := bufio.NewReader(stdout).ReadString('\n')
+		lines <- line
+	}()
+	var line string
+	select {
+	case line = <-lines:
+	case <-time.After(killBound):
+		t.Fatalf("the root process printed no pgid within %v", killBound)
 	}
 	pgid, err := strconv.Atoi(strings.TrimSpace(line))
 	if err != nil || pgid <= 1 {
-		t.Fatalf("root group printed pgid %q: %v", line, err)
+		t.Fatalf("the root process printed pgid %q (%v); did sudo -n refuse? (%s=1 promises passwordless sudo)", line, err, sudoTestEnv)
 	}
-	// The perl process leads the group and sleeps, so the pgid stays its own
-	// until this kill, which needs root.
-	defer func() {
-		_ = exec.Command("sudo", "-n", "perl", "-e", `kill "KILL", -$ARGV[0]`, strconv.Itoa(pgid)).Run()
-	}()
-
+	// The root process is alive until the cleanup closes its stdin, so the
+	// pgid is still its group.
 	if err := killGroup(pgid); !errors.Is(err, syscall.EPERM) {
 		t.Fatalf("killGroup of a root-owned group = %v, want EPERM", err)
 	}
