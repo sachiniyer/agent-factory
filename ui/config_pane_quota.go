@@ -168,7 +168,18 @@ func (c *ConfigPane) appendQuotaRows() {
 		// rows already enforce.
 		c.rows = append(c.rows, configRow{quotaAccountsEmpty: true})
 	}
-	c.rows = append(c.rows, configRow{quotaAccountsEnd: true})
+	// The mover line and the closing footnote ride at the end of the section,
+	// exactly as the CLI's RenderAccountSection prints them (#6776). Each is
+	// its own selectable row — split from a single end row — so window(),
+	// which pins an over-tall selection to its start, cannot hide the footnote
+	// behind the mover at a narrow or short terminal: the cursor moves from
+	// the mover row onto the footnote row to reveal each independently. The
+	// mover row is appended only when the daemon served a mover line; the
+	// footnote always rides after the rows.
+	if c.quota.mover != "" {
+		c.rows = append(c.rows, configRow{quotaAccountsMover: true})
+	}
+	c.rows = append(c.rows, configRow{quotaAccountsFoot: true})
 }
 
 // renderQuotaRow draws one agent line: cursor, name, "quota · observed" on the
@@ -264,17 +275,31 @@ func (c *ConfigPane) renderQuotaAccountsEmpty(i int) string {
 	return c.fitPaneLine(b.String())
 }
 
-// renderQuotaAccountsEnd draws the per-account evidence section's trailing
-// mover line and closing footnote (#6776), matching the CLI's
-// RenderAccountSection. Selectable so the cursor can land on it: selection is
-// the list's only scroll driver, so a non-selectable end row leaves the mover
-// status (including a recorded halt) and the explanatory footer permanently
-// behind the "↓ more" cue when the section is taller than the pane — window()
-// pins scrollTop to selStart for an over-tall span, which the previous selEnd
-// extension ran into. The cursor marks the mover line when present, else the
-// footnote's first line; continuation lines keep the wrapped indent, exactly
-// as a parked-agent row's detail rides under its cursor line.
-func (c *ConfigPane) renderQuotaAccountsEnd(i int) string {
+// renderQuotaAccountsMover draws the per-account evidence section's mover line
+// (#6776), matching the CLI's RenderAccountSection, as its own selectable row.
+// Selectable so the cursor can land on it: selection is the list's only scroll
+// driver, so a non-selectable mover line leaves a recorded halt permanently
+// behind the "↓ more" cue when the section is taller than the pane. Split from
+// the footnote (rather than riding with it on one row) so window() — which pins
+// an over-tall selection to its start — cannot hide the footnote behind the
+// mover at a narrow or short terminal: the cursor moves from the mover row onto
+// the footnote row to reveal each independently.
+func (c *ConfigPane) renderQuotaAccountsMover(i int) string {
+	return c.renderQuotaEndBlock(i, "mover: "+c.quota.mover)
+}
+
+// renderQuotaAccountsFoot draws the per-account evidence section's closing
+// footnote (#6776) as its own selectable row, after the mover line. Selectable
+// for the same scroll-reach reason as the mover row — see renderQuotaAccountsMover.
+func (c *ConfigPane) renderQuotaAccountsFoot(i int) string {
+	return c.renderQuotaEndBlock(i, quotaAccountsFootNote)
+}
+
+// renderQuotaEndBlock draws one trailing block of the per-account evidence
+// section (the mover line or the closing footnote) as a selectable row: the
+// cursor marks the first wrapped line, continuation lines keep the wrapped
+// indent, exactly as a parked-agent row's detail rides under its cursor line.
+func (c *ConfigPane) renderQuotaEndBlock(i int, text string) string {
 	selected := i == c.selectedIdx
 	cursor := "  "
 	if selected {
@@ -284,24 +309,8 @@ func (c *ConfigPane) renderQuotaAccountsEnd(i int) string {
 	if selected {
 		style = configSelectedStyle
 	}
-	var blocks []string
-	if c.quota.mover != "" {
-		blocks = append(blocks, "mover: "+c.quota.mover)
-	}
-	blocks = append(blocks, quotaAccountsFootNote)
-	var b strings.Builder
-	for idx, text := range blocks {
-		block := c.wrapIndented(text, style)
-		if idx == 0 {
-			// Replace the first wrapped line's indent with the cursor so the
-			// selected end row reads like other selectable rows; the cursor is
-			// plain (or accent-styled via SelectionMarker), the styled content
-			// follows it — the same split renderQuotaAccountsEmpty uses.
-			block = cursor + strings.TrimPrefix(block, "    ")
-		}
-		b.WriteString(block)
-	}
-	return b.String()
+	block := c.wrapIndented(text, style)
+	return cursor + strings.TrimPrefix(block, "    ")
 }
 
 // renderQuotaUnavailable is the section's failure body — the reason the read

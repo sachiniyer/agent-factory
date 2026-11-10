@@ -470,12 +470,13 @@ func TestConfigPaneQuota_NoAccountsSectionWhenAbsentTable(t *testing.T) {
 	}
 }
 
-// The per-account evidence section's trailing end row (mover line + footnote)
-// is non-selectable, so the cursor cannot land on it; selection is the list's
-// only scroll driver, so the end row would sit permanently behind the "↓ more"
-// cue when the cursor rests on the last selectable row above it. The selection
-// span extends through the end row so window() can scroll it into view — the
-// reach the empty-table row's own comment already promises (#6776).
+// The per-account evidence section's trailing rows (mover line + footnote) are
+// each selectable, so the cursor can land on them; selection is the list's only
+// scroll driver, so non-selectable trailing rows would sit permanently behind
+// the "↓ more" cue when the cursor rests on the last selectable row above them.
+// The selection span extends through the trailing rows so window() can scroll
+// them into view — the reach the empty-table row's own comment already
+// promises (#6776).
 func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromLastAccountRow(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
@@ -485,52 +486,65 @@ func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromLastAccountRow(t *te
 		{Agent: "codex", Name: "personal", Observed: "no evidence", Windows: "—", Detail: "no rate_limits claims found"},
 	}, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
 
-	var lastAcct, endIdx int = -1, -1
+	var lastAcct, moverIdx, footIdx int = -1, -1, -1
 	for i, row := range pane.rows {
 		if row.quotaAccount != nil {
 			lastAcct = i
 		}
-		if row.quotaAccountsEnd {
-			endIdx = i
+		if row.quotaAccountsMover {
+			moverIdx = i
+		}
+		if row.quotaAccountsFoot {
+			footIdx = i
 		}
 	}
-	if lastAcct < 0 || endIdx < 0 || endIdx != lastAcct+1 {
-		t.Fatalf("expected the last account row immediately followed by the end row: lastAcct=%d endIdx=%d", lastAcct, endIdx)
+	if lastAcct < 0 || moverIdx < 0 || footIdx < 0 {
+		t.Fatalf("expected an account row followed by the mover and footnote rows: lastAcct=%d moverIdx=%d footIdx=%d", lastAcct, moverIdx, footIdx)
+	}
+	if moverIdx != lastAcct+1 || footIdx != moverIdx+1 {
+		t.Fatalf("expected last account, then mover, then footnote: lastAcct=%d moverIdx=%d footIdx=%d", lastAcct, moverIdx, footIdx)
 	}
 
 	// Cursor on the last account row: the span must reach the end of all lines
-	// (the end row is last), covering the mover line and footnote so window()
-	// scrolls them into view rather than clipping them behind "↓ more".
+	// (the trailing rows are last in the section), covering the mover line and
+	// footnote so window() scrolls them into view rather than clipping them
+	// behind "↓ more".
 	pane.selectedIdx = lastAcct
 	lines, selStart, selEnd := pane.renderRowLines()
 	if selStart < 0 {
 		t.Fatal("expected a selection span")
 	}
 	if selEnd != len(lines) {
-		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
+		t.Fatalf("selection span must extend through the trailing rows: selEnd=%d lines=%d", selEnd, len(lines))
 	}
 }
 
 // The same reach must hold for the empty-accounts shape: the empty-table row is
-// the only selectable row in the section, and the mover line + footnote ride on
-// the non-selectable end row below it.
+// the first selectable row in the section, and the mover line + footnote ride
+// on the trailing selectable rows below it.
 func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromEmptyRow(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
 	}, nil)
 	pane.SetQuota(pane.quota.rows, nil, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
 
-	var emptyIdx, endIdx int = -1, -1
+	var emptyIdx, moverIdx, footIdx int = -1, -1, -1
 	for i, row := range pane.rows {
 		if row.quotaAccountsEmpty {
 			emptyIdx = i
 		}
-		if row.quotaAccountsEnd {
-			endIdx = i
+		if row.quotaAccountsMover {
+			moverIdx = i
+		}
+		if row.quotaAccountsFoot {
+			footIdx = i
 		}
 	}
-	if emptyIdx < 0 || endIdx < 0 || endIdx != emptyIdx+1 {
-		t.Fatalf("expected the empty row immediately followed by the end row: emptyIdx=%d endIdx=%d", emptyIdx, endIdx)
+	if emptyIdx < 0 || moverIdx < 0 || footIdx < 0 {
+		t.Fatalf("expected an empty row followed by the mover and footnote rows: emptyIdx=%d moverIdx=%d footIdx=%d", emptyIdx, moverIdx, footIdx)
+	}
+	if moverIdx != emptyIdx+1 || footIdx != moverIdx+1 {
+		t.Fatalf("expected empty row, then mover, then footnote: emptyIdx=%d moverIdx=%d footIdx=%d", emptyIdx, moverIdx, footIdx)
 	}
 	pane.selectedIdx = emptyIdx
 	lines, selStart, selEnd := pane.renderRowLines()
@@ -538,7 +552,7 @@ func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromEmptyRow(t *testing.
 		t.Fatal("expected a selection span")
 	}
 	if selEnd != len(lines) {
-		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
+		t.Fatalf("selection span must extend through the trailing rows: selEnd=%d lines=%d", selEnd, len(lines))
 	}
 }
 
@@ -607,14 +621,17 @@ func TestConfigPaneQuota_AccountsSectionRendersAfterAgentRows(t *testing.T) {
 	}
 }
 
-// The trailing end row (mover line + footnote) is selectable so the cursor can
-// land on it and window() can scroll it into view — selection is the list's
-// only scroll driver, so a non-selectable end row leaves the mover status
-// (including a recorded halt) and the explanatory footer permanently behind the
-// "↓ more" cue when the section is taller than the pane (#6776). Verified by
-// rendering the span through window() with a budget smaller than the section,
-// not just by inspecting selEnd: window() pins scrollTop to selStart for an
-// over-tall span, which a selEnd-only check would miss.
+// The trailing mover line and the closing footnote are each their own
+// selectable row (#6776) — split from a single end row — so the cursor can
+// land on each and window() can scroll each into view independently.
+// Selection is the list's only scroll driver; a single row carrying both
+// blocks left the footnote permanently behind the "↓ more" cue at a narrow or
+// short terminal, because window() pins an over-tall selection to its start.
+// Verified by rendering the span through window() with a budget smaller than
+// the section, not just by inspecting selEnd: window() pins scrollTop to
+// selStart for an over-tall span, which a selEnd-only check would miss. Both
+// the mover line AND the footnote must be reachable this way — the prior
+// single-row fix only asserted the mover line.
 func TestConfigPaneQuota_TrailingAccountsEndRowSelectableAndScrollsIntoView(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
@@ -623,48 +640,78 @@ func TestConfigPaneQuota_TrailingAccountsEndRowSelectableAndScrollsIntoView(t *t
 		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
 	}, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
 
-	var lastAcct, endIdx int = -1, -1
+	var lastAcct, moverIdx, footIdx int = -1, -1, -1
 	for i, row := range pane.rows {
 		if row.quotaAccount != nil {
 			lastAcct = i
 		}
-		if row.quotaAccountsEnd {
-			endIdx = i
+		if row.quotaAccountsMover {
+			moverIdx = i
+		}
+		if row.quotaAccountsFoot {
+			footIdx = i
 		}
 	}
-	if endIdx < 0 {
-		t.Fatal("expected a trailing end row")
+	if moverIdx < 0 || footIdx < 0 {
+		t.Fatal("expected a trailing mover row and footnote row")
 	}
-	if !pane.rows[endIdx].isSelectable() {
-		t.Fatal("the trailing end row must be selectable so the cursor can scroll it into view")
+	if !pane.rows[moverIdx].isSelectable() {
+		t.Fatal("the trailing mover row must be selectable so the cursor can scroll it into view")
 	}
-	// Pressing down from the last account row must land on the end row, not
+	if !pane.rows[footIdx].isSelectable() {
+		t.Fatal("the trailing footnote row must be selectable so the cursor can scroll it into view")
+	}
+	// Pressing down from the last account row must land on the mover row, not
 	// skip past it into the Accounts section — the move the previous
 	// non-selectable end row blocked.
 	pane.selectedIdx = lastAcct
 	pane.move(1)
-	if pane.selectedIdx != endIdx {
-		t.Fatalf("down from the last account row must reach the end row: got selectedIdx=%d want %d", pane.selectedIdx, endIdx)
+	if pane.selectedIdx != moverIdx {
+		t.Fatalf("down from the last account row must reach the mover row: got selectedIdx=%d want %d", pane.selectedIdx, moverIdx)
 	}
 
 	// Render through window() with a budget smaller than the section so the
-	// over-tall-span branch is exercised. With the cursor on the end row,
+	// over-tall-span branch is exercised. With the cursor on the mover row,
 	// window() must reveal the mover line rather than clipping it behind the
 	// "↓ more" cue.
+	visible := windowSelectedLines(t, pane, moverIdx, 3)
+	if !strings.Contains(visible, "mover:") {
+		t.Fatalf("window() must reveal the mover line when the mover row is selected (budget=3):\n%s", visible)
+	}
+
+	// Pressing down from the mover row must land on the footnote row, not skip
+	// past it — the reach the single end row denied the footnote at a narrow
+	// or short terminal.
+	pane.move(1)
+	if pane.selectedIdx != footIdx {
+		t.Fatalf("down from the mover row must reach the footnote row: got selectedIdx=%d want %d", pane.selectedIdx, footIdx)
+	}
+	// With the cursor on the footnote row, window() must reveal the closing
+	// explanation rather than clipping it behind the "↓ more" cue — the
+	// symptom the finding reported (the prior test asserted only mover:).
+	visible = windowSelectedLines(t, pane, footIdx, 3)
+	if !strings.Contains(visible, "ACCOUNTS is what af recorded") {
+		t.Fatalf("window() must reveal the footnote when the footnote row is selected (budget=3):\n%s", visible)
+	}
+}
+
+// windowSelectedLines renders the pane's row lines, sets the selection to the
+// given row, and returns the lines window() reveals at the given budget — so a
+// test can assert the cursor scrolls a specific trailing row into view rather
+// than reading selEnd alone (which window()'s over-tall-span pin would hide).
+func windowSelectedLines(t *testing.T, pane *ConfigPane, selectedIdx, budget int) string {
+	t.Helper()
+	pane.selectedIdx = selectedIdx
 	pane.scrollTop = 0
 	lines, selStart, selEnd := pane.renderRowLines()
-	budget := 3
 	visible, _, _ := pane.window(lines, selStart, selEnd, budget)
 	if selStart < 0 {
-		t.Fatal("expected a selection span on the end row")
+		t.Fatal("expected a selection span")
 	}
 	var b strings.Builder
 	for _, l := range visible {
 		b.WriteString(l)
 		b.WriteString("\n")
 	}
-	got := b.String()
-	if !strings.Contains(got, "mover:") {
-		t.Fatalf("window() must reveal the mover line when the end row is selected (budget=%d):\n%s", budget, got)
-	}
+	return b.String()
 }

@@ -194,15 +194,20 @@ type configRow struct {
 	// codex account is registered. Selectable so the cursor reaches the
 	// section (and reveals the trailing mover line) even with no account rows.
 	quotaAccountsEmpty bool
-	// quotaAccountsEnd marks the trailing row of the per-account evidence
-	// sub-section (#6776), which renders the mover line and the explanatory
-	// footer — matching the CLI's RenderAccountSection. Selectable so the
-	// cursor can land on it: selection is the list's only scroll driver, so a
-	// non-selectable end row leaves the mover status (including a recorded
-	// halt) and the footer permanently behind the "↓ more" cue when the
-	// section is taller than the pane — window() pins scrollTop to selStart
-	// for an over-tall span, which the previous selEnd extension ran into.
-	quotaAccountsEnd bool
+	// quotaAccountsMover marks the trailing mover line of the per-account
+	// evidence sub-section (#6776), matching the CLI's RenderAccountSection.
+	// Selectable so the cursor can land on it: selection is the list's only
+	// scroll driver, so a non-selectable mover line leaves a recorded halt
+	// permanently behind the "↓ more" cue when the section is taller than the
+	// pane. Only appended when the daemon served a mover line.
+	quotaAccountsMover bool
+	// quotaAccountsFoot marks the closing footnote of the per-account evidence
+	// sub-section (#6776), rendered after the mover line. Its own selectable
+	// row — split from the mover rather than riding with it — so window(),
+	// which pins an over-tall selection to its start, cannot hide the footnote
+	// behind the mover at a narrow or short terminal: the cursor moves from
+	// the mover row onto the footnote row to reveal each independently.
+	quotaAccountsFoot bool
 	// host is set for a row of the Hosts section (#5571 W10.5) — a saved host
 	// or one of the section's action rows (add, check-all), derived from the
 	// `hosts`/`default_host` manifest entries themselves.
@@ -221,12 +226,14 @@ type configRow struct {
 // scrolls just far enough to reveal it — so a non-selectable Usage section
 // below the last editable row would render but never scroll into view. Enter
 // on one is a no-op because selectedEntry returns nil for it. The per-account
-// evidence rows, the empty-table row, and the trailing end row (mover line +
-// footnote) follow the same rule for the same reason (#6776): the end row is
-// selectable so the cursor can scroll it into view rather than relying on the
-// selEnd extension, which window()'s over-tall-span pin leaves short.
+// evidence rows and the empty-table row follow the same rule for the same
+// reason (#6776). The trailing mover line and the closing footnote are each
+// their own selectable row (split from a single end row) so the cursor can
+// scroll each into view independently: window() pins an over-tall selection to
+// its start, so a single row carrying both blocks left the footnote
+// permanently behind the "↓ more" cue at a narrow or short terminal.
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil || r.quota != nil || r.quotaAccount != nil || r.quotaAccountsEmpty || r.quotaAccountsEnd || r.host != nil
+	return r.entry != nil || r.account != nil || r.quota != nil || r.quotaAccount != nil || r.quotaAccountsEmpty || r.quotaAccountsMover || r.quotaAccountsFoot || r.host != nil
 }
 
 var (
@@ -784,15 +791,22 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			if len(c.quota.accounts) > 0 {
 				lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaAccountColHeader, configHintStyle), "\n"), "\n")...)
 			}
-		case row.quotaAccountsEnd:
-			// The mover line and the closing explanation ride at the end of the
-			// per-account evidence section, exactly as the CLI's
-			// RenderAccountSection prints them after the table (#6776). The
-			// mover moved here from the Usage heading so the TUI matches the
-			// CLI's shape; a halt is still never silent (R16) — it remains in
-			// the section the daemon sourced it for. The row is selectable so
-			// the cursor can scroll it into view (see renderQuotaAccountsEnd).
-			rendered := c.renderQuotaAccountsEnd(i)
+		case row.quotaAccountsMover:
+			// The mover line rides at the end of the per-account evidence
+			// section, exactly as the CLI's RenderAccountSection prints it
+			// after the table (#6776). The mover moved here from the Usage
+			// heading so the TUI matches the CLI's shape; a halt is still
+			// never silent (R16) — it remains in the section the daemon
+			// sourced it for. The row is selectable so the cursor can scroll
+			// it into view (see renderQuotaAccountsMover).
+			rendered := c.renderQuotaAccountsMover(i)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.quotaAccountsFoot:
+			// The closing footnote rides after the mover line, matching the
+			// CLI's RenderAccountSection. Its own selectable row so the
+			// cursor can scroll it into view independently of the mover
+			// (see renderQuotaAccountsFoot).
+			rendered := c.renderQuotaAccountsFoot(i)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
 		case row.host != nil:
 			rendered := c.renderHostRow(i, *row.host)
@@ -822,7 +836,7 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 				default:
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaHeadingNote, configHintStyle), "\n"), "\n")...)
 					// The mover line no longer rides under the Usage heading: it moved
-					// into the per-account evidence section (quotaAccountsEnd) so the
+					// into the per-account evidence section (quotaAccountsMover) so the
 					// TUI matches the CLI's RenderAccountSection shape (#6776). It
 					// still surfaces wherever the report renders (R16: a halted mover
 					// is never silent) — just at the end of the section the daemon
@@ -855,19 +869,21 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 			selStart, selEnd = start, len(lines)
 		}
 	}
-	// The per-account evidence section's trailing end row (the mover line and
-	// the closing footnote) is selectable, so the cursor can land on it and
-	// window() scrolls it into view (#6776). This extension is a best-effort
-	// preview: when the cursor rests on the last account/empty row above it,
-	// widen the selection span to include the end row's lines so window()
+	// The per-account evidence section's trailing rows (the mover line and the
+	// closing footnote) are each selectable, so the cursor can land on them and
+	// window() scrolls each into view (#6776). This extension is a best-effort
+	// preview: when the cursor rests on the last account/empty row above them,
+	// widen the selection span to include the trailing rows' lines so window()
 	// reveals them when the pane has room. When the section is taller than the
 	// pane, window()'s over-tall-span pin still clips the tail — the user then
-	// presses down onto the end row itself, which selection scrolls fully into
-	// view. Kept because it costs nothing and shows the mover line early on
-	// tall panes; the end row's own selectability is the reachability guarantee.
+	// presses down onto the mover row and then the footnote row, each of which
+	// selection scrolls fully into view. Kept because it costs nothing and
+	// shows the mover line early on tall panes; the trailing rows' own
+	// selectability is the reachability guarantee.
 	if selStart >= 0 && c.selectedIdx+1 < len(c.rows) {
 		sel := c.rows[c.selectedIdx]
-		if (sel.quotaAccount != nil || sel.quotaAccountsEmpty) && c.rows[c.selectedIdx+1].quotaAccountsEnd {
+		next := c.rows[c.selectedIdx+1]
+		if (sel.quotaAccount != nil || sel.quotaAccountsEmpty) && (next.quotaAccountsMover || next.quotaAccountsFoot) {
 			selEnd = len(lines)
 		}
 	}
