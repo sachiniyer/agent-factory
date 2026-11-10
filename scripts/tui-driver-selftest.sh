@@ -1144,6 +1144,121 @@ EOF
     return "$rc"
 }
 
+# _af_expect_dead_pane_holds <rows> — at a TUI height of <rows>, the open pane on
+# the finished one-shot tab must show the program's output AND tmux's "Pane is
+# dead" marker, and keep showing both: binding the pane is the only repaint a
+# dead tab will ever get, so nothing later can fill in a blank (#7061).
+# shellcheck disable=SC2317  # called from _expect_dead_tab_pane_renders.
+_af_expect_dead_pane_holds() {
+    local rows="$1" out_marker='AF_DEAD_7061_OUT' dead_marker='Pane is dead' deadline
+    af_wait_for "$out_marker" 10 "the dead tab's pane shows its output at ${AF_DRIVER_COLS}x${rows} (#7061)" || return 1
+    af_wait_for "$dead_marker" 10 "the dead tab's pane shows the 'Pane is dead' marker at ${AF_DRIVER_COLS}x${rows} (#7061)" || return 1
+    deadline=$(( $(_af_now) + 2 ))
+    while [ "$(_af_now)" -lt "$deadline" ]; do
+        if ! af_capture | grep -qE -- "$out_marker" || ! af_capture | grep -qE -- "$dead_marker"; then
+            _af_fail "the dead tab's pane showed its output and marker at ${AF_DRIVER_COLS}x${rows}, then lost them (#7061)"
+            af_capture >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+    printf '\n=== pane on a finished one-shot tab: %sx%s ===\n' "$AF_DRIVER_COLS" "$rows"
+    af_capture
+}
+
+# _expect_dead_tab_pane_renders — #7061. A one-shot process tab whose command
+# already exited when its pane is FIRST opened must show the command's last
+# output and tmux's "Pane is dead" marker at once, with no scrolling or
+# interaction. #5592 covered a tab that dies while it is being watched; the
+# play-test found the pane blank when the tab died before anyone watched it.
+#
+# The command prints one line and exits, far under a screenful: tmux then pushes
+# that line into history when it draws the marker (scroll up one row, draw on the
+# last), so the output and the marker are a full pane height apart. The tab is
+# created through the CLI, which spawns it at tmux's default 80x24, and the step
+# waits until the daemon records the exit before the TUI looks at it. The flow
+# is the reported one: tree-focused number key → transient preview, then `s`
+# opens the tab as a pane. It is checked with the pane box shorter than the tab
+# (the crop is in play) and again taller than it.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_dead_tab_pane_renders() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    local tab_re bin script n header deadline rc=0
+    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+(› )?oneshot([[:space:]]|$)'
+    bin="$(_af_resolve_bin)"
+    mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
+    script="$AF_DRIVER_STATE_DIR/oneshot.sh"
+    # The output marker lives only in the script, never in the tab's command
+    # line, so nothing but the program's own output can put it on the TUI.
+    cat >"$script" <<'EOF' || return 1
+#!/bin/sh
+printf 'AF_DEAD_7061_OUT one-shot finished\n'
+EOF
+    if ! AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions tab-create cycle \
+        --repo "$AF_DRIVER_REPO" --command "sh '$script'" --name oneshot >/dev/null; then
+        _af_fail "af sessions tab-create could not add the one-shot tab"
+        return 1
+    fi
+    # Dead before the TUI ever binds a pane to it: the daemon has seen the exit.
+    deadline=$(( $(_af_now) + 15 ))
+    until AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get cycle --repo "$AF_DRIVER_REPO" 2>/dev/null \
+        | jq -e '.tabs[] | select(.name == "oneshot") | .exit.status_known == true' >/dev/null 2>&1; do
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail 'the one-shot tab never reported a known exit status'
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+
+    af_resize "$saved_cols" 20 || return 1
+    af_select cycle || rc=1
+    if [ "$rc" -eq 0 ]; then
+        af_wait_for "$tab_re" 15 'the CLI-created one-shot tab reaches the tree' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        n="$(af_capture | grep -E -- "$tab_re" | head -1 | grep -oE '[0-9]+' | head -1)"
+        [ -n "$n" ] || { _af_fail 'could not read the one-shot tab number from the tree'; rc=1; }
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_focus_tree || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send "$n"
+        af_wait_for 'oneshot.*· preview' 10 'the number key previews the one-shot tab' || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send s
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        while :; do
+            header="$(_af_pane_header_row)"
+            if printf '%s\n' "$header" | grep -qE -- 'oneshot' \
+                && ! printf '%s\n' "$header" | grep -qE -- 'preview'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "s did not open the one-shot tab as a pane (pane headers: '$header')"
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        sleep 3   # past the live attachment's bind, as in the #7037 step
+        _af_expect_dead_pane_holds 20 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # A pane box taller than the tab's 24 rows: no crop at all.
+        af_resize "$saved_cols" 40 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        _af_expect_dead_pane_holds 40 || rc=1
+    fi
+
+    af_resize "$saved_cols" "$saved_rows" || return 1
+    return "$rc"
+}
+
 # _expect_scrolled_rail_relaunch — the LIVE half of #2148. At 80x24, seed
 # enough sessions for the current row density and select the last: the rail scrolls,
 # the header is gone, and the boot gate has to read the frame as booted anyway.
@@ -2003,6 +2118,10 @@ step "cycle: confirmed w deletes the VIEWED tab, not the tree's (#1884)" _expect
 # Runs on the 'cycle' instance the steps above leave with a pane open: the
 # transient preview it commits needs an owner pane.
 step "a committed pane on an idle alternate-screen tab renders it (#7037)" _expect_altscreen_commit_renders
+
+# --- #7061: a pane first opened on an already-finished one-shot tab shows its end ---
+# Same 'cycle' instance; the previewing pane it opens from is the one above.
+step "a pane opened on a finished one-shot tab shows its output and the dead marker (#7061)" _expect_dead_tab_pane_renders
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.
