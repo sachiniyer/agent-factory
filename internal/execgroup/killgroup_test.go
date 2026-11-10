@@ -71,8 +71,15 @@ func (f *fakeGroup) read(pgid int) ([]groupMember, error) {
 	return f.reads[min(f.nReads, len(f.reads))-1], nil
 }
 
+// run calls killGroupWith with a minute's bound, and fails the test within
+// five seconds if it has not returned, so a regression that runs a sweep to
+// its deadline fails fast.
 func (f *fakeGroup) run() error {
-	return killGroupWith(fakePgid, f.kill, f.read, time.Minute)
+	var err error
+	within(f.t, 5*time.Second, "killGroup", func() {
+		err = killGroupWith(fakePgid, f.kill, f.read, time.Minute)
+	})
+	return err
 }
 
 func (f *fakeGroup) killCount() int {
@@ -126,8 +133,9 @@ func TestKillGroupSweepsAGroupThatHadNobodyToSignal(t *testing.T) {
 	}
 }
 
-// A live member that is not exiting is one the kill could not signal, such
-// as a setuid child. That EPERM is real, and Cancel must report it.
+// A member still running after a second EPERM is one the kill may not
+// signal: its real and saved uids both differ from ours, as after sudo. That
+// EPERM is real, and Cancel must report it.
 func TestKillGroupKeepsTheEPERMOfAMemberThatRefusedTheSignal(t *testing.T) {
 	f := &fakeGroup{t: t, kills: []error{syscall.EPERM, syscall.EPERM}, reads: [][]groupMember{
 		{zombie(fakePgid), live(7)},
@@ -298,8 +306,23 @@ func TestKillGroupKeepsOneDeadlineAcrossTheSecondKill(t *testing.T) {
 	}
 }
 
+// A read that answers after its deadline counts as no answer, so nothing
+// acting on it can signal past the deadline.
+func TestReadByCountsALateAnswerAsNone(t *testing.T) {
+	deadline := time.Now().Add(time.Minute)
+	t.Cleanup(func() { readByNow = time.Now })
+	readByNow = func() time.Time { return deadline } // the answer lands at the deadline
+	members, err := readBy(fakePgid, func(int) ([]groupMember, error) {
+		return []groupMember{live(7)}, nil
+	}, deadline)
+	if !errors.Is(err, errReadTimedOut) || members != nil {
+		t.Fatalf("readBy of an answer at its deadline = %v, %v; want nil, errReadTimedOut", members, err)
+	}
+}
+
 // No signal goes out once the deadline has passed, and that includes the
-// second kill. A read that answers after the deadline counts as no answer.
+// second kill. TestReadByCountsALateAnswerAsNone pins the rule
+// deterministically. This drives it through afterEPERM.
 func TestKillGroupSendsNoSecondKillPastTheDeadline(t *testing.T) {
 	// The read answers at once, and the deadline has already passed, so
 	// which of the two readBy sees first is a race. Repeat to cover both.
@@ -340,8 +363,8 @@ func waitForZombie(t *testing.T, pid int) {
 // A context cancelled after its command already exited has nothing to kill,
 // and Cancel must not report an error for it. On darwin the group kill of a
 // group holding only the unreaped zombie leader answers EPERM, and before
-// #7072 Wait then returned "error sending signal to Cmd: operation not
-// permitted" for a command that had exited 0.
+// #7072 Wait then returned "exec: canceling Cmd: operation not permitted"
+// for a command that had exited 0.
 func TestCancelOfACommandThatAlreadyExitedIsNotAnError(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
