@@ -225,6 +225,11 @@ func TestDeadPaneScreen(t *testing.T) {
 		if got := deadScreenRows("line 1\nline 2\nline 3\nline 4\n", 4); !slicesEqual(got, want) {
 			t.Fatalf("got %q, want %q", got, want)
 		}
+		// With no measured height the caller passes the visible grid, whose row
+		// count is the pane height: the screen still fits it.
+		if got := deadScreenRows("line 1\nline 2\nline 3\nline 4\n", 0); !slicesEqual(got, want) {
+			t.Fatalf("unmeasured height: got %q, want %q", got, want)
+		}
 	})
 
 	t.Run("output that merely mentions the marker still gets one", func(t *testing.T) {
