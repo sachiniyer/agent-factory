@@ -606,3 +606,82 @@ func TestConfigPaneQuota_AccountsSectionRendersAfterAgentRows(t *testing.T) {
 		t.Fatalf("per-account evidence section must render after the agent table: last agent at %d, heading at %d", lastAgentIdx, headingIdx)
 	}
 }
+
+// The footer must advertise only what works on the row under the cursor (#7047).
+// A Usage row (a quota agent row, a per-account evidence row, or the
+// empty-accounts row) takes the cursor so the window can scroll the section into
+// view, but nothing on it opens: selectedEntry returns nil, so `↵ edit` and
+// `e explain` are no-ops there. The default footer nonetheless lists both, so a
+// user pressing enter or e on a Usage row gets a silent no-op. While one of
+// these rows is selected the footer lists only what works there — move, the
+// advanced toggle, the assistant, and the exit — and drops the two dead verbs.
+func TestConfigPaneQuota_FooterDropsDeadVerbsOnUsageRows(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "shadow", nil)
+
+	// Find one row of each selectable Usage kind the cursor can land on.
+	var quotaIdx, accountIdx, emptyIdx, entryIdx int = -1, -1, -1, -1
+	for i, row := range pane.rows {
+		switch {
+		case row.quota != nil && quotaIdx < 0:
+			quotaIdx = i
+		case row.quotaAccount != nil && accountIdx < 0:
+			accountIdx = i
+		case row.quotaAccountsEmpty:
+			emptyIdx = i
+		case row.entry != nil && entryIdx < 0:
+			entryIdx = i
+		}
+	}
+	if quotaIdx < 0 || accountIdx < 0 || entryIdx < 0 {
+		t.Fatalf("expected a quota row, an account-evidence row, and a config entry: %d %d %d", quotaIdx, accountIdx, entryIdx)
+	}
+
+	check := func(idx int, label string) {
+		t.Helper()
+		pane.selectedIdx = idx
+		hints := pane.renderHints()
+		for _, dead := range []string{"↵ edit", "e explain"} {
+			if strings.Contains(hints, dead) {
+				t.Errorf("%s: footer must not advertise %q (it is a no-op there):\n%s", label, dead, hints)
+			}
+		}
+		for _, live := range []string{"↑/↓ move", "C assistant", "esc close"} {
+			if !strings.Contains(hints, live) {
+				t.Errorf("%s: footer must still advertise %q:\n%s", label, live, hints)
+			}
+		}
+	}
+	check(quotaIdx, "quota agent row")
+	check(accountIdx, "per-account evidence row")
+
+	// The empty-accounts shape exercises the empty-accounts row too.
+	empty := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	empty.SetQuota(empty.quota.rows, nil, nil, "shadow", nil)
+	for i, row := range empty.rows {
+		if row.quotaAccountsEmpty {
+			emptyIdx = i
+			break
+		}
+	}
+	if emptyIdx < 0 {
+		t.Fatal("expected an empty-accounts row")
+	}
+	check(emptyIdx, "empty-accounts row")
+
+	// Contrast: a config entry row keeps both verbs — the footer only drops
+	// them where they do not work.
+	pane.selectedIdx = entryIdx
+	entryHints := pane.renderHints()
+	for _, live := range []string{"↵ edit", "e explain"} {
+		if !strings.Contains(entryHints, live) {
+			t.Errorf("a config entry row must still advertise %q:\n%s", live, entryHints)
+		}
+	}
+}

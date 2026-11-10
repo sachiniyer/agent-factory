@@ -104,6 +104,21 @@ type quotaSection struct {
 	unavailable string
 }
 
+// selectedUsageRow reports whether the cursor is on a row of the Usage section
+// (#2983, #6776): a quota agent row, a per-account evidence row, or the
+// empty-accounts row. These rows take the cursor so the window can scroll the
+// section into view, but nothing on them opens for editing or explaining —
+// selectedEntry returns nil, so beginEdit and beginExplain are no-ops there —
+// so the footer must not advertise `↵ edit` or `e explain` while one is
+// selected (#7047). The non-selectable heading/end rows never hold the cursor.
+func (c *ConfigPane) selectedUsageRow() bool {
+	if c.selectedIdx < 0 || c.selectedIdx >= len(c.rows) {
+		return false
+	}
+	r := c.rows[c.selectedIdx]
+	return r.quota != nil || r.quotaAccount != nil || r.quotaAccountsEmpty
+}
+
 // SetQuota installs the daemon's report. A read failure becomes the section's
 // own message — the config view is still useful when usage cannot be read, and
 // an empty section would silently claim there is nothing parked.

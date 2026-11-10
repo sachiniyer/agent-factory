@@ -263,6 +263,24 @@ func (c *ConfigPane) renderHints() string {
 			configHint{text: "esc close"})
 		return "\n" + configHintStyle.Render(c.fitHints(hints)) + "\n"
 	}
+	if c.selectedUsageRow() {
+		// A Usage row (quota agent, per-account evidence, or the empty-accounts
+		// row) takes the cursor so the window can scroll the section into view,
+		// but nothing on it opens: selectedEntry returns nil, so `↵ edit` and
+		// `e explain` are no-ops there (#7047). List only what works — move,
+		// the advanced toggle, the assistant, and the exit — so the footer is
+		// not advertising verbs the row refuses.
+		advanced := "a show advanced"
+		if c.showAdvanced {
+			advanced = "a hide advanced"
+		}
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↑/↓ move", drop: 2},
+			{text: advanced, drop: 1},
+			{text: "C assistant", drop: 3},
+			{text: "esc close"},
+		})) + "\n"
+	}
 	advanced := "a show advanced"
 	if c.showAdvanced {
 		advanced = "a hide advanced"
