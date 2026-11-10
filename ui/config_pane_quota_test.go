@@ -190,7 +190,7 @@ func registerQuotaPane(t *testing.T, agents []string, quota []QuotaRow) *ConfigP
 	}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(nil, agents, nil)
 	if quota != nil {
-		pane.SetQuota(quota, nil, "", nil)
+		pane.SetQuota(quota, nil, nil, "", nil)
 	}
 	pane.SetFocus(true)
 	return pane
