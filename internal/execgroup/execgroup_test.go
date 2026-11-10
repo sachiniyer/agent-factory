@@ -138,9 +138,13 @@ func startGroupHolders(t *testing.T, ctx context.Context, script string) groupHo
 // group provably still exists — before the leader is waited, or while a
 // member still holds the pipe — so the pgid cannot have been reused by now.
 // It sends the one plain kill a test can vouch for, not the code under test.
+// darwin answers EPERM, not ESRCH, for a group holding only zombies (#7072),
+// and a test's own group holds no process it may not signal, so EPERM means
+// the same as ESRCH here.
 func killOwnGroup(t *testing.T, pgid int) {
 	t.Helper()
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
+	err := syscall.Kill(-pgid, syscall.SIGKILL)
+	if err != nil && !errors.Is(err, syscall.ESRCH) && !errors.Is(err, syscall.EPERM) {
 		t.Errorf("cleanup kill of the test's own group %d: %v", pgid, err)
 	}
 }

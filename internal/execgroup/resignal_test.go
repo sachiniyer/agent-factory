@@ -15,8 +15,11 @@ import (
 // never sent.
 const fakePgid = 4242
 
-func live(pid int) groupMember   { return groupMember{pid: pid} }
-func zombie(pid int) groupMember { return groupMember{pid: pid, zombie: true} }
+func live(pid int) groupMember { return groupMember{pid: pid} }
+
+// zombie is a member that has exited. XNU never clears P_LEXIT, so a zombie
+// reads as exiting too.
+func zombie(pid int) groupMember { return groupMember{pid: pid, zombie: true, exiting: true} }
 
 // script answers each read with the next scripted listing and fails the test
 // if resignal reads past the end.
