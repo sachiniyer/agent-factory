@@ -105,6 +105,23 @@ func TestKillGroupMapsEPERMFromAnExitingMemberToProcessDone(t *testing.T) {
 	}
 }
 
+// An exiting member can still finish a fork its other thread was making, so
+// the group that had nobody to signal is swept like any other: the sweep
+// kills the child that shows up.
+func TestKillGroupSweepsAGroupThatHadNobodyToSignal(t *testing.T) {
+	f := &fakeGroup{t: t, kills: []error{syscall.EPERM}, reads: [][]groupMember{
+		{exiting(fakePgid)},
+		{zombie(fakePgid), live(9)},
+		{zombie(fakePgid), zombie(9)},
+	}}
+	if err := f.run(); !errors.Is(err, os.ErrProcessDone) {
+		t.Fatalf("killGroup of a group with nobody to signal = %v, want os.ErrProcessDone", err)
+	}
+	if n := f.killCount(); n != 2 {
+		t.Fatalf("killGroup sent %d kills, want 2: the first, and the sweep's kill of the new child", n)
+	}
+}
+
 // A live member that is not exiting is one the kill could not signal, such
 // as a setuid child. That EPERM is real, and Cancel must report it.
 func TestKillGroupKeepsTheEPERMOfAMemberThatRefusedTheSignal(t *testing.T) {

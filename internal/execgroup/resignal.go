@@ -1,20 +1,26 @@
 package execgroup
 
 import (
+	"errors"
+	"os"
+	"sync"
 	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
-// This file is the sweep killGroup runs after its first kill wherever
-// readGroup is defined (darwin). It carries no build tag, so every platform's
-// CI tests its logic through an injected read and kill.
+// This file is what killGroup does after its first kill wherever readGroup
+// is defined (darwin): sweep the group, and decide what an EPERM from that
+// kill means. It carries no build tag, so every platform's CI tests its
+// logic through an injected read and kill.
 
-// resignalBound caps, in wall-clock time, how long killGroup waits for the
-// sweep. A SIGKILLed process is normally a zombie within milliseconds, so
-// the bound matters only when something does not end: a member stuck in an
-// uninterruptible wait, or a membership read that blocks (see sweep).
-// Without it, Cancel would hold os/exec's Wait for as long as that lasts,
-// and WaitDelay's timer does not start until Cancel returns.
+// resignalBound caps, in wall-clock time, how long killGroup spends after
+// its first kill. A SIGKILLed process is normally a zombie within
+// milliseconds, so the bound matters only when something does not end: a
+// member stuck in an uninterruptible wait, or a membership read that blocks
+// (see sweep). Without it, Cancel would hold os/exec's Wait for as long as
+// that lasts, and WaitDelay's timer does not start until Cancel returns.
 const resignalBound = 2 * time.Second
 
 // The pause after each re-signal starts at resignalPollMin and doubles up to
@@ -41,8 +47,84 @@ type groupReader func(pgid int) ([]groupMember, error)
 // signaller sends a signal the way syscall.Kill does.
 type signaller func(pid int, sig syscall.Signal) error
 
-// sweep runs resignal on its own goroutine and waits for it for at most
-// bound, so killGroup returns within bound whatever a read does.
+// afterEPERM decides what an EPERM from killGroup's first kill means where
+// readGroup is defined (darwin). killpg answers EPERM there both when a
+// member refused the signal and when it found no member it could signal at
+// all, because every member was a zombie or already exiting (#7072).
+//
+// One read of the group tells those apart. A member that is neither a
+// zombie nor exiting either refused the signal (a setuid child, say) or was
+// created after the kill, which killpg skips while a child is still being
+// created. A second kill decides between the two. It succeeds on a new
+// child, and the sweep then runs as after any kill that landed. EPERM again
+// is a real refusal, and afterEPERM returns it. ESRCH means the group is
+// gone. A group of only zombies and exiting members had nobody to signal,
+// so there is nothing left to kill. afterEPERM sweeps it anyway, which waits
+// out the exiting members and catches anything one of them was still
+// forking, and returns os.ErrProcessDone.
+//
+// The exiting flag can be trusted for this. XNU sets P_LEXIT, which
+// kern.proc reports as P_WEXIT, before P_REF_DEAD, the mark that makes
+// proc_find refuse a process, and never clears it. So every member that
+// killpg skipped for exiting reads as exiting, or is left out of the read
+// entirely.
+//
+// A read that fails, or is still blocked at the deadline, proves nothing,
+// and the EPERM stands.
+func afterEPERM(pgid int, kill signaller, read groupReader, deadline time.Time, eperm error) error {
+	members, err := readBy(pgid, read, deadline)
+	if err != nil {
+		return eperm
+	}
+	for _, m := range members {
+		if m.zombie || m.exiting {
+			continue
+		}
+		switch err := kill(-pgid, syscall.SIGKILL); {
+		case err == nil:
+			sweep(pgid, read, kill, deadline)
+			return nil
+		case errors.Is(err, syscall.ESRCH):
+			return os.ErrProcessDone
+		default:
+			return err
+		}
+	}
+	sweep(pgid, read, kill, deadline)
+	return os.ErrProcessDone
+}
+
+// errReadTimedOut is readBy's answer for a read still blocked at its
+// deadline.
+var errReadTimedOut = errors.New("execgroup: the membership read was still blocked at its deadline")
+
+// readBy reads the group on its own goroutine and waits for the answer
+// until deadline, for the reason sweep gives: a read can block.
+func readBy(pgid int, read groupReader, deadline time.Time) ([]groupMember, error) {
+	type answer struct {
+		members []groupMember
+		err     error
+	}
+	done := make(chan answer, 1)
+	go func() {
+		members, err := read(pgid)
+		if err != nil {
+			noteReadFailure(pgid, err)
+		}
+		done <- answer{members, err}
+	}()
+	timer := time.NewTimer(time.Until(deadline))
+	defer timer.Stop()
+	select {
+	case a := <-done:
+		return a.members, a.err
+	case <-timer.C:
+		return nil, errReadTimedOut
+	}
+}
+
+// sweep runs resignal on its own goroutine and waits for it until deadline,
+// so killGroup returns by then whatever a read does.
 //
 // A read can block. XNU's kern.proc.pgrp waits, with no timeout and no
 // interruption, for any member that is part-way through an exec
@@ -52,14 +134,13 @@ type signaller func(pid int, sig syscall.Signal) error
 // and then returns without signalling, because by then its deadline has
 // passed. That costs one parked goroutine per stuck group, where waiting
 // would cost a hung Cancel and Wait.
-func sweep(pgid int, read groupReader, kill signaller, bound time.Duration) {
-	deadline := time.Now().Add(bound)
+func sweep(pgid int, read groupReader, kill signaller, deadline time.Time) {
 	done := make(chan struct{})
 	go func() {
 		defer close(done)
 		resignal(pgid, read, kill, deadline)
 	}()
-	timer := time.NewTimer(bound)
+	timer := time.NewTimer(time.Until(deadline))
 	defer timer.Stop()
 	select {
 	case <-done:
@@ -68,10 +149,11 @@ func sweep(pgid int, read groupReader, kill signaller, bound time.Duration) {
 }
 
 // resignal re-sends SIGKILL to the group pgid leads until two consecutive
-// reads prove that no member is alive and none can still be forking.
+// reads find no live member. That rule narrows the fork race. It does not
+// rule it out.
 //
-// One read is not that proof. kern.proc.pgrp is not a snapshot: XNU lists
-// the group's pids under a lock, skipping a process that is still being
+// One quiet read is plainly not enough. kern.proc.pgrp is not a snapshot:
+// XNU lists the group's pids under a lock, skipping a process still being
 // created, and only afterwards reads each listed member's state. One read
 // can list a parent P that is forking, miss its child C, and then read P
 // after P has finished the fork and died. That read finds no live member
@@ -80,14 +162,23 @@ func sweep(pgid int, read groupReader, kill signaller, bound time.Duration) {
 // So the loop stops only when a read finds no live member and lists no pid
 // that the read before it did not, and that earlier read also found no live
 // member. The second read follows the first at once, with no pause and no
-// signal in between. Suppose a member X were alive after the second read.
-// That read saw every process it listed dead, so it did not list X: X was
-// still being created when it took its list, or was created later. Follow
-// X's forks back to the first process in that line that was alive and fully
-// created at that moment. The second read listed that process and saw it
-// dead. Since the second read lists no new pid, the first read listed it as
-// well, and saw it dead before the second read began. A process dead then
-// was not alive at that later moment, so no such X exists.
+// signal in between, so an escaped C is normally listed, alive, by the
+// second. Normally, not always. A pid reaped between a read's locked listing
+// and its state read is silently left out of that read's report. An orphan
+// is reaped inside its own exit, so it can go from alive to absent without
+// ever showing as a zombie. So an escaped orphan that forks and exits at
+// once (a double fork, "( holder & )"), with the reading thread stalled at
+// the wrong moment in both reads, leaves both reports quiet while its
+// unsignalled child holds the pipe. More quiet reads only lengthen the fork
+// chain that takes, and never close it. Closing it takes a locked pid
+// listing (proc_listpids) reported apart from the state reads, so that a
+// pid reaped in between shows as gone rather than vanishing (#7072).
+//
+// Measured on macos-15 (#7069): before this sweep, one group kill missed a
+// mid-fork child in about half the trials that had a fork in flight. With
+// this rule, 0 of 300 forkingGroup trials did. A rule that stopped on a
+// single quiet read held 0 of 525 across two probe runs, so even the stale
+// read above, plain in XNU's source, is too rare to have shown up there.
 //
 // Each re-signal can reach a group that is not ours. A read cannot tell our
 // group N from a later group that reused N, so a reuse anywhere between one
@@ -111,7 +202,11 @@ func resignal(pgid int, read groupReader, kill signaller, deadline time.Time) {
 	leaderGone := false
 	for {
 		members, err := read(pgid)
-		if err != nil || !time.Now().Before(deadline) {
+		if err != nil {
+			noteReadFailure(pgid, err)
+			return
+		}
+		if !time.Now().Before(deadline) {
 			return
 		}
 		live, leaderLive := false, false
@@ -141,8 +236,25 @@ func resignal(pgid int, read groupReader, kill signaller, deadline time.Time) {
 		prev = nil
 		_ = kill(-pgid, syscall.SIGKILL)
 		time.Sleep(pause)
-		pause = min(2*pause, resignalPollMax)
+		pause = nextPause(pause)
 	}
+}
+
+// nextPause doubles a pause, up to resignalPollMax.
+func nextPause(pause time.Duration) time.Duration {
+	return min(2*pause, resignalPollMax)
+}
+
+// readFailureNoted makes noteReadFailure log once per process.
+var readFailureNoted sync.Once
+
+// noteReadFailure logs the first membership read that fails. Without the
+// read, killGroup has only its first kill to go on: the sweep stops, and an
+// EPERM stands. Neither shows anywhere else.
+func noteReadFailure(pgid int, err error) {
+	readFailureNoted.Do(func() {
+		log.WarningLog.Printf("execgroup: reading process group %d failed, so its kill went ahead without the follow-up that read drives (logged once): %v", pgid, err)
+	})
 }
 
 // subset reports whether every pid in a is also in b.

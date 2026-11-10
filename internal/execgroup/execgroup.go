@@ -106,9 +106,21 @@ func Reap(cmd *exec.Cmd) {
 // an orphan, still in the group and still holding every pipe it inherited.
 //
 // So, where readGroup is defined, killGroup goes on to sweep the group
-// (resignal.go). It returns within resignalBound whatever the sweep does.
-// Where readGroup is nil, the kernel gives the guarantee itself, and the
-// first kill is all there is.
+// (resignal.go). Where readGroup is nil, the kernel gives the guarantee
+// itself, and the first kill is all there is.
+//
+// darwin's killpg also answers EPERM, not ESRCH, when it found no member it
+// could signal: its walk skips zombies, and proc_find refuses a member that
+// is exiting. killpg1 returns "posix ? EPERM : ESRCH" for that, and
+// libsyscall's kill passes posix=1. So a group holding only its exited
+// leader, as when a deadline races a command that finished on its own,
+// used to make Cancel fail with "operation not permitted" (#7072).
+// afterEPERM tells that case apart from a member that refused the signal.
+// Linux's kill of a group of zombies succeeds, so there EPERM is always a
+// refusal and is returned as it is.
+//
+// Everything after the first kill finishes within resignalBound, whatever a
+// membership read does.
 func killGroup(pgid int) error {
 	return killGroupWith(pgid, syscall.Kill, readGroup, resignalBound)
 }
@@ -116,14 +128,18 @@ func killGroup(pgid int) error {
 // killGroupWith is killGroup with its kill, membership read and bound
 // injected, so every platform's CI can test the darwin path.
 func killGroupWith(pgid int, kill signaller, read groupReader, bound time.Duration) error {
-	if err := kill(-pgid, syscall.SIGKILL); err != nil {
-		if errors.Is(err, syscall.ESRCH) {
-			return os.ErrProcessDone
-		}
+	deadline := time.Now().Add(bound)
+	err := kill(-pgid, syscall.SIGKILL)
+	switch {
+	case errors.Is(err, syscall.ESRCH):
+		return os.ErrProcessDone
+	case read == nil:
+		return err
+	case errors.Is(err, syscall.EPERM):
+		return afterEPERM(pgid, kill, read, deadline, err)
+	case err != nil:
 		return err
 	}
-	if read != nil {
-		sweep(pgid, read, kill, bound)
-	}
+	sweep(pgid, read, kill, deadline)
 	return nil
 }
