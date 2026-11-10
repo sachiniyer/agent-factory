@@ -15,8 +15,11 @@ import (
 // never sent.
 const fakePgid = 4242
 
-func live(pid int) groupMember   { return groupMember{pid: pid} }
-func zombie(pid int) groupMember { return groupMember{pid: pid, zombie: true} }
+func live(pid int) groupMember { return groupMember{pid: pid} }
+
+// zombie is a member that has exited. XNU never clears P_LEXIT, so a zombie
+// reads as exiting too.
+func zombie(pid int) groupMember { return groupMember{pid: pid, zombie: true, exiting: true} }
 
 // script answers each read with the next scripted listing and fails the test
 // if resignal reads past the end.
@@ -171,6 +174,22 @@ func TestResignalBacksOff(t *testing.T) {
 	}
 }
 
+// The pause doubles from resignalPollMin and holds at resignalPollMax.
+func TestNextPauseDoublesUpToTheCap(t *testing.T) {
+	want := []time.Duration{
+		1 * time.Millisecond, 2 * time.Millisecond, 4 * time.Millisecond,
+		8 * time.Millisecond, 16 * time.Millisecond, 32 * time.Millisecond,
+		50 * time.Millisecond, 50 * time.Millisecond,
+	}
+	pause := resignalPollMin
+	for i, w := range want {
+		if pause != w {
+			t.Fatalf("pause %d = %v, want %v (all: %v)", i, pause, w, want)
+		}
+		pause = nextPause(pause)
+	}
+}
+
 // sweepSlack is how far past its bound sweep may return on a loaded runner.
 const sweepSlack = 500 * time.Millisecond
 
@@ -198,7 +217,7 @@ func TestSweepReturnsWithinItsBoundWhenAReadBlocks(t *testing.T) {
 	}
 
 	start := time.Now()
-	sweep(fakePgid, read, kill, bound)
+	sweep(fakePgid, read, kill, time.Now().Add(bound))
 	took := time.Since(start)
 	if took < bound || took > bound+sweepSlack {
 		close(release)
@@ -226,7 +245,7 @@ func TestSweepReturnsAsSoonAsTheGroupIsDead(t *testing.T) {
 		return nil
 	}
 	start := time.Now()
-	sweep(fakePgid, quiet, noKill, time.Minute)
+	sweep(fakePgid, quiet, noKill, time.Now().Add(time.Minute))
 	if took := time.Since(start); took > sweepSlack {
 		t.Fatalf("sweep of a dead group took %v, want it to return at once", took)
 	}

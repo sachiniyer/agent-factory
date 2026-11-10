@@ -10,11 +10,12 @@ import (
 	"time"
 )
 
-// readGroup must report a running leader as live, the same leader as a
-// zombie once it is killed but not yet waited, and nothing once Wait has
-// reaped it. The zombie row matters. kern.proc.pgrp keeps a zombie in its
-// group until its parent reaps it, which may be long after Cancel ran. If
-// that row read as live, every such sweep would run to its bound.
+// readGroup must report a running leader as live and not exiting, the same
+// leader as a zombie once it is killed but not yet waited (still flagged
+// exiting: XNU never clears P_LEXIT), and nothing once Wait has reaped it.
+// The zombie row matters. kern.proc.pgrp keeps a zombie in its group until
+// its parent reaps it, which may be long after Cancel ran. If that row read
+// as live, every such sweep would run to its bound.
 func TestReadGroupSeesTheLeaderLiveThenZombieThenGone(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
