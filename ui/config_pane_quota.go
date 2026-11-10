@@ -264,6 +264,46 @@ func (c *ConfigPane) renderQuotaAccountsEmpty(i int) string {
 	return c.fitPaneLine(b.String())
 }
 
+// renderQuotaAccountsEnd draws the per-account evidence section's trailing
+// mover line and closing footnote (#6776), matching the CLI's
+// RenderAccountSection. Selectable so the cursor can land on it: selection is
+// the list's only scroll driver, so a non-selectable end row leaves the mover
+// status (including a recorded halt) and the explanatory footer permanently
+// behind the "↓ more" cue when the section is taller than the pane — window()
+// pins scrollTop to selStart for an over-tall span, which the previous selEnd
+// extension ran into. The cursor marks the mover line when present, else the
+// footnote's first line; continuation lines keep the wrapped indent, exactly
+// as a parked-agent row's detail rides under its cursor line.
+func (c *ConfigPane) renderQuotaAccountsEnd(i int) string {
+	selected := i == c.selectedIdx
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	style := configHintStyle
+	if selected {
+		style = configSelectedStyle
+	}
+	var blocks []string
+	if c.quota.mover != "" {
+		blocks = append(blocks, "mover: "+c.quota.mover)
+	}
+	blocks = append(blocks, quotaAccountsFootNote)
+	var b strings.Builder
+	for idx, text := range blocks {
+		block := c.wrapIndented(text, style)
+		if idx == 0 {
+			// Replace the first wrapped line's indent with the cursor so the
+			// selected end row reads like other selectable rows; the cursor is
+			// plain (or accent-styled via SelectionMarker), the styled content
+			// follows it — the same split renderQuotaAccountsEmpty uses.
+			block = cursor + strings.TrimPrefix(block, "    ")
+		}
+		b.WriteString(block)
+	}
+	return b.String()
+}
+
 // renderQuotaUnavailable is the section's failure body — the reason the read
 // failed plus what to do, never a bare red line.
 func (c *ConfigPane) renderQuotaUnavailable() string {
