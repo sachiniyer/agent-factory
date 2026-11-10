@@ -26,9 +26,12 @@ const (
 )
 
 // groupMember is one process that a membership read found in the group.
+// exiting is set from the moment the process starts to exit (XNU's P_LEXIT,
+// reported as P_WEXIT), so it is also set on a zombie.
 type groupMember struct {
-	pid    int
-	zombie bool
+	pid     int
+	zombie  bool
+	exiting bool
 }
 
 // groupReader lists the processes in the group that pgid leads, zombies

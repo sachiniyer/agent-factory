@@ -39,6 +39,7 @@ import (
 	"os"
 	"os/exec"
 	"syscall"
+	"time"
 )
 
 // Lead puts cmd in its own process group (SysProcAttr.Setpgid) and installs
@@ -109,14 +110,20 @@ func Reap(cmd *exec.Cmd) {
 // Where readGroup is nil, the kernel gives the guarantee itself, and the
 // first kill is all there is.
 func killGroup(pgid int) error {
-	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+	return killGroupWith(pgid, syscall.Kill, readGroup, resignalBound)
+}
+
+// killGroupWith is killGroup with its kill, membership read and bound
+// injected, so every platform's CI can test the darwin path.
+func killGroupWith(pgid int, kill signaller, read groupReader, bound time.Duration) error {
+	if err := kill(-pgid, syscall.SIGKILL); err != nil {
 		if errors.Is(err, syscall.ESRCH) {
 			return os.ErrProcessDone
 		}
 		return err
 	}
-	if readGroup != nil {
-		sweep(pgid, readGroup, syscall.Kill, resignalBound)
+	if read != nil {
+		sweep(pgid, read, kill, bound)
 	}
 	return nil
 }
