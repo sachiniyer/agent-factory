@@ -53,7 +53,9 @@ func Lead(cmd *exec.Cmd) {
 
 // KillOnCancel installs on cmd the Cancel that SIGKILLs the process GROUP led
 // by the child — the negative pid reaches every member, not just the direct
-// process exec.CommandContext kills by default. A group already gone (ESRCH)
+// process exec.CommandContext kills by default. On darwin it also re-signals
+// until no member is alive, which reaches a child the group was forking when
+// the kill landed (see killGroup). A group already gone (ESRCH)
 // maps to os.ErrProcessDone, which Wait ignores rather than reporting as a
 // command failure. A nil Process — a command that never started — is a
 // no-op.
@@ -69,13 +71,7 @@ func KillOnCancel(cmd *exec.Cmd) {
 		if cmd.Process == nil {
 			return nil
 		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
+		return killGroup(cmd.Process.Pid)
 	}
 }
 
@@ -84,9 +80,43 @@ func KillOnCancel(cmd *exec.Cmd) {
 // completion included. The group is led by the already-exited child, so the
 // signal is ESRCH (ignored) in the common case; a nil Process means the
 // command never started and there is nothing to reap. Like KillOnCancel, it
-// reaches only a group that cmd's child leads.
+// reaches only a group that cmd's child leads, and on darwin it re-signals
+// the same way.
 func Reap(cmd *exec.Cmd) {
 	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
+		_ = killGroup(cmd.Process.Pid)
 	}
+}
+
+// killGroup SIGKILLs every process in the group that pgid leads, including
+// a child the group is forking at that instant. A group already gone (ESRCH)
+// maps to os.ErrProcessDone.
+//
+// One kill(-pgid) is enough on Linux, whose fork is atomic against a group
+// signal: "Process group and session signals need to be delivered to just
+// the parent before the fork or both the parent and the child after the
+// fork" (kernel/fork.c, copy_process). XNU gives no such guarantee. A child
+// joins its parent's group while it is still being created, and killpg's
+// walk of the group skips a process that is still being created
+// (pgrp_iterate's proc_find refuses one still marked P_REF_NEW). On
+// macos-15, a kill(-pgid, SIGKILL) that landed while a member was forking
+// missed the new child in about half the trials, and never on Linux
+// (#7066). The parent died on its way out of fork, and the child ran on as
+// an orphan, still in the group and still holding every pipe it inherited.
+//
+// So, where readGroup is defined, killGroup goes on to sweep the group
+// (resignal.go). It returns within resignalBound whatever the sweep does.
+// Where readGroup is nil, the kernel gives the guarantee itself, and the
+// first kill is all there is.
+func killGroup(pgid int) error {
+	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil {
+		if errors.Is(err, syscall.ESRCH) {
+			return os.ErrProcessDone
+		}
+		return err
+	}
+	if readGroup != nil {
+		sweep(pgid, readGroup, syscall.Kill, resignalBound)
+	}
+	return nil
 }

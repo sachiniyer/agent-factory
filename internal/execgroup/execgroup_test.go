@@ -60,7 +60,9 @@ func TestNilProcessIsNoOp(t *testing.T) {
 const killBound = 10 * time.Second
 
 // holderLife is how long every process a test starts would live on its own.
-// Only a working kill ends them inside killBound.
+// Only a working kill ends them inside killBound. forkingGroup's loops do
+// not end on their own, so its watchdog ends them after holderLife, and what
+// they forked ends holderLife after that.
 const holderLife = "60"
 
 // groupHolders is a command whose whole process group shares one pipe.
@@ -125,20 +127,34 @@ func startGroupHolders(t *testing.T, ctx context.Context, script string) groupHo
 		t.Fatalf("script %q exited before it printed ready", script)
 	case <-time.After(killBound):
 		// Not yet waited, so the leader's pid still names this test's group.
-		killGroup(t, h.pgid)
+		killOwnGroup(t, h.pgid)
 		_ = cmd.Wait()
 		t.Fatalf("script %q did not print ready within %v", script, killBound)
 	}
 	return h
 }
 
-// killGroup SIGKILLs the group the test started. Call it only while the group
-// provably still exists — before the leader is waited, or while a member
-// still holds the pipe — so the pgid cannot have been reused by now.
-func killGroup(t *testing.T, pgid int) {
+// killOwnGroup SIGKILLs the group the test started. Call it only while the
+// group provably still exists — before the leader is waited, or while a
+// member still holds the pipe — so the pgid cannot have been reused by now.
+// It sends the one plain kill a test can vouch for, not the code under test.
+func killOwnGroup(t *testing.T, pgid int) {
 	t.Helper()
 	if err := syscall.Kill(-pgid, syscall.SIGKILL); err != nil && !errors.Is(err, syscall.ESRCH) {
 		t.Errorf("cleanup kill of the test's own group %d: %v", pgid, err)
+	}
+}
+
+// killHeldGroup kills the group of a leader that has already been waited,
+// when a member still holds the pipe. A member holding it keeps the group,
+// and so its pgid, alive. Once the pipe is released there is nothing left to
+// kill, and the pgid may already name someone else's group.
+func killHeldGroup(t *testing.T, h groupHolders) {
+	t.Helper()
+	select {
+	case <-h.eof:
+	default:
+		killOwnGroup(t, h.pgid)
 	}
 }
 
@@ -146,6 +162,11 @@ func killGroup(t *testing.T, pgid int) {
 // the child forked into its group dies with it. A Cancel that kills only
 // cmd.Process, or nothing at all, leaves the grandchild holding the pipe past
 // killBound.
+//
+// Where sh is bash (macOS), the shell forks the foreground sleep just after
+// it prints ready, so the cancel often lands mid-fork. On darwin a single
+// kill(-pgid) missed that child about half the time (#7066), which
+// TestCancelKillsAChildTheGroupIsForking pins down deliberately.
 func TestCancelKillsAGrandchildInTheGroup(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -156,8 +177,8 @@ func TestCancelKillsAGrandchildInTheGroup(t *testing.T) {
 	select {
 	case <-h.eof:
 	case <-time.After(killBound):
-		t.Errorf("a process in the group led by %d still holds the pipe %v after cancel: Cancel did not reach the grandchild", h.pgid, killBound)
-		killGroup(t, h.pgid)
+		t.Errorf("a process in the group led by %d still holds the pipe %v after cancel: Cancel did not reach every member of the group", h.pgid, killBound)
+		killOwnGroup(t, h.pgid)
 	}
 	_ = h.cmd.Wait()
 }
@@ -176,11 +197,12 @@ func TestReapKillsAStragglerHoldingThePipe(t *testing.T) {
 	select {
 	case err := <-waited:
 		if err != nil {
+			killHeldGroup(t, h)
 			t.Fatalf("the leader should exit 0 on its own: %v", err)
 		}
 	case <-time.After(killBound):
 		// Still unwaited, so the leader's pid still names this test's group.
-		killGroup(t, h.pgid)
+		killOwnGroup(t, h.pgid)
 		<-waited
 		t.Fatalf("the leader did not exit within %v", killBound)
 	}
@@ -196,6 +218,91 @@ func TestReapKillsAStragglerHoldingThePipe(t *testing.T) {
 	case <-time.After(killBound):
 		t.Errorf("the straggler in the group led by %d still holds the pipe %v after Reap", h.pgid, killBound)
 		// The straggler is alive, so the group and its pgid are still ours.
-		killGroup(t, h.pgid)
+		killOwnGroup(t, h.pgid)
+	}
+}
+
+// forkingGroup is a script whose group is always forking: four background
+// loops, each forking a pipe holder and killing it again. A group kill lands
+// mid-fork in most trials. That is the instant at which XNU's kill(-pgid)
+// misses the new child, which then runs on in the group holding the pipe
+// (#7066).
+//
+// The loops never end on their own, and they run in their own group, which
+// Ctrl-C does not reach. So the script's first fork is a watchdog that
+// SIGKILLs the whole group (kill 0) after holderLife. An interrupted or
+// timed-out test binary then leaves nothing running for longer than that,
+// plus holderLife for a sleep the watchdog's own kill missed mid-fork.
+func forkingGroup(then string) string {
+	return "(sleep " + holderLife + "; kill -9 0) & " +
+		"for i in 1 2 3 4; do (while :; do sleep " + holderLife +
+		" & p=$!; kill $p; wait $p; done) & done; echo ready; " + then
+}
+
+// forkTrials is how many times each fork-race test repeats. On macos-15,
+// without killGroup's re-signal, a single group kill left a forkingGroup
+// child holding the pipe in 20 of 20 trials, and both fork-race tests failed
+// on their first trial (#7069's probe runs). The repeats cover a slower or
+// faster runner, where the race lands less often. A trial that passes costs
+// milliseconds.
+const forkTrials = 20
+
+// Cancel must reach a child the group is forking at the moment it lands.
+func TestCancelKillsAChildTheGroupIsForking(t *testing.T) {
+	for i := 0; i < forkTrials; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		h := startGroupHolders(t, ctx, forkingGroup("wait"))
+		cancel()
+		select {
+		case <-h.eof:
+		case <-time.After(killBound):
+			t.Errorf("trial %d: a process in the group led by %d still holds the pipe %v after cancel: Cancel missed a child the group was forking", i, h.pgid, killBound)
+			killOwnGroup(t, h.pgid)
+		}
+		_ = h.cmd.Wait()
+		if t.Failed() {
+			return
+		}
+	}
+}
+
+// Reap must reach a child that a straggler is forking at the moment it lands.
+func TestReapKillsAChildAStragglerIsForking(t *testing.T) {
+	for i := 0; i < forkTrials; i++ {
+		ctx, cancel := context.WithCancel(context.Background())
+		h := startGroupHolders(t, ctx, forkingGroup("exit 0"))
+		waited := make(chan error, 1)
+		go func() { waited <- h.cmd.Wait() }()
+		select {
+		case err := <-waited:
+			if err != nil {
+				killHeldGroup(t, h)
+				cancel()
+				t.Fatalf("trial %d: the leader should exit 0 on its own: %v", i, err)
+			}
+		case <-time.After(killBound):
+			killOwnGroup(t, h.pgid)
+			<-waited
+			cancel()
+			t.Fatalf("trial %d: the leader did not exit within %v", i, killBound)
+		}
+		select {
+		case <-h.eof:
+			cancel()
+			t.Fatalf("trial %d: the stragglers released the pipe before Reap ran, so this test proves nothing", i)
+		default:
+		}
+		Reap(h.cmd)
+		select {
+		case <-h.eof:
+		case <-time.After(killBound):
+			t.Errorf("trial %d: a process in the group led by %d still holds the pipe %v after Reap: Reap missed a child a straggler was forking", i, h.pgid, killBound)
+			// A member holds the pipe, so the group and its pgid are still ours.
+			killOwnGroup(t, h.pgid)
+		}
+		cancel()
+		if t.Failed() {
+			return
+		}
 	}
 }
