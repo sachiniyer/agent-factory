@@ -250,7 +250,11 @@ func changedFields(before, after Task) []string {
 //     and the surface-parity inventory, which already declared them "never a client
 //     input"). scheduleReference prefers a nonzero LastRunAt over CreatedAt, so a
 //     forged future run time suppresses detection the same way — a task that has
-//     never run claiming it just did.
+//     never run claiming it just did. LastRunID / LastRunStartedAt key the run that
+//     status describes (RecordRunStatus).
+//   - LastRunTarget: the session a delivery's verdict was stamped against (#6590).
+//     A restarted daemon re-arms an unproven send's re-verification on it, so a
+//     forged title could credit another session's turn to this task (#7059).
 //   - DroppedEvents: watcher-owned delivery history. A forged value would claim
 //     af discarded source events that it never observed.
 //   - SandboxOwner: daemon-stamped provenance (#5571 W3.5). A client-supplied
@@ -259,12 +263,15 @@ func changedFields(before, after Task) []string {
 //     every delivery is re-authorized against the stored owner. AddTaskChecked
 //     re-stamps the field from its sandboxOwner parameter after this reset, so
 //     only the daemon's credential can supply it.
+//   - RepoID: resolved by the daemon at bind time (Task.RepoID). AddTaskChecked
+//     re-derives it from ProjectPath after this reset.
 //   - CreatedAt: the fallback reference for a task that has never run. Absent, no
 //     verdict can be derived at all and the task reports healthy forever; dated in
 //     the future, detection is off until then.
 //
 // So the rule is stated once, positively: a create supplies the task's DEFINITION,
-// and the store supplies its history. The creation stamp is clamped rather than
+// and the store supplies its history. TestTaskFieldsAreClassifiedForCreate holds
+// every Task field to one side of that line, so a new field cannot skip it. The creation stamp is clamped rather than
 // rejected because no client agrees with this clock to the second — a remote
 // --daemon-url caller stamps its own — and refusing an add over a second of skew
 // is a worse bargain than correcting a value that is never legitimately in the
@@ -278,9 +285,11 @@ func (t *Task) resetStoreOwnedFields(now time.Time) {
 	t.Audit = nil
 	t.LastRunAt = nil
 	t.LastRunStatus = ""
+	t.LastRunTarget = ""
 	t.LastRunID, t.LastRunStartedAt = "", nil
 	t.DroppedEvents = 0
 	t.SandboxOwner = ""
+	t.RepoID = ""
 	if t.CreatedAt.IsZero() || t.CreatedAt.After(now) {
 		t.CreatedAt = now
 	}
