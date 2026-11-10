@@ -44,7 +44,7 @@ monitor scanout. The observer and driver add overhead; comparisons keep it fixed
 
 | Metric | Start → observable completion |
 | --- | --- |
-| raw/gzip bytes | Sum of every shipped JS and CSS file under `web/dist`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
+| raw/gzip bytes | Sum of every shipped JS, CSS and HTML file under `web/dist`; each file gzip level 9 independently, excluding maps and images; recomputed three times |
 | first terminal | Navigation time origin → first nonblank PTY glyph painted; select `add-json-export` as soon as the 1,000-row rail is available |
 | keystroke echo | Browser keydown → that previously absent ASCII character appears in the terminal DOM and crosses a paint opportunity; actual PTY echo, no mocked socket |
 | rail render | First Snapshot JSON decoded → all 1,000 rail rows present and a paint opportunity; includes row construction, layout and scheduling, excludes HTTP transfer |
