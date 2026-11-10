@@ -2487,7 +2487,7 @@ const quotaRefetcher = createFencedRefetcher({
   fetch: quotaReport,
   commit: (resp) => {
     store.set({
-      quota: { agents: resp.agents, warnings: resp.warnings ?? [], mover: resp.mover ?? "", error: "", loaded: true },
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], accounts: resp.accounts ?? [], mover: resp.mover ?? "", error: "", loaded: true },
     });
   },
   onError: (err: unknown) => {

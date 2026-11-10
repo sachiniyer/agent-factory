@@ -843,6 +843,27 @@ export interface QuotaAgentRow {
   detail: string;
 }
 
+/** One per-account evidence row of the QuotaReport (quota/accounts.go:
+ *  RenderedAccount) — the wire shape the daemon's QuotaReport serves, so the
+ *  TUI, the web, and a remote `af quota` all show the daemon's own words
+ *  rather than re-deriving the vocabulary. Field names match the Go struct's
+ *  JSON tags exactly so this decodes the daemon projection as-is. */
+export interface RenderedAccount {
+  /** The agent the account belongs to ("codex" today; codex-only until
+   *  another agent's equivalent rollout record is proven). */
+  agent: string;
+  /** The account name as registered under the af home. */
+  name: string;
+  /** The observed-evidence verdict ("observed", "unknown", "no evidence"). */
+  observed: string;
+  /** The rendered window list ("primary 42%, secondary 4%"), or "—" when
+   *  there is nothing to show. Never blank. */
+  windows: string;
+  /** The row's sentence — when the newest claim was recorded, or why the
+   *  verdict is not "observed". */
+  detail: string;
+}
+
 /** QuotaReportResponse (daemon/control_types_quota.go). */
 export interface QuotaReportResponse {
   agents: QuotaAgentRow[];
@@ -850,6 +871,13 @@ export interface QuotaReportResponse {
    *  Shown when present — an incomplete report that hides them reads as
    *  authoritative. */
   warnings?: string[];
+  /** The per-account evidence section — what af recorded in each registered
+   *  account's own rollout files (#6776). Absent (omitempty) under the
+   *  absent-[account_handoff] condition, when no handoff machinery ever ran
+   *  here: that shape is no section at all. The web mirrors it (optional, like
+   *  the Go `omitempty`) and renders the section whenever the daemon serves
+   *  it, matching `af quota`'s ACCOUNTS block. */
+  accounts?: RenderedAccount[];
   /** The rendered mover line — the configured auto-handoff mode plus any
    *  recorded halt (R16: a halted mover is never silent). Absent under the
    *  absent-table condition, when no handoff machinery ever ran here. */

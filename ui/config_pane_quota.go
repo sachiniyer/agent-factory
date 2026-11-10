@@ -20,6 +20,31 @@ const (
 	quotaHeadingNote = "What af can honestly say about each agent's quota — read on every open. " +
 		"Quota is what the provider reports (today \"not reported\" everywhere); observed is what af's own sessions show. " +
 		"af quota prints the same report."
+	// quotaAccountsHeading is the per-account evidence sub-section's label,
+	// rendered after the agent table (#6776). It reads "Account evidence" —
+	// distinct from the agent-identity Accounts section's "Accounts" heading so
+	// an operator never sees two "Accounts" headings, and descriptive enough
+	// to signal the rows are per-account usage evidence (the daemon's own
+	// vocabulary, matching the CLI's "ACCOUNTS" block, which the closing note
+	// also names). It rides under the Usage section, never as a top-level pane
+	// heading.
+	quotaAccountsHeading = "Account evidence"
+	// quotaAccountColHeader is the column header the CLI's RenderAccountSection
+	// prints above the rows; the pane shows the same words so the reader can
+	// name each column without guessing.
+	quotaAccountColHeader = "ACCOUNT  OBSERVED  WINDOWS  DETAIL"
+	// quotaAccountsNoCodex is the empty-table line the CLI prints when the
+	// handoff machinery is engaged (so the section exists) but no codex account
+	// is registered to record windows for.
+	quotaAccountsNoCodex = "(no codex accounts registered)"
+	// quotaAccountsFootNote is the closing explanation the CLI's
+	// RenderAccountSection prints after the section, so the pane cannot
+	// disagree with `af quota` about what the ACCOUNTS block is.
+	quotaAccountsFootNote = "ACCOUNTS is what af recorded in each account's own rollout files — " +
+		"observed evidence, never a provider claim. It appears only when " +
+		"[account_handoff] mode is enabled (or its machinery left a state file), " +
+		"and is codex-only today: no other agent writes an equivalent record. " +
+		"mover: is the configured mode plus any halt the engine recorded."
 )
 
 // QuotaRow is one agent's line of the daemon's QuotaReport — the pane's own
@@ -37,16 +62,42 @@ type QuotaRow struct {
 	Detail  string
 }
 
+// QuotaAccountRow is one registered account's line of the per-account evidence
+// section (#6776) — the pane's own mirror of quota.RenderedAccount, like
+// QuotaRow mirrors the agent table. The words are rendered server-side; the
+// pane displays them, never re-derives them.
+type QuotaAccountRow struct {
+	// Agent is the agent the account belongs to ("codex" today).
+	Agent string
+	// Name is the account name as registered under the af home.
+	Name string
+	// Observed is the evidence verdict ("observed", "unknown", "no evidence").
+	Observed string
+	// Windows is the rendered window list ("primary 42%, secondary 4%") or
+	// "—" when there is nothing to show. Never blank.
+	Windows string
+	// Detail is the row's sentence — when the newest claim was recorded, or
+	// why the verdict is not "observed".
+	Detail string
+}
+
 // quotaSection mirrors accountsSection: the last fetched rows, the completeness
 // warnings, and the read's own failure state — an absent answer must render as
 // "af could not look", never as an empty section that reads as "all clear".
 type quotaSection struct {
 	rows     []QuotaRow
 	warnings []string
+	// accounts is the per-account evidence section the daemon served (#6776),
+	// the same rows `af quota`'s ACCOUNTS block prints. nil/empty under the
+	// absent-[account_handoff] condition, so the section never materializes
+	// for a home the feature never touched.
+	accounts []QuotaAccountRow
 	// mover is the served mover line — the configured auto-handoff mode
 	// plus any recorded halt (R16: a halted mover is never silent). Empty
 	// under the absent-table condition, so the line never materializes for
-	// a home the feature never touched.
+	// a home the feature never touched. It rides inside the accounts section
+	// (matching the CLI's RenderAccountSection) rather than under the Usage
+	// heading, so the web/TUI/CLI all show it in the same place.
 	mover       string
 	loaded      bool
 	loading     bool
@@ -56,12 +107,13 @@ type quotaSection struct {
 // SetQuota installs the daemon's report. A read failure becomes the section's
 // own message — the config view is still useful when usage cannot be read, and
 // an empty section would silently claim there is nothing parked.
-func (c *ConfigPane) SetQuota(rows []QuotaRow, warnings []string, mover string, err error) {
+func (c *ConfigPane) SetQuota(rows []QuotaRow, warnings []string, accounts []QuotaAccountRow, mover string, err error) {
 	c.quota.loading = false
 	c.quota.loaded = true
 	if err != nil {
 		c.quota.rows = nil
 		c.quota.warnings = nil
+		c.quota.accounts = nil
 		c.quota.mover = ""
 		c.quota.unavailable = err.Error()
 		c.rebuildRows()
@@ -69,6 +121,7 @@ func (c *ConfigPane) SetQuota(rows []QuotaRow, warnings []string, mover string, 
 	}
 	c.quota.rows = rows
 	c.quota.warnings = warnings
+	c.quota.accounts = accounts
 	c.quota.mover = mover
 	c.quota.unavailable = ""
 	c.rebuildRows()
@@ -95,6 +148,27 @@ func (c *ConfigPane) appendQuotaRows() {
 	for i := range c.quota.rows {
 		c.rows = append(c.rows, configRow{quota: &c.quota.rows[i]})
 	}
+	// Per-account evidence section (#6776): the accounts evidence and the
+	// mover line ride together after the agent table, exactly as the CLI's
+	// RenderAccountSection prints them. The section appears only when the
+	// daemon served accounts OR a mover line — the absent-table shape (neither)
+	// is no section at all, byte-identical to before the machinery existed.
+	if len(c.quota.accounts) == 0 && c.quota.mover == "" {
+		return
+	}
+	c.rows = append(c.rows, configRow{quotaAccountsHeading: true})
+	if len(c.quota.accounts) > 0 {
+		for i := range c.quota.accounts {
+			c.rows = append(c.rows, configRow{quotaAccount: &c.quota.accounts[i]})
+		}
+	} else {
+		// The empty-table line is its own selectable row so the cursor can
+		// reach the section (and reveal the mover line below it) even when no
+		// codex account is registered — the same reachability rule the agent
+		// rows already enforce.
+		c.rows = append(c.rows, configRow{quotaAccountsEmpty: true})
+	}
+	c.rows = append(c.rows, configRow{quotaAccountsEnd: true})
 }
 
 // renderQuotaRow draws one agent line: cursor, name, "quota · observed" on the
@@ -133,6 +207,55 @@ func (c *ConfigPane) renderQuotaRow(i int, row QuotaRow) string {
 	b.WriteString("\n")
 	b.WriteString(c.wrapIndented(row.Detail, configHintStyle))
 	return b.String()
+}
+
+// renderQuotaAccountRow draws one per-account evidence line (#6776): cursor,
+// "agent/name · observed · windows" on the row and the daemon's detail sentence
+// indented under it. Mirrors renderQuotaRow so a parked-account row reads the
+// same way a parked-agent row does — the detail (the recorded time or the
+// reason the verdict is not "observed") stays visible off-selection.
+func (c *ConfigPane) renderQuotaAccountRow(i int, row QuotaAccountRow) string {
+	var b strings.Builder
+	selected := i == c.selectedIdx
+
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	b.WriteString(cursor)
+
+	nameStyle := configKeyStyle
+	if selected {
+		nameStyle = configSelectedStyle
+	}
+	b.WriteString(nameStyle.Render(row.Agent + "/" + row.Name))
+	b.WriteString(configValueStyle.Render("  " + row.Observed + " · " + row.Windows))
+	line := c.fitPaneLine(b.String())
+	b.Reset()
+	b.WriteString(line)
+	b.WriteString("\n")
+	b.WriteString(c.wrapIndented(row.Detail, configHintStyle))
+	return b.String()
+}
+
+// renderQuotaAccountsEmpty draws the empty-table line the CLI prints when the
+// section exists (the handoff machinery is engaged) but no codex account is
+// registered. It is selectable so the cursor can reach the section and reveal
+// the mover line trailing it — the same reachability rule the agent rows keep.
+func (c *ConfigPane) renderQuotaAccountsEmpty(i int) string {
+	var b strings.Builder
+	selected := i == c.selectedIdx
+	cursor := "  "
+	if selected {
+		cursor = SelectionMarker("› ")
+	}
+	b.WriteString(cursor)
+	style := configHintStyle
+	if selected {
+		style = configSelectedStyle
+	}
+	b.WriteString(style.Render(quotaAccountsNoCodex))
+	return c.fitPaneLine(b.String())
 }
 
 // renderQuotaUnavailable is the section's failure body — the reason the read
