@@ -7,6 +7,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // The `default_accounts` key: which credential account a session runs as when the
@@ -174,26 +175,28 @@ func (s DefaultAccountSelection) ClearHint(repoPath string) string {
 	return fmt.Sprintf(`af config set %s ""`, s.Key())
 }
 
-// DefaultAccountLayersFor reports the `default_accounts` entry for agent from the
-// two layers that may declare one, so a caller can run them through
-// agentaccount.Resolve in its own precedence rather than being handed a
+// DefaultAccountLayersFromResolved reports the `default_accounts` entry for
+// agent from the two layers that may declare one, so a caller can run them
+// through agentaccount.Resolve in its own precedence rather than being handed a
 // pre-collapsed answer.
 //
-// The PROJECT selection is the per-repo resolution, which already folds the
-// global layer under the personal one — so when the global entry is the one that
-// wins there, the returned provenance says "global", and it says "personal
-// project" when the project overrode it. The GLOBAL selection is returned ONLY as
-// the fallback for a resolution that could not happen at all: no repo path, a path
-// Git does not recognize, or a config that does not load. Falling back rather than
-// failing matches defaultProgramFor — the create surfaces a real path problem a
-// moment later, with more context than this read has — and the two are never
+// resolved is the repo's resolution, or nil when the repo has no project config
+// to read (no repo path, a path Git does not recognize, or a config the repo
+// answered as invalid). The PROJECT selection comes from a non-nil resolution,
+// which already folds the global layer under the personal one — so when the
+// global entry is the one that wins there, the returned provenance says
+// "global", and it says "personal project" when the project overrode it. The
+// GLOBAL selection is returned ONLY for a nil resolution. The two are never
 // returned together, so a project's empty opt-out cannot be resolved past.
 //
-// It reads through ResolveConfigForRepoInspection, never the recording variant:
-// answering "what account would a create use" is a read, and a read must not
-// create durable state (the catalog RPC behind the TUI and web pickers calls this
-// on every form open).
-func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, globalLayer DefaultAccountSelection) {
+// Resolving is the caller's, and so is telling "no project config" from "could
+// not read it": a project config that could not be read is NOT nil here — the
+// global default would then scope the session to an account the project may
+// have replaced or turned off (#7077 review). The daemon's create resolves it
+// through session.CheckProjectConfigForLaunch, which reads without the durable
+// load observation (a read must not create durable state) and refuses an
+// unknown instead of answering it.
+func DefaultAccountLayersFromResolved(global *Config, resolved *ResolvedConfig, agent string) (project, globalLayer DefaultAccountSelection) {
 	if strings.TrimSpace(agent) == "" {
 		return DefaultAccountSelection{}, DefaultAccountSelection{}
 	}
@@ -208,15 +211,7 @@ func DefaultAccountLayersFor(global *Config, repoPath, agent string) (project, g
 			}
 		}
 	}
-	if strings.TrimSpace(repoPath) == "" {
-		return DefaultAccountSelection{}, globalLayer
-	}
-	repo, err := RepoFromPath(repoPath)
-	if err != nil {
-		return DefaultAccountSelection{}, globalLayer
-	}
-	resolved, err := ResolveConfigForRepoInspection(repo)
-	if err != nil {
+	if resolved == nil {
 		return DefaultAccountSelection{}, globalLayer
 	}
 	// From here the repo resolution is AUTHORITATIVE and the fallback is dropped.
@@ -279,10 +274,16 @@ func ResolvedDefaultAccountsFor(global *Config, repoPath string) map[string]stri
 	}
 	repo, err := RepoFromPath(repoPath)
 	if err != nil {
+		if ResolveWentUnanswered(err) {
+			log.WarningLog.Printf("default accounts for %q: the project config could not be read in time (%v); this read-only catalog is answering from the global config instead, and a create re-reads it rather than use this answer", repoPath, err)
+		}
 		return fallback
 	}
 	resolved, err := ResolveConfigForRepoInspection(repo)
 	if err != nil {
+		if ResolveWentUnanswered(err) {
+			log.WarningLog.Printf("default accounts for %q: the project config could not be read in time (%v); this read-only catalog is answering from the global config instead, and a create re-reads it rather than use this answer", repoPath, err)
+		}
 		return fallback
 	}
 	effective := map[string]string{}

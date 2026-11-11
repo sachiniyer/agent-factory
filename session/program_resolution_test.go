@@ -251,7 +251,7 @@ func TestResolveLaunchProgram_TrustsUnquotedSpellingOfDetectedClaude(t *testing.
 
 	// A path outside any repo resolves through the global config — the same
 	// code path the repro hits.
-	resolution := resolveLaunchProgramForInstance(&Instance{Title: "t", Path: t.TempDir(), Program: "claude"})
+	resolution := launchResolutionForTest(t, &Instance{Title: "t", Path: t.TempDir(), Program: "claude"})
 	require.Equal(t, claudePath+" "+config.DetectedClaudePermissionsFlag, resolution.command,
 		"the effective configured value is the unquoted one")
 	require.True(t, resolution.trustBase,

@@ -7,6 +7,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/session"
 )
 
 // The project's default credential account, applied where every surface passes
@@ -67,7 +68,19 @@ func applyDefaultAccount(cfg *config.Config, req *CreateSessionRequest) error {
 	if agent == "" {
 		return nil
 	}
-	project, global := config.DefaultAccountLayersFor(cfg, req.RepoPath, agent)
+	// Read-only, with a launch's patience: the default account decides the
+	// identity the launch runs as. A project config that cannot be read refuses
+	// the create — the global default would bypass the project's own account or
+	// its opt-out (#7077 review). An answered failure keeps the global fallback.
+	var resolved *config.ResolvedConfig
+	if strings.TrimSpace(req.RepoPath) != "" {
+		var rerr error
+		resolved, rerr = checkProjectConfigForLaunch(req.RepoPath)
+		if session.IsProjectConfigUnknown(rerr) {
+			return fmt.Errorf("cannot pick the default account for this session: %w", rerr)
+		}
+	}
+	project, global := config.DefaultAccountLayersFromResolved(cfg, resolved, agent)
 	name := agentaccount.Resolve(req.Account, project.Name, global.Name)
 	if name == "" {
 		return nil

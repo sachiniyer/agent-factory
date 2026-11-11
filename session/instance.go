@@ -14,6 +14,12 @@ type Instance struct {
 	// restoreCtx is the batch-shared repo/config resolution for the duration of a
 	// FromInstanceDataWithContext restore (#6446); nil otherwise.
 	restoreCtx atomic.Pointer[RestoreContext]
+	// frozenEnvPassthrough is the session-environment pass-through list a
+	// prepared swap's admission resolved before the outgoing agent stopped,
+	// held while that plan executes; nil otherwise. SessionEnvPassthroughForInstance
+	// answers it instead of re-reading the project config, so a read that cannot
+	// complete after teardown never strands an admitted swap with no agent (#7077).
+	frozenEnvPassthrough atomic.Pointer[[]string]
 
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):

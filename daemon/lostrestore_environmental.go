@@ -8,6 +8,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiproto"
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/session"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -81,6 +82,13 @@ func lostRestoreEnvironmentalClass(err error) lostRestoreEnvClass {
 	// but its class can (#5295 review).
 	if errors.Is(err, apiproto.ErrRemoteResourceExhausted) {
 		return lostRestoreEnvErrno
+	}
+	// A project config that could not be read in time is the environment not
+	// answering a bounded probe, and its own message says to retry (#7077
+	// review). It waits on the bounded deadline share rather than burning the
+	// structural budget toward a durable give-up during a load window.
+	if session.IsProjectConfigUnknown(err) {
+		return lostRestoreEnvDeadline
 	}
 	// A restore refused because the session's tmux socket is missing under a
 	// possibly-live server (#4135) is waiting on the environment, not a session

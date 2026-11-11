@@ -27,6 +27,12 @@ import (
 type RestoreContext struct {
 	repoFromPath  func(string) (*config.RepoContext, error)
 	resolveConfig func(*config.RepoContext) (*config.ResolvedConfig, error)
+	// attempts bounds how many unanswered project-config reads one resolve
+	// through this context makes before reporting it unknown (#7077); zero is
+	// the launch default. A load asks once: whoever retries the load — the
+	// daemon's deferred-row probe, the lost-restore loop — owns the patience,
+	// and a load runs under locks that must not pay a launch's retry budget.
+	attempts int
 
 	mu    sync.Mutex
 	repos map[string]*repoMemo
@@ -52,6 +58,43 @@ func NewRestoreContext() *RestoreContext {
 		repos:         map[string]*repoMemo{},
 		cfgs:          map[string]*configMemo{},
 	}
+}
+
+// newLoadRestoreContext is the context a single load runs in when its caller
+// brought none: every config read of that one Start shares the first answer,
+// so a sibling tab's read can never miss after the agent's read succeeded and
+// tear down an agent the load only reattached (#7077 review), and an
+// unanswered read is asked once.
+func newLoadRestoreContext() *RestoreContext {
+	rc := NewRestoreContext()
+	rc.attempts = 1
+	return rc
+}
+
+// loadContext is the context a load reads through: its caller's, else its own.
+func loadContext(rc *RestoreContext) *RestoreContext {
+	if rc != nil {
+		return rc
+	}
+	return newLoadRestoreContext()
+}
+
+// PrimeRestoreContext resolves path's repository and project config with a
+// launch's full retry budget and returns a context that answers both from
+// memory. A caller that must not pay the reads where it materializes the row —
+// the daemon's refresh runs under its manager lock — primes one off that lock
+// and hands it to FromInstanceDataWithContext, so the load reads no config
+// at all. The error is resolveProjectConfig's: nil for a readable or absent
+// config, a *ProjectConfigUnknownError when every attempt went unanswered.
+func PrimeRestoreContext(path string) (*RestoreContext, error) {
+	rc := NewRestoreContext()
+	_, err := resolveProjectConfig(path, projectConfigSource{
+		repoFromPath: rc.RepoFromPath, resolveRepo: rc.ResolveConfigForRepo, attempts: launchConfigResolveAttempts,
+	})
+	// The load that consumes it answers from memory; should it ever miss, it
+	// asks once, as any load does.
+	rc.attempts = 1
+	return rc, err
 }
 
 // RepoFromPath is config.RepoFromPath, answered once per path for the batch.

@@ -12,7 +12,11 @@ import (
 // SwapAgent consumes the returned plan and cannot drift to a different override
 // in the destructive close/start gap.
 func (b *LocalBackend) PrepareAgentSwap(i *Instance, target string) (AgentSwapPlan, error) {
-	return prepareAgentSwapFrom(i, target, resolveProgramForAgent(i, target))
+	resolved, err := resolveProgramForAgent(i, target)
+	if err != nil {
+		return AgentSwapPlan{}, fmt.Errorf("handoff target %s: %w", target, err)
+	}
+	return prepareAgentSwapFrom(i, target, resolved)
 }
 
 // prepareAgentSwapFrom is PrepareAgentSwap for an already-resolved command: an
@@ -27,7 +31,11 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 	// non-scopable target unresolved and drop the ambient af skill the
 	// replacement pane should read (#4430 review round 7).
 	workDir := i.GetWorktreePath()
-	program := injectSystemPromptWithEnv(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps(), launchEnvFor(i, workDir))
+	env, err := launchEnvFor(i, workDir)
+	if err != nil {
+		return AgentSwapPlan{}, fmt.Errorf("handoff target %s: %w", target, err)
+	}
+	program := injectSystemPromptWithEnv(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps(), env)
 	program, conversation := planLaunchConversation(i.ID, program)
 	if workDir == "" {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for launch preflight", target)
@@ -54,5 +62,6 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 	}
 	return AgentSwapPlan{
 		target: target, baseProgram: resolved, program: program, conversation: conversation, conversationCapture: capture,
+		passthrough: env.passthrough, passthroughFrozen: true,
 	}, nil
 }

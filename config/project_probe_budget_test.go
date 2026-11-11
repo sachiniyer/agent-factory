@@ -149,3 +149,25 @@ func TestResolveConfigPropagatesWhenTheGitEntryStatOutlivesTheScan(t *testing.T)
 	require.Nil(t, resolved)
 	require.ErrorIs(t, err, context.DeadlineExceeded)
 }
+
+// TestResolveConfigWithAnEmptyProjectRegistryNeedsNoCheckoutProbe is the
+// "absent stays absent" half of #7077. The checkout probe exists to match a
+// workspace against registered projects; with none registered there is
+// nothing for its answer to match, so the personal layer is absent whether or
+// not the probe answers in time. A slow probe must not turn that knowable
+// absence into an unknown that refuses the user's launches.
+func TestResolveConfigWithAnEmptyProjectRegistryNeedsNoCheckoutProbe(t *testing.T) {
+	base := t.TempDir()
+	home := filepath.Join(base, "af-home")
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	repoRoot := initProjectRegistryRepo(t, filepath.Join(base, "repo"))
+	writeGlobalTOML(t, home, "default_program = \"codex\"\n")
+
+	realGit, err := exec.LookPath("git")
+	require.NoError(t, err)
+	installFakeGit(t, "#!/bin/sh\nif [ \"$#\" -eq 4 ] && [ \"$4\" = --git-common-dir ]; then sleep 3; fi\nexec \""+realGit+"\" \"$@\"\n")
+
+	resolved, err := ResolveConfig(repoRoot)
+	require.NoError(t, err, "no registered project can match this checkout, so the probe cannot change the answer")
+	assert.Equal(t, "codex", resolved.DefaultProgram)
+}

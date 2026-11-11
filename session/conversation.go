@@ -7,6 +7,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -560,7 +561,13 @@ func (i *Instance) SessionCodexHomeDir() string {
 	}
 	program := i.RuntimeProgram()
 	if strings.TrimSpace(program) == "" {
-		program = resolveLaunchProgramForInstance(i).command
+		// A project config that cannot be read leaves the home unknown, which is
+		// this method's "" — never a home derived from the global config (#7077).
+		resolution, err := resolveLaunchProgramForInstance(i)
+		if err != nil {
+			return ""
+		}
+		program = resolution.command
 	}
 	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex {
 		return ""
@@ -581,7 +588,15 @@ func (i *Instance) SessionCodexHomeDir() string {
 func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
 	program := i.RuntimeProgram()
 	if strings.TrimSpace(program) == "" {
-		program = resolveLaunchProgramForInstance(i).command
+		// An unreadable project config is "cannot baseline", the empty
+		// snapshot every other unresolvable store answers — never a store
+		// bound to the global config's command (#7077).
+		resolution, err := resolveLaunchProgramForInstance(i)
+		if err != nil {
+			log.WarningLog.Printf("session %q: no conversation capture baseline: %v", i.Title, err)
+			return ConversationCaptureSnapshot{}
+		}
+		program = resolution.command
 	}
 	return i.sessionCodexCaptureBaselineFor(program)
 }
@@ -652,7 +667,13 @@ func (i *Instance) ExactResume() (bool, string) {
 // is not judged here: ResumeConversationOutcome answers it separately with an
 // honest non-carry, because the driving daemon cannot prove a sandbox carry.
 func (i *Instance) exactResumeVerdict() (bool, string) {
-	program := resolveLaunchProgramForInstance(i).command
+	resolution, err := resolveLaunchProgramForInstance(i)
+	if err != nil {
+		// The restore would refuse on the same read, so it resumes nothing;
+		// the reason is the actionable one the restore will give (#7077).
+		return false, err.Error()
+	}
+	program := resolution.command
 	_, ok, refusal := prepareExactResumeConversation(i, program)
 	if ok {
 		return true, ""
@@ -804,7 +825,13 @@ func (i *Instance) handoffConversationForRespawn() HandoffConversation {
 // resumed id is empty for a worktree-scoped resume — the command picks its
 // conversation at launch — and for a fresh start.
 func (i *Instance) respawnConversationPlan() (HandoffConversation, AgentConversationData) {
-	program := resolveLaunchProgramForInstance(i).command
+	resolution, err := resolveLaunchProgramForInstance(i)
+	if err != nil {
+		// No carry can be promised for a launch whose command is unknown; the
+		// respawn itself refuses on the same read (#7077).
+		return HandoffConversation{CarryFailure: err.Error()}, AgentConversationData{}
+	}
+	program := resolution.command
 	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
 		return HandoffConversation{Carried: true}, i.resumableConversation()
 	}

@@ -105,15 +105,26 @@ func (m *Manager) handoffAccount(req HandoffSessionRequest, instance *session.In
 				// operator typed is worse than refusing.
 				return HandoffSessionResponse{}, fmt.Errorf("session %q has a committed account swap to %s whose recorded mission is what the retry delivers; retry without --brief", instance.Title, accountSwapIdentity(target, swap.to))
 			}
-		} else if strings.TrimSpace(req.To) == "" ||
-			session.HandoffTargetIsCurrent(outgoing, target, session.HandoffEffectiveAgentForPath(instance.Path, target), instance.AgentProgram()) {
+		} else {
 			// No committed transaction: a no-op when the request named no
 			// target (an account-only re-request of the account already in
 			// use), or when the request's RESOLVED target is the running
 			// identity. An enum that still matches i.Program but resolves
 			// elsewhere after an override edit is a real cross-agent request
-			// and falls through to admission.
-			return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)
+			// and falls through to admission. A target whose resolution is
+			// unknown — the project's config could not be read (#7077) — is
+			// refused with that error rather than classified either way.
+			sameTarget := strings.TrimSpace(req.To) == ""
+			if !sameTarget {
+				effective, err := session.HandoffEffectiveAgentForPath(instance.Path, target)
+				if err != nil {
+					return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s: %w", instance.Title, target, err)
+				}
+				sameTarget = session.HandoffTargetIsCurrent(outgoing, target, effective, instance.AgentProgram())
+			}
+			if sameTarget {
+				return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, target, from)
+			}
 		}
 	}
 	if swap == nil {
@@ -196,10 +207,15 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 	// account-only one — so the namespace consulted here is the one the frozen
 	// launch plan proves, even when overrides point at each other (aider→codex
 	// beside codex→aider). ManualAccountSwapProgram documents the rule.
-	program, crossAgent := instance.ManualAccountSwapProgram(swap.agent, swap.accountOnly)
+	program, crossAgent, err := instance.ManualAccountSwapProgram(swap.agent, swap.accountOnly)
+	if err != nil {
+		return nil, fmt.Errorf("cannot hand %q off to %s with account %q: %w", instance.Title, swap.agent, swap.to, err)
+	}
 	swap.crossAgent = crossAgent
 	if crossAgent {
-		swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+		if swap.accountAgent, err = session.HandoffEffectiveAgentForPath(instance.Path, program); err != nil {
+			return nil, fmt.Errorf("cannot hand %q off to %s with account %q: %w", instance.Title, swap.agent, swap.to, err)
+		}
 	} else {
 		// Same-agent and account-only swaps keep the RUNNING identity, so the
 		// namespace is the established runtime command's agent — a fresh enum
@@ -212,7 +228,9 @@ func (m *Manager) evaluateManualAccountSwap(instance *session.Instance, swap *au
 			swap.accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
 		}
 		if swap.accountAgent == "" {
-			swap.accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, program)
+			if swap.accountAgent, err = session.HandoffEffectiveAgentForPath(instance.Path, program); err != nil {
+				return nil, fmt.Errorf("cannot hand %q off to %s with account %q: %w", instance.Title, swap.agent, swap.to, err)
+			}
 		}
 	}
 	if swap.accountAgent == "" {

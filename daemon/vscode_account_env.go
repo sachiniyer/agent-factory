@@ -121,17 +121,28 @@ func vscodeAccountScopeForInstance(instance *session.Instance) vscodeAccountScop
 	if agent == "" {
 		agent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
 	}
+	// The re-resolution and the pass-through list both read the project's
+	// config. When it cannot be read (#7077) the editor's credential environ is
+	// refused rather than built from the global config's namespace or
+	// allowlist; the error surfaces where every other environ failure does.
+	var resolveErr error
 	if agent == "" {
-		agent = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
+		agent, resolveErr = session.HandoffEffectiveAgentForPath(instance.Path, instance.AgentProgram())
 	}
-	if agent == "" {
+	if agent == "" && resolveErr == nil {
 		agent = sessionenv.AgentNamespaceForCommand(instance.AgentProgram())
 	}
 	return vscodeAccountScope{
 		account: account,
 		environ: func() ([]string, error) {
-			environ, err := vscodeAccountEnvironment(
-				agent, account, session.SessionEnvPassthroughForInstance(instance))
+			if resolveErr != nil {
+				return nil, fmt.Errorf("%w %q: %w", errVSCodeAccountScope, account, resolveErr)
+			}
+			passthrough, err := session.SessionEnvPassthroughForInstance(instance)
+			if err != nil {
+				return nil, fmt.Errorf("%w %q: %w", errVSCodeAccountScope, account, err)
+			}
+			environ, err := vscodeAccountEnvironment(agent, account, passthrough)
 			if err != nil {
 				// Both wrapped: the sentinel is what the pane renderer matches on, and
 				// the cause is what tells the operator which command to run. The tab
