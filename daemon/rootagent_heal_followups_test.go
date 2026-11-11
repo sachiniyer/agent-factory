@@ -176,3 +176,70 @@ func TestARootLaunchedForTheRepositoryRetiresEveryCandidatesHeldCarry(t *testing
 	_, held := manager.heldRootCarry(other, repo, nil)
 	require.False(t, held, "the launched root retires the other candidate's older carry")
 }
+
+// #7090 review, P3-2: deleting a project retires its held root carries. The
+// ensure loop clears a candidate's carry only when it visits the candidate, and
+// one in backoff goes unvisited for minutes; a tombstone released in that time
+// — another clone proven at the same path — would otherwise hand the deleted
+// project's conversation and tabs to the unrelated clone through a legacy
+// root_agents carry, which has no checkout to tell the two apart.
+func TestDeletingAProjectRetiresItsHeldRootCarries(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	registerArchivable(t, manager, repoID, repoPath, "worker")
+	repo := &config.RepoContext{Root: repoPath, ID: repoID}
+	held := &rootEnsureState{}
+	manager.mu.Lock()
+	manager.rootEnsureStates[repoPath] = held // the legacy root_agents spelling
+	manager.mu.Unlock()
+	manager.holdRootCarry(held, repo, nil,
+		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation"}})
+
+	_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
+	require.NoError(t, err)
+
+	_, stillHeld := manager.heldRootCarry(held, repo, nil)
+	require.False(t, stillHeld, "a deleted project's carry must not outlive it for a clone at the same path to inherit")
+}
+
+// #7090 review, P3-4: a held carry outranks a record reaped since. While it is
+// held no replacement has launched, so any root record reaped in the meantime
+// is a failed replacement (persistFailedCreate can leave one): the heal carries
+// the last working root's conversation, not the failed one's.
+func TestAHeldRootCarryOutranksARecordReapedSince(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	const heldID = "019f4a2e-7206-7fc2-803b-f7045e07a244"
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, heldID)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+	failed := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, failed, "precondition: a root record exists")
+	reaped := seedRootConversation(t, failed) // the failed replacement's conversation
+	require.NotEqual(t, heldID, reaped.ID)
+
+	// The last working root's state, held by a heal whose create failed.
+	repo, err := resolveLegacyRootRepo(repoPath)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	require.NotNil(t, st, "precondition: the candidate's ensure state")
+	manager.holdRootCarry(st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: heldID, CaptureKind: session.ConversationCaptureInjected,
+	}})
+
+	failed.SetStatusForTest(session.Lost)
+	manager.ensureRootAgentsAndWait()
+
+	require.NotNil(t, findRootInstance(t, manager, repoPath), "the heal re-creates the root")
+	last := (*seen)[len(*seen)-1]
+	require.Equal(t, heldID, last.ResumeConversation.ID, "the held carry, not the record reaped since, is what the replacement resumes")
+	_, stillHeld := manager.heldRootCarry(st, repo, nil)
+	require.False(t, stillHeld, "the launch retires it")
+}

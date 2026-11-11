@@ -73,6 +73,12 @@ func (m *Manager) heldRootCarry(st *rootEnsureState, repo *config.RepoContext, i
 func (m *Manager) retireRootCarries(repoID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	m.retireRootCarriesLocked(repoID)
+}
+
+// retireRootCarriesLocked is retireRootCarries for a caller holding m.mu:
+// deleting the project retires them too (suppressRootAgent).
+func (m *Manager) retireRootCarriesLocked(repoID string) {
 	for _, st := range m.rootEnsureStates {
 		if st.carry != nil && st.carry.repoID == repoID {
 			st.carry = nil

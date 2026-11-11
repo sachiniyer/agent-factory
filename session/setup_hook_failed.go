@@ -76,22 +76,19 @@ const legacyHookNotRunTail = "run them in the worktree yourself, or recreate the
 
 // dropSetupNotes removes the "; "-joined notes that begin with prefix. A hook
 // not-run note never contains "; " itself (git.hookNotRunNote), so exactly that
-// note goes, and every other note is kept as it was written — except that the
-// tail of the earlier build's two-part note goes with its head, so no fragment
-// of it is left on the row (#7088 review).
+// note goes, and every other note is kept as it was written. The earlier
+// build's two-part note goes whole: its tail is dropped too, whether it still
+// follows its head or a build since dropped the head alone and left the tail
+// on the row — that text is unique to the old note (#7088, #7090 review).
 func dropSetupNotes(notes, prefix string) string {
-	if !strings.Contains(notes, prefix) {
+	if !strings.Contains(notes, prefix) && !strings.Contains(notes, legacyHookNotRunTail) {
 		return notes
 	}
 	var kept []string
-	afterDropped := false
 	for _, note := range strings.Split(notes, "; ") {
-		dropped := strings.HasPrefix(note, prefix) ||
-			(afterDropped && strings.HasPrefix(note, legacyHookNotRunTail))
-		if !dropped {
+		if !strings.HasPrefix(note, prefix) && !strings.HasPrefix(note, legacyHookNotRunTail) {
 			kept = append(kept, note)
 		}
-		afterDropped = strings.HasPrefix(note, prefix)
 	}
 	return strings.Join(kept, "; ")
 }
