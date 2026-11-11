@@ -65,6 +65,18 @@ import (
 // already follows.
 var ErrBranchDeletionTimedOut = errors.New("git branch operation timed out")
 
+// branchProbeStall classifies a failed filesystem observation on the
+// branch-prune path. A bounded stat that hit its deadline (or joined the latch
+// an earlier deadline left) proves nothing, so it carries
+// ErrBranchDeletionTimedOut, exactly as a stalled git does; any other error is
+// returned as is.
+func branchProbeStall(err error) error {
+	if errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, ErrBranchDeletionTimedOut) {
+		return fmt.Errorf("%w: %w", ErrBranchDeletionTimedOut, err)
+	}
+	return err
+}
+
 // runBoundedBranchGit runs one local git command for the branch-prune path
 // (DeleteLocalBranch and its existence probes) under localGitTimeout, killing
 // the whole process group on the deadline and abandoning a child that cannot

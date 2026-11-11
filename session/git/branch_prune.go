@@ -28,7 +28,7 @@ import (
 //     repo was deleted out from under the record, taking its refs with it. A
 //     BARE repository legitimately carries no .git child (its metadata — HEAD,
 //     objects/, refs/ — lives directly at the root), so a missing .git alone is
-//     not absence: the bare layout is recognized by bareMetadataDirectory (the
+//     not absence: the bare layout is recognized by bareMetadataLayout (the
 //     same structural check resolveRepoMetadataRoot uses on this path) and
 //     falls through to the show-ref probe rather than fabricating absence for
 //     a branch that verifiably exists (#5136: af sessions prune over a
@@ -69,30 +69,39 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 
 // localBranchExists is the probe LocalBranchExists wraps. It returns the
 // existence verdict, the bare-layout flag the probe computed (`bare` is true only
-// when the repoRoot had no .git child and bareMetadataDirectory recognized the
+// when the repoRoot had no .git child and bareMetadataLayout recognized the
 // bare layout, so the probe pinned GIT_DIR to repoRoot), and any error. The
 // `bare` flag is preserved for DeleteLocalBranch so the deletion runs against the
 // same repo the probe verified instead of recomputing the layout — a recompute
 // is fail-open (a bare root that loses HEAD/objects/refs between probe and
 // delete would read as non-bare and let `git -C` discover an enclosing repo).
+//
+// Every filesystem observation here is bounded, not just the git calls: on the
+// stalled mount the git bound exists for, a raw stat of the root, of .git or of
+// the bare layout blocks just as hard, and the reset would never reach the
+// bounded git at all. The stats go through BoundedStat (it follows symlinks as
+// os.Stat does: a root may be a symlink, as macOS /tmp is, and .git may be a
+// symlink or a gitfile) and the loose-ref check through BoundedLstat. A stat
+// that hits its deadline is UNKNOWN and returns ErrBranchDeletionTimedOut, the
+// same class a stalled git gets; only ENOENT is determinate absence.
 func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 	if repoRoot == "" || branch == "" {
 		return false, false, nil
 	}
-	if _, err := os.Stat(repoRoot); err != nil {
+	if _, err := BoundedStat(repoRoot); err != nil {
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
-		return false, false, fmt.Errorf("stat repo %s: %w", repoRoot, err)
+		return false, false, branchProbeStall(fmt.Errorf("stat repo %s: %w", repoRoot, err))
 	}
 	// .git is a directory in a main worktree and a file in a linked one; Stat
 	// accepts either. A bare repository has NO .git child — its metadata lives
 	// directly at the root (HEAD, objects/, refs/) — so a missing .git is
 	// determinate absence only when the root is not a bare layout; otherwise
-	// fall through to the show-ref probe (bareMetadataDirectory is the same
+	// fall through to the show-ref probe (bareMetadataLayout is the same
 	// structural check resolveRepoMetadataRoot uses on this path).
 	//
-	// bareMetadataDirectory is STRUCTURAL: it proves the layout git clones
+	// bareMetadataLayout is STRUCTURAL: it proves the layout git clones
 	// produce, not that git accepts this directory as a bare repo. A de-git'd
 	// directory that happens to carry HEAD/config/objects/refs would satisfy
 	// it, and `git -C repoRoot` could then walk upward to discover an
@@ -102,11 +111,17 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 	// not accept as bare then errors (a failed probe, never absence) instead of
 	// reaching a parent.
 	gitPath := filepath.Join(repoRoot, ".git")
-	if _, err := os.Stat(gitPath); err != nil {
+	if _, err := BoundedStat(gitPath); err != nil {
 		if !os.IsNotExist(err) {
-			return false, false, fmt.Errorf("stat %s: %w", gitPath, err)
+			return false, false, branchProbeStall(fmt.Errorf("stat %s: %w", gitPath, err))
 		}
-		if !bareMetadataDirectory(repoRoot) {
+		// A stalled layout probe is an error, never "not bare": read as
+		// "not bare", it would make a missing .git determinate absence.
+		isBare, err := bareMetadataLayout(repoRoot, BoundedStat)
+		if err != nil {
+			return false, false, branchProbeStall(fmt.Errorf("inspect bare layout of %s: %w", repoRoot, err))
+		}
+		if !isBare {
 			return false, false, nil
 		}
 		// Bare origin: refs live at the root; fall through to show-ref.
@@ -185,7 +200,7 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		case os.IsNotExist(statErr) || errors.Is(statErr, syscall.ENOTDIR):
 			return false, bare, nil
 		default:
-			return false, bare, fmt.Errorf("stat %s: %w", loose, statErr)
+			return false, bare, branchProbeStall(fmt.Errorf("stat %s: %w", loose, statErr))
 		}
 	}
 	var stderrDetail string
@@ -219,7 +234,7 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 // the reset is deliberately discarding.
 func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 	// Reuse the probe's bare-layout determination rather than recomputing it
-	// here: a second `os.Stat(<repoRoot>/.git)` + `bareMetadataDirectory` pass
+	// here: a second stat of <repoRoot>/.git + bare-layout probe pass
 	// is fail-open if the bare metadata is lost between the probe and the
 	// delete (HEAD/objects/refs renamed or removed), which would drop the
 	// GIT_DIR pin and let `git -C repoRoot branch -D` discover an enclosing
