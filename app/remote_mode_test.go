@@ -111,7 +111,7 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 	require.True(t, degraded)
 	_, err := m.activeTasks(m.repoRoot, m.repoID)
 	require.ErrorContains(t, err, "http://box.example:8443 did not answer", "the poll's timeout, from the cache")
-	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa")
+	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa", "")
 	require.NoError(t, err)
 	require.Less(t, time.Since(loopStart), 250*time.Millisecond, "no loop-side call waited on the hung target")
 }
@@ -120,13 +120,13 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 func TestRemoteSelectionNeverProbesLocalGit(t *testing.T) {
 	stubRemote(t)
 	m := &home{sidebarProjects: []overlay.Project{{Root: "/srv/box/alpha", RepoID: "aaaaaaaaaaaa"}}}
-	rc, err := m.repoContextForSelection("/srv/box/alpha", "") // sidebar Enter / mouse: root only
+	rc, err := m.repoContextForSelection("/srv/box/alpha", "", "") // sidebar Enter / mouse: root only
 	require.NoError(t, err)
 	require.Equal(t, "aaaaaaaaaaaa", rc.ID)
-	rc, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa") // picker
+	rc, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa", "") // picker
 	require.NoError(t, err)
 	require.Equal(t, "/srv/box/alpha", rc.Root)
-	_, err = m.repoContextForSelection("/srv/box/unknown", "")
+	_, err = m.repoContextForSelection("/srv/box/unknown", "", "")
 	require.ErrorContains(t, err, "not in the daemon's project list")
 }
 
@@ -469,7 +469,7 @@ func setupEnclosingRepoFixture(t *testing.T) (outer, nested, nestedID, outerID s
 func TestLocalSelectionRefusesForeignCheckout(t *testing.T) {
 	_, nested, nestedID, _ := setupEnclosingRepoFixture(t)
 	m := &home{}
-	_, err := m.repoContextForSelection(nested, nestedID)
+	_, err := m.repoContextForSelection(nested, nestedID, "")
 	require.Error(t, err)
 	require.ErrorContains(t, err, "no longer the registered repository")
 	require.ErrorContains(t, err, "af projects rebind")
@@ -482,7 +482,7 @@ func TestLocalSelectionSwitchesWhenIdentityMatches(t *testing.T) {
 	repoRoot := initTestGitRepo(t)
 	repoID := config.RepoIDFromRoot(repoRoot)
 	m := &home{}
-	rc, err := m.repoContextForSelection(repoRoot, repoID)
+	rc, err := m.repoContextForSelection(repoRoot, repoID, "")
 	require.NoError(t, err)
 	require.Equal(t, repoID, rc.ID)
 	require.Equal(t, repoRoot, rc.Root)
@@ -494,7 +494,7 @@ func TestLocalSelectionSwitchesWhenIdentityMatches(t *testing.T) {
 func TestLocalSelectionSwitchesWhenIdentityAbsent(t *testing.T) {
 	_, nested, _, outerID := setupEnclosingRepoFixture(t)
 	m := &home{}
-	rc, err := m.repoContextForSelection(nested, "")
+	rc, err := m.repoContextForSelection(nested, "", "")
 	require.NoError(t, err)
 	require.Equal(t, outerID, rc.ID, "an empty identity probes and switches without the guard")
 }
@@ -508,7 +508,7 @@ func TestLocalSelectionExemptsInventedIDs(t *testing.T) {
 	invented := config.DerivedRepoIDForUnresolvedRoot(nested)
 	require.True(t, config.IsDerivedRepoID(invented), "fixture: the id must be invented")
 	m := &home{}
-	rc, err := m.repoContextForSelection(nested, invented)
+	rc, err := m.repoContextForSelection(nested, invented, "")
 	require.NoError(t, err)
 	require.Equal(t, outerID, rc.ID, "an invented id is exempt and switches on the probe")
 }
@@ -517,7 +517,7 @@ func TestLocalSelectionExemptsInventedIDs(t *testing.T) {
 // no enclosing repo surfaces the probe error rather than switching.
 func TestLocalSelectionSurfacesProbeFailure(t *testing.T) {
 	m := &home{}
-	_, err := m.repoContextForSelection(t.TempDir(), "aaaaaaaaaaaa")
+	_, err := m.repoContextForSelection(t.TempDir(), "aaaaaaaaaaaa", "")
 	require.Error(t, err)
 }
 
@@ -542,7 +542,7 @@ func TestSwitchToProjectRootRefusesStaleRowInLocalMode(t *testing.T) {
 	require.NotEqual(t, nestedID, beforeRepoID, "fixture: the active project must not be the stale row")
 	require.NotEqual(t, outerID, beforeRepoID, "fixture: the active project must not be the enclosing repo")
 
-	mod, cmd := h.switchToProjectRoot(nested, nestedID)
+	mod, cmd := h.switchToProjectRoot(nested, nestedID, "")
 	require.NotNil(t, mod)
 	_ = cmd
 	// The switch was refused: the rail stays on the active project, not the
@@ -569,7 +569,7 @@ func TestSwitchToProjectRootSwitchesOnMatchingIdentity(t *testing.T) {
 	repoID := config.RepoIDFromRoot(repoRoot)
 	require.NotEqual(t, repoID, h.repoID, "fixture: the target must differ from the active project")
 
-	mod, _ := h.switchToProjectRoot(repoRoot, repoID)
+	mod, _ := h.switchToProjectRoot(repoRoot, repoID, "")
 	require.NotNil(t, mod)
 	assert.Equal(t, repoID, h.repoID, "a matching identity switches the rail to the target project")
 	assert.Equal(t, repoRoot, h.repoRoot)
@@ -594,7 +594,7 @@ func TestSwitchToProjectRootSwitchesOnAbsentIdentity(t *testing.T) {
 	repoID := config.RepoIDFromRoot(repoRoot)
 	require.NotEqual(t, repoID, h.repoID)
 
-	mod, _ := h.switchToProjectRoot(repoRoot, "")
+	mod, _ := h.switchToProjectRoot(repoRoot, "", "")
 	require.NotNil(t, mod)
 	assert.Equal(t, repoID, h.repoID, "an empty identity probes and switches")
 	assert.Equal(t, repoRoot, h.repoRoot)
