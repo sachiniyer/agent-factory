@@ -48,7 +48,7 @@ func TestResolveAttachTarget_RemoteDoesNotResolveOnLocalDisk(t *testing.T) {
 	}
 	// The client's cwd names a repo on THIS machine, which says nothing about
 	// the daemon's projects — scoping by it asks the remote for an ID it has
-	// never seen (the resolveRepoIDForLookup contract).
+	// never seen (the resolveLookupScope contract).
 	if repoID != "" {
 		t.Errorf("repoID = %q, want empty: the client's cwd must not scope a remote attach", repoID)
 	}

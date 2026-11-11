@@ -304,7 +304,7 @@ idle, because an idle report tells a driver to act.`,
 
 		// Snapshot-based read (getSessionByTitleInScope -> snapshotRead): it
 		// follows --daemon-url to the remote, so the client's cwd must not scope it.
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -316,7 +316,7 @@ idle, because an idle report tells a driver to act.`,
 			// the default timeout), and folding a per-poll notice into a single
 			// final JSON record needs its own design, not a drive-by here.
 			get: func(t string) (*session.InstanceData, error) {
-				data, _, err := getSessionByTitleInScope(repoID, t)
+				data, _, err := getSessionByTitleInScope(scope.RepoID, t)
 				return data, err
 			},
 			interval: watchIntervalFlag,
@@ -325,7 +325,9 @@ idle, because an idle report tells a driver to act.`,
 			sleep:    time.Sleep,
 		}, title)
 		if err != nil {
-			return jsonError(err)
+			// After watchForReady's own classification, so a session that
+			// resolved and then vanished keeps its "disappeared" wording.
+			return jsonError(scope.nameMiss(title, err))
 		}
 
 		if envelopeOutput {

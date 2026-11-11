@@ -262,7 +262,9 @@ var sessionsListCmd = &cobra.Command{
 		"otherwise the current directory's project is used, and --all spans every " +
 		"project. Run from outside a git repository with no --repo, there is no " +
 		"project context and every project's sessions are listed — one stderr line " +
-		"says so, so an empty list cannot be misread as an empty fleet. Lifecycle, age, " +
+		"says so, so an empty list cannot be misread as an empty fleet. An empty list " +
+		"scoped by the current directory likewise prints one stderr line naming that " +
+		"project. Under --json neither line is printed. Lifecycle, age, " +
 		"and limit filters compose and are applied by the daemon before transfer. " +
 		"With no filter flags, the complete list and its existing order are unchanged.\n\n" +
 		"Every row names its own integers. liveness_name is the one --status matches, " +
@@ -278,17 +280,17 @@ var sessionsListCmd = &cobra.Command{
 
 		// Snapshot-based read: it follows --daemon-url to the remote, so it uses
 		// the lookup resolver (which ignores the client's cwd against a remote).
-		repoID := ""
+		var scope lookupScope
 		if !sessionsListAllFlag {
 			var err error
-			repoID, err = resolveRepoIDForLookup()
+			scope, err = resolveLookupScope()
 			if err != nil {
 				return jsonError(err)
 			}
 		}
 
 		req := daemon.SnapshotRequest{
-			RepoID:   repoID,
+			RepoID:   scope.RepoID,
 			Live:     sessionsListLiveFlag,
 			Statuses: append([]string(nil), sessionsListStatusesFlag...),
 		}
@@ -319,10 +321,20 @@ var sessionsListCmd = &cobra.Command{
 		// breadth, but a silent `[]` reads as "all your sessions are gone" to
 		// a user standing in the wrong directory (#6882). One stderr line names
 		// the scope and the flags that change it; stdout's JSON is untouched.
-		// Under --json stderr carries the envelope, so the notice waits for
-		// #3511's structural channel like every other caveat.
-		if repoID == "" && !sessionsListAllFlag && !envelopeOutput {
-			fmt.Fprintln(warnWriter, unscopedListNotice())
+		// The cwd-scoped twin (#7092): a project the current directory picked
+		// that comes back empty names that project, since `[]` from the wrong
+		// checkout reads exactly the same. An explicit --repo or --all chose
+		// the scope on purpose, so neither needs saying. Under --json stderr
+		// carries the envelope, so both notices wait for #3511's structural
+		// channel like every other caveat.
+		if !sessionsListAllFlag && !envelopeOutput {
+			switch {
+			case scope.RepoID == "":
+				fmt.Fprintln(warnWriter, unscopedListNotice())
+			case scope.FromCwd && len(allData) == 0:
+				filtered := req.Live || len(req.Statuses) > 0 || !req.CreatedAfter.IsZero()
+				fmt.Fprintln(warnWriter, emptyScopedListNotice(scope.Project, filtered))
+			}
 		}
 
 		if allData == nil {
@@ -342,7 +354,9 @@ name can exist in several repos. The title resolves inside the repo given by
 With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
 those projects instead of guessing between them. A title no project holds
-reports that no project holds it, with the ways to scope the lookup.`,
+reports that no project holds it, with the ways to scope the lookup. A miss
+inside a project names that project, and whether --repo or the current
+directory chose it.`,
 	Args: cobra.ExactArgs(1),
 	RunE: func(cmd *cobra.Command, args []string) error {
 		log.Initialize(false)
@@ -353,13 +367,13 @@ reports that no project holds it, with the ways to scope the lookup.`,
 		// whichever same-titled session the map walk hit first. This read is
 		// served by the TARGETED daemon, so it uses the lookup resolver (which
 		// ignores the client's cwd against a remote).
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
-		data, notice, err := getSessionByTitleInScope(repoID, args[0])
+		data, notice, err := getSessionByTitleInScope(scope.RepoID, args[0])
 		if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(args[0], err))
 		}
 		// Bare payload stays byte-identical to before #1029 (#3511).
 		if envelopeOutput {
@@ -614,7 +628,7 @@ parse it rather than render it.`,
 		// --repo is accepted on this command; it used to be parsed and then
 		// silently dropped. That was worse here than on `get`: resolving the
 		// wrong repo's session does not just read it, it restores/starts it.
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -627,14 +641,14 @@ parse it rather than render it.`,
 		// there unresolved and are applied atomically against its current tab roster.
 		snapshot, err := previewSessionViaDaemon(daemon.PreviewRequest{
 			Title:   args[0],
-			RepoID:  repoID,
+			RepoID:  scope.RepoID,
 			Tab:     previewTabFlag,
 			TabName: previewTabNameFlag,
 			TabID:   previewTabIDFlag,
 			Full:    previewFullFlag,
 		})
 		if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(args[0], err))
 		}
 		// A tab-level miss is NOT a dead session. Reporting one as the other
 		// tells the user their running session ended because they mistyped a
@@ -693,44 +707,6 @@ parse it rather than render it.`,
 		}
 		return jsonOut(out)
 	},
-}
-
-// resolveAttachTarget resolves the {title, repoID} pair `sessions attach` hands
-// to the daemon's WS PTY stream.
-//
-// --repo scoping is honored (#891, same class as #761/#776): an empty repoID
-// preserves the all-repo search, a non-empty one confines the attach to that
-// repo so `attach <title> --repo <other>` can never connect the terminal to a
-// same-titled session in a different repo.
-//
-// The remote branch is #1974. Attach runs over the apiclient transport, so it
-// follows --daemon-url to another machine — but it was resolving the session on
-// THIS machine's disk first (resolveRepoID + findLiveInstanceByTitleInScope),
-// which fails "session not found" before any remote call for a session that
-// only exists on the daemon. Both halves were wrong against a remote: the repo
-// ID hashes the CLIENT's cwd, naming a repo the daemon has never heard of, and
-// the instances.json read has no bearing on what the remote holds. So a remote
-// target hands the bare title to the daemon, which resolves it on its own side
-// (by id from memory, then by title from its own disk) — mirroring the preview
-// command's remote branch above, the other apiclient-transport read.
-//
-// The LOCAL path is deliberately unchanged: resolveRepoIDForLookup is identical
-// to resolveRepoID when no remote target is set, and the disk lookup still
-// restores the instance, which is what gives the local daemon a session to
-// attach to.
-func resolveAttachTarget(title string) (string, string, error) {
-	repoID, err := resolveRepoIDForLookup()
-	if err != nil {
-		return "", "", err
-	}
-	if apiclient.IsRemoteTarget() {
-		return title, repoID, nil
-	}
-	instance, _, err := findLiveInstanceByTitleInScope(repoID, title)
-	if err != nil {
-		return "", "", err
-	}
-	return instance.Title, repoID, nil
 }
 
 // closeLogForOutputMode is the deferred close for commands whose success path

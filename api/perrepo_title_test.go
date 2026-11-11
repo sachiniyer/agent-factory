@@ -146,12 +146,12 @@ func TestFindInstanceByTitle_DuplicateRowsInOneRepoAreNotAmbiguous(t *testing.T)
 	}
 }
 
-// TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd pins the remote rule:
+// TestResolveLookupScope_RemoteIsNotScopedByClientCwd pins the remote rule:
 // --daemon-url points af at a daemon on ANOTHER machine, where the client's cwd
 // names a repo that exists HERE, not there. Auto-scoping by it would ask the
 // remote for a repo ID it does not have — and the remote read path has no disk
 // fallback — turning a working bare-title lookup into a spurious not-found.
-func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
+func TestResolveLookupScope_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	// cwd is a real git repo, so CurrentRepo() would happily produce a scope.
 	repo := t.TempDir()
@@ -161,22 +161,23 @@ func TestResolveRepoIDForLookup_RemoteIsNotScopedByClientCwd(t *testing.T) {
 	t.Chdir(repo)
 
 	// Local target: the cwd repo DOES scope the lookup.
-	local, err := resolveRepoIDForLookup()
+	localScope, err := resolveLookupScope()
 	if err != nil {
 		t.Fatalf("local resolve: %v", err)
 	}
+	local := localScope.RepoID
 	if local == "" {
 		t.Fatalf("a LOCAL lookup should still scope by the cwd repo")
 	}
 
 	// Remote target: the client's cwd must NOT scope it.
 	remoteTarget(t)
-	got, err := resolveRepoIDForLookup()
+	got, err := resolveLookupScope()
 	if err != nil {
 		t.Fatalf("remote resolve: %v", err)
 	}
-	if got != "" {
-		t.Errorf("a REMOTE lookup must not be scoped by the client's cwd, got repoID %q", got)
+	if got != (lookupScope{}) {
+		t.Errorf("a REMOTE lookup must not be scoped by the client's cwd, got %+v", got)
 	}
 
 	// But the WRITE-path resolver must STAY cwd-scoped even against a remote:
@@ -212,11 +213,11 @@ func TestSessionsGet_RemoteSendsUnscopedRequest(t *testing.T) {
 		return []session.InstanceData{{Title: "foo", Path: "/remote/alpha"}}, nil
 	})
 
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		t.Fatalf("resolve: %v", err)
 	}
-	got, _, err := getSessionByTitleInScope(repoID, "foo")
+	got, _, err := getSessionByTitleInScope(scope.RepoID, "foo")
 	if err != nil {
 		t.Fatalf("remote bare-title lookup must resolve, got: %v", err)
 	}
@@ -563,8 +564,10 @@ func TestSessionsList_ExplicitAllPrintsNoHint(t *testing.T) {
 	}
 }
 
-// TestSessionsList_InsideRepoPrintsNoHint pins property 3 for the hint:
-// scoped to a project, nothing about the output or the streams changes.
+// TestSessionsList_InsideRepoPrintsNoHint pins property 3 for the hint: scoped
+// to a project, the outside-repo hint never prints. An EMPTY scoped list gets
+// its own notice naming the project (#7092, scoped_lookup_notice_test.go), so
+// this asserts the absence of the outside-repo claim, not an empty stderr.
 func TestSessionsList_InsideRepoPrintsNoHint(t *testing.T) {
 	useTempConfig(t)
 	resetScopeFlags(t)
@@ -579,7 +582,7 @@ func TestSessionsList_InsideRepoPrintsNoHint(t *testing.T) {
 	if !json.Valid(out) {
 		t.Fatalf("stdout must stay valid JSON, got %q", out)
 	}
-	if warn.String() != "" {
+	if strings.Contains(warn.String(), "not inside a project repo") {
 		t.Errorf("a scoped list must not print the outside-repo hint, got %q", warn.String())
 	}
 }

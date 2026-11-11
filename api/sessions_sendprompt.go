@@ -173,10 +173,11 @@ can inspect per-session results.`,
 		// preserves the prior all-repo search; a non-empty one confines both
 		// the existence pre-check and the delivery to that repo so a
 		// same-titled session in a different repo never receives the prompt.
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
+		repoID := scope.RepoID
 
 		// --create routes through the daemon's serialized create-or-send path
 		// so a session that pops into existence concurrently (another
@@ -281,12 +282,15 @@ can inspect per-session results.`,
 				// affordance, which binds to the project the new scope names.
 				return jsonError(fmt.Errorf("%w — add --create to create the session in the project you scope to", unscopedTitleMiss(title)))
 			}
-			return jsonError(fmt.Errorf("session %q not found. Use --create to auto-create the session, or run: %s --prompt <prompt>", title, shellsuggest.Command("af", "sessions", "create", "--name", title)))
+			// A scoped miss names the project the check read (#7092), and keeps
+			// the --create affordance after it.
+			miss := scope.nameMiss(title, fmt.Errorf("session %q %w", title, errTitleNotFound))
+			return jsonError(fmt.Errorf("%w. Use --create to auto-create the session, or run: %s --prompt <prompt>", miss, shellsuggest.Command("af", "sessions", "create", "--name", title)))
 		}
 
 		status, err := sendPromptViaDaemon(daemon.SendPromptRequest{Title: title, RepoID: repoID, Prompt: prompt})
 		if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(title, err))
 		}
 		return jsonOut(sendPromptResult{OK: true, Status: status})
 	},

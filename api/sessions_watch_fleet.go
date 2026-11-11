@@ -720,10 +720,11 @@ var (
 func runFleetWatch() error {
 	// Same scoping as the single-title form: --repo confines the fleet to one
 	// repository, and an empty repoID watches every session the daemon reports.
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		return jsonError(err)
 	}
+	repoID := scope.RepoID
 
 	events, err := watchFleet(fleetWatchDeps{
 		list:     func() ([]session.InstanceData, watchSource, error) { return listSessionsInScope(repoID) },

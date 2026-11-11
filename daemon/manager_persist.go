@@ -262,7 +262,7 @@ func findInstanceDataByTitle(title, repoID string) (*session.InstanceData, strin
 				return &data[i], repoID, nil
 			}
 		}
-		return nil, "", fmt.Errorf("instance %q %w", title, errSessionNotFound)
+		return nil, "", scopedInstanceMissError{title: title}
 	}
 
 	allInstances, unreadable, err := config.LoadAllRepoInstancesReportingSkipDetails()

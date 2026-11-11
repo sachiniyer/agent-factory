@@ -2630,7 +2630,9 @@ name can exist in several repos. The title resolves inside the repo given by
 With no repo context, a title held by exactly one session still resolves; one
 held by sessions in several projects is ambiguous and reports an error naming
 those projects instead of guessing between them. A title no project holds
-reports that no project holds it, with the ways to scope the lookup.
+reports that no project holds it, with the ways to scope the lookup. A miss
+inside a project names that project, and whether --repo or the current
+directory chose it.
 
 ```
 af sessions get <title>
@@ -2777,7 +2779,7 @@ List sessions in the current project
 
 List sessions in the current project.
 
-Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed — one stderr line says so, so an empty list cannot be misread as an empty fleet. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
+Scope follows the shared project-context contract: --repo names a project, otherwise the current directory's project is used, and --all spans every project. Run from outside a git repository with no --repo, there is no project context and every project's sessions are listed — one stderr line says so, so an empty list cannot be misread as an empty fleet. An empty list scoped by the current directory likewise prints one stderr line naming that project. Under --json neither line is printed. Lifecycle, age, and limit filters compose and are applied by the daemon before transfer. With no filter flags, the complete list and its existing order are unchanged.
 
 Every row names its own integers. liveness_name is the one --status matches, and it round-trips exactly; status_name only names the legacy status integer and is not a filter value. tabs[].kind_name uses the tab_kinds[].kind words.
 

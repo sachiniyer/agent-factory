@@ -107,14 +107,14 @@ Examples:
 		// Honor --repo scoping the way kill/archive do: an empty repoID keeps the
 		// all-repo search, a non-empty one confines the swap to that repo so a
 		// same-titled session elsewhere is never touched.
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
 
 		resp, err := handoffSessionViaDaemon(daemon.HandoffSessionRequest{
 			Title:   title,
-			RepoID:  repoID,
+			RepoID:  scope.RepoID,
 			To:      sessionsHandoffTo,
 			Brief:   sessionsHandoffBrief,
 			Account: sessionsHandoffAccount,
@@ -123,7 +123,7 @@ Examples:
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(title, err))
 		}
 
 		output := map[string]any{

@@ -200,7 +200,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never receives the tab.
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		return jsonError(err)
 	}
@@ -216,7 +216,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 	}
 	created, err := createTabViaDaemon(daemon.CreateTabRequest{
 		Title:    args[0],
-		RepoID:   repoID,
+		RepoID:   scope.RepoID,
 		Command:  tabCreateCommandFlag,
 		Name:     tabCreateNameFlag,
 		Shell:    isShell,
@@ -226,7 +226,7 @@ func runTabCreate(cmd *cobra.Command, args []string) error {
 		Proposal: tabCreateProposalFlag,
 	})
 	if err != nil {
-		return jsonError(err)
+		return jsonError(scope.nameMiss(args[0], err))
 	}
 	return jsonOut(map[string]string{"name": created.Name})
 }
@@ -270,18 +270,18 @@ func runTabDelete(cmd *cobra.Command, args []string) error {
 	// repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo
 	// never loses a tab.
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		return jsonError(err)
 	}
 
 	name, err := closeTabViaDaemon(daemon.CloseTabRequest{
 		Title:   args[0],
-		RepoID:  repoID,
+		RepoID:  scope.RepoID,
 		TabName: tabDeleteNameFlag,
 	})
 	if err != nil {
-		return jsonError(err)
+		return jsonError(scope.nameMiss(args[0], err))
 	}
 	return jsonOut(map[string]string{"name": name})
 }
@@ -345,19 +345,19 @@ func runTabRename(cmd *cobra.Command, args []string) error {
 	// empty repoID preserves the all-repo search; a non-empty one confines the
 	// session lookup to that repo so a same-titled session in another repo never
 	// has a tab renamed out from under it.
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		return jsonError(err)
 	}
 
 	name, err := renameTabViaDaemon(daemon.RenameTabRequest{
 		Title:   args[0],
-		RepoID:  repoID,
+		RepoID:  scope.RepoID,
 		TabName: tabRenameNameFlag,
 		NewName: tabRenameNewNameFlag,
 	})
 	if err != nil {
-		return jsonError(err)
+		return jsonError(scope.nameMiss(args[0], err))
 	}
 	return jsonOut(map[string]string{"name": name})
 }
@@ -410,19 +410,19 @@ func runTabReorder(cmd *cobra.Command, args []string) error {
 	}
 
 	// Honor --repo scoping (#891 class), mirroring the other tab verbs.
-	repoID, err := resolveRepoIDForLookup()
+	scope, err := resolveLookupScope()
 	if err != nil {
 		return jsonError(err)
 	}
 
 	name, index, err := reorderTabViaDaemon(daemon.ReorderTabRequest{
 		Title:    args[0],
-		RepoID:   repoID,
+		RepoID:   scope.RepoID,
 		TabName:  tabReorderNameFlag,
 		NewIndex: tabReorderIndexFlag,
 	})
 	if err != nil {
-		return jsonError(err)
+		return jsonError(scope.nameMiss(args[0], err))
 	}
 	return jsonOut(map[string]any{"name": name, "index": index})
 }
