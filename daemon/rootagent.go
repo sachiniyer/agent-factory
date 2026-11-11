@@ -121,10 +121,10 @@ type rootEnsureState struct {
 	escalated           bool
 	escalatedPersistent bool
 	nextAttempt         time.Time
-	// carry is what a heal reaped that no replacement has received yet, held
-	// against the checkout it was reaped from (rootagent_carry.go, #7088).
-	carry         *reapedRootState
-	carryCheckout string
+	// carry is what a heal reaped that no replacement has received yet, bound
+	// to the repository, workspace and checkout it came from
+	// (rootagent_carry.go, #7088).
+	carry *rootCarry
 	// suppressLogged dedupes the "not re-creating a user-killed root" log
 	// line to once per suppression.
 	suppressLogged bool
@@ -764,7 +764,7 @@ func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
-	st.carry, st.carryCheckout = nil, ""
+	st.carry = nil
 	m.mu.Unlock()
 }
 

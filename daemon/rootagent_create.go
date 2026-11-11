@@ -230,7 +230,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// (rootagent_carry.go). It is the last working root's, so it outranks a
 	// record reaped since: no replacement has launched, and any record reaped
 	// meanwhile is a failed one.
-	held, haveHeld := m.heldRootCarry(st, identity)
+	held, haveHeld := m.heldRootCarry(st, repo, identity)
 
 	if inst != nil {
 		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
@@ -379,7 +379,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 	if err != nil {
 		if reapedRoot {
-			m.holdRootCarry(st, identity, carried) // the next pass's create carries it
+			m.holdRootCarry(st, repo, identity, carried) // the next pass's create carries it
 		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
@@ -398,5 +398,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
+	m.retireRootCarries(repo.ID)
 	m.rootEnsureSucceeded(st)
 }

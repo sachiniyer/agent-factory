@@ -14,6 +14,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // #7088: follow-ups to the root heal's config snapshot (#7084, #7086).
@@ -123,4 +124,55 @@ func TestRootRefusalForAnExplicitProgramNamesTheConfigNotTheProgram(t *testing.T
 	require.Contains(t, out, `cannot start the root agent "/opt/root"`)
 	require.Contains(t, out, "couldn't read the project config")
 	require.NotContains(t, out, "cannot pick the root agent's program")
+}
+
+// #7090 review: a legacy root_agents entry has no checkout identity, and its
+// path can be retargeted at another repository. A carry is bound to the
+// repository and workspace it was reaped from, so a changed target drops it
+// instead of handing one project's conversation and tabs to another's root.
+func TestAHeldRootCarryIsBoundToTheRepositoryItCameFrom(t *testing.T) {
+	m := &Manager{rootEnsureStates: map[string]*rootEnsureState{}}
+	st := &rootEnsureState{}
+	m.rootEnsureStates["/legacy/path"] = st
+	a := &config.RepoContext{Root: "/repo-a", ID: "repo-a"}
+	b := &config.RepoContext{Root: "/repo-b", ID: "repo-b"}
+	carried := reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "conversation-a"}}
+
+	m.holdRootCarry(st, a, nil, carried)
+	got, held := m.heldRootCarry(st, a, nil)
+	require.True(t, held, "precondition: the same target gets its carry")
+	require.Equal(t, carried.conversation.ID, got.conversation.ID)
+
+	_, held = m.heldRootCarry(st, b, nil)
+	require.False(t, held, "a path retargeted at another repository does not inherit the old one's carry")
+	_, held = m.heldRootCarry(st, a, nil)
+	require.False(t, held, "and the mismatched carry was dropped, not kept for a later pass")
+}
+
+// #7090 review: two root_agents spellings of one repository are two ensure
+// candidates with their own retry state. A root one of them launches is newer
+// than what the other holds, so the launch retires every candidate's carry for
+// the repository — a later heal by the other reaps that root's state rather
+// than replacing it with the older snapshot.
+func TestARootLaunchedForTheRepositoryRetiresEveryCandidatesHeldCarry(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	// The other spelling's heal failed after its reap and holds what it carried.
+	other := &rootEnsureState{}
+	manager.mu.Lock()
+	manager.rootEnsureStates["other spelling of the repository"] = other
+	manager.mu.Unlock()
+	manager.holdRootCarry(other, repo, nil,
+		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "older-conversation"}})
+
+	manager.ensureRootAgentsAndWait() // this candidate launches the root
+	require.NotNil(t, findRootInstance(t, manager, repoPath), "precondition: the root launched")
+
+	_, held := manager.heldRootCarry(other, repo, nil)
+	require.False(t, held, "the launched root retires the other candidate's older carry")
 }
