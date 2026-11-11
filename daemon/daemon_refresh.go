@@ -38,6 +38,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		return existing, nil, nil, nil, err
 	}
 	allInstances, unreadable, missing, sigs := load.Instances, load.Skipped, load.Missing, load.Signatures
+	configTick := beginDeferredConfigTick()
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
@@ -68,6 +69,10 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		unreadableRepos[skip.RepoID] = true
 	}
 	reread := make(map[string]bool, len(allInstances))
+	// listedRepos is every repo whose row set this pass enumerated (parsed, or
+	// read as empty). Unlike reread it is never retracted, and only these repos
+	// can prove one of their deferred rows left the disk (#7080 review).
+	listedRepos := make(map[string]bool, len(allInstances))
 	for repoID, raw := range allInstances {
 		sig := sigs[repoID]
 		var data []session.InstanceData
@@ -83,16 +88,19 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			case outcome.empty:
 				reread[repoID] = !missing[repoID]
+				listedRepos[repoID] = !missing[repoID]
 				continue
 			default:
 				data, keys = outcome.rows, outcome.keys
 				reread[repoID] = true
+				listedRepos[repoID] = true
 			}
 		} else {
 			if raw == nil || string(raw) == "[]" || string(raw) == "null" {
 				// A missing file loads as "[]" too, but nothing was read, so it
 				// clears nothing (#4783).
 				reread[repoID] = !missing[repoID]
+				listedRepos[repoID] = !missing[repoID]
 				refreshRowOutcomes.store(repoID, repoRowsOutcome{sig: sig, empty: true})
 				continue
 			}
@@ -119,6 +127,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				continue
 			}
 			reread[repoID] = true
+			listedRepos[repoID] = true
 			keys = make([]string, len(data))
 			for i := range data {
 				keys[i] = daemonInstanceKey(repoID, data[i].Title)
@@ -174,15 +183,29 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 			}
 
-			instance, err := fromInstanceDataForRefresh(item)
+			instance, err := materializeRefreshRow(configTick, repoID, key, item)
 			if err != nil {
 				failedRows++
-				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				// A row deferred on its project config (#7077 review) logged its
+				// deferral and logs each re-read; skipping it is not news, and
+				// neither warning below repeats for it on every tick (#7080 review).
+				// Such a row recovers on its own once the config answers, so its
+				// first warning says that instead of asking for a repair.
+				deferredSkip := isDeferredConfigSkip(err)
+				configUnknown := session.IsProjectConfigUnknown(err)
+				if !deferredSkip {
+					log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				}
 				// A marked row that cannot materialize still owes its teardown
 				// (#4162) — the obligation is durable but nothing in memory can
 				// drain it. Name the session so the leak is a visible diagnosis,
 				// not the silent disappearance the marker exists to fix.
-				if item.PendingOnComplete != nil {
+				switch {
+				case item.PendingOnComplete == nil || deferredSkip:
+				case configUnknown:
+					log.WarningLog.Printf("daemon: session %q is owed an on_complete teardown for task %s (filed %s); it runs once the record loads, which it does when its project config can be read: %v",
+						item.Title, item.PendingOnComplete.TaskID, item.PendingOnComplete.FiledAt.Format(time.RFC3339), err)
+				default:
 					log.WarningLog.Printf("daemon: session %q is owed an on_complete teardown for task %s (filed %s) but its record failed to load; it stays on disk for repair or manual cleanup: %v",
 						item.Title, item.PendingOnComplete.TaskID, item.PendingOnComplete.FiledAt.Format(time.RFC3339), err)
 				}
@@ -208,7 +231,13 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				// it as a ghost on the next daemon start (#3310).
 				if rawTaskRunHoldsSlot(item) {
 					ghostTaskRuns[taskRunReservationKey(repoID, item.TaskID)]++
-					log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
+					switch {
+					case deferredSkip:
+					case configUnknown:
+						log.WarningLog.Printf("watch task %s: session %q has not loaded yet — its project config could not be read — so its run stays counted against max_concurrent_runs (#1892) until it does", item.TaskID, item.Title)
+					default:
+						log.WarningLog.Printf("watch task %s: session %q failed to load but its run is still counted against max_concurrent_runs (#1892); kill or repair the session to release its slot", item.TaskID, item.Title)
+					}
 				}
 				continue
 			}
@@ -226,6 +255,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, skipped)
 	}
 	refreshRowOutcomes.prune(allInstances)
+	endDeferredConfigTick(configTick, listedRepos)
 
 	// Preserve in-memory instances whose repo storage vanished from disk (#736):
 	// either the repo's instances directory was deleted entirely OR the repo's

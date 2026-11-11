@@ -273,8 +273,10 @@ func tmuxPaneSnapshot(ts *tmux.TmuxSession) (PaneSnapshot, error) {
 		}
 	}
 	snap.Screen = deadPaneScreen(content, int(snap.Rows))
-	// A dead pane has no live cursor to restore; leave the emulator's at the
-	// bottom the repaint ends on.
+	// A dead pane has no live cursor to restore; leave the emulator's where the
+	// repaint ends, on the marker row. A viewer's crop anchors on that row
+	// (#4480), and the output sits directly above it, so any box shows both
+	// (#7061).
 	snap.CursorRow, snap.CursorCol, snap.HasCursor = 0, 0, false
 	return snap, nil
 }

@@ -8,8 +8,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // WorkspaceFacts is what an off-box session's workspace holds that a kill would
@@ -404,16 +405,7 @@ func runWorkspaceGitStatus(dir string, args ...string) (out []byte, stderr strin
 	ctx, cancel := context.WithTimeout(context.Background(), workspaceGitTimeout)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, "git", append([]string{"-C", dir}, args...)...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = 2 * time.Second
 	var errBuf bytes.Buffer
 	cmd.Stderr = &errBuf

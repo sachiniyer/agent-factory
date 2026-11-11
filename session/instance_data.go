@@ -959,10 +959,8 @@ func FromInstanceDataWithContext(data InstanceData, rc *RestoreContext) (*Instan
 		return instance, nil
 	}
 
-	if rc != nil {
-		instance.restoreCtx.Store(rc)
-		defer instance.restoreCtx.Store(nil)
-	}
+	instance.restoreCtx.Store(loadContext(rc)) // one config answer per load (#7077)
+	defer instance.restoreCtx.Store(nil)
 	if err := instance.Start(false); err != nil {
 		if retainsInertInstance(err) {
 			// A sibling probe or the live agent's in-place scope upgrade did not

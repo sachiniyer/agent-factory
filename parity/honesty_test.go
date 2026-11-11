@@ -186,8 +186,12 @@ func TestDerivationTracksTUICreateFieldUse(t *testing.T) {
 			"(expected app/session_control.go, startSessionThroughDaemon)")
 	}
 	unreached := unreachedFields(auditedRequests["CreateSessionRequest"], u, typeUse)
-	// --here has no TUI analogue; force_remote is compatibility-only (#4017).
-	for _, f := range []string{"in_place", "force_remote"} {
+	// --here has no TUI analogue; force_remote is compatibility-only (#4017);
+	// title_base is deliberately unsent — the naming form refuses a collision
+	// in-form rather than letting the daemon auto-suffix, and the
+	// never-populated sessionStartRequest.TitleBase forward that used to
+	// fake this reach was removed.
+	for _, f := range []string{"in_place", "force_remote", "title_base"} {
 		if !contains(unreached, f) {
 			t.Errorf("derivation says the TUI reaches CreateSession.%s, but sessionStartRequest "+
 				"has no such field. Either the gap was fixed (retire the fixture) or the AST "+

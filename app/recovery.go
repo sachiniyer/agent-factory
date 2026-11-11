@@ -42,8 +42,10 @@ func (m *home) restoreFailedCreate() (bool, tea.Cmd) {
 	_ = instance.Transition(session.ClearOp())
 	_ = instance.Transition(session.BeginCreate())
 	m.store.AddInstance(instance)
+	// Named before it is selected: the draft can carry the very title the
+	// daemon refused, and the select must not read it as that session (#7060).
+	m.setNamingInstance(instance)
 	m.sidebar.SelectInstance(instance)
-	m.namingInstance = instance
 	// The field re-seeds from the placeholder's Program — the value the user was
 	// shown — not req.Program, which is the WIRE value and is "" for a submit
 	// whose program was implicit (#4889 review). What a resubmit SENDS depends

@@ -90,8 +90,12 @@ func TestStartPathHelpersShareTheBatchResolution(t *testing.T) {
 	for i := 0; i < 20; i++ {
 		inst := &Instance{Path: "/projects/alpha"}
 		inst.restoreCtx.Store(rc)
-		require.NotNil(t, resolveConfigForInstance(inst))
-		require.NotNil(t, resolveResolvedConfigForInstance(inst))
+		cfg, err := resolveConfigForInstance(inst)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		resolved, err := resolveResolvedConfigForInstance(inst)
+		require.NoError(t, err)
+		require.NotNil(t, resolved)
 		repo, err := inst.restoreContext().RepoFromPath(inst.Path) // Provision's lookup
 		require.NoError(t, err)
 		require.Equal(t, "/projects/alpha", repo.IdentityPath())

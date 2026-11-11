@@ -14,6 +14,24 @@ type Instance struct {
 	// restoreCtx is the batch-shared repo/config resolution for the duration of a
 	// FromInstanceDataWithContext restore (#6446); nil otherwise.
 	restoreCtx atomic.Pointer[RestoreContext]
+	// frozenEnvPassthrough is the session-environment pass-through list a
+	// prepared swap's admission resolved before the outgoing agent stopped,
+	// held while that plan executes; nil otherwise. SessionEnvPassthroughForInstance
+	// answers it instead of re-reading the project config, so a read that cannot
+	// complete after teardown never strands an admitted swap with no agent (#7077).
+	frozenEnvPassthrough atomic.Pointer[[]string]
+	// envResolvedTmux and envResolvedWorktree name the agent handle and the
+	// worktree on which an environment refresh last SUCCEEDED — the pass-through
+	// list, and on the agent handle the session's account (#7083). A handle not
+	// named here never had its environment applied: one that skipped Provision
+	// (a startup-unknown row a handoff later marked started), or one an inert
+	// load could not read the config for. A tab spawn built from it resolves
+	// first or refuses (ensureSpawnEnvironment); it never starts bare.
+	envResolvedTmux     atomic.Pointer[tmux.TmuxSession]
+	envResolvedWorktree atomic.Pointer[git.GitWorktree]
+	// spawnEnvMu serializes the spawn that resolves them, so concurrent tab
+	// creates read the environment once (#7080 review).
+	spawnEnvMu sync.Mutex
 
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):

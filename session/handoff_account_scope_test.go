@@ -325,11 +325,11 @@ func TestHandoffEffectiveAgentForPath_MatchesInstanceResolution(t *testing.T) {
 	require.NoError(t, err)
 	inst := handoffTestInstance(t, tmux.ProgramClaude)
 	for _, target := range tmux.SupportedPrograms {
-		require.Equal(t, handoffEffectiveAgent(inst, target),
-			HandoffEffectiveAgentForPath(inst.Path, target), target)
+		require.Equal(t, instanceEffectiveAgentForTest(t, inst, target),
+			effectiveAgentForTest(t, inst.Path, target), target)
 	}
 	require.Equal(t, tmux.ProgramAider,
-		HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramCodex))
+		effectiveAgentForTest(t, inst.Path, tmux.ProgramCodex))
 }
 
 // The plan-failure precedence fix (daemon/handoff.go) resolves the same
@@ -342,7 +342,7 @@ func TestHandoffEffectiveAgentForPath_NeedsNoBinary(t *testing.T) {
 		"program_overrides."+tmux.ProgramAider, "/nonexistent/codex")
 	require.NoError(t, err)
 	require.Equal(t, tmux.ProgramCodex,
-		HandoffEffectiveAgentForPath(t.TempDir(), tmux.ProgramAider),
+		effectiveAgentForTest(t, t.TempDir(), tmux.ProgramAider),
 		"detection answers from the resolved command even when its binary cannot launch")
 }
 

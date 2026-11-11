@@ -84,8 +84,23 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// namespace for linked worktrees, including bare clones (#3358).
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
+	// A load whose row stays inert (Dead, Lost, killed, startup-unknown) launches
+	// nothing — launch returns before any reattach or spawn — so a config it
+	// cannot read must not keep the row from loading (#7077 review). It still
+	// SETS both environments, best-effort: the row can go live without Recover
+	// (the status poll lifts a Lost row whose pane is alive), and a tab added
+	// then is built from this handle while every git command its worktree runs
+	// reads the hook list (#7080). A handle whose refresh failed is not marked
+	// resolved, and the next tab spawn reads its own (ensureSpawnEnvironment).
+	inertLoad := !firstTimeSetup && i.loadStaysInert()
+	sessionEnvFailed := false
 	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
-		return err
+		if !inertLoad {
+			return err
+		}
+		refreshSessionIdentity(i, tmuxSession)
+		sessionEnvFailed = true
+		log.WarningLog.Printf("session %q loads without its environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
 	}
 
 	i.mu.Lock()
@@ -113,11 +128,30 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	i.mu.RLock()
 	gitWorktree := i.gitWorktree
 	i.mu.RUnlock()
-	if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
-		return err
+	switch {
+	case sessionEnvFailed:
+		// The session read already failed; another is no likelier to answer.
+		if gitWorktree != nil {
+			gitWorktree.SetHookScopeSessionID(i.ID)
+		}
+	default:
+		if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
+			if !inertLoad {
+				return err
+			}
+			log.WarningLog.Printf("session %q loads without its worktree environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
+		}
 	}
 
 	return nil
+}
+
+// loadStaysInert reports whether a load of this row reattaches and spawns
+// nothing: launch returns before both for a recorded Dead/Lost runtime, a
+// tombstone, or an unconfirmed startup (#935/#970/#1108).
+func (i *Instance) loadStaysInert() bool {
+	status := i.GetStatus()
+	return status == Dead || status == Lost || i.UserKilled() || i.StartupStateUnknown()
 }
 
 func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *CreateLaunchPlan) error {
@@ -198,7 +232,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// loop or user-initiated restore (#1108 PR 2, #1300), never a
 		// load-time side effect; a tombstoned record's only future is
 		// having its kill finished.
-		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() || i.StartupStateUnknown() {
+		if i.loadStaysInert() {
 			return nil
 		}
 
@@ -230,9 +264,22 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			resolution := resolveLaunchProgramForInstance(i)
+			// A launch-class resolve: this program is what a re-spawn runs. An
+			// unknown project config fails the load instead of arming a re-spawn
+			// with the global config's command (#7077); the daemon's refresh
+			// retries an unloadable row on its next tick.
+			resolution, err := resolveLaunchProgramForInstance(i)
+			if err != nil {
+				setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+				return setupErr
+			}
+			env, err := launchEnvFor(i, i.GetWorktreePath())
+			if err != nil {
+				setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+				return setupErr
+			}
 			runtimeProgram = resolution.command
-			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			// A re-spawn here resumes the session's own recorded conversation or
@@ -324,11 +371,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
 			return setupErr
 		}
-		// A staged setup payload that failed to copy in is non-blocking like
-		// the hook failure itself, but the row must say so (#6667).
-		if overlayErr := gw.SetupOverlayError(); overlayErr != "" {
-			i.noteSetupHookFailure(overlayErr)
-		}
+		// A staged setup payload that failed to copy in, or post_worktree_commands
+		// that did not run, is non-blocking like the hook failure itself, but the
+		// row must say so (#6667, #7079, #7084).
+		i.noteWorktreeSetup(gw)
 
 		// Inject Agent Factory instructions into the session. The daemon create
 		// path supplies a command frozen after provisioning and before process
@@ -350,11 +396,20 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			// The pre-rewrite command is resolved once and kept with the proof it
 			// produces. A prepared create carries both from its earlier freeze.
-			resolution := resolveLaunchProgramForInstance(i)
+			resolution, err := resolveLaunchProgramForInstance(i)
+			if err != nil {
+				setupErr = err
+				return setupErr
+			}
+			env, err := launchEnvFor(i, i.GetWorktreePath())
+			if err != nil {
+				setupErr = err
+				return setupErr
+			}
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)
@@ -413,7 +468,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// names it: nilling the ref here would orphan the pane. See the predicate.
 		// A sibling spawn-dir refusal keeps it too — the binding (live or
 		// never-spawned) is what Recover reattaches or re-spawns (#5172).
-		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
+		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err) || isProjectConfigUnknown(err)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}
@@ -552,6 +607,12 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 
 	ts.SetProgram(plan.program)
+	// The outgoing agent is stopped: apply the pass-through list preflight
+	// resolved rather than re-read config, which could now fail only after the
+	// point where refusing kept an agent running (#7077).
+	if plan.passthroughFrozen {
+		defer i.freezeEnvPassthrough(plan.passthrough)()
+	}
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}

@@ -84,7 +84,7 @@ func TestValidateHandoffTarget_OpaqueOverrideKeepsTheSameTargetGuard(t *testing.
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		"af_handoff_opaque", wrapper, nil, nil))
 
-	require.Empty(t, HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+	require.Empty(t, effectiveAgentForTest(t, inst.Path, tmux.ProgramClaude),
 		"precondition: the wrapper must be an unprovable invocation")
 	require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
 		"precondition: the session is claude by its configured enum")
@@ -141,7 +141,7 @@ func TestValidateHandoffTarget_OpaqueWrapperRejectsWhitespaceStoredSelfHandoff(t
 			inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 				"af_whitespace", wrapper, nil, nil))
 
-			require.Empty(t, HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+			require.Empty(t, effectiveAgentForTest(t, inst.Path, tmux.ProgramClaude),
 				"precondition: wrapper is opaque so the opaque branch is used")
 			require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
 				"precondition: the session is claude by its configured enum")
@@ -196,17 +196,17 @@ func TestManualAccountSwapProgram_AccountOnlyKeepsTheRecordedProgram(t *testing.
 	inst.Tabs = []*Tab{newAgentTab(tmux.NewTmuxSession("swap", tmux.ProgramCodex))}
 	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName(), "precondition: the pane runs codex")
 
-	program, cross := inst.ManualAccountSwapProgram(inst.CurrentAgentName(), true)
+	program, cross := manualSwapProgramForTest(t, inst, inst.CurrentAgentName(), true)
 	require.False(t, cross, "an account-only request never changes the agent")
 	require.Equal(t, tmux.ProgramClaude, program)
-	require.Equal(t, tmux.ProgramCodex, HandoffEffectiveAgentForPath(inst.Path, program),
+	require.Equal(t, tmux.ProgramCodex, effectiveAgentForTest(t, inst.Path, program),
 		"the account namespace is the running codex, not codex's override")
 
-	program, cross = inst.ManualAccountSwapProgram(tmux.ProgramCodex, false)
+	program, cross = manualSwapProgramForTest(t, inst, tmux.ProgramCodex, false)
 	require.True(t, cross, "an explicit --to codex resolves to gemini — a real cross-agent handoff")
 	require.Equal(t, tmux.ProgramCodex, program)
 
-	program, cross = inst.ManualAccountSwapProgram(tmux.ProgramClaude, false)
+	program, cross = manualSwapProgramForTest(t, inst, tmux.ProgramClaude, false)
 	require.False(t, cross, "--to claude resolves to the running codex — the same-agent account change")
 	require.Equal(t, tmux.ProgramClaude, program)
 }
@@ -246,7 +246,7 @@ func TestValidateManualAccountSwap_AccountOnlyLaunchesTheRecordedProgram(t *test
 	require.NoError(t, config.SaveConfig(cfg))
 
 	agent := inst.CurrentAgentName()
-	_, cross := inst.ManualAccountSwapProgram(agent, true)
+	_, cross := manualSwapProgramForTest(t, inst, agent, true)
 	require.NoError(t, inst.ValidateManualAccountSwap("work", agent, cross))
 	require.NotNil(t, inst.accountSwapLaunch)
 	launched := inst.accountSwapLaunch.program

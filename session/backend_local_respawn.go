@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -156,7 +157,16 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if err := refreshWorktreeEnvironment(i, gw); err != nil {
 		return fmt.Errorf("recover: %w", err)
 	}
-	resolution := resolveLaunchProgramForInstance(i)
+	var resolution launchProgramResolution
+	if prepared == nil {
+		// Only a fresh respawn resolves: a prepared plan carries the base its
+		// admission already resolved and proved, and must not fail here on a
+		// config read it no longer needs.
+		var err error
+		if resolution, err = resolveLaunchProgramForInstance(i); err != nil {
+			return fmt.Errorf("recover: session %q: %w", i.Title, err)
+		}
+	}
 	resolvedProgram := resolution.command
 	if prepared != nil {
 		// The base admission resolved and proved against, not a fresh resolve: a
@@ -307,9 +317,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		// Either rebuild may have hit a setup-payload collision — non-blocking,
 		// but the row must say so (#6667).
-		if s := gw.SetupOverlayError(); s != "" {
-			i.noteSetupHookFailure(s)
-		}
+		i.noteWorktreeSetup(gw)
 	}
 
 	// A rebuild gives the worktree a new identity, so any tmux session that
@@ -336,8 +344,11 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 	}
 
-	program, proof, refusedID := respawnLaunchProgram(
+	program, proof, refusedID, perr := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
+	if perr != nil {
+		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: session %q: %w", i.Title, perr))
+	}
 	setLaunchProgram(ts, program, proof)
 	// A re-spawn resumes this session's own recorded conversation or starts fresh
 	// (#4797): never the latest one on a shared account home.
@@ -662,4 +673,41 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 		return fmt.Errorf("branch %s is gone and no recorded conversation id can resume into a fresh rebuild", branch)
 	}
 	return nil
+}
+
+// respawnLaunchProgram is the respawn's launch command and proof: a prepared
+// account-swap plan's frozen answer, or the resolved program with the resume
+// rewrite and system-prompt injection a first-time launch gets. It fails when
+// the launch environment's project config cannot be read (#7077).
+func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
+	trustBase, resume bool, prepared *accountSwapLaunchPlan,
+) (string, sessionenv.AccountLaunchProof, string, error) {
+	if prepared != nil {
+		if prepared.conversation.HasID() {
+			i.SetAgentConversation(prepared.conversation)
+		}
+		return prepared.program, prepared.proof, "", nil
+	}
+	program := resolvedProgram
+	refusedID := ""
+	if resume {
+		rewritten, ok, reason := prepareExactResumeConversation(i, program)
+		if ok {
+			program = rewritten
+		} else if reason != "" {
+			// The recorded conversation was refused as stale or unprovable, so
+			// this launch starts fresh. The caller retires the dead id when the
+			// spawn commits (#6769 review): leaving it recorded would suppress
+			// every later capture arm and make each restore start fresh again.
+			refusedID = i.resumableConversation().ID
+		}
+	} else {
+		program = prepareLaunchConversation(i, program)
+	}
+	env, err := launchEnvFor(i, i.GetWorktreePath())
+	if err != nil {
+		return "", sessionenv.AccountLaunchProof{}, "", err
+	}
+	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
+	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusedID, nil
 }

@@ -285,9 +285,15 @@ type launchEnv struct {
 	workDir     string
 }
 
-// launchEnvFor is the launch environment of session i starting in workDir.
-func launchEnvFor(i *Instance, workDir string) launchEnv {
-	return launchEnv{passthrough: SessionEnvPassthroughForInstance(i), workDir: workDir}
+// launchEnvFor is the launch environment of session i starting in workDir. It
+// fails, rather than answer the global config's pass-through list, when the
+// project's config cannot be read (#7077).
+func launchEnvFor(i *Instance, workDir string) (launchEnv, error) {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return launchEnv{}, err
+	}
+	return launchEnv{passthrough: passthrough, workDir: workDir}, nil
 }
 
 // injectSystemPromptWithEnv is injectSystemPrompt for a launch whose

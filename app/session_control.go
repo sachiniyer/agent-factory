@@ -141,11 +141,10 @@ func mutationCallRetryable(err error) bool {
 }
 
 type sessionStartRequest struct {
-	Title     string
-	TitleBase string
-	RepoPath  string
-	Program   string
-	Prompt    string
+	Title    string
+	RepoPath string
+	Program  string
+	Prompt   string
 	// Backend is the runtime picked in the naming form's backend field (#1933),
 	// or "" to let the repo's `backend` config key decide — the same defaulting
 	// `af sessions create` applies when --backend is absent.
@@ -204,14 +203,13 @@ var startSessionThroughDaemon = func(_ *session.Instance, req sessionStartReques
 		return gateHostPick(c, daemon.HostPickOnCreate, req.Host, func() error {
 			var e error
 			data, e = c.CreateSession(daemon.CreateSessionRequest{
-				Title:     req.Title,
-				TitleBase: req.TitleBase,
-				RepoPath:  req.RepoPath,
-				Program:   req.Program,
-				Prompt:    req.Prompt,
-				Backend:   req.Backend,
-				Host:      req.Host,
-				Account:   req.Account,
+				Title:    req.Title,
+				RepoPath: req.RepoPath,
+				Program:  req.Program,
+				Prompt:   req.Prompt,
+				Backend:  req.Backend,
+				Host:     req.Host,
+				Account:  req.Account,
 			})
 			return e
 		})

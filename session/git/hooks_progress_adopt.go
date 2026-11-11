@@ -18,7 +18,7 @@ func (g *GitWorktree) adoptHookProgress() bool {
 		return false
 	}
 	// Capture identity before publication: teardown can replace worktree fields.
-	worktreePath, sessionID := g.worktreePath, g.hookScopeSessionID
+	worktreePath, sessionID := g.worktreePath, g.hookScopeID()
 	p, err := readPendingHookProgress(worktreePath, sessionID)
 	return g.installHookProgressAdoption(worktreePath, sessionID, p, err)
 }
@@ -136,7 +136,7 @@ func (g *GitWorktree) installRelocationPendingHookAdoption() {
 	done := make(chan struct{})
 	g.hooksDone = done
 	interval := hookAdoptionPollInterval
-	sessionID := g.hookScopeSessionID
+	sessionID := g.hookScopeID()
 	go func() {
 		ticker := time.NewTicker(interval)
 		defer ticker.Stop()

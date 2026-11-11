@@ -12,6 +12,8 @@ import (
 	"strings"
 	"syscall"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // SupervisionOwner is the derived owner of one AF home's daemon lifecycle.
@@ -470,22 +472,11 @@ func runEnsureManagerCommand(deadline time.Time, name string, args ...string) er
 	ctx, cancel := context.WithDeadline(context.Background(), deadline)
 	defer cancel()
 	cmd := exec.CommandContext(ctx, name, args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = ensureUnitStartWaitDelay
 
 	out, err := cmd.CombinedOutput()
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	execgroup.Reap(cmd)
 	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
 		// The manager exited zero. A deadline that fires while WaitDelay is
 		// cleaning inherited pipes cannot retroactively make the command time out.

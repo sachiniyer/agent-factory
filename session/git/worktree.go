@@ -132,6 +132,10 @@ type GitWorktree struct {
 	// Git/runtime subset plus these exact names, but never agent-provider keys
 	// merely because the session selected that agent.
 	hookEnvPassthrough []string
+	// hookEnvMu guards hookEnvPassthrough and hookScopeSessionID: a tab spawn
+	// can refresh both on a live session (#7080, #7083) while its git commands
+	// and hook readers read them.
+	hookEnvMu sync.RWMutex
 	// Base commit hash for the worktree
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory.
@@ -189,6 +193,10 @@ type GitWorktree struct {
 	// session row rather than propagated: an overlay failure, like the hook
 	// failure that produced the payload, must not block the worktree create.
 	setupOverlayErr string
+	// hookConfigNote says why the last hook run's post_worktree_commands did
+	// not run because the project config could not be read (#7079); "" when
+	// they ran or the project has none. Surfaced with setupOverlayErr.
+	hookConfigNote string
 }
 
 // RelocationRecovery is the durable, non-authoritative second handle retained
@@ -217,15 +225,27 @@ func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	if err != nil {
 		return err
 	}
+	g.hookEnvMu.Lock()
 	g.hookEnvPassthrough = normalized
+	g.hookEnvMu.Unlock()
 	return nil
+}
+
+// HookEnvironment is the exact pass-through list the worktree's git commands
+// and post-worktree hooks run with, read under its lock.
+func (g *GitWorktree) HookEnvironment() []string {
+	g.hookEnvMu.RLock()
+	defer g.hookEnvMu.RUnlock()
+	return append([]string(nil), g.hookEnvPassthrough...)
 }
 
 // SetHookScopeSessionID records the session identity that daemon-spawned hook
 // scopes are named after. Call it before Setup or a rebuild; an empty id (the
 // default) means hooks are spawned exactly as they were before #3650.
 func (g *GitWorktree) SetHookScopeSessionID(id string) {
+	g.hookEnvMu.Lock()
 	g.hookScopeSessionID = id
+	g.hookEnvMu.Unlock()
 }
 
 // HookScopeUnitPrefix returns the recorded scope handle, or "" when this
@@ -597,4 +617,11 @@ func (g *GitWorktree) GetRepoName() string {
 // GetBaseCommitSHA returns the base commit SHA for the worktree
 func (g *GitWorktree) GetBaseCommitSHA() string {
 	return g.baseCommitSHA
+}
+
+// hookScopeID is hookScopeSessionID, read under its lock.
+func (g *GitWorktree) hookScopeID() string {
+	g.hookEnvMu.RLock()
+	defer g.hookEnvMu.RUnlock()
+	return g.hookScopeSessionID
 }

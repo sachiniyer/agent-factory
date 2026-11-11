@@ -541,7 +541,7 @@ func TestSwapSameTitle_PreservesOpenPanes(t *testing.T) {
 		return recreated, nil
 	}))
 
-	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale.Title))
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale))
 
 	require.Equal(t, 1, h.store.NumOpenPanes(),
 		"a same-title swap must PRESERVE the open pane — the replacement's ids differ by construction")
@@ -700,7 +700,7 @@ func TestSwapSameTitle_StalesPinnedPaneJump(t *testing.T) {
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return recreated, nil
 	}))
-	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale.Title))
+	require.True(t, h.swapInstanceFromSnapshot(recreated.ToInstanceData(), stale))
 
 	// The swap is a logical selection change: the next selectionChanged must see it.
 	_ = h.selectionChanged()

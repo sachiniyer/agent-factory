@@ -8,9 +8,9 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
-	"syscall"
 	"time"
 
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 )
 
@@ -236,33 +236,17 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// process, leaving ssh / git-remote-https orphaned and still holding the
 	// network connection (mirrors config.go's claude probe and the hook
 	// runner, #610/#769/#856).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Negative pid targets the whole group led by cmd.Process.Pid. A group
-		// already gone (ESRCH) maps to os.ErrProcessDone, which Wait ignores
-		// rather than reporting as a command failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	// Bound the post-exit wait: a transport child can inherit the capture pipes
 	// and, without a bound, Output() would block on pipe EOF until that child
 	// exits even after the deadline killed git (#856).
 	cmd.WaitDelay = gitWaitDelay
 
 	output, err := cmd.Output()
-	if cmd.Process != nil {
-		// Reap any transport child that outlived git on every exit path —
-		// normal completion or timeout — so a fetch never leaks a
-		// connection-holding process (#769 pattern). The group is led by git,
-		// which has already exited, so this is ESRCH (ignored) in the common
-		// case.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	// Reap any transport child that outlived git on every exit path —
+	// normal completion or timeout — so a fetch never leaks a
+	// connection-holding process (#769 pattern).
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited (successfully — a non-zero exit would surface as an
 		// ExitError, not ErrWaitDelay); only a transport child held the capture
@@ -281,6 +265,6 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 }
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
-	return append(sessionenv.Filter(os.Environ(), "", g.hookEnvPassthrough),
+	return append(sessionenv.Filter(os.Environ(), "", g.HookEnvironment()),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }

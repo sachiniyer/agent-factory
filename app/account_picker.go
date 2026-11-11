@@ -1,6 +1,7 @@
 package app
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 
@@ -249,6 +250,12 @@ func (m *home) openAccountPicker() (tea.Model, tea.Cmd) {
 	// `af sessions create --account` validates against (api/sessions.go), so the
 	// picker and the create cannot disagree about which registry a program uses.
 	agent := sessionenv.AgentForCommand(m.pendingProgram)
+	if strings.TrimSpace(m.pendingProgram) == "" {
+		// The project's default could not be read yet (#7079): there is no
+		// program to name, and quoting "" would read as a bug (#7084).
+		return m, m.handleNotice(errors.New(
+			"this project's default program is not known yet, so there is no account registry to offer — pick a program first, or try again in a moment"))
+	}
 	if agent == "" {
 		return m, m.handleNotice(fmt.Errorf(
 			"af cannot tell which agent %q runs as, so it has no account registry to offer for it",

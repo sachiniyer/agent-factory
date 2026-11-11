@@ -759,3 +759,56 @@ func TestSandboxTaskDeliveryIsPinnedToTheAuthorizedSessionID(t *testing.T) {
 	f.peer.SetStatusForTest(session.Archived)
 	assert.ErrorIs(t, guard(f.peer, f.repoA), errSandboxOutOfScope)
 }
+
+// TestSandboxScope_AddTaskClearsForgedSandboxOwner is the end-to-end regression
+// for the sandbox_owner forgery (#5571 W3.5): AddTaskRequest carries a whole
+// task.Task, so a client can populate sandbox_owner. resetStoreOwnedFields
+// clears it and AddTaskChecked re-stamps the daemon's own value from the
+// credential. An operator's forged value never reaches disk, and a sandbox
+// credential that forges another session as owner is stored under its own.
+func TestSandboxScope_AddTaskClearsForgedSandboxOwner(t *testing.T) {
+	f := newScopeFixture(t)
+	f.useScheduler()
+	addTask := func(taskJSON string) string { return `{"task":` + taskJSON + `}` }
+
+	// --- operator path: a forged sandbox_owner is cleared -------------------
+	//
+	// An operator can reach /v1/AddTask with any token-bearing client. Without
+	// the fix, a forged sandbox_owner survives the create and the disk write,
+	// making the daemon treat an operator task as sandbox-created: runs are
+	// refused forever for per-run-session tasks, and deliveries are gated
+	// against the attacker-chosen owner.
+	code, out := f.call(t, "operator-token", "/v1/AddTask", addTask(
+		`{"id":"forged-op","prompt":"p","cron_expr":"0 * * * *","project_path":"`+
+			f.me.Path+`","program":"claude","enabled":true,"sandbox_owner":"attacker-session-id"}`))
+	require.Equal(t, http.StatusOK, code, out)
+
+	stored, err := task.GetTask("forged-op")
+	require.NoError(t, err)
+	assert.Empty(t, stored.SandboxOwner,
+		"a client-supplied sandbox_owner must not survive the create on the operator path")
+
+	// --- sandbox path: a forged owner is replaced by the credential's --------
+	//
+	// The body names the peer, a real session in the same project, as the
+	// owner. resetStoreOwnedFields clears that, and AddTaskChecked stamps the
+	// owner s.addTask reads from the authenticated credential (f.me).
+	code, out = f.call(t, f.secret, "/v1/AddTask", addTask(
+		`{"prompt":"p","cron_expr":"0 * * * *","target_session":"peer","sandbox_owner":"`+f.peer.ID+`"}`))
+	require.Equal(t, http.StatusOK, code, out)
+	var env struct {
+		Data AddTaskResponse `json:"data"`
+	}
+	require.NoError(t, json.Unmarshal([]byte(out), &env))
+	require.NotNil(t, env.Data.Task, "the sandbox create returned a task")
+	require.NotEmpty(t, env.Data.Task.ID, "the daemon minted the id")
+
+	stored, err = task.GetTask(env.Data.Task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, f.me.ID, stored.SandboxOwner,
+		"the stored owner is the credential's own session, not the forged peer")
+	// sandboxSafeTask projects the response to a sandbox credential, and it
+	// withholds SandboxOwner entirely: the caller sees neither owner.
+	assert.Empty(t, env.Data.Task.SandboxOwner,
+		"the sandbox-safe projection withholds SandboxOwner from the response")
+}

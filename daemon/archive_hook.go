@@ -7,10 +7,10 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
 	"github.com/sachiniyer/agent-factory/internal/systemdunit"
@@ -181,23 +181,11 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 	)
 	cmd.Stdout = outputFile
 	cmd.Stderr = outputFile
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	// The file descriptors above need no pipe drain. Keep a post-cancellation
 	// bound for the immediate process itself in case a platform fails to deliver
 	// the group kill below as expected.
 	cmd.WaitDelay = onArchiveHookWaitDelay
-	cmd.Cancel = func() error {
-		if cmd.Process == nil {
-			return nil
-		}
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 
 	if onArchiveHookBeforeStart != nil {
 		onArchiveHookBeforeStart(cmd)
@@ -208,14 +196,12 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		}
 		err = cmd.Wait()
 	}
-	if cmd.Process != nil {
-		// A hook may background a descendant and exit. Kill the process group on
-		// every path so no cleanup process survives the archive operation with a
-		// cwd or inherited output descriptor in the worktree. systemd-run --scope
-		// execs rather than forks, so cmd.Process.Pid is still the hook shell and
-		// this signals exactly the group it always did.
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
+	// A hook may background a descendant and exit. Kill the process group on
+	// every path so no cleanup process survives the archive operation with a
+	// cwd or inherited output descriptor in the worktree. systemd-run --scope
+	// execs rather than forks, so cmd.Process.Pid is still the hook shell and
+	// this signals exactly the group it always did.
+	execgroup.Reap(cmd)
 	// The scope is the wider net over the same tree: a descendant that left the
 	// process group (setsid) is still in the control group, where the SIGKILL
 	// above cannot reach it. `systemctl stop` waits for the job — StopScopeUnits

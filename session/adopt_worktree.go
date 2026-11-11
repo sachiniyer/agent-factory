@@ -3,6 +3,7 @@ package session
 import (
 	"fmt"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
@@ -116,12 +117,18 @@ func (i *Instance) adoptExistingWorktree() error {
 		if err := CheckWorktreeOccupants(gw.GetWorktreePath()); err != nil {
 			return fmt.Errorf("the worktree at %s is gone, but what outlived it is not proven stopped; not rebuilding: %w", gw.GetWorktreePath(), err)
 		}
+		// The rebuild starts the post-worktree hooks, so their environment — the
+		// pass-through list and the scope id — is set on the worktree first
+		// rather than by Provision's refresh after it (#7087 review).
+		// Best-effort: the hook run reads the config again and records any
+		// failure on the row, and Provision's refresh stays authoritative.
+		if err := refreshWorktreeEnvironment(i, gw); err != nil {
+			log.WarningLog.Printf("session %q: rebuilding its worktree before its environment pass-through could be read; the hooks run with the default list: %v", i.Title, err)
+		}
 		if err := gw.RebuildFromExistingBranch(); err != nil {
 			return fmt.Errorf("the worktree at %s is gone and could not be rebuilt from branch %q: %w", gw.GetWorktreePath(), branch, err)
 		}
-		if s := gw.SetupOverlayError(); s != "" {
-			i.noteSetupHookFailure(s)
-		}
+		i.noteWorktreeSetup(gw)
 	default:
 		return fmt.Errorf("cannot adopt the worktree at %s: whether it is present could not be established", gw.GetWorktreePath())
 	}

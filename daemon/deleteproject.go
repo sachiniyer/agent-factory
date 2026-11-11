@@ -631,11 +631,20 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 // and clears the kill-grace record so no stale grace window survives (#1735). The
 // ensure loop is keyed by config path, not repoID, so the deletedRootRepos check
 // (which resolves each path to its repoID) is where suppression takes effect.
+//
+// It also retires every held root carry for repoID (rootagent_carry.go). The
+// ensure loop clears a candidate's carry only when it visits that candidate,
+// and a candidate in backoff goes unvisited for minutes. If the tombstone is
+// released in that time — a different clone proven at the same path — a
+// legacy root_agents carry, which has no checkout to tell the two apart,
+// would bring the deleted project's conversation and tabs back into the
+// unrelated clone (#7090 review).
 func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedRootRepos[repoID] = claimantProjectID
 	delete(m.rootKilledAt, repoID)
+	m.retireRootCarriesLocked(repoID)
 }
 
 // boundedRecordRootAbsentTimeout bounds one recorded-root stat taken while

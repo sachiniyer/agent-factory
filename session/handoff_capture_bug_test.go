@@ -41,7 +41,7 @@ func setupBugInstance(t *testing.T) *Instance {
 		"precondition: the pane runs the override target's provable agent (codex)")
 	require.Equal(t, tmux.ProgramClaude, inst.AgentProgram(),
 		"precondition: the recorded enum is still claude")
-	require.Empty(t, HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramCodex),
+	require.Empty(t, effectiveAgentForTest(t, inst.Path, tmux.ProgramCodex),
 		"precondition: codex's own override is an unprovable wrapper — opaque target")
 	require.False(t, HandoffTargetIsCurrent(inst.CurrentAgentName(), tmux.ProgramCodex, "", inst.AgentProgram()),
 		"precondition: admission must classify this as cross-agent (recorded claude != target codex)")
@@ -139,7 +139,7 @@ func TestCaptureHandoffBrief_OpaqueCrossAgent_DifferentTargetKeepsRunningAgent(t
 	inst.Tabs[0].Conversation = AgentConversationData{}
 	inst.SetTmuxSession(tmux.NewTmuxSession("af-aider", tmux.ProgramCodex))
 	require.Equal(t, tmux.ProgramCodex, inst.CurrentAgentName())
-	require.Empty(t, HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramAider),
+	require.Empty(t, effectiveAgentForTest(t, inst.Path, tmux.ProgramAider),
 		"precondition: aider's override is an opaque wrapper")
 	require.False(t, HandoffTargetIsCurrent(inst.CurrentAgentName(), tmux.ProgramAider, "", inst.AgentProgram()),
 		"precondition: admission must classify this as cross-agent")

@@ -164,7 +164,7 @@ func TestAddTaskReturnsTheRowTheNextReadWillReport(t *testing.T) {
 
 	var want []int
 	for i, id := range []string{"aaa00001", "bbb00002", "ccc00003"} {
-		created, err := AddTaskChecked(ordinalRow(id, "row", "0 9 * * *", "/repo"), ActorCLI, nil)
+		created, err := AddTaskChecked(ordinalRow(id, "row", "0 9 * * *", "/repo"), ActorCLI, nil, "")
 		require.NoError(t, err)
 		assert.Equal(t, i+1, created.Ordinal, "the create returns the row it landed on")
 		require.NotEmpty(t, created.StoreGeneration, "and the generation of the store it wrote")
@@ -176,7 +176,7 @@ func TestAddTaskReturnsTheRowTheNextReadWillReport(t *testing.T) {
 	assert.Equal(t, map[string]int{"aaa00001": want[0], "bbb00002": want[1], "ccc00003": want[2]},
 		rowsByID(read), "and a later read agrees with every one of them")
 
-	last, err := AddTaskChecked(ordinalRow("ddd00004", "row", "0 9 * * *", "/repo"), ActorCLI, nil)
+	last, err := AddTaskChecked(ordinalRow("ddd00004", "row", "0 9 * * *", "/repo"), ActorCLI, nil, "")
 	require.NoError(t, err)
 	fresh, err := LoadTasks()
 	require.NoError(t, err)

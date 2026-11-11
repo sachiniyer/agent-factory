@@ -846,6 +846,72 @@ func TestSetGlobalConfigValuePreservesHiddenTombstoneWhileDetectorIsUnavailable(
 	}
 }
 
+// TestSetGlobalConfigValueWholeProgramOverridesRemovalPinsTombstoneWhenProbeFails
+// is the intersection the two tests above leave uncovered: the removal itself
+// (not just a later edit) is performed while the claude detector is
+// unavailable. The on-disk claude entry is a real, non-empty override (as
+// first-run materialization or a hand edit would leave), and the whole-map
+// write omits claude to remove it. The reseed loop must still seed a
+// claude = ” tombstone so the loader cannot resurrect the auto-detected
+// command on a later load where detection succeeds — independent of the
+// probe's outcome in the writing process.
+func TestSetGlobalConfigValueWholeProgramOverridesRemovalPinsTombstoneWhenProbeFails(t *testing.T) {
+	binDir := t.TempDir()
+	stub := filepath.Join(binDir, "claude")
+	if err := os.WriteFile(stub, []byte("#!/bin/sh\n"), 0755); err != nil {
+		t.Fatal(err)
+	}
+	availablePath := binDir + ":" + os.Getenv("PATH")
+	t.Setenv("SHELL", "/bin/bash")
+	t.Setenv("HOME", t.TempDir())
+
+	// Start with a real (non-empty) claude override on disk, as first-run
+	// materialization or a hand edit would leave.
+	t.Setenv("PATH", availablePath)
+	configPath := writeTempConfig(t, "default_program = 'claude'\n[program_overrides]\nclaude = 'myclaude --flag'\ncodex = 'mycodex'\n")
+
+	before, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(before, "claude"); got != "myclaude --flag" {
+		t.Fatalf("setup invariant: ResolveProgram(claude) = %q, want %q", got, "myclaude --flag")
+	}
+
+	// Make the claude probe fail for the write: PATH without claude. The
+	// probe cache key includes PATH, so a fresh probe runs and fails.
+	t.Setenv("PATH", t.TempDir())
+	if _, err := SetGlobalConfigValue("program_overrides", `{"codex":"codex"}`); err != nil {
+		t.Fatal(err)
+	}
+
+	// The file must carry a claude = '' tombstone even though the probe
+	// failed during the write.
+	data, err := os.ReadFile(configPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+	content := string(data)
+	if !strings.Contains(content, "claude = ''") {
+		t.Fatalf("whole-map removal while probe failed dropped the claude tombstone:\n%s", content)
+	}
+
+	// Restore PATH so detection succeeds, and verify the removal is pinned:
+	// LoadConfig must resolve claude to the bare agent name, not the
+	// auto-detected command with --dangerously-skip-permissions.
+	t.Setenv("PATH", availablePath)
+	after, err := LoadConfig()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := ResolveProgram(after, "claude"); got != "claude" {
+		t.Fatalf("whole-map removal while probe failed resurrected the detected override: ResolveProgram = %q", got)
+	}
+	if shown, ok := CurrentValue(after, "program_overrides"); !ok || shown != `{"codex":"codex"}` {
+		t.Fatalf("editor value = %q (ok=%v), want only the submitted codex override", shown, ok)
+	}
+}
+
 func TestSetGlobalConfigValueStructuredValidationRejectsBeforeWrite(t *testing.T) {
 	cases := []struct {
 		key, value, want string

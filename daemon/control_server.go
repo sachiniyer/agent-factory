@@ -784,6 +784,40 @@ func (s *controlServer) DeliverPrompt(req DeliverPromptRequest, resp *DeliverPro
 	if err := s.requireStateMutationAdmission(); err != nil {
 		return err
 	}
+	// A remote client sends the project path as typed; expand ~ against this daemon's
+	// home before anything resolves it. A still-relative path would resolve against
+	// the DAEMON's working directory and could silently pick a different checkout
+	// (#5743). Every sibling RPC boundary (CreateSession, DeleteProject,
+	// RegisterProject) applies ResolveDaemonHostPath for this reason; DeliverPrompt
+	// resolves repo_path via `git -C <path>` and auto-creates a session bound to it,
+	// so the same guard belongs here (#4821). Unlike CreateSession, where an
+	// empty RepoPath means "no project", DeliverPrompt requires a RepoPath, so a
+	// whitespace-only value is still a (relative) path and must be refused here
+	// rather than slipped past the guard to `git -C` against the daemon's cwd.
+	//
+	// A task fire (TaskOrigin) replays a stored ProjectPath whose retained RepoID
+	// was computed from the raw bytes via RepoFromPath (task.repoIDForPath, no
+	// trim). ResolveDaemonHostPath trims surrounding whitespace, which would
+	// change the repo a trailing-space path (e.g. "/p/repo ") resolves to and
+	// break the retained-RepoID check for a bound task — failing every fire of a
+	// task whose path names a real repo, or silently moving a legacy unbound
+	// task to the trimmed sibling repo (#6996). TaskOrigin is daemon-internal
+	// provenance (json:"-", never set by a remote HTTP caller) and the path was
+	// validated at task create/update, so enforce absoluteness without trimming
+	// the bytes a task's retained RepoID depends on.
+	if req.RepoPath != "" {
+		if req.TaskOrigin {
+			if !filepath.IsAbs(req.RepoPath) {
+				return fmt.Errorf("path %q must be absolute (or start with ~/): the daemon resolves it on its own filesystem and has no access to your working directory", req.RepoPath)
+			}
+		} else {
+			resolved, err := config.ResolveDaemonHostPath(req.RepoPath)
+			if err != nil {
+				return err
+			}
+			req.RepoPath = resolved
+		}
+	}
 	managerDelegated = true
 	status, deliveryStatus, promptRetained, err := s.manager.deliverPromptWithOutcome(req)
 	// A committed retained auto-create (#3357) — the absent-target branch

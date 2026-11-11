@@ -178,6 +178,15 @@ func (m *Manager) waitRootAgentCreatesForShutdown() {
 	m.waitRootAgentCreates()
 }
 
+// primeRootCreateConfig reads the root's project config once, with a launch's
+// patience, into the snapshot its heal and create share (#7084). A seam so
+// tests can stand in a config that stops answering after the reap.
+var primeRootCreateConfig = session.PrimeRestoreContext
+
+// testHookRootAfterReap runs once a heal has reaped the dead root's record —
+// the point past which a refusal would cost the carried state.
+var testHookRootAfterReap = func() {}
+
 // runRootCreate is everything past the create boundary for one candidate: prove
 // the checkout, reap a dead record, resolve the program, settle the conversation
 // to resume, create the session, and record the outcome in the same ensure state
@@ -188,6 +197,26 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	resolution, identity, inst := job.resolution, job.identity, job.inst
 	workspace := repo.WorkspacePath()
 
+	// The project config first, and ALL of it, before the reap below can destroy
+	// the record that holds the conversation (#2616) and tab roster (#2628) the
+	// heal carries. One snapshot, read here with a launch's patience, answers the
+	// program, the transcript program and every config read the create makes
+	// (CreateSessionRequest.configSnapshot): a config that cannot be read
+	// refuses this pass with nothing changed and the next one retries (#7079),
+	// and a load spike after the reap can no longer make the create refuse and
+	// bring root back blank (#7084).
+	primed, err := primeRootCreateConfig(workspace)
+	if session.IsProjectConfigUnknown(err) {
+		m.rootEnsureFailed(stateKey, st, rootConfigUnknownError(resolution.RootAgent, err))
+		return
+	}
+	projectConfig, projectErr := primed.ResolvedConfigFor(workspace)
+	program, err := rootAgentProgramFromResolution(workspace, resolution.RootAgent, projectConfig, projectErr)
+	if err != nil {
+		m.rootEnsureFailed(stateKey, st, err)
+		return
+	}
+
 	// What the vanished root was, snapshotted before the reap deletes the record
 	// that holds it: the conversation it was in (#2616) and the tabs it had open
 	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
@@ -197,6 +226,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		carried    reapedRootState
 		reapedRoot bool
 	)
+	// What an earlier heal carried, if its create failed after its reap
+	// (rootagent_carry.go). It is the last working root's, so it outranks a
+	// record reaped since: no replacement has launched, and any record reaped
+	// meanwhile is a failed one.
+	held, haveHeld := m.heldRootCarry(st, repo, identity)
 
 	if inst != nil {
 		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
@@ -244,12 +278,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		if !reapedRoot {
 			return
 		}
+		testHookRootAfterReap()
+	}
+	if haveHeld {
+		m.warn().Printf("root agent for %s: re-creating it with the conversation and tabs its last heal carried; that heal's create failed after the reap", workspace)
+		carried, reapedRoot = held, true
 	}
 
-	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
 	skipRecordedResume := false
 	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+		transcriptProgram, resolveErr := rootAgentTranscriptProgramFrom(projectConfig, projectErr, program)
 		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
 		if inspectErr == nil {
 			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
@@ -301,6 +339,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// carry — that is the heal whose replacement most needs the marker.
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
+		configSnapshot:        primed,
 	}
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
@@ -315,7 +354,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
 		// would be worse than the bug.
 		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)
+			transcriptProgram, resolveErr := rootAgentTranscriptProgramFrom(projectConfig, projectErr, program)
 			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
 			if inspectErr == nil {
 				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
@@ -339,6 +378,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		data, err = m.createVerifiedRoot(repo.ID, identity, req)
 	}
 	if err != nil {
+		if reapedRoot {
+			m.holdRootCarry(st, repo, identity, carried) // the next pass's create carries it
+		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
 			// CreateSession, so no create was attempted and none may be reported
@@ -356,5 +398,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
+	m.retireRootCarries(repo.ID)
 	m.rootEnsureSucceeded(st)
 }

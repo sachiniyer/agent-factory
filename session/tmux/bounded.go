@@ -4,12 +4,11 @@ import (
 	"context"
 	"errors"
 	"io"
-	"os"
 	"os/exec"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/cmd"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // Bounded tmux control commands (#1787).
@@ -106,33 +105,9 @@ var ErrTmuxServerNoAnswer = errors.New("tmux server did not answer the pre-spawn
 // Cancel kills just the direct process; #610/#769/#856 precedent).
 func boundedTmuxCommand(ctx context.Context, args ...string) *exec.Cmd {
 	cmd := exec.CommandContext(ctx, "tmux", args...)
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		// Negative pid targets the whole group led by cmd.Process.Pid. A group
-		// already gone (ESRCH) maps to os.ErrProcessDone, which Wait ignores
-		// rather than reporting as a command failure.
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = tmuxWaitDelay
 	return cmd
-}
-
-// reapTmuxGroup SIGKILLs any process that outlived the tmux client on every exit
-// path — normal completion or timeout — so a wedged server never leaves a
-// pipe-holding child behind. The group is led by tmux, which has already exited,
-// so this is ESRCH (ignored) in the common case. A nil Process means the command
-// never started (a mock executor in tests, or a failed fork), so there is nothing
-// to reap.
-func reapTmuxGroup(cmd *exec.Cmd) {
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL)
-	}
 }
 
 // runTmuxBoundedWith runs a tmux command under ctx against an explicit executor,
@@ -142,7 +117,9 @@ func reapTmuxGroup(cmd *exec.Cmd) {
 func runTmuxBoundedWith(ctx context.Context, cmdExec cmd.Executor, args ...string) error {
 	c := boundedTmuxCommand(ctx, args...)
 	err := cmdExec.Run(c)
-	reapTmuxGroup(c)
+	// Reap any process that outlived the tmux client on every exit path, so a
+	// wedged server never leaves a pipe-holding child behind.
+	execgroup.Reap(c)
 	return normalizeWaitDelay(err)
 }
 
@@ -150,7 +127,7 @@ func runTmuxBoundedWith(ctx context.Context, cmdExec cmd.Executor, args ...strin
 func outputTmuxBoundedWith(ctx context.Context, cmdExec cmd.Executor, args ...string) ([]byte, error) {
 	c := boundedTmuxCommand(ctx, args...)
 	out, err := cmdExec.Output(c)
-	reapTmuxGroup(c)
+	execgroup.Reap(c)
 	return out, normalizeWaitDelay(err)
 }
 
@@ -184,7 +161,7 @@ func runTmuxBoundedStdin(ctx context.Context, cmdExec cmd.Executor, r io.Reader,
 	c := boundedTmuxCommand(ctx, args...)
 	c.Stdin = r
 	err := cmdExec.Run(c)
-	reapTmuxGroup(c)
+	execgroup.Reap(c)
 	return err
 }
 

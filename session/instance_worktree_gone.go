@@ -153,9 +153,7 @@ func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
 		i.SetWorktreeMissing(WorktreeMissingDeletedReason(orig))
 		return err
 	}
-	if s := gw.SetupOverlayError(); s != "" {
-		i.noteSetupHookFailure(s)
-	}
+	i.noteWorktreeSetup(gw)
 	if err := gw.ProveRecordedWorktree(); err != nil {
 		return fmt.Errorf("rebuilt the worktree at %s but could not prove the directory there is the rebuild: %w", dest, err)
 	}

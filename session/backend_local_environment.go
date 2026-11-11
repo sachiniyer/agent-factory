@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -22,15 +23,41 @@ func configuredSessionEnvPassthrough(explicit []string) []string {
 // pass-through list — the same names its agent pane's default-deny allowlist
 // admits — so a daemon-owned child that must hold the pane's boundary can ask
 // for the identical extension (the VS Code editor, #4311).
-func SessionEnvPassthroughForInstance(i *Instance) []string {
+//
+// The list configures what a launched process may inherit, so it is a
+// launch-class resolve: when the project's config cannot be read it fails with
+// a *ProjectConfigUnknownError instead of answering the global config's list,
+// which would silently drop the names the project adds (#7077).
+func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
+	if frozen := i.frozenEnvPassthrough.Load(); frozen != nil {
+		return append([]string(nil), (*frozen)...), nil
+	}
 	i.mu.RLock()
 	explicit := append([]string(nil), i.sessionEnvPassthrough...)
 	i.mu.RUnlock()
-	if cfg := resolveConfigForInstance(i); cfg != nil {
+	cfg, err := resolveConfigForInstance(i)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
 		explicit = append(explicit, cfg.SessionEnvPassthrough...)
 	}
 	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
-	return normalized
+	return normalized, nil
+}
+
+// freezeEnvPassthrough makes SessionEnvPassthroughForInstance answer names — the
+// list a prepared plan's admission already resolved — until the returned release
+// runs. A swap executes its plan after stopping the outgoing agent; re-reading
+// the project config there could only fail too late to refuse, so execution
+// applies the answer admission proved, as it does the plan's frozen command.
+//
+// Releases nest: each restores the freeze it replaced, so an inner plan ending
+// cannot clear an outer one that is still executing.
+func (i *Instance) freezeEnvPassthrough(names []string) (release func()) {
+	frozen := append([]string(nil), names...)
+	prev := i.frozenEnvPassthrough.Swap(&frozen)
+	return func() { i.frozenEnvPassthrough.Store(prev) }
 }
 
 // refreshSessionEnvironment reapplies a session's environment declarations to
@@ -42,9 +69,21 @@ func SessionEnvPassthroughForInstance(i *Instance) []string {
 // and the launch disagree, prepareLaunchEnvironment's namespace check is what
 // refuses — so the pin must be the durable one.
 func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
-	if err := tmuxSession.SetEnvPassthrough(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("session environment for %q: %w", i.Title, err)
+	}
+	if err := tmuxSession.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
+	refreshSessionIdentity(i, tmuxSession)
+	i.envResolvedTmux.Store(tmuxSession)
+	return nil
+}
+
+// refreshSessionIdentity is refreshSessionEnvironment's config-free half: the
+// account and instance id the session carries, which need no project config.
+func refreshSessionIdentity(i *Instance, tmuxSession *tmux.TmuxSession) {
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
 	// re-provisioned session carries the account it was created with rather than
 	// quietly reverting to the ambient identity (#3051).
@@ -56,7 +95,71 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// The agent session carries its instance id so a reconcile that finds it live
 	// can prove which create attempt spawned it (#6258).
 	tmuxSession.SetInstanceID(i.ID)
+}
+
+// ensureSpawnEnvironment is the property for the tab spawns that build a
+// sibling from the agent's handle: a spawn reads its own environment
+// (#7080, #7083). A handle counts as resolved only once a refresh SUCCEEDED on
+// it — Provision, Recover, a respawn or a swap marks it (envResolvedTmux,
+// envResolvedWorktree). Any other handle — one that skipped Provision, or one
+// whose load could not read the config — is refreshed here: the agent handle's
+// pass-through and account, which the sibling inherits, and the worktree's
+// list. A refresh that fails refuses the spawn with its error (the actionable
+// unknown-config one, for a config not read in time) rather than start the
+// tab bare, on the daemon's own identity.
+func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.GitWorktree) error {
+	// The account the sibling inherits is the session's CURRENT one, applied
+	// on every spawn (#7087). The resolved-handle mark below records which
+	// handle a refresh ran on, not which account it applied, and a record can
+	// change without the handle: a reverted handoff restores the account in the
+	// record only, and a swap rollback the same. The identity reads no config,
+	// so applying it costs nothing and needs no mark.
+	if agentTmux != nil {
+		refreshSessionIdentity(i, agentTmux)
+	}
+	resolved := func() bool {
+		return i.envResolvedTmux.Load() == agentTmux && (gw == nil || i.envResolvedWorktree.Load() == gw)
+	}
+	if resolved() {
+		return nil
+	}
+	// One spawn resolves it; a concurrent one waits, then finds it resolved.
+	i.spawnEnvMu.Lock()
+	defer i.spawnEnvMu.Unlock()
+	if i.envResolvedTmux.Load() != agentTmux {
+		if err := refreshSessionEnvironment(i, agentTmux); err != nil {
+			return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+		}
+	}
+	if gw != nil && i.envResolvedWorktree.Load() != gw {
+		if err := refreshWorktreeEnvironment(i, gw); err != nil {
+			return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+		}
+	}
 	return nil
+}
+
+// markSwapEnvironmentResolved records a settled swap's restored environment as
+// a resolution: tabs is the roster SynchronizeAccountSwapRuntimeMetadata just
+// gave passthrough and the session's account, so its agent tab's handle is
+// resolved, and the worktree is given the same list here. A row restored with
+// a pending swap never ran Provision, so without this its first tab after the
+// swap settles would read the config again (#7087 review).
+func (i *Instance) markSwapEnvironmentResolved(tabs []*Tab, passthrough []string) {
+	for _, tab := range tabs {
+		if tab != nil && tab.Kind == TabKindAgent && tab.tmux != nil {
+			i.envResolvedTmux.Store(tab.tmux)
+			break
+		}
+	}
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		if err := applyWorktreeEnvironment(i, gw, passthrough); err != nil {
+			log.WarningLog.Printf("session %q: %v", i.Title, err)
+		}
+	}
 }
 
 // refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab
@@ -67,7 +170,11 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	if tab == nil || tab.tmux == nil {
 		return nil
 	}
-	if err := tab.tmux.SetEnvPassthrough(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("session environment for %q tab %q: %w", i.Title, tab.Name, err)
+	}
+	if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	i.mu.RLock()
@@ -93,8 +200,20 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	// re-derivable by a later daemon generation (#3650). It changes nothing for a
 	// TUI- or CLI-created worktree, where no scope is derived at all.
 	worktree.SetHookScopeSessionID(i.ID)
-	if err := worktree.SetHookEnvironment(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("post-worktree environment for %q: %w", i.Title, err)
+	}
+	return applyWorktreeEnvironment(i, worktree, passthrough)
+}
+
+// applyWorktreeEnvironment gives the worktree the hook environment a refresh
+// resolved — its scope id and pass-through list — and marks it resolved.
+func applyWorktreeEnvironment(i *Instance, worktree *git.GitWorktree, passthrough []string) error {
+	worktree.SetHookScopeSessionID(i.ID)
+	if err := worktree.SetHookEnvironment(passthrough); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}
+	i.envResolvedWorktree.Store(worktree)
 	return nil
 }

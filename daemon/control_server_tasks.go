@@ -106,7 +106,11 @@ func (s *controlServer) addTask(ctx context.Context, req AddTaskRequest, resp *A
 			return s.manager.validateEnabledTaskTarget(candidate, validation)
 		}
 	}
-	created, err := task.AddTaskChecked(req.Task, taskActor(ctx, req.Actor), validate)
+	// The sandbox owner is the daemon's credential, never the caller's:
+	// resetStoreOwnedFields clears any client-supplied value and AddTaskChecked
+	// re-stamps this one. An empty owner is an operator-created task.
+	owner, _ := sandboxOwner(ctx)
+	created, err := task.AddTaskChecked(req.Task, taskActor(ctx, req.Actor), validate, owner)
 	if targetLocked {
 		s.manager.taskTargetMu.Unlock()
 		targetLocked = false

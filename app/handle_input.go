@@ -33,7 +33,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
 		m.state = stateDefault
-		m.namingInstance = nil
+		m.setNamingInstance(nil)
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend, m.pendingHost = "", ""
@@ -205,6 +205,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// in flight: the daemon would resolve a default the field has not yet
 		// shown (#4889 review).
 		if m.remoteDefaultPending {
+			// A local project whose config could not be read asks the daemon
+			// too (#7079); naming a remote daemon there would be wrong (#7084).
+			if !isRemoteTarget() {
+				return m, m.handleNotice(errors.New("still asking the daemon for this project's default program — try again in a moment"))
+			}
 			return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
 		}
 		sendProgram := m.sendProgramForCreate()
@@ -260,7 +265,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		m.pendingProgramChosen = false
 		m.remoteDefaultPending = false
 		m.remoteProgramCatalog = nil
-		m.namingInstance = nil
+		m.setNamingInstance(nil)
 		m.clearNamingPlaceholder()
 		m.state = stateDefault
 		m.menu.SetState(ui.StateDefault)
@@ -385,7 +390,7 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		if err := m.store.KillInstance(m.namingInstance); err != nil {
 			log.ErrorLog.Printf("failed to clean up instance on cancel: %v", err)
 		}
-		m.namingInstance = nil
+		m.setNamingInstance(nil)
 		m.clearNamingPlaceholder()
 		m.pendingPrompt = ""
 		m.pendingBackend, m.pendingHost = "", ""
@@ -472,7 +477,9 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.remoteDefaultPending = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
-	if m.pendingProgram == "" && m.appConfig != nil {
+	// An unknown project default stays unknown here (#7079): the global
+	// default is not this project's, and the daemon is asked below.
+	if m.pendingProgram == "" && m.appConfig != nil && !m.programUnknown {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
 	// Target the ACTIVE project's repo root, not the process cwd: after an
@@ -511,8 +518,10 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	}
 	_ = instance.Transition(session.BeginCreate())
 	m.store.AddInstance(instance)
+	// Mark the row as the one being named BEFORE selecting it, so the select's
+	// own rebuild already reads its title as a draft (#7060).
+	m.setNamingInstance(instance)
 	m.sidebar.SelectInstance(instance)
-	m.namingInstance = instance
 	// #2470: generate the autocreate-name suggestion and show it as shadow text on
 	// the naming row. Pressing enter on the untouched field adopts it.
 	m.namingPlaceholder = m.suggestSessionName(instance)
@@ -528,9 +537,13 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// the same default either way. What the preselection buys is that the user SEES
 	// it and can change it.
 	accountFetch := m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
-	if !isRemoteTarget() {
+	if !isRemoteTarget() && !m.programUnknown {
 		return m, accountFetch
 	}
+	// A local project whose default could not be read asks the daemon the same
+	// way a remote one always does (#7079): ListPrograms answers the project's
+	// own default once the daemon can read it, and no default while it cannot,
+	// so the field never shows the global agent as this project's.
 	// The remote daemon resolves its OWN default_program (#4889 review): the
 	// launch-time local seed displayed above is only a guess at remote state,
 	// and the account preselect just fired against that guess's agent. Asking
@@ -639,6 +652,16 @@ func (m *home) suggestSessionName(naming *session.Instance) string {
 		}
 		return false
 	})
+}
+
+// setNamingInstance is the one writer of the row the create form is naming. The
+// store holds the same pointer: the row's title is a draft that can spell an
+// existing session's title, and every selection rule asks the store whether two
+// rows are the same (store.SameRow), so it has to know which row is the draft
+// (#7060). Set it before selecting a newly named row.
+func (m *home) setNamingInstance(inst *session.Instance) {
+	m.namingInstance = inst
+	m.store.SetNaming(inst)
 }
 
 // clearNamingPlaceholder drops the autocreate-name shadow text (#2470) from both

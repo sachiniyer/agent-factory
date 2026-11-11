@@ -705,6 +705,10 @@ func (m *home) closeProjectPicker() {
 	m.state = stateDefault
 }
 
+// resolveSwitchProjectConfig is the incoming project's config read, a seam so
+// tests can stand in a config that cannot be read in time.
+var resolveSwitchProjectConfig = config.ResolveConfigForRepo
+
 // switchProject re-scopes the running TUI to repo in place (#1461): it flushes
 // the outgoing project's view state, tears down its panes (and their live
 // termpane PTYs), resets the projection, then re-primes everything — sidebar,
@@ -780,10 +784,12 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		if m.appConfig != nil {
 			m.program = m.appConfig.DefaultProgram
 		}
+		m.programUnknown = false
 		m.store.SetHookCount(0)
 		m.hooksPane.SetCommands(nil)
 		m.hooksPane.SetReadOnly(remoteHooksReadOnlyReason())
-	} else if resolved, err := config.ResolveConfigForRepo(repo); err == nil {
+	} else if resolved, err := resolveSwitchProjectConfig(repo); err == nil {
+		m.programUnknown = false
 		// A project that sets no default_program already arrives here as the
 		// global default: ResolveConfig seeds DefaultProgram from the global
 		// config and only overwrites it with a non-empty in-repo value, and a
@@ -813,8 +819,19 @@ func (m *home) switchProject(repo *config.RepoContext) (tea.Model, tea.Cmd) {
 		// default — the value a project that expresses no preference gets. This
 		// branch is where the leak actually shipped, because it was the one path
 		// that left m.program untouched.
-		if m.appConfig != nil {
+		//
+		// A config that could not be READ in time is different: the project may
+		// well express a preference, and the global default is not it. Hold no
+		// default at all, and mark it, so the form asks the daemon rather than
+		// show — and, with an account chosen, pin — the global agent as this
+		// project's (#7079).
+		switch {
+		case config.ResolveWentUnanswered(err):
+			m.program = ""
+			m.programUnknown = true
+		case m.appConfig != nil:
 			m.program = m.appConfig.DefaultProgram
+			m.programUnknown = false
 		}
 	}
 

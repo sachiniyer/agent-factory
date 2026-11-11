@@ -61,7 +61,14 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// ListPrograms (#1970) answers by calling the same function rather than
 		// restating the precedence — so the program a picker labels "repo default"
 		// cannot disagree with the one a real create picks.
-		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
+		//
+		// A project config that cannot be read refuses the create rather than
+		// start it on the global default (#7077 review).
+		program, err := defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
+		if err != nil {
+			return session.InstanceData{}, fmt.Errorf("cannot pick the default program for this session: %w", err)
+		}
+		req.Program = program
 	}
 	// The project's default credential account (#3386), from the same op-entry
 	// snapshot. It runs after the program is settled — an account belongs to ONE
@@ -194,6 +201,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
+		ConfigSnapshot:                 req.configSnapshot,
 		BranchPrefix:                   &frozenBranchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Mints and revokes this session's credential, driven by the RUNTIME's
@@ -239,6 +247,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.warn().Printf("create of session %q: could not journal the pending create (a crash-leftover would stay unprovable): %v", title, err)
 	}
 	instance, err := session.NewInstance(launchOpts)
+	if instance != nil && req.configSnapshot != nil {
+		// The create's reads answer from the snapshot primed before it (#7084);
+		// once the create returns, the session reads its config afresh.
+		defer instance.ReleaseConfigSnapshot()
+	}
 	// A create that does not finish must not leave a live credential behind
 	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
 	// failure after it — or any later abandonment on this path — would otherwise

@@ -10,11 +10,11 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/daemon"
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
@@ -637,22 +637,11 @@ func execBinaryVersion(path string) (string, error) {
 	cmd := exec.CommandContext(ctx, path, "version")
 	// Its own process group, so the deadline tears down the whole tree rather
 	// than orphaning a child that still holds the pipe (#610/#769/#856).
-	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
-	cmd.Cancel = func() error {
-		if err := syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL); err != nil {
-			if errors.Is(err, syscall.ESRCH) {
-				return os.ErrProcessDone
-			}
-			return err
-		}
-		return nil
-	}
+	execgroup.Lead(cmd)
 	cmd.WaitDelay = binaryProbeWaitDelay
 
 	out, err := cmd.Output()
-	if cmd.Process != nil {
-		_ = syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) // reap stragglers
-	}
+	execgroup.Reap(cmd) // reap stragglers
 	if err == nil || errors.Is(err, exec.ErrWaitDelay) {
 		// The binary exited zero and its answer is in out. ErrWaitDelay means
 		// only that inherited-pipe cleanup outlived the process; a context

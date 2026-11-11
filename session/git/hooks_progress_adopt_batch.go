@@ -34,7 +34,7 @@ func reconcileHookProgressBatch(worktrees, terminal []*GitWorktree) map[*GitWork
 	// test restoring this seam must not race a worker still starting up.
 	readFinished := hookProgressBatchReadFinished
 	startRead := func(g *GitWorktree, abandon bool) {
-		read := hookProgressAdoptionRead{worktree: g, path: g.worktreePath, sessionID: g.hookScopeSessionID, abandon: abandon}
+		read := hookProgressAdoptionRead{worktree: g, path: g.worktreePath, sessionID: g.hookScopeID(), abandon: abandon}
 		pending[g] = read
 		go func() {
 			defer readFinished()

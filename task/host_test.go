@@ -30,15 +30,15 @@ func hostTask(id, dir, host string) Task {
 func TestAddTaskRefusesAnUnlistedHost(t *testing.T) {
 	dir := taskHostFixture(t, map[string]config.HostConfig{"box1": {Host: "box1.example"}})
 
-	_, err := AddTaskChecked(hostTask("a1", dir, "nope"), ActorCLI, nil)
+	_, err := AddTaskChecked(hostTask("a1", dir, "nope"), ActorCLI, nil, "")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), `host "nope" is not in the host list [box1]`)
 	assert.Contains(t, err.Error(), "[hosts.nope]")
 
-	_, err = AddTaskChecked(hostTask("a2", dir, "-oProxyCommand=x"), ActorCLI, nil)
+	_, err = AddTaskChecked(hostTask("a2", dir, "-oProxyCommand=x"), ActorCLI, nil, "")
 	require.Error(t, err, "a malformed name never reaches the list lookup")
 
-	created, err := AddTaskChecked(hostTask("a3", dir, "  box1 "), ActorCLI, nil)
+	created, err := AddTaskChecked(hostTask("a3", dir, "  box1 "), ActorCLI, nil, "")
 	require.NoError(t, err)
 	assert.Equal(t, "box1", created.Host)
 }
@@ -46,7 +46,7 @@ func TestAddTaskRefusesAnUnlistedHost(t *testing.T) {
 // A task with no host serializes exactly as before the field existed.
 func TestAddTaskWithoutHostStoresNoKey(t *testing.T) {
 	dir := taskHostFixture(t, nil)
-	_, err := AddTaskChecked(hostTask("b1", dir, ""), ActorCLI, nil)
+	_, err := AddTaskChecked(hostTask("b1", dir, ""), ActorCLI, nil, "")
 	require.NoError(t, err)
 	raw, err := os.ReadFile(filepath.Join(dir, "tasks.json"))
 	require.NoError(t, err)
@@ -55,7 +55,7 @@ func TestAddTaskWithoutHostStoresNoKey(t *testing.T) {
 
 func TestUpdateTaskHostPatch(t *testing.T) {
 	dir := taskHostFixture(t, map[string]config.HostConfig{"box1": {Host: "box1.example"}})
-	_, err := AddTaskChecked(hostTask("c1", dir, "box1"), ActorCLI, nil)
+	_, err := AddTaskChecked(hostTask("c1", dir, "box1"), ActorCLI, nil, "")
 	require.NoError(t, err)
 
 	bad := "ghost"

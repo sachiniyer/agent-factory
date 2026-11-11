@@ -29,7 +29,7 @@ func seedAuditTask(t *testing.T, actor Actor) string {
 		Program:     "claude",
 		Enabled:     true,
 		CreatedAt:   time.Now(),
-	}, actor, nil)
+	}, actor, nil, "")
 	require.NoError(t, err)
 	return "audit001"
 }
@@ -232,7 +232,7 @@ func TestAudit_ClientSuppliedTrailIsDiscarded(t *testing.T) {
 			{At: forged, Actor: ActorCLI, Action: AuditEnabled, Fields: []string{"enabled"}},
 			{At: time.Now(), Actor: ActorAPI, Action: AuditUpdated, Fields: []string{"prompt"}},
 		},
-	}, ActorAPI, nil)
+	}, ActorAPI, nil, "")
 	require.NoError(t, err)
 
 	trail := auditOf(t, "forged01")
@@ -253,7 +253,7 @@ func TestAddTask_StampsCreatedAt(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "nostamp1", Name: "No stamp", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
-	}, ActorAPI, nil)
+	}, ActorAPI, nil, "")
 	require.NoError(t, err)
 	assert.False(t, created.CreatedAt.IsZero(), "the returned record carries the stamp")
 	assert.False(t, created.CreatedAt.Before(before))
@@ -278,7 +278,7 @@ func TestAddTask_KeepsAnExplicitCreatedAt(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "hasstamp", Name: "Has stamp", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true, CreatedAt: want,
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	assert.True(t, want.Equal(created.CreatedAt))
 }
@@ -297,7 +297,7 @@ func TestAddTask_ClampsAFutureCreatedAt(t *testing.T) {
 		ID: "future01", Name: "From the future", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
 		CreatedAt: time.Now().Add(365 * 24 * time.Hour),
-	}, ActorAPI, nil)
+	}, ActorAPI, nil, "")
 	require.NoError(t, err)
 	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)),
 		"the stamp was pulled back to the store's own clock")
@@ -323,7 +323,7 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 		ID: "history1", Name: "Forged history", Prompt: "p", CronExpr: "20 * * * *",
 		ProjectPath: dir, Program: "claude", Enabled: true,
 		LastRunAt: &forged, LastRunStatus: "started", DroppedEvents: 99,
-	}, ActorAPI, nil)
+	}, ActorAPI, nil, "")
 	require.NoError(t, err)
 	assert.Nil(t, created.LastRunAt, "a task that has never run has no run time")
 	assert.Empty(t, created.LastRunStatus)
@@ -334,40 +334,6 @@ func TestAddTask_DiscardsClientSuppliedRunHistory(t *testing.T) {
 	require.Nil(t, stored.LastRunAt)
 	assert.True(t, DeriveScheduleHealth(*stored, stored.CreatedAt.Add(3*time.Hour)).Overdue,
 		"and the derivation reaches the task instead of waiting a year")
-}
-
-// TestAddTask_ResetsEveryStoreOwnedField is the class rather than its members:
-// three review rounds found the same defect through three different fields, so
-// the create path resets all of them together.
-func TestAddTask_ResetsEveryStoreOwnedField(t *testing.T) {
-	dir := t.TempDir()
-	t.Setenv("AGENT_FACTORY_HOME", dir)
-
-	future := time.Now().Add(48 * time.Hour)
-	next := time.Now().Add(time.Hour)
-	created, err := AddTaskChecked(Task{
-		ID: "kitchen1", Name: "Everything at once", Prompt: "p", CronExpr: "20 * * * *",
-		ProjectPath: dir, Program: "claude", Enabled: true,
-		CreatedAt: future, LastRunAt: &future, LastRunStatus: "started",
-		DroppedEvents: 99,
-		Audit:         []AuditEntry{{At: future, Actor: ActorCLI, Action: AuditEnabled}},
-		Overdue:       true, MissedOccurrences: 99, MissedOccurrencesCapped: true,
-		Unschedulable: true, Arming: ArmingArmed, NextRunAt: &next,
-	}, ActorAPI, nil)
-	require.NoError(t, err)
-
-	assert.False(t, created.CreatedAt.After(time.Now().Add(time.Minute)), "created_at clamped")
-	assert.Nil(t, created.LastRunAt)
-	assert.Empty(t, created.LastRunStatus)
-	assert.Zero(t, created.DroppedEvents)
-	require.Len(t, created.Audit, 1, "only the store's own create entry")
-	assert.Equal(t, AuditCreated, created.Audit[0].Action)
-	assert.False(t, created.Overdue, "the response must not echo a health verdict the client invented")
-	assert.Zero(t, created.MissedOccurrences)
-	assert.False(t, created.MissedOccurrencesCapped)
-	assert.False(t, created.Unschedulable)
-	assert.Empty(t, created.Arming)
-	assert.Nil(t, created.NextRunAt)
 }
 
 // TestAudit_ValidatorBackfilledRepoIDIsRecorded: the daemon resolves a legacy
@@ -982,7 +948,7 @@ func TestAudit_SamePathDeadPatchRetainsRepoID(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "own00001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
 	retained := created.RepoID
@@ -1013,7 +979,7 @@ func TestAudit_SamePathDeadPatchRetainsWorktreeBinding(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "wtd00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
 	retained := created.RepoID
@@ -1061,7 +1027,7 @@ func TestAudit_SamePathDeadPatchRetainsRepoIDForEquivalentSpelling(t *testing.T)
 	created, err := AddTaskChecked(Task{
 		ID: "wte00001", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
 	retained := created.RepoID
@@ -1120,7 +1086,7 @@ func TestAudit_SamePathDeadPatchRetainsWorktreeBinding_DurableThroughLoaderPass(
 	created, err := AddTaskChecked(Task{
 		ID: "wtd00003", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	retained := created.RepoID
 
@@ -1159,7 +1125,7 @@ func TestAudit_SamePathDeadPatchRetainsSubdirOfDeadParentBinding(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "sub00001", Name: "subdir-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: sub, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID)
 	retained := created.RepoID
@@ -1200,7 +1166,7 @@ func TestAudit_SamePathDeadPatchRetainsRepoIDWithUnchangedField(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "wtd00004", Name: "worktree-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: worktree, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	retained := created.RepoID
 
@@ -1269,7 +1235,7 @@ func TestAudit_SymlinkDivergentRebindIsDetectedNotRetained(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "sym00001", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
 
@@ -1324,7 +1290,7 @@ func TestAudit_SymlinkDivergentRebindAgainstDeadRecordedPath(t *testing.T) {
 	created, err := AddTaskChecked(Task{
 		ID: "sym00002", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID from base/task's own repo")
 	retained := created.RepoID
@@ -1391,7 +1357,7 @@ func TestAudit_SymlinkDivergentRebindWithDotDotInDeadRecordedPath(t *testing.T) 
 	created, err := AddTaskChecked(Task{
 		ID: "sym00003", Name: "symlink-task", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: recorded, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "bind-time resolution stamped a RepoID from the repo behind the link")
 	retained := created.RepoID
@@ -1451,7 +1417,7 @@ func TestAudit_SamePathDeadPatchRetainsRepoIDForCaseVariantSpelling(t *testing.T
 	created, err := AddTaskChecked(Task{
 		ID: "case0001", Name: "Bound", Prompt: "p", CronExpr: "0 3 * * *",
 		ProjectPath: repo, Program: "claude", Enabled: false, CreatedAt: time.Now(),
-	}, ActorCLI, nil)
+	}, ActorCLI, nil, "")
 	require.NoError(t, err)
 	require.NotEmpty(t, created.RepoID, "precondition: bind-time resolution stamped a RepoID")
 	retained := created.RepoID

@@ -251,8 +251,10 @@ func TestListPrograms_DefaultMatchesTheCreatePath(t *testing.T) {
 func TestDefaultProgramFor_FallsBackWhenTheRepoCannotBeResolved(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 
-	assert.Equal(t, tmux.ProgramAider, defaultProgramFor(tmux.ProgramAider, ""),
-		"no repo path at all falls back to the global default")
-	assert.Equal(t, tmux.ProgramAider, defaultProgramFor(tmux.ProgramAider, filepath.Join(t.TempDir(), "not-a-repo")),
-		"a path that is not a repo falls back to the global default")
+	program, err := defaultProgramFor(tmux.ProgramAider, "")
+	require.NoError(t, err)
+	assert.Equal(t, tmux.ProgramAider, program, "no repo path at all falls back to the global default")
+	program, err = defaultProgramFor(tmux.ProgramAider, filepath.Join(t.TempDir(), "not-a-repo"))
+	require.NoError(t, err)
+	assert.Equal(t, tmux.ProgramAider, program, "a path that is not a repo falls back to the global default")
 }

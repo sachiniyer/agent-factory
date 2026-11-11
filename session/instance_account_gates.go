@@ -159,15 +159,17 @@ func refuseUnsupportedAccountAgent(opts InstanceOptions, absPath string) error {
 	// uses too. A failure to resolve leaves cfg nil, and config.ResolveProgram on a
 	// nil config returns the label unchanged — which is the pre-override answer, so an
 	// unreadable config cannot silently admit a cross-agent override.
-	// Repo config, then GLOBAL — mirroring resolveConfigForInstance exactly, because
-	// that is what the launch uses. Trying only the repo would miss a global
-	// program_overrides entry that the launch then applies, which is the very
-	// gate-disagrees-with-launch divergence this check exists to close.
-	var cfg *config.Config
-	if resolved, rerr := resolveRepoConfig(absPath); rerr == nil {
-		cfg = &resolved.Config
-	} else if loaded, lerr := config.LoadConfig(); lerr == nil {
-		cfg = loaded
+	// Repo config, then GLOBAL — the launch's own chain (resolveConfigForPath),
+	// called rather than mirrored, because that is what the launch uses. Trying
+	// only the repo would miss a global program_overrides entry that the launch
+	// then applies, which is the very gate-disagrees-with-launch divergence this
+	// check exists to close. For the same reason a project config that cannot be
+	// read in time refuses here as the launch would, instead of judging the
+	// account against the global overrides the launch will never use (#7077).
+	cfg, err := resolveConfigForPath(absPath)
+	if err != nil {
+		return accountRefusalWithSource(opts, fmt.Errorf(
+			"cannot check account %q against this session's program_overrides: %w", opts.Account, err))
 	}
 	requested := sessionenv.AgentForCommand(opts.Program)
 	agent := sessionenv.AgentForCommand(config.ResolveProgram(cfg, opts.Program))

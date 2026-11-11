@@ -132,7 +132,7 @@ func TestDefaultAccountLayersForAttributesTheWinningLayer(t *testing.T) {
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	codex, codexGlobal := DefaultAccountLayersFor(global, repoRoot, "codex")
+	codex, codexGlobal := defaultAccountLayersForRepo(global, repoRoot, "codex")
 	assert.Equal(t, "side", codex.Name)
 	assert.Equal(t, SourceProjectPersonal, codex.Layer, "the project overrode it, so the refusal must name that file")
 	assert.Contains(t, codex.Source(), "default_accounts.codex")
@@ -141,7 +141,7 @@ func TestDefaultAccountLayersForAttributesTheWinningLayer(t *testing.T) {
 		"a resolution that SUCCEEDED already folded the global layer in; returning it beside the answer would let "+
 			"a caller resolve past a project's opt-out")
 
-	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
+	claude, _ := defaultAccountLayersForRepo(global, repoRoot, "claude")
 	assert.Equal(t, "shared", claude.Name)
 	assert.Equal(t, SourceGlobal, claude.Layer,
 		"an agent the project did not override resolves through the global layer, and the trace must say so")
@@ -162,13 +162,13 @@ func TestAnEmptyProjectEntryOptsOutOfTheGlobalDefault(t *testing.T) {
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	codex, codexGlobal := DefaultAccountLayersFor(global, repoRoot, "codex")
+	codex, codexGlobal := defaultAccountLayersForRepo(global, repoRoot, "codex")
 	assert.Empty(t, codex.Name, "the project turned the default off for this agent")
 	assert.Empty(t, codexGlobal.Name, "and the global entry must not come back as a fallback")
 	assert.Empty(t, ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
 		"the catalog must agree, or a picker would preselect an identity the create does not use")
 
-	claude, _ := DefaultAccountLayersFor(global, repoRoot, "claude")
+	claude, _ := defaultAccountLayersForRepo(global, repoRoot, "claude")
 	assert.Equal(t, "shared", claude.Name, "and the opt-out is per agent, like every other entry")
 }
 
@@ -186,7 +186,7 @@ func TestAnEmptyValueClearsAGlobalDefaultAccount(t *testing.T) {
 	cfg, err := LoadConfig()
 	require.NoError(t, err)
 	assert.Empty(t, cfg.DefaultAccounts["codex"])
-	_, globalLayer := DefaultAccountLayersFor(cfg, "", "codex")
+	_, globalLayer := defaultAccountLayersForRepo(cfg, "", "codex")
 	assert.Empty(t, globalLayer.Name, "and the cleared entry stops selecting anything")
 }
 
@@ -212,7 +212,7 @@ func TestDefaultAccountLayersForFallsBackWhenTheRepoDoesNotResolve(t *testing.T)
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	project, globalLayer := DefaultAccountLayersFor(global, filepath.Join(t.TempDir(), "not-a-repo"), "codex")
+	project, globalLayer := defaultAccountLayersForRepo(global, filepath.Join(t.TempDir(), "not-a-repo"), "codex")
 	assert.Empty(t, project.Name, "an unresolvable repo contributes no project layer")
 	assert.Equal(t, "work", globalLayer.Name,
 		"the global default still applies, exactly as defaultProgramFor falls back rather than failing the create")
@@ -224,7 +224,7 @@ func TestDefaultAccountLayersForIgnoresAnAgentWithNoEntry(t *testing.T) {
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	project, globalLayer := DefaultAccountLayersFor(global, repoRoot, "claude")
+	project, globalLayer := defaultAccountLayersForRepo(global, repoRoot, "claude")
 	assert.Empty(t, project.Name)
 	assert.Empty(t, globalLayer.Name,
 		"an account belongs to ONE agent, so a codex default must never be offered to a claude session")
@@ -236,7 +236,7 @@ func TestCheckDefaultAccountRefusesAnUnregisteredAccountNamingTheKey(t *testing.
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	selection, _ := DefaultAccountLayersFor(global, repoRoot, "codex")
+	selection, _ := defaultAccountLayersForRepo(global, repoRoot, "codex")
 	err = CheckDefaultAccount(home, repoRoot, selection)
 	require.Error(t, err, "a default that cannot be honoured must fail the create, never fall back to the ambient identity")
 	message := err.Error()
@@ -253,7 +253,7 @@ func TestCheckDefaultAccountAcceptsARegisteredAccount(t *testing.T) {
 	global, err := LoadConfig()
 	require.NoError(t, err)
 
-	selection, _ := DefaultAccountLayersFor(global, repoRoot, "codex")
+	selection, _ := defaultAccountLayersForRepo(global, repoRoot, "codex")
 	require.NoError(t, CheckDefaultAccount(home, repoRoot, selection))
 }
 
@@ -278,7 +278,7 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 	for _, repoPath := range []string{repoRoot, "", filepath.Join(t.TempDir(), "not-a-repo")} {
 		effective := ResolvedDefaultAccountsFor(global, repoPath)
 		for _, agent := range []string{"claude", "codex", "gemini"} {
-			project, globalLayer := DefaultAccountLayersFor(global, repoPath, agent)
+			project, globalLayer := defaultAccountLayersForRepo(global, repoPath, agent)
 			want := project.Name
 			if want == "" {
 				want = globalLayer.Name
@@ -290,4 +290,20 @@ func TestResolvedDefaultAccountsAgreesWithThePerAgentResolution(t *testing.T) {
 
 	assert.Equal(t, "side", ResolvedDefaultAccountsFor(global, repoRoot)["codex"],
 		"and the answer is the project's, not the global one")
+}
+
+// defaultAccountLayersForRepo resolves repoPath read-only, the way the daemon's
+// create does for a READABLE config — nil for a path with no project config to
+// read — and reports its layers. (A config that could not be read is the
+// caller's to refuse; session.CheckProjectConfigForLaunch covers that half.)
+func defaultAccountLayersForRepo(global *Config, repoPath, agent string) (DefaultAccountSelection, DefaultAccountSelection) {
+	var resolved *ResolvedConfig
+	if strings.TrimSpace(repoPath) != "" {
+		if repo, err := RepoFromPath(repoPath); err == nil {
+			if r, rerr := ResolveConfigForRepoInspection(repo); rerr == nil {
+				resolved = r
+			}
+		}
+	}
+	return DefaultAccountLayersFromResolved(global, resolved, agent)
 }

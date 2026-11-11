@@ -221,7 +221,7 @@ func (g *GitWorktree) hookScopePrefixes() []string {
 	}
 	add(g.HookScopeUnitPrefix())
 	if systemdunit.RunningDaemonProcess() {
-		add(systemdunit.HookScopeUnitPrefix(g.hookScopeSessionID))
+		add(systemdunit.HookScopeUnitPrefix(g.hookScopeID()))
 		add(systemdunit.HookScopeUnitPrefix(worktreePathScopeIdentity(g.worktreePath)))
 	}
 	return prefixes
@@ -322,13 +322,15 @@ func (g *GitWorktree) startHooks() {
 // identity. A worktree with no session id derives no scope name, so the runner
 // takes exactly the path it took before #3650.
 func (g *GitWorktree) runHooks() <-chan struct{} {
+	g.hookConfigNote = ""
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
 		repoPath:            g.repoPath,
 		worktreePath:        g.worktreePath,
-		passthrough:         g.hookEnvPassthrough,
-		scopeSessionID:      g.hookScopeSessionID,
+		passthrough:         g.HookEnvironment(),
+		scopeSessionID:      g.hookScopeID(),
 		onScopeLaunched:     g.SetHookScopeUnitPrefix,
 		onProgressPublished: g.retainHookProgressForCreate,
+		onNotRun:            func(note string) { g.hookConfigNote = note },
 	})
 }
 

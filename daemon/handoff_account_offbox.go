@@ -50,10 +50,15 @@ func (m *Manager) handoffAccountOffBox(req HandoffSessionRequest, instance *sess
 	outgoing := instance.CurrentAgentName()
 	// The scope variable is part of the environment fixed when the agent-server
 	// launched, so the account changes and the agent does not.
-	if target := strings.TrimSpace(req.To); target != "" &&
-		!session.HandoffTargetIsCurrent(outgoing, target, session.HandoffEffectiveAgentForPath(instance.Path, target), instance.AgentProgram()) {
-		return HandoffSessionResponse{}, fmt.Errorf("session %q runs on a host: moving it to %s and to account %q at once is not supported; hand it off to the agent first, then change its account, or use a local session: %w",
-			instance.Title, target, to, session.ErrSwapNeedsAccountHandoff)
+	if target := strings.TrimSpace(req.To); target != "" {
+		effective, err := session.HandoffEffectiveAgentForPath(instance.Path, target)
+		if err != nil {
+			return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s: %w", instance.Title, target, err)
+		}
+		if !session.HandoffTargetIsCurrent(outgoing, target, effective, instance.AgentProgram()) {
+			return HandoffSessionResponse{}, fmt.Errorf("session %q runs on a host: moving it to %s and to account %q at once is not supported; hand it off to the agent first, then change its account, or use a local session: %w",
+				instance.Title, target, to, session.ErrSwapNeedsAccountHandoff)
+		}
 	}
 	if from == to {
 		return HandoffSessionResponse{}, fmt.Errorf("session %q already uses %s account %q", instance.Title, outgoing, from)

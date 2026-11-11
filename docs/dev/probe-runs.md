@@ -91,8 +91,11 @@ not one:
   matches nothing, which would look exactly like "the test did not catch the
   mutation".
 - **A skipped test raises a warning.** A skipped test cannot fail, so check the
-  log before reading green as "not caught". Tests gated on an environment
-  variable skip here the same way they do in the real run.
+  log before reading green as "not caught". The probe step sets no opt-in
+  variable, so every test gated on one skips here: the systemd lifecycle
+  tests (`AF_SYSTEMD_LIFECYCLE_TEST`), which skip in the real `Test` job too,
+  and the sudo EPERM test in `internal/execgroup` (`AF_EXECGROUP_SUDO_TEST`),
+  which the real `Test` job runs.
 
 ## Rules
 
@@ -129,10 +132,11 @@ branch once you have the result.
 ### Only what the Linux `Test` job covers
 
 A probe runs the Linux `Test` job's `go test` and nothing else. It cannot prove
-tests that only run in another lane: the systemd lifecycle tests
-(`AF_SYSTEMD_LIFECYCLE_TEST`), the macOS suite, the web checks, or the
-performance baselines. For those, dispatch without `-f probe=true` to get the
-full run.
+tests that only run in another lane or behind an opt-in the probe step does
+not set: the systemd lifecycle tests (`AF_SYSTEMD_LIFECYCLE_TEST`), the sudo
+EPERM test in `internal/execgroup` (`AF_EXECGROUP_SUDO_TEST`), the macOS
+suite, the web checks, or the performance baselines. For those, dispatch
+without `-f probe=true` to get the full run.
 
 ## How a probe stays out of the gates
 

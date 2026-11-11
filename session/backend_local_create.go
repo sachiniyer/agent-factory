@@ -14,10 +14,17 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 		return CreateLaunchPlan{}, fmt.Errorf("cannot prepare session %q: local provisioning produced no launch directory", i.Title)
 	}
 
-	resolution := resolveLaunchProgramForInstance(i)
+	resolution, err := resolveLaunchProgramForInstance(i)
+	if err != nil {
+		return CreateLaunchPlan{}, fmt.Errorf("cannot create session %q: %w", i.Title, err)
+	}
+	env, err := launchEnvFor(i, i.GetWorktreePath())
+	if err != nil {
+		return CreateLaunchPlan{}, fmt.Errorf("cannot create session %q: %w", i.Title, err)
+	}
 	resolved := resolution.command
 	program, conversation := planCreateConversation(i, resolved)
-	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 	proof := accountLaunchProof(resolved, program, resolution.trustBase, nil, "")
 	if account := strings.TrimSpace(i.Account); account != "" {
 		accountAgent := sessionenv.AgentForCommand(i.AgentProgram())

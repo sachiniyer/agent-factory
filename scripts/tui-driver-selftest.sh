@@ -1039,6 +1039,77 @@ SCREEN
     )
 }
 
+# _af_cli_tab_slot <session> <tab-name> — print the 1-9 jump number of the
+# session's tab named <tab-name>, read from the daemon rather than from the rail.
+# `af sessions get` lists `.tabs` in tab-bar order (slot 0 is the agent tab; see
+# `af sessions tab-reorder --index`), and the tree's jump numbers are that same
+# order counted from 1 (ui/tree/labels.go TabLabels feeds both).
+#
+# The rail cannot be the source. At a short height it folds the selected
+# session's later tabs into "▼ N more", and how many it folds depends on how many
+# session rows earlier steps left behind. #7064 left one more session, so the
+# #7061 step's tab row was never drawn and its wait for the row timed out on
+# master. A step that reads its number here does not depend on any of that.
+#
+# It polls for up to 15s, in case `sessions get` lists the new tab later than
+# `tab-create` returns. It stops early only on exactly one match.
+# shellcheck disable=SC2317  # called from the #7037 and #7061 steps.
+_af_cli_tab_slot() {
+    local session="$1" tab="$2" bin slots count deadline
+    bin="$(_af_resolve_bin)"
+    deadline=$(( $(_af_now) + 15 ))
+    while :; do
+        slots="$(AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get "$session" --repo "$AF_DRIVER_REPO" 2>/dev/null \
+            | jq -r --arg t "$tab" '[.tabs[].name] | to_entries[] | select(.value == $t) | .key + 1')" || true
+        count="$(printf '%s' "$slots" | grep -c . || true)"
+        [ "$count" -eq 1 ] && break
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "expected exactly one tab named '$tab' in '$session' from af sessions get, found $count"
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+    if [ "$slots" -gt 9 ]; then
+        _af_fail "tab '$tab' is slot $slots in '$session'; the 1-9 number keys cannot reach it"
+        return 1
+    fi
+    printf '%s\n' "$slots"
+}
+
+# _af_jump_preview <slot> <tab-name> — with the tree focused, press <slot>'s
+# number key until the screen shows <tab-name>'s transient preview header
+# (`<session> · <tab> · preview`).
+#
+# The tab was created through the CLI, so the first press can reach the TUI
+# before the TUI has the tab: the jump is checked against the TUI's own tab list
+# (app/handle_tabs.go handleTabJump) and does nothing until the tab is in it. So
+# the key is pressed again every 2s. A repeat is harmless: it names the same
+# target, which only refreshes the preview, as the 100ms preview tick does. The
+# header names the tab, so a slot that pointed at any other tab fails here
+# instead of passing. The 25s budget covers both waits it replaces: 15s for the
+# tab row and 10s for the preview.
+# shellcheck disable=SC2317  # called from the #7037 and #7061 steps.
+_af_jump_preview() {
+    local slot="$1" header_re deadline next=0
+    header_re="$(_af_regex_escape "$2").*· preview"
+    deadline=$(( $(_af_now) + 25 ))
+    while :; do
+        if [ "$(_af_now)" -ge "$next" ]; then
+            af_send "$slot"
+            next=$(( $(_af_now) + 2 ))
+        fi
+        sleep "$AF_DRIVER_POLL"
+        if af_capture | grep -qE -- "$header_re"; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail "number key $slot did not preview the '$2' tab within 25s"
+            af_capture >&2
+            return 1
+        fi
+    done
+}
+
 # _expect_altscreen_commit_renders — the LIVE half of #7037. A committed pane is a
 # viewer: it keeps the tab's real size and crops it into its box (#4480). On the
 # alternate screen a full-screen program parks its cursor wherever it likes —
@@ -1062,10 +1133,7 @@ SCREEN
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_altscreen_commit_renders() {
     local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
-    local marker='AF_ALT_7037_TOP' tab_re bin script n header deadline rc=0
-    # A process tab's label is its kind glyph and its name ("› altscreen", see
-    # ui/tree/labels.go), after the tree's jump-slot number.
-    tab_re='^[[:space:]]*(├|└)[[:space:]]+[0-9]+[[:space:]]+(› )?altscreen([[:space:]]|$)'
+    local marker='AF_ALT_7037_TOP' bin script n header deadline rc=0
     bin="$(_af_resolve_bin)"
     mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
     script="$AF_DRIVER_STATE_DIR/altscreen-idle.sh"
@@ -1085,19 +1153,14 @@ EOF
     af_resize "$saved_cols" 20 || return 1
     af_select cycle || rc=1
     if [ "$rc" -eq 0 ]; then
-        af_wait_for "$tab_re" 15 'the CLI-created altscreen tab reaches the tree' || rc=1
-    fi
-    if [ "$rc" -eq 0 ]; then
-        n="$(af_capture | grep -E -- "$tab_re" | head -1 | grep -oE '[0-9]+' | head -1)"
-        [ -n "$n" ] || { _af_fail 'could not read the altscreen tab number from the tree'; rc=1; }
+        # From the daemon, not the rail: the rail may fold this row (see above).
+        n="$(_af_cli_tab_slot cycle altscreen)" || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_focus_tree || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
-        af_send "$n"
-        # The pane header names a transient preview `<session> · <tab> · preview`.
-        af_wait_for 'altscreen.*· preview' 10 'the number key previews the altscreen tab' || rc=1
+        _af_jump_preview "$n" altscreen || rc=1
     fi
     if [ "$rc" -eq 0 ]; then
         af_wait_for "$marker" 10 'control: the capture-backed preview renders the program' || rc=1
@@ -1138,6 +1201,124 @@ EOF
     if [ "$rc" -eq 0 ]; then
         printf '\n=== committed alternate-screen pane: %sx20 ===\n' "$saved_cols"
         af_capture
+    fi
+
+    af_resize "$saved_cols" "$saved_rows" || return 1
+    return "$rc"
+}
+
+# _af_expect_dead_pane_holds <rows> — at a TUI height of <rows>, the open pane on
+# the finished one-shot tab must show the program's output AND tmux's "Pane is
+# dead" marker, and keep showing both: binding the pane is the only repaint a
+# dead tab will ever get, so nothing later can fill in a blank (#7061).
+# shellcheck disable=SC2317  # called from _expect_dead_tab_pane_renders.
+_af_expect_dead_pane_holds() {
+    local rows="$1" out_marker='AF_DEAD_7061_OUT' dead_marker='Pane is dead' deadline
+    af_wait_for "$out_marker" 10 "the dead tab's pane shows its output at ${AF_DRIVER_COLS}x${rows} (#7061)" || return 1
+    af_wait_for "$dead_marker" 10 "the dead tab's pane shows the 'Pane is dead' marker at ${AF_DRIVER_COLS}x${rows} (#7061)" || return 1
+    deadline=$(( $(_af_now) + 2 ))
+    while [ "$(_af_now)" -lt "$deadline" ]; do
+        if ! af_capture | grep -qE -- "$out_marker" || ! af_capture | grep -qE -- "$dead_marker"; then
+            _af_fail "the dead tab's pane showed its output and marker at ${AF_DRIVER_COLS}x${rows}, then lost them (#7061)"
+            af_capture >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+    printf '\n=== pane on a finished one-shot tab: %sx%s ===\n' "$AF_DRIVER_COLS" "$rows"
+    af_capture
+}
+
+# _expect_dead_tab_pane_renders — #7061. A one-shot process tab whose command
+# already exited when its pane is FIRST opened must show the command's last
+# output and tmux's "Pane is dead" marker at once, with no scrolling or
+# interaction. #5592 covered a tab that dies while it is being watched; the
+# play-test found the pane blank when the tab died before anyone watched it.
+#
+# The command prints one line and exits, far under a screenful: tmux then pushes
+# that line into history when it draws the marker (scroll up one row, draw on the
+# last), so the output and the marker are a full pane height apart. The tab is
+# created through the CLI, which spawns it at tmux's default 80x24, and the step
+# waits until the daemon records the exit before the TUI looks at it. The flow
+# is the reported one: tree-focused number key → transient preview, then `s`
+# opens the tab as a pane. It is checked with the pane box shorter than the tab
+# (the crop is in play), taller than it, and at the play-test's 80x24.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_dead_tab_pane_renders() {
+    local saved_cols="$AF_DRIVER_COLS" saved_rows="$AF_DRIVER_ROWS"
+    local bin script n header deadline rc=0
+    bin="$(_af_resolve_bin)"
+    mkdir -p "$AF_DRIVER_STATE_DIR" || return 1
+    script="$AF_DRIVER_STATE_DIR/oneshot.sh"
+    # The output marker lives only in the script, never in the tab's command
+    # line, so nothing but the program's own output can put it on the TUI.
+    cat >"$script" <<'EOF' || return 1
+#!/bin/sh
+printf 'AF_DEAD_7061_OUT one-shot finished\n'
+EOF
+    if ! AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions tab-create cycle \
+        --repo "$AF_DRIVER_REPO" --command "sh '$script'" --name oneshot >/dev/null; then
+        _af_fail "af sessions tab-create could not add the one-shot tab"
+        return 1
+    fi
+    # Dead before the TUI ever binds a pane to it: the daemon has seen the exit.
+    deadline=$(( $(_af_now) + 15 ))
+    until AGENT_FACTORY_HOME="$AGENT_FACTORY_HOME" "$bin" sessions get cycle --repo "$AF_DRIVER_REPO" 2>/dev/null \
+        | jq -e '.tabs[] | select(.name == "oneshot") | .exit.status_known == true' >/dev/null 2>&1; do
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_fail 'the one-shot tab never reported a known exit status'
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+
+    af_resize "$saved_cols" 20 || return 1
+    af_select cycle || rc=1
+    if [ "$rc" -eq 0 ]; then
+        # From the daemon, not the rail: this is the row #7064's extra session
+        # folded into "▼ 2 more" at this height (see _af_cli_tab_slot).
+        n="$(_af_cli_tab_slot cycle oneshot)" || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_focus_tree || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        _af_jump_preview "$n" oneshot || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        af_send s
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        while :; do
+            header="$(_af_pane_header_row)"
+            if printf '%s\n' "$header" | grep -qE -- 'oneshot' \
+                && ! printf '%s\n' "$header" | grep -qE -- 'preview'; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                _af_fail "s did not open the one-shot tab as a pane (pane headers: '$header')"
+                rc=1
+                break
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    fi
+    if [ "$rc" -eq 0 ]; then
+        sleep 3   # past the live attachment's bind, as in the #7037 step
+        _af_expect_dead_pane_holds 20 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # A pane box taller than the tab's 24 rows: no crop at all.
+        af_resize "$saved_cols" 40 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        _af_expect_dead_pane_holds 40 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        # The play-test's own geometry: an 80x24 TUI.
+        af_resize 80 24 || rc=1
+    fi
+    if [ "$rc" -eq 0 ]; then
+        _af_expect_dead_pane_holds 24 || rc=1
     fi
 
     af_resize "$saved_cols" "$saved_rows" || return 1
@@ -1283,6 +1464,63 @@ step "select alpha"                                         af_select alpha
 step "assert alpha is selected"                             af_expect_selected alpha
 step "select beta"                                          af_select beta
 step "assert beta is selected"                              af_expect_selected beta
+
+# --- #7060 regression: the naming row keeps the selection through a taken title ---
+# Type a prefix of an existing session's title, the exact title, then a free
+# suffix, and submit. The exact match used to auto-expand the EXISTING alpha as
+# if it were the selection; its tab row shifted the rail under the cursor, which
+# committed the row above the naming row (▾ beta) and never came back, so the
+# finished create landed unselected. While the form is open no session row may
+# carry ▾; once the create is ready, the new session must.
+#
+# _af_wait_draft <title> <min-lines> waits for the frame that renders the draft:
+# the naming row prints the bare title, so an exact match of an existing title
+# shows on two rail lines. A drift commits in that same frame (the rail
+# re-derives its rows when it paints), so the refute below reads it.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_af_wait_draft() {
+    local re n deadline screen
+    re="(^|[[:space:]])$(_af_regex_escape "$1")([[:space:]]|\$)"
+    n="$2"
+    deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+    while :; do
+        screen="$(af_capture)"
+        if [ "$(printf '%s\n' "$screen" | grep -cE -- "$re")" -ge "$n" ]; then
+            return 0
+        fi
+        if [ "$(_af_now)" -ge "$deadline" ]; then
+            _af_log "TIMEOUT waiting for the naming draft '$1' on $n line(s)"
+            printf '%s\n' "$screen" >&2
+            return 1
+        fi
+        sleep "$AF_DRIVER_POLL"
+    done
+}
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_naming_row_keeps_selection() {
+    local drifted='▾[[:space:]]+(alpha|beta)([[:space:]]|$)'
+    af_ensure_nav
+    af_focus_tree || return 1
+    af_send n
+    af_wait_for 'submit name' "$AF_DRIVER_TIMEOUT" 'name prompt' || return 1
+    af_send_literal alph
+    _af_wait_draft alph 1 || return 1
+    af_refute_screen "$drifted" 'prefix draft: no session row took the selection' || return 1
+    af_send_literal a
+    _af_wait_draft alpha 2 || return 1
+    af_refute_screen "$drifted" 'exact-title draft: no session row took the selection' || return 1
+    af_send_literal x
+    _af_wait_draft alphax 1 || return 1
+    af_refute_screen "$drifted" 'suffix draft: the selection came back to the form' || return 1
+    af_send Enter
+    af_wait_for 'alphax.*●' "$AF_DRIVER_TIMEOUT" "instance 'alphax' ready" || return 1
+    af_expect_selected alphax || return 1
+    af_refute_screen "$drifted" 'the create landed on the new session, not a neighbour'
+}
+step "naming row keeps the selection through a taken title (#7060)" _expect_naming_row_keeps_selection
+# Later steps act on beta's tab; put the selection back where they expect it.
+step "reselect beta after the #7060 create"                 af_select beta
+step "assert beta is selected again"                        af_expect_selected beta
 
 # --- #1759 regression: af_select must check AFTER the final scan step ---
 # A row that only becomes actionable on the loop's boundary `j` used to be
@@ -2003,6 +2241,10 @@ step "cycle: confirmed w deletes the VIEWED tab, not the tree's (#1884)" _expect
 # Runs on the 'cycle' instance the steps above leave with a pane open: the
 # transient preview it commits needs an owner pane.
 step "a committed pane on an idle alternate-screen tab renders it (#7037)" _expect_altscreen_commit_renders
+
+# --- #7061: a pane first opened on an already-finished one-shot tab shows its end ---
+# Same 'cycle' instance; the previewing pane it opens from is the one above.
+step "a pane opened on a finished one-shot tab shows its output and the dead marker (#7061)" _expect_dead_tab_pane_renders
 
 # --- #2148 live: relaunch at 80x24 with enough sessions to scroll the rail.
 # Runs last because it adds sessions and relaunches the TUI.

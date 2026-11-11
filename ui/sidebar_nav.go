@@ -80,7 +80,7 @@ func (s *Sidebar) moveCursorToInstance(target *session.Instance) {
 		return
 	}
 	wantTab := -1
-	if s.lastCursorTitle == target.Title {
+	if s.proj.SameRow(s.lastCursorInst, target) {
 		tabs := target.GetTabs()
 		// A replacement is any same-title swap to a different instance identity:
 		// a kill/recreate mints an entirely new session whose tab ids all differ
@@ -196,7 +196,7 @@ func (s *Sidebar) pushSelection() {
 		s.lastCursorTabID = ""
 		s.lastCursorTabName = ""
 	}
-	s.lastCursorTitle = inst.Title
+	s.lastCursorInst = inst
 	if prev != inst {
 		s.treeCollapsed = nil
 		s.rebuildPreservingCursor()
@@ -204,12 +204,15 @@ func (s *Sidebar) pushSelection() {
 }
 
 // rowIdentity is the rebuild-stable identity of a visible row: instances are
-// keyed by title (stable across index shifts and #765 same-title swaps), tab
-// rows by title + slot.
+// keyed by pointer, tab rows by pointer + slot. Every caller re-derives the rows
+// of an unchanged instance list (a fold, a section toggle, a selection move), so
+// the pointer is exact — a title could only add a wrong match: an earlier row
+// carrying the same title, such as the session the naming row's draft spells
+// (#7060).
 type rowIdentity struct {
 	kind   SidebarSectionKind
 	header bool
-	title  string
+	inst   *session.Instance
 	isTab  bool
 	tab    int
 }
@@ -219,7 +222,7 @@ func (s *Sidebar) rowIdentityAt(item SidebarItem) rowIdentity {
 	if item.Kind == SectionInstances && !item.IsHeader {
 		instances := s.proj.GetInstances()
 		if item.ItemIndex >= 0 && item.ItemIndex < len(instances) {
-			id.title = instances[item.ItemIndex].Title
+			id.inst = instances[item.ItemIndex]
 		}
 	}
 	return id
@@ -242,7 +245,7 @@ func (s *Sidebar) rebuildPreservingCursor() {
 		}
 		if item.Kind == SectionInstances {
 			if item.ItemIndex < 0 || item.ItemIndex >= len(instances) ||
-				instances[item.ItemIndex].Title != id.title {
+				instances[item.ItemIndex] != id.inst {
 				continue
 			}
 			if item.IsTab && item.TabIndex != id.tab {
@@ -823,8 +826,8 @@ func (s *Sidebar) SelectInstance(target *session.Instance) {
 //
 // Both are avoided by rebuilding here — while the store still selects the
 // acting instance, so its subtree stays expanded — and re-pinning the cursor
-// by captured title BEFORE any selection is pushed, rather than routing through
-// syncFromStore and trying to undo the drift afterward. Bare tab jumps/cycles
+// by the captured instance BEFORE any selection is pushed, rather than routing
+// through syncFromStore and trying to undo the drift afterward. Bare tab jumps/cycles
 // don't change the structure, so the rebuild is a no-op for them; both paths go
 // through the same capture-first flow. Any pending #969 SelectInstance
 // assertion has already been consumed by the GetSelectedInstance sync at the
@@ -839,16 +842,18 @@ func (s *Sidebar) SyncCursorToActiveTab() {
 	if pre.ItemIndex < 0 || pre.ItemIndex >= len(instances) {
 		return
 	}
-	// Key the parent instance by title: the rebuild below re-derives the row
-	// list and flat/instance indices are only stable across it by identity.
-	title := instances[pre.ItemIndex].Title
+	// Key the parent instance by pointer: the rebuild below re-derives the row
+	// list of an unchanged instance list, and flat/instance indices are only
+	// stable across it by identity. A title could match another row that
+	// carries it (#7060).
+	parent := instances[pre.ItemIndex]
 	s.rebuildVisibleItems()
 	instances = s.proj.GetInstances()
 	found := false
 	for j, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
 			item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
-			instances[item.ItemIndex].Title == title && item.TabIndex == want {
+			instances[item.ItemIndex] == parent && item.TabIndex == want {
 			s.selectedIdx = j
 			found = true
 			break
@@ -866,7 +871,7 @@ func (s *Sidebar) SyncCursorToActiveTab() {
 		for j, item := range s.visibleItems {
 			if item.Kind == SectionInstances && !item.IsHeader && !item.IsTab &&
 				item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
-				instances[item.ItemIndex].Title == title {
+				instances[item.ItemIndex] == parent {
 				s.selectedIdx = j
 				break
 			}
@@ -910,11 +915,12 @@ func (s *Sidebar) ClickHeaderKind(kind SidebarSectionKind) {
 // such row no-ops rather than guessing.
 func (s *Sidebar) SelectTabRow(title string, idx int) {
 	s.syncFromStore()
+	target := s.proj.GetInstanceByTitle(title)
 	instances := s.proj.GetInstances()
 	for j, item := range s.visibleItems {
 		if item.Kind == SectionInstances && !item.IsHeader && item.IsTab &&
 			item.ItemIndex >= 0 && item.ItemIndex < len(instances) &&
-			instances[item.ItemIndex].Title == title && item.TabIndex == idx {
+			target != nil && instances[item.ItemIndex] == target && item.TabIndex == idx {
 			s.selectedIdx = j
 			s.afterCursorMove()
 			return
@@ -929,10 +935,11 @@ func (s *Sidebar) SelectTabRow(title string, idx int) {
 // instance toggles its explicit h/← collapse override.
 func (s *Sidebar) ToggleInstanceTree(title string) {
 	s.syncFromStore()
+	target := s.proj.GetInstanceByTitle(title)
 	instances := s.proj.GetInstances()
 	instIdx := -1
 	for i, inst := range instances {
-		if inst.Title == title {
+		if inst == target {
 			instIdx = i
 			break
 		}
@@ -940,8 +947,7 @@ func (s *Sidebar) ToggleInstanceTree(title string) {
 	if instIdx < 0 {
 		return
 	}
-	sel := s.proj.GetSelectedInstance()
-	wasSelected := sel != nil && sel.Title == title
+	wasSelected := s.proj.SameRow(s.proj.GetSelectedInstance(), target)
 	wasExpanded := s.instanceExpanded(instances[instIdx])
 	s.SetSelectedInstance(instIdx)
 	if !wasSelected {

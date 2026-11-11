@@ -88,7 +88,7 @@ func (g *GitWorktree) ownedHookProgress() (*hookProgress, string, error) {
 	if g.IsExternalWorktree() {
 		return nil, "", fmt.Errorf("%w: external worktree", errInvalidHookProgress)
 	}
-	return readOwnedHookProgress(g.worktreePath, g.hookScopeSessionID)
+	return readOwnedHookProgress(g.worktreePath, g.hookScopeID())
 }
 
 func readOwnedHookProgress(worktreePath, sessionID string) (*hookProgress, string, error) {
@@ -113,7 +113,7 @@ func readOwnedHookProgress(worktreePath, sessionID string) (*hookProgress, strin
 // stopping a survivor. Kill's existing safe teardown still owns that stop.
 func (g *GitWorktree) AbandonHookProgress() {
 	g.hooksResumeDisabled = true
-	worktreePath, sessionID := g.worktreePath, g.hookScopeSessionID
+	worktreePath, sessionID := g.worktreePath, g.hookScopeID()
 	if err := abandonHookProgress(worktreePath, sessionID); err != nil {
 		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, err)
 		done := make(chan struct{})

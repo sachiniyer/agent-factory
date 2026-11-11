@@ -341,9 +341,12 @@ func checkSandboxCreate(req CreateSessionRequest) error {
 
 // --- tasks: prompt-delivery tasks on the project's own off-box sessions ------
 
-// stampSandboxTask binds a sandbox-created task to its owner and project. The
-// provenance is durable and overwrites anything the caller sent: every later
-// delivery re-checks against it (checkSandboxTaskDelivery).
+// stampSandboxTask binds a sandbox-created task to its owner and project, over
+// anything the caller sent. The owner it sets keeps this record saying what will
+// be stored, but the store does not depend on it: AddTaskChecked clears any
+// client-supplied owner and stamps the one s.addTask reads from the credential,
+// which is this same owner (#7048). Every later delivery re-checks against the
+// stored owner (checkSandboxTaskDelivery).
 func stampSandboxTask(t task.Task, id, owner string, proj sandboxProject, target string) task.Task {
 	// The ID is the daemon's, minted per add and never the caller's: a caller
 	// that named an existing task's ID could otherwise shadow or re-arm a task it

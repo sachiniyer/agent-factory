@@ -759,6 +759,21 @@ func DefaultConfig() *Config {
 	return cfg
 }
 
+// builtInAutoDetectedProgramAgents is the stable set of agent names the
+// built-in provenance layer of ProgramOverrides can ever contribute via
+// DefaultConfig, independent of whether the live claude probe succeeds in
+// the current process. The whole-map program_overrides writer seeds
+// tombstones for these agents so a removal performed while the probe is
+// transiently unavailable (claude unresolvable by the probe and absent from
+// the invoking process's PATH) stays pinned — DefaultConfig().ProgramOverrides
+// is only populated when GetClaudeCommand() succeeds, so iterating it alone
+// would seed nothing and let the loader resurrect the auto-detected command
+// on a later load where detection succeeds. Today the built-in layer
+// contributes exactly one agent, tmux.ProgramClaude.
+func builtInAutoDetectedProgramAgents() []string {
+	return []string{tmux.ProgramClaude}
+}
+
 // staticDefaultConfig returns the compiled-in default configuration without the
 // machine-dependent claude probe. DefaultConfig layers that probe's
 // auto-detected ProgramOverrides on top of this baseline. Callers that only
