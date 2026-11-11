@@ -317,7 +317,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		// Either rebuild may have hit a setup-payload collision — non-blocking,
 		// but the row must say so (#6667).
-		if s := gw.SetupOverlayError(); s != "" {
+		if s := gw.SetupFailureNote(); s != "" {
 			i.noteSetupHookFailure(s)
 		}
 	}

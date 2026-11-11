@@ -373,10 +373,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			setupErr = fmt.Errorf("failed to setup git worktree: %w", err)
 			return setupErr
 		}
-		// A staged setup payload that failed to copy in is non-blocking like
-		// the hook failure itself, but the row must say so (#6667).
-		if overlayErr := gw.SetupOverlayError(); overlayErr != "" {
-			i.noteSetupHookFailure(overlayErr)
+		// A staged setup payload that failed to copy in, or post_worktree_commands
+		// that could not run because the project config could not be read, is
+		// non-blocking like the hook failure itself, but the row must say so
+		// (#6667, #7079).
+		if note := gw.SetupFailureNote(); note != "" {
+			i.noteSetupHookFailure(note)
 		}
 
 		// Inject Agent Factory instructions into the session. The daemon create
