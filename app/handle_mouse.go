@@ -560,10 +560,17 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	}
 	if root, ok := zones.ProjectRoot(id); ok {
 		// Click a Projects-section row: focus the section and switch the rail to
-		// that project (the row's primary action, like Enter on it).
+		// that project (the row's primary action, like Enter on it). The row's
+		// recorded identity rides along so a stale row whose checkout was
+		// replaced is refused rather than silently opening the replacement.
 		m.focusRegionClick(layout.RegionProjects)
-		m.projects.SelectByRoot(root)
-		return m.switchToProjectRoot(root)
+		var repoID string
+		if m.projects.SelectByRoot(root) {
+			if proj, ok := m.projects.SelectedProject(); ok {
+				repoID = proj.RepoID
+			}
+		}
+		return m.switchToProjectRoot(root, repoID)
 	}
 	if region, kind, ok := zones.PaneZone(id); ok {
 		// Click a pane header (or an unfocused pane's body): focus that pane

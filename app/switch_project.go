@@ -521,12 +521,16 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches
-// the rail to it, reusing the #1461 switchProject path. A root that no longer
-// resolves (repo moved/removed) surfaces an error rather than silently doing
-// nothing. Switching to the already-active project is a no-op inside
+// the rail to it, reusing the #1461 switchProject path. repoID is the row's
+// recorded identity; in local mode repoContextForSelection refuses to switch
+// when a probe of root resolves to a different repository than the row recorded
+// (a stale row whose checkout was replaced or absorbed by an enclosing repo),
+// so the rail cannot be silently re-scoped onto a foreign checkout. A root that
+// no longer resolves (repo moved/removed) surfaces an error rather than silently
+// doing nothing. Switching to the already-active project is a no-op inside
 // switchProject.
-func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := m.repoContextForSelection(root, "")
+func (m *home) switchToProjectRoot(root, repoID string) (tea.Model, tea.Cmd) {
+	repo, err := m.repoContextForSelection(root, repoID)
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
 	}

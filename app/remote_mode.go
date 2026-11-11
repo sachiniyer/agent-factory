@@ -221,9 +221,27 @@ func (m *home) activeTasks(repoRoot, repoID string) ([]task.Task, error) {
 // follow-up) goes through. Remotely the row's root is a path on the daemon's
 // host, so the context comes from the row's registry identity, never from a
 // local git probe.
+//
+// Locally the row's root IS probed (the checkout's working tree is on this
+// machine), but the probe's answer is no longer accepted unconditionally: a
+// registered root that no longer holds the registered checkout can resolve
+// upward into an unrelated enclosing repository, or to a different checkout that
+// took the path over. When the row carries a recorded identity that disagrees
+// with the probe, switching is refused rather than silently re-scoping the TUI
+// onto a foreign repo — mirroring the remote branch and the daemon's own
+// delete-project check. Legacy invented ids (d-…) predate the recorded RepoID
+// field and can never equal a probe result, so they are exempt and switch on the
+// probe as they always did.
 func (m *home) repoContextForSelection(root, repoID string) (*config.RepoContext, error) {
 	if !isRemoteTarget() {
-		return config.RepoFromPath(root)
+		repo, err := config.RepoFromPath(root)
+		if err != nil {
+			return nil, err
+		}
+		if repoID != "" && !config.IsDerivedRepoID(repoID) && repo.ID != repoID {
+			return nil, fmt.Errorf("%s is no longer the registered repository (git found a different one there); run `af projects rebind` if the replacement is intentional", root)
+		}
+		return repo, nil
 	}
 	if repoID == "" {
 		for _, p := range m.sidebarProjects {
