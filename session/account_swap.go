@@ -959,6 +959,7 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 			return fmt.Errorf("restore account swap environment for tab %q: %w", tab.Name, err)
 		}
 	}
+	i.markSwapEnvironmentResolved(tabs, passthrough)
 	return nil
 }
 

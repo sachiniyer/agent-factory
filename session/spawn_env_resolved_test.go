@@ -5,6 +5,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/log"
@@ -128,4 +129,31 @@ func TestInertLoadResolvesTheWorktreeEnvironment(t *testing.T) {
 	require.Same(t, gw, instance.envResolvedWorktree.Load(), "the inert load applied the worktree's pass-through")
 	require.Contains(t, gw.HookEnvironment(), inertEnvName)
 	require.True(t, envResolvedOnHandles(instance))
+}
+
+// #7087 review, P3: a refresh that FAILED must not mark the handle resolved.
+// Asserted on the environment the next tab actually gets, not on a read count:
+// a handle marked before success would let the spawn skip its own read and
+// start the tab without the session's names.
+func TestAFailedRefreshLeavesTheHandleForTheSpawnToResolve(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	noRetryPause(t)
+	p := sessionEnvHome(t)
+	p.slow(t)
+	instance, commands := loadLostThenRevive(t, p, "lost-failed-refresh", "af_lost_failed_refresh")
+	instance.mu.RLock()
+	agentTmux := instance.tmuxLocked()
+	instance.mu.RUnlock()
+
+	require.Error(t, refreshSessionEnvironment(instance, agentTmux), "precondition: the refresh cannot read the config")
+	// Not fatal: the environment the tab gets below is the assertion that counts.
+	assert.NotSame(t, agentTmux, instance.envResolvedTmux.Load(), "a failed refresh resolves nothing")
+
+	require.NoError(t, os.Remove(p.flag)) // the box answers again
+	tab, err := instance.AddShellTab()
+	require.NoError(t, err)
+	chain, spawned := spawnChain(commands(), tab.tmux.SanitizedName())
+	require.True(t, spawned)
+	require.Contains(t, chain, inertEnvName, "the spawn read the environment the failed refresh could not")
 }
