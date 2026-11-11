@@ -13,13 +13,34 @@
 #
 # Toolchain-only, like Dockerfile.test: the source is bind-mounted read-only at run
 # time (scripts/testbox.sh), so this image rebuilds only when the toolchain changes,
-# never on code changes. Build it with no context (`docker build - < …`); no COPY.
+# never on code changes. Its build context is two files that testbox.sh assembles:
+# this Dockerfile and scripts/ci-apt-install.sh. By hand, the scripts/ directory
+# works as the context:
+#
+#     docker build -f scripts/container/Dockerfile.web-selftest scripts
 FROM mcr.microsoft.com/playwright:v1.56.1-noble
+
+# Every apt install below goes through scripts/ci-apt-install.sh (#7096), the
+# wrapper the workflows use (#3774). This base ships a NodeSource apt source
+# (/etc/apt/sources.list.d/nodesource.list, from Playwright's own Dockerfile) that
+# this image never installs from. A bare `apt-get update && apt-get install`
+# fails the build whenever ANY source fails, so a NodeSource 403 or an expired
+# signature would fail the build. With the wrapper the update is advisory and the
+# install is the assertion: a broken source we do not use is printed and
+# survived, and a package that is genuinely unavailable still fails the build.
+#
+# APT_ATTEMPT_TIMEOUT: the wrapper times out each apt-get call (180s by default)
+# and retries a timed-out one, which suits a runner adding one small package.
+# The ffmpeg layer below pulls a few hundred packages, and a call killed while
+# dpkg is unpacking can leave the next attempt a half-configured system. 900s
+# still lets a slow mirror finish. An ARG reaches these RUNs and stays out of
+# the image's runtime environment.
+COPY ci-apt-install.sh /usr/local/lib/agent-factory/ci-apt-install.sh
+ARG APT_ATTEMPT_TIMEOUT=900
 
 # tmux + git are what the daemon drives to run sessions; procps provides pgrep for
 # the daemon's SIGTERM fallback path — the same trio Dockerfile.test installs.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends tmux git procps ca-certificates \
+RUN bash /usr/local/lib/agent-factory/ci-apt-install.sh tmux git procps ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # Go 1.25 (the repo floor, CLAUDE.md). Fetched from the official tarball for the
@@ -68,8 +89,7 @@ ENV PATH=/usr/local/go/bin:/root/go/bin:$PATH \
 # would invalidate the Go tarball download for every web-selftest build, and the
 # gate runs far more often than the recorder does. The gate itself never invokes
 # ffmpeg — this only makes the image able to.
-RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+RUN bash /usr/local/lib/agent-factory/ci-apt-install.sh ffmpeg \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /src

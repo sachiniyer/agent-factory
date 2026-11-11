@@ -595,3 +595,113 @@ func TestAptLintOverTheRealCIDefinitions(t *testing.T) {
 			"If a step was removed on purpose, lower this number deliberately.", callSites)
 	}
 }
+
+// ── the same lint, over the images (#7096) ──────────────────────────────────
+//
+// scripts/container/Dockerfile.web-selftest builds on the Playwright image, which
+// ships a NodeSource apt source the image never installs from. That is the
+// runner's #3774 problem inside an image build, and #7096 moved the image's apt
+// layers onto ci-apt-install.sh (testbox.sh puts the script in every build
+// context). The lint above only read .github/, so nothing stopped the next
+// package from being added as a bare `apt-get update && apt-get install`.
+//
+// The scope is every Dockerfile that COPYs the wrapper in. Once an image has
+// the wrapper, a direct apt-get call in it has no excuse, and the rule is the
+// one the workflows already follow. Dockerfiles that do not copy it in yet
+// (Dockerfile.test, Dockerfile.session) are out of scope until they do. The
+// note in ci-apt-install.sh says why, and when to move them.
+
+// copiesAptWrapper reports whether a Dockerfile COPYs or ADDs ci-apt-install.sh
+// into the image. Comment lines never match: their first field is `#`.
+func copiesAptWrapper(dockerfile string) bool {
+	for _, line := range strings.Split(dockerfile, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) < 2 {
+			continue
+		}
+		switch strings.ToUpper(fields[0]) {
+		case "COPY", "ADD":
+			for _, f := range fields[1:] {
+				if filepath.Base(f) == "ci-apt-install.sh" {
+					return true
+				}
+			}
+		}
+	}
+	return false
+}
+
+func TestCopiesAptWrapper(t *testing.T) {
+	cases := []struct {
+		name    string
+		content string
+		want    bool
+	}{
+		{"COPY into the image", "FROM x\nCOPY ci-apt-install.sh /usr/local/lib/agent-factory/ci-apt-install.sh\n", true},
+		{"ADD works the same way", "FROM x\nadd ci-apt-install.sh /opt/\n", true},
+		{"a comment that names it", "FROM x\n# COPY ci-apt-install.sh would go here\nRUN apt-get update\n", false},
+		{"a RUN that names it is not a copy", "FROM x\nRUN echo ci-apt-install.sh\n", false},
+		{"no mention at all", "FROM x\nRUN apt-get update\n", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			if got := copiesAptWrapper(tc.content); got != tc.want {
+				t.Fatalf("copiesAptWrapper = %v, want %v", got, tc.want)
+			}
+		})
+	}
+}
+
+func TestAptLintOverTheContainerImagesThatCarryTheWrapper(t *testing.T) {
+	dir := filepath.Join(repoRoot(t), "scripts", "container")
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	files := map[string]string{}
+	dockerfiles := 0
+	for _, e := range entries {
+		if e.IsDir() || !strings.HasPrefix(e.Name(), "Dockerfile") {
+			continue
+		}
+		dockerfiles++
+		data, readErr := os.ReadFile(filepath.Join(dir, e.Name()))
+		if readErr != nil {
+			t.Fatal(readErr)
+		}
+		if copiesAptWrapper(string(data)) {
+			files[filepath.Join("scripts", "container", e.Name())] = string(data)
+		}
+	}
+	if dockerfiles == 0 {
+		t.Fatalf("no Dockerfiles found under %s — the scan is looking in the wrong place", dir)
+	}
+
+	// Anti-vacuity, and the guard on the image #7096 is about. If
+	// Dockerfile.web-selftest stops copying the wrapper in, it has gone back to a
+	// bare apt-get update against a base with a source it never installs from.
+	webSelftest := filepath.Join("scripts", "container", "Dockerfile.web-selftest")
+	content, ok := files[webSelftest]
+	if !ok {
+		t.Fatalf("%s no longer COPYs ci-apt-install.sh. Its Playwright base ships a NodeSource "+
+			"apt source it never installs from, so its apt layers must go through the wrapper (#7096).", webSelftest)
+	}
+
+	if findings := lintAptUsage(files); len(findings) > 0 {
+		t.Fatalf("container images call apt-get outside the wrapper:\n  %s", strings.Join(findings, "\n  "))
+	}
+
+	// The lint above is also satisfied by an image that installs nothing. The
+	// web-selftest image installs in two layers (the daemon's tools, then ffmpeg),
+	// and both must run the wrapper.
+	runs := 0
+	for _, line := range strings.Split(content, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) > 0 && strings.EqualFold(fields[0], "RUN") && strings.Contains(line, "ci-apt-install.sh ") {
+			runs++
+		}
+	}
+	if runs < 2 {
+		t.Errorf("%s runs ci-apt-install.sh in %d layer(s), want its 2 apt layers (#7096)", webSelftest, runs)
+	}
+}

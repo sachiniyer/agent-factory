@@ -282,30 +282,81 @@ finish_image_start() {
 # fetched, so these builds cannot be made registry-free, only resilient. The
 # blips in #2521 lasted seconds, which a few spaced attempts absorb.
 #
-# The Dockerfile path is a parameter rather than a `<` on the call because stdin
-# is CONSUMED by the first attempt — a retry redirected by the caller would feed
-# the second attempt an empty Dockerfile and "fail" for a reason of our own
-# making. Redirecting the caller's stdout is still fine; only stdin is spent.
+# Usage: retry_image_build quiet|loud <dockerfile> <engine build args...>
+#
+# QUIET OR LOUD (#7096). Every target but `build` is `quiet`: a build that succeeds
+# prints nothing, and a build that fails prints its whole log, once per failed
+# attempt. These builds used to run as `-q … >/dev/null`, and `-q` drops the
+# build's own log on failure too, so a failing RUN reached the CI log as the
+# Dockerfile excerpt and `exit code: 100` and nothing else. Run 43033894945 failed
+# in `apt-get update` on all three attempts and nothing in its log said whether
+# the Ubuntu archive, its security pocket or the base image's NodeSource source
+# was the one that failed. The log is captured rather than streamed so a green
+# run stays as short as it was. `loud` streams the log as it happens; only the
+# `build` target uses it, because a person running that wants to watch.
+#
+# THE BUILD CONTEXT (#7096). Each build gets a fresh temp directory holding two
+# files: the Dockerfile, and scripts/ci-apt-install.sh. Dockerfile.web-selftest
+# copies in the wrapper so its apt steps keep #3774's contract: a source the
+# image does not install from cannot fail the build, and a package that is
+# genuinely unavailable still does. The Playwright base it builds on ships
+# NodeSource's apt source, which this project never installs from. The context
+# is those two files and not the repo. The source tree reaches each container
+# through the read-only bind mount at run time, so an image still rebuilds only
+# when its toolchain (or the wrapper) changes, and sending the context costs
+# nothing. Each attempt reads the Dockerfile from that directory, so a retry
+# cannot be handed an already-consumed stdin.
+#
+# AF_TESTBOX_BUILD_RETRY_DELAY scales the backoff (seconds; default 5, so 5s then
+# 10s). It exists for the harness's own tests, which have no registry blip to
+# wait out.
 retry_image_build() {
-    local dockerfile="$1"
-    shift
-    local attempt
+    local mode="$1" dockerfile="$2"
+    shift 2
+    case "$mode" in
+    quiet | loud) ;;
+    *)
+        echo "testbox: retry_image_build: mode must be quiet or loud, got '$mode'" >&2
+        return 2
+        ;;
+    esac
+    local ctx attempt out rc=1 delay="${AF_TESTBOX_BUILD_RETRY_DELAY:-5}"
+    ctx="$(mktemp -d "${TMPDIR:-/tmp}/af-testbox-image.XXXXXX")"
+    cp "$dockerfile" "$ctx/Dockerfile"
+    cp "$REPO_ROOT/scripts/ci-apt-install.sh" "$ctx/ci-apt-install.sh"
     for attempt in 1 2 3; do
-        if "$ENGINE" build "$@" - <"$dockerfile"; then
-            return 0
+        rc=0
+        if [ "$mode" = loud ]; then
+            "$ENGINE" build "$@" "$ctx" </dev/null || rc=$?
+        else
+            # BUILDKIT_PROGRESS=plain: docker's tty progress redraws in place,
+            # which is unreadable once captured. Podman ignores it and prints
+            # plain step output anyway.
+            out="$(BUILDKIT_PROGRESS=plain "$ENGINE" build "$@" "$ctx" </dev/null 2>&1)" || rc=$?
+            if [ "$rc" -ne 0 ]; then
+                {
+                    echo "testbox: image build attempt $attempt of $(basename "$dockerfile") failed (exit $rc); its build log follows (#7096)"
+                    printf '%s\n' "$out"
+                    echo "testbox: end of attempt $attempt's build log"
+                } >&2
+            fi
+        fi
+        if [ "$rc" -eq 0 ]; then
+            break
         fi
         if [ "$attempt" -lt 3 ]; then
-            echo "testbox: image build attempt $attempt failed; retrying in $((attempt * 5))s" >&2
-            sleep $((attempt * 5))
+            echo "testbox: image build attempt $attempt failed; retrying in $((attempt * delay))s" >&2
+            sleep $((attempt * delay))
         fi
     done
-    return 1
+    rm -rf "$ctx"
+    [ "$rc" -eq 0 ]
 }
 
 build_image() {
-    # Dockerfile via stdin: no build context is sent (the Dockerfile has no
-    # COPY), so this is instant when layers are cached.
-    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" -q --label "$LABEL" -t "$IMAGE" >/dev/null
+    # Two files of context (see retry_image_build), so this is instant when
+    # layers are cached.
+    retry_image_build quiet "$REPO_ROOT/scripts/container/Dockerfile.test" --label "$LABEL" -t "$IMAGE"
 }
 
 # ensure_cache_volumes — create the named cache volumes up front, labelled.
@@ -555,7 +606,7 @@ fi
 
 case "$cmd" in
 build)
-    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" --label "$LABEL" -t "$IMAGE"
+    retry_image_build loud "$REPO_ROOT/scripts/container/Dockerfile.test" --label "$LABEL" -t "$IMAGE"
     finish_image_start
     ;;
 test)
@@ -719,7 +770,7 @@ lifecycle)
     if [ "$lc_teardown" = yes ]; then
         trap lifecycle_teardown EXIT INT TERM
     fi
-    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.test" -q --label "$LABEL" -t "$LIFECYCLE_IMAGE" >/dev/null
+    retry_image_build quiet "$REPO_ROOT/scripts/container/Dockerfile.test" --label "$LABEL" -t "$LIFECYCLE_IMAGE"
     fix_cache_perms "$LIFECYCLE_IMAGE"
     rc=0
     watch_image_start "$LIFECYCLE_NAME"
@@ -742,7 +793,7 @@ web-selftest|perf)
     # listener, and drives the embedded SPA in a headless Chromium. Everything
     # (daemon, tmux, browser) lives on 127.0.0.1 inside the container: no
     # published ports, no host tmux, no real AF home.
-    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" -q --label "$LABEL" -t "$WEB_IMAGE" >/dev/null
+    retry_image_build quiet "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" --label "$LABEL" -t "$WEB_IMAGE"
     # Dedicated cache volumes (not the shared testbox ones): this container runs
     # as root, so mixing caches would leave root-owned files the dev-user testbox
     # can't write. Chromium wants more memory + pids than the default suite.
@@ -813,7 +864,7 @@ web-demo)
     #
     # It is NOT a gate and CI never runs it: `make demo-assets` is how the
     # product's face gets refreshed, and the assets it writes are committed.
-    retry_image_build "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" -q --label "$LABEL" -t "$WEB_IMAGE" >/dev/null
+    retry_image_build quiet "$REPO_ROOT/scripts/container/Dockerfile.web-selftest" --label "$LABEL" -t "$WEB_IMAGE"
     ensure_cache_volumes af-web-selftest-gomod af-web-selftest-gobuild
     # The ONE path out of the container, and deliberately the committed asset
     # directory rather than a scratch dir the caller then has to copy: `make
