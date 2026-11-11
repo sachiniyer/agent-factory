@@ -196,7 +196,12 @@ func TestLoad_InertRowLoadsWithAnUnreadableProjectConfig(t *testing.T) {
 
 	require.NoError(t, err, "a row that launches nothing must load with its project config unreadable")
 	require.NotNil(t, instance)
-	require.True(t, instance.envUnresolved.Load(), "the unread environment is marked for the next spawn")
+	require.False(t, envResolvedOnHandles(instance), "the unread environment leaves the handles unresolved for the next spawn")
+	// One attempt — the config layer's probe and its in-budget retry; a
+	// launch's three attempts would make six — and no worktree read after the
+	// session read failed (#7083 review).
+	require.Positive(t, p.count())
+	require.LessOrEqual(t, p.count(), 2, "an inert load spends one attempt on an unreadable config")
 	require.Empty(t, commands(), "an inert load touches no tmux session")
 }
 

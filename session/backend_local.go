@@ -90,16 +90,16 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	// SETS both environments, best-effort: the row can go live without Recover
 	// (the status poll lifts a Lost row whose pane is alive), and a tab added
 	// then is built from this handle while every git command its worktree runs
-	// reads the hook list (#7080). A list it could not read is marked, and the
-	// next tab spawn reads its own (ensureSpawnEnvironment).
+	// reads the hook list (#7080). A handle whose refresh failed is not marked
+	// resolved, and the next tab spawn reads its own (ensureSpawnEnvironment).
 	inertLoad := !firstTimeSetup && i.loadStaysInert()
-	envUnresolved := false
+	sessionEnvFailed := false
 	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
 		if !inertLoad {
 			return err
 		}
 		refreshSessionIdentity(i, tmuxSession)
-		envUnresolved = true
+		sessionEnvFailed = true
 		log.WarningLog.Printf("session %q loads without its environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
 	}
 
@@ -129,7 +129,7 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	gitWorktree := i.gitWorktree
 	i.mu.RUnlock()
 	switch {
-	case envUnresolved:
+	case sessionEnvFailed:
 		// The session read already failed; another is no likelier to answer.
 		if gitWorktree != nil {
 			gitWorktree.SetHookScopeSessionID(i.ID)
@@ -139,11 +139,9 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 			if !inertLoad {
 				return err
 			}
-			envUnresolved = true
 			log.WarningLog.Printf("session %q loads without its worktree environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
 		}
 	}
-	i.envUnresolved.Store(envUnresolved)
 
 	return nil
 }

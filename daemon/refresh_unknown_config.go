@@ -39,7 +39,11 @@ type deferredConfigRow struct {
 	probing   bool
 	probePath string
 	primed    *session.RestoreContext
+	primedAt  time.Time
 	seen      uint64
+	// seenAt is when a pass last listed the row. A repo that stops being
+	// listed keeps its rows only for deferredRowForgetAfter (#7083 review).
+	seenAt time.Time
 }
 
 var deferredConfigRows = struct {
@@ -79,6 +83,14 @@ var (
 		return time.Duration(rand.Int64N(int64(backoff/4) + 1))
 	}
 	maxDeferredConfigProbes = 4
+	// deferredPrimedMaxAge bounds how old a primed snapshot may be when its row
+	// loads: an older one is re-probed, so a row whose repo was unlisted for a
+	// while never loads from a config read long ago (#7083 review).
+	deferredPrimedMaxAge = 30 * time.Second
+	// deferredRowForgetAfter drops a deferred row no pass has listed for this
+	// long — its repo unreadable, missing or gone — so the registry cannot
+	// grow without bound (#7083 review). It reloads normally if it reappears.
+	deferredRowForgetAfter = 10 * time.Minute
 )
 
 // errDeferredConfigRow marks a refresh that skipped a deferred row without
@@ -110,12 +122,17 @@ func beginDeferredConfigTick() uint64 {
 // repo this pass READ but no longer listed. A repo the pass did not read — its
 // instances.json unreadable or missing this tick — keeps its rows and their
 // backoff, or one transient read failure would reset every one of them (#7080
-// review).
+// review) — but only for deferredRowForgetAfter: a repo that stays unlisted
+// drops its rows instead of keeping them forever (#7083 review).
 func endDeferredConfigTick(tick uint64, readRepos map[string]bool) {
 	deferredConfigRows.Lock()
 	defer deferredConfigRows.Unlock()
+	now := time.Now()
 	for key, row := range deferredConfigRows.rows {
-		if row.seen != tick && readRepos[row.repoID] {
+		if row.seen == tick {
+			continue
+		}
+		if readRepos[row.repoID] || now.Sub(row.seenAt) > deferredRowForgetAfter {
 			delete(deferredConfigRows.rows, key)
 		}
 	}
@@ -130,8 +147,12 @@ func materializeRefreshRow(tick uint64, repoID, key string, item session.Instanc
 	row := deferredConfigRows.rows[key]
 	var primed *session.RestoreContext
 	if row != nil {
-		row.seen = tick
+		row.seen, row.seenAt = tick, time.Now()
 		row.path, row.title = item.Path, item.Title // the record may have moved
+		if row.primed != nil && time.Since(row.primedAt) > deferredPrimedMaxAge {
+			// Read too long ago to stand for the config now: probe again.
+			row.primed, row.next = nil, time.Time{}
+		}
 		if row.primed == nil && !row.probing && !time.Now().Before(row.next) {
 			switch {
 			case deferredConfigRows.probes[row.path]:
@@ -194,7 +215,7 @@ func noteRefreshRowOutcome(tick uint64, repoID, key string, item session.Instanc
 		row = &deferredConfigRow{}
 		deferredConfigRows.rows[key] = row
 	}
-	row.repoID, row.path, row.title, row.seen = repoID, item.Path, item.Title, tick
+	row.repoID, row.path, row.title, row.seen, row.seenAt = repoID, item.Path, item.Title, tick, time.Now()
 	row.backOffLocked(err)
 	log.WarningLog.Printf("daemon: deferring session %q until its project config can be read; it is re-read off the refresh lock in %s: %v",
 		item.Title, time.Until(row.next).Round(time.Second), err)
@@ -220,7 +241,7 @@ func probeDeferredConfigPath(path string) {
 			row.backOffLocked(err)
 			continue
 		}
-		row.primed = primed
+		row.primed, row.primedAt = primed, time.Now()
 	}
 	if unknown && waiting > 0 {
 		log.WarningLog.Printf("daemon: the project config for %q still could not be read; %d deferred session(s) wait on it: %v", path, waiting, err)

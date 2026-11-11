@@ -76,6 +76,7 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	refreshSessionIdentity(i, tmuxSession)
+	i.envResolvedTmux.Store(tmuxSession)
 	return nil
 }
 
@@ -95,29 +96,36 @@ func refreshSessionIdentity(i *Instance, tmuxSession *tmux.TmuxSession) {
 	tmuxSession.SetInstanceID(i.ID)
 }
 
-// ensureSpawnEnvironment is #7080's property for the tab spawns that build a
-// sibling from the agent's handle: a spawn reads its own environment. When the
-// load that produced the handle could not read the pass-through, the spawn
-// reads it — the agent handle's, which the sibling inherits, and the worktree's
-// — and refuses with the actionable unknown-config error if it still cannot,
-// rather than start the tab without the names.
+// ensureSpawnEnvironment is the property for the tab spawns that build a
+// sibling from the agent's handle: a spawn reads its own environment
+// (#7080, #7083). A handle counts as resolved only once a refresh SUCCEEDED on
+// it — Provision, Recover, a respawn or a swap marks it (envResolvedTmux,
+// envResolvedWorktree). Any other handle — one that skipped Provision, or one
+// whose load could not read the config — is refreshed here: the agent handle's
+// pass-through and account, which the sibling inherits, and the worktree's
+// list. A refresh that fails refuses the spawn with its error (the actionable
+// unknown-config one, for a config not read in time) rather than start the
+// tab bare, on the daemon's own identity.
 func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.GitWorktree) error {
-	if !i.envUnresolved.Load() {
+	resolved := func() bool {
+		return i.envResolvedTmux.Load() == agentTmux && (gw == nil || i.envResolvedWorktree.Load() == gw)
+	}
+	if resolved() {
 		return nil
 	}
 	// One spawn resolves it; a concurrent one waits, then finds it resolved.
 	i.spawnEnvMu.Lock()
 	defer i.spawnEnvMu.Unlock()
-	if !i.envUnresolved.Load() {
-		return nil
+	if i.envResolvedTmux.Load() != agentTmux {
+		if err := refreshSessionEnvironment(i, agentTmux); err != nil {
+			return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+		}
 	}
-	if err := refreshSessionEnvironment(i, agentTmux); err != nil {
-		return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+	if gw != nil && i.envResolvedWorktree.Load() != gw {
+		if err := refreshWorktreeEnvironment(i, gw); err != nil {
+			return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+		}
 	}
-	if err := refreshWorktreeEnvironment(i, gw); err != nil {
-		return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
-	}
-	i.envUnresolved.Store(false)
 	return nil
 }
 
@@ -166,5 +174,6 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	if err := worktree.SetHookEnvironment(passthrough); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}
+	i.envResolvedWorktree.Store(worktree)
 	return nil
 }

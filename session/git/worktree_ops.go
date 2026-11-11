@@ -221,7 +221,7 @@ func (g *GitWorktree) hookScopePrefixes() []string {
 	}
 	add(g.HookScopeUnitPrefix())
 	if systemdunit.RunningDaemonProcess() {
-		add(systemdunit.HookScopeUnitPrefix(g.hookScopeSessionID))
+		add(systemdunit.HookScopeUnitPrefix(g.hookScopeID()))
 		add(systemdunit.HookScopeUnitPrefix(worktreePathScopeIdentity(g.worktreePath)))
 	}
 	return prefixes
@@ -326,8 +326,8 @@ func (g *GitWorktree) runHooks() <-chan struct{} {
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
 		repoPath:            g.repoPath,
 		worktreePath:        g.worktreePath,
-		passthrough:         g.hookEnvironment(),
-		scopeSessionID:      g.hookScopeSessionID,
+		passthrough:         g.HookEnvironment(),
+		scopeSessionID:      g.hookScopeID(),
 		onScopeLaunched:     g.SetHookScopeUnitPrefix,
 		onProgressPublished: g.retainHookProgressForCreate,
 		onConfigUnknown:     func(note string) { g.hookConfigNote = note },

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"strings"
 	"testing"
 
@@ -79,4 +80,52 @@ func TestTabOnAnUnprovisionedHandleRefusesWhileItsEnvironmentIsUnknown(t *testin
 	for _, command := range commands() {
 		require.NotContains(t, command, "new-session", "nothing was spawned bare")
 	}
+}
+
+// P3-1: Recover, a respawn and a swap refresh both lists before they spawn. A
+// handle a refresh succeeded on is resolved — the next tab neither pays
+// another config read nor is refused under load with fresh handles.
+func TestARefreshThatSucceededResolvesTheHandleForTabSpawns(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	p := sessionEnvHome(t)
+	p.slow(t)
+	instance, commands := loadLostThenRevive(t, p, "lost-recovered", "af_lost_recovered")
+	require.False(t, envResolvedOnHandles(instance), "precondition: the load could not read the environment")
+	require.NoError(t, os.Remove(p.flag))
+
+	// What Recover's respawn runs before it spawns (backend_local_respawn.go).
+	instance.mu.RLock()
+	agentTmux, gw := instance.tmuxLocked(), instance.gitWorktree
+	instance.mu.RUnlock()
+	require.NoError(t, refreshWorktreeEnvironment(instance, gw))
+	require.NoError(t, refreshSessionEnvironment(instance, agentTmux))
+	require.True(t, envResolvedOnHandles(instance))
+
+	p.slow(t) // a load spike after the recovery
+	before := p.count()
+	tab, err := instance.AddShellTab()
+
+	require.NoError(t, err, "fresh handles need no config read to spawn a tab")
+	require.Equal(t, before, p.count(), "the spawn read nothing")
+	chain, spawned := spawnChain(commands(), tab.tmux.SanitizedName())
+	require.True(t, spawned)
+	require.Contains(t, chain, inertEnvName)
+}
+
+// P3-2: an inert load with a readable config applies the worktree's list too —
+// every git command its worktree runs reads it (#7080).
+func TestInertLoadResolvesTheWorktreeEnvironment(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	p := sessionEnvHome(t)
+	instance, _ := loadLostThenRevive(t, p, "lost-readable", "af_lost_readable")
+
+	instance.mu.RLock()
+	gw := instance.gitWorktree
+	instance.mu.RUnlock()
+	require.NotNil(t, gw)
+	require.Same(t, gw, instance.envResolvedWorktree.Load(), "the inert load applied the worktree's pass-through")
+	require.Contains(t, gw.HookEnvironment(), inertEnvName)
+	require.True(t, envResolvedOnHandles(instance))
 }

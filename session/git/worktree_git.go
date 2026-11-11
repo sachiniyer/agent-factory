@@ -265,6 +265,6 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 }
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
-	return append(sessionenv.Filter(os.Environ(), "", g.hookEnvironment()),
+	return append(sessionenv.Filter(os.Environ(), "", g.HookEnvironment()),
 		"GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 }

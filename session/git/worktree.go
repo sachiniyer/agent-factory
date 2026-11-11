@@ -132,8 +132,9 @@ type GitWorktree struct {
 	// Git/runtime subset plus these exact names, but never agent-provider keys
 	// merely because the session selected that agent.
 	hookEnvPassthrough []string
-	// hookEnvMu guards hookEnvPassthrough: a tab spawn can refresh it on a
-	// live session (#7080) while its git commands read it.
+	// hookEnvMu guards hookEnvPassthrough and hookScopeSessionID: a tab spawn
+	// can refresh both on a live session (#7080, #7083) while its git commands
+	// and hook readers read them.
 	hookEnvMu sync.RWMutex
 	// Base commit hash for the worktree
 	baseCommitSHA string
@@ -230,8 +231,9 @@ func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	return nil
 }
 
-// hookEnvironment is the current pass-through list, read under its lock.
-func (g *GitWorktree) hookEnvironment() []string {
+// HookEnvironment is the exact pass-through list the worktree's git commands
+// and post-worktree hooks run with, read under its lock.
+func (g *GitWorktree) HookEnvironment() []string {
 	g.hookEnvMu.RLock()
 	defer g.hookEnvMu.RUnlock()
 	return append([]string(nil), g.hookEnvPassthrough...)
@@ -241,7 +243,9 @@ func (g *GitWorktree) hookEnvironment() []string {
 // scopes are named after. Call it before Setup or a rebuild; an empty id (the
 // default) means hooks are spawned exactly as they were before #3650.
 func (g *GitWorktree) SetHookScopeSessionID(id string) {
+	g.hookEnvMu.Lock()
 	g.hookScopeSessionID = id
+	g.hookEnvMu.Unlock()
 }
 
 // HookScopeUnitPrefix returns the recorded scope handle, or "" when this
@@ -613,4 +617,11 @@ func (g *GitWorktree) GetRepoName() string {
 // GetBaseCommitSHA returns the base commit SHA for the worktree
 func (g *GitWorktree) GetBaseCommitSHA() string {
 	return g.baseCommitSHA
+}
+
+// hookScopeID is hookScopeSessionID, read under its lock.
+func (g *GitWorktree) hookScopeID() string {
+	g.hookEnvMu.RLock()
+	defer g.hookEnvMu.RUnlock()
+	return g.hookScopeSessionID
 }
