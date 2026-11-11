@@ -205,6 +205,11 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 		// in flight: the daemon would resolve a default the field has not yet
 		// shown (#4889 review).
 		if m.remoteDefaultPending {
+			// A local project whose config could not be read asks the daemon
+			// too (#7079); naming a remote daemon there would be wrong (#7084).
+			if !isRemoteTarget() {
+				return m, m.handleNotice(errors.New("still asking the daemon for this project's default program — try again in a moment"))
+			}
 			return m, m.handleNotice(errors.New("still resolving the remote daemon's default program — try again in a moment"))
 		}
 		sendProgram := m.sendProgramForCreate()

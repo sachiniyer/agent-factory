@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"strings"
 	"time"
@@ -194,22 +195,18 @@ func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {
 	m.mu.Unlock()
 }
 
-// rootAgentTranscriptProgram applies the same program_overrides lookup the
+// rootAgentTranscriptProgramFrom applies the same program_overrides lookup the
 // create path applies after the root profile selects its program. Transcript
 // verification must inspect the environment of the command that actually runs,
-// not the unresolved enum label stored in the profile.
-func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, error) {
-	program, err := rootAgentProgramForProfile(repoRoot, ra)
-	if err != nil {
-		return "", err
+// not the unresolved enum label stored in the profile. It reads the heal's
+// snapshot (#7084): the resolution the create launches on, read before the reap,
+// never a second read after it.
+func rootAgentTranscriptProgramFrom(resolved *config.ResolvedConfig, resolveErr error, program string) (string, error) {
+	if resolveErr != nil {
+		return "", resolveErr
 	}
-	repo, err := config.RepoFromPath(repoRoot)
-	if err != nil {
-		return "", err
-	}
-	resolved, err := config.ResolveConfigForRepo(repo)
-	if err != nil {
-		return "", err
+	if resolved == nil {
+		return "", errors.New("the root's repository has no project config to resolve its program against")
 	}
 	return config.ResolveProgram(&resolved.Config, program), nil
 }

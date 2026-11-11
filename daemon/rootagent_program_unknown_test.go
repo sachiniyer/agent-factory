@@ -18,11 +18,15 @@ import (
 
 func unknownLaunchConfig(t *testing.T) {
 	t.Helper()
-	prev := resolveProjectConfigForLaunch
+	prev, prevPrime := resolveProjectConfigForLaunch, primeRootCreateConfig
 	resolveProjectConfigForLaunch = func(path string) (*config.ResolvedConfig, error) {
 		return nil, unknownProjectConfig(path)
 	}
-	t.Cleanup(func() { resolveProjectConfigForLaunch = prev })
+	// The heal reads its config once, primed, before the reap (#7084).
+	primeRootCreateConfig = func(path string) (*session.RestoreContext, error) {
+		return session.NewRestoreContext(), unknownProjectConfig(path)
+	}
+	t.Cleanup(func() { resolveProjectConfigForLaunch, primeRootCreateConfig = prev, prevPrime })
 }
 
 func TestRootAgentProgramRefusesAnUnknownProjectConfig(t *testing.T) {

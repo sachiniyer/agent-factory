@@ -879,6 +879,16 @@ func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) (string, e
 		return ra.Program, nil
 	}
 	resolved, err := resolveProjectConfigForLaunch(repoRoot)
+	return rootAgentProgramFromResolution(repoRoot, ra, resolved, err)
+}
+
+// rootAgentProgramFromResolution is rootAgentProgramForProfile over a
+// resolution the caller already holds — the root heal's snapshot, read before
+// its reap (#7084) — so the program and the create read one config.
+func rootAgentProgramFromResolution(repoRoot string, ra config.RootAgent, resolved *config.ResolvedConfig, err error) (string, error) {
+	if strings.TrimSpace(ra.Program) != "" {
+		return ra.Program, nil
+	}
 	if session.IsProjectConfigUnknown(err) {
 		return "", fmt.Errorf("cannot pick the root agent's program: %w", err)
 	}

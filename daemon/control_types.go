@@ -137,6 +137,13 @@ type CreateSessionRequest struct {
 	// its siblings: a client-settable one would let a caller stamp any session
 	// with a history-loss warning.
 	pendingRecreateNotice session.RootRecreateContext
+
+	// configSnapshot is the project config the root heal read BEFORE it reaped
+	// the dead root's record (#7084): the create answers every instance-scoped
+	// config read from it, so it cannot refuse on an unknown config after the
+	// carried conversation and tab roster are already gone. Unexported like its
+	// siblings — it is daemon state, never a client's.
+	configSnapshot *session.RestoreContext
 }
 
 type CreateSessionResponse struct {

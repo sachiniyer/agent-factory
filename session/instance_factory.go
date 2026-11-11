@@ -113,6 +113,14 @@ type InstanceOptions struct {
 	// keeps its record and resumes through Recover. Empty for every ordinary
 	// create, which is why the fresh-injection path is unchanged.
 	ResumeConversation AgentConversationData
+	// ConfigSnapshot, when set, is a RestoreContext primed before the create:
+	// every instance-scoped project-config read the create makes — its launch
+	// program, its environment pass-through, its repository identity — answers
+	// from it instead of reading again. A caller that must not have the create
+	// refuse on an unknown config AFTER an irreversible step (the root heal's
+	// reap, #7084) primes it first. The caller releases it once the create is
+	// done (Instance.ReleaseConfigSnapshot); later reads resolve afresh.
+	ConfigSnapshot *RestoreContext
 	// RestoreTabs asks the first launch to rebuild the tab roster a previous
 	// record held, rather than coming up with only its agent tab (#2628). Set by
 	// the same single caller as ResumeConversation — the daemon's root-agent
@@ -721,7 +729,7 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	}
 
 	payloadOrphaned = false
-	return &Instance{
+	instance := &Instance{
 		ID:           id,
 		sandboxCreds: opts.SandboxCredentials,
 		TaskID:       opts.TaskID,
@@ -764,7 +772,11 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 		hostedRemotely:        opts.HostedRemotely,
 		advertisedFeatures:    opts.AdvertisedFeatures,
 		beforeWorktreeCreate:  opts.BeforeWorktreeCreate,
-	}, nil
+	}
+	if opts.ConfigSnapshot != nil {
+		instance.restoreCtx.Store(opts.ConfigSnapshot)
+	}
+	return instance, nil
 }
 
 // callbackUnavailableReasonFor picks the callback-absence reason a new instance
