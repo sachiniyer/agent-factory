@@ -25,9 +25,19 @@
 # the real "zsh is unavailable" too, and a check that reports clean when it did
 # not run is a failure mode this repo has already paid for.
 #
-# NOT for the Dockerfiles under scripts/container/. Those build from a pinned
-# base image whose only apt sources are the distro's own, so there is no
-# unrelated source to tolerate, and a failed update there should fail the build.
+# IMAGES TOO (#7096). scripts/container/Dockerfile.web-selftest runs this script
+# for its apt layers. Its base, mcr.microsoft.com/playwright:v1.56.1-noble, ships
+# a NodeSource source (/etc/apt/sources.list.d/nodesource.list) that the image
+# never installs from, so it has the runner's problem exactly.
+# scripts/testbox.sh puts this file in every image's build context, and
+# scripts/ci_apt_install_test.go holds any Dockerfile that COPYs it to using it.
+# This note used to say no Dockerfile here needed it, because each base shipped
+# only the distro's own sources. That was never checked, and it was false for
+# the Playwright image. Dockerfile.test (golang:1.25-bookworm) and
+# Dockerfile.session (node:22-trixie-slim) still call apt-get directly. #7096's
+# probe run 43043846214 found only debian.sources in the golang base; the node
+# base was not probed. A base's sources are a fact about one pinned tag, not a
+# guarantee, so move an image onto this script when a base bump adds a source.
 #
 # WEDGES (#6457). apt can also stop answering altogether — a dead mirror
 # connection, a stuck dpkg lock, a wedged runner — and then neither command

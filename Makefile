@@ -122,8 +122,8 @@ registry-free-check:
 # start, so this image carries only the workspace tooling: git, tmux, and the
 # agent CLIs (claude + codex; see scripts/container/Dockerfile.session for the
 # opt-in others). Built from stdin with no build context (the Dockerfile has no
-# COPY), matching the testbox images. Override the tag with SESSION_IMAGE=…; it
-# must be a glibc base >= the daemon's build glibc (see the Dockerfile header).
+# COPY). Override the tag with SESSION_IMAGE=…; it must be a glibc base >= the
+# daemon's build glibc (see the Dockerfile header).
 SESSION_IMAGE ?= af-session:local
 session-image:
 	docker build -t $(SESSION_IMAGE) - < scripts/container/Dockerfile.session
