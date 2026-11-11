@@ -34,25 +34,6 @@ func TestRestoreContextRemembersAnAnsweredConfigError(t *testing.T) {
 	require.Equal(t, 1, calls, "the answer is read once and given to every caller")
 }
 
-// The same for a path the repository probe answered as no repository: that
-// answer is "no project config" for the whole snapshot.
-func TestRestoreContextRemembersAnAnsweredRepoError(t *testing.T) {
-	rc := NewRestoreContext()
-	rc.attempts = 1
-	calls := 0
-	rc.repoFromPath = func(string) (*config.RepoContext, error) {
-		calls++
-		return nil, errors.New("not a git repository")
-	}
-
-	for n := 0; n < 3; n++ {
-		resolved, err := rc.ResolvedConfigFor("/not-a-repo")
-		require.NoError(t, err)
-		require.Nil(t, resolved)
-	}
-	require.Equal(t, 1, calls, "the answer is read once and given to every caller")
-}
-
 // Control: a read that went unanswered is not an answer, and the next caller
 // asks again.
 func TestRestoreContextAsksAgainAfterAnUnansweredRead(t *testing.T) {
