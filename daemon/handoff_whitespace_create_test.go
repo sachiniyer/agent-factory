@@ -78,7 +78,9 @@ func TestCreateRPC_WhitespaceProgramIsNormalizedAtCreateThenOpaqueSelfHandoffIsR
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		title, wrapper, nil, nil))
 
-	require.Empty(t, session.HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+	effective, err := session.HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude)
+	require.NoError(t, err)
+	require.Empty(t, effective,
 		"precondition: the opaque wrapper forces the opaque branch of the guard")
 	require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
 		"precondition: the session is claude by its configured enum")
@@ -148,7 +150,9 @@ func TestDeliverPrompt_WhitespaceProgramIsNormalizedAtAutoCreateThenOpaqueSelfHa
 	inst.SetTmuxSession(tmux.NewTmuxSessionFromSanitizedNameWithDeps(
 		title, wrapper, nil, nil))
 
-	require.Empty(t, session.HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude),
+	effective, err := session.HandoffEffectiveAgentForPath(inst.Path, tmux.ProgramClaude)
+	require.NoError(t, err)
+	require.Empty(t, effective,
 		"precondition: the opaque wrapper forces the opaque branch of the guard")
 	require.Equal(t, tmux.ProgramClaude, inst.CurrentAgentName(),
 		"precondition: the session is claude by its configured enum")

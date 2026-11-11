@@ -39,6 +39,25 @@ var ErrNotGitRepository = errors.New("not inside a git repository")
 // call site narrates the failure.
 var ErrRepoProbeUnanswered = errors.New("git repository probe did not complete")
 
+// ResolveWentUnanswered reports whether a repository or config resolution
+// failed WITHOUT AN ANSWER: a git or checkout-identity probe that could not
+// complete (ErrRepoProbeUnanswered), ran out of its deadline, or was cancelled.
+// Its complement is a failure that IS an answer — not a repository, a config
+// that does not parse, a value that does not validate.
+//
+// The distinction is the one #6746 drew inside this package and #7077 drew
+// for its callers: slow is not absent. A caller that would otherwise treat a
+// failed project resolve as "no project config, use the global one" must not
+// do that for this class, because the project's config may exist and differ.
+func ResolveWentUnanswered(err error) bool {
+	if err == nil {
+		return false
+	}
+	return errors.Is(err, ErrRepoProbeUnanswered) ||
+		errors.Is(err, context.DeadlineExceeded) ||
+		errors.Is(err, context.Canceled)
+}
+
 // unansweredProbeError joins ErrRepoProbeUnanswered into an error's chain
 // without changing what the error prints.
 type unansweredProbeError struct{ err error }

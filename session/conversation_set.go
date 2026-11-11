@@ -43,7 +43,11 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 	// evidence rule SessionCodexCaptureBaseline applies (#6769 review).
 	program := i.RuntimeProgram()
 	if strings.TrimSpace(program) == "" {
-		program = resolveLaunchProgramForInstance(i).command
+		resolution, err := resolveLaunchProgramForInstance(i)
+		if err != nil {
+			return AgentConversationData{}, fmt.Errorf("session %q: %w", i.Title, err)
+		}
+		program = resolution.command
 	}
 	// The provider is what the launch command resolves to, not the configured
 	// enum: a program_overrides entry pointing another agent's name at codex,

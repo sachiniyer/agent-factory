@@ -230,9 +230,22 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// Setting the program on the existing attach path is harmless:
 		// attach-session does not re-exec the program.
 		if workDir != "" {
-			resolution := resolveLaunchProgramForInstance(i)
+			// A launch-class resolve: this program is what a re-spawn runs. An
+			// unknown project config fails the load instead of arming a re-spawn
+			// with the global config's command (#7077); the daemon's refresh
+			// retries an unloadable row on its next tick.
+			resolution, err := resolveLaunchProgramForInstance(i)
+			if err != nil {
+				setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+				return setupErr
+			}
+			env, err := launchEnvFor(i, i.GetWorktreePath())
+			if err != nil {
+				setupErr = fmt.Errorf("failed to restore existing session: %w", err)
+				return setupErr
+			}
 			runtimeProgram = resolution.command
-			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			// A re-spawn here resumes the session's own recorded conversation or
@@ -350,11 +363,20 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			// The pre-rewrite command is resolved once and kept with the proof it
 			// produces. A prepared create carries both from its earlier freeze.
-			resolution := resolveLaunchProgramForInstance(i)
+			resolution, err := resolveLaunchProgramForInstance(i)
+			if err != nil {
+				setupErr = err
+				return setupErr
+			}
+			env, err := launchEnvFor(i, i.GetWorktreePath())
+			if err != nil {
+				setupErr = err
+				return setupErr
+			}
 			base := resolution.command
 			runtimeProgram = base
 			program = prepareLaunchConversation(i, base)
-			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
+			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}
 		setLaunchProgram(tmuxSession, program, proof)

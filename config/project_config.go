@@ -466,6 +466,14 @@ func projectForWorkspaceContext(parent context.Context, root string) (Project, b
 	if err != nil {
 		return Project{}, false, &projectRegistryReadError{err: err}
 	}
+	// The checkout probe only exists to match this workspace against a
+	// registered project. With none registered there is nothing for its answer
+	// to match, so the lookup is settled — absent — before any git runs. Asking
+	// anyway let a slow probe turn that knowable absence into an unknown, and an
+	// unknown refuses the user's launches (#7077).
+	if len(projects) == 0 {
+		return Project{}, false, nil
+	}
 	ctx, cancel := context.WithTimeout(parent, registeredProjectScanTimeout)
 	defer cancel()
 	checkoutID, ok, err := checkoutIDForWorkspaceContext(ctx, root)

@@ -259,3 +259,133 @@ func TestInspectionFallbackNamesTheGlobalSubstitution(t *testing.T) {
 	require.Contains(t, buf.String(), repo)
 	require.Contains(t, buf.String(), "global config", "the warning names what the answer was substituted from")
 }
+
+// The helpers below adapt pre-#7077 tests to the resolvers' error returns: in
+// each of those tests the project config is readable, so an error is a failure.
+
+func effectiveAgentForTest(t *testing.T, path, target string) string {
+	t.Helper()
+	agent, err := HandoffEffectiveAgentForPath(path, target)
+	require.NoError(t, err)
+	return agent
+}
+
+func instanceEffectiveAgentForTest(t *testing.T, i *Instance, target string) string {
+	t.Helper()
+	agent, err := handoffEffectiveAgent(i, target)
+	require.NoError(t, err)
+	return agent
+}
+
+func launchResolutionForTest(t *testing.T, i *Instance) launchProgramResolution {
+	t.Helper()
+	resolution, err := resolveLaunchProgramForInstance(i)
+	require.NoError(t, err)
+	return resolution
+}
+
+func manualSwapProgramForTest(t *testing.T, i *Instance, agent string, accountOnly bool) (string, bool) {
+	t.Helper()
+	program, cross, err := i.ManualAccountSwapProgram(agent, accountOnly)
+	require.NoError(t, err)
+	return program, cross
+}
+
+// The resolver's own contract, which the end-to-end tests above rely on:
+// exactly launchConfigResolveAttempts unanswered attempts, an answer is final
+// on the first try, and an unanswered repository probe is unknown too.
+
+func noRetryPause(t *testing.T) {
+	t.Helper()
+	prev := launchConfigRetryPause
+	launchConfigRetryPause = 0
+	t.Cleanup(func() { launchConfigRetryPause = prev })
+}
+
+func TestResolveProjectConfigSpendsExactlyItsAttemptsOnAnUnknown(t *testing.T) {
+	noRetryPause(t)
+	var calls int
+	src := projectConfigSource{
+		repoFromPath: func(path string) (*config.RepoContext, error) { return &config.RepoContext{Root: path}, nil },
+		resolveRepo: func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			calls++
+			return nil, unansweredProbe("/repo")
+		},
+	}
+
+	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+
+	require.Nil(t, resolved)
+	var unknown *ProjectConfigUnknownError
+	require.ErrorAs(t, err, &unknown)
+	require.Equal(t, launchConfigResolveAttempts, calls)
+	require.Equal(t, launchConfigResolveAttempts, unknown.Attempts)
+	require.Contains(t, err.Error(), fmt.Sprintf("%d attempts", launchConfigResolveAttempts))
+}
+
+func TestResolveProjectConfigDoesNotRetryAnAnswer(t *testing.T) {
+	noRetryPause(t)
+	var calls int
+	invalid := errors.New("parse config.toml: toml: expected '='")
+	src := projectConfigSource{
+		repoFromPath: func(path string) (*config.RepoContext, error) { return &config.RepoContext{Root: path}, nil },
+		resolveRepo: func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			calls++
+			return nil, invalid
+		},
+	}
+
+	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+
+	require.Nil(t, resolved)
+	require.ErrorIs(t, err, invalid, "an answered failure is returned as itself")
+	require.False(t, isProjectConfigUnknown(err))
+	require.Equal(t, 1, calls)
+}
+
+// A repository probe that could not run (fork failure, a signal) has not said
+// "not a repository": the path may be a project with its own config, so it is
+// retried and then unknown — never the global config's answer.
+func TestResolveProjectConfigTreatsAnUnansweredRepoProbeAsUnknown(t *testing.T) {
+	noRetryPause(t)
+	var calls int
+	src := projectConfigSource{
+		repoFromPath: func(string) (*config.RepoContext, error) {
+			calls++
+			return nil, fmt.Errorf("failed to get git repo root: %w", errors.Join(config.ErrRepoProbeUnanswered, errors.New("fork/exec git: resource temporarily unavailable")))
+		},
+		resolveRepo: func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			t.Fatal("no repository was resolved")
+			return nil, nil
+		},
+	}
+
+	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+
+	require.Nil(t, resolved)
+	require.True(t, isProjectConfigUnknown(err))
+	require.ErrorIs(t, err, config.ErrRepoProbeUnanswered)
+	require.Equal(t, launchConfigResolveAttempts, calls)
+	require.Contains(t, err.Error(), "git did not answer", "a probe that never ran is not reported as a timeout")
+}
+
+func TestResolveProjectConfigOutsideARepositoryIsAbsent(t *testing.T) {
+	noRetryPause(t)
+	var calls int
+	src := projectConfigSource{
+		repoFromPath: func(string) (*config.RepoContext, error) {
+			calls++
+			return nil, fmt.Errorf("%w: fatal: not a git repository", config.ErrNotGitRepository)
+		},
+		resolveRepo: func(*config.RepoContext) (*config.ResolvedConfig, error) {
+			t.Fatal("no repository was resolved")
+			return nil, nil
+		},
+	}
+
+	resolved, err := resolveProjectConfig("/tmp/plain", src, launchConfigResolveAttempts)
+
+	require.NoError(t, err, "outside a repository there is no project config to be unknown")
+	require.Nil(t, resolved)
+	require.Equal(t, 1, calls)
+}

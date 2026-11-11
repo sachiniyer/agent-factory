@@ -199,7 +199,7 @@ func TestPoisonReproNextManualSwapSucceedsWithPoisonedRuntimeEvidence(t *testing
 
 	// A same-agent (account-only) manual swap: the operator asked to move to
 	// "next" without changing the running agent.
-	program, crossAgent := inst.ManualAccountSwapProgram("", true)
+	program, crossAgent := manualSwapProgramForTest(t, inst, "", true)
 	require.False(t, crossAgent, "an account-only manual swap is same-agent")
 	require.NotEmpty(t, program)
 	require.NoError(t, inst.ValidateManualAccountSwap("next", "", false),

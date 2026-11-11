@@ -158,7 +158,7 @@ func TestRecover_RespawnsLostSession(t *testing.T) {
 		"resolved-program injection must appear exactly once in the spawn: %s", agentSpawn)
 	require.NotEmpty(t, restored.RuntimeProgram(),
 		"Recover respawns a real process, so it must record the command it launched (#5066)")
-	assert.Equal(t, resolveLaunchProgramForInstance(restored).command, restored.RuntimeProgram(),
+	assert.Equal(t, launchResolutionForTest(t, restored).command, restored.RuntimeProgram(),
 		"the recorded command must be the respawn's resolved base, not the bare persisted Program")
 }
 

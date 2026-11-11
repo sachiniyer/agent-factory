@@ -375,18 +375,26 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 	if opts.ForceRemote {
 		return BackendHook, nil
 	}
-	// Not a git repo: there is no in-repo config to read, so local as ever.
-	repo, err := config.RepoFromPath(absPath)
+	// The create path's first launch-class resolve, so it shares the launch's
+	// absent/unknown split (resolveProjectConfig) and its retry budget:
+	//   - Not a git repo: there is no in-repo config to read, so local as ever.
+	//   - A repo whose config EXISTS but cannot be resolved (a TOML syntax error
+	//     anywhere in it, an invalid value) has an undeterminable backend.
+	//     Falling back to local would run an agent the repo isolated
+	//     (docker/ssh) on the daemon host with no error, so refuse with the
+	//     config error (#5801).
+	//   - A config that could not be READ — the probe went unanswered, most
+	//     often on a loaded machine — is the same refusal for the same reason,
+	//     but its remedy is to retry, not to fix a config that is fine (#7077).
+	cfg, err := resolveProjectConfig(absPath, runtimeProjectConfig(), launchConfigResolveAttempts)
 	if err != nil {
-		return BackendLocal, nil
-	}
-	// A repo whose config EXISTS but cannot be resolved (a TOML syntax error
-	// anywhere in it, an invalid value) has an undeterminable backend. Falling
-	// back to local would run an agent the repo isolated (docker/ssh) on the
-	// daemon host with no error, so refuse with the config error (#5801).
-	cfg, err := config.ResolveConfigForRepo(repo)
-	if err != nil {
+		if isProjectConfigUnknown(err) {
+			return "", fmt.Errorf("cannot determine the backend for %s, and creating the session on the local machine instead could bypass the isolation the repo asks for: %w", absPath, err)
+		}
 		return "", fmt.Errorf("cannot determine the backend for %s: its configuration could not be resolved, and creating the session on the local machine instead could bypass the isolation the repo asks for — fix the config and retry: %w", absPath, err)
+	}
+	if cfg == nil {
+		return BackendLocal, nil
 	}
 	return ParseBackendKind(cfg.Backend)
 }

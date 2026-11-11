@@ -146,7 +146,10 @@ func (i *Instance) ValidateHandoffTarget(target string) error {
 	// does config I/O and must not run under i.mu.
 	effective := ""
 	if tmux.IsSupportedProgram(target) {
-		effective = handoffEffectiveAgent(i, target)
+		var err error
+		if effective, err = handoffEffectiveAgent(i, target); err != nil {
+			return fmt.Errorf("cannot hand off to %s: %w", target, err)
+		}
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
@@ -291,7 +294,10 @@ func (i *Instance) SwapAgentProgram(target, reason, headSHA string, automatic bo
 	target = strings.TrimSpace(target)
 	// Resolve the effective agent before the lock — resolveProgramForAgent does
 	// config I/O and must not run under i.mu.
-	effectiveAgent := handoffEffectiveAgent(i, target)
+	effectiveAgent, err := handoffEffectiveAgent(i, target)
+	if err != nil {
+		return HandoffSwap{}, fmt.Errorf("cannot hand off to %s: %w", target, err)
+	}
 
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -337,7 +343,7 @@ func (i *Instance) RecordHandoffSwap(target, effectiveAgent, reason, headSHA str
 // holding i.mu must not invoke it. Where a frozen AgentSwapPlan exists its
 // EffectiveAgent is the same answer computed once, and preferred: a
 // re-resolution could see a different config than the plan already froze.
-func handoffEffectiveAgent(i *Instance, target string) string {
+func handoffEffectiveAgent(i *Instance, target string) (string, error) {
 	return HandoffEffectiveAgentForPath(i.Path, target)
 }
 
@@ -348,6 +354,11 @@ func handoffEffectiveAgent(i *Instance, target string) string {
 // Instance, so a picker classifies a target by the agent its command launches,
 // never by the enum the request happened to name (#4430 review).
 //
+// Every consumer is an admission or launch decision, so it fails with a
+// *ProjectConfigUnknownError rather than classify the target against the global
+// config when the project's cannot be read (#7077). Read-only pickers use
+// HandoffEffectiveAgentsForPathInspection instead.
+//
 // The answer comes from the credential-boundary parser — the same
 // AgentForCommand the account selection and launch checks use — because every
 // consumer of this value decides whether an ACCOUNT can follow the target, and
@@ -356,8 +367,12 @@ func handoffEffectiveAgent(i *Instance, target string) string {
 // (`bash`) answers "": the target is non-scopable, and callers must not fall
 // back to the enum — an enum answer would offer --account remedies that can
 // never succeed (#4430 review round 3).
-func HandoffEffectiveAgentForPath(path, target string) string {
-	return sessionenv.AgentForCommand(resolveProgramForPath(path, target))
+func HandoffEffectiveAgentForPath(path, target string) (string, error) {
+	program, err := resolveProgramForPath(path, target)
+	if err != nil {
+		return "", err
+	}
+	return sessionenv.AgentForCommand(program), nil
 }
 
 // HandoffEffectiveAgentsForPathInspection answers HandoffEffectiveAgentForPath

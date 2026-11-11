@@ -320,8 +320,16 @@ func RunAgentServer(opts AgentServerOptions, stdout io.Writer) error {
 	// program_overrides must apply while the key is still the key —
 	// resolving "claude" to an absolute path first would make
 	// program_overrides.claude unreachable (#5578 review).
+	//
+	// A launch-class resolve: when the project's config cannot be read in time
+	// it fails the create with an actionable error instead of resolving the key
+	// through the global program_overrides (#7077).
 	if !opts.ProgramResolved {
-		program = session.ResolveProgramForPath(opts.RepoPath, program)
+		resolved, rerr := session.ResolveProgramForPath(opts.RepoPath, program)
+		if rerr != nil {
+			return fmt.Errorf("af agent-server: %w", rerr)
+		}
+		program = resolved
 	}
 	// The daemon sends the configured program name and flags, never its own
 	// auto-detected path — this host's filesystem is where the executable must

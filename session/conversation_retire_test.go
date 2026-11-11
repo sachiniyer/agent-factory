@@ -152,7 +152,8 @@ func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir()) // empty store: the recorded rollout is missing
 	inst := retireTestInstance(t)
 
-	program, _, refusedID := respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	program, _, refusedID, err := respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	require.NoError(t, err)
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", refusedID,
 		"a stale recorded rollout must surface as the id the commit retires")
 	require.NotContains(t, program, "resume",
@@ -164,7 +165,8 @@ func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 	t.Setenv("CODEX_HOME", codexHome)
 	writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-08-10T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", inst.Path)
-	program, _, refusedID = respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	program, _, refusedID, err = respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	require.NoError(t, err)
 	require.Empty(t, refusedID)
 	require.Contains(t, program, "resume 019f386f-7206-7fc2-803b-f7045e07a242")
 }

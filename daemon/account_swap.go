@@ -10,6 +10,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/quota"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -182,7 +183,13 @@ func committedAccountSwap(instance *session.Instance) *autoAccountSwap {
 			accountAgent = sessionenv.AgentForCommand(instance.ResolvedPaneProgram())
 		}
 		if accountAgent == "" {
-			accountAgent = session.HandoffEffectiveAgentForPath(instance.Path, agent)
+			// An unreadable project config (#7077) leaves it unresolved rather
+			// than classified against the global config: accountNamespace then
+			// names the recorded enum, as for an unclassifiable command.
+			var err error
+			if accountAgent, err = session.HandoffEffectiveAgentForPath(instance.Path, agent); err != nil {
+				log.WarningLog.Printf("committed account swap for %q: namespace falls back to the recorded %s enum: %v", instance.Title, agent, err)
+			}
 		}
 	} else if pinned := instance.AccountAgent(); pinned != "" {
 		// An automatic transaction's registry is the same durable pin: the

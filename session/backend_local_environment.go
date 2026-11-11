@@ -22,15 +22,24 @@ func configuredSessionEnvPassthrough(explicit []string) []string {
 // pass-through list — the same names its agent pane's default-deny allowlist
 // admits — so a daemon-owned child that must hold the pane's boundary can ask
 // for the identical extension (the VS Code editor, #4311).
-func SessionEnvPassthroughForInstance(i *Instance) []string {
+//
+// The list configures what a launched process may inherit, so it is a
+// launch-class resolve: when the project's config cannot be read it fails with
+// a *ProjectConfigUnknownError instead of answering the global config's list,
+// which would silently drop the names the project adds (#7077).
+func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
 	i.mu.RLock()
 	explicit := append([]string(nil), i.sessionEnvPassthrough...)
 	i.mu.RUnlock()
-	if cfg := resolveConfigForInstance(i); cfg != nil {
+	cfg, err := resolveConfigForInstance(i)
+	if err != nil {
+		return nil, err
+	}
+	if cfg != nil {
 		explicit = append(explicit, cfg.SessionEnvPassthrough...)
 	}
 	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
-	return normalized
+	return normalized, nil
 }
 
 // refreshSessionEnvironment reapplies a session's environment declarations to
@@ -42,7 +51,11 @@ func SessionEnvPassthroughForInstance(i *Instance) []string {
 // and the launch disagree, prepareLaunchEnvironment's namespace check is what
 // refuses — so the pin must be the durable one.
 func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error {
-	if err := tmuxSession.SetEnvPassthrough(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("session environment for %q: %w", i.Title, err)
+	}
+	if err := tmuxSession.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
@@ -67,7 +80,11 @@ func refreshTabSessionEnvironment(i *Instance, tab *Tab) error {
 	if tab == nil || tab.tmux == nil {
 		return nil
 	}
-	if err := tab.tmux.SetEnvPassthrough(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("session environment for %q tab %q: %w", i.Title, tab.Name, err)
+	}
+	if err := tab.tmux.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
 	i.mu.RLock()
@@ -93,7 +110,11 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	// re-derivable by a later daemon generation (#3650). It changes nothing for a
 	// TUI- or CLI-created worktree, where no scope is derived at all.
 	worktree.SetHookScopeSessionID(i.ID)
-	if err := worktree.SetHookEnvironment(SessionEnvPassthroughForInstance(i)); err != nil {
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("post-worktree environment for %q: %w", i.Title, err)
+	}
+	if err := worktree.SetHookEnvironment(passthrough); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}
 	return nil

@@ -218,7 +218,13 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		// either — earns the refusal; anything else leaves preflight to name
 		// the real blocker.
 		if fromAccount != "" {
-			effective := session.HandoffEffectiveAgentForPath(instance.Path, target)
+			effective, rerr := session.HandoffEffectiveAgentForPath(instance.Path, target)
+			if rerr != nil {
+				// The project's config could not be read (#7077): there is no
+				// resolution to classify, and the plan failed on the same read,
+				// so its actionable error is the blocker worth naming.
+				return HandoffSessionResponse{}, fmt.Errorf("cannot hand %q off to %s: %w", req.Title, target, rerr)
+			}
 			if _, scopable := sessionenv.SupportsAccounts(effective); scopable {
 				return HandoffSessionResponse{}, scopedAccountHandoffRefusal(
 					req.Title, instance.CurrentAgentName(), fromAccount, target, effective)

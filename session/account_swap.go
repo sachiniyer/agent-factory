@@ -58,35 +58,6 @@ func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchP
 	return &copy
 }
 
-func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
-	trustBase, resume bool, prepared *accountSwapLaunchPlan,
-) (string, sessionenv.AccountLaunchProof, string) {
-	if prepared != nil {
-		if prepared.conversation.HasID() {
-			i.SetAgentConversation(prepared.conversation)
-		}
-		return prepared.program, prepared.proof, ""
-	}
-	program := resolvedProgram
-	refusedID := ""
-	if resume {
-		rewritten, ok, reason := prepareExactResumeConversation(i, program)
-		if ok {
-			program = rewritten
-		} else if reason != "" {
-			// The recorded conversation was refused as stale or unprovable, so
-			// this launch starts fresh. The caller retires the dead id when the
-			// spawn commits (#6769 review): leaving it recorded would suppress
-			// every later capture arm and make each restore start fresh again.
-			refusedID = i.resumableConversation().ID
-		}
-	} else {
-		program = prepareLaunchConversation(i, program)
-	}
-	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), launchEnvFor(i, i.GetWorktreePath()))
-	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusedID
-}
-
 // AccountSelection reports the current account and whether af selected it. A
 // non-empty account with auto=false is an explicit --account pin.
 func (i *Instance) AccountSelection() (account string, auto bool) {
@@ -179,15 +150,23 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 // asked: with program_overrides.claude = "codex" and program_overrides.codex =
 // "gemini", a claude-configured codex pane would read "codex" as a gemini
 // launch and turn `--account work` into a cross-agent handoff (#4430 review).
-// Resolution does config I/O, so this must not run under i.mu.
-func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool) {
+// Resolution does config I/O, so this must not run under i.mu. It fails, rather
+// than classify the target against the global config, when the project's config
+// cannot be read (#7077).
+func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool, err error) {
 	program = i.AgentProgram()
 	agent = strings.TrimSpace(agent)
-	if accountOnly || agent == "" ||
-		HandoffTargetIsCurrent(i.CurrentAgentName(), agent, handoffEffectiveAgent(i, agent), program) {
-		return program, false
+	if accountOnly || agent == "" {
+		return program, false, nil
 	}
-	return agent, true
+	effective, err := handoffEffectiveAgent(i, agent)
+	if err != nil {
+		return "", false, err
+	}
+	if HandoffTargetIsCurrent(i.CurrentAgentName(), agent, effective, program) {
+		return program, false, nil
+	}
+	return agent, true, nil
 }
 
 // ValidateManualAccountSwap uses the same launch proof with an operator-selected
@@ -242,7 +221,13 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	if pendingCleanup > 0 {
 		return fmt.Errorf("cannot switch accounts for session %q while %d prior tab teardown(s) remain unconfirmed; restart af to retry that cleanup, then retry the account swap", i.Title, pendingCleanup)
 	}
-	resolution := resolveLaunchProgramForInstance(i)
+	refuse := func(err error) error {
+		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
+	}
+	resolution, err := resolveLaunchProgramForInstance(i)
+	if err != nil {
+		return refuse(err)
+	}
 	// paneGeneratedArgs seeds the launch proof (accountLaunchProof) with the
 	// pane's still-recorded af-authored argument declaration when the swap base
 	// is the pane's frozen program. That program already carries af's own
@@ -270,9 +255,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// whose agent is the running identity rather than an enum — is not (#4430
 	// review).
 	if crossAgent {
-		resolved := resolveResolvedConfigForInstance(i)
-		resolution.command = resolveProgramForAgent(i, agent)
-		resolution.trustBase = builtInProgramOverride(resolved, agent, resolution.command)
+		if resolution, err = resolveLaunchProgramForAgent(i, agent); err != nil {
+			return refuse(err)
+		}
 	} else {
 		// A same-agent or account-only swap promises to keep the agent that is
 		// RUNNING — which is the command that positively established this pane,
@@ -321,8 +306,11 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			if committedAgent == "" {
 				committedAgent = sessionenv.AgentForCommand(pending.Program)
 			}
-			resolution.trustBase = builtInOverrideCandidateMatches(
-				resolveResolvedConfigForInstance(i), committedAgent, pending.Program)
+			resolved, err := resolveResolvedConfigForInstance(i)
+			if err != nil {
+				return refuse(err)
+			}
+			resolution.trustBase = builtInOverrideCandidateMatches(resolved, committedAgent, pending.Program)
 		case pending != nil && pending.To == name && pending.AccountAgent != "" &&
 			tmux.DetectAgentFromCommand(established) != pending.AccountAgent:
 			// A pending record written before Program existed: the committed
@@ -332,9 +320,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			// refuses if configuration has since moved it off the committed
 			// namespace.
 			if target := i.PendingAccountSwapTarget(); target != "" {
-				resolved := resolveResolvedConfigForInstance(i)
-				resolution.command = resolveProgramForAgent(i, target)
-				resolution.trustBase = builtInProgramOverride(resolved, target, resolution.command)
+				if resolution, err = resolveLaunchProgramForAgent(i, target); err != nil {
+					return refuse(err)
+				}
 			}
 		case established != "":
 			resolution = launchProgramResolution{command: established}
@@ -348,7 +336,11 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 				i.mu.RLock()
 				enum := i.Program
 				i.mu.RUnlock()
-				resolution.trustBase = builtInProgramOverride(resolveResolvedConfigForInstance(i), enum, established)
+				resolved, err := resolveResolvedConfigForInstance(i)
+				if err != nil {
+					return refuse(err)
+				}
+				resolution.trustBase = builtInProgramOverride(resolved, enum, established)
 			}
 		}
 		// When the resolved base IS the pane's frozen program, that command
@@ -462,9 +454,12 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// The CANDIDATE account and program, not the still-recorded fields: validation
 	// must leave the outgoing identity intact, while the af skill has to land in
 	// the root the replacement pane will actually read.
+	env, err := launchEnvFor(i, workDir)
+	if err != nil {
+		return refuse(err)
+	}
 	launchProgram = injectSystemPromptWithEnv(launchProgram,
-		resolveSkillTargetForAccount(launchProgram, accountNamespace, name, workDir), i.guidanceCaps(),
-		launchEnvFor(i, workDir))
+		resolveSkillTargetForAccount(launchProgram, accountNamespace, name, workDir), i.guidanceCaps(), env)
 	// Same-agent manual swaps with a worktree always preflight, including an
 	// unchanged command whose binary disappeared after the current process
 	// started. Worktree-less projections cannot launch, so they retain the
@@ -496,7 +491,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	accountScope.TrustedExecutable = proof.TrustedExecutable
 	accountScope.GeneratedArgs = proof.GeneratedArgs
 	filtered := sessionenv.FilterForCommand(
-		os.Environ(), accountScope.Agent, launchProgram, SessionEnvPassthroughForInstance(i))
+		os.Environ(), accountScope.Agent, launchProgram, env.passthrough)
 	if _, err := sessionenv.ApplyAccount(filtered, launchProgram, accountScope); err != nil {
 		return fmt.Errorf("cannot switch session %q to account %q: %w", i.Title, name, err)
 	}
@@ -892,7 +887,12 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	// durable selection records win: they are the answers the committed
 	// transaction actually froze, which re-resolution can only approximate once
 	// the configuration has moved.
-	resolvedAgent := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
+	//
+	// The re-resolution is the LAST resort, so its failure is deferred: a record
+	// that names the namespace durably needs no config read, and must not be
+	// refused because the project's config could not be read in time. Only a
+	// record old enough to need the re-resolution refuses on it (#7077).
+	resolvedAgent, resolveErr := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
 	i.mu.Lock()
 	account := i.Account
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
@@ -904,16 +904,21 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	// pre-lock re-resolution is the legacy fallback for records older than all
 	// of them (#4430 review round 4).
 	agent := resolvedAgent
+	durable := false
 	if ts := i.tmuxLocked(); ts != nil {
 		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
-			agent = frozen
+			agent, durable = frozen, true
 		}
 	}
 	if pending != nil && pending.AccountAgent != "" {
-		agent = pending.AccountAgent
+		agent, durable = pending.AccountAgent, true
 	}
 	if i.accountAgent != "" {
-		agent = i.accountAgent
+		agent, durable = i.accountAgent, true
+	}
+	if !durable && resolveErr != nil {
+		i.mu.Unlock()
+		return fmt.Errorf("account swap for %q: %w", i.Title, resolveErr)
 	}
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()
@@ -950,7 +955,10 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	}
 	tabs := append([]*Tab(nil), i.Tabs...)
 	i.mu.Unlock()
-	passthrough := SessionEnvPassthroughForInstance(i)
+	passthrough, err := SessionEnvPassthroughForInstance(i)
+	if err != nil {
+		return fmt.Errorf("restore account swap environment for %q: %w", i.Title, err)
+	}
 	for _, tab := range tabs {
 		if tab == nil || tab.tmux == nil || !tab.Kind.HasTmux() {
 			continue
