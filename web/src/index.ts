@@ -1358,7 +1358,11 @@ function openConfirm(
       const showRefusal = () => {
         m.setBusy(false);
         m.setError(errorText(e));
-        if (immediateRestore && modal !== m) surfaceMutationError(e);
+        // A dismissed confirm dialog (Escape or backdrop click while the restore
+        // RPC runs) detaches this handle — the refusal must reach a persistent
+        // surface instead of vanishing into the detached element. Parity with
+        // the rebind flow's `if (modal !== m) surfaceTabError(e)` guard.
+        if (modal !== m) surfaceMutationError(e);
       };
       // A definitive guarded refusal may come from a replacement daemon. Keep
       // every restore entry point fenced until an accepted Snapshot refreshes
