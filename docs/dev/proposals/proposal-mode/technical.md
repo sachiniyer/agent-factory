@@ -88,6 +88,7 @@ When a session is attached to a proposal, a ref exists in the proposals repo:
 ```
 refs/af/cursor/<session id>     → the last commit this session has seen
 refs/af/attach/<session id>     → a blob that holds the slug
+refs/af/brief/<session id>      → a blob that holds the slug and briefing state (owed|done|unconfirmed); only with deliver_rules
 ```
 
 - A session is attached to at most one proposal. When it attaches to a second
