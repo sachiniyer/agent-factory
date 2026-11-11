@@ -33,7 +33,7 @@ can be closed, renamed, and reordered like local web tabs.
 
 The operator-owned backend settings use `[docker]`, `[ssh]`, and `[sandbox]` in
 global TOML. Their former flat spellings (`docker_mount_agent_credentials`,
-`ssh_host_key_verification`, and `sandbox_ssh`) remain permanent aliases for
+`ssh_host_key_verification`, `sandbox_ssh`, and `sandbox_binary`) remain permanent aliases for
 existing TOML and JSON. When both spellings are present, the grouped value wins,
 including explicit `false` and empty-string values.
 

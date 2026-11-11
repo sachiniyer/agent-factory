@@ -516,8 +516,11 @@ written, so set can never leave a config that fails to load.
 
 Settable keys:
   default_program            agent enum (%s)
+  appearance                 light | dark | system  (TUI appearance; applies on next TUI launch)
   program_overrides          compact JSON object of agent-to-command entries
   program_overrides.<agent>  full command string for an agent
+  default_accounts           compact JSON object of agent-to-account entries
+  default_accounts.<agent>   registered account name a new session for that agent runs as
   session_env_passthrough    compact JSON array of exact environment variable names
   sandbox_agent_config       compact JSON array of agent:file entries (claude:settings.json, claude:CLAUDE.md, claude:.claude.json, codex:config.toml, codex:AGENTS.md) placed in a sandbox session's account scope
   root_agents                compact JSON object keyed by repository path
@@ -558,10 +561,14 @@ Settable keys:
   log_max_backups            non-negative integer
   branch_prefix              string
   on_archive_command         shell command run before a local worktree moves into the archive, or "" to disable
+  move_cmd                   script run on the daemon host when moving a live session to a
+                             sandbox, or "" for none (global-only)
   worktree_root              subdirectory | sibling
   projects_root              absolute path on the daemon host where af projects add <git-url> clones (default <af home>/projects)
   detach_keys                string (e.g. ctrl-w)
   update_channel             stable | preview
+  upgrade_clear_unverifiable_artifacts  true | false  (let an upgrade set aside a staged binary
+                             whose owning agent-factory home af cannot read; default false)
   vscode_server_binary       path to the binary a VS Code tab runs, or "" to detect one on PATH
   limit_auto_resume          true | false
   limit_account_candidates   comma-separated registered account names, or "" to disable account switching
@@ -583,12 +590,16 @@ Settable keys:
                              name tailscale serve forwards, or "" for none — the whole list is replaced. localhost,
                              loopback IPs and the listener's own address always work; any other Host is refused.
   sandbox.ssh                the ssh command the sandbox backend runs to reach the sandbox host (global-only: af runs it on the daemon host)
+  sandbox.binary             daemon-local path to the af binary the sandbox/ssh backends stream to
+                             remote hosts, or "" to use the daemon's own binary or a release
+                             download (global-only)
   hosts                      compact JSON object of host name to {host,user,port,identity_file,workspace_root,host_key_verification,use_ssh_config} (global-only)
   default_host               name of the listed host used when a session does not pick one (global-only)
 
-Legacy CLI aliases listen_addr, preview_listen_addr, require_token,
-require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
-allowed_hosts, docker_mount_agent_credentials, ssh_host_key_verification, and sandbox_ssh
+Legacy CLI aliases listen_addr, preview_listen_addr, editor_origin_ports,
+require_token, require_loopback_token, allow_unauthenticated_network,
+cors_allowed_origins, allowed_hosts, docker_mount_agent_credentials,
+ssh_host_key_verification, sandbox_ssh, and sandbox_binary
 remain accepted and edit the same canonical grouped values.
 
 Structured values must be shell-quoted so the JSON remains one argument. A write
@@ -812,9 +823,10 @@ still a present, winning override.
 With --project, unset targets a project's machine-local config (a prj_ id from
 'af projects list', or a path inside a registered repository). Without
 --project, it clears one migrated global setting — a network.* key
-(listen_addr, preview_listen_addr, require_token, require_loopback_token,
-cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials,
-ssh.host_key_verification, sandbox.ssh). Their legacy flat CLI names are
+(listen_addr, preview_listen_addr, editor_origin_ports, require_token,
+require_loopback_token, allow_unauthenticated_network, cors_allowed_origins,
+allowed_hosts) or a backend key (docker.mount_agent_credentials,
+ssh.host_key_verification, sandbox.ssh, sandbox.binary). Their legacy flat CLI names are
 accepted aliases. Global unset removes both on-disk spellings together, so a
 conflicting legacy value cannot silently reappear. Every path edits only the
 target setting, preserves unknown keys and comments, and is a clean no-op when
