@@ -20,12 +20,17 @@ type Instance struct {
 	// answers it instead of re-reading the project config, so a read that cannot
 	// complete after teardown never strands an admitted swap with no agent (#7077).
 	frozenEnvPassthrough atomic.Pointer[[]string]
-	// envUnresolved records that an inert load could not read the session's
-	// environment pass-through, so its handles carry none: the next tab spawn
-	// reads it before building a sibling from them (#7080).
-	envUnresolved atomic.Bool
-	// spawnEnvMu serializes the spawn that resolves envUnresolved, so
-	// concurrent tab creates read the environment once (#7080 review).
+	// envResolvedTmux and envResolvedWorktree name the agent handle and the
+	// worktree on which an environment refresh last SUCCEEDED — the pass-through
+	// list, and on the agent handle the session's account (#7083). A handle not
+	// named here never had its environment applied: one that skipped Provision
+	// (a startup-unknown row a handoff later marked started), or one an inert
+	// load could not read the config for. A tab spawn built from it resolves
+	// first or refuses (ensureSpawnEnvironment); it never starts bare.
+	envResolvedTmux     atomic.Pointer[tmux.TmuxSession]
+	envResolvedWorktree atomic.Pointer[git.GitWorktree]
+	// spawnEnvMu serializes the spawn that resolves them, so concurrent tab
+	// creates read the environment once (#7080 review).
 	spawnEnvMu sync.Mutex
 
 	// mu protects fields that are accessed concurrently by async Start()

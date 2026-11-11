@@ -125,7 +125,7 @@ func TestConcurrentSpawnsResolveAnUnreadEnvironmentOnce(t *testing.T) {
 	p := sessionEnvHome(t)
 	p.slow(t)
 	instance, _ := loadLostThenRevive(t, p, "lost-concurrent", "af_lost_concurrent")
-	require.True(t, instance.envUnresolved.Load(), "precondition: the load could not read the environment")
+	require.False(t, envResolvedOnHandles(instance), "precondition: the load could not read the environment")
 	require.NoError(t, os.Remove(p.flag)) // the box answers again
 	instance.mu.RLock()
 	agentTmux, gw := instance.tmuxLocked(), instance.gitWorktree
@@ -149,7 +149,17 @@ func TestConcurrentSpawnsResolveAnUnreadEnvironmentOnce(t *testing.T) {
 	for _, err := range errs {
 		require.NoError(t, err)
 	}
-	require.False(t, instance.envUnresolved.Load())
+	require.True(t, envResolvedOnHandles(instance))
 	require.Equal(t, 2, p.count()-before,
 		"one spawn reads the session and worktree lists; the others find them resolved")
+}
+
+// envResolvedOnHandles reports whether a refresh succeeded on the instance's
+// CURRENT agent handle and worktree — the condition ensureSpawnEnvironment
+// spawns without reading (#7083).
+func envResolvedOnHandles(i *Instance) bool {
+	i.mu.RLock()
+	agentTmux, gw := i.tmuxLocked(), i.gitWorktree
+	i.mu.RUnlock()
+	return i.envResolvedTmux.Load() == agentTmux && i.envResolvedWorktree.Load() == gw
 }
