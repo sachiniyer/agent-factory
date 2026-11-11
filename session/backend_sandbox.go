@@ -479,6 +479,14 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 	} else {
 		out, err = cmd.Output()
 	}
+	// Reap any process that outlived the leader on every exit path, normal
+	// completion included — a backgrounded transport child (a wedged
+	// `af ssh-relay` or the operator's ProxyCommand) that inherited the
+	// capture pipe would otherwise survive a step that reported success and
+	// leak as a live process holding open upstream connections. Lead bound
+	// the group; this SIGKILLs its survivors (#769 pattern, same as every
+	// other bounded runner that uses execgroup).
+	execgroup.Reap(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The child exited cleanly (a non-zero exit surfaces as an *exec.ExitError,
 		// not ErrWaitDelay) and only a descendant held the capture pipe open past
