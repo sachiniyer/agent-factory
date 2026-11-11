@@ -59,6 +59,26 @@ func TestEffectNoticeDowngradesAppliedLiveWithoutADaemon(t *testing.T) {
 	}
 }
 
+// TestAccountHandoffIsAppliedLive pins #7044's classification. A global save of
+// any [account_handoff] key goes through SetConfigValue → Manager.ApplyConfig,
+// which swaps the live config and reruns the handoff discovery, and the engine
+// re-resolves each session's config on every pass — so the global save surfaces
+// must say the change is live, not that it waits for a daemon start.
+func TestAccountHandoffIsAppliedLive(t *testing.T) {
+	for _, key := range []string{"account_handoff", "account_handoff.mode", "account_handoff.wall_percent"} {
+		if got := KeyEffectClass(key); got != EffectAppliedLive {
+			t.Errorf("KeyEffectClass(%q) = %v, want EffectAppliedLive", key, got)
+		}
+		n := EffectNotice(key, ApplyOutcome{DaemonApply: DaemonApplyApplied})
+		if !strings.Contains(n, "using the new value now") {
+			t.Errorf("%s: a global save the daemon applied must say it is live now, got %q", key, n)
+		}
+		if strings.Contains(n, "next daemon start") {
+			t.Errorf("%s: a global save the daemon applied must not defer to the next daemon start, got %q", key, n)
+		}
+	}
+}
+
 // TestKeyEffectClassClassifiesDottedLeavesByBase: a dynamic family leaf
 // (program_overrides.claude) inherits its base key's class, since the daemon
 // applies the whole map.

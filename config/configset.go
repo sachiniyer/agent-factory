@@ -679,7 +679,7 @@ func (w scalarWrite) applyProject(path, prettyPath string) (*SetResult, error) {
 	// values the resolver produces. Validate the overlay onto the global
 	// layer now rather than persist a file every subsequent resolve fails
 	// on (Codex on #6793).
-	if isAccountHandoffKey(w.key) {
+	if IsAccountHandoffKey(w.key) {
 		if err := validatePersonalAccountHandoffMerge(resulting); err != nil {
 			return nil, err
 		}
