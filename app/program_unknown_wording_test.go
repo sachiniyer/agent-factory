@@ -17,11 +17,9 @@ import (
 func TestLocalUnknownDefaultSubmitSaysItIsAskingTheDaemon(t *testing.T) {
 	clearDaemonTarget(t)
 	h := newTestHome(t)
+	h.errBox.SetSize(500, 1) // the bar renders nothing at zero size
 	switchToUnreadableProject(t, h)
-	release := make(chan struct{})
-	t.Cleanup(func() { close(release) })
 	t.Cleanup(SetProgramListerForTest(func(string) (daemon.ListProgramsResponse, error) {
-		<-release
 		return daemon.ListProgramsResponse{}, nil
 	}))
 	t.Cleanup(SetAccountListerForTest(func(string, string) (daemon.ListAccountsResponse, error) {
@@ -29,8 +27,8 @@ func TestLocalUnknownDefaultSubmitSaysItIsAskingTheDaemon(t *testing.T) {
 	}))
 	got := recordStartRequest(t)
 
-	_, cmd := h.startNewInstance()
-	_ = drainCmd(t, cmd, 200*time.Millisecond)
+	// The daemon's answer is still in flight: its fetch command is not run.
+	_, _ = h.startNewInstance()
 	require.True(t, h.remoteDefaultPending, "precondition: the form is waiting on the daemon's answer")
 	require.NoError(t, h.namingInstance.SetTitle("demo"))
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
@@ -44,6 +42,7 @@ func TestLocalUnknownDefaultSubmitSaysItIsAskingTheDaemon(t *testing.T) {
 func TestAccountPickerNamesAnUnknownDefaultPlainly(t *testing.T) {
 	clearDaemonTarget(t)
 	h := newTestHome(t)
+	h.errBox.SetSize(500, 1) // the bar renders nothing at zero size
 	switchToUnreadableProject(t, h)
 	t.Cleanup(SetProgramListerForTest(func(string) (daemon.ListProgramsResponse, error) {
 		return daemon.ListProgramsResponse{}, nil // the daemon cannot read it either
