@@ -132,6 +132,9 @@ type GitWorktree struct {
 	// Git/runtime subset plus these exact names, but never agent-provider keys
 	// merely because the session selected that agent.
 	hookEnvPassthrough []string
+	// hookEnvMu guards hookEnvPassthrough: a tab spawn can refresh it on a
+	// live session (#7080) while its git commands read it.
+	hookEnvMu sync.RWMutex
 	// Base commit hash for the worktree
 	baseCommitSHA string
 	// externalWorktree is true if the worktree was not created by agent-factory.
@@ -217,8 +220,17 @@ func (g *GitWorktree) SetHookEnvironment(names []string) error {
 	if err != nil {
 		return err
 	}
+	g.hookEnvMu.Lock()
 	g.hookEnvPassthrough = normalized
+	g.hookEnvMu.Unlock()
 	return nil
+}
+
+// hookEnvironment is the current pass-through list, read under its lock.
+func (g *GitWorktree) hookEnvironment() []string {
+	g.hookEnvMu.RLock()
+	defer g.hookEnvMu.RUnlock()
+	return append([]string(nil), g.hookEnvPassthrough...)
 }
 
 // SetHookScopeSessionID records the session identity that daemon-spawned hook

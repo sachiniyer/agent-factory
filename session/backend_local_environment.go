@@ -105,6 +105,12 @@ func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.G
 	if !i.envUnresolved.Load() {
 		return nil
 	}
+	// One spawn resolves it; a concurrent one waits, then finds it resolved.
+	i.spawnEnvMu.Lock()
+	defer i.spawnEnvMu.Unlock()
+	if !i.envUnresolved.Load() {
+		return nil
+	}
 	if err := refreshSessionEnvironment(i, agentTmux); err != nil {
 		return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
 	}

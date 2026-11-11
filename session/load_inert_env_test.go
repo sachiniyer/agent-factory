@@ -3,6 +3,7 @@ package session
 import (
 	"os"
 	"strings"
+	"sync"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -113,4 +114,42 @@ func TestLostRowTabSpawnRefusesWhileItsEnvironmentIsUnknown(t *testing.T) {
 	for _, command := range commands() {
 		require.NotContains(t, command, "new-session", "nothing was spawned without its environment")
 	}
+}
+
+// #7080 review: concurrent tab creates on a row whose environment the load
+// could not read resolve it once. Each refresh publishes the worktree's hook
+// list, which its git commands read; two at once raced on it.
+func TestConcurrentSpawnsResolveAnUnreadEnvironmentOnce(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	p := sessionEnvHome(t)
+	p.slow(t)
+	instance, _ := loadLostThenRevive(t, p, "lost-concurrent", "af_lost_concurrent")
+	require.True(t, instance.envUnresolved.Load(), "precondition: the load could not read the environment")
+	require.NoError(t, os.Remove(p.flag)) // the box answers again
+	instance.mu.RLock()
+	agentTmux, gw := instance.tmuxLocked(), instance.gitWorktree
+	instance.mu.RUnlock()
+	before := p.count()
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	errs := make([]error, 8)
+	for k := range errs {
+		wg.Add(1)
+		go func(k int) {
+			defer wg.Done()
+			<-start
+			errs[k] = instance.ensureSpawnEnvironment(agentTmux, gw)
+		}(k)
+	}
+	close(start)
+	wg.Wait()
+
+	for _, err := range errs {
+		require.NoError(t, err)
+	}
+	require.False(t, instance.envUnresolved.Load())
+	require.Equal(t, 2, p.count()-before,
+		"one spawn reads the session and worktree lists; the others find them resolved")
 }

@@ -325,7 +325,7 @@ func (g *GitWorktree) runHooks() <-chan struct{} {
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
 		repoPath:            g.repoPath,
 		worktreePath:        g.worktreePath,
-		passthrough:         g.hookEnvPassthrough,
+		passthrough:         g.hookEnvironment(),
 		scopeSessionID:      g.hookScopeSessionID,
 		onScopeLaunched:     g.SetHookScopeUnitPrefix,
 		onProgressPublished: g.retainHookProgressForCreate,

@@ -24,6 +24,9 @@ type Instance struct {
 	// environment pass-through, so its handles carry none: the next tab spawn
 	// reads it before building a sibling from them (#7080).
 	envUnresolved atomic.Bool
+	// spawnEnvMu serializes the spawn that resolves envUnresolved, so
+	// concurrent tab creates read the environment once (#7080 review).
+	spawnEnvMu sync.Mutex
 
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):
