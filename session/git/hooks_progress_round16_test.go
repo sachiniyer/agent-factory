@@ -262,7 +262,7 @@ func TestHookProgressPruneBoundsReceiptMetadata(t *testing.T) {
 		deadline := time.Now().Add(5 * time.Second)
 		for {
 			boundedLstatFlights.Lock()
-			flight := boundedLstatFlights.byPath[blockedPath]
+			flight := boundedLstatFlights.byPath[boundedStatKey{path: blockedPath}]
 			boundedLstatFlights.Unlock()
 			if flight == nil {
 				break
