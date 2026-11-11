@@ -153,7 +153,7 @@ func (i *Instance) RebuildAbsentArchivedWorktree(dest string) error {
 		i.SetWorktreeMissing(WorktreeMissingDeletedReason(orig))
 		return err
 	}
-	if s := gw.SetupOverlayError(); s != "" {
+	if s := gw.SetupFailureNote(); s != "" {
 		i.noteSetupHookFailure(s)
 	}
 	if err := gw.ProveRecordedWorktree(); err != nil {

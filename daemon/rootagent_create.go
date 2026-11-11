@@ -188,6 +188,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	resolution, identity, inst := job.resolution, job.identity, job.inst
 	workspace := repo.WorkspacePath()
 
+	// The program first, before the reap below can destroy the record that
+	// holds the conversation (#2616) and tab roster (#2628) the heal carries: a
+	// project config that cannot be read refuses this pass with nothing changed,
+	// and the next one retries (#7079).
+	program, err := rootAgentProgramForProfile(workspace, resolution.RootAgent)
+	if err != nil {
+		m.rootEnsureFailed(stateKey, st, err)
+		return
+	}
+
 	// What the vanished root was, snapshotted before the reap deletes the record
 	// that holds it: the conversation it was in (#2616) and the tabs it had open
 	// (#2628). reapedRoot distinguishes "the reaped root had none of these" from
@@ -246,7 +256,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		}
 	}
 
-	program := rootAgentProgramForProfile(workspace, resolution.RootAgent)
 	skipRecordedResume := false
 	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
 		transcriptProgram, resolveErr := rootAgentTranscriptProgram(workspace, resolution.RootAgent)

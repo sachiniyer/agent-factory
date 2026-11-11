@@ -472,7 +472,9 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	m.remoteDefaultPending = false
 	m.remoteProgramCatalog = nil
 	m.clearPendingAccount()
-	if m.pendingProgram == "" && m.appConfig != nil {
+	// An unknown project default stays unknown here (#7079): the global
+	// default is not this project's, and the daemon is asked below.
+	if m.pendingProgram == "" && m.appConfig != nil && !m.programUnknown {
 		m.pendingProgram = m.appConfig.DefaultProgram
 	}
 	// Target the ACTIVE project's repo root, not the process cwd: after an
@@ -530,9 +532,13 @@ func (m *home) startNewInstance() (tea.Model, tea.Cmd) {
 	// the same default either way. What the preselection buys is that the user SEES
 	// it and can change it.
 	accountFetch := m.fetchAccountDefault(instance, sessionenv.AgentForCommand(m.pendingProgram))
-	if !isRemoteTarget() {
+	if !isRemoteTarget() && !m.programUnknown {
 		return m, accountFetch
 	}
+	// A local project whose default could not be read asks the daemon the same
+	// way a remote one always does (#7079): ListPrograms answers the project's
+	// own default once the daemon can read it, and no default while it cannot,
+	// so the field never shows the global agent as this project's.
 	// The remote daemon resolves its OWN default_program (#4889 review): the
 	// launch-time local seed displayed above is only a guess at remote state,
 	// and the account preselect just fired against that guess's agent. Asking

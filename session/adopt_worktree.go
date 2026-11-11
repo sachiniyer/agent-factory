@@ -119,7 +119,7 @@ func (i *Instance) adoptExistingWorktree() error {
 		if err := gw.RebuildFromExistingBranch(); err != nil {
 			return fmt.Errorf("the worktree at %s is gone and could not be rebuilt from branch %q: %w", gw.GetWorktreePath(), branch, err)
 		}
-		if s := gw.SetupOverlayError(); s != "" {
+		if s := gw.SetupFailureNote(); s != "" {
 			i.noteSetupHookFailure(s)
 		}
 	default:

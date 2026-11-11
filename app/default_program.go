@@ -28,6 +28,12 @@ type programChoice struct {
 	// re-read whenever it is about to be used instead of trusting the boot-time
 	// snapshot (#4889).
 	programFollowsConfig bool
+	// programUnknown records that the active project's config could not be read
+	// in time, so program holds no default at all — never the global default
+	// standing in for it (#7079). A new-session form then asks the daemon for
+	// the project's default instead of substituting the global one, and a
+	// successful re-read clears it.
+	programUnknown bool
 }
 
 // newProgramChoice seeds the launch choice. An empty program means no --program
@@ -116,6 +122,7 @@ func (m *home) refreshDefaultProgram() {
 	}
 	if program != "" {
 		m.program = program
+		m.programUnknown = false
 	}
 }
 

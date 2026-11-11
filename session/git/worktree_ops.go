@@ -322,6 +322,7 @@ func (g *GitWorktree) startHooks() {
 // identity. A worktree with no session id derives no scope name, so the runner
 // takes exactly the path it took before #3650.
 func (g *GitWorktree) runHooks() <-chan struct{} {
+	g.hookConfigNote = ""
 	return runPostWorktreeHooks(g.hooksCtx, hookRun{
 		repoPath:            g.repoPath,
 		worktreePath:        g.worktreePath,
@@ -329,6 +330,7 @@ func (g *GitWorktree) runHooks() <-chan struct{} {
 		scopeSessionID:      g.hookScopeSessionID,
 		onScopeLaunched:     g.SetHookScopeUnitPrefix,
 		onProgressPublished: g.retainHookProgressForCreate,
+		onConfigUnknown:     func(note string) { g.hookConfigNote = note },
 	})
 }
 

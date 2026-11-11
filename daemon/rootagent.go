@@ -778,7 +778,7 @@ func (m *Manager) rootEnsureFailed(path string, st *rootEnsureState, err error) 
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	st.consecutiveFailures++
-	if errors.Is(err, config.ErrRepoProbeUnanswered) {
+	if errors.Is(err, config.ErrRepoProbeUnanswered) || session.IsProjectConfigUnknown(err) {
 		st.unansweredFailures++
 	}
 	backoff := rootEnsureBackoffFor(st.consecutiveFailures)
@@ -868,20 +868,28 @@ func rootEnsureEscalationCause(st *rootEnsureState) string {
 // program). The default profile — an empty program — is the repo's resolved
 // claude command with --dangerously-skip-permissions ensured, the root agent's
 // whole purpose being autonomous operation (#1106).
-func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) string {
+//
+// A project config that cannot be read in time is an error, never the bare
+// claude below: that would run the root without the project's
+// program_overrides.claude, and nothing would show it (#7079). The ensure loop
+// retries it with its own backoff. A repo with no readable project config —
+// not a repo, or one the repo answered as invalid — still gets bare claude.
+func rootAgentProgramForProfile(repoRoot string, ra config.RootAgent) (string, error) {
 	if strings.TrimSpace(ra.Program) != "" {
-		return ra.Program
+		return ra.Program, nil
 	}
-	repo, err := config.RepoFromPath(repoRoot)
+	resolved, err := resolveProjectConfigForLaunch(repoRoot)
+	if session.IsProjectConfigUnknown(err) {
+		return "", fmt.Errorf("cannot pick the root agent's program: %w", err)
+	}
+	if resolved != nil {
+		return rootAgentCreateProgramFromResolvedConfig(&resolved.Config), nil
+	}
 	if err == nil {
-		var resolved *config.ResolvedConfig
-		resolved, err = config.ResolveConfigForRepo(repo)
-		if err == nil {
-			return rootAgentCreateProgramFromResolvedConfig(&resolved.Config)
-		}
+		err = errors.New("not a git repository")
 	}
 	log.WarningLog.Printf("root agent for %s: failed to resolve repo config, using bare claude: %v", repoRoot, err)
-	return finishRootAgentProgram("claude")
+	return finishRootAgentProgram("claude"), nil
 }
 
 // rootAgentCreateProgramFromResolvedConfig performs the root-specific first

@@ -189,6 +189,10 @@ type GitWorktree struct {
 	// session row rather than propagated: an overlay failure, like the hook
 	// failure that produced the payload, must not block the worktree create.
 	setupOverlayErr string
+	// hookConfigNote says why the last hook run's post_worktree_commands did
+	// not run because the project config could not be read (#7079); "" when
+	// they ran or the project has none. Surfaced with setupOverlayErr.
+	hookConfigNote string
 }
 
 // RelocationRecovery is the durable, non-authoritative second handle retained

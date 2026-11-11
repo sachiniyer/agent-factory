@@ -199,7 +199,10 @@ func (m *Manager) clearRootClaudeTranscriptWarning(st *rootEnsureState) {
 // verification must inspect the environment of the command that actually runs,
 // not the unresolved enum label stored in the profile.
 func rootAgentTranscriptProgram(repoRoot string, ra config.RootAgent) (string, error) {
-	program := rootAgentProgramForProfile(repoRoot, ra)
+	program, err := rootAgentProgramForProfile(repoRoot, ra)
+	if err != nil {
+		return "", err
+	}
 	repo, err := config.RepoFromPath(repoRoot)
 	if err != nil {
 		return "", err

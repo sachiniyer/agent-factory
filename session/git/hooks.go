@@ -9,6 +9,7 @@ import (
 	"os/exec"
 	"strings"
 	"syscall"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/hooklog"
@@ -39,29 +40,67 @@ type hookRun struct {
 	// onProgressPublished lets the daemon create path retain the runner lease
 	// until its owner row is durably committed or the create aborts.
 	onProgressPublished func(*hookProgress)
+	// onConfigUnknown receives the note a run that could not read its project
+	// config records instead of running post_worktree_commands (#7079). It is
+	// called before runPostWorktreeHooks returns.
+	onConfigUnknown func(note string)
 }
 
-func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
-	done := make(chan struct{})
-	// A bare repository's identity path contains no checked-out config. Once a
-	// worktree has been provisioned, resolve through it to keep identity-keyed
-	// legacy config on the bare directory and checked-in config on the checkout.
-	// Retain the raw-path fallback for recovery and callers whose recorded repo is
-	// temporarily unavailable.
-	var cmds []string
-	if run.progress != nil {
-		cmds = run.progress.Commands
-	} else {
-		repo, repoErr := config.RepoFromPath(run.worktreePath)
+// The patience a hook run's project-config read gets before the run records
+// that its commands did not run (#7079): the same three attempts a launch
+// spends (session's launchConfigResolveAttempts), since a worktree created
+// without its setup commands is as wrong as an agent started on the wrong
+// config. Vars so tests can drive the loop without sleeping.
+var (
+	hookConfigResolveAttempts = 3
+	hookConfigRetryWait       = func() { time.Sleep(250 * time.Millisecond) }
+)
+
+// resolveHookConfig resolves the config whose post_worktree_commands a run
+// executes, retrying only reads that went unanswered (config.ResolveWentUnanswered).
+// An answer — including "this config is invalid" — is final on the first try.
+func resolveHookConfig(run hookRun) (*config.ResolvedConfig, int, error) {
+	for attempt := 1; ; attempt++ {
+		// A bare repository's identity path contains no checked-out config. Once a
+		// worktree has been provisioned, resolve through it to keep identity-keyed
+		// legacy config on the bare directory and checked-in config on the checkout.
+		// Retain the raw-path fallback for recovery and callers whose recorded repo is
+		// temporarily unavailable.
 		var repoCfg *config.ResolvedConfig
 		var err error
-		if repoErr == nil {
+		if repo, repoErr := config.RepoFromPath(run.worktreePath); repoErr == nil {
 			repoCfg, err = config.ResolveConfigForRepo(repo)
 		} else {
 			repoCfg, err = config.ResolveConfig(run.repoPath)
 		}
+		if err == nil || !config.ResolveWentUnanswered(err) || attempt >= hookConfigResolveAttempts {
+			return repoCfg, attempt, err
+		}
+		hookConfigRetryWait()
+	}
+}
+
+func runPostWorktreeHooks(ctx context.Context, run hookRun) <-chan struct{} {
+	done := make(chan struct{})
+	var cmds []string
+	if run.progress != nil {
+		cmds = run.progress.Commands
+	} else {
+		repoCfg, attempts, err := resolveHookConfig(run)
 		if err != nil {
-			log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
+			// Not reading the project config is not the same as it listing no
+			// commands: the worktree is about to be used without its setup, so
+			// the row says so instead of a log line alone (#7079).
+			if config.ResolveWentUnanswered(err) {
+				note := fmt.Sprintf("post_worktree_commands did not run: couldn't read the project config for %s in time (%d attempts) — the machine may be under heavy load, or its filesystem may not be responding; run them in the worktree yourself, or recreate the session once it recovers: %v",
+					run.repoPath, attempts, err)
+				log.WarningLog.Print(note)
+				if run.onConfigUnknown != nil {
+					run.onConfigUnknown(note)
+				}
+			} else {
+				log.WarningLog.Printf("failed to resolve repo config for hooks: %v", err)
+			}
 			close(done)
 			return done
 		}

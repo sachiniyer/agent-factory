@@ -141,3 +141,16 @@ func (g *GitWorktree) SetSetupOverlayDir(dir string) {
 func (g *GitWorktree) SetupOverlayError() string {
 	return g.setupOverlayErr
 }
+
+// SetupFailureNote is every non-blocking setup failure the row must show: the
+// payload copy's, and post_worktree_commands that did not run because the
+// project config could not be read (#7079). "" when there is none.
+func (g *GitWorktree) SetupFailureNote() string {
+	var notes []string
+	for _, note := range []string{g.setupOverlayErr, g.hookConfigNote} {
+		if strings.TrimSpace(note) != "" {
+			notes = append(notes, note)
+		}
+	}
+	return strings.Join(notes, "; ")
+}
