@@ -317,9 +317,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 		// Either rebuild may have hit a setup-payload collision — non-blocking,
 		// but the row must say so (#6667).
-		if s := gw.SetupFailureNote(); s != "" {
-			i.noteSetupHookFailure(s)
-		}
+		i.noteWorktreeSetup(gw)
 	}
 
 	// A rebuild gives the worktree a new identity, so any tmux session that

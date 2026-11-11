@@ -97,6 +97,24 @@ func PrimeRestoreContext(path string) (*RestoreContext, error) {
 	return rc, err
 }
 
+// ResolvedConfigFor is path's project config answered through this context —
+// from memory once primed. (nil, nil) is a path with no project config, as for
+// resolveProjectConfig; a context primed without an error answers without I/O.
+func (c *RestoreContext) ResolvedConfigFor(path string) (*config.ResolvedConfig, error) {
+	src := projectConfigSource{repoFromPath: c.RepoFromPath, resolveRepo: c.ResolveConfigForRepo}
+	if c != nil {
+		src.attempts = c.attempts
+	}
+	return resolveProjectConfig(path, src)
+}
+
+// ReleaseConfigSnapshot ends the create's use of InstanceOptions.ConfigSnapshot:
+// later config reads for this session resolve afresh rather than from the
+// snapshot the create was primed with.
+func (i *Instance) ReleaseConfigSnapshot() {
+	i.restoreCtx.Store(nil)
+}
+
 // RepoFromPath is config.RepoFromPath, answered once per path for the batch.
 // Concurrent callers for the same path wait for the first rather than each
 // spawning their own git probes.

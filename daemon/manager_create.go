@@ -201,6 +201,7 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		ResumeConversation:             req.resumeConversation,
 		RestoreTabs:                    req.restoreTabs,
 		PendingRecreateNotice:          req.pendingRecreateNotice,
+		ConfigSnapshot:                 req.configSnapshot,
 		BranchPrefix:                   &frozenBranchPrefix,
 		ProvisionSessionEnvPassthrough: append([]string(nil), cfg.SessionEnvPassthrough...),
 		// Mints and revokes this session's credential, driven by the RUNTIME's
@@ -246,6 +247,11 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		m.warn().Printf("create of session %q: could not journal the pending create (a crash-leftover would stay unprovable): %v", title, err)
 	}
 	instance, err := session.NewInstance(launchOpts)
+	if instance != nil && req.configSnapshot != nil {
+		// The create's reads answer from the snapshot primed before it (#7084);
+		// once the create returns, the session reads its config afresh.
+		defer instance.ReleaseConfigSnapshot()
+	}
 	// A create that does not finish must not leave a live credential behind
 	// (#3012 review). The mint happens INSIDE NewInstance, so a provisioning
 	// failure after it — or any later abandonment on this path — would otherwise

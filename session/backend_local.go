@@ -372,12 +372,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			return setupErr
 		}
 		// A staged setup payload that failed to copy in, or post_worktree_commands
-		// that could not run because the project config could not be read, is
-		// non-blocking like the hook failure itself, but the row must say so
-		// (#6667, #7079).
-		if note := gw.SetupFailureNote(); note != "" {
-			i.noteSetupHookFailure(note)
-		}
+		// that did not run, is non-blocking like the hook failure itself, but the
+		// row must say so (#6667, #7079, #7084).
+		i.noteWorktreeSetup(gw)
 
 		// Inject Agent Factory instructions into the session. The daemon create
 		// path supplies a command frozen after provisioning and before process

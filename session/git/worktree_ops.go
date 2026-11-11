@@ -330,7 +330,7 @@ func (g *GitWorktree) runHooks() <-chan struct{} {
 		scopeSessionID:      g.hookScopeID(),
 		onScopeLaunched:     g.SetHookScopeUnitPrefix,
 		onProgressPublished: g.retainHookProgressForCreate,
-		onConfigUnknown:     func(note string) { g.hookConfigNote = note },
+		onNotRun:            func(note string) { g.hookConfigNote = note },
 	})
 }
 

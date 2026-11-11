@@ -1,6 +1,10 @@
 package session
 
-import "strings"
+import (
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/session/git"
+)
 
 // The setup-hook failure note: ONE field on the Instance, projected onto
 // InstanceData and rendered on every surface that shows the session's
@@ -43,6 +47,42 @@ func (i *Instance) noteSetupHookFailure(note string) {
 		i.setupHookFailed += "; " + note
 	}
 	i.touchLocked()
+}
+
+// noteWorktreeSetup records a worktree setup or rebuild's outcome on the row:
+// every non-blocking failure the run produced (gw.SetupFailureNote — the
+// setup payload's, and post_worktree_commands that did not run, #7079). It is
+// the one path from a worktree run to the row, so a call site cannot surface
+// half of it (#7084). A post_worktree_commands note an EARLIER run left is
+// dropped first: the row describes this run, and a run that did start the
+// commands must not keep claiming they did not.
+func (i *Instance) noteWorktreeSetup(gw *git.GitWorktree) {
+	if gw == nil {
+		return
+	}
+	i.mu.Lock()
+	if kept := dropSetupNotes(i.setupHookFailed, git.HookNotRunNotePrefix); kept != i.setupHookFailed {
+		i.setupHookFailed = kept
+		i.touchLocked()
+	}
+	i.mu.Unlock()
+	i.noteSetupHookFailure(gw.SetupFailureNote())
+}
+
+// dropSetupNotes removes the "; "-joined notes that begin with prefix. A hook
+// not-run note never contains "; " itself (git.hookNotRunNote), so exactly that
+// note goes, and every other note is kept as it was written.
+func dropSetupNotes(notes, prefix string) string {
+	if !strings.Contains(notes, prefix) {
+		return notes
+	}
+	var kept []string
+	for _, note := range strings.Split(notes, "; ") {
+		if !strings.HasPrefix(note, prefix) {
+			kept = append(kept, note)
+		}
+	}
+	return strings.Join(kept, "; ")
 }
 
 // ReconcileSetupHookFailed mirrors the daemon's projected note onto an
