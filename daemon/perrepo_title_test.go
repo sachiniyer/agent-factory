@@ -459,6 +459,15 @@ func TestFindInstanceDataByTitle_ScopedMissStaysBare(t *testing.T) {
 	if got := err.Error(); got != `instance "ghost" not found` {
 		t.Errorf("a scoped miss must keep its bare not-found shape, got: %v", got)
 	}
+	if !errors.Is(err, errSessionNotFound) {
+		t.Errorf("a clean scoped miss must still classify as errSessionNotFound, got: %v", err)
+	}
+	// The CLI recognizes this miss by ScopedInstanceMissText once net/rpc has
+	// flattened it to text (#7092), so the exported text and the resolver's
+	// actual error must be the same string.
+	if got, want := err.Error(), ScopedInstanceMissText("ghost"); got != want {
+		t.Errorf("the scoped miss must be exactly ScopedInstanceMissText: got %q, want %q", got, want)
+	}
 }
 
 // TestArchivedHookRenameChecksGlobalSlug covers the archived-name-reuse path:

@@ -9,6 +9,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/apiclient"
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
@@ -46,7 +47,7 @@ import (
 // Remote targets (--daemon-url) are deliberately exempt from rule 2 wherever a
 // command's request actually reaches the remote: the client's cwd names a repo
 // on THIS machine, which says nothing about the daemon's projects. That
-// exemption lives in resolveRepoIDForLookup for the session reads, and in
+// exemption lives in resolveLookupScope for the session reads, and in
 // resolveProjectScope below for the task verbs — the dividing line is the
 // transport, not the command, and #3730 moved the whole `af tasks` group across
 // it.
@@ -108,7 +109,7 @@ func optionalCurrentRepo() (*config.RepoContext, error) {
 // those requests act on.
 //
 // Every verb that genuinely reaches the targeted daemon — reads AND the routed
-// lifecycle/tab mutations (W9.1/W9.3) — uses resolveRepoIDForLookup instead.
+// lifecycle/tab mutations (W9.1/W9.3) — uses resolveLookupScope instead.
 func resolveRepoID() (string, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
@@ -128,7 +129,20 @@ func resolveRepoID() (string, error) {
 	return repo.ID, nil
 }
 
-// resolveRepoIDForLookup resolves the repo scope for a request routed to the
+// lookupScope is the repo scope a session lookup ran in, and where that scope
+// came from. An answer scoped by the current directory reads like a fleet-wide
+// one unless it says which project it searched. The #7092 play-test took a
+// cwd-scoped `[]` and `instance "alpha" not found` for lost sessions, so the
+// empty-list notice and the title miss name the project from here.
+type lookupScope struct {
+	RepoID string // "" = no project context (rule 3)
+	// Project is the project's root as --repo would name it; "" when RepoID is.
+	Project string
+	// FromCwd says the current directory chose the project rather than --repo.
+	FromCwd bool
+}
+
+// resolveLookupScope resolves the repo scope for a request routed to the
 // TARGETED daemon: the snapshot-based reads (`sessions list`, `get`, `watch`,
 // `preview`, `attach`) and the lifecycle/tab mutations W9.1/W9.3 moved onto
 // apiclient (kill/archive/restore/send-prompt/retry-limit/handoff, the tab
@@ -151,25 +165,25 @@ func resolveRepoID() (string, error) {
 // daemon has that project checked out at the same absolute path. Scoping a
 // remote by a repo identity the daemon owns needs a daemon-side repo lookup — a
 // separate change; until then, prefer a bare title against a remote.
-func resolveRepoIDForLookup() (string, error) {
+func resolveLookupScope() (lookupScope, error) {
 	if repoFlag != "" {
 		repo, err := repoFromFlag()
 		if err != nil {
-			return "", err
+			return lookupScope{}, err
 		}
-		return repo.ID, nil
+		return lookupScope{RepoID: repo.ID, Project: repo.WorkspacePath()}, nil
 	}
 	if apiclient.IsRemoteTarget() {
-		return "", nil // the client's cwd says nothing about the remote's repos
+		return lookupScope{}, nil // the client's cwd says nothing about the remote's repos
 	}
 	repo, err := optionalCurrentRepo()
 	if err != nil {
-		return "", err
+		return lookupScope{}, err
 	}
 	if repo == nil {
-		return "", nil // all-repo mode, guarded by the ambiguity check
+		return lookupScope{}, nil // all-repo mode, guarded by the ambiguity check
 	}
-	return repo.ID, nil
+	return lookupScope{RepoID: repo.ID, Project: repo.WorkspacePath(), FromCwd: true}, nil
 }
 
 // resolveRepo is the single binding resolver for commands that can create
@@ -246,7 +260,7 @@ func resolveProjectScope(allFlag bool) (projectScope, error) {
 					"different paths. Drop --repo to act across the daemon's projects (task ids are unique), or run the command on the daemon host",
 				apiclient.RemoteTargetURL())
 		}
-		// No project context (rule 3), for the reason resolveRepoIDForLookup gives:
+		// No project context (rule 3), for the reason resolveLookupScope gives:
 		// the client's cwd names a repository here, not on the daemon's machine. An
 		// id therefore resolves across the remote's projects, exactly as it does
 		// from outside a git repository locally.
@@ -493,4 +507,87 @@ func unscopedListNotice() string {
 		return fmt.Sprintf("af sessions list: no --repo given — listing sessions across every project on the daemon at %s; pass --repo <path> to scope to one, or --all to list every project explicitly", apiclient.RemoteTargetURL())
 	}
 	return "af sessions list: not inside a project repo — listing sessions across every project; pass --repo <path> to scope to one, or --all to list every project explicitly"
+}
+
+// emptyScopedListNotice is unscopedListNotice's scoped sibling (#7092): the one
+// stderr line a `sessions list` prints when the current directory chose its
+// project and that project's answer is empty. Without it the bare `[]` reads as
+// an empty fleet, when the user may simply be standing in a project they did not
+// mean. A filtered list says "matching", because a filter can empty the answer
+// for a project that holds sessions.
+func emptyScopedListNotice(project string, filtered bool) string {
+	what := "no sessions"
+	if filtered {
+		what = "no matching sessions"
+	}
+	return fmt.Sprintf("af sessions list: %s in project %s (resolved from the current directory); pass --repo <path> to list another project, or --all to list every project", what, project)
+}
+
+// scopedTitleMissError is a clean title miss inside one project's scope, with
+// that project named (#7092), the scoped sibling of unscopedTitleMissError. The
+// resolver's own miss text stays first and any clause it appended stays last,
+// so a caller matching on the old message still matches. Unwrap returns the
+// original error, keeping errTitleNotFound reachable for the errors.Is checks
+// that tell a clean miss from an under-read one (#861).
+type scopedTitleMissError struct {
+	cause   error
+	head    string // the resolver's miss, e.g. `instance "alpha" not found`
+	tail    string // whatever the resolver appended after it, e.g. "; prompt not delivered"
+	project string
+	fromCwd bool
+	remote  string // the daemon a remote lookup searched; "" for a local one
+}
+
+func (e scopedTitleMissError) Error() string {
+	msg := e.head + " in project " + e.project
+	if e.remote != "" {
+		msg += " on the daemon at " + e.remote
+	}
+	if e.fromCwd {
+		msg += " (resolved from the current directory); pass --repo <path> to search another project, or run outside the repo to search every project"
+	}
+	return msg + e.tail
+}
+
+func (e scopedTitleMissError) Unwrap() error { return e.cause }
+
+// nameMiss names the project a scoped title lookup searched when err is that
+// lookup's clean miss (#7092), and returns every other error unchanged: an
+// unscoped lookup already explains itself (#6882), and a refusal or a
+// corruption-tainted miss is not a statement about which project was searched.
+//
+// Two miss shapes reach a command. The CLI's own resolvers return `session %q
+// not found` wrapping errTitleNotFound. The daemon's scoped resolver returns
+// daemon.ScopedInstanceMissText, which arrives as bare text because net/rpc and
+// the HTTP envelope carry only the message. A daemon "session %q not found" is
+// deliberately NOT matched: the daemon uses it for a row it found but could not
+// restore, so naming the project there would send the user looking for a
+// session that exists.
+func (s lookupScope) nameMiss(title string, err error) error {
+	if err == nil || s.RepoID == "" || s.Project == "" {
+		return err
+	}
+	msg := err.Error()
+	for _, head := range scopedMissHeads(title, err) {
+		tail, ok := strings.CutPrefix(msg, head)
+		if !ok || (tail != "" && !strings.HasPrefix(tail, "; ")) {
+			continue
+		}
+		miss := scopedTitleMissError{cause: err, head: head, tail: tail, project: s.Project, fromCwd: s.FromCwd}
+		if apiclient.IsRemoteTarget() {
+			miss.remote = apiclient.RemoteTargetURL()
+		}
+		return miss
+	}
+	return err
+}
+
+// scopedMissHeads lists the clean-miss texts err may start with: the daemon's
+// scoped miss always, and the CLI's own only when err really is errTitleNotFound.
+func scopedMissHeads(title string, err error) []string {
+	heads := []string{daemon.ScopedInstanceMissText(title)}
+	if errors.Is(err, errTitleNotFound) {
+		heads = append(heads, fmt.Sprintf("session %q not found", title))
+	}
+	return heads
 }

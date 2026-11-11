@@ -70,10 +70,11 @@ Example:
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
+		repoID := scope.RepoID
 
 		title := args[0]
 		var conversation session.HandoffConversation
@@ -92,7 +93,7 @@ Example:
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(title, err))
 		}
 
 		output := map[string]any{"ok": true, "title": title, "conversation": conversation}

@@ -52,7 +52,7 @@ func TestProjectScopeResolversPropagateGitDiscoveryErrors(t *testing.T) {
 		{
 			name: "local read scope",
 			resolve: func() error {
-				_, err := resolveRepoIDForLookup()
+				_, err := resolveLookupScope()
 				return err
 			},
 		},

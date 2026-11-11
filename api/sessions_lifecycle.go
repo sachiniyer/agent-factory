@@ -38,8 +38,8 @@ be lost. Archive instead to keep the session restorable.
 		// Honor --repo scoping (#761). An empty repoID preserves the prior
 		// all-repo search; a non-empty one confines the kill to that repo so a
 		// same-titled session in a different repo is never destroyed by
-		// mistake. Mirrors sessionsListCmd's resolveRepoID() usage.
-		repoID, err := resolveRepoIDForLookup()
+		// mistake. Mirrors sessionsListCmd's resolveLookupScope() usage.
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -60,12 +60,12 @@ be lost. Archive instead to keep the session restorable.
 		// is running inside closes the pane's pty under it, and the kernel
 		// hangup would otherwise kill the caller before the reply (#5182).
 		defer ignoreTeardownHangup()()
-		kept, err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: repoID})
+		kept, err := killSessionViaDaemon(daemon.KillSessionRequest{Title: args[0], RepoID: scope.RepoID})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(args[0], err))
 		}
 
 		result := map[string]any{"ok": true}
@@ -130,6 +130,9 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		// non-relocatable worktree.
 		var repoID string
 		var sessionID string
+		// scope stays zero for --self: the session's own record chose the repo,
+		// so a miss there is not a statement about a lookup scope.
+		var scope lookupScope
 		if sessionsArchiveSelf {
 			if title != "" {
 				return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self archives the current session"))
@@ -183,10 +186,11 @@ their worktree. Local archives print the relocated worktree path on success.`,
 			// to that repo so a same-titled session in another repo is never
 			// touched.
 			var err error
-			repoID, err = resolveRepoIDForLookup()
+			scope, err = resolveLookupScope()
 			if err != nil {
 				return jsonError(err)
 			}
+			repoID = scope.RepoID
 		}
 
 		// --self's reason for existing: same SIGHUP shield as kill (#5182).
@@ -196,7 +200,7 @@ their worktree. Local archives print the relocated worktree path on success.`,
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(title, err))
 		}
 
 		result := map[string]any{"ok": true, "title": title, "archived_path": archivedPath}
@@ -293,7 +297,7 @@ is no global equivalent.`,
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -303,12 +307,12 @@ is no global equivalent.`,
 			return jsonError(err)
 		}
 
-		worktreePath, err := restoreSessionViaDaemon(daemon.RestoreSessionRequest{Title: args[0], RepoID: repoID, ForceReap: forceReap})
+		worktreePath, err := restoreSessionViaDaemon(daemon.RestoreSessionRequest{Title: args[0], RepoID: scope.RepoID, ForceReap: forceReap})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(args[0], err))
 		}
 
 		result := map[string]any{"ok": true, "title": args[0], "worktree_path": worktreePath}

@@ -58,13 +58,13 @@ func proposalSessionFromFlagOrSelf() (data *session.InstanceData, found bool, er
 			}
 			return data, true, nil
 		}
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return nil, false, err
 		}
-		data, _, err := getSessionByTitleInScope(repoID, proposalSessionFlag)
+		data, _, err := getSessionByTitleInScope(scope.RepoID, proposalSessionFlag)
 		if err != nil {
-			return nil, false, err
+			return nil, false, scope.nameMiss(proposalSessionFlag, err)
 		}
 		return data, true, nil
 	}

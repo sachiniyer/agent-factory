@@ -41,6 +41,9 @@ after it went idle.
 				return jsonError(fmt.Errorf("cannot combine --clear with --reason"))
 			}
 			var id, title, repoID string
+			// scope stays zero for --self: the session's own record chose the
+			// repo, so a miss there is not a statement about a lookup scope.
+			var scope lookupScope
 			if self {
 				if len(args) == 1 {
 					return jsonError(fmt.Errorf("cannot combine --self with a <title> argument; --self targets the current session"))
@@ -58,18 +61,18 @@ after it went idle.
 				// The request goes to the TARGETED daemon (routedSetAttention), so the
 				// scope is the one every other routed session verb uses: against a
 				// remote daemon the client's cwd names a repo that exists here, not there.
-				repoID, err = resolveRepoIDForLookup()
+				scope, err = resolveLookupScope()
 				if err != nil {
 					return jsonError(err)
 				}
-				title = args[0]
+				repoID, title = scope.RepoID, args[0]
 			}
 
 			resp, err := setAttentionViaDaemon(daemon.SetAttentionRequest{
 				ID: id, Title: title, RepoID: repoID, Reason: reason, Clear: clear,
 			})
 			if err != nil {
-				return jsonError(err)
+				return jsonError(scope.nameMiss(title, err))
 			}
 			return jsonOut(map[string]any{"ok": true, "id": resp.ID, "title": resp.Title, "attention": !clear})
 		},

@@ -19,3 +19,25 @@ func (e unscopedInstanceMissError) Error() string {
 }
 
 func (e unscopedInstanceMissError) Unwrap() error { return errSessionNotFound }
+
+// scopedInstanceMissError is the clean miss for a title looked up inside one
+// repo scope: the request carried a RepoID and that project holds no row with
+// the title. Unwrap keeps errSessionNotFound reachable for the same errors.Is
+// callers the unscoped miss serves.
+type scopedInstanceMissError struct{ title string }
+
+func (e scopedInstanceMissError) Error() string { return ScopedInstanceMissText(e.title) }
+
+func (e scopedInstanceMissError) Unwrap() error { return errSessionNotFound }
+
+// ScopedInstanceMissText is the scoped miss's text, and it is exported because
+// on the wire the text is the whole error: net/rpc and the HTTP envelope carry
+// only the message, so no sentinel reaches a client. The CLI matches on it to
+// name the project it scoped the request to (#7092), which the daemon cannot
+// do itself. It sees an opaque repo ID, not the path the user would recognize,
+// and not whether --repo or the current directory chose it. Changing this text
+// stops clients built against it from recognizing the miss, so they fall back
+// to printing it bare.
+func ScopedInstanceMissText(title string) string {
+	return fmt.Sprintf("instance %q not found", title)
+}

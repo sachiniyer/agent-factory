@@ -37,7 +37,7 @@ Example:
 		log.Initialize(false)
 		defer log.Close()
 
-		repoID, err := resolveRepoIDForLookup()
+		scope, err := resolveLookupScope()
 		if err != nil {
 			return jsonError(err)
 		}
@@ -45,14 +45,14 @@ Example:
 		title, conversationID := args[0], args[1]
 		err = setConversationViaDaemon(daemon.SetConversationRequest{
 			Title:          title,
-			RepoID:         repoID,
+			RepoID:         scope.RepoID,
 			ConversationID: conversationID,
 		})
 		warning := ""
 		if err != nil && apiclient.IsMutationCommitted(err) {
 			warning = err.Error()
 		} else if err != nil {
-			return jsonError(err)
+			return jsonError(scope.nameMiss(title, err))
 		}
 
 		output := map[string]any{"ok": true, "title": title, "conversation_id": conversationID}

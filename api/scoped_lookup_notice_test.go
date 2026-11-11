@@ -500,3 +500,44 @@ func TestDaemonRoutedTitleVerbs_CwdScopedMissNamesTheProject(t *testing.T) {
 		})
 	}
 }
+
+// TestNameMiss_KeepsTheResolversClausesInPlace pins the matcher's edges. A
+// clause the daemon appended after the miss (SendPrompt's "; prompt not
+// delivered") stays last, with the project inserted after the miss itself.
+// Text that only resembles the miss is left alone, and an unscoped lookup is
+// never renamed, because #6882 already explains it.
+func TestNameMiss_KeepsTheResolversClausesInPlace(t *testing.T) {
+	scope := lookupScope{RepoID: "repo-alpha", Project: "/repos/alpha", FromCwd: true}
+
+	got := scope.nameMiss("alpha", rpc.ServerError(`instance "alpha" not found; prompt not delivered`))
+	want := `instance "alpha" not found in project /repos/alpha (resolved from the current directory); ` +
+		`pass --repo <path> to search another project, or run outside the repo to search every project; prompt not delivered`
+	if got == nil || got.Error() != want {
+		t.Errorf("a trailing clause must stay last:\n got: %v\nwant: %s", got, want)
+	}
+
+	for _, msg := range []string{
+		`instance "alpha" not found: corrupted instances.json`,
+		`instance "alpha" not foundling`,
+		`instance "alphabet" not found`,
+	} {
+		in := rpc.ServerError(msg)
+		if got := scope.nameMiss("alpha", in); got != in {
+			t.Errorf("%q is not the clean miss and must pass through unchanged, got: %v", msg, got)
+		}
+	}
+
+	// A CLI-side "session %q not found" counts only when it IS errTitleNotFound.
+	bare := errors.New(`session "alpha" not found`)
+	if got := scope.nameMiss("alpha", bare); got != bare {
+		t.Errorf("a look-alike that is not errTitleNotFound must pass through, got: %v", got)
+	}
+
+	clean := fmt.Errorf("session %q %w", "alpha", errTitleNotFound)
+	if got := (lookupScope{}).nameMiss("alpha", clean); got != clean {
+		t.Errorf("an unscoped lookup must keep its own miss, got: %v", got)
+	}
+	if got := scope.nameMiss("alpha", nil); got != nil {
+		t.Errorf("no error must stay no error, got: %v", got)
+	}
+}
