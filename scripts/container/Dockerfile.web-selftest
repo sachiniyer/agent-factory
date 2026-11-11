@@ -29,14 +29,11 @@ FROM mcr.microsoft.com/playwright:v1.56.1-noble
 # install is the assertion: a broken source we do not use is printed and
 # survived, and a package that is genuinely unavailable still fails the build.
 #
-# APT_ATTEMPT_TIMEOUT: the wrapper times out each apt-get call (180s by default)
-# and retries a timed-out one, which suits a runner adding one small package.
-# The ffmpeg layer below pulls a few hundred packages, and a call killed while
-# dpkg is unpacking can leave the next attempt a half-configured system. 900s
-# still lets a slow mirror finish. An ARG reaches these RUNs and stays out of
-# the image's runtime environment.
+# The wrapper's own per-call timeout (180s, retried) is left at its default. The
+# base already carries most of what these layers need: measured in #7096's
+# probe run 43071392162, the first layer fetched 6.4 MB and the ffmpeg layer
+# 2.1 MB (7 packages), each in under 10s.
 COPY ci-apt-install.sh /usr/local/lib/agent-factory/ci-apt-install.sh
-ARG APT_ATTEMPT_TIMEOUT=900
 
 # tmux + git are what the daemon drives to run sessions; procps provides pgrep for
 # the daemon's SIGTERM fallback path — the same trio Dockerfile.test installs.
