@@ -15,30 +15,39 @@ import "strings"
 // listedAccountHost reports the listed host name a session placed by (kind, pick)
 // would run on, and whether it is licensed to receive an account. Only the ssh
 // kind can be: sandbox and hook targets are free-form commands af cannot list.
-func listedAccountHost(kind BackendKind, repoRoot, pick string) (string, bool) {
+//
+// A non-nil error means the licence could not be DETERMINED because the repo's
+// project config could not be resolved (invalid TOML, or a checkout-identity
+// probe that went unanswered): it is NOT the same as "not listed", and callers
+// must surface it rather than report the host as unlisted (#7078). Without the
+// error a listed host under an unresolvable config would be indistinguishable
+// from a genuinely unlisted one, and the SSH refusal would send the operator to
+// "fix" a host-list entry that is already correct.
+func listedAccountHost(kind BackendKind, repoRoot, pick string) (string, bool, error) {
 	if kind != BackendSSH {
-		return "", false
+		return "", false, nil
 	}
 	cfg, err := resolveRepoConfig(repoRoot)
 	if err != nil {
-		return "", false
+		return "", false, err
 	}
 	name, listed, err := chooseListedHost(pick, cfg)
 	if err != nil || listed == nil {
-		return "", false
+		return "", false, nil
 	}
-	return name, true
+	return name, true, nil
 }
 
 // accountCarried reports whether a session of this kind placed by pick can carry
 // its account: docker (a mount, #3082) or ssh on a listed host (a synced scope,
-// W7.3).
-func accountCarried(kind BackendKind, repoRoot, pick string) bool {
+// W7.3). A non-nil error means the answer could not be determined because the
+// repo's project config could not be resolved (#7078).
+func accountCarried(kind BackendKind, repoRoot, pick string) (bool, error) {
 	if kind.CarriesAccount() {
-		return true
+		return true, nil
 	}
-	_, ok := listedAccountHost(kind, repoRoot, pick)
-	return ok
+	_, ok, err := listedAccountHost(kind, repoRoot, pick)
+	return ok, err
 }
 
 // listedHostAccountReason is WHY an account is not sent to an unlisted target, stated
@@ -68,8 +77,9 @@ func recordedAccountHost(opts InstanceOptions, kind BackendKind, repoRoot string
 	if opts.Host != "" || strings.TrimSpace(opts.Account) == "" {
 		return opts.Host
 	}
-	if name, ok := listedAccountHost(kind, repoRoot, ""); ok {
-		return name
+	name, ok, err := listedAccountHost(kind, repoRoot, "")
+	if err != nil || !ok {
+		return ""
 	}
-	return ""
+	return name
 }

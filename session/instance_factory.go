@@ -241,7 +241,11 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// path is a symlink out of the registry), and those must be checked on THIS
 	// machine, where the registry lives, before a path derived from them is handed
 	// to a runtime that will mount it.
-	if accountCarried(kind, absPath, opts.Host) && strings.TrimSpace(opts.Account) != "" {
+	carried, carryErr := accountCarried(kind, absPath, opts.Host)
+	if carryErr != nil {
+		return ProvisionResult{}, fmt.Errorf("cannot resolve account %q for provisioning: %w", opts.Account, carryErr)
+	}
+	if carried && strings.TrimSpace(opts.Account) != "" {
 		account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
 		if aerr != nil {
 			return ProvisionResult{}, aerr
@@ -617,20 +621,37 @@ func NewInstance(opts InstanceOptions) (*Instance, error) {
 	accountBackendErr := error(nil)
 	if resolveBackendErr == nil {
 		accountBackendErr = refuseOffBoxAccountForKind(opts, kind)
-		if accountBackendErr != nil && accountCarried(kind, absPath, opts.Host) {
-			// An account on a LISTED host is carried by W7.3's synced scope (#5571
-			// W7.4); the refusal below stands for every other off-box target.
-			accountBackendErr = nil
-		} else if accountBackendErr != nil && opts.AccountSource != "" {
-			// A DEFAULT account (default_accounts) must never make a sandbox create
-			// impossible: nobody typed it, so there is no identity to defend and no
-			// flag to fix. The session runs without it — on the host's own
-			// credentials, as an unlisted target always did — and the operator is
-			// told. An explicit --account is still refused with its remedy.
-			log.WarningLog.Printf("not applying account %q to %q on a %s target that cannot carry it: %s; %s",
-				opts.Account, opts.Title, kind, opts.AccountSource, listedHostAccountRemedy())
-			opts.Account, opts.AccountSource = "", ""
-			accountBackendErr = nil
+		if accountBackendErr != nil {
+			carried, carryErr := accountCarried(kind, absPath, opts.Host)
+			if carryErr != nil {
+				// The project config could not be resolved, so the listed-host
+				// licence could not be determined. Surface the resolve error
+				// instead of the static unlisted-host remedy — the same treatment
+				// #7078 gave resolveBackendKind and refuseUnsupportedAccountAgent.
+				// A host that IS listed would otherwise be misdiagnosed as "not
+				// listed" (accountCarried returns false on an unreadable config),
+				// sending the operator to "fix" a host-list entry that is already
+				// correct and masking the real cause: the config could not be read.
+				accountBackendErr = accountRefusalWithSource(opts, fmt.Errorf(
+					"account %q cannot be used with the %s backend: the listed-host licence could not be checked because the project config could not be resolved: %w",
+					opts.Account, kind, carryErr))
+			} else if carried {
+				// An account on a LISTED host is carried by W7.3's synced scope
+				// (#5571 W7.4); the refusal below stands for every other off-box
+				// target.
+				accountBackendErr = nil
+			} else if opts.AccountSource != "" {
+				// A DEFAULT account (default_accounts) must never make a sandbox
+				// create impossible: nobody typed it, so there is no identity to
+				// defend and no flag to fix. The session runs without it — on the
+				// host's own credentials, as an unlisted target always did — and
+				// the operator is told. An explicit --account is still refused
+				// with its remedy.
+				log.WarningLog.Printf("not applying account %q to %q on a %s target that cannot carry it: %s; %s",
+					opts.Account, opts.Title, kind, opts.AccountSource, listedHostAccountRemedy())
+				opts.Account, opts.AccountSource = "", ""
+				accountBackendErr = nil
+			}
 		}
 	} else {
 		// Preserve the direct guard's established answer for an explicitly invalid

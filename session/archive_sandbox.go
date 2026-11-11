@@ -374,7 +374,15 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// would refuse a handoff-scoped pin whose registry is not the recorded
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
 	// credentials.
-	if accountCarried(kind, i.Path, i.Host) && strings.TrimSpace(accountName) != "" {
+	carried, carryErr := accountCarried(kind, i.Path, i.Host)
+	if carryErr != nil && strings.TrimSpace(accountName) != "" {
+		// The project config could not be resolved, so the listed-host licence
+		// could not be determined. The drift check above already surfaced the
+		// same error when it ran; this guards the path where it was skipped
+		// (no account name) and accountCarried was still called.
+		return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, carryErr)
+	}
+	if carried && strings.TrimSpace(accountName) != "" {
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
