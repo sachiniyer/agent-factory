@@ -9,10 +9,8 @@ import (
 	"github.com/sachiniyer/agent-factory/session"
 )
 
-// TestFirstAutoOpenCandidate covers the #1238 relaunch trap: the cold-start
-// auto-open must prefer a non-reserved instance so a relaunch (e.g. right after
-// an auto-update) doesn't greet the user with root front-and-center — root pins
-// first in the store order, so instances[0] is always root when present.
+// TestFirstAutoOpenCandidate pins the cold-start auto-open choice: the root
+// session wherever it sits in the list, else the first instance, else nil.
 func TestFirstAutoOpenCandidate(t *testing.T) {
 	mk := func(title string) *session.Instance {
 		restore := session.SetBackendFactoryForTest(func(_ session.InstanceOptions, _ string) (session.Backend, error) {
@@ -29,19 +27,25 @@ func TestFirstAutoOpenCandidate(t *testing.T) {
 		assert.Nil(t, firstAutoOpenCandidate([]*session.Instance{}))
 	})
 
-	t.Run("root is the sole session falls back to root", func(t *testing.T) {
+	t.Run("root as the sole session returns root", func(t *testing.T) {
 		root := mk(session.RootSessionTitle)
 		assert.Same(t, root, firstAutoOpenCandidate([]*session.Instance{root}))
 	})
 
-	t.Run("prefers the first non-reserved instance over a top-pinned root", func(t *testing.T) {
-		// Store order pins root first (ui/store/order.go); the candidate must
-		// skip it for the first real session.
+	t.Run("root listed first among others returns root", func(t *testing.T) {
 		root := mk(session.RootSessionTitle)
 		work := mk("feature-x")
 		other := mk("feature-y")
-		got := firstAutoOpenCandidate([]*session.Instance{root, work, other})
-		assert.Same(t, work, got)
+		assert.Same(t, root, firstAutoOpenCandidate([]*session.Instance{root, work, other}))
+	})
+
+	t.Run("root not listed first still returns root", func(t *testing.T) {
+		// Store order is not relied on: root is found wherever it sits.
+		work := mk("feature-x")
+		root := mk(session.RootSessionTitle)
+		other := mk("feature-y")
+		assert.Same(t, root, firstAutoOpenCandidate([]*session.Instance{work, other, root}))
+		assert.Same(t, root, firstAutoOpenCandidate([]*session.Instance{work, root, other}))
 	})
 
 	t.Run("no root present returns the first instance", func(t *testing.T) {
