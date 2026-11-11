@@ -320,9 +320,9 @@ func accountHandoffDurationValue(leaf, value string) error {
 	return nil
 }
 
-// isAccountHandoffKey reports whether a settable key targets the
+// IsAccountHandoffKey reports whether a settable key targets the
 // [account_handoff] table — the whole table or one leaf.
-func isAccountHandoffKey(key string) bool {
+func IsAccountHandoffKey(key string) bool {
 	return key == "account_handoff" || strings.HasPrefix(key, "account_handoff.")
 }
 

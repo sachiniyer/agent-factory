@@ -85,16 +85,19 @@ func (m *Manager) noteHandoffObservation(key string, captured bool, content stri
 
 // accountHandoffDiscovery is the indirection a test uses to count discovery
 // invocations (#6817 final review): session create and materialise must
-// never trigger one — opt-in arrives only through `af config` writes, which
-// run discovery on apply.
+// never trigger one — discovery runs at daemon start and on a global config
+// save's apply, never on an `af config set --project` write (#7044).
 var accountHandoffDiscovery = (*Manager).accountHandoffDiscover
 
 // accountHandoffDiscover recomputes "is shadow opted in anywhere" from the
 // already-loaded global config plus each live session's resolved project
 // config — the ONLY inputs an opt-in can arrive through (#6817 round-2
-// review). It runs at daemon start and on config apply, so a hand-edited
-// personal-project file takes effect on the next `af config` write or
-// daemon restart — documented, never polled.
+// review). It runs at daemon start and on every global config apply, and on
+// nothing else (#7044): an `af config set --project` write and a hand edit
+// never reach the daemon, so while the gate is off a personal-project opt-in
+// waits for the next global config save or daemon restart, and only counts
+// once that project has a session — documented, never polled. Once the gate
+// is on, the per-pass ResolveConfig below reads the personal file itself.
 func (m *Manager) accountHandoffDiscover() {
 	// Compute AND store under the one lock (#6817 final review): two
 	// discoveries queue in arrival order and each resolves config at its
@@ -216,11 +219,15 @@ func (m *Manager) accountHandoffTick() {
 	}
 	defer m.handoffMoveMu.Unlock()
 	// The tick NEVER stores handoffActive (#6817 round-3 review): discovery
-	// — start, config apply, session registration — is the only writer, so
-	// the most recent config decision always wins. A tick that began while
+	// — daemon start and global config apply — is the only writer, so the
+	// most recent config decision always wins. A tick that began while
 	// active and finishes after ApplyConfig turned the last opt-in off
 	// must not re-activate from its stale governed count; it just returns,
-	// and the next tick's gate observes the deactivation.
+	// and the next tick's gate observes the deactivation. The converse is
+	// visible (#7044): when the last opt-in is turned off by a --project
+	// write or a hand edit, passes stop governing at once but the gate —
+	// and so `af accounts handoff status`'s "engine: observing" — stays on
+	// until the next discovery.
 	if _, err := m.accountHandoffEngine().Tick(m.accountHandoffInputs()); err != nil {
 		m.warn().Printf("account-handoff engine tick: %v", err)
 	}

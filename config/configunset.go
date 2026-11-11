@@ -111,7 +111,7 @@ func applyProjectUnset(path, prettyPath, section, leaf, key string, structured b
 	// also flip the merged ordering (the revealed global value may conflict
 	// with a sibling personal leaf), so the effective table is re-checked
 	// before the write commits.
-	if isAccountHandoffKey(key) {
+	if IsAccountHandoffKey(key) {
 		if err := validatePersonalAccountHandoffMerge(resulting); err != nil {
 			return nil, err
 		}

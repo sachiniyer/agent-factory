@@ -200,16 +200,18 @@ var keyDiff = map[string]func(a, b *config.Config) bool{
 	"upgrade_clear_unverifiable_artifacts": func(a, b *config.Config) bool {
 		return a.UpgradeClearUnverifiableArtifacts != b.UpgradeClearUnverifiableArtifacts
 	},
+	// The account-handoff engine (#6776) reads the table live (#7044): the
+	// accountHandoffDiscovery call at the end of ApplyConfig recomputes the
+	// off↔shadow gate from the config this apply just swapped in, and every
+	// engine pass re-resolves each session's config against m.Config(), so a
+	// changed value is applied, not pending.
+	"account_handoff": func(a, b *config.Config) bool {
+		return !reflect.DeepEqual(a.AccountHandoff, b.AccountHandoff)
+	},
 	// EffectNextDaemonStart keys — read once at startup.
 	"root_agents":   func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgents, b.RootAgents) },
 	"root_agent":    func(a, b *config.Config) bool { return !reflect.DeepEqual(a.RootAgent, b.RootAgent) },
 	"branch_prefix": func(a, b *config.Config) bool { return a.BranchPrefix != b.BranchPrefix },
-	// Staged for the account-handoff engine (#6776): nothing reads the table
-	// yet, so a changed value is reported pending — the honest bucket until
-	// the engine slice lands and claims a live effect.
-	"account_handoff": func(a, b *config.Config) bool {
-		return !reflect.DeepEqual(a.AccountHandoff, b.AccountHandoff)
-	},
 	// The watcher supervisor snapshots this cap when the daemon constructs it
 	// (daemon.go) and is not rebuilt by ApplyConfig, so a change waits for the next
 	// daemon start (config/effect.go classifies it EffectNextDaemonStart).

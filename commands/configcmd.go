@@ -664,15 +664,7 @@ owns.`, tmux.SupportedProgramsString()),
 				fmt.Fprintln(cmd.ErrOrStderr(), w)
 			}
 			if res.RequiresRestart {
-				if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
-					fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
-				} else if res.Key == "on_archive_command" {
-					fmt.Fprintln(cmd.OutOrStdout(),
-						"saved. It applies to archive operations in this project from now on.")
-				} else {
-					fmt.Fprintln(cmd.OutOrStdout(),
-						"saved. It applies to sessions created in this project from now on.")
-				}
+				fmt.Fprintln(cmd.OutOrStdout(), projectConfigEffectNotice(res.Key))
 			}
 			return nil
 		}
@@ -878,18 +870,40 @@ override file it clears is this machine's.`,
 		fmt.Fprintf(cmd.OutOrStdout(), "cleared %s override for project %s in %s\n",
 			res.Key, configUnsetProjectFlag, prettyPath(res.Path))
 		if res.RequiresRestart {
-			if config.KeyEffectClass(res.Key) == config.EffectNextDaemonStart {
-				fmt.Fprintln(cmd.OutOrStdout(), projectConfigRestartNotice(res.Key))
-			} else if res.Key == "on_archive_command" {
-				fmt.Fprintln(cmd.OutOrStdout(),
-					"saved. It applies to archive operations in this project from now on.")
-			} else {
-				fmt.Fprintln(cmd.OutOrStdout(),
-					"saved. It applies to sessions created in this project from now on.")
-			}
+			fmt.Fprintln(cmd.OutOrStdout(), projectConfigEffectNotice(res.Key))
 		}
 		return nil
 	},
+}
+
+// projectAccountHandoffNotice is what a --project write of an [account_handoff]
+// key prints (#7044). The key's effect class describes the GLOBAL save, which
+// the daemon applies; a --project write never reaches the daemon, so neither
+// generic project sentence is true of it. Once the engine is observing, each
+// pass re-resolves every session's config with the personal file read from
+// disk, so the edit lands on the next pass (daemon/account_handoff.go). While it
+// is not, only discovery can switch it on, and discovery runs at daemon start
+// and on a global config apply, walking the projects that have a session.
+const projectAccountHandoffNotice = "saved. If the daemon's account-handoff engine is already observing, " +
+	"this applies on its next pass, within about 45 seconds. If it is not, the daemon looks for a " +
+	`mode = "shadow" opt-in only at startup and on a global config save ` +
+	"(af config set without --project, or the TUI or web config editor), and only in projects that " +
+	"have a session · af accounts handoff status shows whether the engine is observing."
+
+// projectConfigEffectNotice is the one effect sentence `af config set --project`
+// and `af config unset --project` print for key, so the two verbs cannot drift
+// apart (#4381, #7044).
+func projectConfigEffectNotice(key string) string {
+	switch {
+	case config.IsAccountHandoffKey(config.CanonicalConfigKey(key)):
+		return projectAccountHandoffNotice
+	case config.KeyEffectClass(key) == config.EffectNextDaemonStart:
+		return projectConfigRestartNotice(key)
+	case key == "on_archive_command":
+		return "saved. It applies to archive operations in this project from now on."
+	default:
+		return "saved. It applies to sessions created in this project from now on."
+	}
 }
 
 func projectConfigRestartNotice(key string) string {

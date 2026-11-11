@@ -676,12 +676,40 @@ mode = "shadow"
   prove empty — holds its backlog instead of being pasted over; retries
   back off exponentially, and a hold longer than ten minutes warns once
   in the log and on `af quota`'s `mover:` line.
-- **Opt-in discovery is event-driven, not polled.** The daemon looks for
-  `mode = "shadow"` at startup and on every `af config` write — never on a
-  timer, and never on session create: `[account_handoff]` is rejected in
-  in-repo config, so an opt-in can only arrive through an applied write.
-  Hand-editing a personal project's config file takes effect on the next
-  `af config` write or daemon restart.
+- **Opt-in discovery is event-driven, not polled.** Whether the engine
+  observes at all is decided by discovery, which runs at daemon start and on
+  every global config save — `af config set` or `unset` without `--project`,
+  or a save in the TUI or web config editor. Nothing else triggers it: not a
+  timer, not a session create, not an `af config set --project` write, and
+  no file watcher — af watches neither config file. It checks the global
+  table and the resolved config of each project that has a session.
+  `[account_handoff]` is rejected in in-repo config, so those are the only
+  places an opt-in can come from.
+- **An observing engine reads edits on its next pass.** Each pass re-resolves
+  every session's config, reading the personal project file from disk and
+  the global layer from the config the daemon last applied. When an
+  `[account_handoff]` edit takes effect therefore depends on how it arrives
+  and on whether the engine is already observing:
+
+  | Edit arrives as | Engine not observing yet (a first `shadow` opt-in) | Engine already observing |
+  | --- | --- | --- |
+  | A global save (`af config set`/`unset`, TUI or web config editor) | At once — the save reruns discovery | At once — the next pass uses the new values |
+  | `af config set`/`unset --project` | At the next global save or daemon restart, once the project has a session | On the next pass |
+  | Hand edit of a personal project file | At the next global save or daemon restart, once the project has a session | On the next pass |
+  | Hand edit of `~/.agent-factory/config.toml` | At the next global save or daemon restart | At the next global save or daemon restart |
+
+  "On the next pass" covers every leaf: thresholds, `exclude_sessions`,
+  `report_to`, and switching a project back to `off`. With no daemon
+  running, every edit waits for the next daemon start. Each save prints the
+  matching sentence, and `af accounts handoff status` shows whether the
+  engine is observing.
+- **Turning the last opt-in off outside a global save leaves status saying
+  `engine: observing`.** After a `--project` write or a hand edit sets the
+  last opted-in project to `off`, the engine stops governing its sessions on
+  the next pass. But only discovery turns the engine itself off, so `af
+  accounts handoff status` keeps printing `engine: observing` until the next
+  global save or daemon restart. No session is governed in the meantime, and
+  no rows reach the event log.
 - **`probe_ttl` currently has no effect.** There is no live usage probe in
   this version: wall confirmation uses the banner plus the account store's
   own `rate_limits` records. The leaf is staged configuration for a later

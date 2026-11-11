@@ -109,14 +109,19 @@ var keyEffectClasses = map[string]EffectClass{
 	// Read per request with the rest of the listener posture, like
 	// cors_allowed_origins, so it needs no rebind.
 	"network.allowed_hosts": EffectAppliedLive,
+	// The account-handoff engine (#6776) reads this table live on both of its
+	// paths (#7044). ApplyConfig reruns its opt-in discovery after the swap
+	// (daemon/config_apply.go), so a global off↔shadow takes effect on the save;
+	// and every engine pass re-resolves each session's config against the live
+	// global snapshot (daemon/account_handoff.go), so any other leaf applies on
+	// the next pass. This class describes the GLOBAL save surfaces only: a
+	// --project write never reaches the daemon, and its notice says what happens
+	// instead (projectConfigEffectNotice in commands/configcmd.go).
+	"account_handoff": EffectAppliedLive,
 	// Next daemon start — the daemon reads these once, at startup.
 	"root_agents":   EffectNextDaemonStart,
 	"root_agent":    EffectNextDaemonStart,
 	"branch_prefix": EffectNextDaemonStart,
-	// Staged for the account-handoff engine (#6776): nothing reads it yet at
-	// any layer, so no start can apply it either — NextDaemonStart is where a
-	// daemon-owned key belongs until its engine slice lands and re-decides.
-	"account_handoff": EffectNextDaemonStart,
 	// The watcher supervisor snapshots this cap when the daemon constructs it;
 	// existing supervisors are not rebuilt by ApplyConfig.
 	"watcher_events_per_minute": EffectNextDaemonStart,
