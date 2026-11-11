@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -133,16 +132,19 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		}
 		repoEnv = append(repoEnv, "GIT_DIR="+absRepoRoot)
 	}
-	check := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	check.Env = repoEnv
-	var stderr bytes.Buffer
-	check.Stderr = &stderr
-	err = check.Run()
+	// Bounded (#3096-equivalent for the branch-prune path): a stalled filesystem
+	// must surface as a timeout, not an unbounded hang. The show-ref probe is the
+	// existence gate for the destructive `git branch -D` that follows; an
+	// unbounded stall here wedges `af reset` with no completion time and no
+	// message. Output (not CombinedOutput) so the caller can read exit code and
+	// stderr separately: a silent exit 1 is determinate absence, a loud non-zero
+	// exit is a failed probe, and the two must not be collapsed (#3243).
+	_, err = runBoundedBranchGit(repoRoot, repoEnv, false, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	if err == nil {
 		return true, bare, nil
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(exitErr.Stderr) == 0 {
 		// The loose ref lives under the COMMON git dir, which is <root>/.git only
 		// when that is a directory. When .git is a gitfile — a linked worktree, or
 		// a main worktree made with --separate-git-dir — the refs live wherever it
@@ -150,26 +152,31 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		// Lstat under the gitfile would report ENOTDIR for every branch and
 		// "confirm" any silent exit 1 as absence. Let git resolve the indirection;
 		// a failed resolution is itself a failed probe, never absence.
-		common := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-common-dir")
-		common.Env = repoEnv
-		var commonOut, commonErr bytes.Buffer
-		common.Stdout = &commonOut
-		common.Stderr = &commonErr
-		if err := common.Run(); err != nil {
+		//
+		// Bounded like the show-ref probe above: a stalled rev-parse must not
+		// wedge the reset, and a stalled loose-ref stat must not fabricate
+		// absence. Both surface as errors so the caller retains the record.
+		commonOut, commonErr := runBoundedBranchGit(repoRoot, repoEnv, false, "rev-parse", "--git-common-dir")
+		if commonErr != nil {
+			var commonExitErr *exec.ExitError
+			var detail string
+			if errors.As(commonErr, &commonExitErr) {
+				detail = strings.TrimSpace(string(commonExitErr.Stderr))
+			}
 			return false, bare, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
-				repoRoot, err, strings.TrimSpace(commonErr.String()))
+				repoRoot, commonErr, detail)
 		}
 		// Strip ONLY the terminating newline: a --separate-git-dir path may
 		// legitimately end in whitespace, and TrimSpace would point the loose-ref
 		// observation at a nonexistent trimmed path, whose ENOENT then fabricates
 		// exactly the confirmed absence this arm exists to prevent.
-		commonDir := strings.TrimSuffix(commonOut.String(), "\n")
+		commonDir := strings.TrimSuffix(string(commonOut), "\n")
 		if !filepath.IsAbs(commonDir) {
 			// Relative output is relative to the -C directory.
 			commonDir = filepath.Join(repoRoot, commonDir)
 		}
 		loose := filepath.Join(commonDir, "refs", "heads", filepath.FromSlash(branch))
-		fi, statErr := os.Lstat(loose)
+		fi, statErr := BoundedLstat(loose)
 		switch {
 		case statErr == nil && fi.IsDir():
 			return false, bare, nil
@@ -181,8 +188,12 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 			return false, bare, fmt.Errorf("stat %s: %w", loose, statErr)
 		}
 	}
+	var stderrDetail string
+	if exitErr != nil {
+		stderrDetail = strings.TrimSpace(string(exitErr.Stderr))
+	}
 	return false, bare, fmt.Errorf("git show-ref refs/heads/%s in %s: %w: %s",
-		branch, repoRoot, err, strings.TrimSpace(stderr.String()))
+		branch, repoRoot, err, stderrDetail)
 }
 
 // DeleteLocalBranch force-deletes the local branch `branch` in the repo at
@@ -238,10 +249,15 @@ func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 		}
 		delEnv = append(delEnv, "GIT_DIR="+absRepoRoot)
 	}
-	del := exec.Command("git", "-C", repoRoot, "branch", "-D", branch)
-	del.Env = delEnv
-	if out, err := del.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, string(out))
+	// Bounded (#3096-equivalent for the branch-prune path): the same stalled-
+	// filesystem hazard the worktree-removal half of this flow already bounds.
+	// An unbounded `git branch -D` on a dead mount wedges `af reset` with no
+	// completion time and no message; a bounded one fails clearly and the caller
+	// (commands/reset.go) retains the session record in unverifiedBranches so a
+	// re-run can revisit the branch. CombinedOutput so the error message carries
+	// git's own diagnostic, matching the pre-fix error shape.
+	if out, err := runBoundedBranchGit(repoRoot, delEnv, true, "branch", "-D", branch); err != nil {
+		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, strings.TrimSpace(string(out)))
 	}
 	return true, nil
 }
