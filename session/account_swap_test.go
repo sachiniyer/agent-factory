@@ -931,6 +931,44 @@ func TestSynchronizeAccountSwapRuntimeMetadataRestoresSessionEnvPassthrough(t *t
 		"retiring the recovery marker must not make later tabs forget configured passthrough variables")
 }
 
+// #7087 review, P3: a row restored with a pending swap never runs Provision, so
+// the environment the swap's settle applies is the only resolution its agent
+// handle and worktree get. It is recorded as one: the first tab after the swap
+// settles builds from it and reads no config, rather than being refused while
+// the box is loaded.
+func TestSettledSwapMarksTheEnvironmentItRestoredAsResolved(t *testing.T) {
+	const passthrough = "AF_TEST_SETTLED_SWAP_RESOLVED"
+	inst := registeredAccountSwapTestInstance(t, tmux.ProgramClaude, "claude")
+	cfg, err := config.LoadConfig()
+	require.NoError(t, err)
+	cfg.SessionEnvPassthrough = []string{passthrough}
+	require.NoError(t, config.SaveConfig(cfg))
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	_, err = inst.SelectAccountAutomatically("", "work")
+	require.NoError(t, err)
+	inst.EndLimitResume()
+	stored := inst.ToInstanceData().ForStorage()
+	stored.Worktree = GitWorktreeData{
+		RepoPath: inst.Path, WorktreePath: inst.Path,
+		SessionName: inst.Title, BranchName: "main", ExternalWorktree: true,
+	}
+	restored, err := FromInstanceData(stored)
+	require.NoError(t, err)
+	agentTmux := tmux.NewTmuxSessionWithDeps("settled-account-swap", "claude", &captureAccountSwapEnvironmentPty{},
+		cmd_test.MockCmdExec{RunFunc: func(*exec.Cmd) error { return fmt.Errorf("session not found") }})
+	restored.mu.Lock()
+	restored.Tabs[0].tmux = agentTmux
+	gw := restored.gitWorktree
+	restored.mu.Unlock()
+	require.NotNil(t, gw, "precondition: the row carries its worktree")
+
+	require.NoError(t, restored.SynchronizeAccountSwapRuntimeMetadata())
+
+	require.Same(t, agentTmux, restored.envResolvedTmux.Load(), "the settled agent handle is resolved")
+	require.Same(t, gw, restored.envResolvedWorktree.Load(), "the worktree is resolved")
+	require.Contains(t, gw.HookEnvironment(), passthrough, "with the list the settle applied")
+}
+
 // flaggedPaneSwapInstance is a limit-blocked, automatic-swap session whose agent
 // pane already carries af's own injected codex startup-update-check flag — the
 // post-#5433 shape — recorded with its generatedArgs declaration, and whose

@@ -5,6 +5,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -107,6 +108,15 @@ func refreshSessionIdentity(i *Instance, tmuxSession *tmux.TmuxSession) {
 // unknown-config one, for a config not read in time) rather than start the
 // tab bare, on the daemon's own identity.
 func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.GitWorktree) error {
+	// The account the sibling inherits is the session's CURRENT one, applied
+	// on every spawn (#7087). The resolved-handle mark below records which
+	// handle a refresh ran on, not which account it applied, and a record can
+	// change without the handle: a reverted handoff restores the account in the
+	// record only, and a swap rollback the same. The identity reads no config,
+	// so applying it costs nothing and needs no mark.
+	if agentTmux != nil {
+		refreshSessionIdentity(i, agentTmux)
+	}
 	resolved := func() bool {
 		return i.envResolvedTmux.Load() == agentTmux && (gw == nil || i.envResolvedWorktree.Load() == gw)
 	}
@@ -127,6 +137,29 @@ func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.G
 		}
 	}
 	return nil
+}
+
+// markSwapEnvironmentResolved records a settled swap's restored environment as
+// a resolution: tabs is the roster SynchronizeAccountSwapRuntimeMetadata just
+// gave passthrough and the session's account, so its agent tab's handle is
+// resolved, and the worktree is given the same list here. A row restored with
+// a pending swap never ran Provision, so without this its first tab after the
+// swap settles would read the config again (#7087 review).
+func (i *Instance) markSwapEnvironmentResolved(tabs []*Tab, passthrough []string) {
+	for _, tab := range tabs {
+		if tab != nil && tab.Kind == TabKindAgent && tab.tmux != nil {
+			i.envResolvedTmux.Store(tab.tmux)
+			break
+		}
+	}
+	i.mu.RLock()
+	gw := i.gitWorktree
+	i.mu.RUnlock()
+	if gw != nil {
+		if err := applyWorktreeEnvironment(i, gw, passthrough); err != nil {
+			log.WarningLog.Printf("session %q: %v", i.Title, err)
+		}
+	}
 }
 
 // refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab
@@ -171,6 +204,13 @@ func refreshWorktreeEnvironment(i *Instance, worktree *git.GitWorktree) error {
 	if err != nil {
 		return fmt.Errorf("post-worktree environment for %q: %w", i.Title, err)
 	}
+	return applyWorktreeEnvironment(i, worktree, passthrough)
+}
+
+// applyWorktreeEnvironment gives the worktree the hook environment a refresh
+// resolved — its scope id and pass-through list — and marks it resolved.
+func applyWorktreeEnvironment(i *Instance, worktree *git.GitWorktree, passthrough []string) error {
+	worktree.SetHookScopeSessionID(i.ID)
 	if err := worktree.SetHookEnvironment(passthrough); err != nil {
 		return fmt.Errorf("invalid post-worktree environment pass-through: %w", err)
 	}

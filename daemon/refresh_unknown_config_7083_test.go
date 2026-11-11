@@ -69,14 +69,14 @@ func TestAStalePrimedSnapshotIsReprobedNotLoaded(t *testing.T) {
 		loaded++
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
-	// The inline probe primes the row; age that snapshot past the cap before
-	// the pass that would load it.
+	// The inline probe primes the row; age that snapshot past the cap — in
+	// refresh passes (#7087 review) — before the pass that would load it.
 	startDeferredConfigProbe = func(p func()) {
 		probes++
 		p()
 		deferredConfigRows.Lock()
 		if row := deferredConfigRows.rows[key]; row != nil && probes == 1 {
-			row.primedAt = time.Now().Add(-deferredPrimedMaxAge - time.Second)
+			row.primedTick = 0                   // primed long ago, in passes
 			row.primed, row.probing = nil, false // hold the load for the next pass
 			row.next = time.Now().Add(time.Hour)
 		}
@@ -88,11 +88,12 @@ func TestAStalePrimedSnapshotIsReprobedNotLoaded(t *testing.T) {
 
 	deferredConfigRows.Lock()
 	row := deferredConfigRows.rows[key]
-	row.primed, row.primedAt = session.NewRestoreContext(), time.Now().Add(-deferredPrimedMaxAge-time.Second)
+	// Older than deferredPrimedMaxPasses passes by the next one.
+	row.primed, row.primedTick = session.NewRestoreContext(), 0
 	deferredConfigRows.Unlock()
 
 	_, _, _, _, err = refreshDaemonInstances(existing)
 	require.NoError(t, err)
-	assert.Equal(t, 2, probes, "a snapshot older than deferredPrimedMaxAge is probed again")
+	assert.Equal(t, 2, probes, "a snapshot older than deferredPrimedMaxPasses passes is probed again")
 	assert.Equal(t, 1, loaded, "and the row loads from the fresh one, never the stale one")
 }
