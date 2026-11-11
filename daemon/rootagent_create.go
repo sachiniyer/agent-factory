@@ -207,7 +207,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// bring root back blank (#7084).
 	primed, err := primeRootCreateConfig(workspace)
 	if session.IsProjectConfigUnknown(err) {
-		m.rootEnsureFailed(stateKey, st, fmt.Errorf("cannot pick the root agent's program: %w", err))
+		m.rootEnsureFailed(stateKey, st, rootConfigUnknownError(resolution.RootAgent, err))
 		return
 	}
 	projectConfig, projectErr := primed.ResolvedConfigFor(workspace)
@@ -226,6 +226,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		carried    reapedRootState
 		reapedRoot bool
 	)
+	// What an earlier heal carried, if its create failed after its reap
+	// (rootagent_carry.go). It is the last working root's, so it outranks a
+	// record reaped since: no replacement has launched, and any record reaped
+	// meanwhile is a failed one.
+	held, haveHeld := m.heldRootCarry(st, repo, identity)
 
 	if inst != nil {
 		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
@@ -274,6 +279,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			return
 		}
 		testHookRootAfterReap()
+	}
+	if haveHeld {
+		m.warn().Printf("root agent for %s: re-creating it with the conversation and tabs its last heal carried; that heal's create failed after the reap", workspace)
+		carried, reapedRoot = held, true
 	}
 
 	skipRecordedResume := false
@@ -369,6 +378,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		data, err = m.createVerifiedRoot(repo.ID, identity, req)
 	}
 	if err != nil {
+		if reapedRoot {
+			m.holdRootCarry(st, repo, identity, carried) // the next pass's create carries it
+		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
 			// CreateSession, so no create was attempted and none may be reported
@@ -386,5 +398,6 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
+	m.retireRootCarries(repo.ID)
 	m.rootEnsureSucceeded(st)
 }

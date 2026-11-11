@@ -69,16 +69,24 @@ func (i *Instance) noteWorktreeSetup(gw *git.GitWorktree) {
 	i.noteSetupHookFailure(gw.SetupFailureNote())
 }
 
+// legacyHookNotRunTail is how the second half of the one not-run note an
+// earlier build wrote with a "; " inside it begins (#7082, 9d9cdfa4ab): split
+// on the row's separator, that note is a prefixed head and this tail.
+const legacyHookNotRunTail = "run them in the worktree yourself, or recreate the session once it recovers: "
+
 // dropSetupNotes removes the "; "-joined notes that begin with prefix. A hook
 // not-run note never contains "; " itself (git.hookNotRunNote), so exactly that
-// note goes, and every other note is kept as it was written.
+// note goes, and every other note is kept as it was written. The earlier
+// build's two-part note goes whole: its tail is dropped too, whether it still
+// follows its head or a build since dropped the head alone and left the tail
+// on the row — that text is unique to the old note (#7088, #7090 review).
 func dropSetupNotes(notes, prefix string) string {
-	if !strings.Contains(notes, prefix) {
+	if !strings.Contains(notes, prefix) && !strings.Contains(notes, legacyHookNotRunTail) {
 		return notes
 	}
 	var kept []string
 	for _, note := range strings.Split(notes, "; ") {
-		if !strings.HasPrefix(note, prefix) {
+		if !strings.HasPrefix(note, prefix) && !strings.HasPrefix(note, legacyHookNotRunTail) {
 			kept = append(kept, note)
 		}
 	}

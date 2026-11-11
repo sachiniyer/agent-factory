@@ -29,10 +29,10 @@ func unknownLaunchConfig(t *testing.T) {
 	t.Cleanup(func() { resolveProjectConfigForLaunch, primeRootCreateConfig = prev, prevPrime })
 }
 
+// Both against the resolver the heal's create runs (runRootCreate), over the
+// answer its primed snapshot gives (#7088 review).
 func TestRootAgentProgramRefusesAnUnknownProjectConfig(t *testing.T) {
-	unknownLaunchConfig(t)
-
-	program, err := rootAgentProgramForProfile("/repo", config.RootAgent{})
+	program, err := rootAgentProgramFromResolution("/repo", config.RootAgent{}, nil, unknownProjectConfig("/repo"))
 
 	require.Error(t, err, "an unknown project config is not bare claude")
 	require.True(t, session.IsProjectConfigUnknown(err))
@@ -41,9 +41,7 @@ func TestRootAgentProgramRefusesAnUnknownProjectConfig(t *testing.T) {
 
 // An explicit profile program names no config, and answers as it always did.
 func TestRootAgentExplicitProgramNeedsNoProjectConfig(t *testing.T) {
-	unknownLaunchConfig(t)
-
-	program, err := rootAgentProgramForProfile("/repo", config.RootAgent{Program: "/opt/root"})
+	program, err := rootAgentProgramFromResolution("/repo", config.RootAgent{Program: "/opt/root"}, nil, unknownProjectConfig("/repo"))
 
 	require.NoError(t, err)
 	require.Equal(t, "/opt/root", program)

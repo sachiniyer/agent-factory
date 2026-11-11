@@ -99,7 +99,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		// THREE keys, not one. A root session's program comes from
 		// root_agent.program (or a legacy root_agents entry) and only falls back
 		// to the program_overrides-resolved claude when that is empty —
-		// rootAgentProgramForProfile returns an explicit program verbatim. All
+		// rootAgentProgramFromResolution returns an explicit program verbatim. All
 		// three arrive here as the pane command.
 		keys: []string{"program_overrides", "root_agent.program", "root_agents"},
 		note: "the pane's program, run as `/bin/sh -c <command>` immediately before exec. This is the site " +
@@ -111,7 +111,7 @@ var shellSiteRegistry = map[string][]classifiedSite{
 		// THREE keys, not one. A root session's program comes from
 		// root_agent.program (or a legacy root_agents entry) and only falls back
 		// to the program_overrides-resolved claude when that is empty —
-		// rootAgentProgramForProfile returns an explicit program verbatim. All
+		// rootAgentProgramFromResolution returns an explicit program verbatim. All
 		// three arrive here as the pane command.
 		keys: []string{"program_overrides", "root_agent.program", "root_agents"},
 		note: "the pane's program as the launcher ADMITTED it into the launch capability (not re-read from argv), run as `/bin/sh -c <command>` immediately before exec. Same operator keys as the unscoped site; this is the account-scoped half of the site " +

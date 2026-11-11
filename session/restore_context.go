@@ -17,9 +17,14 @@ import (
 // The context is explicit — carried on the Instance for the duration of its
 // restore — rather than process-global, so nothing outside a batch that opted in
 // ever sees a shared result. Every method is nil-safe: a nil *RestoreContext
-// resolves exactly as before. Only successes are remembered; a failed resolution
-// is retried by the next caller, as it always was. The shared *RepoContext and
-// *ResolvedConfig are read-only on the Start path.
+// resolves exactly as before. A repository is remembered once resolved; a
+// failed repository probe is retried by the next caller. A project config is
+// remembered once ANSWERED — resolved, or answered with an error such as an
+// invalid value — so each read of the batch gets the answer the first read got
+// rather than asking git again with a load's single attempt (#7088 review);
+// only a config read that went unanswered (config.ResolveWentUnanswered) is
+// retried. The shared *RepoContext and *ResolvedConfig are read-only on the
+// Start path.
 //
 // ResolveConfigForRepo's durable observation (the in-repo config hash marker) is
 // idempotent — it records only when the content hash changed — so the first
@@ -46,7 +51,9 @@ type repoMemo struct {
 
 type configMemo struct {
 	mu       sync.Mutex
+	answered bool
 	resolved *config.ResolvedConfig
+	err      error
 }
 
 // NewRestoreContext returns a context that resolves through the real config
@@ -159,12 +166,12 @@ func (c *RestoreContext) ResolveConfigForRepo(repo *config.RepoContext) (*config
 
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.resolved != nil {
-		return m.resolved, nil
+	if m.answered {
+		return m.resolved, m.err
 	}
 	resolved, err := c.resolveConfig(repo)
-	if err == nil {
-		m.resolved = resolved
+	if err == nil || !config.ResolveWentUnanswered(err) {
+		m.answered, m.resolved, m.err = true, resolved, err
 	}
 	return resolved, err
 }

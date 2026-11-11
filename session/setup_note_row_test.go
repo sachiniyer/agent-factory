@@ -72,3 +72,31 @@ func TestNoteWorktreeSetupReplacesAStaleNotRunNote(t *testing.T) {
 	inst.noteWorktreeSetup(gw)
 	require.Equal(t, other, inst.SetupHookFailed(), "replacing is idempotent")
 }
+
+// #7088 review, P3: #7082 (9d9cdfa4ab) wrote one not-run note with a "; "
+// inside it, the separator the row joins notes with. Dropping only the part
+// that starts with the prefix left the rest on the row — "run them in the
+// worktree yourself, or recreate the session once it recovers: …". The next
+// run drops that whole note, head and tail, and nothing else.
+func TestNoteWorktreeSetupDropsTheWholeNoteAnEarlierBuildWrote(t *testing.T) {
+	gw, err := git.NewGitWorktreeFromStorage(t.TempDir(), t.TempDir(), "legacy-note", "main", "", true, false)
+	require.NoError(t, err)
+	other := "entry 1 failed: exit status 3; output kept at /tmp/x.log"
+	legacyTail := "run them in the worktree yourself, or recreate the session once it recovers: read checkout marker for /repo: context deadline exceeded"
+	legacy := "post_worktree_commands did not run: couldn't read the project config for /repo in time (3 attempts) — " +
+		"the machine may be under heavy load, or its filesystem may not be responding; " + legacyTail
+	for _, tc := range []struct{ name, notes, want string }{
+		{"alone", legacy, ""},
+		{"before another note", legacy + "; " + other, other},
+		{"after another note", other + "; " + legacy, other},
+		// A build since 23a8503dfd dropped the head alone and left the tail.
+		{"a tail an earlier build left on its own", legacyTail, ""},
+		{"a tail an earlier build left beside another note", other + "; " + legacyTail, other},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst := &Instance{Title: "legacy-note", setupHookFailed: tc.notes}
+			inst.noteWorktreeSetup(gw)
+			require.Equal(t, tc.want, inst.SetupHookFailed(), "no fragment of the earlier note is left on the row")
+		})
+	}
+}
