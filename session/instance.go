@@ -20,6 +20,13 @@ type Instance struct {
 	// answers it instead of re-reading the project config, so a read that cannot
 	// complete after teardown never strands an admitted swap with no agent (#7077).
 	frozenEnvPassthrough atomic.Pointer[[]string]
+	// envUnresolved records that an inert load could not read the session's
+	// environment pass-through, so its handles carry none: the next tab spawn
+	// reads it before building a sibling from them (#7080).
+	envUnresolved atomic.Bool
+	// spawnEnvMu serializes the spawn that resolves envUnresolved, so
+	// concurrent tab creates read the environment once (#7080 review).
+	spawnEnvMu sync.Mutex
 
 	// mu protects fields that are accessed concurrently by async Start()
 	// goroutines (writers) and the main bubbletea loop (readers):

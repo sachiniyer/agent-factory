@@ -182,6 +182,10 @@ func (i *Instance) AddShellTabWithID(id string) (resultTab *Tab, resultErr error
 		return nil, fmt.Errorf("cannot add a tab without a worktree")
 	}
 
+	if err := i.ensureSpawnEnvironment(agentTmux, gw); err != nil {
+		return nil, err
+	}
+
 	// Spawn outside the lock: Start shells out to `tmux new-session` and polls
 	// for the session to appear, which must not block other readers of i.mu. The
 	// tmux name was resolved above against the live sibling sessions, so it is
@@ -354,6 +358,10 @@ func (i *Instance) AddProcessTabWithID(id, command, requestedName string) (resul
 	worktreePath := gw.GetWorktreePath()
 	if worktreePath == "" {
 		return nil, fmt.Errorf("cannot add a tab without a worktree")
+	}
+
+	if err := i.ensureSpawnEnvironment(agentTmux, gw); err != nil {
+		return nil, err
 	}
 
 	// Spawn outside the lock (see AddShellTab): the tmux name was resolved above
