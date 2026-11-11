@@ -340,6 +340,11 @@ type TmuxSession struct {
 	// The caller applies the session's own recorded id to the program first, and a
 	// session with none starts fresh. Guarded by programMu.
 	exactResumeOnly bool
+	// exactResumeRefusal is why the program carries no conversation id when
+	// the session HAD one recorded and refused it (#7101), so the fresh start
+	// is reported as a refusal instead of as "nothing recorded". Guarded by
+	// programMu.
+	exactResumeRefusal ExactResumeRefusal
 	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
 	// pane browser-free (#3854), or nil for every other pane. It is a resolved
 	// list rather than a bool because the operator's own pass-through wins: a name

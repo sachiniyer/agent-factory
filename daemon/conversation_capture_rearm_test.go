@@ -127,13 +127,16 @@ func TestConversationCaptureLoopRecordsARolloutMintedAfterTheFirstWindow(t *test
 	}, 2*time.Second, 10*time.Millisecond,
 		"the recorded id must reach the repo's instance data")
 
-	// Recording is the loop's exit condition: the armed marker must release so
-	// a later runtime generation is never fenced by a spent loop.
+	// Recording no longer ends the loop (#7101): it keeps the generation's
+	// marker for the follow check, and between checks it still drops the
+	// reap fence, so a recorded row is never pinned busy.
+	token, armed := armedConversationToken(t, manager, inst)
+	require.True(t, armed, "a recorded row keeps its loop for the follow check")
+	require.Equal(t, inst.AgentRuntimeToken(), token)
 	require.Eventually(t, func() bool {
-		_, armed := armedConversationToken(t, manager, inst)
-		return !armed
+		return pendingConversationCaptureCount(manager, inst) == 0
 	}, 2*time.Second, 10*time.Millisecond,
-		"the loop must disarm once the conversation is recorded")
+		"the follow loop must drop the reap fence between checks")
 }
 
 // TestConversationCaptureLoopExitsWhenTheRowDies: a dead or archived pane
@@ -189,17 +192,24 @@ func TestConversationCaptureLoopExitsWhenItsMarkerIsDisplaced(t *testing.T) {
 }
 
 // TestArmConversationCapturesArmsExactlyTheRowsThatNeedIt is the deferred-half
-// contract: post-restart and capture-predating rows get an arm; rows that
-// already recorded, died, or run a different provider are left alone.
+// contract: post-restart and capture-predating rows get an arm, and so does a
+// row that already recorded — for the follow check (#7101); rows that died or
+// run a different provider are left alone.
 func TestArmConversationCapturesArmsExactlyTheRowsThatNeedIt(t *testing.T) {
 	shrinkConversationCaptureForTest(t)
-	manager, inst, repoID, _, _ := codexLoopTestInstance(t)
+	manager, inst, repoID, _, codexHome := codexLoopTestInstance(t)
 
 	recorded, err := session.NewInstance(session.InstanceOptions{
 		Title: "codex-done", Path: inst.Path, Program: tmux.ProgramCodex,
 	})
 	require.NoError(t, err)
 	recorded.SetTmuxSession(tmux.NewTmuxSession("codex-done", tmux.ProgramCodex))
+	// The follow loop asks the runtime what it holds; the fixture's pane is a
+	// name-only handle, so hand it the (empty) store like the primary row.
+	recorded.SetCodexRuntimeHeldOverrideForTest(heldAllCodexRollouts(codexHome))
+	recordedWorktree, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, recorded.Title, "main", "", false, true)
+	require.NoError(t, err)
+	recorded.SetGitWorktreeForTest(recordedWorktree)
 	recorded.SetStatusForTest(session.Running)
 	recorded.SetAgentConversation(session.AgentConversationData{
 		Agent: tmux.ProgramCodex, ID: "5299e00d-1111-4222-8333-f7045e07a242",
@@ -230,8 +240,11 @@ func TestArmConversationCapturesArmsExactlyTheRowsThatNeedIt(t *testing.T) {
 	token, armed := armedConversationToken(t, manager, inst)
 	require.True(t, armed, "a live unrecorded codex row must gain a capture loop")
 	require.Equal(t, inst.AgentRuntimeToken(), token)
+	token, armed = armedConversationToken(t, manager, recorded)
+	require.True(t, armed, "a live recorded codex row must gain a follow loop")
+	require.Equal(t, recorded.AgentRuntimeToken(), token)
 	for name, other := range map[string]*session.Instance{
-		"recorded": recorded, "lost": lost, "claude": claude,
+		"lost": lost, "claude": claude,
 	} {
 		_, armed := armedConversationToken(t, manager, other)
 		require.False(t, armed, "a %s row must not be armed", name)

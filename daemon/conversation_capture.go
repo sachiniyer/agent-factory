@@ -123,12 +123,15 @@ func (m *Manager) finishConversationCapture(inst *session.Instance) {
 	m.pendingConversationCaptures[inst]--
 }
 
-// conversationCaptureLoop keeps an armed capture re-asking until a
-// conversation is recorded or the row stops qualifying (#6769): a Codex
-// rollout minted after the first capture's window — the pane's first prompt,
-// a daemon-restart gap — must still land on the record, or a restore falls
-// back to the provider's latest-session behavior. Ordinary "still nothing"
-// polls stay silent; each DISTINCT actual error is warned once.
+// conversationCaptureLoop keeps an armed capture re-asking while the row
+// qualifies (#6769): a Codex rollout minted after the first capture's window —
+// the pane's first prompt, a daemon-restart gap — must still land on the
+// record, or a restore falls back to the provider's latest-session behavior.
+// Recording does not end it (#7101): a recorded row keeps a follow check on the
+// same cadence, so a pane that moves to another thread (`/new`, `/resume`)
+// re-records it instead of leaving a stale id the next restore must refuse.
+// Ordinary "still nothing" polls stay silent; each DISTINCT actual error is
+// warned once.
 //
 // pendingConversationCaptures keeps its original meaning — an ATTEMPT in
 // flight, the signal a reap waits on — not "a loop exists". A row that simply
@@ -173,11 +176,12 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 
 // conversationCaptureArmed is the loop's gate: the row must still be the same
 // tracked instance, still own the armed marker for THIS generation, and still
-// be a live unrecorded session whose baseline can be trusted. Failing any of
-// those ends the loop — a recorded conversation, a replaced runtime, a row
-// that died or was archived, a baseline whose store scan never worked.
+// be a live session whose baseline can be trusted. Failing any of those ends
+// the loop — a replaced runtime, a row that died or was archived, a baseline
+// whose store scan never worked. A recorded conversation no longer does: the
+// loop goes on following the runtime (#7101).
 func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, token session.AgentRuntimeToken, snap session.ConversationCaptureSnapshot) bool {
-	if inst == nil || inst.UserKilled() || inst.IsArchived() || inst.AgentConversation().HasID() {
+	if inst == nil || inst.UserKilled() || inst.IsArchived() {
 		return false
 	}
 	if inst.AgentRuntimeToken() != token || snap.CodexBaselineFailed() {
@@ -202,11 +206,13 @@ func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, t
 }
 
 // ArmConversationCaptures is the deferred half of #6769's recording
-// guarantee: a live Codex row with no recorded conversation and no armed
-// capture — the daemon restarted into it, or it predates capture — gets a
-// fresh baseline and the same loop every launch gets. The expensive half (the
-// baseline's store walk) runs outside m.mu; admission re-verifies the row is
-// still tracked under the lock.
+// guarantee: a live Codex row with no armed capture — the daemon restarted
+// into it, or it predates capture — gets a fresh baseline and the same loop
+// every launch gets. A recorded row is armed too, for the follow check
+// (#7101). A late baseline is harmless now: capture also asks the runtime
+// which rollout it holds open, so a file minted before this arm is still
+// found. The expensive half (the baseline's store walk) runs outside m.mu;
+// admission re-verifies the row is still tracked under the lock.
 func (m *Manager) ArmConversationCaptures() {
 	m.mu.Lock()
 	instances := make(map[string]*session.Instance, len(m.instances))
@@ -228,16 +234,19 @@ func (m *Manager) ArmConversationCaptures() {
 			continue
 		}
 		if _, killing := kills[key]; killing {
-			// A replacement operation (swap, handoff, kill, restore) arms its
-			// own capture when the new runtime exists; a baseline built now
-			// would bind the wrong store.
+			// A kill, archive, or restore arms its own capture when the new
+			// runtime exists; a baseline built now would bind the wrong store.
+			// Swaps and handoffs never enter killsInFlight, so this pass can
+			// arm their replacement mid-operation — which the held-open
+			// answer makes safe (#7101).
 			continue
 		}
-		if inst.DropPendingConversationCaptureIfMoot() {
-			// A recorded, killed, or archived row can never arm again, so its
-			// parked baseline is permanently moot: the check and the drop are
-			// one atomic step so a respawn parking its baseline between them
-			// is never destroyed (#6946).
+		// A recorded, killed, or archived row can never spend a parked
+		// baseline, so the park is dropped: the check and the drop are one
+		// atomic step so a respawn parking its baseline between them is never
+		// destroyed (#6946). A recorded row still arms, for the follow check.
+		inst.DropPendingConversationCaptureIfMoot()
+		if inst.UserKilled() || inst.IsArchived() {
 			continue
 		}
 		switch inst.GetLiveness() {
@@ -276,13 +285,15 @@ func (m *Manager) ArmConversationCaptures() {
 // generation, the caller's token going stale, or a baseline that never bound
 // a Codex store. A park released and then unused goes back the same way
 // (#6946). The declines that make the park permanently moot — a recorded,
-// killed, or archived row — drop it explicitly instead. Callers must hold
-// m.mu.
+// killed, or archived row — drop it explicitly instead; a recorded row then
+// arms on the fallback baseline for its follow check (#7101). Callers must
+// hold m.mu.
 func (m *Manager) armDeferredConversationCaptureLocked(repoID, key string, inst *session.Instance, fallback session.ConversationCaptureSnapshot, token session.AgentRuntimeToken) {
 	if m.instances[key] != inst {
 		return
 	}
-	if inst.DropPendingConversationCaptureIfMoot() {
+	inst.DropPendingConversationCaptureIfMoot()
+	if inst.UserKilled() || inst.IsArchived() {
 		return
 	}
 	if armed, ok := m.armedConversationCaptures[inst]; ok && armed == token {
@@ -309,11 +320,16 @@ func (m *Manager) armDeferredConversationCaptureLocked(repoID, key string, inst 
 }
 
 // captureAgentConversation runs one capture attempt and commits any id it
-// finds. A non-nil return is the attempt's failure for the loop's rate-limited
-// warning; ordinary absence (no rollout yet) returns nil — nothing wrong.
+// finds; on a row that already recorded one it runs the follow check instead
+// (#7101). A non-nil return is the attempt's failure for the loop's
+// rate-limited warning; ordinary absence (no rollout yet) returns nil —
+// nothing wrong.
 func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) error {
-	if inst == nil || inst.UserKilled() || inst.AgentConversation().HasID() {
+	if inst == nil || inst.UserKilled() {
 		return nil
+	}
+	if recorded := inst.AgentConversation(); recorded.HasID() {
+		return m.followAgentConversation(repoID, key, inst, snap, token, recorded)
 	}
 	agent := token.Agent()
 	if agent == "" {

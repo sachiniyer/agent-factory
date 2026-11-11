@@ -344,12 +344,17 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		}
 	}
 
-	program, proof, refusedID, perr := respawnLaunchProgram(
+	program, proof, refusal, perr := respawnLaunchProgram(
 		i, resolvedProgram, declarationBase, resolution.trustBase, resume, prepared)
 	if perr != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: session %q: %w", i.Title, perr))
 	}
+	refusedID := refusal.ID
 	setLaunchProgram(ts, program, proof)
+	// A refused id must be reported as refused, with its reason, by the
+	// re-spawn that starts fresh because of it — not as "nothing recorded"
+	// (#7101). The zero value clears an earlier attempt's refusal.
+	ts.SetExactResumeRefusal(refusal)
 	// A re-spawn resumes this session's own recorded conversation or starts fresh
 	// (#4797): never the latest one on a shared account home.
 	ts.SetExactResumeOnly(true)
@@ -681,15 +686,15 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 // the launch environment's project config cannot be read (#7077).
 func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	trustBase, resume bool, prepared *accountSwapLaunchPlan,
-) (string, sessionenv.AccountLaunchProof, string, error) {
+) (string, sessionenv.AccountLaunchProof, tmux.ExactResumeRefusal, error) {
 	if prepared != nil {
 		if prepared.conversation.HasID() {
 			i.SetAgentConversation(prepared.conversation)
 		}
-		return prepared.program, prepared.proof, "", nil
+		return prepared.program, prepared.proof, tmux.ExactResumeRefusal{}, nil
 	}
 	program := resolvedProgram
-	refusedID := ""
+	var refusal tmux.ExactResumeRefusal
 	if resume {
 		rewritten, ok, reason := prepareExactResumeConversation(i, program)
 		if ok {
@@ -699,15 +704,15 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 			// this launch starts fresh. The caller retires the dead id when the
 			// spawn commits (#6769 review): leaving it recorded would suppress
 			// every later capture arm and make each restore start fresh again.
-			refusedID = i.resumableConversation().ID
+			refusal = tmux.ExactResumeRefusal{Session: i.Title, ID: i.resumableConversation().ID, Reason: reason}
 		}
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
 	env, err := launchEnvFor(i, i.GetWorktreePath())
 	if err != nil {
-		return "", sessionenv.AccountLaunchProof{}, "", err
+		return "", sessionenv.AccountLaunchProof{}, tmux.ExactResumeRefusal{}, err
 	}
 	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
-	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusedID, nil
+	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusal, nil
 }

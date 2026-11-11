@@ -1,6 +1,11 @@
 package tmux
 
-import "github.com/sachiniyer/agent-factory/log"
+import (
+	"fmt"
+	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
+)
 
 // accountWideLatestResume reports whether program's agent resumes "the latest
 // conversation" from a store shared by every session on the same account home,
@@ -30,6 +35,38 @@ func (t *TmuxSession) SetExactResumeOnly(on bool) {
 	t.programMu.Lock()
 	defer t.programMu.Unlock()
 	t.exactResumeOnly = on
+}
+
+// ExactResumeRefusal records a recorded conversation the session refused to
+// resume and why (#7101): a stale id (a newer thread exists in the worktree),
+// a missing rollout, or one af cannot prove current. Session is the session's
+// own title, which the tmux name only approximates.
+type ExactResumeRefusal struct {
+	Session string
+	ID      string
+	Reason  string
+}
+
+// SetExactResumeRefusal records the conversation the caller refused to put in
+// this session's program; the zero value clears it. A re-spawn that then starts
+// fresh reports the refusal, naming the id and the reason, instead of claiming
+// there was no recorded id.
+func (t *TmuxSession) SetExactResumeRefusal(refusal ExactResumeRefusal) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.exactResumeRefusal = refusal
+}
+
+// ExactResumeFreshStartMessage is the warning a re-spawn logs when it starts a
+// fresh conversation instead of the account-wide latest. A refused id gets its
+// own wording: "no recorded conversation id" would be false, and it is the
+// line an operator reads to learn why a restore lost its context.
+func ExactResumeFreshStartMessage(sanitizedName string, refusal ExactResumeRefusal) string {
+	if strings.TrimSpace(refusal.ID) == "" {
+		return fmt.Sprintf("tmux session %q: no recorded conversation id to resume; starting a fresh conversation rather than the latest one on a shared account home", sanitizedName)
+	}
+	return fmt.Sprintf("session %q (tmux %q): refused to resume its recorded conversation %s: %s; starting a fresh conversation rather than the latest one on a shared account home",
+		refusal.Session, sanitizedName, refusal.ID, refusal.Reason)
 }
 
 // ProgramResumesConversation reports whether program — launched through the
@@ -76,12 +113,13 @@ func (t *TmuxSession) resumeRewrite() func(string) string {
 	t.programMu.RLock()
 	exact := t.exactResumeOnly
 	program := t.program
+	refusal := t.exactResumeRefusal
 	t.programMu.RUnlock()
 	if !exact {
 		return resumeProgram
 	}
 	if accountWideLatestResume(program) && resumeProgram(program) != program {
-		log.WarningLog.Printf("tmux session %q: no recorded conversation id to resume; starting a fresh conversation rather than the latest one on a shared account home", t.sanitizedName)
+		log.WarningLog.Print(ExactResumeFreshStartMessage(t.sanitizedName, refusal))
 	}
 	return resumeProgramExactOnly
 }

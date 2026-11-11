@@ -150,3 +150,70 @@ func TestRecordedConversationFollowsTheRuntimeToANewThread(t *testing.T) {
 		return persistedConversationID(t, repoID) == heldUserThreadID
 	}, 3*time.Second, 10*time.Millisecond, "the followed id must reach disk")
 }
+
+// TestRecordedConversationIsNotFollowedWhileASwapIsPending is lift condition
+// 3: a pending account swap or handoff reads the recorded id as the
+// conversation it carries or retires, and an in-flight operation owns the
+// runtime the evidence would come from. The follow check must leave the record
+// alone through both, and follow once they clear.
+func TestRecordedConversationIsNotFollowedWhileASwapIsPending(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	writeHeldTestRollout(t, codexHome, heldMissionThreadID, dir)
+	recorded := session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldMissionThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	}
+	inst.SetAgentConversation(recorded)
+	second := writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(second)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	snap := inst.SessionCodexCaptureBaseline()
+	token := inst.AgentRuntimeToken()
+
+	// A committed swap whose delivery is still pending.
+	inst.ReconcileAccountHandoffSnapshot("", "", false, &session.AccountSwapData{
+		ReplacementPanesStarted: true, Manual: true, Mission: "continue",
+	})
+	require.NotEmpty(t, inst.ConversationFollowFrozen())
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, recorded))
+	require.Equal(t, heldMissionThreadID, inst.AgentConversation().ID,
+		"a pending swap's recorded conversation must not move under it")
+
+	// The swap settles; a replacement operation's fence is up instead.
+	inst.ReconcileAccountHandoffSnapshot("", "", false, nil)
+	inst.SetInFlightOpForTest(session.OpRespawning)
+	require.NotEmpty(t, inst.ConversationFollowFrozen())
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, recorded))
+	require.Equal(t, heldMissionThreadID, inst.AgentConversation().ID,
+		"an in-flight operation's runtime is not evidence the follow may act on")
+
+	// Nothing pending, nothing in flight: the record follows the runtime.
+	inst.SetInFlightOpForTest(session.OpNone)
+	require.Empty(t, inst.ConversationFollowFrozen())
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, recorded))
+	require.Equal(t, heldUserThreadID, inst.AgentConversation().ID)
+	require.Equal(t, heldUserThreadID, persistedConversationID(t, repoID))
+}
+
+// TestFollowLeavesARecordThatChangedSinceItWasJudged: an operator's
+// set-conversation (or any commit) landing between the follow's read and its
+// write is newer than the judgement and stands.
+func TestFollowLeavesARecordThatChangedSinceItWasJudged(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	writeHeldTestRollout(t, codexHome, heldMissionThreadID, dir)
+	second := writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(second)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	judged := session.AgentConversationData{Agent: tmux.ProgramCodex, ID: heldMissionThreadID}
+	repaired := session.AgentConversationData{Agent: tmux.ProgramCodex, ID: "5299e00d-1111-4222-8333-f7045e07a242"}
+	inst.SetAgentConversation(repaired)
+
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst,
+		inst.SessionCodexCaptureBaseline(), inst.AgentRuntimeToken(), judged))
+	require.Equal(t, repaired.ID, inst.AgentConversation().ID,
+		"the follow replaces only the exact record it judged stale")
+}

@@ -465,7 +465,7 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	extended := false
 	for {
 		conv, retry, err := captureCodexConversationOnce(snap)
-		if conv.HasID() || !retry || timeout <= 0 {
+		if conv.HasID() || !retry {
 			return conv, err
 		}
 		// Expiry while a concrete candidate is still unclassifiable is not
@@ -479,7 +479,14 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 		if extended {
 			deadline = settleDeadline
 		}
-		if time.Now().After(deadline) {
+		if timeout <= 0 || time.Now().After(deadline) {
+			if err == nil {
+				// Nothing NEW appeared — which a late baseline guarantees when
+				// the runtime's rollout predates it (#7101). Ask the runtime
+				// itself, once per attempt rather than per poll: the process
+				// walk is the expensive half of attribution.
+				return snap.heldCodexConversation()
+			}
 			return conv, err
 		}
 		time.Sleep(50 * time.Millisecond)

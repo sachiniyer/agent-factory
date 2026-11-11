@@ -511,6 +511,11 @@ type Instance struct {
 	codexAttrMu       sync.Mutex
 	codexAttrGen      string
 	codexAttrVerdicts map[string]codexRolloutVerdict
+	// codexHolder is the pane member whose descriptors last named this
+	// runtime's conversation, so the follow check can confirm an unchanged
+	// answer from that one process instead of the whole process table
+	// (#7101). Guarded by codexAttrMu.
+	codexHolder codexConversationHolder
 	// claudeLimitScanMu and claudeLimitScan memoize each candidate
 	// transcript's usage-limit claim by file fingerprint (mtime+size) so an
 	// unchanged-banner poll does not re-read and re-decode every transcript
