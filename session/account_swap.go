@@ -139,42 +139,6 @@ func (i *Instance) ValidateAccountSwap(name string) error {
 	return i.validateAccountSwap(name, "", false, false, true)
 }
 
-// ManualAccountSwapProgram decides which program a manual account swap
-// launches: agent's own command for a cross-agent handoff, the recorded
-// program otherwise. The daemon asks it once, at admission, and hands the same
-// crossAgent to ValidateManualAccountSwap and SelectAccountForHandoff so the
-// frozen launch and the record cannot disagree.
-//
-// "Same agent" is HandoffTargetIsCurrent, the same-target guard's predicate:
-// with program_overrides.aider = "codex" running a codex pane, `--to codex`
-// whose own override resolves to aider is CROSS-agent, while `--to aider` is
-// the same-agent account change despite the enum differing from Program.
-//
-// accountOnly (no --to) is same-agent by construction and skips the predicate.
-// Its agent is the running IDENTITY, not an enum whose override produced the
-// pane, so resolving it through its own override answers a question nobody
-// asked: with program_overrides.claude = "codex" and program_overrides.codex =
-// "gemini", a claude-configured codex pane would read "codex" as a gemini
-// launch and turn `--account work` into a cross-agent handoff (#4430 review).
-// Resolution does config I/O, so this must not run under i.mu. It fails, rather
-// than classify the target against the global config, when the project's config
-// cannot be read (#7077).
-func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool, err error) {
-	program = i.AgentProgram()
-	agent = strings.TrimSpace(agent)
-	if accountOnly || agent == "" {
-		return program, false, nil
-	}
-	effective, err := handoffEffectiveAgent(i, agent)
-	if err != nil {
-		return "", false, err
-	}
-	if HandoffTargetIsCurrent(i.CurrentAgentName(), agent, effective, program) {
-		return program, false, nil
-	}
-	return agent, true, nil
-}
-
 // ValidateManualAccountSwap uses the same launch proof with an operator-selected
 // identity. agent names the handoff target; crossAgent is
 // ManualAccountSwapProgram's decision for it.
@@ -887,6 +851,28 @@ func (i *Instance) ValidateAccountSwapReplacementPanes() error {
 	return nil
 }
 
+// durableAccountSwapAgentLocked is the account namespace a durable record
+// names, most durable first: the selection record (i.accountAgent) is the
+// commit-time answer no config flip or restart can move; a committed manual
+// swap's AccountAgent predates it on records written between the two fields;
+// the pane's frozen program only survives until an attach rewrites its metadata
+// from CURRENT config (#4430 review round 4). false: only a re-resolution, the
+// legacy fallback for records older than all of them, can answer.
+func (i *Instance) durableAccountSwapAgentLocked() (string, bool) {
+	if i.accountAgent != "" {
+		return i.accountAgent, true
+	}
+	if p := i.pendingAccountSwap; p != nil && p.AccountAgent != "" {
+		return p.AccountAgent, true
+	}
+	if ts := i.tmuxLocked(); ts != nil {
+		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
+			return frozen, true
+		}
+	}
+	return "", false
+}
+
 // SynchronizeAccountSwapRuntimeMetadata repairs the process-local launch state
 // after a daemon restart. The running panes already have the selected account;
 // this restores tmux's launch metadata and promotes a durable injected Claude
@@ -901,37 +887,27 @@ func (i *Instance) SynchronizeAccountSwapRuntimeMetadata() error {
 	// transaction actually froze, which re-resolution can only approximate once
 	// the configuration has moved.
 	//
-	// The re-resolution is the LAST resort, so its failure is deferred: a record
-	// that names the namespace durably needs no config read, and must not be
-	// refused because the project's config could not be read in time. Only a
-	// record old enough to need the re-resolution refuses on it (#7077).
-	resolvedAgent, resolveErr := HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
+	// The re-resolution is the LAST resort, so it runs only when no durable
+	// record names the namespace: such a record needs no config read, and must
+	// neither wait on nor be refused by one that cannot complete (#7077).
+	i.mu.RLock()
+	_, durable := i.durableAccountSwapAgentLocked()
+	i.mu.RUnlock()
+	var resolvedAgent string
+	var resolveErr error
+	if !durable {
+		resolvedAgent, resolveErr = HandoffEffectiveAgentForPath(i.Path, i.AgentProgram())
+	}
 	i.mu.Lock()
 	account := i.Account
 	pending := cloneAccountSwapData(i.pendingAccountSwap)
-	// Namespace preference order, most durable first: the selection record
-	// (i.accountAgent) is the commit-time answer no config flip or restart can
-	// move; a committed manual swap's AccountAgent predates it on records
-	// written between the two fields; the pane's frozen program only survives
-	// until an attach rewrites its metadata from CURRENT config; and the
-	// pre-lock re-resolution is the legacy fallback for records older than all
-	// of them (#4430 review round 4).
-	agent := resolvedAgent
-	durable := false
-	if ts := i.tmuxLocked(); ts != nil {
-		if frozen := sessionenv.AgentForCommand(ts.Program()); frozen != "" {
-			agent, durable = frozen, true
+	agent, durable := i.durableAccountSwapAgentLocked()
+	if !durable {
+		if resolveErr != nil {
+			i.mu.Unlock()
+			return fmt.Errorf("account swap for %q: %w", i.Title, resolveErr)
 		}
-	}
-	if pending != nil && pending.AccountAgent != "" {
-		agent, durable = pending.AccountAgent, true
-	}
-	if i.accountAgent != "" {
-		agent, durable = i.accountAgent, true
-	}
-	if !durable && resolveErr != nil {
-		i.mu.Unlock()
-		return fmt.Errorf("account swap for %q: %w", i.Title, resolveErr)
+		agent = resolvedAgent
 	}
 	if pending == nil || account != pending.To {
 		i.mu.Unlock()

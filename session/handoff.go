@@ -650,3 +650,39 @@ func (i *Instance) handoffUnsettledAccountError(plan AgentSwapPlan) error {
 			"the session record must drop the scope before the runtime changes",
 		i.Title, account, incoming)
 }
+
+// ManualAccountSwapProgram decides which program a manual account swap
+// launches: agent's own command for a cross-agent handoff, the recorded
+// program otherwise. The daemon asks it once, at admission, and hands the same
+// crossAgent to ValidateManualAccountSwap and SelectAccountForHandoff so the
+// frozen launch and the record cannot disagree.
+//
+// "Same agent" is HandoffTargetIsCurrent, the same-target guard's predicate:
+// with program_overrides.aider = "codex" running a codex pane, `--to codex`
+// whose own override resolves to aider is CROSS-agent, while `--to aider` is
+// the same-agent account change despite the enum differing from Program.
+//
+// accountOnly (no --to) is same-agent by construction and skips the predicate.
+// Its agent is the running IDENTITY, not an enum whose override produced the
+// pane, so resolving it through its own override answers a question nobody
+// asked: with program_overrides.claude = "codex" and program_overrides.codex =
+// "gemini", a claude-configured codex pane would read "codex" as a gemini
+// launch and turn `--account work` into a cross-agent handoff (#4430 review).
+// Resolution does config I/O, so this must not run under i.mu. It fails, rather
+// than classify the target against the global config, when the project's config
+// cannot be read (#7077).
+func (i *Instance) ManualAccountSwapProgram(agent string, accountOnly bool) (program string, crossAgent bool, err error) {
+	program = i.AgentProgram()
+	agent = strings.TrimSpace(agent)
+	if accountOnly || agent == "" {
+		return program, false, nil
+	}
+	effective, err := handoffEffectiveAgent(i, agent)
+	if err != nil {
+		return "", false, err
+	}
+	if HandoffTargetIsCurrent(i.CurrentAgentName(), agent, effective, program) {
+		return program, false, nil
+	}
+	return agent, true, nil
+}

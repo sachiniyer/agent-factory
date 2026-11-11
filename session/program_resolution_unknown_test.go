@@ -313,7 +313,7 @@ func TestResolveProjectConfigSpendsExactlyItsAttemptsOnAnUnknown(t *testing.T) {
 		},
 	}
 
-	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig("/repo", src)
 
 	require.Nil(t, resolved)
 	var unknown *ProjectConfigUnknownError
@@ -335,7 +335,7 @@ func TestResolveProjectConfigDoesNotRetryAnAnswer(t *testing.T) {
 		},
 	}
 
-	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig("/repo", src)
 
 	require.Nil(t, resolved)
 	require.ErrorIs(t, err, invalid, "an answered failure is returned as itself")
@@ -360,7 +360,7 @@ func TestResolveProjectConfigTreatsAnUnansweredRepoProbeAsUnknown(t *testing.T) 
 		},
 	}
 
-	resolved, err := resolveProjectConfig("/repo", src, launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig("/repo", src)
 
 	require.Nil(t, resolved)
 	require.True(t, isProjectConfigUnknown(err))
@@ -383,7 +383,7 @@ func TestResolveProjectConfigOutsideARepositoryIsAbsent(t *testing.T) {
 		},
 	}
 
-	resolved, err := resolveProjectConfig("/tmp/plain", src, launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig("/tmp/plain", src)
 
 	require.NoError(t, err, "outside a repository there is no project config to be unknown")
 	require.Nil(t, resolved)

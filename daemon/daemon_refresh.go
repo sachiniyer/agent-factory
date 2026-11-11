@@ -38,6 +38,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		return existing, nil, nil, nil, err
 	}
 	allInstances, unreadable, missing, sigs := load.Instances, load.Skipped, load.Missing, load.Signatures
+	configTick := beginDeferredConfigTick()
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
@@ -174,10 +175,14 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 				}
 			}
 
-			instance, err := fromInstanceDataForRefresh(item)
+			instance, err := materializeRefreshRow(configTick, key, item)
 			if err != nil {
 				failedRows++
-				log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				// A row deferred on its project config (#7077 review) logged its
+				// deferral and logs each re-read; skipping it is not news.
+				if !isDeferredConfigSkip(err) {
+					log.WarningLog.Printf("daemon skipping instance %q: %v", item.Title, err)
+				}
 				// A marked row that cannot materialize still owes its teardown
 				// (#4162) — the obligation is durable but nothing in memory can
 				// drain it. Name the session so the leak is a visible diagnosis,
@@ -226,6 +231,7 @@ func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*
 		skipped = retractRereadOnUnloadableRows(reread, repoID, len(data), materialized, failedRows, skipped)
 	}
 	refreshRowOutcomes.prune(allInstances)
+	endDeferredConfigTick(configTick)
 
 	// Preserve in-memory instances whose repo storage vanished from disk (#736):
 	// either the repo's instances directory was deleted entirely OR the repo's

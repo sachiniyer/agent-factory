@@ -477,7 +477,16 @@ func taskFireLeftoverRecord(t *task.Task, fire *taskFireMarker, repo *config.Rep
 
 	program := t.Program
 	if program == "" {
-		program = defaultProgramFor(cfg.DefaultProgram, t.ProjectPath)
+		// This program only labels an inert startup-unknown record and names the
+		// tmux handle a proof-bound reap inspects; nothing here launches it. So a
+		// project config that cannot be read is asked once, read-only, and the
+		// global default stands in for the label — said aloud (#7077 review).
+		resolved, rerr := inspectRepoConfigForDefault(t.ProjectPath)
+		var perr error
+		if program, perr = defaultProgramFromResolution(cfg.DefaultProgram, resolved, rerr); perr != nil {
+			log.WarningLog.Printf("task %s: labelling the interrupted-fire record with the global default program %q: %v", t.ID, cfg.DefaultProgram, perr)
+			program = cfg.DefaultProgram
+		}
 	}
 
 	// A live tmux session is stopped only if THAT incarnation proves, from its own

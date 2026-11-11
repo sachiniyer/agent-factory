@@ -50,10 +50,13 @@ func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
 // runs. A swap executes its plan after stopping the outgoing agent; re-reading
 // the project config there could only fail too late to refuse, so execution
 // applies the answer admission proved, as it does the plan's frozen command.
+//
+// Releases nest: each restores the freeze it replaced, so an inner plan ending
+// cannot clear an outer one that is still executing.
 func (i *Instance) freezeEnvPassthrough(names []string) (release func()) {
 	frozen := append([]string(nil), names...)
-	i.frozenEnvPassthrough.Store(&frozen)
-	return func() { i.frozenEnvPassthrough.Store(nil) }
+	prev := i.frozenEnvPassthrough.Swap(&frozen)
+	return func() { i.frozenEnvPassthrough.Store(prev) }
 }
 
 // refreshSessionEnvironment reapplies a session's environment declarations to
@@ -72,6 +75,13 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	if err := tmuxSession.SetEnvPassthrough(passthrough); err != nil {
 		return fmt.Errorf("invalid session environment pass-through: %w", err)
 	}
+	refreshSessionIdentity(i, tmuxSession)
+	return nil
+}
+
+// refreshSessionIdentity is refreshSessionEnvironment's config-free half: the
+// account and instance id the session carries, which need no project config.
+func refreshSessionIdentity(i *Instance, tmuxSession *tmux.TmuxSession) {
 	// Refreshed alongside the pass-through, on the same paths, so a restored or
 	// re-provisioned session carries the account it was created with rather than
 	// quietly reverting to the ambient identity (#3051).
@@ -83,7 +93,6 @@ func refreshSessionEnvironment(i *Instance, tmuxSession *tmux.TmuxSession) error
 	// The agent session carries its instance id so a reconcile that finds it live
 	// can prove which create attempt spawned it (#6258).
 	tmuxSession.SetInstanceID(i.ID)
-	return nil
 }
 
 // refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab

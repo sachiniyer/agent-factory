@@ -61,7 +61,14 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 		// ListPrograms (#1970) answers by calling the same function rather than
 		// restating the precedence — so the program a picker labels "repo default"
 		// cannot disagree with the one a real create picks.
-		req.Program = defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
+		//
+		// A project config that cannot be read refuses the create rather than
+		// start it on the global default (#7077 review).
+		program, err := defaultProgramFor(cfg.DefaultProgram, req.RepoPath)
+		if err != nil {
+			return session.InstanceData{}, fmt.Errorf("cannot pick the default program for this session: %w", err)
+		}
+		req.Program = program
 	}
 	// The project's default credential account (#3386), from the same op-entry
 	// snapshot. It runs after the program is settled — an account belongs to ONE

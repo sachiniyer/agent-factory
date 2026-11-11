@@ -386,7 +386,7 @@ func resolveBackendKind(opts InstanceOptions, absPath string) (BackendKind, erro
 	//   - A config that could not be READ — the probe went unanswered, most
 	//     often on a loaded machine — is the same refusal for the same reason,
 	//     but its remedy is to retry, not to fix a config that is fine (#7077).
-	cfg, err := resolveProjectConfig(absPath, runtimeProjectConfig(), launchConfigResolveAttempts)
+	cfg, err := resolveProjectConfig(absPath, runtimeProjectConfig())
 	if err != nil {
 		if isProjectConfigUnknown(err) {
 			return "", fmt.Errorf("cannot determine the backend for %s, and creating the session on the local machine instead could bypass the isolation the repo asks for: %w", absPath, err)

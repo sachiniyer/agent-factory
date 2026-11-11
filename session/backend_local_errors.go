@@ -122,7 +122,11 @@ func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err e
 	// just decided to keep — the contradiction retainsInertInstance's own
 	// comment calls out. Mirror the two preserveAgentHandle sites in launch by
 	// sparing the agent from this error too.
-	if firstTime || tmuxSession == nil || retainsInertInstance(err) || restoreDeferred(err) {
+	//
+	// An unreadable project config is never a reason to tear anything down
+	// (#7077 review): it says nothing about the agent this load reattached, and
+	// the row's next load reads the config again. Spare the agent for it too.
+	if firstTime || tmuxSession == nil || retainsInertInstance(err) || restoreDeferred(err) || isProjectConfigUnknown(err) {
 		return err
 	}
 	if _, cleanupErr := tmuxSession.CloseAndWaitForPaneExit(); cleanupErr != nil {

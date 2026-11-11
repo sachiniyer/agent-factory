@@ -84,7 +84,14 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		// namespace for linked worktrees, including bare clones (#3358).
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
-	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
+	// A load whose row stays inert (Dead, Lost, killed, startup-unknown) launches
+	// nothing — launch returns before any reattach or spawn — so it reads no
+	// project config: an unreadable one must not keep such a row from loading
+	// (#7077 review). Recover refreshes both environments before it spawns.
+	inertLoad := !firstTimeSetup && i.loadStaysInert()
+	if inertLoad {
+		refreshSessionIdentity(i, tmuxSession)
+	} else if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
 		return err
 	}
 
@@ -113,11 +120,23 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	i.mu.RLock()
 	gitWorktree := i.gitWorktree
 	i.mu.RUnlock()
-	if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
+	if inertLoad {
+		if gitWorktree != nil {
+			gitWorktree.SetHookScopeSessionID(i.ID)
+		}
+	} else if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
 		return err
 	}
 
 	return nil
+}
+
+// loadStaysInert reports whether a load of this row reattaches and spawns
+// nothing: launch returns before both for a recorded Dead/Lost runtime, a
+// tombstone, or an unconfirmed startup (#935/#970/#1108).
+func (i *Instance) loadStaysInert() bool {
+	status := i.GetStatus()
+	return status == Dead || status == Lost || i.UserKilled() || i.StartupStateUnknown()
 }
 
 func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *CreateLaunchPlan) error {
@@ -198,7 +217,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// loop or user-initiated restore (#1108 PR 2, #1300), never a
 		// load-time side effect; a tombstoned record's only future is
 		// having its kill finished.
-		if status := i.GetStatus(); status == Dead || status == Lost || i.UserKilled() || i.StartupStateUnknown() {
+		if i.loadStaysInert() {
 			return nil
 		}
 
@@ -435,7 +454,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// names it: nilling the ref here would orphan the pane. See the predicate.
 		// A sibling spawn-dir refusal keeps it too — the binding (live or
 		// never-spawned) is what Recover reattaches or re-spawns (#5172).
-		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err)
+		preserveAgentHandle = retainsInertInstance(err) || restoreDeferred(err) || isProjectConfigUnknown(err)
 		setupErr = finishLaunchTabFailure(firstTimeSetup, tmuxSession, err)
 		return setupErr
 	}

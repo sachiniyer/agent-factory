@@ -26,7 +26,7 @@ func agentPolicyFor(repoPath string, branchPrefix *string) ([]byte, error) {
 	if err != nil {
 		return nil, fmt.Errorf("resolving the operator config for the sandbox failed: %w", err)
 	}
-	repo, rerr := resolveProjectConfig(repoPath, runtimeProjectConfig(), launchConfigResolveAttempts)
+	repo, rerr := resolveProjectConfig(repoPath, runtimeProjectConfig())
 	if rerr != nil {
 		if isProjectConfigUnknown(rerr) {
 			return nil, fmt.Errorf("resolving the project config for the sandbox failed: %w", rerr)

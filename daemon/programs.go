@@ -1,7 +1,11 @@
 package daemon
 
 import (
+	"strings"
+
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -90,7 +94,17 @@ func (s *controlServer) ListPrograms(req ListProgramsRequest, resp *ListPrograms
 			global = c.DefaultProgram
 		}
 	}
-	resp.Default = defaultProgramFor(global, req.RepoPath)
+	// A picker asks once and read-only. When the project config cannot be read
+	// it reports NO default — the documented "nothing to report" answer — rather
+	// than label the global default as this repo's: the create re-reads it and
+	// refuses an unknown instead of using it (#7077 review).
+	resolved, rerr := inspectRepoConfigForDefault(req.RepoPath)
+	def, derr := defaultProgramFromResolution(global, resolved, rerr)
+	if derr != nil {
+		log.WarningLog.Printf("programs: no default reported for %q: %v", req.RepoPath, derr)
+		return nil
+	}
+	resp.Default = def
 	return nil
 }
 
@@ -125,21 +139,47 @@ func programCatalog(programs []string) []ProgramOption {
 // describes, which is the same class of bug as the hardcoded enum this RPC
 // exists to delete, one layer down again.
 //
-// The global default is the fallback at every step where the repo cannot be
-// resolved, matching what a real create does: an unreadable in-repo config does
-// not fail the create, it falls back (reserveCreate surfaces the path problem
-// right after, with more context).
-func defaultProgramFor(globalDefault, repoPath string) string {
-	if repoPath == "" {
-		return globalDefault
+// The global default is the answer for a repo with no project config to read —
+// no path, a path Git does not recognize — and, as before, for a config the repo
+// answered as invalid (reserveCreate surfaces that problem right after, with
+// more context). It is NEVER the answer for a project config that could not be
+// read: that is unknown, not absent, and a create started on the global default
+// in its place runs the wrong agent with nothing to show for it (#7077 review).
+// The create resolves with a launch's retry budget and refuses the unknown.
+func defaultProgramFor(globalDefault, repoPath string) (string, error) {
+	if strings.TrimSpace(repoPath) == "" {
+		return globalDefault, nil
 	}
-	repo, err := config.RepoFromPath(repoPath)
-	if err != nil {
-		return globalDefault
+	resolved, err := resolveProjectConfigForLaunch(repoPath)
+	return defaultProgramFromResolution(globalDefault, resolved, err)
+}
+
+// The project-config reads a create's defaults make, as seams so tests can
+// stand in an unreadable config without a slow filesystem.
+var (
+	resolveProjectConfigForLaunch = session.ResolveProjectConfigForLaunch
+	checkProjectConfigForLaunch   = session.CheckProjectConfigForLaunch
+)
+
+// defaultProgramFromResolution is the precedence itself, shared by the create
+// and every reader of its pick: the repo's resolved default, the global one for
+// a repo with no readable project config, and an error for an unknown.
+func defaultProgramFromResolution(globalDefault string, resolved *config.ResolvedConfig, err error) (string, error) {
+	if session.IsProjectConfigUnknown(err) {
+		return "", err
 	}
-	resolved, rerr := config.ResolveConfigForRepo(repo)
-	if rerr != nil {
-		return globalDefault
+	if resolved == nil {
+		return globalDefault, nil
 	}
-	return resolved.DefaultProgram
+	return resolved.DefaultProgram, nil
+}
+
+// inspectRepoConfigForDefault is the read-only, one-attempt resolve a picker or
+// an inert record label uses: no durable load observation (#4430), and an
+// unknown answered as unknown.
+func inspectRepoConfigForDefault(repoPath string) (*config.ResolvedConfig, error) {
+	if strings.TrimSpace(repoPath) == "" {
+		return nil, nil
+	}
+	return session.InspectProjectConfig(repoPath)
 }

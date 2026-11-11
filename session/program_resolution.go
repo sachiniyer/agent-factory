@@ -30,8 +30,8 @@ type ProjectConfigUnknownError struct {
 
 func (e *ProjectConfigUnknownError) Error() string {
 	if errors.Is(e.Err, context.DeadlineExceeded) {
-		return fmt.Sprintf("couldn't read the project config for %s in time (%s) — the machine may be under heavy load; "+
-			"af won't fall back to the global config, which could start the wrong agent, so retry when the load drops: %v",
+		return fmt.Sprintf("couldn't read the project config for %s in time (%s) — the machine may be under heavy load, or its filesystem may not be responding; "+
+			"af won't fall back to the global config, which could start the wrong agent, so retry once it recovers: %v",
 			e.Path, e.attempts(), e.Err)
 	}
 	return fmt.Sprintf("couldn't read the project config for %s (%s): git did not answer — "+
@@ -53,6 +53,37 @@ func isProjectConfigUnknown(err error) bool {
 	return errors.As(err, &unknown)
 }
 
+// IsProjectConfigUnknown reports whether err carries a *ProjectConfigUnknownError:
+// the project's config could not be read, which is never the same as having none.
+func IsProjectConfigUnknown(err error) bool { return isProjectConfigUnknown(err) }
+
+// ResolveProjectConfigForLaunch is resolveProjectConfig for callers outside
+// this package that decide what a launch runs — the daemon's default program
+// and default account for a create (#7077 review). It records the in-repo load
+// observation like any runtime resolve and spends a launch's retry budget.
+// (nil, nil) means path has no project config, and the global config applies.
+func ResolveProjectConfigForLaunch(path string) (*config.ResolvedConfig, error) {
+	return resolveProjectConfig(path, runtimeProjectConfig())
+}
+
+// CheckProjectConfigForLaunch is ResolveProjectConfigForLaunch without the
+// durable load observation: a check a create runs before it commits to
+// launching — the default account it would scope to — is a read and must not
+// create durable state (#4430), but it decides what the launch runs, so it
+// keeps a launch's retry budget (#7077 review).
+func CheckProjectConfigForLaunch(path string) (*config.ResolvedConfig, error) {
+	src := inspectionProjectConfig()
+	src.attempts = 0
+	return resolveProjectConfig(path, src)
+}
+
+// InspectProjectConfig is ResolveProjectConfigForLaunch for read-only callers:
+// no durable load observation, and one attempt — a picker must not stall on a
+// launch's patience. Its unknown is the caller's to show, not to substitute.
+func InspectProjectConfig(path string) (*config.ResolvedConfig, error) {
+	return resolveProjectConfig(path, inspectionProjectConfig())
+}
+
 // launchConfigResolveAttempts is how many times a launch-class resolve asks for
 // the project's config before refusing. Each attempt is already bounded by the
 // config layer's own probe budget (registeredProjectScanTimeout, 1s) — the
@@ -67,11 +98,14 @@ var (
 	launchConfigRetryPause      = 250 * time.Millisecond
 )
 
-// projectConfigSource is where a resolve asks: the real config package, or a
-// batched restore's RestoreContext answering the same two questions.
+// projectConfigSource is where a resolve asks — the real config package, or a
+// load's RestoreContext answering the same two questions — and how many
+// unanswered attempts it makes before reporting unknown (zero: the launch
+// default).
 type projectConfigSource struct {
 	repoFromPath func(string) (*config.RepoContext, error)
 	resolveRepo  func(*config.RepoContext) (*config.ResolvedConfig, error)
+	attempts     int
 }
 
 func runtimeProjectConfig() projectConfigSource {
@@ -79,12 +113,16 @@ func runtimeProjectConfig() projectConfigSource {
 }
 
 func inspectionProjectConfig() projectConfigSource {
-	return projectConfigSource{repoFromPath: config.RepoFromPath, resolveRepo: config.ResolveConfigForRepoInspection}
+	return projectConfigSource{repoFromPath: config.RepoFromPath, resolveRepo: config.ResolveConfigForRepoInspection, attempts: 1}
 }
 
 func instanceProjectConfig(i *Instance) projectConfigSource {
-	rc := i.restoreContext() // nil outside a batched restore: resolves exactly as before
-	return projectConfigSource{repoFromPath: rc.RepoFromPath, resolveRepo: rc.ResolveConfigForRepo}
+	rc := i.restoreContext() // nil outside a load: resolves exactly as before
+	src := projectConfigSource{repoFromPath: rc.RepoFromPath, resolveRepo: rc.ResolveConfigForRepo}
+	if rc != nil {
+		src.attempts = rc.attempts
+	}
+	return src
 }
 
 // resolveProjectConfig is the one place a path's project config is asked for,
@@ -100,7 +138,11 @@ func instanceProjectConfig(i *Instance) projectConfigSource {
 //
 // A project-registry read failure never reaches here as an error: the config
 // layer degrades it to "no personal layer" itself (#2216), which #6748 kept.
-func resolveProjectConfig(path string, src projectConfigSource, attempts int) (*config.ResolvedConfig, error) {
+func resolveProjectConfig(path string, src projectConfigSource) (*config.ResolvedConfig, error) {
+	attempts := src.attempts
+	if attempts < 1 {
+		attempts = launchConfigResolveAttempts
+	}
 	if attempts < 1 {
 		attempts = 1
 	}
@@ -171,7 +213,7 @@ func resolveLaunchProgramForInstance(i *Instance) (launchProgramResolution, erro
 // the global config standing in for an unknown project (#7077). A config the
 // repository answered as invalid keeps the legacy warn-and-use-global degrade.
 func resolveResolvedConfigForInstance(i *Instance) (*config.ResolvedConfig, error) {
-	resolved, err := resolveProjectConfig(i.Path, instanceProjectConfig(i), launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig(i.Path, instanceProjectConfig(i))
 	if err != nil {
 		if isProjectConfigUnknown(err) {
 			return nil, err
@@ -311,7 +353,7 @@ func resolveConfigForPath(path string) (*config.Config, error) {
 // it answers can launch anything: every launch re-resolves through the strict
 // chain and refuses on the same unknown (#7077).
 func resolveConfigForPathInspection(path string) *config.Config {
-	resolved, err := resolveProjectConfig(path, inspectionProjectConfig(), 1)
+	resolved, err := resolveProjectConfig(path, inspectionProjectConfig())
 	if err != nil {
 		var unknown *ProjectConfigUnknownError
 		if errors.As(err, &unknown) {
@@ -334,7 +376,7 @@ func resolveConfigForPathInspection(path string) *config.Config {
 // project config resolves the global config as it always has, and a config the
 // repository answered as invalid keeps its legacy warn-and-use-global degrade.
 func resolveConfigForPathVia(path string, src projectConfigSource) (*config.Config, error) {
-	resolved, err := resolveProjectConfig(path, src, launchConfigResolveAttempts)
+	resolved, err := resolveProjectConfig(path, src)
 	if err != nil {
 		if isProjectConfigUnknown(err) {
 			return nil, err
