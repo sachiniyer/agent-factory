@@ -95,6 +95,26 @@ func refreshSessionIdentity(i *Instance, tmuxSession *tmux.TmuxSession) {
 	tmuxSession.SetInstanceID(i.ID)
 }
 
+// ensureSpawnEnvironment is #7080's property for the tab spawns that build a
+// sibling from the agent's handle: a spawn reads its own environment. When the
+// load that produced the handle could not read the pass-through, the spawn
+// reads it — the agent handle's, which the sibling inherits, and the worktree's
+// — and refuses with the actionable unknown-config error if it still cannot,
+// rather than start the tab without the names.
+func (i *Instance) ensureSpawnEnvironment(agentTmux *tmux.TmuxSession, gw *git.GitWorktree) error {
+	if !i.envUnresolved.Load() {
+		return nil
+	}
+	if err := refreshSessionEnvironment(i, agentTmux); err != nil {
+		return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+	}
+	if err := refreshWorktreeEnvironment(i, gw); err != nil {
+		return fmt.Errorf("cannot add a tab to %q: %w", i.Title, err)
+	}
+	i.envUnresolved.Store(false)
+	return nil
+}
+
 // refreshTabSessionEnvironment is the sibling-tab half: a shell or process tab
 // carries the SESSION's account scope in the account's own selection namespace
 // — the sibling's own program (a shell, a dev server) is not the namespace the

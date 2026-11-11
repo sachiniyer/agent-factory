@@ -33,8 +33,9 @@ func unknownProjectConfig(path string) error {
 func isolateDeferredConfigRows(t *testing.T) *[]string {
 	t.Helper()
 	deferredConfigRows.Lock()
-	saved := deferredConfigRows.rows
+	saved, savedProbes := deferredConfigRows.rows, deferredConfigRows.probes
 	deferredConfigRows.rows = map[string]*deferredConfigRow{}
+	deferredConfigRows.probes = map[string]bool{}
 	deferredConfigRows.Unlock()
 	var probes []string
 	prevStart, prevPrime, prevLoad := startDeferredConfigProbe, primeRestoreContextForRefresh, fromInstanceDataWithContextForRefresh
@@ -42,7 +43,7 @@ func isolateDeferredConfigRows(t *testing.T) *[]string {
 	t.Cleanup(func() {
 		startDeferredConfigProbe, primeRestoreContextForRefresh, fromInstanceDataWithContextForRefresh = prevStart, prevPrime, prevLoad
 		deferredConfigRows.Lock()
-		deferredConfigRows.rows = saved
+		deferredConfigRows.rows, deferredConfigRows.probes = saved, savedProbes
 		deferredConfigRows.Unlock()
 	})
 	return &probes

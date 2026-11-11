@@ -36,15 +36,16 @@ func sessionEnvHome(t *testing.T) *checkoutProbe {
 	return p
 }
 
-// spawnCarriesSessionEnv reports whether the new-session that created
-// sessionName carried the pass-through name.
+// spawnCarriesSessionEnv reports whether the tmux chain whose new-session
+// created sessionName admitted the pass-through name: tmux imports it from the
+// client environment through the chain's update-environment list.
 func spawnCarriesSessionEnv(commands []string, sessionName string) (spawned, carried bool) {
 	for _, command := range commands {
-		if !strings.Contains(command, "new-session") || !strings.Contains(command, sessionName) {
+		if !strings.Contains(command, "new-session -d -s "+sessionName+" ") {
 			continue
 		}
 		spawned = true
-		if strings.Contains(command, inertEnvName+"=present") {
+		if strings.Contains(command, inertEnvName) {
 			carried = true
 		}
 	}

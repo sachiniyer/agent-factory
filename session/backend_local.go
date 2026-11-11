@@ -85,14 +85,22 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 		tmuxSession = tmux.NewTmuxSessionForRepo(i.Title, repo.IdentityPath(), i.Program)
 	}
 	// A load whose row stays inert (Dead, Lost, killed, startup-unknown) launches
-	// nothing — launch returns before any reattach or spawn — so it reads no
-	// project config: an unreadable one must not keep such a row from loading
-	// (#7077 review). Recover refreshes both environments before it spawns.
+	// nothing — launch returns before any reattach or spawn — so a config it
+	// cannot read must not keep the row from loading (#7077 review). It still
+	// SETS both environments, best-effort: the row can go live without Recover
+	// (the status poll lifts a Lost row whose pane is alive), and a tab added
+	// then is built from this handle while every git command its worktree runs
+	// reads the hook list (#7080). A list it could not read is marked, and the
+	// next tab spawn reads its own (ensureSpawnEnvironment).
 	inertLoad := !firstTimeSetup && i.loadStaysInert()
-	if inertLoad {
+	envUnresolved := false
+	if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
+		if !inertLoad {
+			return err
+		}
 		refreshSessionIdentity(i, tmuxSession)
-	} else if err := refreshSessionEnvironment(i, tmuxSession); err != nil {
-		return err
+		envUnresolved = true
+		log.WarningLog.Printf("session %q loads without its environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
 	}
 
 	i.mu.Lock()
@@ -120,13 +128,22 @@ func (b *LocalBackend) Provision(i *Instance, firstTimeSetup bool) error {
 	i.mu.RLock()
 	gitWorktree := i.gitWorktree
 	i.mu.RUnlock()
-	if inertLoad {
+	switch {
+	case envUnresolved:
+		// The session read already failed; another is no likelier to answer.
 		if gitWorktree != nil {
 			gitWorktree.SetHookScopeSessionID(i.ID)
 		}
-	} else if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
-		return err
+	default:
+		if err := refreshWorktreeEnvironment(i, gitWorktree); err != nil {
+			if !inertLoad {
+				return err
+			}
+			envUnresolved = true
+			log.WarningLog.Printf("session %q loads without its worktree environment pass-through; a tab spawn re-reads it: %v", i.Title, err)
+		}
 	}
+	i.envUnresolved.Store(envUnresolved)
 
 	return nil
 }

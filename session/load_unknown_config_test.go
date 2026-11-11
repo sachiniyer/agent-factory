@@ -182,9 +182,10 @@ func TestLaunchTabFailureOnAnUnknownConfigSparesTheAgent(t *testing.T) {
 
 // P1-2. A Lost row launches nothing on load — launch returns before any
 // reattach or spawn — so it must load whether or not the project config can be
-// read, and read none of it: the lost-restore loop's Recover reads the config
-// it needs, under its own retry policy.
-func TestLoad_InertRowReadsNoProjectConfig(t *testing.T) {
+// read. It still asks for its environment once, best-effort (#7080): the row
+// can go live without Recover, and a tab spawned then needs the list. A list it
+// could not read is marked for the spawn to read itself.
+func TestLoad_InertRowLoadsWithAnUnreadableProjectConfig(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
 	p := newCheckoutProbe(t)
@@ -195,7 +196,7 @@ func TestLoad_InertRowReadsNoProjectConfig(t *testing.T) {
 
 	require.NoError(t, err, "a row that launches nothing must load with its project config unreadable")
 	require.NotNil(t, instance)
-	require.Zero(t, p.count(), "an inert load reads no project config")
+	require.True(t, instance.envUnresolved.Load(), "the unread environment is marked for the next spawn")
 	require.Empty(t, commands(), "an inert load touches no tmux session")
 }
 
