@@ -359,6 +359,12 @@ type AgentSwapPlan struct {
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
 	afterStop           func() error
+	// passthrough is the session-environment list preflight resolved, applied
+	// after the outgoing agent stops instead of re-reading config (#7077).
+	// passthroughFrozen distinguishes a frozen empty list from a plan built
+	// without one.
+	passthrough       []string
+	passthroughFrozen bool
 }
 
 // ConversationCapture returns the provider-store before-image frozen by

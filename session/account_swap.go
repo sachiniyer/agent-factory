@@ -45,6 +45,11 @@ type accountSwapLaunchPlan struct {
 	// carryFallback says why a carry that applied launches fresh instead.
 	carry         *conversationCarry
 	carryFallback string
+	// passthrough is the session-environment list admission resolved. The
+	// respawn applies it after the outgoing panes stopped instead of re-reading
+	// config there (#7077); passthroughFrozen marks a plan admission built.
+	passthrough       []string
+	passthroughFrozen bool
 }
 
 func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchPlan {
@@ -55,6 +60,7 @@ func cloneAccountSwapLaunchPlan(plan *accountSwapLaunchPlan) *accountSwapLaunchP
 	copy.proof.GeneratedArgs = append([]string(nil), plan.proof.GeneratedArgs...)
 	copy.conversationCapture = cloneConversationCaptureSnapshot(plan.conversationCapture)
 	copy.carry = plan.carry.clone()
+	copy.passthrough = append([]string(nil), plan.passthrough...)
 	return &copy
 }
 
@@ -568,7 +574,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		account: name, base: resolvedProgram, runtimeBase: runtimeBase, program: launchProgram,
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
-		carry: carry, carryFallback: carryFallback,
+		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
 	}
 	return nil
 }
@@ -824,6 +830,13 @@ func (b *LocalBackend) respawnFresh(i *Instance) error {
 	plan, err := i.accountSwapLaunchForRespawn()
 	if err != nil {
 		return err
+	}
+	// The outgoing panes are already stopped: every environment refresh below —
+	// worktree hooks, the agent pane, each sibling tab — applies the list
+	// admission resolved instead of re-reading config, which could now fail only
+	// after refusing would have kept an agent running (#7077).
+	if plan.passthroughFrozen {
+		defer i.freezeEnvPassthrough(plan.passthrough)()
 	}
 	// Idempotent, and the only copy a restarted daemon performs. A carry that
 	// can no longer complete — at this copy or already at validation — leaves

@@ -62,5 +62,6 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 	}
 	return AgentSwapPlan{
 		target: target, baseProgram: resolved, program: program, conversation: conversation, conversationCapture: capture,
+		passthrough: env.passthrough, passthroughFrozen: true,
 	}, nil
 }

@@ -574,6 +574,12 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	}
 
 	ts.SetProgram(plan.program)
+	// The outgoing agent is stopped: apply the pass-through list preflight
+	// resolved rather than re-read config, which could now fail only after the
+	// point where refusing kept an agent running (#7077).
+	if plan.passthroughFrozen {
+		defer i.freezeEnvPassthrough(plan.passthrough)()
+	}
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}

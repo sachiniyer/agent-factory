@@ -28,6 +28,9 @@ func configuredSessionEnvPassthrough(explicit []string) []string {
 // a *ProjectConfigUnknownError instead of answering the global config's list,
 // which would silently drop the names the project adds (#7077).
 func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
+	if frozen := i.frozenEnvPassthrough.Load(); frozen != nil {
+		return append([]string(nil), (*frozen)...), nil
+	}
 	i.mu.RLock()
 	explicit := append([]string(nil), i.sessionEnvPassthrough...)
 	i.mu.RUnlock()
@@ -40,6 +43,17 @@ func SessionEnvPassthroughForInstance(i *Instance) ([]string, error) {
 	}
 	normalized, _ := sessionenv.NormalizeExtraNames(explicit)
 	return normalized, nil
+}
+
+// freezeEnvPassthrough makes SessionEnvPassthroughForInstance answer names — the
+// list a prepared plan's admission already resolved — until the returned release
+// runs. A swap executes its plan after stopping the outgoing agent; re-reading
+// the project config there could only fail too late to refuse, so execution
+// applies the answer admission proved, as it does the plan's frozen command.
+func (i *Instance) freezeEnvPassthrough(names []string) (release func()) {
+	frozen := append([]string(nil), names...)
+	i.frozenEnvPassthrough.Store(&frozen)
+	return func() { i.frozenEnvPassthrough.Store(nil) }
 }
 
 // refreshSessionEnvironment reapplies a session's environment declarations to
