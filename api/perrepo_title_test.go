@@ -563,8 +563,10 @@ func TestSessionsList_ExplicitAllPrintsNoHint(t *testing.T) {
 	}
 }
 
-// TestSessionsList_InsideRepoPrintsNoHint pins property 3 for the hint:
-// scoped to a project, nothing about the output or the streams changes.
+// TestSessionsList_InsideRepoPrintsNoHint pins property 3 for the hint: scoped
+// to a project, the outside-repo hint never prints. An EMPTY scoped list gets
+// its own notice naming the project (#7092, scoped_lookup_notice_test.go), so
+// this asserts the absence of the outside-repo claim, not an empty stderr.
 func TestSessionsList_InsideRepoPrintsNoHint(t *testing.T) {
 	useTempConfig(t)
 	resetScopeFlags(t)
@@ -579,7 +581,7 @@ func TestSessionsList_InsideRepoPrintsNoHint(t *testing.T) {
 	if !json.Valid(out) {
 		t.Fatalf("stdout must stay valid JSON, got %q", out)
 	}
-	if warn.String() != "" {
+	if strings.Contains(warn.String(), "not inside a project repo") {
 		t.Errorf("a scoped list must not print the outside-repo hint, got %q", warn.String())
 	}
 }
