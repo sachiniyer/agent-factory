@@ -74,6 +74,7 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	if instance == nil {
 		return fmt.Errorf("session %q not found", title)
 	}
+	observed := observeRepairHeld(instance)
 	key := daemonInstanceKey(repoID, instance.Title)
 	opLock := m.opLockFor(key)
 	opLock.Lock()
@@ -101,16 +102,16 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 		return err
 	}
 	prev := instance.AgentConversation()
-	if prev.Agent == conv.Agent && prev.ID == conv.ID && prev.CaptureKind == session.ConversationCaptureOperator {
-		return nil // already this repair: same id is a no-op success
-	}
-	// The same id recorded by a capture is NOT a no-op: the repair makes it
-	// the operator's, which the follow and the staleness guards treat as
-	// standing (#7120 review).
-	if !instance.SetAgentConversation(conv) {
+	// Re-running a repair is a fresh repair, never a no-op: it re-dates the
+	// record and re-stamps what the runtime holds now. The staleness guards
+	// disregard only the threads that existed when the repair was made
+	// (#7122), so a re-run is how an operator also overrides a thread the
+	// pane started since the first one. The same id recorded by a capture
+	// becomes the operator's, which the follow and the staleness guards treat
+	// as standing (#7120 review).
+	if !instance.SetAgentConversation(observed.stamp(instance, conv)) {
 		return nil
 	}
-	stampConversationRepair(instance, conv)
 
 	// opLock→repoStartLock is the ordering SetAttention and the kill/archive
 	// paths use: the write persists the whole row, so it must not checkpoint a

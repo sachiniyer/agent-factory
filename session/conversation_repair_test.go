@@ -39,38 +39,61 @@ func heldAnswer(id string) AgentConversationData {
 func TestOperatorRepairStampedAtCommitStandsUntilTheRuntimeMoves(t *testing.T) {
 	inst := retireTestInstance(t)
 	token := inst.AgentRuntimeToken()
-	repair := operatorRecord(heldTestOwnID)
+	repair := operatorRecord(heldTestOwnID).WithRepairStamp(repairHeldID)
 	inst.SetAgentConversation(repair)
-	inst.StampConversationRepair(repair.ID, repairHeldID)
 
 	for check := 0; check < 3; check++ {
-		require.False(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairHeldID)),
+		require.False(t, inst.ConversationFollowPermitted(token, repair, heldAnswer(repairHeldID)))
+		require.Equal(t, ConversationFollowUnchanged, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairHeldID)),
 			"the thread the runtime already held at the repair never replaces it")
 	}
-	require.False(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer("")),
+	require.Equal(t, ConversationFollowUnchanged, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer("")),
 		"a runtime holding nothing has nothing to move to")
-	require.True(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairNextID)),
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairNextID)),
 		"a thread the runtime moved to after the repair replaces it")
 	require.Equal(t, repairNextID, inst.AgentConversation().ID)
 	require.Equal(t, ConversationCaptureCodexRollout, inst.AgentConversation().CaptureKind,
 		"once followed, the record is an ordinary capture again")
 }
 
-// TestOperatorRepairWithoutAStampTakesItsFirstObservationAsBaseline is the
-// restart shape: the stamp is in memory only, so after a daemon restart (or a
-// repair whose held query failed) the first check of the repair is its
-// baseline and moves nothing.
+// TestOperatorRepairWithoutAStampTakesItsFirstObservationAsBaseline: a repair
+// that carries no observation of the runtime — its held query failed, the
+// runtime changed under it, or it predates the stamp's persistence — takes
+// the first check's answer as its baseline. That is a record write (the
+// caller persists it, so it survives a restart, #7122) that moves nothing.
 func TestOperatorRepairWithoutAStampTakesItsFirstObservationAsBaseline(t *testing.T) {
 	inst := retireTestInstance(t)
 	token := inst.AgentRuntimeToken()
 	repair := operatorRecord(heldTestOwnID)
 	inst.SetAgentConversation(repair)
 
-	require.False(t, inst.ConversationFollowPermitted(token, repair, heldAnswer(repairHeldID)),
-		"the first observation after a restart is the repair's baseline")
-	require.False(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairHeldID)))
-	require.Equal(t, heldTestOwnID, inst.AgentConversation().ID)
-	require.True(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairNextID)))
+	require.True(t, inst.ConversationFollowPermitted(token, repair, heldAnswer(repairHeldID)),
+		"recording the baseline is a write the daemon must take the op-lock for")
+	require.Equal(t, ConversationFollowBaselined, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairHeldID)))
+	baselined := inst.AgentConversation()
+	require.Equal(t, heldTestOwnID, baselined.ID, "the baseline moves nothing")
+	require.Equal(t, ConversationCaptureOperator, baselined.CaptureKind)
+	require.Equal(t, repair.CapturedAt, baselined.CapturedAt, "the baseline does not re-date the repair")
+	require.True(t, baselined.RepairStamped)
+	require.Equal(t, repairHeldID, baselined.RepairHeldID)
+
+	require.False(t, inst.ConversationFollowPermitted(token, baselined, heldAnswer(repairHeldID)))
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, baselined, heldAnswer(repairNextID)))
+	require.Equal(t, repairNextID, inst.AgentConversation().ID)
+	require.False(t, inst.AgentConversation().RepairStamped, "a followed record is an ordinary capture, with no stamp")
+}
+
+// TestOperatorRepairBaselineOfNothingHeld: a repair observed while the pane
+// held no thread (a fresh Codex not yet prompted) is stamped with that, so
+// the pane's first prompt is a move the follow takes (#7120 review F-E).
+func TestOperatorRepairBaselineOfNothingHeld(t *testing.T) {
+	inst := retireTestInstance(t)
+	token := inst.AgentRuntimeToken()
+	repair := operatorRecord(heldTestOwnID).WithRepairStamp("")
+	inst.SetAgentConversation(repair)
+
+	require.Equal(t, ConversationFollowUnchanged, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer("")))
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(repairNextID)))
 	require.Equal(t, repairNextID, inst.AgentConversation().ID)
 }
 
@@ -82,21 +105,24 @@ func TestCapturedRecordStillFollowsTheRuntimeImmediately(t *testing.T) {
 	token := inst.AgentRuntimeToken()
 	captured := inst.AgentConversation()
 	require.NotEqual(t, ConversationCaptureOperator, captured.CaptureKind)
-	require.True(t, inst.FollowAgentConversationForRuntime(token, captured, heldAnswer(repairNextID)))
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, captured, heldAnswer(repairNextID)))
 	require.Equal(t, repairNextID, inst.AgentConversation().ID)
 }
 
 // TestExactResumeKeepsAStandingOperatorRepair: a repair to an OLDER thread
 // than the one the pane last wrote is exactly what an operator does after a
 // fresh restore, and the restore guard must resume it rather than refuse it as
-// stale. A capture's record in the same store is still refused.
+// stale — the newer thread existed when the repair was made (#7122). A
+// capture's record in the same store is still refused.
 func TestExactResumeKeepsAStandingOperatorRepair(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	workDir := t.TempDir()
-	repaired := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", workDir)
-	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T14-42-50-"+repairHeldID+".jsonl", workDir)
-	markRolloutOlder(t, repaired)
+	now := time.Now()
+	writeMintedCodexRollout(t, codexHome, heldTestOwnID, workDir,
+		now.Add(-2*time.Hour), now.Add(-2*time.Hour), now.Add(-time.Hour), "cli")
+	writeMintedCodexRollout(t, codexHome, repairHeldID, workDir,
+		now.Add(-time.Hour), now.Add(-time.Hour), now, "cli")
 
 	repair := staleResumeInstance(t, workDir, operatorRecord(heldTestOwnID))
 	assert.Contains(t, prepareResumeConversation(repair, repair.Program), "resume "+heldTestOwnID,
@@ -117,8 +143,9 @@ func TestCarryKeepsAStandingOperatorRepair(t *testing.T) {
 		Agent: tmux.ProgramCodex, ID: carryTestID, CapturedAt: time.Now(), CaptureKind: ConversationCaptureOperator,
 	}))
 	source := filepath.Join(home, ".codex")
-	recorded := writeCarryFile(t, source, codexRolloutRel(carryTestID), codexRollout(inst.GetWorktreePath()))
-	newer := writeCarryFile(t, source, codexRolloutRel(newerConversationID), codexRollout(inst.GetWorktreePath()))
+	dir := inst.GetWorktreePath()
+	recorded := writeCarryFile(t, source, codexRolloutRel(carryTestID), codexSessionMetaLine(t, carryTestID, dir, past.Add(-time.Hour), "cli"))
+	newer := writeCarryFile(t, source, codexRolloutRel(newerConversationID), codexSessionMetaLine(t, newerConversationID, dir, past, "cli"))
 	setModTime(t, recorded, past)
 	setModTime(t, newer, past.Add(time.Minute))
 
@@ -189,17 +216,16 @@ func TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone(t *testing.T)
 func TestOperatorRepairRetiresOnceThePaneReachesIt(t *testing.T) {
 	inst := retireTestInstance(t)
 	token := inst.AgentRuntimeToken()
-	repair := operatorRecord(heldTestOwnID)
+	repair := operatorRecord(heldTestOwnID).WithRepairStamp(repairHeldID)
 	inst.SetAgentConversation(repair)
-	inst.StampConversationRepair(repair.ID, repairHeldID)
 
-	require.True(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(heldTestOwnID)),
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(heldTestOwnID)),
 		"the pane reaching the repaired thread retires the repair's provenance")
 	reached := inst.AgentConversation()
 	require.Equal(t, heldTestOwnID, reached.ID)
 	require.Equal(t, ConversationCaptureCodexRollout, reached.CaptureKind)
 
-	require.True(t, inst.FollowAgentConversationForRuntime(token, reached, heldAnswer(repairHeldID)),
+	require.Equal(t, ConversationFollowMoved, inst.FollowAgentConversationForRuntime(token, reached, heldAnswer(repairHeldID)),
 		"a later move back to the pre-repair thread is followed like any other")
 	require.Equal(t, repairHeldID, inst.AgentConversation().ID)
 }

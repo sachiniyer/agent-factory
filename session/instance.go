@@ -516,12 +516,6 @@ type Instance struct {
 	// answer from that one process instead of the whole process table
 	// (#7101). Guarded by codexAttrMu.
 	codexHolder codexConversationHolder
-	// repairStamp is what the runtime held when an operator's set-conversation
-	// repair was recorded, so the follow check can tell "the runtime moved
-	// after the repair" from "it was already there" (#7120 review). In memory
-	// only: after a restart the first follow observation of the repair is its
-	// baseline. Guarded by mu.
-	repairStamp conversationRepairStamp
 	// followFreeze counts consecutive follow checks a pending swap, handoff,
 	// or operation skipped, so a freeze that lingers is logged once. Guarded
 	// by mu.

@@ -726,7 +726,10 @@ type resumeRefusal struct {
 	// review): leaving it recorded would suppress every later capture arm and
 	// make each restore start fresh again. An id the launch command merely
 	// cannot express (a recorded conversation of another agent) is reported
-	// but kept: it may be exactly what a later handoff back resumes.
+	// but kept: it may be exactly what a later handoff back resumes. So is an
+	// operator's repair that af merely could not check — an unresolvable
+	// home, an unreadable store — which says nothing about the id
+	// (refusalKeepsOperatorRepair, #7122).
 	retire bool
 }
 
@@ -740,7 +743,10 @@ func (i *Instance) exactResumeRefusal(reason string) resumeRefusal {
 	if !conv.HasID() {
 		return resumeRefusal{}
 	}
-	refusal := resumeRefusal{ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: reason}, retire: reason != ""}
+	refusal := resumeRefusal{
+		ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: reason},
+		retire:             reason != "" && !refusalKeepsOperatorRepair(conv, reason),
+	}
 	if reason == "" {
 		refusal.Reason = fmt.Sprintf("its launch command cannot resume a recorded %s conversation", conv.Agent)
 	}

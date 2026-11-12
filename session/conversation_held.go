@@ -200,86 +200,92 @@ func (i *Instance) conversationFollowFrozenLocked() string {
 	return ""
 }
 
-// conversationRepairStamp records, for one operator-set record, what the
-// runtime held when the repair was made ("" = it held nothing).
-type conversationRepairStamp struct {
-	recordID string
-	heldID   string
-}
+// ConversationFollowOutcome is what one follow commit did to the record.
+type ConversationFollowOutcome int
 
-// StampConversationRepair records what the runtime held (heldID, "" for
-// nothing) when the operator's repair to recordID was committed. The follow
-// check leaves that record standing until the runtime holds something else
-// (#7120 review). A repair that could not be stamped — the held query failed —
-// is stamped by the first follow observation instead.
-func (i *Instance) StampConversationRepair(recordID, heldID string) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.repairStamp = conversationRepairStamp{recordID: strings.ToLower(recordID), heldID: strings.ToLower(heldID)}
-}
+const (
+	// ConversationFollowUnchanged: the record stands as it was.
+	ConversationFollowUnchanged ConversationFollowOutcome = iota
+	// ConversationFollowMoved: the record now names the thread the runtime
+	// holds open.
+	ConversationFollowMoved
+	// ConversationFollowBaselined: an operator repair that carried no
+	// observation of the runtime now records this one as what the runtime
+	// held at the repair. The repair itself stands.
+	ConversationFollowBaselined
+)
 
 // ConversationFollowPermitted is FollowAgentConversationForRuntime's decision
 // without the write: whether held — the runtime's current answer, empty when
-// it holds no thread — may replace prev. The daemon asks it before taking the
-// op-lock, so a check that will not move the record never contends for it.
+// it holds no thread — would change the record prev. The daemon asks it
+// before taking the op-lock, so a check that will not write never contends
+// for it.
 func (i *Instance) ConversationFollowPermitted(token AgentRuntimeToken, prev, held AgentConversationData) bool {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	return i.followPermittedLocked(token, prev, held)
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	outcome, _ := i.followDecisionLocked(token, prev, held)
+	return outcome != ConversationFollowUnchanged
 }
 
 // FollowAgentConversationForRuntime re-points the recorded conversation from
 // prev to held — the thread the live runtime now holds open — and reports
-// whether it changed. It refuses unless token still names the live
-// generation, held belongs to its provider, the record is still exactly prev
-// (an operator's set-conversation or a sibling write since the caller read it
-// is newer than this judgement), and nothing has frozen the record.
+// what it did. It refuses unless token still names the live generation, held
+// belongs to its provider, the record is still exactly prev (an operator's
+// set-conversation or a sibling write since the caller read it is newer than
+// this judgement), and nothing has frozen the record.
 //
 // An operator's repair (ConversationCaptureOperator) stands until the
 // runtime's answer changes from what it held when the repair was made, and
 // only the thread it then holds may replace it (#7120 review): the repair's
 // whole point is that the pane may be on a thread the operator did not want
-// the next resume to use.
-func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, prev, held AgentConversationData) bool {
+// the next resume to use. What it held is part of the record
+// (RepairStamped/RepairHeldID), so it survives a daemon restart (#7122); a
+// repair that carries none takes this observation as that baseline, and the
+// caller persists it like any other write.
+func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, prev, held AgentConversationData) ConversationFollowOutcome {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !i.followPermittedLocked(token, prev, held) {
-		return false
+	outcome, next := i.followDecisionLocked(token, prev, held)
+	if outcome == ConversationFollowUnchanged || !i.setAgentConversationLocked(next) {
+		return ConversationFollowUnchanged
 	}
-	if !i.setAgentConversationLocked(held) {
-		return false
-	}
-	i.repairStamp = conversationRepairStamp{}
-	return true
+	return outcome
 }
 
-func (i *Instance) followPermittedLocked(token AgentRuntimeToken, prev, held AgentConversationData) bool {
+// followDecisionLocked is the follow rule: what held does to prev, and the
+// record to write when it does anything.
+func (i *Instance) followDecisionLocked(token AgentRuntimeToken, prev, held AgentConversationData) (ConversationFollowOutcome, AgentConversationData) {
 	if !i.runtimeTokenLiveLocked(token) || (held.HasID() && held.Agent != token.agent) {
-		return false
+		return ConversationFollowUnchanged, AgentConversationData{}
 	}
 	if i.conversationFollowFrozenLocked() != "" {
-		return false
+		return ConversationFollowUnchanged, AgentConversationData{}
 	}
 	if len(i.Tabs) == 0 || i.Tabs[0].Conversation != prev {
-		return false
+		return ConversationFollowUnchanged, AgentConversationData{}
 	}
 	if prev.CaptureKind == ConversationCaptureOperator {
-		stamp := i.repairStamp
-		if stamp.recordID != strings.ToLower(prev.ID) {
-			// This repair was never stamped — the daemon restarted since,
-			// or the held query failed when it was made — so this
-			// observation is its baseline, and it moves nothing.
-			i.repairStamp = conversationRepairStamp{recordID: strings.ToLower(prev.ID), heldID: strings.ToLower(held.ID)}
-			return false
+		if !prev.RepairStamped {
+			// Never observed: the held query could not answer when the
+			// repair was made, the runtime changed under it, or the record
+			// predates the stamp's persistence. This observation is its
+			// baseline, and it moves nothing.
+			return ConversationFollowBaselined, prev.WithRepairStamp(held.ID)
 		}
 		// Any thread other than the one held at the repair is a move the
 		// follow takes — including the repaired thread itself: once the pane
 		// is on it, the repair has done its job and the record becomes an
 		// ordinary capture, so a later move back to the pre-repair thread is
 		// followed like any other (#7120 Codex review).
-		return held.HasID() && !strings.EqualFold(held.ID, stamp.heldID)
+		if held.HasID() && !strings.EqualFold(held.ID, prev.RepairHeldID) {
+			return ConversationFollowMoved, held
+		}
+		return ConversationFollowUnchanged, AgentConversationData{}
 	}
-	return held.HasID() && !strings.EqualFold(held.ID, prev.ID)
+	if held.HasID() && !strings.EqualFold(held.ID, prev.ID) {
+		return ConversationFollowMoved, held
+	}
+	return ConversationFollowUnchanged, AgentConversationData{}
 }
 
 // conversationFollowFreezeLogAfter is how many consecutive follow checks a

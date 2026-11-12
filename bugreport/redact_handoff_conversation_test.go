@@ -241,6 +241,7 @@ func TestRedactInstanceDataClearsEveryNestedConversationID(t *testing.T) {
 		id := "resume-" + strings.ReplaceAll(strings.ReplaceAll(path, ".", "-"), "InstanceData-", "")
 		v.FieldByName("Agent").SetString("codex")
 		v.FieldByName("ID").SetString(id)
+		v.FieldByName("RepairHeldID").SetString(id + "-held")
 		seeded[path] = id
 	})
 
@@ -263,8 +264,10 @@ func TestRedactInstanceDataClearsEveryNestedConversationID(t *testing.T) {
 	visited := 0
 	walkConversations(t, reflect.ValueOf(&d).Elem(), "InstanceData", false, func(v reflect.Value, path string) {
 		visited++
-		if got := v.FieldByName("ID").String(); got != "" {
-			t.Errorf("%s.ID survived redaction as %q — a conversation id resumes a provider session and must not ship in a shared bundle", path, got)
+		for _, field := range []string{"ID", "RepairHeldID"} {
+			if got := v.FieldByName(field).String(); got != "" {
+				t.Errorf("%s.%s survived redaction as %q — a conversation id resumes a provider session and must not ship in a shared bundle", path, field, got)
+			}
 		}
 	})
 	if visited == 0 {

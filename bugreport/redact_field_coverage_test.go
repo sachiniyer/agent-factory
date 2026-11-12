@@ -245,6 +245,12 @@ var unplantableInstanceFields = map[string]string{
 	"Tabs[].Exit.StatusKnown":                       "bool — whether tmux reported an exit code at all",
 	"PendingTabs[].Exit.StatusKnown":                "same exit-code bool under the staging roster",
 	"TabKinds[].Allowed":                            "bool — whether this backend admits the kind (#3060)",
+	// RepairStamped says only whether an operator repair's stamp was taken;
+	// the thread id it stamps (RepairHeldID) is cleared like the record's ID.
+	"Tabs[].Conversation.RepairStamped":           "bool — whether an operator repair recorded what the runtime held (#7122)",
+	"PendingTabs[].Conversation.RepairStamped":    "same repair-stamp bool under the staging roster",
+	"Tabs[].Handoffs[].From.RepairStamped":        "same repair-stamp bool on the outgoing record a handoff ledger keeps",
+	"PendingTabs[].Handoffs[].From.RepairStamped": "same repair-stamp bool under the staging roster",
 }
 
 // ---------------------------------------------------------------------------

@@ -21,9 +21,9 @@ const (
 	// ConversationCaptureOperator marks an id an operator recorded with
 	// `af sessions set-conversation` (#6769). It is persisted so the repair
 	// keeps its standing across a daemon restart: the follow check leaves it
-	// until the runtime moves to another thread, and the restore and carry
-	// staleness guards accept it — its provenance was proven when it was set
-	// (#7120 review).
+	// until the runtime moves to another thread (#7120 review), and the
+	// restore and carry staleness guards disregard the threads that already
+	// existed when it was made — never one minted after it (#7122).
 	ConversationCaptureOperator = "operator"
 )
 
@@ -36,6 +36,16 @@ type AgentConversationData struct {
 	ID          string    `json:"id,omitempty"`
 	CapturedAt  time.Time `json:"captured_at,omitempty"`
 	CaptureKind string    `json:"capture_kind,omitempty"`
+	// RepairStamped and RepairHeldID belong to an operator record only:
+	// whether af has observed what the runtime held open when the repair was
+	// made, and that thread's id ("" = it held none). The follow check leaves
+	// the repair standing until the runtime holds something else. They are
+	// persisted with the record so a daemon restart keeps the observation
+	// instead of mistaking a thread the pane moved to while the daemon was
+	// down for the one it held at the repair (#7122). Any other write of the
+	// record drops them.
+	RepairStamped bool   `json:"repair_stamped,omitempty"`
+	RepairHeldID  string `json:"repair_held_id,omitempty"`
 }
 
 // AgentRuntimeToken binds asynchronous provider discovery to one concrete
@@ -54,7 +64,9 @@ func (c AgentConversationData) Empty() bool {
 	return strings.TrimSpace(c.Agent) == "" &&
 		strings.TrimSpace(c.ID) == "" &&
 		c.CapturedAt.IsZero() &&
-		strings.TrimSpace(c.CaptureKind) == ""
+		strings.TrimSpace(c.CaptureKind) == "" &&
+		!c.RepairStamped &&
+		strings.TrimSpace(c.RepairHeldID) == ""
 }
 
 func (c AgentConversationData) HasID() bool {
@@ -417,7 +429,7 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 		return program, false, ""
 	}
 	if !carried && conv.Agent == tmux.ProgramCodex {
-		if reason := i.staleRecordedCodexReason(program, conv.ID, conv.CaptureKind == ConversationCaptureOperator); reason != "" {
+		if reason := i.staleRecordedCodexReason(program, conv); reason != "" {
 			return program, false, reason
 		}
 	}
@@ -447,7 +459,7 @@ func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool
 	return i.carriedConversation, true
 }
 
-// staleRecordedCodexReason answers whether the recorded Codex conversation id
+// staleRecordedCodexReason answers whether the recorded Codex conversation
 // still names the pane's conversation: "" when af can prove it does or when
 // there is nothing newer to compare, a refusal reason when the rollout is
 // missing, a newer same-worktree top-level thread exists, or the newer set
@@ -455,26 +467,27 @@ func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool
 // and "provably stale" both refuse, because silently resuming the wrong
 // thread is the bug this guard exists to kill.
 //
-// operatorRepair skips only the newer-thread comparison, never the existence
-// checks: set-conversation proved the repair's rollout belongs to this
-// worktree and is a top-level thread, and the follow check replaces the record
-// (dropping the operator kind) as soon as the runtime moves to another thread
-// after the repair. A standing repair is the conversation the operator chose
-// for exactly this resume, so a newer thread in the worktree is no reason to
-// refuse it (#7120 review) — but a rollout that is gone or ambiguous still is.
-func (i *Instance) staleRecordedCodexReason(program, id string, operatorRepair bool) string {
+// An operator's repair (conv's kind is ConversationCaptureOperator) is
+// judged the same way with one difference, and only after its provenance is
+// re-checked (#7122): the threads that already existed when the repair was
+// made never make it stale, because those are the ones the operator chose
+// over. A thread minted after the repair does, whether or not the follow
+// check ever saw the pane move to it — the bound is the record's own
+// CapturedAt against each candidate's mint time, so it needs nothing held in
+// memory and holds across a daemon restart or a blind follow alike.
+func (i *Instance) staleRecordedCodexReason(program string, conv AgentConversationData) string {
 	workDir := i.GetWorktreePath()
 	home, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil || strings.TrimSpace(home) == "" {
-		return "af cannot resolve the Codex home this session writes to"
+		return codexHomeUnresolvedReason
 	}
 	files, err := codexRolloutFiles(home)
 	if err != nil {
-		return "af could not verify the recorded conversation against the Codex home this session uses"
+		return codexStoreUnverifiedReason
 	}
 	var recordedPath string
 	for file := range files {
-		if strings.EqualFold(codexConversationIDFromPath(file), id) {
+		if strings.EqualFold(codexConversationIDFromPath(file), conv.ID) {
 			if recordedPath != "" {
 				// Two rollouts claim the same id: "current" cannot be proven.
 				return "af could not confirm the recorded conversation is still the newest one in this worktree"
@@ -485,10 +498,15 @@ func (i *Instance) staleRecordedCodexReason(program, id string, operatorRepair b
 	if recordedPath == "" {
 		return "the recorded conversation's rollout is missing from the Codex home this session uses"
 	}
-	if operatorRepair {
-		return ""
+	launchDir := LaunchCaptureWorkingDir(program, workDir)
+	var repairedAt time.Time
+	if conv.CaptureKind == ConversationCaptureOperator {
+		if reason := operatorRepairProvenanceReason(recordedPath, launchDir); reason != "" {
+			return reason
+		}
+		repairedAt = operatorRepairBound(conv, time.Now())
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repairedAt) {
 	case codexRolloutStale:
 		return staleCarryReason
 	case codexRolloutUncorrelated:
@@ -516,7 +534,12 @@ const (
 // an empty launchDir leaves every newer top-level file a candidate, which the
 // callers' fail-closed reading treats correctly. files is the store listing
 // the caller already took, so a check never walks the store twice.
-func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string) codexStalenessVerdict {
+//
+// A non-zero repairedAt is an operator repair's bound (operatorRepairBound):
+// a newer file proven minted at or before it existed when the repair was made
+// and is disregarded; one minted after it, or one af cannot date, stays a
+// candidate exactly as it would for any record.
+func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string, repairedAt time.Time) codexStalenessVerdict {
 	recorded, err := os.Lstat(recordedPath)
 	if err != nil {
 		return codexRolloutRecordedGone
@@ -529,6 +552,9 @@ func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{},
 		if info, serr := os.Lstat(path); serr == nil && info.ModTime().After(recorded.ModTime()) {
 			newer = append(newer, path)
 		}
+	}
+	if !repairedAt.IsZero() {
+		newer = codexRolloutsNotMintedBy(newer, repairedAt)
 	}
 	if len(newer) == 0 {
 		return codexRolloutCurrent
