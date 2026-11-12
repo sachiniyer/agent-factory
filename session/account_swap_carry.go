@@ -316,7 +316,11 @@ func (c *conversationCarry) locateCodex() string {
 		c.transcript = source
 	}
 	// A plain rollout is not the thread's current one after a backtrack (#7141).
-	return c.codexRevertReason()
+	if reason := c.codexRevertReason(); reason != "" {
+		return reason
+	}
+	// A paginated fork's rollout holds only the turns after the fork (#7153).
+	return c.codexForkReason(source != "")
 }
 
 // staleCarryReason is what a replacement is told when the recorded

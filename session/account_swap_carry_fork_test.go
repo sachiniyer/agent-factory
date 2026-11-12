@@ -100,3 +100,25 @@ func TestCommittedCarryResumesAForkTheNewAccountMade(t *testing.T) {
 	require.Equal(t, forkRel, plan.carry.transcript)
 	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+carryOtherThreadID, plan.program)
 }
+
+func TestCodexRolloutHistoryBase(t *testing.T) {
+	dir := t.TempDir()
+	for _, tc := range []struct {
+		name, header string
+		based        bool
+	}{
+		{"a paginated fork", codexForkRollout("/wt", carryTestID, carryOtherThreadID, true), true},
+		{"a fork written whole", codexForkRollout("/wt", carryTestID, carryOtherThreadID, false), false},
+		{"an ordinary thread", codexRollout("/wt"), false},
+		{"an explicit null base", `{"type":"session_meta","payload":{"cwd":"/wt","history_base":null}}` + "\n", false},
+		{"a first line that is not session_meta", `{"type":"event_msg","payload":{"history_base":{}}}` + "\n", false},
+		{"a first line that is not JSON", "turn one\n", false},
+	} {
+		path := writeCarryFile(t, dir, filepath.Join("sessions", tc.name+".jsonl"), tc.header)
+		based, err := codexRolloutHistoryBase(path)
+		require.NoError(t, err, tc.name)
+		require.Equal(t, tc.based, based, tc.name)
+	}
+	_, err := codexRolloutHistoryBase(filepath.Join(dir, "missing.jsonl"))
+	require.Error(t, err, "a rollout that cannot be read is not a fork-free one")
+}
