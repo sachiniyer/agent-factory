@@ -373,16 +373,25 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 	// selection runs inside it directly — re-deriving from spec.Program's enum
 	// would refuse a handoff-scoped pin whose registry is not the recorded
 	// enum's (#4430 review round 4), and restore cannot drift onto ambient
-	// credentials.
-	carried, carryErr := accountCarried(kind, i.Path, i.Host)
-	if carryErr != nil && strings.TrimSpace(accountName) != "" {
-		// The project config could not be resolved, so the listed-host licence
-		// could not be determined. The drift check above already surfaced the
-		// same error when it ran; this guards the path where it was skipped
-		// (no account name) and accountCarried was still called.
-		return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, carryErr)
-	}
-	if carried && strings.TrimSpace(accountName) != "" {
+	// credentials. Only an account-bearing session asks the licence question.
+	if strings.TrimSpace(accountName) != "" {
+		carried, carryErr := accountCarried(kind, i.Path, i.Host)
+		if carryErr != nil {
+			// The licence is undeterminable: the config the drift check above read
+			// has become unreadable since.
+			return fmt.Errorf("cannot re-provision session %q: its account cannot be checked against the resolved program: %w", i.Title, carryErr)
+		}
+		if !carried {
+			// A session recorded under an account is relaunched under THAT account or
+			// not at all (#5571 W7.4). The target can no longer carry it — its host is
+			// not in the global host list any more — and replacing the sandbox anyway
+			// would run the session on the host's own login (or another account) while
+			// the row still reports this one. Refused BEFORE anything is reaped, so the
+			// old runtime stays recoverable.
+			return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
+				"re-add the host under [hosts.<name>] (it is recorded as %q) or clear the session's account, rather than restoring it under another identity",
+				i.Title, accountName, string(kind), i.Host)
+		}
 		account, accountErr := selectAccountInNamespace(scopedAgent, accountName)
 		if accountErr != nil {
 			return fmt.Errorf("cannot re-provision session %q with its persisted account: %w", i.Title, accountErr)
@@ -402,16 +411,6 @@ func (i *Instance) reprovisionRemoteOpts(adopt *AdoptSpec, replacePreserved bool
 				return fmt.Errorf("cannot re-provision session %q: %w", i.Title, verr)
 			}
 		}
-	} else if strings.TrimSpace(accountName) != "" {
-		// A session recorded under an account is relaunched under THAT account or
-		// not at all (#5571 W7.4). The target can no longer carry it — its host is
-		// not in the global host list any more — and replacing the sandbox anyway
-		// would run the session on the host's own login (or another account) while
-		// the row still reports this one. Refused BEFORE anything is reaped, so the
-		// old runtime stays recoverable.
-		return fmt.Errorf("cannot re-provision session %q: it runs under account %q, but its target %s is not a host in the global host list, so the account cannot be synced; "+
-			"re-add the host under [hosts.<name>] (it is recorded as %q) or clear the session's account, rather than restoring it under another identity",
-			i.Title, accountName, string(kind), i.Host)
 	}
 	rt, err := ResolveRuntime(kind)
 	if err != nil {

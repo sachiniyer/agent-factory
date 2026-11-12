@@ -241,16 +241,23 @@ func defaultBackendFactoryForKind(opts InstanceOptions, absPath string, kind Bac
 	// path is a symlink out of the registry), and those must be checked on THIS
 	// machine, where the registry lives, before a path derived from them is handed
 	// to a runtime that will mount it.
-	carried, carryErr := accountCarried(kind, absPath, opts.Host)
-	if carryErr != nil {
-		return ProvisionResult{}, fmt.Errorf("cannot resolve account %q for provisioning: %w", opts.Account, carryErr)
-	}
-	if carried && strings.TrimSpace(opts.Account) != "" {
-		account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
-		if aerr != nil {
-			return ProvisionResult{}, aerr
+	//
+	// Only a create that NAMES an account asks the licence question at all. An
+	// accountless create under an unresolvable config must reach the runtime,
+	// whose own answer (the backend's config failure) is the one to report, not
+	// an account error about an account nobody asked for.
+	if strings.TrimSpace(opts.Account) != "" {
+		carried, carryErr := accountCarried(kind, absPath, opts.Host)
+		if carryErr != nil {
+			return ProvisionResult{}, fmt.Errorf("cannot resolve account %q for provisioning: %w", opts.Account, carryErr)
 		}
-		spec.Account = account
+		if carried {
+			account, aerr := resolveAccountForProvision(absPath, opts.Program, opts.Account)
+			if aerr != nil {
+				return ProvisionResult{}, aerr
+			}
+			spec.Account = account
+		}
 	}
 	cred := mintForProvision(&spec, kind, opts.SandboxCredentials)
 	res, err := rt.Provision(spec)
