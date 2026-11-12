@@ -179,14 +179,15 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 }
 
 // classifyCodexRolloutFiles is codexRolloutFilesForWorkingDir that also
-// reports why af could not read an uncorrelated file's header, when it could
-// not: an unreadable header is a channel af could not look through, while a
-// readable one that does not parse yet is a header still being written
-// (#7140).
+// reports why af could not read the uncorrelated files' headers, when it could
+// read none of them: an unreadable header is a channel af could not look
+// through, while a readable one that does not parse is an answer (#7140). A
+// window holding both is an answer, so it reports nil (#7160).
 func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []string, uncorrelated int, unreadable error) {
 	if workingDir != "" && !filepath.IsAbs(workingDir) {
 		return nil, len(paths), nil
 	}
+	unreadableCount := 0
 	for _, path := range paths {
 		cwd, subagent, ok, readErr := codexRolloutHeader(path)
 		switch {
@@ -197,8 +198,11 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 				matches = append(matches, path)
 			} else {
 				uncorrelated++
-				if unreadable == nil {
-					unreadable = readErr
+				if readErr != nil {
+					unreadableCount++
+					if unreadable == nil {
+						unreadable = readErr
+					}
 				}
 			}
 		case subagent:
@@ -207,6 +211,9 @@ func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []str
 		case workingDir == "" || pathutil.ResolveForCompare(cwd) == workingDir:
 			matches = append(matches, path)
 		}
+	}
+	if unreadableCount < uncorrelated {
+		unreadable = nil
 	}
 	return matches, uncorrelated, unreadable
 }
