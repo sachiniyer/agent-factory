@@ -12,7 +12,7 @@ const fs = require('node:fs');
 const path = require('node:path');
 const test = require('node:test');
 const {
-  YML, parseJobs, makeOrigin, fakeGithub, runWorkflow, outcome,
+  YML, parseJobs, makeOrigin, FIX, fakeGithub, runWorkflow, outcome, jobResult,
 } = require('./auto-merge-harness.js');
 
 const JOBS = parseJobs(YML);
@@ -56,9 +56,11 @@ test("every other job runs only auto-merge.js, from a fresh checkout of the work
   }
 });
 
+// Not `result`: a check step is continue-on-error, so its job succeeds whether
+// or not the check did. Only the `passed` output carries the verdict.
 test("the other jobs read nothing from a check but its verdict: pass or fail, the sha checked, the fixes that passed", () => {
   const checks = new Set(JOBS.filter(runsComposition).map((job) => job.id));
-  const verdict = new Set(['outputs.passed', 'outputs.sha', 'outputs.fixes', 'outputs.base', 'result']);
+  const verdict = new Set(['outputs.passed', 'outputs.sha', 'outputs.fixes', 'outputs.base']);
   const reads = [];
   for (const job of JOBS.filter((j) => !runsComposition(j))) {
     for (const [, id, field] of job.text.matchAll(/needs\.([\w-]+)\.([\w.]+)/g)) {
@@ -67,6 +69,25 @@ test("the other jobs read nothing from a check but its verdict: pass or fail, th
     }
   }
   for (const check of checks) assert.ok(reads.some((r) => r.includes(`<- ${check}.`)), `nothing acts on ${check}: ${reads}`);
+});
+
+test('every check reports a passed verdict, taken from its check step', () => {
+  for (const job of JOBS.filter(runsComposition)) {
+    const check = job.steps.find((step) => step.run && COMPOSITION.test(step.run));
+    assert.equal(job.outputs.passed, `\${{ steps.${check.id}.outcome == 'success' }}`, `${job.id}: passed`);
+  }
+});
+
+test('only master runs the merger: a dispatch from any other ref would run that ref\'s auto-merge.js with the write token', () => {
+  const gate = JOBS.find((job) => job.id === 'gate');
+  assert.match(gate.if, /github\.ref == 'refs\/heads\/master'/);
+  for (const job of JOBS.filter((j) => j.id !== 'gate')) assert.ok(job.needs.includes('gate') || job.needs.some((n) => JOBS.find((j) => j.id === n).needs.includes('gate')), `${job.id} does not wait for gate`);
+});
+
+test('the post-merge check runs whenever something merged, even if land failed afterwards', () => {
+  const compose = JOBS.find((job) => job.id === 'compose');
+  assert.match(compose.if, /!cancelled\(\)/);
+  assert.match(compose.if, /needs\.land\.outputs\.merged == 'true'/);
 });
 
 test('the workflow-wide token can only read the repository; each job asks for its own', () => {
@@ -126,4 +147,70 @@ test('a check that never reaches its verdict counts as a failure, not a pass', a
     assert.deepEqual(github.merged, [], fault);
     assert.notEqual(outcome(run, 'recheck'), 'success', fault);
   }
+});
+
+// The #7172 security review's R1-R3: a missing verdict fails closed on every
+// path, not only the re-check's.
+test('a post-merge check that never reports (a lost runner) still reports master broken', async () => {
+  const origin = makeOrigin();
+  origin.squash(origin.heads[12], 'the fix, hand-merged'); // master passes
+  const github = fakeGithub(origin, [[13]], { broken: false });
+  const run = await runWorkflow(origin, github, { crash: (job) => job.id === 'compose' });
+  assert.deepEqual(github.merged, [13]);
+  assert.equal(jobResult(run, 'compose'), 'failure');
+  assert.equal(github.opened.length, 1, 'a lost post-merge check left the merge unreported');
+});
+
+test('a fault in the halt check never lets a halted master merge ordinary PRs', async () => {
+  const origin = makeOrigin(); // master broken, issue open
+  const github = fakeGithub(origin, [[13]]);
+  await runWorkflow(origin, github, { fail: (job, step) => step.id === 'halt' });
+  assert.deepEqual(github.merged, [], 'merged during a halt because the halt check faulted');
+});
+
+test('a fix check that never reports (a lost runner) merges nothing', async () => {
+  const origin = makeOrigin();
+  const github = fakeGithub(origin, [[12, FIX]]);
+  await runWorkflow(origin, github, { crash: (job) => job.id === 'fixcheck' });
+  assert.deepEqual(github.merged, []);
+  assert.equal(github.issue.state, 'open');
+});
+
+// Code in a check job can forge that job's outputs: a runner gives it sudo. The
+// jobs holding a token must act only on what they re-validate.
+const forge = (stepId, outputs) => (run) => {
+  Object.assign(run.state[stepId].outputs, outputs.outputs || {});
+  if (outputs.outcome) run.state[stepId].outcome = outputs.outcome;
+};
+
+test('a fix list without a passing verdict merges nothing', async () => {
+  const origin = makeOrigin();
+  const github = fakeGithub(origin, [[12, FIX]]);
+  // #12 really passes, so the list is real; the check's verdict says failed.
+  const run = await runWorkflow(origin, github, { after: { fixcheck: forge('fixcheck', { outcome: 'failure' }) } });
+  assert.notEqual(outcome(run, 'fixcheck'), 'success');
+  assert.deepEqual(github.merged, [], 'a fix landed on its list alone, without the check passing');
+});
+
+test("a forged sha from the post-merge check never reaches the broken-master issue", async () => {
+  const origin = makeOrigin();
+  origin.squash(origin.heads[12], 'the fix, hand-merged');
+  const github = fakeGithub(origin, [[13]], { broken: false });
+  const forged = 'not-a-sha, then prose';
+  await runWorkflow(origin, github, {
+    after: { compose: forge('compose', { outcome: 'failure' }), compose_checkout: forge('compose_checkout', { outputs: { commit: forged } }) },
+  });
+  assert.equal(github.opened.length, 1);
+  const { title, body } = github.opened[0];
+  assert.ok(!title.includes('not-a-sha') && !body.includes('not-a-sha'), `forged text reached the issue: ${title}`);
+  assert.ok(title.endsWith(origin.master().slice(0, 10)), `the issue names master's head instead: ${title}`);
+});
+
+test('a dispatch from a branch runs no job at all', async () => {
+  const origin = makeOrigin();
+  const github = fakeGithub(origin, [[12, FIX], [13]], { broken: false });
+  const run = await runWorkflow(origin, github, { ref: 'refs/heads/some-branch' });
+  assert.deepEqual(run.ran, [], 'a step ran on a branch dispatch');
+  assert.equal(jobResult(run, 'gate'), 'skipped');
+  assert.deepEqual(github.merged, []);
 });
