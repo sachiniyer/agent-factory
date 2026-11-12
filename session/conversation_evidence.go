@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -146,9 +147,7 @@ func (i *Instance) dropScannedCaptureEvidence(kept keptCaptureEvidence, settles 
 	if i.captureSettles != settles {
 		return false
 	}
-	if i.captureEvidence.pid == kept.pid && i.captureEvidence.startID == kept.startID {
-		i.captureEvidence = keptCaptureEvidence{}
-	}
+	i.dropCaptureEvidenceLocked(kept)
 	return true
 }
 
@@ -158,8 +157,20 @@ func (i *Instance) dropScannedCaptureEvidence(kept keptCaptureEvidence, settles 
 func (i *Instance) dropCaptureEvidence(kept keptCaptureEvidence) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.dropCaptureEvidenceLocked(kept)
+}
+
+// dropCaptureEvidenceLocked is every drop of kept. Each answer that drops it —
+// the process is gone or its pid was reused, or a scan that no reattach
+// straddled found no pane of the session rooted at it — is evidence that the
+// runtime af launched is no longer the one in the pane, so a standing
+// operator repair records the replacement here, exactly as the reattach
+// settle's answered mismatch does (#7147 G-3). A scan a reattach straddled
+// drops nothing and so records nothing. Callers hold i.mu.
+func (i *Instance) dropCaptureEvidenceLocked(kept keptCaptureEvidence) {
 	if i.captureEvidence.pid == kept.pid && i.captureEvidence.startID == kept.startID {
 		i.captureEvidence = keptCaptureEvidence{}
+		i.markRepairRuntimeReplacedLocked(time.Now())
 	}
 }
 

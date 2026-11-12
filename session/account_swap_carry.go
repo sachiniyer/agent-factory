@@ -322,7 +322,7 @@ func (c *conversationCarry) locateCodex() string {
 // staleCarryReason is what a replacement is told when the recorded
 // conversation is not the one the user was last in.
 const staleCarryReason = "the conversation af recorded is no longer the newest one in this worktree " +
-	"(a new one was started, for example with /clear or /new)"
+	"(a new one was started, for example with /clear or /new, or an older one was resumed)"
 
 // staleReason refuses a carry whose recorded conversation is no longer the
 // newest in this worktree. The recorded id is written at launch and at
