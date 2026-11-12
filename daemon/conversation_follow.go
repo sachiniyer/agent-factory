@@ -3,8 +3,10 @@ package daemon
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // followAgentConversation is a recorded row's turn of the capture loop
@@ -23,11 +25,15 @@ import (
 //     the commit). A freeze that outlasts a few checks is reported once;
 //   - an operator's set-conversation repair, until the runtime holds something
 //     other than what it held when the repair was made, and then only to that
-//     new thread (#7120 review);
+//     new thread (#7120 review). What it held is persisted with the record, so
+//     a restart does not reset it; a repair that carries no observation takes
+//     this check's answer as its baseline, persisted the same way (#7122);
 //   - a record that changed since this check read it.
 //
 // The answer comes only from the runtime af launched — verified launch
-// evidence, never the session's active pane (#7120 review). One check costs
+// evidence, or an identity kept from an unanswerable reattach probe once the
+// session-wide pane scan re-verifies it (#7123), never the session's active
+// pane (#7120 review). One check costs
 // one stat per verified root plus that process's descriptor list in the steady
 // state; nothing in the conversation store is walked. The commit takes the
 // per-session op-lock the swap, handoff, and set-conversation paths hold.
@@ -42,6 +48,13 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 		return nil
 	}
 	inst.ClearConversationFollowFrozen()
+	// An identity an unanswerable reattach probe kept is re-verified here,
+	// by the session-wide pane scan, before the held query judges from it
+	// (#7123). A recorded row keeps its record either way, so its failure is
+	// the follow's own and names no restore consequence.
+	if err := inst.CheckConversationCaptureEvidence(); err != nil {
+		return fmt.Errorf("could not confirm recorded conversation %s is still the pane's: %w", recorded.ID, err)
+	}
 	current, err := session.HeldAgentConversation(token.Agent(), inst.BindConversationCaptureRuntime(snap))
 	if err != nil {
 		return fmt.Errorf("could not confirm recorded conversation %s is still the pane's: %w", recorded.ID, err)
@@ -59,17 +72,22 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	if tracked != inst || inst.UserKilled() || inst.IsArchived() {
 		return nil
 	}
-	if !inst.FollowAgentConversationForRuntime(token, recorded, current) {
+	outcome := inst.FollowAgentConversationForRuntime(token, recorded, current)
+	if outcome == session.ConversationFollowUnchanged {
 		return nil
 	}
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
 	persistErr := persistInstanceData(repoID, inst.ToInstanceData())
 	repoStartLock.Unlock()
-	if strings.EqualFold(recorded.ID, current.ID) {
+	switch {
+	case outcome == session.ConversationFollowBaselined:
+		m.info().Printf("session %q: the operator-recorded conversation %s stands; its Codex pane now holds %s, and only a move off that is followed (#7122)",
+			inst.Title, recorded.ID, heldThreadForLog(current))
+	case strings.EqualFold(recorded.ID, current.ID):
 		m.info().Printf("session %q: its Codex pane is now on the conversation %s an operator recorded; following it like any capture from here (#7120)",
 			inst.Title, current.ID)
-	} else {
+	default:
 		m.info().Printf("session %q: its Codex pane moved from conversation %s to %s; recorded the thread its runtime now holds open (#7101)",
 			inst.Title, recorded.ID, current.ID)
 	}
@@ -79,19 +97,59 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	return nil
 }
 
-// stampConversationRepair records what the runtime held when an operator's
-// set-conversation repair landed, so the follow check leaves the repair until
-// the runtime moves (#7120 review). It runs under the repair's op-lock. A held
-// query that cannot answer leaves the repair unstamped; the first follow
-// observation then becomes its baseline, which can only keep the repair longer.
-func stampConversationRepair(inst *session.Instance, conv session.AgentConversationData) {
+func heldThreadForLog(held session.AgentConversationData) string {
+	if held.HasID() {
+		return "conversation " + held.ID
+	}
+	return "no conversation yet"
+}
+
+// repairHeldObservation is which thread the runtime held open when an
+// operator's set-conversation repair was requested, for the stamp the repair
+// record carries (#7120 review): the follow check leaves the repair standing
+// until the runtime holds something else.
+type repairHeldObservation struct {
+	token  session.AgentRuntimeToken
+	heldID string
+	// at is taken before the walk starts, so a thread the pane moves to while
+	// the walk runs is after it.
+	at time.Time
+	ok bool
+}
+
+// observeRepairHeld takes that answer BEFORE the repair's op-lock (#7122,
+// #7120 review F-H): it walks the process table, which on darwin can block
+// on a member that is mid-exec, and a slow walk must never hold the lock a
+// kill or archive waits on. A query that cannot answer leaves the repair
+// unstamped; the first follow observation then becomes its baseline, which
+// can only keep the repair longer.
+func observeRepairHeld(inst *session.Instance) repairHeldObservation {
 	scope := inst.SessionCodexCaptureScope()
 	if !scope.CapturesCodex() {
-		return
+		return repairHeldObservation{}
 	}
-	held, err := session.HeldAgentConversation(conv.Agent, inst.BindConversationCaptureRuntime(scope))
+	token := inst.AgentRuntimeToken()
+	if token.Agent() != tmux.ProgramCodex {
+		return repairHeldObservation{}
+	}
+	at := time.Now()
+	held, err := session.HeldAgentConversation(token.Agent(), inst.BindConversationCaptureRuntime(scope))
 	if err != nil {
-		return
+		return repairHeldObservation{}
 	}
-	inst.StampConversationRepair(conv.ID, held.ID)
+	return repairHeldObservation{token: token, heldID: held.ID, at: at, ok: true}
+}
+
+// stamp folds the observation into the repair it was taken for, under the
+// op-lock — only while the runtime it observed is still the live one, so a
+// respawn or swap that landed in between leaves the repair unstamped rather
+// than stamped with another runtime's thread. A stamped repair is dated no
+// later than the observation (#7125 review R-2): the staleness bound then
+// treats a thread the pane moved to after the look, while the op-lock wait
+// and the store walk ran, as the move the follow sees it as.
+func (o repairHeldObservation) stamp(inst *session.Instance, conv session.AgentConversationData) session.AgentConversationData {
+	if !o.ok || inst.AgentRuntimeToken() != o.token {
+		return conv
+	}
+	return conv.WithRepairObservation(o.heldID, o.at)
 }

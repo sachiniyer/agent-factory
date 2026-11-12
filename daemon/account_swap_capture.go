@@ -49,6 +49,9 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	}
 	// Rollout adoption needs the replacement's own runtime as evidence, not
 	// just the store and directory its launch was composed against (#6847).
+	// Re-verify an identity kept for capture first (#7123); with none, the
+	// fresh capture returns at once and the swap defers (#7124 review F2).
+	_ = instance.CheckConversationCaptureEvidence()
 	snap = instance.BindConversationCaptureRuntime(snap)
 	type captureResult struct {
 		conversation session.AgentConversationData

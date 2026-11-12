@@ -3,6 +3,7 @@ package daemon
 import (
 	"time"
 
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -32,10 +33,24 @@ func (hs *headlessServer) captureCodexConversation(snap session.ConversationCapt
 		return
 	}
 	go func() {
+		// The same chokepoint as the daemon's loop: settle the evidence first
+		// (re-verifying a kept identity, #7123), and say so when there is
+		// none rather than waiting out the window in silence (#7124 review
+		// F5) — a server restarted over a surviving tmux session rebuilds its
+		// instance with no launch record at all.
+		if err := hs.inst.CheckConversationCaptureEvidence(); err != nil {
+			log.WarningLog.Printf("agent-server: conversation capture for %q recorded nothing: %v",
+				hs.inst.Title, unrecordedCaptureError(hs.inst.Title, err))
+			return
+		}
 		// Adoption is attributed to the launched runtime's own open files,
 		// not merely to a new rollout naming the right directory (#6847).
 		conv, err := session.CaptureAgentConversation(token.Agent(), hs.inst.BindConversationCaptureRuntime(snap), agentServerCaptureTimeout)
-		if err != nil || !conv.HasID() {
+		if err != nil {
+			log.WarningLog.Printf("agent-server: conversation capture for %q failed: %v", hs.inst.Title, err)
+			return
+		}
+		if !conv.HasID() {
 			return
 		}
 		hs.inst.SetAgentConversationForRuntime(token, conv)

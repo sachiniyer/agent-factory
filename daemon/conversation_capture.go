@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
+	"github.com/sachiniyer/agent-factory/internal/shellsuggest"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -173,6 +174,17 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 		}
 		m.beginConversationCapture(inst)
 		held = true
+		// A failed before-image never answers the diff, and keeping it for
+		// the runtime's life turned a transient store failure — EMFILE, EIO —
+		// into the permanent loss of the one channel that can answer while the
+		// runtime holds two top-level threads (#7124 review F3). Take it again:
+		// one walk per rearm, never per poll. A late baseline only hides a
+		// rollout minted before it, which the held query still finds.
+		if snap.CodexBaselineErr() != nil && !inst.AgentConversation().HasID() {
+			if retaken := inst.SessionCodexCaptureBaseline(); retaken.CapturesCodex() {
+				snap = retaken
+			}
+		}
 	}
 }
 
@@ -183,8 +195,9 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 // loop goes on following the runtime (#7101). Nor does a baseline whose store
 // scan failed: the follow never reads it (#7120 review), and an unrecorded
 // row's attempt skips the diff that would and asks the held query, which
-// needs none (#7123). Ending the loop on it would hand the row back to the
-// poll, whose re-arm walks the store again for a fresh baseline every cycle.
+// needs none (#7123), while the loop itself takes the baseline again on its
+// next re-ask. Ending the loop on it would hand the row back to the poll,
+// whose re-arm walks the store again for a fresh baseline every cycle.
 func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, token session.AgentRuntimeToken) bool {
 	if inst == nil || inst.UserKilled() || inst.IsArchived() {
 		return false
@@ -332,6 +345,20 @@ func (m *Manager) armDeferredConversationCaptureLocked(repoID, key string, inst 
 	}
 }
 
+// unrecordedCaptureError is an unrecorded row's attempt failure as its owner
+// needs to read it. When the cause is that af cannot tell which process is the
+// agent, the consequence lands much later and says nothing: a restore of a row
+// with no recorded conversation starts a fresh one without a refusal reason
+// (#7124 review F1). So the one warning the loop logs names that consequence
+// and the repair, which needs no launch evidence.
+func unrecordedCaptureError(title string, err error) error {
+	if !errors.Is(err, session.ErrNoConversationCaptureEvidence) {
+		return err
+	}
+	return fmt.Errorf("%w. Until it can, restoring this session starts a fresh conversation; if you know which one it is in, record it with `%s <id>`",
+		err, shellsuggest.PositionalCommand("af", []string{"sessions", "set-conversation"}, title))
+}
+
 // captureAgentConversation runs one capture attempt and commits any id it
 // finds; on a row that already recorded one it runs the follow check instead
 // (#7101). A non-nil return is the attempt's failure for the loop's
@@ -356,6 +383,15 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// on each judgement, so a snapshot armed before the launch recorded it
 	// still attributes to that runtime once it has; without that evidence
 	// nothing is attributed — never the active pane's thread (#7123).
+	//
+	// Evidence is settled first, once per attempt: an identity an unanswerable
+	// reattach probe kept is re-verified here by the session-wide pane scan,
+	// and with no verified agent process neither the diff nor the held query
+	// can answer, so the attempt ends now — saying what that costs — rather
+	// than polling the store for its whole window (#7123, #7124 review F1/F2).
+	if err := inst.CheckConversationCaptureEvidence(); err != nil {
+		return unrecordedCaptureError(inst.Title, err)
+	}
 	snap = inst.BindConversationCaptureRuntime(snap)
 	var conv session.AgentConversationData
 	var err error
@@ -391,7 +427,7 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 		// capture keeps treating "no rollout yet" as the expected fresh start
 		// rather than failing the handoff on a walk it does not need.
 		if conv, err = session.HeldAgentConversation(agent, snap); err != nil {
-			return err
+			return unrecordedCaptureError(inst.Title, err)
 		}
 		if !conv.HasID() {
 			if baselineErr != nil {

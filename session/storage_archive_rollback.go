@@ -348,7 +348,8 @@ func (d InstanceData) ForStorage() InstanceData {
 // InstanceData doubles as the instances.json record, so it also carries the
 // daemon-side usage-limit wall machinery (banner anchor, runtime pins, the
 // retired shadow, the send tombstone): raw pane text and process identity kept
-// solely for the daemon's own stale-read/residue matching (#6972 item 5). No
+// solely for the daemon's own stale-read/residue matching (#6972 item 5), and
+// the identity conversation capture keeps to re-verify (#7123). No
 // client renders or decides anything from those fields, so the projection
 // withholds them; the visible badge facts — LimitResetAt, LimitResetEvidence,
 // LimitAgent, LimitAccount — stay.
@@ -358,6 +359,8 @@ func (d InstanceData) ForClients() InstanceData {
 	d.LimitWallRuntimePID = 0
 	d.LimitWallRuntimeStartID = 0
 	d.LimitWallRuntimeGen = 0
+	d.CaptureRuntimePID = 0
+	d.CaptureRuntimeStartID = 0
 	d.LimitPromptSent = false
 	d.AgentRuntimeGeneration = 0
 	d.LastLimitWall = nil

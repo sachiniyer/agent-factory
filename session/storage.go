@@ -357,6 +357,13 @@ type InstanceData struct {
 	// records predating the evidence.
 	RuntimePID     int    `json:"runtime_pid,omitempty"`
 	RuntimeStartID uint64 `json:"runtime_start_id,omitempty"`
+	// CaptureRuntimePID/CaptureRuntimeStartID: the RuntimePID pair a reattach
+	// probe could not answer about, kept for conversation capture alone and
+	// re-verified before use (#7123; see keptCaptureEvidence). Additive: an
+	// older binary ignores it, and dropping it leaves capture failing closed.
+	// Daemon-side process identity, so ForClients withholds it.
+	CaptureRuntimePID     int    `json:"capture_runtime_pid,omitempty"`
+	CaptureRuntimeStartID uint64 `json:"capture_runtime_start_id,omitempty"`
 	// Account is the credential account this session's provider panes use (#3051).
 	// Persisted because the identity a session runs as must survive a daemon
 	// restart and an archive/restore: a session that silently reverted to the

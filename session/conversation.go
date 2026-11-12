@@ -21,9 +21,10 @@ const (
 	// ConversationCaptureOperator marks an id an operator recorded with
 	// `af sessions set-conversation` (#6769). It is persisted so the repair
 	// keeps its standing across a daemon restart: the follow check leaves it
-	// until the runtime moves to another thread, and the restore and carry
-	// staleness guards accept it — its provenance was proven when it was set
-	// (#7120 review).
+	// until the runtime moves to another thread (#7120 review), and the
+	// restore and carry staleness guards disregard only the threads it
+	// overrode — never one whose rollout appeared after it, or one the pane
+	// moved to since (#7122, operatorRepairWindow.disregards).
 	ConversationCaptureOperator = "operator"
 )
 
@@ -36,6 +37,18 @@ type AgentConversationData struct {
 	ID          string    `json:"id,omitempty"`
 	CapturedAt  time.Time `json:"captured_at,omitempty"`
 	CaptureKind string    `json:"capture_kind,omitempty"`
+	// RepairStamped and RepairHeldID belong to an operator record only:
+	// whether af has observed what the runtime held open when the repair was
+	// made, and that thread's id ("" = it held none). The follow check leaves
+	// the repair standing until the runtime holds something else, and the
+	// staleness guards exempt that thread by id. They are persisted with the
+	// record so a daemon restart keeps the observation instead of mistaking a
+	// thread the pane moved to while the daemon was down for the one it held
+	// at the repair (#7122). A write that replaces the record — a follow, a
+	// capture, a carry — drops them; a handoff ledger entry keeps the whole
+	// outgoing record, stamp included, for a revert to restore as it was.
+	RepairStamped bool   `json:"repair_stamped,omitempty"`
+	RepairHeldID  string `json:"repair_held_id,omitempty"`
 }
 
 // AgentRuntimeToken binds asynchronous provider discovery to one concrete
@@ -54,7 +67,9 @@ func (c AgentConversationData) Empty() bool {
 	return strings.TrimSpace(c.Agent) == "" &&
 		strings.TrimSpace(c.ID) == "" &&
 		c.CapturedAt.IsZero() &&
-		strings.TrimSpace(c.CaptureKind) == ""
+		strings.TrimSpace(c.CaptureKind) == "" &&
+		!c.RepairStamped &&
+		strings.TrimSpace(c.RepairHeldID) == ""
 }
 
 func (c AgentConversationData) HasID() bool {
@@ -404,24 +419,24 @@ func prepareResumeConversation(i *Instance, program string) string {
 // exists), or unconfirmable (a newer rollout cannot be correlated either way)
 // no longer names the conversation the pane is in, so a restore must start
 // fresh rather than continue a thread the user left (#6769). A refused
-// Codex resume comes back with the reason; every other non-resume case
-// (nothing recorded, the command cannot express a resume) stays reason-free
+// Codex resume comes back with its typed reason; every other non-resume case
+// (nothing recorded, the command cannot express a resume) is the zero decline
 // because there is nothing to warn about.
-func prepareExactResumeConversation(i *Instance, program string) (string, bool, string) {
+func prepareExactResumeConversation(i *Instance, program string) (string, bool, resumeDecline) {
 	conv, carried := i.resumableConversationAndSource()
 	if !conv.HasID() {
-		return program, false, ""
+		return program, false, resumeDecline{}
 	}
 	rewritten, ok := tmux.ResumeProgramWithConversationID(program, conv.Agent, conv.ID)
 	if !ok {
-		return program, false, ""
+		return program, false, resumeDecline{}
 	}
 	if !carried && conv.Agent == tmux.ProgramCodex {
-		if reason := i.staleRecordedCodexReason(program, conv.ID, conv.CaptureKind == ConversationCaptureOperator); reason != "" {
-			return program, false, reason
+		if decline := i.staleRecordedCodexDecline(program, conv); decline.reason != "" {
+			return program, false, decline
 		}
 	}
-	return rewritten, true, ""
+	return rewritten, true, resumeDecline{}
 }
 
 // resumableConversation is the conversation a restore would resume: the
@@ -447,56 +462,66 @@ func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool
 	return i.carriedConversation, true
 }
 
-// staleRecordedCodexReason answers whether the recorded Codex conversation id
-// still names the pane's conversation: "" when af can prove it does or when
-// there is nothing newer to compare, a refusal reason when the rollout is
-// missing, a newer same-worktree top-level thread exists, or the newer set
+// staleRecordedCodexDecline answers whether the recorded Codex conversation
+// still names the pane's conversation: the zero decline when af can prove it
+// does or when there is nothing newer to compare, a refusal when the rollout
+// is missing, a newer same-worktree top-level thread exists, or the newer set
 // cannot be correlated either way. Fail closed: "we cannot prove current"
 // and "provably stale" both refuse, because silently resuming the wrong
-// thread is the bug this guard exists to kill.
+// thread is the bug this guard exists to kill. The two are typed apart
+// (resumeDecline.unverified), which decides whether an operator's repair is
+// retired.
 //
-// operatorRepair skips only the newer-thread comparison, never the existence
-// checks: set-conversation proved the repair's rollout belongs to this
-// worktree and is a top-level thread, and the follow check replaces the record
-// (dropping the operator kind) as soon as the runtime moves to another thread
-// after the repair. A standing repair is the conversation the operator chose
-// for exactly this resume, so a newer thread in the worktree is no reason to
-// refuse it (#7120 review) — but a rollout that is gone or ambiguous still is.
-func (i *Instance) staleRecordedCodexReason(program, id string, operatorRepair bool) string {
+// An operator's repair (conv's kind is ConversationCaptureOperator) is
+// judged the same way with one difference, and only after its provenance is
+// re-checked (#7122): a newer thread the operator chose over never makes it
+// stale (operatorRepairWindow.disregards). Any other — a thread whose rollout
+// appeared after the repair, or one the pane moved to since — does, whether or
+// not the follow check saw the pane move: the rule reads only the record and
+// the store, so it holds across a daemon restart or a blind follow alike.
+func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversationData) resumeDecline {
 	workDir := i.GetWorktreePath()
 	home, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil || strings.TrimSpace(home) == "" {
-		return "af cannot resolve the Codex home this session writes to"
+		return declineResumeUnverified("af cannot resolve the Codex home this session writes to")
 	}
 	files, err := codexRolloutFiles(home)
 	if err != nil {
-		return "af could not verify the recorded conversation against the Codex home this session uses"
+		return declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses")
 	}
 	var recordedPath string
 	for file := range files {
-		if strings.EqualFold(codexConversationIDFromPath(file), id) {
+		if strings.EqualFold(codexConversationIDFromPath(file), conv.ID) {
 			if recordedPath != "" {
-				// Two rollouts claim the same id: "current" cannot be proven.
-				return "af could not confirm the recorded conversation is still the newest one in this worktree"
+				// Two rollouts claim the same id: "current" cannot be proven,
+				// now or later.
+				return declineResume("af could not confirm the recorded conversation is still the newest one in this worktree: two rollouts record it")
 			}
 			recordedPath = file
 		}
 	}
 	if recordedPath == "" {
-		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+		return declineResume("the recorded conversation's rollout is missing from the Codex home this session uses")
 	}
-	if operatorRepair {
-		return ""
+	launchDir := LaunchCaptureWorkingDir(program, workDir)
+	var repair operatorRepairWindow
+	if conv.CaptureKind == ConversationCaptureOperator {
+		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
+			return decline
+		}
+		repair = operatorRepairWindowOf(conv, time.Now())
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutStale:
-		return staleCarryReason
+		return declineResume(staleCarryReason)
 	case codexRolloutUncorrelated:
-		return "af could not confirm the recorded conversation is still the newest one in this worktree"
+		// A newer rollout whose header af cannot classify yet — Codex may be
+		// mid-write — is a look that failed, not evidence about the id.
+		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree")
 	case codexRolloutRecordedGone:
-		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+		return declineResume("the recorded conversation's rollout is missing from the Codex home this session uses")
 	}
-	return ""
+	return resumeDecline{}
 }
 
 // codexStalenessVerdict is the outcome of comparing a recorded rollout against
@@ -516,7 +541,12 @@ const (
 // an empty launchDir leaves every newer top-level file a candidate, which the
 // callers' fail-closed reading treats correctly. files is the store listing
 // the caller already took, so a check never walks the store twice.
-func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string) codexStalenessVerdict {
+//
+// repair is an operator repair's window (operatorRepairWindowOf): a newer
+// file it disregards is a thread the operator chose over and is dropped; any
+// other, including one af cannot date, stays a candidate exactly as it would
+// for any record. The zero window drops nothing.
+func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string, repair operatorRepairWindow) codexStalenessVerdict {
 	recorded, err := os.Lstat(recordedPath)
 	if err != nil {
 		return codexRolloutRecordedGone
@@ -526,7 +556,8 @@ func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{},
 		if path == recordedPath {
 			continue
 		}
-		if info, serr := os.Lstat(path); serr == nil && info.ModTime().After(recorded.ModTime()) {
+		if info, serr := os.Lstat(path); serr == nil && info.ModTime().After(recorded.ModTime()) &&
+			!repair.disregards(path, info.ModTime()) {
 			newer = append(newer, path)
 		}
 	}
@@ -735,12 +766,12 @@ func (i *Instance) exactResumeVerdict() (bool, string) {
 		return false, err.Error()
 	}
 	program := resolution.command
-	_, ok, refusal := prepareExactResumeConversation(i, program)
+	_, ok, decline := prepareExactResumeConversation(i, program)
 	if ok {
 		return true, ""
 	}
-	if refusal != "" {
-		return false, refusal
+	if decline.reason != "" {
+		return false, decline.reason
 	}
 	agent := tmux.DetectAgentFromCommand(program)
 	if agent == "" {

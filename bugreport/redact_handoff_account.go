@@ -2,8 +2,17 @@ package bugreport
 
 import "github.com/sachiniyer/agent-factory/session"
 
+// clearConversationIDs clears every provider conversation id a recorded
+// conversation holds: its own, and the thread an operator repair's stamp
+// says the runtime held when the repair was made (#7122), which resumes a
+// provider session just the same. Cleared, not marked, like the id itself.
+func clearConversationIDs(conv *session.AgentConversationData) {
+	conv.ID = ""
+	conv.RepairHeldID = ""
+}
+
 func redactHandoffAccount(entry *session.AgentHandoff) {
-	entry.From.ID = ""
+	clearConversationIDs(&entry.From)
 	if entry.FromAccount != "" {
 		entry.FromAccount = redactedMarker
 	}

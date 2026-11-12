@@ -699,11 +699,11 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	program := resolvedProgram
 	var refusal resumeRefusal
 	if resume {
-		rewritten, ok, reason := prepareExactResumeConversation(i, program)
+		rewritten, ok, decline := prepareExactResumeConversation(i, program)
 		if ok {
 			program = rewritten
 		} else {
-			refusal = i.exactResumeRefusal(reason)
+			refusal = i.exactResumeRefusal(decline)
 		}
 	} else {
 		program = prepareLaunchConversation(i, program)
@@ -726,22 +726,28 @@ type resumeRefusal struct {
 	// review): leaving it recorded would suppress every later capture arm and
 	// make each restore start fresh again. An id the launch command merely
 	// cannot express (a recorded conversation of another agent) is reported
-	// but kept: it may be exactly what a later handoff back resumes.
+	// but kept: it may be exactly what a later handoff back resumes. So is an
+	// operator's repair that af merely could not check — an unresolvable
+	// home, an unreadable store, a header it could not classify — which says
+	// nothing about the id (resumeDecline.retiresRecord, #7122).
 	retire bool
 }
 
-// exactResumeRefusal turns prepareExactResumeConversation's refusal reason
-// into the record a re-spawn logs. reason is empty for the cases with nothing
-// to say — nothing recorded — and for an id the command cannot express, which
+// exactResumeRefusal turns prepareExactResumeConversation's decline into the
+// record a re-spawn logs. Its reason is empty for the cases with nothing to
+// say — nothing recorded — and for an id the command cannot express, which
 // still gets a reason so the log never claims nothing was recorded (#7120
 // review F6).
-func (i *Instance) exactResumeRefusal(reason string) resumeRefusal {
+func (i *Instance) exactResumeRefusal(decline resumeDecline) resumeRefusal {
 	conv := i.resumableConversation()
 	if !conv.HasID() {
 		return resumeRefusal{}
 	}
-	refusal := resumeRefusal{ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: reason}, retire: reason != ""}
-	if reason == "" {
+	refusal := resumeRefusal{
+		ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: decline.reason},
+		retire:             decline.retiresRecord(conv),
+	}
+	if decline.reason == "" {
 		refusal.Reason = fmt.Sprintf("its launch command cannot resume a recorded %s conversation", conv.Agent)
 	}
 	return refusal

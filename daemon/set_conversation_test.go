@@ -64,8 +64,14 @@ func TestSetConversationRecordsAProvenRollout(t *testing.T) {
 	assert.Equal(t, session.ConversationCaptureOperator, conv.CaptureKind)
 	assert.Equal(t, setConversationDaemonID, persistedConversationID(t, repoID))
 
-	// Same id again is a no-op success, not a rewrite.
+	// Same id again succeeds and renews the repair as of now: the staleness
+	// guards disregard only the threads that existed when it was made, so a
+	// re-run is how an operator also overrides one started since (#7122).
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
+	renewed := inst.AgentConversation()
+	assert.Equal(t, setConversationDaemonID, renewed.ID)
+	assert.Equal(t, session.ConversationCaptureOperator, renewed.CaptureKind)
+	assert.False(t, renewed.CapturedAt.Before(conv.CapturedAt), "a re-run never dates the repair earlier")
 }
 
 func TestSetConversationRefusesUnprovenIDs(t *testing.T) {

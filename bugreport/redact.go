@@ -594,7 +594,7 @@ func (r *redactor) redactInstanceData(d *session.InstanceData) {
 		redactTabData(&d.PendingTabs[i])
 	}
 	if d.AgentConversation != nil {
-		d.AgentConversation.ID = ""
+		clearConversationIDs(d.AgentConversation)
 	}
 	// Path is the session's own absolute path. See collapsePathField.
 	d.Path = r.collapsePathField(d.Path)
@@ -773,7 +773,7 @@ func redactTabData(tab *session.TabData) {
 		}
 	}
 	if tab.Conversation != nil {
-		tab.Conversation.ID = ""
+		clearConversationIDs(tab.Conversation)
 	}
 	// Handoffs[].From is the same AgentConversationData under a different name,
 	// carrying an id with the same resume semantics — so it is the same policy,

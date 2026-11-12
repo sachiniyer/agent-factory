@@ -33,6 +33,25 @@ func (codexReadyFakeBackend) Preview(*session.Instance) (string, error) {
 	return "ready\n› ", nil
 }
 
+// attributableCodexFakeBackend is a codex root whose capture can attribute:
+// the fake spawns no process, so Start hands the instance the held-set
+// stand-in a launch's verified evidence would give it — a runtime that holds
+// no rollout yet. Without it the root has no agent process to judge from, and
+// its capture ends each attempt at once rather than polling (#7123).
+type attributableCodexFakeBackend struct {
+	codexReadyFakeBackend
+}
+
+func (b attributableCodexFakeBackend) Start(instance *session.Instance, firstTimeSetup bool) error {
+	if err := b.codexReadyFakeBackend.Start(instance, firstTimeSetup); err != nil {
+		return err
+	}
+	instance.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		return map[string]struct{}{}, nil
+	})
+	return nil
+}
+
 // seedRootConversation gives the manager's live root the recorded conversation
 // a real one carries, the way a claude root gets one from the --session-id
 // injected at first launch. The fake create backend spawns no program and so
@@ -146,7 +165,8 @@ func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing
 // earlier edge than the operation-lock snapshot above: Codex discovery polls
 // outside that lock, then takes it only to commit. Reaping while the poll is in
 // flight deletes the instance that eventual commit is bound to and loses the
-// newly discovered id forever.
+// newly discovered id forever. The root's capture can attribute — the case
+// the fence exists for; one that cannot is below.
 func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	codexHome := t.TempDir()
@@ -159,7 +179,7 @@ func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.
 		seen = append(seen, opts)
 		backend := session.NewFakeBackend()
 		backend.CompleteStart()
-		return codexReadyFakeBackend{backend}, nil
+		return attributableCodexFakeBackend{codexReadyFakeBackend{backend}}, nil
 	})
 	t.Cleanup(restore)
 	repoPath := setupControlRepo(t)
@@ -191,6 +211,50 @@ func TestEnsureRootAgentsDefersReapWhileConversationCaptureIsPolling(t *testing.
 
 	manager.ensureRootAgentsAndWait()
 	require.Len(t, seen, 2, "the root may be re-created once discovery settles")
+}
+
+// TestEnsureRootAgentsDoesNotDeferReapForACaptureThatCannotAttribute is the
+// other side of that fence (#7123). A root with no verified agent process —
+// its launch's pane query failed — can never commit a discovered id: every
+// attribution judges from that process, and the active pane is no substitute.
+// Its attempt ends at once rather than polling for an answer that cannot come
+// (#7124 review F2), so there is nothing in flight for the reap to wait on,
+// and a vanished root is re-created on the next pass instead of after the
+// capture window.
+func TestEnsureRootAgentsDoesNotDeferReapForACaptureThatCannotAttribute(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	t.Setenv("CODEX_HOME", t.TempDir())
+	oldCaptureTimeout := conversationCaptureTimeout
+	conversationCaptureTimeout = 5 * time.Second
+	t.Cleanup(func() { conversationCaptureTimeout = oldCaptureTimeout })
+	var seen []session.InstanceOptions
+	restore := session.SetBackendFactoryForTest(func(opts session.InstanceOptions, _ string) (session.Backend, error) {
+		seen = append(seen, opts)
+		backend := session.NewFakeBackend()
+		backend.CompleteStart()
+		return codexReadyFakeBackend{backend}, nil
+	})
+	t.Cleanup(restore)
+	repoPath := setupControlRepo(t)
+
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{
+		Program: tmux.ProgramCodex,
+	}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first)
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		return manager.pendingConversationCaptures[first] == 0
+	}, time.Second, 10*time.Millisecond,
+		"an attempt with no agent process to judge from ends at once, well inside its 5s window")
+	first.SetStatusForTest(session.Lost)
+	manager.ensureRootAgentsAndWait()
+
+	require.Len(t, seen, 2, "nothing is in flight, so the vanished root is re-created at once")
 }
 
 // unresumableCarryBackend fails exactly the create that carries a conversation

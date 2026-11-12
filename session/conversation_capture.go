@@ -469,6 +469,16 @@ func captureCodexConversation(snap ConversationCaptureSnapshot, timeout time.Dur
 	if snap.carried.HasID() {
 		return captureCarriedCodexConversation(snap)
 	}
+	if snap.runtimeEvidence() != nil {
+		// The bound runtime has no verified agent process, so no candidate can
+		// be attributed however long this waits: end the attempt rather than
+		// re-walk the store and re-read every new rollout's header for the
+		// whole absent window (#7124 review F2). Nothing found is an answer
+		// every caller already handles — the loop asks the held query, which
+		// says why, and the swap defers to its post-delivery capture. A carried
+		// confirmation, above, needs no attribution and is unaffected.
+		return AgentConversationData{}, nil
+	}
 	start := time.Now()
 	absentDeadline := start.Add(timeout)
 	settleDeadline := start.Add(timeout + codexSessionMetaSettleTimeout)
