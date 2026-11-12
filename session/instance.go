@@ -507,6 +507,10 @@ type Instance struct {
 	// here and re-verifies it with the session-wide pane scan before judging
 	// from it. Zero whenever runtimePID is set; every launch boundary clears it.
 	captureEvidence keptCaptureEvidence
+	// captureSettles counts reattach settles. A capture check snapshots it with
+	// captureEvidence before its pane scan and acts on the scan's answer only if
+	// no settle ran meanwhile (#7140).
+	captureSettles uint64
 	// codexRuntimeHeldOverride, when set by a test, replaces the live
 	// descriptor walk capture attribution performs against this runtime.
 	codexRuntimeHeldOverride func() (map[string]struct{}, error)

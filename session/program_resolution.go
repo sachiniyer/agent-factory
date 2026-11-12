@@ -185,6 +185,13 @@ type launchProgramResolution struct {
 // It fails with a *ProjectConfigUnknownError rather than resolve the global
 // config when the project's cannot be read (#7077).
 func resolveLaunchProgramForInstance(i *Instance) (launchProgramResolution, error) {
+	return resolveLaunchProgramForInstanceReporting(i, log.WarningLog.Printf)
+}
+
+// resolveLaunchProgramForInstanceReporting is resolveLaunchProgramForInstance
+// with the degrade warnings of resolveResolvedConfigForInstance routed through
+// warn; nil drops them.
+func resolveLaunchProgramForInstanceReporting(i *Instance, warn func(string, ...any)) (launchProgramResolution, error) {
 	i.mu.RLock()
 	agent := i.Program
 	alreadyResolved := agent != "" && agent == i.preResolvedProgram
@@ -193,7 +200,7 @@ func resolveLaunchProgramForInstance(i *Instance) (launchProgramResolution, erro
 		return launchProgramResolution{command: agent}, nil
 	}
 
-	resolved, err := resolveResolvedConfigForInstance(i)
+	resolved, err := resolveResolvedConfigForInstanceReporting(i, warn)
 	if err != nil {
 		return launchProgramResolution{}, err
 	}
@@ -213,19 +220,28 @@ func resolveLaunchProgramForInstance(i *Instance) (launchProgramResolution, erro
 // the global config standing in for an unknown project (#7077). A config the
 // repository answered as invalid keeps the legacy warn-and-use-global degrade.
 func resolveResolvedConfigForInstance(i *Instance) (*config.ResolvedConfig, error) {
+	return resolveResolvedConfigForInstanceReporting(i, log.WarningLog.Printf)
+}
+
+// resolveResolvedConfigForInstanceReporting is resolveResolvedConfigForInstance
+// with its degrade warnings routed through warn; nil drops them.
+func resolveResolvedConfigForInstanceReporting(i *Instance, warn func(string, ...any)) (*config.ResolvedConfig, error) {
+	if warn == nil {
+		warn = func(string, ...any) {}
+	}
 	resolved, err := resolveProjectConfig(i.Path, instanceProjectConfig(i))
 	if err != nil {
 		if isProjectConfigUnknown(err) {
 			return nil, err
 		}
-		log.WarningLog.Printf("failed to resolve repo config when resolving program for %q, using the global config: %v", i.Title, err)
+		warn("failed to resolve repo config when resolving program for %q, using the global config: %v", i.Title, err)
 	}
 	if resolved != nil {
 		return resolved, nil
 	}
 	global, err := config.ResolveGlobalConfig()
 	if err != nil {
-		log.WarningLog.Printf("failed to load config when resolving program for %q: %v", i.Title, err)
+		warn("failed to load config when resolving program for %q: %v", i.Title, err)
 		return nil, nil
 	}
 	return global, nil

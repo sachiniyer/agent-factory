@@ -350,17 +350,28 @@ func unrecordedCaptureError(title string, err error) error {
 		err, shellsuggest.PositionalCommand("af", []string{"sessions", "set-conversation"}, title))
 }
 
-// captureAgentConversation runs one capture attempt and commits any id it
-// finds; on a row that already recorded one it runs the follow check instead
-// (#7101). A non-nil return is the attempt's failure for the loop's
-// rate-limited warning; ordinary absence (no rollout yet) returns nil —
-// nothing wrong.
-func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) error {
-	return m.captureAgentConversationAttempt(repoID, key, inst, &snap, token, timeout, false)
+// diffUnanswered says why this attempt's diff could not answer, or nil when it
+// could have. A diff that failed mid-window is named by its own error, which
+// says which channel failed — the store scan, a rollout header af could not
+// read, the runtime's open files — rather than blaming the store for all of
+// them (#7140).
+func diffUnanswered(baselineErr, retakeErr, diffErr error) error {
+	switch {
+	case baselineErr != nil && retakeErr != nil:
+		return fmt.Errorf("the Codex rollout store could not be scanned for a baseline (%v), and taking it again failed: %w", baselineErr, retakeErr)
+	case baselineErr != nil:
+		return fmt.Errorf("the Codex rollout store could not be scanned for a baseline: %w", baselineErr)
+	case diffErr != nil:
+		return fmt.Errorf("the new-rollout diff could not answer: %w", diffErr)
+	}
+	return nil
 }
 
 // captureAgentConversationAttempt is one attempt of the capture loop, which
-// owns loopSnap. With retake set, an unrecorded row whose before-image failed
+// owns loopSnap. A non-nil return is the attempt's failure for the loop's
+// rate-limited warning; ordinary absence (no rollout yet) returns nil —
+// nothing wrong. On a row that already recorded an id it runs the follow
+// check instead (#7101). With retake set, an unrecorded row whose before-image failed
 // takes it again — but only once the attempt has an agent process to judge
 // from, since the diff it feeds is the only use of a store walk and an attempt
 // without evidence returns before any diff (#7124 review F3, #7131). The
@@ -426,7 +437,11 @@ func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *sess
 	// thread, and the held query below reads the runtime's open files, not the
 	// store. So it still gets its turn; ending the attempt here would leave a
 	// swap that deferred on that same failure recording nothing for as long as
-	// the store stays unreadable (#7126, #7128 review).
+	// the store stays unreadable (#7126, #7128 review). That makes this an
+	// initial record for one more class of row while a durable pending account
+	// swap waits for its post-restart recovery: like every unrecorded row's held
+	// query it is not frozen in that window, though it never re-writes a
+	// recorded id (#7124 review, #7140).
 	var diffErr error
 	if !snap.BaselineFree() && baselineErr == nil {
 		if conv, err = session.CaptureAgentConversation(agent, snap, timeout); err != nil {
@@ -445,20 +460,21 @@ func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *sess
 		// CaptureAgentConversation, so the swap's synchronous pre-delivery
 		// capture keeps treating "no rollout yet" as the expected fresh start
 		// rather than failing the handoff on a walk it does not need.
+		why := diffUnanswered(baselineErr, retakeErr, diffErr)
 		if conv, err = session.HeldAgentConversation(agent, snap); err != nil {
+			if why != nil {
+				// The diff is the channel that tells two held threads apart;
+				// the one warning names both what failed and why that channel
+				// is closed, or a persistent cause is never logged (#7140).
+				err = fmt.Errorf("%w; %w", err, why)
+			}
 			return unrecordedCaptureError(inst.Title, err)
 		}
 		if !conv.HasID() {
-			if baselineErr != nil {
+			if why != nil {
 				// Say so once: until the agent holds a rollout open there is
-				// nothing to record, and the store is broken either way.
-				if retakeErr != nil {
-					return fmt.Errorf("the Codex rollout store could not be scanned for a baseline (%v), and taking it again failed: %w", baselineErr, retakeErr)
-				}
-				return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
-			}
-			if diffErr != nil {
-				return fmt.Errorf("af can record only a rollout the agent holds open until the Codex rollout store can be scanned: %w", diffErr)
+				// nothing to record.
+				return fmt.Errorf("af can record only a rollout the agent holds open, because %w", why)
 			}
 			return nil
 		}
