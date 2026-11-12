@@ -42,6 +42,10 @@ type conversationCarry struct {
 	// aux is Claude's per-session directory (tool results, subagent
 	// transcripts), relative to both homes. Empty for codex.
 	aux string
+	// claudeProjects is every project directory, relative to a Claude config
+	// dir, that locateClaude searched for the transcript: the staleness check
+	// reads the same set (#7177).
+	claudeProjects []string
 	// committed marks a carry re-planned from a pending record: the identity
 	// checkpoint only records a carry whose pre-commit copy landed.
 	committed bool
@@ -287,7 +291,8 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 		return carryNoClaudeDirReason
 	}
 	var refused string
-	for _, project := range claudeProjectCandidates(launch.WorkingDir) {
+	c.claudeProjects = claudeProjectCandidates(launch.WorkingDir)
+	for _, project := range c.claudeProjects {
 		transcript := filepath.Join(project, c.id+".jsonl")
 		roots := []carryRoot{c.srcRoot}
 		if c.committed {
@@ -360,31 +365,16 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 // delivery capture only, so a /clear in Claude or /new in Codex leaves it
 // naming a conversation the user abandoned; resuming that and saying
 // "continue" is worse than a stated fresh start. Newer is by modification
-// time, strictly: the live runtime appends to the conversation it is in.
+// time, strictly: the live runtime appends to the conversation it is in. A
+// Claude worktree's conversations are every one filed under any spelling of
+// its path locateClaude searched (claudeCarryStaleness).
 // outgoing is the record being carried; only a Codex operator repair is
 // judged differently, and the kind buys a Claude record nothing — no repair
 // ever writes one.
 func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentConversationData) string {
 	switch c.agent {
 	case tmux.ProgramClaude:
-		transcripts, err := claudeProjectTranscripts(filepath.Join(c.srcHome, filepath.Dir(c.transcript)))
-		if err != nil {
-			return carryTranscriptsUnlistedReason
-		}
-		var recorded *claudeTranscript
-		for idx := range transcripts {
-			if strings.EqualFold(transcripts[idx].id, c.id) {
-				recorded = &transcripts[idx]
-			}
-		}
-		if recorded == nil {
-			return carryTranscriptMissingReason
-		}
-		for _, transcript := range transcripts {
-			if transcript.id != recorded.id && transcript.modTime.After(recorded.modTime) {
-				return staleCarryReason
-			}
-		}
+		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.transcript, c.id)
 	case tmux.ProgramCodex:
 		return c.staleCodexReason(program, workDir, outgoing)
 	}
