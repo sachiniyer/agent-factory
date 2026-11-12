@@ -83,15 +83,21 @@ const git = (cwd, ...args) =>
 
 // The composition check is real; its parts are stand-ins. `go` fails anywhere a
 // BROKEN_BUILD file exists, and the file-length lint allows big.txt three lines.
+// The lint anchors to its own parent directory exactly as the real one does
+// (scripts/lint-file-length.sh: ROOT is dirname/..), so WHICH copy runs decides
+// which tree is linted.
 const STUB_GO = '#!/bin/sh\ntest ! -e BROKEN_BUILD\n';
-const STUB_LINT = '#!/bin/sh\ntest "$(wc -l < big.txt)" -le 3\n';
+const STUB_LINT = '#!/usr/bin/env bash\ncd "$(dirname "${BASH_SOURCE[0]}")/.." && test "$(wc -l < big.txt)" -le 3\n';
 const lines = (n) => 'line\n'.repeat(n);
+// What actions/checkout persists unless `persist-credentials: false`.
+const TOKEN_HEADER = 'AUTHORIZATION: basic FAKE-WRITE-TOKEN';
 
 // master:  base (big.txt 2 lines) -> broken batch (4 lines: the lint fails)
 // #11 fix-master, branched from base: adds a note. Its head alone passes the
 //     lint, but merged onto master it is still broken.
 // #12 fix-master, branched from master: trims big.txt. Its merge passes.
 // #13 an ordinary PR, branched from master: adds a feature.
+// Tests add more with origin.addPr, always branched from the broken master.
 const roots = [];
 test.after(() => { for (const dir of roots) fs.rmSync(dir, { recursive: true, force: true }); });
 
@@ -128,6 +134,11 @@ function makeOrigin() {
   let workspaces = 0;
   return {
     root, bin, bare, heads, broken,
+    addPr: (number, files, message) => {
+      git(work, 'checkout', '-q', '-B', `pr${number}`, broken);
+      heads[number] = commit(files, message);
+      git(bare, 'fetch', '-q', work, `${heads[number]}:refs/pull/${number}/head`);
+    },
     master: () => git(bare, 'rev-parse', 'refs/heads/master'),
     newWorkspace: () => path.join(root, `workspace-${++workspaces}`),
     // Squash-merge `sha` onto master the way GitHub does: the merge's tree, one
@@ -154,7 +165,9 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
     commits: { nodes: [{ commit: { statusCheckRollup: { contexts: { nodes: GREEN } } } }] },
   }));
   const issue = broken ? { number: 900, title: `${merger.BROKEN_TITLE_PREFIX} ${origin.broken.slice(0, 10)}`, state: 'open' } : null;
-  const g = { prs, issue, merged: [], dispatched: [], comments: [], opened: [] };
+  // `refuse`: PR numbers whose merge GitHub refuses (a ruleset, say) though
+  // selection saw nothing wrong.
+  const g = { prs, issue, merged: [], dispatched: [], comments: [], opened: [], refuse: new Set() };
   const open = () => prs.filter((p) => !g.merged.includes(p.number));
   const rateLimit = { cost: 1, remaining: 4999, resetAt: 'later' };
   g.graphql = async (query) => {
@@ -194,6 +207,7 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
       merge: async ({ pull_number, sha }) => {
         const pr = open().find((p) => p.number === pull_number);
         if (!pr || pr.headRefOid !== sha) throw Object.assign(new Error('Head branch was modified'), { status: 409 });
+        if (g.refuse.has(pull_number)) throw Object.assign(new Error('Repository rule violations found'), { status: 405 });
         const squashed = origin.squash(sha, `PR #${pull_number}`);
         g.merged.push(pull_number);
         return { data: { sha: squashed } };
@@ -213,7 +227,7 @@ const CONTEXT = { repo: { owner: 'o', repo: 'r' }, eventName: 'schedule', runId:
 async function runJob(origin, github, { after = {} } = {}) {
   const state = {};
   const steps = new Proxy({}, { get: (_, id) => state[id] || { outcome: '', outputs: lenient({}) } });
-  const job = { state, ran: [], warnings: [], notices: [], logs: {}, workspace: null };
+  const job = { state, ran: [], warnings: [], notices: [], logs: {}, temps: {}, workspace: null };
   let failed = false;
   for (const step of parseSteps(YML)) {
     const id = step.id || step.name;
@@ -228,6 +242,14 @@ async function runJob(origin, github, { after = {} } = {}) {
       // actions/checkout's default: depth 1.
       job.workspace = origin.newWorkspace();
       git(origin.root, 'clone', '-q', '--depth', '1', '--branch', 'master', `file://${origin.bare}`, job.workspace);
+      if (step.with['persist-credentials'] !== 'false') {
+        // v6 keeps the token in a file outside the repository, included for the
+        // repository's gitdir and for every linked worktree's (git-auth-helper.ts).
+        const creds = path.join(origin.root, `credentials-${path.basename(job.workspace)}.config`);
+        fs.writeFileSync(creds, `[http "https://github.com/"]\n\textraheader = ${TOKEN_HEADER}\n`);
+        git(job.workspace, 'config', `includeIf.gitdir:${job.workspace}/.git.path`, creds);
+        git(job.workspace, 'config', `includeIf.gitdir:${job.workspace}/.git/worktrees/*.path`, creds);
+      }
       result = { outcome: 'success', outputs: {} };
     } else if (/^actions\/setup-go@/.test(step.uses || '')) {
       result = { outcome: 'success', outputs: {} };
@@ -237,6 +259,7 @@ async function runJob(origin, github, { after = {} } = {}) {
       assert.ok(job.workspace, `"${step.name}" would run outside a checkout`);
       result = runShell(step.run, env, job.workspace, origin);
       job.logs[id] = result.log;
+      job.temps[id] = result.runnerTemp;
     } else {
       throw new Error(`no handler for step "${step.name}"`);
     }
@@ -290,7 +313,7 @@ function runShell(script, env, cwd, origin) {
   const outputs = Object.fromEntries(
     fs.readFileSync(output, 'utf8').split('\n').filter(Boolean).map((l) => [l.slice(0, l.indexOf('=')), l.slice(l.indexOf('=') + 1)]),
   );
-  return { outcome: res.status === 0 ? 'success' : 'failure', outputs, log: res.stdout + res.stderr };
+  return { outcome: res.status === 0 ? 'success' : 'failure', outputs, log: res.stdout + res.stderr, runnerTemp };
 }
 
 // One scenario: a fresh origin, the open PRs, the job run once.
@@ -354,7 +377,6 @@ test('a halted run with only ordinary PRs merges nothing and checks nothing', as
 test('a failing fix-master candidate does not block a passing one, and ordinary PRs stay halted', async () => {
   const { github, job } = await halted([[11, FIX], [12, FIX], [13]]);
   assert.deepEqual(github.merged, [12]);
-  assert.equal(output(job, 'fixcheck', 'number'), '12', job.logs.fixcheck);
   assert.match(job.logs.fixcheck, /#11 does not pass the composition check/);
 });
 
@@ -419,7 +441,7 @@ test('mergeHaltFix itself refuses an unchecked fix and any PR that is not fix-ma
   const call = async (passed, number) => {
     const outputs = {};
     const core = fakeCore({ warnings: [], notices: [] }, outputs);
-    const args = { passed, number: String(number), head: origin.heads[number], base: origin.broken };
+    const args = { passed, fixes: `${number}:${origin.heads[number]}`, base: origin.broken };
     await merger.mergeHaltFix({ github, core, context: CONTEXT, ...args });
     return outputs.merged;
   };
@@ -428,6 +450,72 @@ test('mergeHaltFix itself refuses an unchecked fix and any PR that is not fix-ma
   assert.deepEqual(github.merged, []);
   assert.equal(await call(true, 12), 'true');
   assert.deepEqual(github.merged, [12]);
+});
+
+test('a fix is not merged if its head moved after it was checked', async () => {
+  const origin = makeOrigin();
+  const github = fakeGithub(origin, [[12, FIX]]);
+  // A push lands after the check: still labelled, still green, never checked.
+  const job = await runJob(origin, github, { after: { fixcheck: () => { github.prs[0].headRefOid = origin.heads[13]; } } });
+  assert.equal(outcome(job, 'fixcheck'), 'success');
+  assert.deepEqual(github.merged, [], 'an unchecked head was merged');
+  assert.ok(job.warnings.some((w) => /head moved/.test(w)), job.warnings.join('\n'));
+});
+
+test('a checked fix whose merge GitHub refuses does not starve the next one', async () => {
+  const origin = makeOrigin();
+  origin.addPr(15, { 'big.txt': lines(3) }, 'another fix');
+  const github = fakeGithub(origin, [[12, FIX], [15, FIX]]);
+  github.refuse.add(12);
+  const job = await runJob(origin, github);
+  assert.deepEqual(github.merged, [15]);
+  assert.ok(job.warnings.some((w) => /#12: merge refused/.test(w)), job.warnings.join('\n'));
+});
+
+test("a fix-master PR cannot pass the check by editing the lint script: master's lints the merge tree", async () => {
+  const origin = makeOrigin();
+  // big.txt stays at 4 lines; the PR's own copy of the lint passes anything.
+  origin.addPr(16, { 'scripts/lint-file-length.sh': '#!/usr/bin/env bash\nexit 0\n' }, 'a lint that passes everything');
+  const github = fakeGithub(origin, [[16, FIX]]);
+  const job = await runJob(origin, github);
+  assert.deepEqual(github.merged, []);
+  assert.equal(outcome(job, 'fixcheck'), 'failure', job.logs.fixcheck);
+});
+
+// The #7154 security review's proof of concept: a real fix whose own lint script
+// is a payload. It reads the job token through checkout's persisted credentials
+// (included in every linked worktree), writes the checkout the merge step loads
+// auto-merge.js from, then exits 1 so it never merges and leaves master clean.
+const PAYLOAD = `#!/bin/sh
+main=$(cd "$(git rev-parse --git-common-dir)/.." && pwd)
+git config --get http.https://github.com/.extraheader > "$main/../STOLEN" || true
+echo pwned > "$main/PWNED"
+exit 1
+`;
+test("a fix-master PR's own lint script never runs before it merges, and no step can read a token", async () => {
+  const origin = makeOrigin();
+  origin.addPr(14, { 'big.txt': lines(2), 'scripts/lint-file-length.sh': PAYLOAD }, 'a real fix, plus a payload');
+  const github = fakeGithub(origin, [[14, FIX]]);
+  let beforeMerge = null;
+  const job = await runJob(origin, github, {
+    after: {
+      fixcheck: (j) => {
+        const scratch = path.join(j.temps.fixcheck, 'fix-14');
+        const read = spawnSync('git', ['config', '--get', 'http.https://github.com/.extraheader'], { cwd: scratch, env: GIT_ENV, encoding: 'utf8' });
+        beforeMerge = {
+          payloadRan: fs.existsSync(path.join(origin.root, 'STOLEN')) || fs.existsSync(path.join(j.workspace, 'PWNED')),
+          tokenInScratchTree: read.stdout.trim(),
+        };
+      },
+    },
+  });
+  assert.deepEqual(beforeMerge, { payloadRan: false, tokenInScratchTree: '' });
+  // Judged by master's lint, the real fix passes and lands.
+  assert.deepEqual(github.merged, [14], job.logs.fixcheck);
+  // Once merged, the post-merge check runs master's new script: that exposure
+  // predates this check and is #7165's. Even there no token is readable.
+  const stolen = path.join(origin.root, 'STOLEN');
+  assert.equal(fs.existsSync(stolen) ? fs.readFileSync(stolen, 'utf8').trim() : '', '');
 });
 
 test('unchanged: with no halt, a red master still lands only fix-master PRs, with no composition pre-check', async () => {
