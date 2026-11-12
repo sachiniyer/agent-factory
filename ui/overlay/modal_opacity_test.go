@@ -275,7 +275,7 @@ func TestEveryModalOccludesBackgroundPane(t *testing.T) {
 	const termW, termH = 80, 24
 	bg := backgroundFrame(termW, termH)
 
-	confirm := NewConfirmationOverlay("Delete session 'nightly-sweep'?")
+	confirm := NewConfirmationOverlay("Delete session \"nightly-sweep\"?")
 	confirm.SetMaxSize(termW, termH)
 	picker := NewProjectPickerOverlay([]Project{
 		{Name: "agent-factory", Root: "/repo/agent-factory"},

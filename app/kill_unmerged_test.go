@@ -267,7 +267,7 @@ func TestHandleKill_ExternalWorktreeSkipsWorktreeLossWarnings(t *testing.T) {
 	assert.Zero(t, checks.Load(), "an external worktree must not run the loss check")
 
 	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, "Delete session 'external'?")
+	assert.Contains(t, rendered, `Delete session "external"?`)
 	assert.Contains(t, rendered, "Your checkout and branch are kept.")
 	assert.NotContains(t, rendered, "are lost")
 	assert.NotContains(t, rendered, "Archive")
@@ -313,7 +313,7 @@ func TestHandleKill_NoUniqueCommits_KeepsBareConfirmation(t *testing.T) {
 	_, hm := armKill(t, inst)
 
 	rendered := flatten(hm.confirmationOverlay.Render())
-	assert.Contains(t, rendered, "Delete session 'empty'?")
+	assert.Contains(t, rendered, `Delete session "empty"?`)
 	assert.NotContains(t, rendered, "not pushed anywhere", "a level branch must not receive the dynamic unique-commit warning")
 	assert.NotContains(t, rendered, "Could not verify")
 	assert.Equal(t, "y", hm.confirmationOverlay.ConfirmKey,

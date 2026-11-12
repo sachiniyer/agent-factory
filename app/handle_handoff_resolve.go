@@ -88,7 +88,7 @@ func (m *home) openHandoffResolvePicker(selected *session.Instance, target sessi
 
 	m.handoffResolve = handoffResolveState{actions: actions, target: target}
 	m.selectionOverlay = overlay.NewSelectionOverlay(
-		fmt.Sprintf("Resolve delivery for '%s' — inspect the pane first", selected.Title), items)
+		fmt.Sprintf("Resolve delivery for %q — inspect the pane first", selected.Title), items)
 	m.state = stateSelectHandoffResolve
 	return m, nil
 }
