@@ -279,3 +279,98 @@ func TestRetryHookProgressAbandonmentStillTerminalizesOriginalJournal(t *testing
 		}
 	}
 }
+
+// holdFirstAbandonmentRetry parks the first abandonment retry attempt before it
+// takes the lock, and returns a channel closed once it is parked plus a release
+// function. Later attempts do not wait. The cleanup releases the hold and joins
+// the retry before restoring the seam, which the retry reads on every attempt.
+func holdFirstAbandonmentRetry(t *testing.T, g *GitWorktree) (<-chan struct{}, func()) {
+	t.Helper()
+	originalWait := hookProgressAbandonmentRetryWait
+	parked := make(chan struct{})
+	release := make(chan struct{})
+	var parkOnce, releaseOnce sync.Once
+	releaseFn := func() { releaseOnce.Do(func() { close(release) }) }
+	t.Cleanup(func() { hookProgressAbandonmentRetryWait = originalWait })
+	hookProgressAbandonmentRetryWait = func(time.Duration) {
+		parkOnce.Do(func() {
+			close(parked)
+			<-release
+		})
+	}
+	t.Cleanup(func() {
+		releaseFn()
+		if g.hooksRetirementDone != nil {
+			waitForClosed(t, g.hooksRetirementDone, 15*time.Second, "abandonment retry did not drain")
+		}
+	})
+	return parked, releaseFn
+}
+
+// TestRetryHookProgressAbandonmentWithoutSnapshotLeavesEarlyRebuildPending is
+// the window before the first retry attempt. The shared restore read missed its
+// budget, so abandonment is armed with no snapshot, and a same-session rebuild
+// republishes the journal before that attempt takes the lock. Nothing ties the
+// journal the attempt then reads to the one abandonment was armed for, so the
+// attempt must leave it to its own runner instead of terminalizing it.
+func TestRetryHookProgressAbandonmentWithoutSnapshotLeavesEarlyRebuildPending(t *testing.T) {
+	claimDaemonProcess(t)
+	installScopeShim(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	tree := g.worktreePath
+	publishHookProgressForTest(t, tree, "owner", "gen1")
+	parked, release := holdFirstAbandonmentRetry(t, g)
+
+	// Exact production input the timed-out batch read produces: p == nil with a
+	// non-noResumable readErr.
+	g.installHookProgressAbandonment(tree, "owner", nil, errors.New("shared hook journal restore budget expired: context deadline exceeded"))
+	if g.hooksRetirementDone == nil {
+		t.Fatal("budget-timeout abandonment did not schedule a retry")
+	}
+	waitForClosed(t, parked, 5*time.Second, "abandonment retry did not reach its first attempt")
+
+	rebuilt := publishHookProgressForTest(t, tree, "owner", "gen2")
+	release()
+
+	waitForClosed(t, g.hooksRetirementDone, 15*time.Second, "abandonment retry did not finish")
+	assertRebuiltJournalResumable(t, tree, "owner", rebuilt)
+}
+
+// TestAbandonHookProgressReadFailureLeavesEarlyRebuildPending is the same
+// window on the synchronous arm: AbandonHookProgress cannot read the journal at
+// all, so its retry also starts with no snapshot.
+func TestAbandonHookProgressReadFailureLeavesEarlyRebuildPending(t *testing.T) {
+	claimDaemonProcess(t)
+	installScopeShim(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	g := worktreeWithRecordedScope(t, "af-hook-owner")
+	g.SetHookScopeSessionID("owner")
+	tree := g.worktreePath
+	publishHookProgressForTest(t, tree, "owner", "gen1")
+
+	// The retry reads this seam too. Registered before the hold below, so LIFO
+	// restores it only after that hold's cleanup has joined the retry.
+	originalRead := hookProgressReadFile
+	var failed atomic.Bool
+	t.Cleanup(func() { hookProgressReadFile = originalRead })
+	hookProgressReadFile = func(path string) ([]byte, error) {
+		if !failed.Swap(true) {
+			return nil, errors.New("journal storage unavailable")
+		}
+		return originalRead(path)
+	}
+	parked, release := holdFirstAbandonmentRetry(t, g)
+
+	g.AbandonHookProgress()
+	if g.hooksRetirementDone == nil {
+		t.Fatal("unreadable journal did not schedule an abandonment retry")
+	}
+	waitForClosed(t, parked, 5*time.Second, "abandonment retry did not reach its first attempt")
+
+	rebuilt := publishHookProgressForTest(t, tree, "owner", "gen2")
+	release()
+
+	waitForClosed(t, g.hooksRetirementDone, 15*time.Second, "abandonment retry did not finish")
+	assertRebuiltJournalResumable(t, tree, "owner", rebuilt)
+}

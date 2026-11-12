@@ -74,6 +74,10 @@ func abandonHookProgressSnapshot(worktreePath, sessionID string, snapshot *hookP
 	return acquired, captured, nil
 }
 
+// Test seam for the pause before each abandonment retry attempt, so a test can
+// publish a rebuild in front of a given attempt. Production always sleeps.
+var hookProgressAbandonmentRetryWait = time.Sleep
+
 // retryHookProgressAbandonment retries terminalizing the owned journal for
 // worktreePath/sessionID after a synchronous abandonment failed. snapshot
 // carries the immutable identity of the journal the synchronous abandonment
@@ -86,7 +90,7 @@ func retryHookProgressAbandonment(worktreePath, sessionID string, snapshot *hook
 	delay := 100 * time.Millisecond
 	var lastError string
 	for attempt := 0; attempt < 8; attempt++ {
-		time.Sleep(delay)
+		hookProgressAbandonmentRetryWait(delay)
 		done, captured, err := abandonHookProgressSnapshot(worktreePath, sessionID, snapshot)
 		if err != nil {
 			if message := err.Error(); message != lastError {
