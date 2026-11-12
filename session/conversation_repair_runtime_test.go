@@ -49,12 +49,22 @@ func TestOperatorRepairStampDescribesOnlyTheRuntimeItWasMadeAgainst(t *testing.T
 		{"never observed, the pane resumes an older thread", operatorRecordAt(heldTestOwnID, repairedAt), repairOlderID},
 		{"observed, the new pane resumes the thread the old one held", operatorRecordAt(heldTestOwnID, repairedAt).WithRepairStamp(repairHeldID), repairHeldID},
 	}
+	// writtenInTheNewPane dates the user's write after the launch: a second
+	// past the instant the launch recorded, so no clock or filesystem
+	// granularity can put it at or before the launch.
+	writtenInTheNewPane := func(t *testing.T, inst *Instance, path string) {
+		t.Helper()
+		replacedAt := inst.AgentConversation().RepairRuntimeReplacedAt
+		require.False(t, replacedAt.IsZero(), "the launch must record that the repair's runtime was replaced")
+		written := replacedAt.Add(time.Second)
+		require.NoError(t, os.Chtimes(path, written, written))
+	}
 	for _, c := range cases {
 		t.Run(c.name+": the follow takes the move", func(t *testing.T) {
 			workDir, paths := setup(t)
 			inst := staleResumeInstance(t, workDir, c.repair)
 			inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
-			require.NoError(t, os.Chtimes(paths[c.resumedIn], now.Add(-10*time.Second), now.Add(-10*time.Second)))
+			writtenInTheNewPane(t, inst, paths[c.resumedIn])
 
 			outcome := inst.FollowAgentConversationForRuntime(inst.AgentRuntimeToken(), inst.AgentConversation(), heldAnswer(c.resumedIn))
 			require.Equal(t, ConversationFollowMoved, outcome, "a runtime launched after the repair held nothing at it")
@@ -64,7 +74,7 @@ func TestOperatorRepairStampDescribesOnlyTheRuntimeItWasMadeAgainst(t *testing.T
 			workDir, paths := setup(t)
 			inst := staleResumeInstance(t, workDir, c.repair)
 			inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
-			require.NoError(t, os.Chtimes(paths[c.resumedIn], now.Add(-10*time.Second), now.Add(-10*time.Second)))
+			writtenInTheNewPane(t, inst, paths[c.resumedIn])
 
 			restore := staleResumeInstance(t, workDir, inst.AgentConversation())
 			program, ok, _ := prepareExactResumeConversation(restore, restore.Program)
@@ -142,22 +152,35 @@ func TestOperatorRepairExemptsTheObservedHeldThreadHoweverLateItWasStored(t *tes
 	})
 }
 
-// N-1 across a restart: the launch boundary's "" is part of the persisted
-// record, so a daemon that restarts after af launched the new pane still
+// N-1 across a restart: the launch's record that the repair's runtime was
+// replaced is part of the persisted record, with the stamp it leaves in
+// place, so a daemon that restarts after af launched the new pane still
 // reads its threads as moves rather than baselining one of them.
 func TestOperatorRepairRestampedAtALaunchSurvivesADaemonRestart(t *testing.T) {
-	inst := retireTestInstance(t)
-	require.True(t, inst.SetAgentConversation(operatorRecord(heldTestOwnID)))
-	inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
-	require.True(t, inst.AgentConversation().RepairStamped, "the launch must stamp the standing repair")
+	for _, repair := range []AgentConversationData{
+		operatorRecord(heldTestOwnID),
+		operatorRecord(heldTestOwnID).WithRepairStamp(repairHeldID),
+	} {
+		inst := retireTestInstance(t)
+		require.True(t, inst.SetAgentConversation(repair))
+		inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+		launched := inst.AgentConversation()
+		require.False(t, launched.RepairRuntimeReplacedAt.IsZero(), "the launch must mark the standing repair")
 
-	restarted := reloadedAgentConversation(t, inst)
-	conv := restarted.AgentConversation()
-	require.Equal(t, ConversationCaptureOperator, conv.CaptureKind, "the repair itself still stands")
-	require.True(t, conv.RepairStamped)
-	require.Empty(t, conv.RepairHeldID)
-	require.Equal(t, ConversationFollowMoved,
-		restarted.FollowAgentConversationForRuntime(restarted.AgentRuntimeToken(), conv, heldAnswer(repairOlderID)))
+		restarted := reloadedAgentConversation(t, inst)
+		conv := restarted.AgentConversation()
+		require.Equal(t, ConversationCaptureOperator, conv.CaptureKind, "the repair itself still stands")
+		require.True(t, conv.RepairRuntimeReplacedAt.Equal(launched.RepairRuntimeReplacedAt))
+		require.Equal(t, repair.RepairStamped, conv.RepairStamped, "the old runtime's stamp is kept")
+		require.Equal(t, repair.RepairHeldID, conv.RepairHeldID)
+		require.Equal(t, repair.RepairHeldObserved, conv.RepairHeldObserved)
+		for _, moved := range []string{repairOlderID, repairHeldID} {
+			require.Equal(t, ConversationFollowMoved,
+				restarted.FollowAgentConversationForRuntime(restarted.AgentRuntimeToken(), conv, heldAnswer(moved)),
+				"the new runtime held nothing at the repair, so %s is a move", moved)
+			restarted = reloadedAgentConversation(t, inst)
+		}
+	}
 }
 
 // N-3: what a baseline means. When the request could not see the pane, the
@@ -216,14 +239,23 @@ func TestOperatorRepairWindowVerdicts(t *testing.T) {
 		[]byte(`{"type":"session_meta","payload":{"id":"`+undatable+`","cwd":"`+cwd+`","source":"cli"}}`+"\n"), 0o644))
 	hStoredAfter := t.TempDir()
 	paths["H stored after"] = writeStoredCodexRollout(t, hStoredAfter, repairHeldID, cwd, pre, post, post)
+	// #7132 review F-5: the observed held thread with no datable first line.
+	hUndatable := t.TempDir()
+	paths["H with no line stamp"] = writeStoredCodexRollout(t, hUndatable, repairHeldID, cwd, pre, pre, pre)
+	require.NoError(t, os.WriteFile(paths["H with no line stamp"],
+		[]byte(`{"type":"session_meta","payload":{"id":"`+repairHeldID+`","cwd":"`+cwd+`","source":"cli"}}`+"\n"), 0o644))
 
+	// The runtime the repair was made against is replaced between the
+	// repair and post; between is a write the old runtime made before that.
+	replacedAt, between := at.Add(30*time.Second), at.Add(10*time.Second)
 	record := operatorRecordAt(heldTestOwnID, at)
 	windows := map[string]operatorRepairWindow{
-		"capture":    operatorRepairWindowOf(AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestOwnID, CapturedAt: at, CaptureKind: ConversationCaptureCodexRollout}, now),
-		"unstamped":  operatorRepairWindowOf(record, now),
-		"observed H": operatorRepairWindowOf(record.WithRepairStamp(repairHeldID), now),
-		"baseline H": operatorRepairWindowOf(record.withRepairBaseline(repairHeldID), now),
-		"replaced":   operatorRepairWindowOf(record.WithRepairStamp(repairHeldID).WithRepairRuntimeReplaced(), now),
+		"capture":             operatorRepairWindowOf(AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestOwnID, CapturedAt: at, CaptureKind: ConversationCaptureCodexRollout}, now),
+		"unstamped":           operatorRepairWindowOf(record, now),
+		"observed H":          operatorRepairWindowOf(record.WithRepairStamp(repairHeldID), now),
+		"baseline H":          operatorRepairWindowOf(record.withRepairBaseline(repairHeldID), now),
+		"observed H replaced": operatorRepairWindowOf(record.WithRepairStamp(repairHeldID).WithRepairRuntimeReplaced(replacedAt), now),
+		"unstamped replaced":  operatorRepairWindowOf(record.WithRepairRuntimeReplaced(replacedAt), now),
 	}
 	cases := []struct {
 		window, path string
@@ -244,9 +276,21 @@ func TestOperatorRepairWindowVerdicts(t *testing.T) {
 		{"baseline H", "H stored after", post, false},
 		{"baseline H", "X stored before", pre, true},
 		{"baseline H", "X stored before", post, false},
-		{"replaced", "H stored before", post, false},
-		{"replaced", "X stored before", pre, true},
-		{"replaced", "X stored before", post, false},
+		// F-5: the request classified H's header, so an undatable H is
+		// still the repair's own; a baseline's is not.
+		{"observed H", "H with no line stamp", post, true},
+		{"baseline H", "H with no line stamp", pre, false},
+		// F-1: before the replacement the old stamp judges; after it,
+		// every write is a move.
+		{"observed H replaced", "H stored before", between, true},
+		{"observed H replaced", "H stored after", between, true},
+		{"observed H replaced", "H stored before", post, false},
+		{"observed H replaced", "X stored before", pre, true},
+		{"observed H replaced", "X stored before", between, false},
+		{"observed H replaced", "X stored before", post, false},
+		{"unstamped replaced", "X stored before", between, true},
+		{"unstamped replaced", "X stored before", post, false},
+		{"unstamped replaced", "X stored after", between, false},
 	}
 	for _, c := range cases {
 		got := windows[c.window].disregards(paths[c.path], c.modified)

@@ -44,9 +44,10 @@ func TestOperatorRepairWithNoObservationIsDatedNoLaterThanTheRequest(t *testing.
 
 // N-1 at the daemon: a runtime that replaced the observed one while the
 // request ran was launched after the request began, so it held nothing then.
-// The repair records exactly that, rather than going unstamped and letting
-// the follow's first look at the replacement become its baseline.
-func TestOperatorRepairAcrossARuntimeReplacementRecordsThatNothingWasHeld(t *testing.T) {
+// The repair records that its runtime was replaced as of the request, rather
+// than letting the follow's first look at the replacement become its
+// baseline. What the request saw may be either runtime's, so it is not kept.
+func TestOperatorRepairAcrossARuntimeReplacementRecordsTheReplacement(t *testing.T) {
 	manager, inst, repoID, _, codexHome := codexLoopTestInstance(t)
 	dir := inst.GetWorktreePath()
 	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
@@ -63,7 +64,11 @@ func TestOperatorRepairAcrossARuntimeReplacementRecordsThatNothingWasHeld(t *tes
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
 	stored := persistedAgentConversation(t, repoID)
 	require.Equal(t, heldUserThreadID, stored.ID)
-	require.True(t, stored.RepairStamped, "the replacement's first answer must not become the repair's baseline")
-	require.Empty(t, stored.RepairHeldID, "a runtime launched after the request began held nothing when it began")
+	require.False(t, stored.RepairRuntimeReplacedAt.IsZero(),
+		"the replacement's first answer must not become the repair's baseline")
+	require.True(t, stored.RepairRuntimeReplacedAt.Equal(stored.CapturedAt),
+		"replaced as of the request (%s), which dates the repair (%s)", stored.RepairRuntimeReplacedAt, stored.CapturedAt)
+	require.False(t, stored.RepairStamped, "the request's answer may be the replacement's, so it is no stamp")
+	require.Empty(t, stored.RepairHeldID)
 	require.False(t, stored.RepairHeldObserved)
 }

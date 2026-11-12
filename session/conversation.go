@@ -48,18 +48,24 @@ type AgentConversationData struct {
 	// capture, a carry — drops them; a handoff ledger entry keeps the whole
 	// outgoing record, stamp included, for a revert to restore as it was.
 	//
-	// The stamp describes one runtime, the one live when the request began:
-	// a runtime launched after it held nothing then, so a launch boundary
-	// re-stamps a standing repair "" (#7129).
+	// The stamp describes one runtime, the one live when the request began
+	// (#7129). RepairRuntimeReplacedAt is when a runtime af did not make the
+	// repair against took its place: a launch af made, or a reattach that
+	// found another process behind the tmux name. That runtime held nothing at
+	// the repair, so whatever it holds is a move to the follow, and a thread
+	// written after that instant is a move to the staleness guards. Writes
+	// made before it are the old runtime's, still judged by the stamp (#7132
+	// review F-1). The earliest replacement is kept.
 	//
 	// RepairHeldObserved says how the stamp was taken (#7129). True: the
 	// request itself saw the runtime hold RepairHeldID, and that thread is the
-	// repair's own however late its rollout was stored. False: anything else —
-	// the follow's first look at a repair the request could not observe (its
-	// baseline, taken some time after the repair), or a launch boundary's "".
-	RepairStamped      bool   `json:"repair_stamped,omitempty"`
-	RepairHeldID       string `json:"repair_held_id,omitempty"`
-	RepairHeldObserved bool   `json:"repair_held_observed,omitempty"`
+	// repair's own however late its rollout was stored. False: the follow's
+	// first look at a repair the request could not observe (its baseline,
+	// taken some time after the repair).
+	RepairStamped           bool      `json:"repair_stamped,omitempty"`
+	RepairHeldID            string    `json:"repair_held_id,omitempty"`
+	RepairHeldObserved      bool      `json:"repair_held_observed,omitempty"`
+	RepairRuntimeReplacedAt time.Time `json:"repair_runtime_replaced_at,omitzero"`
 }
 
 // AgentRuntimeToken binds asynchronous provider discovery to one concrete
@@ -81,7 +87,8 @@ func (c AgentConversationData) Empty() bool {
 		strings.TrimSpace(c.CaptureKind) == "" &&
 		!c.RepairStamped &&
 		strings.TrimSpace(c.RepairHeldID) == "" &&
-		!c.RepairHeldObserved
+		!c.RepairHeldObserved &&
+		c.RepairRuntimeReplacedAt.IsZero()
 }
 
 func (c AgentConversationData) HasID() bool {

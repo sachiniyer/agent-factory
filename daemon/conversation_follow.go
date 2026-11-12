@@ -82,8 +82,8 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	repoStartLock.Unlock()
 	switch {
 	case outcome == session.ConversationFollowBaselined:
-		m.info().Printf("session %q: the operator-recorded conversation %s stands; its Codex pane now holds %s, and only a move off that is followed (#7122)",
-			inst.Title, recorded.ID, heldThreadForLog(current))
+		m.info().Printf("session %q: the operator-recorded conversation %s stands; its Codex pane now holds %s, and only a move off that is followed (#7122)%s",
+			inst.Title, recorded.ID, heldThreadForLog(current), baselineRestoreCaveat(current))
 	case strings.EqualFold(recorded.ID, current.ID):
 		m.info().Printf("session %q: its Codex pane is now on the conversation %s an operator recorded; following it like any capture from here (#7120)",
 			inst.Title, current.ID)
@@ -95,6 +95,18 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, persistErr)
 	}
 	return nil
+}
+
+// baselineRestoreCaveat is what the follow's baseline does not buy at a
+// restore (#7132 review F-3): af read the pane only after the repair, so a
+// restore counts that thread as the repair's own only if its rollout was
+// already in the store when the id was set, and otherwise as a move that
+// starts the restore fresh.
+func baselineRestoreCaveat(held session.AgentConversationData) string {
+	if !held.HasID() {
+		return ""
+	}
+	return "; af read the pane only after the id was set, so a restore keeps the id over that conversation only if it existed when the id was set, and otherwise starts fresh"
 }
 
 func heldThreadForLog(held session.AgentConversationData) string {
@@ -147,15 +159,17 @@ func observeRepairHeld(inst *session.Instance, requestedAt time.Time) repairHeld
 // it as. The stamp names what the runtime held only while that runtime is
 // still the live one. A respawn or swap that landed in between launched a
 // runtime after the request began, which held nothing then (#7129 N-1), so
-// the repair records exactly that rather than going unstamped and letting
-// the follow baseline the replacement. A token that moved without a new
-// launch (a reverted handoff) reads the same way, which can only end the
-// repair sooner.
+// the repair records that its runtime was replaced as of the request, rather
+// than letting the follow baseline the replacement. The observation may be
+// of either runtime, so it is not kept: the repair is judged as unobserved
+// for writes before the request and as moved by any write since. A token
+// that moved without a new launch (a reverted handoff) reads the same way,
+// which can only end the repair sooner.
 func (o repairHeldObservation) stamp(inst *session.Instance, conv session.AgentConversationData) session.AgentConversationData {
 	conv = conv.WithRepairRequestedAt(o.at)
 	switch {
 	case inst.AgentRuntimeToken() != o.token:
-		return conv.WithRepairRuntimeReplaced()
+		return conv.WithRepairRuntimeReplaced(o.at)
 	case o.ok:
 		return conv.WithRepairStamp(o.heldID)
 	}

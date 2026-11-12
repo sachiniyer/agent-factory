@@ -37,13 +37,16 @@ see the move, the next restore or handoff starts a fresh conversation rather
 than resume the id (#7122). A move is a new thread (/new, or the first prompt
 of a fresh Codex, which is on no thread until then) or an older thread the
 pane resumes. A pane af starts after you set the id was on no thread when you
-set it, so any thread it opens is a move, even the one the old pane was on
-(#7129). If af could not read which thread the pane was on as you set the id,
-the thread it is on the first time af can read it stands in for that, and
-any other thread written to since you set the id then counts as a move;
-until af has read it, an older thread the pane resumes does not. So set the
-id after a fresh pane's first prompt, not before. Re-running with the same
-id renews the repair as of now.
+set it, so any thread it opens or writes to is a move, even the one the old
+pane was on; what the old pane wrote before af replaced it is judged as
+before (#7129). If af could not read which thread the pane was on as you set
+the id, the thread it is on the first time af can read it stands in for
+that: af follows only a move off it, and any other thread written to since
+you set the id then counts as a move. A restore keeps the id over that
+thread only if the thread already existed when you set the id. Until af has
+read the pane, an older thread it resumes does not count as a move. So set
+the id after a fresh pane's first prompt, not before. Re-running with the
+same id renews the repair as of now.
 
 Example:
   af sessions set-conversation fix-auth 0195f8e2-7c3a-7b1d-9e4f-2a6c8d0b1e2f`,

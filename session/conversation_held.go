@@ -268,14 +268,15 @@ func (i *Instance) followDecisionLocked(token AgentRuntimeToken, prev, held Agen
 		return ConversationFollowUnchanged, AgentConversationData{}
 	}
 	if prev.CaptureKind == ConversationCaptureOperator {
-		if !prev.RepairStamped {
+		heldAtRepair, known := prev.repairHeldAtRepair()
+		if !known {
 			// Never observed: the held query could not answer when the
 			// repair was made, or the record predates the stamp's
 			// persistence. The runtime is still the one the repair was made
-			// against — a launch since would have stamped it "" (#7129) — so
-			// this observation is its baseline, and it moves nothing. It
-			// stands in for the repair's own observation without being one
-			// (withRepairBaseline).
+			// against — one that replaced it would have been recorded as
+			// holding nothing then (#7129) — so this observation is its
+			// baseline, and it moves nothing. It stands in for the repair's
+			// own observation without being one (withRepairBaseline).
 			return ConversationFollowBaselined, prev.withRepairBaseline(held.ID)
 		}
 		// Any thread other than the one held at the repair is a move the
@@ -283,7 +284,7 @@ func (i *Instance) followDecisionLocked(token AgentRuntimeToken, prev, held Agen
 		// is on it, the repair has done its job and the record becomes an
 		// ordinary capture, so a later move back to the pre-repair thread is
 		// followed like any other (#7120 Codex review).
-		if held.HasID() && !strings.EqualFold(held.ID, prev.RepairHeldID) {
+		if held.HasID() && !strings.EqualFold(held.ID, heldAtRepair) {
 			return ConversationFollowMoved, held
 		}
 		return ConversationFollowUnchanged, AgentConversationData{}

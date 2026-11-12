@@ -373,19 +373,40 @@ func TestWithRepairStamp(t *testing.T) {
 	require.False(t, AgentConversationData{RepairStamped: true}.Empty())
 	require.False(t, AgentConversationData{RepairHeldObserved: true}.Empty())
 
-	// #7129: the follow's baseline and a launch boundary's "" are stamps,
-	// never observations of the repair.
+	// #7129: the follow's baseline is a stamp, never an observation of the
+	// repair.
 	baseline := operatorRecord(heldTestOwnID).withRepairBaseline(" 01A1CCD0-1111-7222-8333-444455556666 ")
 	require.True(t, baseline.RepairStamped)
 	require.Equal(t, repairHeldID, baseline.RepairHeldID)
 	require.False(t, baseline.RepairHeldObserved)
-	replaced := stamped.WithRepairRuntimeReplaced()
+
+	// A replacement keeps the stamp (#7132 review F-1), keeps the earliest
+	// instant, and makes the live runtime one that held nothing.
+	first := time.Now()
+	replaced := stamped.WithRepairRuntimeReplaced(first)
 	require.True(t, replaced.RepairStamped)
-	require.Empty(t, replaced.RepairHeldID)
-	require.False(t, replaced.RepairHeldObserved)
+	require.Equal(t, repairHeldID, replaced.RepairHeldID)
+	require.True(t, replaced.RepairHeldObserved)
+	require.True(t, replaced.RepairRuntimeReplacedAt.Equal(first))
+	require.True(t, replaced.WithRepairRuntimeReplaced(first.Add(time.Minute)).RepairRuntimeReplacedAt.Equal(first),
+		"a later runtime replaced one that already held nothing at the repair")
+	require.True(t, replaced.WithRepairRuntimeReplaced(first.Add(-time.Minute)).RepairRuntimeReplacedAt.Equal(first.Add(-time.Minute)))
+	require.Equal(t, replaced, replaced.WithRepairRuntimeReplaced(time.Time{}))
+	held, known := replaced.repairHeldAtRepair()
+	require.True(t, known)
+	require.Empty(t, held, "the live runtime held nothing at the repair")
+	held, known = stamped.repairHeldAtRepair()
+	require.True(t, known)
+	require.Equal(t, repairHeldID, held)
+	_, known = operatorRecord(heldTestOwnID).repairHeldAtRepair()
+	require.False(t, known)
+	_, known = operatorRecord(heldTestOwnID).WithRepairRuntimeReplaced(first).repairHeldAtRepair()
+	require.True(t, known, "an unobserved repair whose runtime was replaced has no baseline left to take")
+	require.False(t, AgentConversationData{RepairRuntimeReplacedAt: first}.Empty())
+
 	require.Equal(t, AgentConversationData{}, AgentConversationData{}.withoutRepairStamp())
 	require.Equal(t, AgentConversationData{Agent: stamped.Agent, ID: stamped.ID, CapturedAt: stamped.CapturedAt, CaptureKind: stamped.CaptureKind},
-		stamped.withoutRepairStamp())
+		replaced.withoutRepairStamp())
 }
 
 // N-4: a repair is dated no later than the request, and never later than it
