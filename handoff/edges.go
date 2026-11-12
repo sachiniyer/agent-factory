@@ -82,6 +82,7 @@ var signatureParams = map[string]bool{
 	"halt_reason": true, // the mover halt reason
 	"halted_at":   true, // the halt episode timestamp (new episode = new edge)
 	"until":       true, // the refusal-backoff deadline (new backoff = new edge)
+	"carry":       true, // why require_carry refused (a new reason = new edge)
 }
 
 // eventSignature renders the decision's event set canonically: order and

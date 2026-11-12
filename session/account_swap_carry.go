@@ -2,6 +2,7 @@ package session
 
 import (
 	"fmt"
+	"iter"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -49,6 +50,11 @@ type conversationCarry struct {
 	// again under the swap's fences (#7152). The plan clears it before it
 	// returns, so a recorded plan never holds the listing.
 	srcFiles map[string]struct{}
+	// srcStore, when set, is the source store snapshot require_carry's
+	// check-ahead shares between sessions (carryAheadStores): the Codex
+	// source checks read it instead of walking the store. The live swap never
+	// sets it, and the plan clears it before it returns.
+	srcStore *codexStoreSnapshot
 }
 
 // HandoffConversation reports what the agent serving a session after a
@@ -147,6 +153,10 @@ type accountSwapCarryRequest struct {
 	// the outgoing side runs, and target is ignored. AccountSwapCarryPossible
 	// asks it before any target is chosen (#7152).
 	sourceOnly bool
+	// stores, when set, answers the Codex source checks from a shared
+	// snapshot of the source store instead of walking it (#7156 review
+	// P2-1). Only the check-ahead sets it; the live swap walks the store.
+	stores *codexStoreCache
 }
 
 // planAccountSwapCarry decides whether a swap carries its conversation. It
@@ -175,24 +185,24 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		carry.id, carry.sourceAccount, carry.committed =
 			pending.CarriedConversationID, pending.CarrySourceAccount, true
 	} else if !req.outgoing.HasID() || req.outgoing.Agent != req.agent {
-		return nil, fmt.Sprintf("af had no recorded %s conversation id for the previous session", req.agent)
+		return nil, fmt.Sprintf(carryUnrecordedFormat, req.agent)
 	}
 	if !providerConversationIDRE.MatchString(carry.id) {
-		return nil, fmt.Sprintf("the recorded conversation id is not a %s session id", req.agent)
+		return nil, fmt.Sprintf(carryForeignIDFormat, req.agent)
 	}
 	home, err := config.GetConfigDir()
 	if err != nil {
-		return nil, "af could not locate its account registry"
+		return nil, carryNoRegistryReason
 	}
 	if !req.sourceOnly {
 		target, err := agentaccount.Selected(home, req.agent, req.target)
 		if err != nil || target.Dir == "" {
 			// resolveAccountForProvision reports the real refusal for this.
-			return nil, "the new account's home could not be resolved"
+			return nil, carryTargetUnresolvedReason
 		}
 		carry.dstHome = target.Dir
 		if carry.dstRoot, err = accountCarryRoot(home, req.agent, req.target, target.Dir); err != nil {
-			return nil, "the new account's home is not where af registers accounts"
+			return nil, carryTargetMisplacedReason
 		}
 	}
 	srcRoot, sourceReason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
@@ -204,6 +214,9 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	// nothing newer to bring; the zero root reads as a missing source.
 	carry.srcHome = srcRoot.dir()
 	carry.srcRoot = srcRoot
+	if req.stores != nil && carry.agent == tmux.ProgramCodex {
+		carry.srcStore = req.stores.snapshot(carry.srcHome, req.outgoing.CapturedAt)
+	}
 	if reason := carry.locate(req.program, req.workDir); reason != "" {
 		if sourceReason != "" {
 			return nil, sourceReason
@@ -218,7 +231,7 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 			return nil, reason
 		}
 	}
-	carry.srcFiles = nil
+	carry.srcFiles, carry.srcStore = nil, nil
 	return carry, ""
 }
 
@@ -229,11 +242,11 @@ func carrySourceHome(home, agent, account, program, workDir string) (carryRoot, 
 	if strings.TrimSpace(account) != "" {
 		source, err := agentaccount.Selected(home, agent, account)
 		if err != nil || source.Dir == "" {
-			return carryRoot{}, fmt.Sprintf("the previous account %q is no longer registered for %s", account, agent)
+			return carryRoot{}, fmt.Sprintf(carrySourceUnregisteredFormat, account, agent)
 		}
 		root, err := accountCarryRoot(home, agent, account, source.Dir)
 		if err != nil {
-			return carryRoot{}, "the previous account's home is not where af registers accounts"
+			return carryRoot{}, carrySourceMisplacedReason
 		}
 		return root, ""
 	}
@@ -241,17 +254,17 @@ func carrySourceHome(home, agent, account, program, workDir string) (carryRoot, 
 	case tmux.ProgramClaude:
 		dir, _, err := claudeTranscriptLaunchContext(program, workDir)
 		if err != nil {
-			return carryRoot{}, "af could not resolve the ambient Claude config directory"
+			return carryRoot{}, carryNoAmbientClaudeReason
 		}
 		return ambientCarryRoot(dir), ""
 	case tmux.ProgramCodex:
 		dir, err := tmux.CodexHomeFromCommand(program, workDir)
 		if err != nil {
-			return carryRoot{}, "af could not resolve the ambient Codex home"
+			return carryRoot{}, carryNoAmbientCodexReason
 		}
 		return ambientCarryRoot(dir), ""
 	}
-	return carryRoot{}, fmt.Sprintf("%s conversations cannot be carried", agent)
+	return carryRoot{}, fmt.Sprintf(carryUnsupportedFormat, agent)
 }
 
 // locate finds the conversation artifact and checks it exists before any
@@ -265,13 +278,13 @@ func (c *conversationCarry) locate(program, workDir string) string {
 	case tmux.ProgramCodex:
 		return c.locateCodex()
 	}
-	return fmt.Sprintf("%s conversations cannot be carried", c.agent)
+	return fmt.Sprintf(carryUnsupportedFormat, c.agent)
 }
 
 func (c *conversationCarry) locateClaude(program, workDir string) string {
 	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
 	if err != nil || !launch.WorkingDirKnown() {
-		return "af could not resolve the directory Claude files this conversation under"
+		return carryNoClaudeDirReason
 	}
 	var refused string
 	for _, project := range claudeProjectCandidates(launch.WorkingDir) {
@@ -295,16 +308,11 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 	if refused != "" {
 		return refused
 	}
-	return "its transcript is missing from the previous account's home"
+	return carryTranscriptMissingReason
 }
 
 func (c *conversationCarry) locateCodex() string {
-	srcFiles, err := codexRolloutFiles(c.srcHome)
-	if err != nil {
-		return "af could not enumerate the Codex rollout store"
-	}
-	c.srcFiles = srcFiles
-	source, reason := codexRolloutRelPathIn(c.srcHome, srcFiles, c.id)
+	source, reason := c.codexSourceRelPath()
 	if reason != "" {
 		return reason
 	}
@@ -321,16 +329,16 @@ func (c *conversationCarry) locateCodex() string {
 				return symlinkCarryReason(path)
 			}
 		}
-		if reason := codexCarryOtherFormsReason(c.srcHome, c.id); reason != "" {
+		if reason := c.codexOtherFormsReason(); reason != "" {
 			return reason
 		}
-		return "its rollout is missing from the previous account's home"
+		return carryRolloutMissingReason
 	case source == "":
 		c.transcript = existing
 	case existing != "" && existing != source:
 		// Codex resolves a thread id by scanning its sessions tree; two rollouts
 		// for one id would leave the resume ambiguous.
-		return "the new account already files this conversation under a different rollout"
+		return carryTargetHoldsOtherRolloutReason
 	default:
 		c.transcript = source
 	}
@@ -357,7 +365,7 @@ func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentC
 	case tmux.ProgramClaude:
 		transcripts, err := claudeProjectTranscripts(filepath.Join(c.srcHome, filepath.Dir(c.transcript)))
 		if err != nil {
-			return "af could not list the conversations in this worktree to confirm the recorded one is current"
+			return carryTranscriptsUnlistedReason
 		}
 		var recorded *claudeTranscript
 		for idx := range transcripts {
@@ -366,7 +374,7 @@ func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentC
 			}
 		}
 		if recorded == nil {
-			return "its transcript is missing from the previous account's home"
+			return carryTranscriptMissingReason
 		}
 		for _, transcript := range transcripts {
 			if transcript.id != recorded.id && transcript.modTime.After(recorded.modTime) {
@@ -383,12 +391,18 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
-	files := c.srcFiles
-	if files == nil {
-		var err error
-		if files, err = codexRolloutFiles(c.srcHome); err != nil {
-			return "af could not enumerate the previous account's rollout store"
+	var rollouts iter.Seq2[string, time.Time]
+	switch {
+	case c.srcStore != nil:
+		rollouts = c.srcStore.rollouts()
+	case c.srcFiles != nil:
+		rollouts = lstatRolloutModTimes(c.srcFiles)
+	default:
+		files, err := codexRolloutFiles(c.srcHome)
+		if err != nil {
+			return carrySourceStoreUnlistedReason
 		}
+		rollouts = lstatRolloutModTimes(files)
 	}
 	launchDir := workDir
 	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
@@ -402,13 +416,13 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 		}
 		repair = operatorRepairWindowOf(outgoing, time.Now())
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
+	switch judgeCodexRecordedStaleness(recordedPath, rollouts, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutRecordedGone:
-		return "its rollout is missing from the previous account's home"
+		return carryRolloutMissingReason
 	case codexRolloutStale:
 		return staleCarryReason
 	case codexRolloutUncorrelated:
-		return "af could not confirm the recorded conversation is still the newest one in this worktree"
+		return carryUncorrelatedReason
 	}
 	return ""
 }
@@ -421,7 +435,7 @@ func codexRolloutRelPath(home, id string) (string, string) {
 	// match it may hold proves nothing about uniqueness (#5471 review).
 	files, err := codexRolloutFiles(home)
 	if err != nil {
-		return "", "af could not enumerate the Codex rollout store"
+		return "", carryStoreUnlistedReason
 	}
 	return codexRolloutRelPathIn(home, files, id)
 }
@@ -435,17 +449,23 @@ func codexRolloutRelPathIn(home string, files map[string]struct{}, id string) (s
 			matches = append(matches, path)
 		}
 	}
+	return codexRolloutRelPathOf(home, matches)
+}
+
+// codexRolloutRelPathOf is codexRolloutRelPath's answer for the thread's
+// plain rollouts, matches.
+func codexRolloutRelPathOf(home string, matches []string) (string, string) {
 	switch len(matches) {
 	case 0:
 		return "", ""
 	case 1:
 		rel, err := filepath.Rel(home, matches[0])
 		if err != nil || !filepath.IsLocal(rel) {
-			return "", "af could not place the Codex rollout inside its home"
+			return "", carryRolloutMisplacedReason
 		}
 		return rel, ""
 	default:
-		return "", fmt.Sprintf("%d Codex rollouts record this conversation", len(matches))
+		return "", fmt.Sprintf(carryDuplicatedFormat, len(matches))
 	}
 }
 

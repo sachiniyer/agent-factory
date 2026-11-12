@@ -336,6 +336,21 @@ type handoffInputDraft struct {
 	inst *session.Instance
 }
 
+// accountHandoffCarryPrecondition is require_carry's in-memory precondition
+// for inst: a local worktree, a carry-supporting provider BY LAUNCH COMMAND,
+// and a recorded conversation that belongs to it — a session with no
+// conversation id can never carry. When it fails, the carry refusal code
+// says which.
+func accountHandoffCarryPrecondition(inst *session.Instance) (bool, string) {
+	switch {
+	case isRemoteWorkspace(inst):
+		return false, handoff.CarryRemoteWorkspace
+	case !inst.AccountSwapCarryRecorded():
+		return false, handoff.CarryUnrecorded
+	}
+	return true, ""
+}
+
 // accountHandoffInputs gathers one SessionInput per instance from the
 // manager's records — the same sources accountSwapOpportunity consults — plus
 // the pane observation the status poll last recorded.
@@ -367,6 +382,7 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 		}
 		obs := m.handoffObserved[sessionKey]
 		agent := accountSwapAgent(inst)
+		carryPossible, carryRefusal := accountHandoffCarryPrecondition(inst)
 		drafts = append(drafts, handoffInputDraft{
 			in: handoffengine.SessionInput{
 				Key:         sessionKey,
@@ -385,15 +401,14 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 				PendingOp:   inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
 				SwapCapable: inst.SupportsAutomaticAccountSwap(),
 				// CarryPossible is admission's in-memory precondition
-				// (#6817 review): a carry-supporting provider BY LAUNCH
-				// COMMAND plus a recorded conversation that belongs to it —
-				// a session with no conversation id can never carry.
-				// CarryConfirmed is the full answer, which reads the
-				// provider's store: a method value, so the engine calls it
-				// after m.mu is released, and only when require_carry can
-				// change a verdict (#7152).
-				CarryPossible:  inst.AccountSwapCarryRecorded() && !isRemoteWorkspace(inst),
-				CarryConfirmed: inst.AccountSwapCarryPossible,
+				// (#6817 review), and CarryRefusal its code when it fails.
+				// CarryCheck is the full answer, which reads the provider's
+				// store: a method value, so the engine calls it after m.mu
+				// is released, and only when require_carry can change a
+				// verdict (#7152).
+				CarryPossible:  carryPossible,
+				CarryRefusal:   carryRefusal,
+				CarryCheck:     inst.AccountSwapCarryRefusal,
 				LimitAccount:   limitAccountFor(inst),
 				WallObservedAt: wallObservedAtFor(inst),
 				Captured:       obs.captured,

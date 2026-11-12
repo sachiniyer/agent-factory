@@ -116,6 +116,10 @@ type SessionFacts struct {
 	// rather than start fresh — the require_carry input. The engine fills it
 	// from the session's own conversation, before any target is chosen.
 	CarryPossible bool
+	// CarryRefusal names why CarryPossible is false with a carry refusal code
+	// (CarryMissing, CarryStale, …); "" is the in-memory precondition's own
+	// refusal, CarryUnrecorded.
+	CarryRefusal string
 	// Reading is the newest usage reading on the session's OWN identity home
 	// — the account's store for a named session, the ambient home under
 	// default_login = "move". StatusNone for agents with no usage record.
@@ -431,7 +435,8 @@ func Decide(f Facts) Decision {
 	}
 	if cfg.RequireCarry && !s.CarryPossible {
 		block(KindDefer, reasonCarryRefused,
-			Event{Kind: EventIgnored, Reason: reasonCarryRefused})
+			Event{Kind: EventIgnored, Reason: reasonCarryRefused,
+				Params: map[string]string{"carry": carryRefusalParam(s.CarryRefusal)}})
 	}
 	if blockedReason != "" {
 		// A blocked session that is also drift-shorn logs both — emit the

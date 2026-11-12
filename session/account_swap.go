@@ -378,7 +378,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	if carry != nil {
 		var ok bool
 		if launchProgram, conversation, ok = carry.launch(resolvedProgram); !ok {
-			carry, carryFallback = nil, "the resolved program cannot resume a specific conversation"
+			carry, carryFallback = nil, carryUnresumableReason
 		}
 	}
 	if carry == nil {
