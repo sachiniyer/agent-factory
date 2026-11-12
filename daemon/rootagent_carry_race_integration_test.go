@@ -561,7 +561,16 @@ func TestARootHealAdmittedJustBeforeASuppressionNeverLaunches(t *testing.T) {
 	manager.waitRootAgentCreates()
 	finishOnce.Do(func() { close(finish) })
 	waitClosed(t, deleteDone, "the delete to finish")
-	require.NoError(t, deleteErr)
+	// With the heal kept from reaping it, the dead root is still there for the
+	// delete's archive loop. The fake backend's root has no external worktree,
+	// so the loop takes the archive branch, which refuses the reserved root
+	// title (archive.go); a real in-place root is killed instead. The delete's
+	// suppression ran before that loop either way, and that is what this pins.
+	t.Logf("DeleteProject: %v", deleteErr)
+	manager.mu.Lock()
+	_, stamped := manager.deletedRootRepos[repo.ID]
+	manager.mu.Unlock()
+	require.True(t, stamped, "the delete's suppression stands")
 
 	manager.mu.Lock()
 	st := manager.rootEnsureStates[repoPath]
