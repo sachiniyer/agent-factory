@@ -91,11 +91,21 @@ func repoResolveClaim(subject, path string, err error) string {
 // release path at all. Identity REUSE at a reused path, filed under #3599
 // option 2 (key the gate on something other than the first-resolved identity),
 // and the conservative direction while it stands.
+//
+// A HISTORICAL stand-in (#7181) is released by the same proof as the derived
+// tombstone it was stamped beside, read where the probe files it: under the
+// derived id its deleted record is keyed by, which deletedRootEvidence names.
+// Its own id carries no record of that project, so the direct lookup alone
+// would never release it (PR #7189, review thread 4554400603).
 func (m *Manager) rootDeletionTombstoneApplies(layers *rootAgentSnapshot, repoID string) bool {
-	if claimant, ok := m.deletedRootRepos[repoID]; ok && !deletedClaimDisproven(layers, repoID, claimant, m.rootHealPassSeq) {
-		return true
+	claimant, ok := m.deletedRootRepos[repoID]
+	if !ok || deletedClaimDisproven(layers, repoID, claimant, m.rootHealPassSeq) {
+		return false
 	}
-	return false
+	if evidenceID, standIn := m.deletedRootEvidence[repoID]; standIn && deletedClaimDisproven(layers, evidenceID, claimant, m.rootHealPassSeq) {
+		return false
+	}
+	return true
 }
 
 // rootIdentityProofPassTolerance is how many heal passes old a probe's identity

@@ -2,6 +2,8 @@ package session
 
 import (
 	"path/filepath"
+	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -30,7 +32,7 @@ const (
 	// codexRevertCarryTargetReason: the incoming account's Codex would resolve
 	// the thread to a revert rollout it already holds, not to the copy.
 	codexRevertCarryTargetReason   = "the new account already holds a thread/revert rollout of this conversation, which Codex would resume instead of the carried one"
-	codexRevertCarryUnlistedReason = "af could not enumerate the Codex rollout store"
+	codexRevertCarryUnlistedReason = carryStoreUnlistedReason
 )
 
 // codexRolloutIsRevert reports whether path names a thread/revert rollout,
@@ -41,10 +43,11 @@ func codexRolloutIsRevert(path string) bool {
 }
 
 // codexHoldsRevertRollout reports whether codexHome's store files thread id
-// under any thread/revert rollout. A store that cannot be walked fails closed:
-// the walk stops at its first failure, so what it found proves nothing.
-func codexHoldsRevertRollout(codexHome, id string) (bool, error) {
-	_, other, err := codexRolloutForms(codexHome, id)
+// under any thread/revert rollout dated on or after floor's day (zero: any).
+// A store that cannot be walked fails closed: the walk stops at its first
+// failure, so what it found proves nothing.
+func codexHoldsRevertRollout(codexHome, id string, floor time.Time) (bool, error) {
+	_, other, err := codexRolloutFormsSince(codexHome, id, floor)
 	if err != nil {
 		return false, err
 	}
@@ -69,7 +72,8 @@ func (c *conversationCarry) codexRevertReason() string {
 	if c.agent != tmux.ProgramCodex {
 		return ""
 	}
-	held, err := codexHoldsRevertRollout(c.srcHome, c.id)
+	floor := codexRevertFloor(c.transcript)
+	held, err := c.sourceHoldsRevert(floor)
 	switch {
 	case err != nil:
 		return codexRevertCarryUnlistedReason
@@ -78,7 +82,7 @@ func (c *conversationCarry) codexRevertReason() string {
 	case c.committed:
 		return ""
 	}
-	held, err = codexHoldsRevertRollout(c.dstHome, c.id)
+	held, err = codexHoldsRevertRollout(c.dstHome, c.id, floor)
 	switch {
 	case err != nil:
 		return codexRevertCarryUnlistedReason
@@ -86,4 +90,24 @@ func (c *conversationCarry) codexRevertReason() string {
 		return codexRevertCarryTargetReason
 	}
 	return ""
+}
+
+// codexRevertFloor bounds where a thread/revert rollout of the thread whose
+// plain rollout is filed at rel can be. A revert is minted after the rollout
+// it reverts, and both are filed under the recorder's local calendar date, so
+// nothing earlier than the plain rollout's day — less the lookback that covers
+// a clock or time-zone change between the two — can hold one (#7152). The
+// revert check runs under the swap's global fences, and a long-lived shared
+// store would otherwise be walked whole, twice per check. A rel that is not a
+// sessions/YYYY/MM/DD path gives the zero floor: the whole store.
+func codexRevertFloor(rel string) time.Time {
+	parts := strings.Split(filepath.ToSlash(rel), "/")
+	if len(parts) != 5 || parts[0] != "sessions" {
+		return time.Time{}
+	}
+	day, err := time.ParseInLocation("2006/01/02", strings.Join(parts[1:4], "/"), time.Local)
+	if err != nil {
+		return time.Time{}
+	}
+	return codexRolloutScanFloor(day)
 }

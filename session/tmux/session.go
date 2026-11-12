@@ -425,6 +425,12 @@ type TmuxSession struct {
 	// time so a stale latch cannot pass a recreated session.
 	// Guarded by provenMu.
 	closedConclusively bool
+	// spawnedAt is the instant start took just before it ran the new-session
+	// that spawned the current pane process: after start's existence gate
+	// answered that no session stood behind the name (and after Restore's own
+	// probe), so whatever process ran there before was already gone. Zero
+	// until a spawn. Guarded by provenMu; read through SpawnedAt.
+	spawnedAt time.Time
 	// The teardown mark lives on statusMonitor (io.go), not here: the fact a
 	// status poll needs is the teardown attribution of the session generation
 	// IT is polling, and a shared session-level flag lets a same-object
@@ -727,6 +733,24 @@ func (t *TmuxSession) proveNoPaneIfDeterminatelyAbsent() {
 func (t *TmuxSession) setProvenNoPane(proven bool) {
 	t.provenMu.Lock()
 	t.provenNoPane = proven
+	t.provenMu.Unlock()
+}
+
+// SpawnedAt is the instant just before this session last spawned its pane
+// process with new-session, or zero if it never has. It is taken after the
+// existence gate, so it is the earliest instant at which the new process can
+// have run and the latest by which any process an earlier pane ran under the
+// name was gone. A launch dates the replacement of the runtime an operator
+// repair was made against by it (#7147).
+func (t *TmuxSession) SpawnedAt() time.Time {
+	t.provenMu.RLock()
+	defer t.provenMu.RUnlock()
+	return t.spawnedAt
+}
+
+func (t *TmuxSession) setSpawnedAt(at time.Time) {
+	t.provenMu.Lock()
+	t.spawnedAt = at
 	t.provenMu.Unlock()
 }
 

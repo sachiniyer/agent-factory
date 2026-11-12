@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -377,7 +378,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	if carry != nil {
 		var ok bool
 		if launchProgram, conversation, ok = carry.launch(resolvedProgram); !ok {
-			carry, carryFallback = nil, "the resolved program cannot resume a specific conversation"
+			carry, carryFallback = nil, carryUnresumableReason
 		}
 	}
 	if carry == nil {
@@ -530,8 +531,8 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return nil
 	}
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
+		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
 	}
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
@@ -539,6 +540,13 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
+	}
+	i.mu.Unlock()
+	// The pane and the API response say why; af's log must too (#7152). A
+	// re-plan after a failed copy is the copy's own refusal, logged there.
+	if carry == nil && carryFallback != "" && carryFailure == "" {
+		log.WarningLog.Printf("account swap for %q cannot carry conversation %q into account %q, so the replacement starts a fresh conversation: %s",
+			i.Title, outgoing.ID, name, carryFallback)
 	}
 	return nil
 }

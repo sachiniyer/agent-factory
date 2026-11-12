@@ -226,7 +226,7 @@ func TestKeptCaptureEvidence_ReverificationOutcomes(t *testing.T) {
 	})
 	t.Run("a launch boundary clears it", func(t *testing.T) {
 		inst, _ := kept(t, agent)
-		inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+		inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 		require.Equal(t, keptCaptureEvidence{}, inst.captureEvidence,
 			"a new launch's own evidence supersedes the old runtime's identity")
 	})

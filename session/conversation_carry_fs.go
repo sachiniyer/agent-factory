@@ -74,7 +74,7 @@ func (e *carrySymlinkError) Error() string {
 func (e *carrySymlinkError) Unwrap() error { return e.err }
 
 func symlinkCarryReason(path string) string {
-	return path + " is a symbolic link, which af does not follow when carrying a conversation"
+	return fmt.Sprintf(carrySymlinkFormat, path)
 }
 
 // carrySymlinkPath returns the refused link err names, if any.

@@ -878,11 +878,18 @@ func bareMetadataDirectory(repoPath string) bool {
 }
 
 // bareMetadataLayout is the structural bare-layout check over a caller-chosen
-// stat. It follows symlinks, as os.Stat does. The answer is determinate unless
-// err is non-nil: an observation that hit its deadline (context.DeadlineExceeded)
-// is returned as the error, because a stalled probe proves nothing about the
-// layout and a caller that reads "not bare" as absence must not get it. Every
-// other failed observation keeps bareMetadataDirectory's meaning: not bare.
+// stat. It follows symlinks, as os.Stat does. The answer is determinate for
+// every observation the probe makes:
+//   - a genuinely missing entry (ENOENT) or a structural mismatch (a file
+//     where a directory is expected, or vice versa) is determinate "not bare";
+//   - any OTHER failed observation (EIO, ESTALE, EACCES, ELOOP, a deadline, …)
+//     is a failed probe and is returned as an error, never "not bare": a
+//     caller that reads "not bare" as determinate absence (localBranchExists,
+//     the gate of DeleteLocalBranch) must not fabricate absence from an
+//     observation that proved nothing (#3243). bareMetadataDirectory discards
+//     the error for its caller (resolveRepoMetadataRoot), which already
+//     reports a non-ENOENT stat of `.git` as an inspection error and is
+//     unaffected by the distinction.
 func bareMetadataLayout(repoPath string, stat func(string) (os.FileInfo, error)) (bool, error) {
 	for _, entry := range []struct {
 		name string
@@ -895,11 +902,14 @@ func bareMetadataLayout(repoPath string, stat func(string) (os.FileInfo, error))
 	} {
 		path := filepath.Join(repoPath, entry.name)
 		info, err := stat(path)
-		if errors.Is(err, context.DeadlineExceeded) {
+		if err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				return false, nil // a genuinely missing entry is determinate "not bare"
+			}
 			return false, fmt.Errorf("stat %s: %w", path, err)
 		}
-		if err != nil || info.IsDir() != entry.dir {
-			return false, nil
+		if info.IsDir() != entry.dir {
+			return false, nil // structural mismatch remains determinate "not bare"
 		}
 	}
 	return true, nil

@@ -40,6 +40,7 @@ type depCounts struct {
 	exclude                                                  []string
 	targetOrder                                              string
 	movesWindow                                              string
+	requireCarry                                             bool
 }
 
 type reportCall struct {
@@ -65,7 +66,7 @@ func (d *depCounts) deps() Deps {
 				ConfirmWall: true, WallPercent: 97, MoveIdleAtPercent: 95,
 				PreferBelowPercent: 85, DefaultLogin: "ignore", MaxMoves: 3,
 				MaxMovesWindow: d.movesWindowOrDefault(), ExcludeSessions: d.exclude,
-				ReportTo: d.reportToFor(root),
+				ReportTo: d.reportToFor(root), RequireCarry: d.requireCarry,
 			}
 			cfg.LimitAccountCandidates = []string{"work", "personal"}
 			return cfg, nil

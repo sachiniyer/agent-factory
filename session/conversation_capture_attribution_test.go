@@ -316,3 +316,177 @@ func TestCodexAttributionResolvesStoreAliases(t *testing.T) {
 	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID,
 		"the runtime's own rollout attributes through a store alias")
 }
+
+// mutableHeldOverride is the override shape a test uses to model a runtime
+// whose held set changes mid-life: Codex /new retires the old thread's write
+// descriptor during a ~60s unload delay while the new thread's recorder is
+// already open, so a single pane genuinely holds two same-cwd rollouts for
+// roughly a minute and then only one. It counts descriptor walks so a test can
+// assert the cache was re-consulted rather than reusing a stale verdict.
+type mutableHeldOverride struct {
+	mu    sync.Mutex
+	held  map[string]struct{}
+	walks int
+}
+
+func (m *mutableHeldOverride) snapshot() (map[string]struct{}, error) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.walks++
+	cp := make(map[string]struct{}, len(m.held))
+	for p := range m.held {
+		cp[p] = struct{}{}
+	}
+	return cp, nil
+}
+
+func (m *mutableHeldOverride) release(path string) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	delete(m.held, path)
+}
+
+// TestCodexAttributionCachedPositiveIsRejudgedWhenHeldSetShrinks is the wedge
+// regression: a single descriptor walk that catches two same-cwd rollouts held
+// together used to mint two permanent positives (a positive verdict was cached
+// forever and never re-verified against the current held set), so every later
+// capture attempt returned the same hard, non-retriable ambiguity — even after
+// the runtime released one of the two rollouts. With the fix, a cached positive
+// ages out on the same cadence as a negative and is re-walked, so once the
+// runtime holds only one rollout the next attempt attributes it and records
+// the thread.
+func TestCodexAttributionCachedPositiveIsRejudgedWhenHeldSetShrinks(t *testing.T) {
+	prev := codexAttributionRejudgeInterval
+	codexAttributionRejudgeInterval = 10 * time.Millisecond
+	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	baseSnap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	p1 := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-49-03-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	p2 := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-50-27-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+
+	held := &mutableHeldOverride{held: map[string]struct{}{p1: {}, p2: {}}}
+	verdicts := make(map[string]codexRolloutVerdict)
+	var mu sync.Mutex
+	bind := func() ConversationCaptureSnapshot {
+		snap := baseSnap
+		snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
+			return judgeCodexRollouts(held.snapshot, verdicts, &mu, candidates)
+		}}
+		return snap
+	}
+
+	// First attempt: the runtime holds both rollouts. Both are judged ours
+	// and cached; capture reports a non-retriable ambiguity.
+	_, retry, err := captureCodexConversationOnce(bind())
+	require.ErrorContains(t, err, "2 new rollout files are held open by the session's runtime")
+	require.False(t, retry, "two genuinely-held rollouts are still ambiguous inside the overlap window")
+	require.Equal(t, 1, held.walks, "the first attempt walks the held set once to judge both candidates")
+
+	// The runtime releases p1: only p2 is held now (the /new transition).
+	held.release(p1)
+	// Within the re-judge cadence the cached positives are still reused —
+	// the cache is the optimization, not the bug — so the ambiguity
+	// persists momentarily.
+	_, _, err = captureCodexConversationOnce(bind())
+	require.ErrorContains(t, err, "ambiguous", "inside the re-judge cadence the cache is still reused")
+	require.Equal(t, 1, held.walks, "no re-walk happens before the cadence elapses")
+
+	// Past the cadence the cached positives age out and are re-walked
+	// against the current held set, which now contains only p2.
+	time.Sleep(30 * time.Millisecond)
+	conv, retry, err := captureCodexConversationOnce(bind())
+	require.NoError(t, err, "once the runtime holds only one rollout, capture must attribute it")
+	require.False(t, retry, "a single attributed rollout is a final answer")
+	require.True(t, conv.HasID())
+	require.Equal(t, "019f386f-75b6-7f68-88e3-6d5e1f15bb6a", conv.ID,
+		"the surviving rollout — not the released one — is recorded")
+	require.Equal(t, 2, held.walks, "the cached positives were re-walked after the cadence elapsed")
+}
+
+// TestCodexAttributionCachedPositiveRejudgesOnInstanceAcrossRearms runs the
+// same wedge through the production instance-side binding
+// (Instance.attributeCodexRolloutPaths, which memoizes verdicts on the Instance
+// keyed to the resolved runtime generation). The deferred capture loop re-binds
+// a fresh attribution object on every rearm; without the fix the cached
+// positives on the instance pinned the ambiguity for the life of the
+// generation. With the fix, a rearm past the re-judge cadence re-walks the held
+// set and attributes the surviving rollout.
+func TestCodexAttributionCachedPositiveRejudgesOnInstanceAcrossRearms(t *testing.T) {
+	prev := codexAttributionRejudgeInterval
+	codexAttributionRejudgeInterval = 10 * time.Millisecond
+	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	baseSnap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	p1 := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-49-03-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	p2 := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-50-27-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+
+	held := &mutableHeldOverride{held: map[string]struct{}{p1: {}, p2: {}}}
+	inst := &Instance{}
+	inst.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		return held.snapshot()
+	})
+
+	// First rearm: both held → ambiguous, both cached positive on the
+	// instance under the override's generation.
+	_, _, err := captureCodexConversationOnce(inst.BindConversationCaptureRuntime(baseSnap))
+	require.ErrorContains(t, err, "ambiguous")
+	require.Equal(t, 1, held.walks)
+
+	// The runtime releases p1.
+	held.release(p1)
+	time.Sleep(30 * time.Millisecond)
+
+	// The daemon loop re-binds the armed snapshot fresh on every rearm;
+	// the verdict cache stays on the instance, so a rearm past the cadence
+	// must re-walk and attribute the surviving rollout.
+	conv, _, err := captureCodexConversationOnce(inst.BindConversationCaptureRuntime(baseSnap))
+	require.NoError(t, err)
+	require.Equal(t, "019f386f-75b6-7f68-88e3-6d5e1f15bb6a", conv.ID)
+	require.Equal(t, 2, held.walks, "the instance's cached positives were re-walked after the cadence")
+}
+
+// TestCodexAttributionFreshPositiveIsStillMemoizedWithinCadence pins the
+// optimization the cache exists for: a freshly-judged positive is reused
+// within one re-judge cadence, so the descriptor walk is not re-run on every
+// 50ms poll. The fix re-judges positives on a cadence; it must not collapse
+// into re-walking every poll.
+func TestCodexAttributionFreshPositiveIsStillMemoizedWithinCadence(t *testing.T) {
+	prev := codexAttributionRejudgeInterval
+	codexAttributionRejudgeInterval = 250 * time.Millisecond
+	t.Cleanup(func() { codexAttributionRejudgeInterval = prev })
+
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	baseSnap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+	own := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-49-03-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-50-27-019f386f-75b6-7f68-88e3-6d5e1f15bb6a.jsonl", workDir)
+
+	held := &mutableHeldOverride{held: map[string]struct{}{own: {}}}
+	verdicts := make(map[string]codexRolloutVerdict)
+	var mu sync.Mutex
+	bind := func() ConversationCaptureSnapshot {
+		snap := baseSnap
+		snap.runtime = &codexRuntimeAttribution{attribute: func(candidates []string) ([]string, bool) {
+			return judgeCodexRollouts(held.snapshot, verdicts, &mu, candidates)
+		}}
+		return snap
+	}
+
+	for i := 0; i < 3; i++ {
+		conv, _, err := captureCodexConversationOnce(bind())
+		require.NoError(t, err)
+		require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", conv.ID)
+	}
+	require.Equal(t, 1, held.walks,
+		"a fresh positive is reused within the re-judge cadence, not re-walked every poll")
+}

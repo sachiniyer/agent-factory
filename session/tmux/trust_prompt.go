@@ -63,6 +63,18 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPDialogPartiallyRendered(content) {
 			return true
 		}
+		// The 2.1.322 MCP-server dialog is painted top-down too. A frame that is
+		// a proper prefix of it — preamble, body, some of the options, no footer
+		// yet — holds the same way (#7163). So does the dialog in a shape af
+		// cannot read, such as a pane narrow enough that Claude Code wraps its
+		// rows: hold, say why once, and send nothing.
+		switch claudeMCPServerDialogOf(content).verdict {
+		case claudeMCPServerPartial:
+			return true
+		case claudeMCPServerUnreadable:
+			t.refuseClaudeMCPServer("its rows do not read as the dialog af knows (a pane too narrow for them wraps them)")
+			return true
+		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
 		// paints its question, then its body, then its options one row at a
 		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
@@ -318,8 +330,11 @@ func sgrSetsReverse(params string, current bool) bool {
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing
-// one of Claude Code's launch-time gates that af auto-dismisses with Enter: the
-// folder-trust prompt (either wording) or the "new MCP server" trust prompt.
+// one of Claude Code's launch-time gates that af answers: the folder-trust
+// prompt (either wording) or an MCP-server prompt (either wording). Being
+// present is not consent to a key: answerClaudeTrustPrompt navigates by label,
+// confirms only what it has read, and refuses — holding without a key — a
+// dialog whose selection is not one af may confirm.
 //
 // This runs on the daemon's CONTINUOUS Snapshot poll (session/agentserver_local.go
 // CheckAndHandleTrustPrompt), and CapturePaneContent is visible-only
@@ -345,7 +360,7 @@ func sgrSetsReverse(params string, current bool) bool {
 // verbatim, so a visible rendering of this file's contents (a diff, a review
 // reply, pasted release notes) carries it too.
 //
-// The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
+// The older MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
 // 1. Yes ... Enter to confirm") is anchored on its unique question "do you
 // trust this new mcp server" AND the modal's "Enter to confirm" footer being
 // the last non-blank content in the pane. The phrase alone cannot tell a live
@@ -372,6 +387,13 @@ func claudeTrustPromptPresent(content string) bool {
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
+	// Claude Code 2.1.322's MCP-server dialog ("New MCP server found in this
+	// project: <name>" … "Continue without using this MCP server"), which kept
+	// none of the older wording's anchors (#7163). Complete means the whole
+	// dialog with its footer last (claudeMCPServerDialogOf) — whichever row
+	// owns the cursor, because a dialog af will refuse is still in the way.
+	mcpServer := claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete
+
 	// Legacy folder-trust dialog — the question as a whole row, opening a
 	// trailing region that holds only rows the dialog paints, complete, with
 	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
@@ -380,5 +402,5 @@ func claudeTrustPromptPresent(content string) bool {
 	// agent."
 	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
 
-	return reworded || mcpDialog || legacy
+	return reworded || mcpDialog || mcpServer || legacy
 }
