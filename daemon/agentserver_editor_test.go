@@ -380,8 +380,22 @@ func newCrashEditorFixture(t *testing.T) *crashEditorFixture {
 	return &crashEditorFixture{t: t, binary: writeFakeVSCodeBinary(t, "code-server", nil)}
 }
 
+// server makes a server that stays alive for the rest of the test, as a running
+// agent-server does: acquireEditorNamespace's flock lives in hs.editor.lock, and
+// nothing else points back at hs (the supervisor and its editors do not), so a
+// test that stops naming hs would otherwise hand the *os.File to its finalizer and
+// lose the lock mid-test (#7139). The cleanup closure keeps hs reachable, and
+// releases the lock deterministically — registered first, so it runs after the
+// supervisor stops.
 func (f *crashEditorFixture) server(id, title string) *headlessServer {
 	hs := &headlessServer{inst: &session.Instance{ID: id}, repoPath: "/srv/repo", title: title}
+	f.t.Cleanup(func() {
+		hs.editor.lockMu.Lock()
+		defer hs.editor.lockMu.Unlock()
+		if hs.editor.lock != nil {
+			_ = hs.editor.lock.Close() // a test that already closed it, to model an exit, gets os.ErrClosed
+		}
+	})
 	sup := hs.editorSupervisor()
 	sup.configuredBinary = func() string { return f.binary }
 	sup.startGrace = 5 * time.Second
