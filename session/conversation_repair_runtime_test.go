@@ -253,3 +253,115 @@ func TestOperatorRepairWindowVerdicts(t *testing.T) {
 		require.Equal(t, c.want, got, "%s window, %s, modified %s after the repair", c.window, c.path, c.modified.Sub(at))
 	}
 }
+
+// #7132 review F-1: a launch boundary ends what the stamp says about the NEW
+// runtime, not what it says about the old one. Writes the old pane made
+// before af launched the new one — to the thread it held, or, for a repair
+// the request could not observe, to any thread already in the store — are
+// judged exactly as they were before the launch. The review's sequences: a
+// restore keeps the repair across a could-not-look refusal and starts a fresh
+// pane that sits idle, or resumes R and a second restore runs before the
+// follow has read the new pane. Either way the next restore resumes R, as it
+// would have before the launch; it must not read the old pane's own work as a
+// move and retire the repair.
+func TestOperatorRepairKeepsTheOldRuntimesOwnWritesAcrossALaunch(t *testing.T) {
+	now := time.Now()
+	repairedAt := now.Add(-30 * time.Minute)
+	repairs := []struct {
+		name   string
+		repair AgentConversationData
+	}{
+		{"observed", operatorRecordAt(heldTestOwnID, repairedAt).WithRepairStamp(repairHeldID)},
+		{"never observed", operatorRecordAt(heldTestOwnID, repairedAt)},
+	}
+	looks := []struct {
+		name string
+		look func(*Instance)
+	}{
+		{"the follow reads an idle fresh pane", func(inst *Instance) {
+			require.Equal(t, ConversationFollowUnchanged,
+				inst.FollowAgentConversationForRuntime(inst.AgentRuntimeToken(), inst.AgentConversation(), heldAnswer("")))
+		}},
+		{"the follow has not read the new pane", func(*Instance) {}},
+	}
+	for _, r := range repairs {
+		for _, l := range looks {
+			t.Run(r.name+", "+l.name, func(t *testing.T) {
+				codexHome := t.TempDir()
+				t.Setenv("CODEX_HOME", codexHome)
+				workDir := t.TempDir()
+				writeStoredCodexRollout(t, codexHome, heldTestOwnID, workDir, now.Add(-3*time.Hour), now.Add(-3*time.Hour), now.Add(-2*time.Hour))
+				// H: the old pane's thread, stored before the repair. The old
+				// pane kept working in it for 20 minutes after the repair,
+				// then died.
+				writeStoredCodexRollout(t, codexHome, repairHeldID, workDir, repairedAt.Add(-time.Hour), repairedAt.Add(-time.Hour), repairedAt.Add(20*time.Minute))
+
+				before := staleResumeInstance(t, workDir, r.repair)
+				_, ok, decline := prepareExactResumeConversation(before, before.Program)
+				require.True(t, ok, "fixture: before any launch the repair resumes R; refused %v", decline)
+
+				inst := staleResumeInstance(t, workDir, r.repair)
+				inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+				l.look(inst)
+
+				restore := staleResumeInstance(t, workDir, inst.AgentConversation())
+				program, ok, decline := prepareExactResumeConversation(restore, restore.Program)
+				require.True(t, ok, "the old pane's own writes before the launch ended the repair: %v (retire=%v)",
+					decline, restore.exactResumeRefusal(decline).retire)
+				require.Contains(t, program, "resume "+heldTestOwnID)
+			})
+		}
+	}
+}
+
+// #7132 review F-2: a reattach that finds another process behind the
+// session's tmux name is evidence of a runtime af did not launch, so it ends
+// the stamp the way an af launch does. Otherwise the next launch decides with
+// the old runtime's stamp — its resume decision runs before that launch
+// records itself — and resumes R over the thread the replacement works in.
+// A probe that could not answer is no such evidence: the pane may still be
+// the runtime the repair was made against.
+func TestOperatorRepairStampEndsWhenAReattachFindsAnotherProcess(t *testing.T) {
+	now := time.Now()
+	repairedAt := now.Add(-30 * time.Minute)
+	agent := startRolloutHolder(t, writeCodexRolloutFileWithCwd(t, t.TempDir(),
+		"rollout-2026-11-11T14-29-00-"+heldTestOwnID+".jsonl", t.TempDir()))
+	other := startRolloutHolder(t, writeCodexRolloutFileWithCwd(t, t.TempDir(),
+		"rollout-2026-11-11T14-30-00-"+heldTestSiblingID+".jsonl", t.TempDir()))
+	for _, c := range []struct {
+		name    string
+		answer  func() ([]byte, error)
+		resumes bool
+	}{
+		{"another process roots the pane", paneRootedAt(other), false},
+		{"tmux reports no pane at all", func() ([]byte, error) { return nil, nil }, false},
+		{"control: the probe could not answer", paneProbeUnanswerable, true},
+	} {
+		t.Run(c.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			workDir := t.TempDir()
+			writeStoredCodexRollout(t, codexHome, heldTestOwnID, workDir, now.Add(-3*time.Hour), now.Add(-3*time.Hour), now.Add(-2*time.Hour))
+			held := writeStoredCodexRollout(t, codexHome, repairHeldID, workDir, repairedAt.Add(-time.Hour), repairedAt.Add(-time.Hour), repairedAt.Add(-time.Minute))
+
+			inst, panes := reattachInstance(t, agent, other)
+			panes.set(c.answer)
+			inst.Tabs[0].Conversation = operatorRecordAt(heldTestOwnID, repairedAt).WithRepairStamp(repairHeldID)
+			inst.settleReattachVerification(inst.Tabs[0].tmux)
+			// From here on, whatever process is behind the name works in H.
+			// A second past the settle, so no clock or filesystem granularity
+			// can put the write at or before it.
+			written := time.Now().Add(time.Second)
+			require.NoError(t, os.Chtimes(held, written, written))
+
+			restore := staleResumeInstance(t, workDir, inst.AgentConversation())
+			program, ok, decline := prepareExactResumeConversation(restore, restore.Program)
+			if c.resumes {
+				require.True(t, ok, "refused: %v", decline)
+				require.Contains(t, program, "resume "+heldTestOwnID)
+				return
+			}
+			require.False(t, ok, "resumed %q over the thread a process af did not launch works in", program)
+		})
+	}
+}
