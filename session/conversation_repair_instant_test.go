@@ -164,6 +164,12 @@ func TestOperatorRepairRecordsTheReplacementWhenAKeptIdentityIsDropped(t *testin
 			inst.Tabs[0].Conversation = operatorRecordAt(heldTestOwnID, repairedAt).WithRepairStamp(repairHeldID)
 			panes.set(c.answer)
 			require.ErrorIs(t, inst.CheckConversationCaptureEvidence(), ErrNoConversationCaptureEvidence)
+			if !c.resumes {
+				// Nothing settled while the scan ran (#7145's straddle refusal
+				// does not apply), so the identity is dropped: what is under
+				// test is whether that drop records the replacement.
+				require.Equal(t, keptCaptureEvidence{}, inst.captureEvidence, "fixture: the kept identity must be dropped")
+			}
 			// From here on, the process in the pane works in H. A second past
 			// the scan, so no clock or filesystem granularity can put the
 			// write at or before it.
@@ -179,4 +185,33 @@ func TestOperatorRepairRecordsTheReplacementWhenAKeptIdentityIsDropped(t *testin
 			require.False(t, ok, "resumed %q over the thread a process af did not launch works in", program)
 		})
 	}
+	// #7145: a scan that a reattach settled during proves nothing after the
+	// settle, so it drops nothing — and so records nothing either.
+	t.Run("control: a scan a reattach straddled drops and records nothing", func(t *testing.T) {
+		workDir, held := instantFixture(t, now, repairedAt)
+		inst, panes := reattachInstance(t, agent, other)
+		inst.settleReattachVerification(inst.Tabs[0].tmux) // unanswerable: kept
+		inst.Tabs[0].Conversation = operatorRecordAt(heldTestOwnID, repairedAt).WithRepairStamp(repairHeldID)
+		entered, release := make(chan struct{}), make(chan struct{})
+		panes.set(func() ([]byte, error) {
+			close(entered)
+			<-release
+			return paneRootedAt(other)() // tmux's answer from before the reattach
+		})
+		done := make(chan error, 1)
+		go func() { done <- inst.CheckConversationCaptureEvidence() }()
+		<-entered
+		panes.set(paneRootedAt(agent))
+		inst.settleReattachVerification(inst.Tabs[0].tmux)
+		close(release)
+		require.ErrorIs(t, <-done, ErrNoConversationCaptureEvidence)
+		require.Equal(t, keptCaptureEvidence{pid: agent.PID, startID: agent.StartID}, inst.captureEvidence,
+			"fixture: the straddled scan drops nothing")
+		writtenAt(t, held, time.Now().Add(time.Second))
+
+		restore := staleResumeInstance(t, workDir, inst.AgentConversation())
+		program, ok, decline := prepareExactResumeConversation(restore, restore.Program)
+		require.True(t, ok, "refused: %v", decline)
+		require.Contains(t, program, "resume "+heldTestOwnID)
+	})
 }
