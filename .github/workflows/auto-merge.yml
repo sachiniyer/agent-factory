@@ -12,8 +12,11 @@ on:
     workflows: ['PR Validation', 'Build', 'Lint']
     types: [completed]
 
-# Nothing by default: each job asks for its own (#7165).
-permissions: {}
+# Only a read of the repository by default: every job asks for its own,
+# which replaces this entirely (#7165). Block form, because the workflow
+# scans in auto-gate.test.js do not read flow-style mappings.
+permissions:
+  contents: read
 
 # One merger at a time; a pending run replaces an older pending one.
 concurrency:

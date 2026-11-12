@@ -69,8 +69,8 @@ test("the other jobs read nothing from a check but its verdict: pass or fail, th
   for (const check of checks) assert.ok(reads.some((r) => r.includes(`<- ${check}.`)), `nothing acts on ${check}: ${reads}`);
 });
 
-test('the workflow-wide token grants nothing; each job asks for its own', () => {
-  assert.match(YML, /^permissions: \{\}$/m);
+test('the workflow-wide token can only read the repository; each job asks for its own', () => {
+  assert.match(YML, /^permissions:\n {2}contents: read\n(?! )/m);
   for (const job of JOBS) assert.ok(Object.keys(job.permissions).length > 0, `${job.id} sets no permissions`);
 });
 

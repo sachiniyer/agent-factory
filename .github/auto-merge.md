@@ -24,7 +24,7 @@ gate ──┬── recheck ──┬── land ── compose ── report
 
 - **`recheck`, `fixcheck`, `compose`** (the composition checks) each run in a job of their own with `permissions: contents: read`, no secrets, `persist-credentials: false`, and `setup-go` with `cache: false`, because `auto-release.yml` and `stable-release.yml` restore default-branch Go caches. They run no github-script. Their outputs are a verdict and nothing else: `passed` (from the check step's `outcome`, which the runner evaluates, not the checked code), the `sha` checked (`actions/checkout`'s own output, read before anything runs), and for `fixcheck` the `fixes` that passed and their `base`.
 - **`gate`** (read-only), **`land`** (the write token) and **`report`** (`issues: write`) run only `auto-merge.js`, each from a fresh checkout of `github.workflow_sha`, the commit this workflow file came from, never a tree a check touched. `land` and `report` read nothing from a check but that verdict. A check that reports no verdict, because its runner was lost or it timed out, counts as failed: the issue stays open and nothing merges.
-- The workflow-wide `permissions` is `{}`; each job asks for its own.
+- The workflow-wide `permissions` is only `contents: read`; each job asks for its own, which replaces it.
 
 The cost is runner start-ups (a merging run has at least three jobs) and an uncached Go build per check. `.github/scripts/auto-merge-isolation.test.js` pins the layout, and runs the workflow to show that a merged PR's lint script cannot get its code run with the write token.
 
