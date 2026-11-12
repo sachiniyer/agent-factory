@@ -179,3 +179,27 @@ func TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone(t *testing.T)
 	require.Contains(t, reason, "missing")
 	require.True(t, repair.exactResumeRefusal(reason).retire, "the unusable repair is retired once the fresh spawn commits")
 }
+
+// TestOperatorRepairRetiresOnceThePaneReachesIt: the repair's stickiness
+// exists to hold the record against the thread the pane was on at the repair.
+// When the pane moves onto the repaired thread itself, the repair has done its
+// job and must become an ordinary capture, or a later move back to the
+// pre-repair thread would read as "unchanged since the repair" and never be
+// followed (#7120 Codex review).
+func TestOperatorRepairRetiresOnceThePaneReachesIt(t *testing.T) {
+	inst := retireTestInstance(t)
+	token := inst.AgentRuntimeToken()
+	repair := operatorRecord(heldTestOwnID)
+	inst.SetAgentConversation(repair)
+	inst.StampConversationRepair(repair.ID, repairHeldID)
+
+	require.True(t, inst.FollowAgentConversationForRuntime(token, repair, heldAnswer(heldTestOwnID)),
+		"the pane reaching the repaired thread retires the repair's provenance")
+	reached := inst.AgentConversation()
+	require.Equal(t, heldTestOwnID, reached.ID)
+	require.Equal(t, ConversationCaptureCodexRollout, reached.CaptureKind)
+
+	require.True(t, inst.FollowAgentConversationForRuntime(token, reached, heldAnswer(repairHeldID)),
+		"a later move back to the pre-repair thread is followed like any other")
+	require.Equal(t, repairHeldID, inst.AgentConversation().ID)
+}
