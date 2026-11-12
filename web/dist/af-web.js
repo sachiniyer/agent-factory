@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1d183bf65313";
+var CLIENT_VERSION = "a51054aa1a10";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -22809,7 +22809,7 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
       const showRefusal = () => {
         m.setBusy(false);
         m.setError(errorText(e));
-        if (immediateRestore && modal !== m) surfaceMutationError(e);
+        if (modal !== m) surfaceMutationError(e);
       };
       if (action === "restore") {
         void pendingRestores.waitForRefusalResync(target.id).then(() => {
