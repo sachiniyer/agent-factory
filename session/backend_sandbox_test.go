@@ -477,17 +477,19 @@ const sandboxOrphanGuard = 8 * time.Second
 // exits 0 — so CombinedOutput() returns exec.ErrWaitDelay after
 // sandboxTunnelWaitDelay while the buffer already holds printCmd's output. The
 // straggler is killed on cleanup so a regression cannot leak it past the test.
-func stubSSHStraggler(t *testing.T, printCmd string) string {
+// The returned pidFile holds the straggler's pid so a test can assert on its
+// liveness after the run.
+func stubSSHStraggler(t *testing.T, printCmd string) (sshPath, pidFile string) {
 	t.Helper()
 	dir := t.TempDir()
-	pidFile := filepath.Join(dir, "straggler.pid")
+	pidFile = filepath.Join(dir, "straggler.pid")
 	body := "#!/usr/bin/env bash\n" +
 		printCmd + "\n" +
 		"sleep 30 &\n" +
 		"echo $! > " + shellQuote(pidFile) + "\n" +
 		"exit 0\n"
-	path := filepath.Join(dir, "ssh")
-	require.NoError(t, os.WriteFile(path, []byte(body), 0o755))
+	sshPath = filepath.Join(dir, "ssh")
+	require.NoError(t, os.WriteFile(sshPath, []byte(body), 0o755))
 	t.Cleanup(func() {
 		data, rerr := os.ReadFile(pidFile)
 		if rerr != nil {
@@ -501,7 +503,7 @@ func stubSSHStraggler(t *testing.T, printCmd string) string {
 			_ = proc.Kill()
 		}
 	})
-	return path
+	return sshPath, pidFile
 }
 
 // TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe drives the REAL
@@ -514,7 +516,7 @@ func stubSSHStraggler(t *testing.T, printCmd string) string {
 // a timeout. Before the fix this returned "...timed out...: context deadline
 // exceeded"; after, it returns the complete output and no error.
 func TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe(t *testing.T) {
-	ssh := stubSSHStraggler(t, "printf 'AF-SANDBOX-ANSWER\\n'")
+	ssh, _ := stubSSHStraggler(t, "printf 'AF-SANDBOX-ANSWER\\n'")
 	p := &sandboxProvisioner{sshCmd: ssh}
 
 	var (
@@ -540,6 +542,56 @@ func TestSandboxRunNormalizesErrWaitDelayToNilWhenOrphanHoldsPipe(t *testing.T) 
 	assert.GreaterOrEqual(t, elapsed, sandboxTunnelWaitDelay-500*time.Millisecond,
 		"the return must wait at least sandboxTunnelWaitDelay for the orphan's pipe")
 	assert.Less(t, elapsed, sandboxOrphanGuard, "and must not block on the straggler's full sleep")
+}
+
+// TestSandboxRunReapsStragglerOnNormalCompletion pins the process-group reap
+// contract for runCommand: a descendant that outlived the leader on a SUCCESSFUL
+// run — the ErrWaitDelay case, where the child exited 0 and only a backgrounded
+// transport child held the capture pipe past WaitDelay — must be SIGKILLed by
+// execgroup.Reap, not left running. Without the reap this site alone among the
+// bounded runners leaked a wedged `af ssh-relay`/ProxyCommand holding open
+// upstream connections after a step that reported success; the survivor is a
+// local process with no observable effect on the current command's result, which
+// is why the leak went undetected.
+//
+// The stub orphans a `sleep 30 &` grandchild that inherits the capture pipe,
+// records its pid, and exits 0 — so CombinedOutput() returns exec.ErrWaitDelay
+// (normalized to nil) while the sleep survives. After runCommand returns the
+// recorded pid must be dead: the reap SIGKILLed the process group the leader
+// bound, reaching the grandchild. A regression that drops the reap leaves the
+// sleep alive for ~30s, re-parented to pid 1 — the leaked transport helper.
+func TestSandboxRunReapsStragglerOnNormalCompletion(t *testing.T) {
+	ssh, pidFile := stubSSHStraggler(t, "printf 'AF-SANDBOX-ANSWER\\n'")
+	p := &sandboxProvisioner{sshCmd: ssh}
+
+	var (
+		out []byte
+		err error
+	)
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		out, err = p.Run(1*time.Second, "true", nil, true)
+	}), "runCommand must return within the guard — a missing WaitDelay would block on the straggler (#1967)")
+
+	require.NoError(t, err,
+		"a bare exec.ErrWaitDelay (child exited 0, output complete) must be normalized to nil")
+	assert.Contains(t, string(out), "AF-SANDBOX-ANSWER",
+		"the orphaned pipe-holder must not lose already-written output")
+
+	// The straggler must be DEAD: execgroup.Reap SIGKILLed the process group the
+	// leader bound, reaching the backgrounded grandchild that held the capture
+	// pipe. Without the reap the sleep would survive ~30s, re-parented to pid 1.
+	data, rerr := os.ReadFile(pidFile)
+	require.NoError(t, rerr, "the stub must have recorded the straggler's pid")
+	pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, perr)
+	require.Positive(t, pid, "the recorded straggler pid must be a real pid")
+	// Poll briefly: the reap sent SIGKILL, and the sleep takes a moment to die. A
+	// 3s window is ample for a SIGKILLed sleep and far below the 30s the
+	// straggler lives without the reap. A zombie counts as killed: under a
+	// container PID 1 that never collects orphans, kill(pid, 0) keeps succeeding
+	// on a sleep the reap did kill (see processGone).
+	assert.True(t, waitProcessGone(pid, 3*time.Second),
+		"the straggler must be reaped (SIGKILLed) on normal completion — a survivor is a leaked transport helper")
 }
 
 // TestSandboxRunGenuineTimeoutWrapsAsDeadlineExceeded pins the path the fix must
@@ -640,7 +692,7 @@ func TestSandboxReapSentinelRoutingDependsOnRunCommandErrorIdentity(t *testing.T
 // of misrouting a completed reap into ErrWorkspaceStateUnknown (the bug, end to
 // end through the real transport).
 func TestSandboxReapLatchesRealErrWaitDelayOrphanEndToEnd(t *testing.T) {
-	ssh := stubSSHStraggler(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'`)
+	ssh, _ := stubSSHStraggler(t, `printf '%s' "${!#}" | grep -o 'af-sandbox-reaped-[0-9a-f]*' | tr 'a-z' 'A-Z'`)
 	p := &sandboxProvisioner{sshCmd: ssh, sessionDir: "/remote/dir", remotePID: "77"}
 	p.runCommandFn = func(_ time.Duration, script string, stdin io.Reader, combined bool) ([]byte, error) {
 		return p.runCommand(1*time.Second, script, stdin, combined)

@@ -97,7 +97,8 @@ func TestProjectsPaneCursorTracksIdentityAcrossRefresh(t *testing.T) {
 	p.Focus()
 
 	// Cursor onto "website" (row 1).
-	require.True(t, p.SelectByRoot("/repos/website"))
+	_, found := p.SelectProject("/repos/website", "")
+	require.True(t, found)
 	sel, _ := p.SelectedProject()
 	require.Equal(t, "/repos/website", sel.Root)
 
@@ -153,12 +154,80 @@ func TestProjectsPaneRegistersZones(t *testing.T) {
 	bgID, _, ok := reg.Resolve(1, 10)
 	require.True(t, ok)
 	assert.Equal(t, zones.ProjectsBG, bgID, "section background zone")
-	// A row zone resolves back to its repo root.
+	// A row zone resolves back to its repo id and root.
 	rowID, _, ok := reg.Resolve(1, 11)
 	require.True(t, ok)
-	root, ok := zones.ProjectRoot(rowID)
-	require.True(t, ok, "row zone id parses to a repo root")
+	repoID, root, ok := zones.ProjectRow(rowID)
+	require.True(t, ok, "row zone id parses to a row identity")
 	assert.Equal(t, "/repos/agent-factory", root)
+	assert.Empty(t, repoID, "the fixture row records no repo id")
+}
+
+// sharedRootRows are two rows at one root with different identities — a stale
+// registration beside the repository now at that path (#7116 review) — after
+// an unrelated first row.
+func sharedRootRows() []SidebarProject {
+	return []SidebarProject{
+		{Name: "agent-factory", Root: "/repos/agent-factory", RepoID: "aaaaaaaaaaaa", Active: true},
+		{Name: "shared", Root: "/repos/shared", RepoID: "bbbbbbbbbbbb", CheckoutID: "chk_stale"},
+		{Name: "shared", Root: "/repos/shared", RepoID: "cccccccccccc"},
+	}
+}
+
+// TestProjectsPaneZonesNameEachRowOfASharedRoot: two rows at one root register
+// distinct zones, each parsing back to its own row, and selecting either by
+// that identity lands on exactly it — never on the first row at the root.
+func TestProjectsPaneZonesNameEachRowOfASharedRoot(t *testing.T) {
+	reg := zones.NewRegistry()
+	reg.Reset()
+	p := newTestProjects(sharedRootRows())
+	p.SetZoneRegistry(reg)
+	p.SetRect(layout.Rect{X: 0, Y: 10, W: 30, H: 8})
+	_ = p.String()
+
+	for i, want := range sharedRootRows() {
+		rowID, _, ok := reg.Resolve(1, 11+i)
+		require.True(t, ok, "row %d registers a zone", i)
+		repoID, root, ok := zones.ProjectRow(rowID)
+		require.True(t, ok, "row %d zone parses", i)
+		assert.Equal(t, want.Root, root)
+		assert.Equal(t, want.RepoID, repoID, "row %d zone names its own repo id", i)
+
+		got, found := p.SelectProject(root, repoID)
+		require.True(t, found)
+		assert.Equal(t, want, got, "selecting row %d by its zone returns that row", i)
+		sel, _ := p.SelectedProject()
+		assert.Equal(t, want, sel, "the cursor rests on row %d", i)
+	}
+	_, found := p.SelectProject("/repos/shared", "dddddddddddd")
+	assert.False(t, found, "a root with an identity no row has selects nothing")
+}
+
+// TestProjectsPaneCursorTracksTheExactRowOfASharedRoot: a refresh keeps the
+// cursor on the row it was on, not the first row at that root — Enter after a
+// background poll must not switch to the sibling.
+func TestProjectsPaneCursorTracksTheExactRowOfASharedRoot(t *testing.T) {
+	rows := sharedRootRows()
+	p := newTestProjects(rows)
+	p.Focus()
+	_, found := p.SelectProject(rows[2].Root, rows[2].RepoID)
+	require.True(t, found)
+
+	// A poll that only changes a count, rows in the same order.
+	refreshed := sharedRootRows()
+	refreshed[1].SessionCount = 2
+	p.SetProjects(refreshed)
+	sel, ok := p.SelectedProject()
+	require.True(t, ok)
+	assert.Equal(t, rows[2].RepoID, sel.RepoID, "the cursor stays on its own row of the shared root")
+
+	// The row's id changing (an invented id replaced by the recorded one) keeps
+	// the cursor at its root rather than clamping to whatever took its index.
+	moved := rows[2]
+	moved.RepoID = "eeeeeeeeeeee"
+	p.SetProjects([]SidebarProject{moved, rows[0]})
+	sel, _ = p.SelectedProject()
+	assert.Equal(t, moved, sel, "a row whose id changed keeps the cursor by root")
 }
 
 // TestProjectsPaneCompactSummary: the degraded 1-line mode renders the project

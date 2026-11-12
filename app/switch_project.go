@@ -395,6 +395,7 @@ func (m *home) projectRows(projects []overlay.Project) []ui.SidebarProject {
 	for _, p := range projects {
 		rows = append(rows, ui.SidebarProject{
 			RepoID:       p.RepoID,
+			CheckoutID:   p.RegistryCheckoutID,
 			Name:         p.Name,
 			Root:         p.Root,
 			SessionCount: p.SessionCount,
@@ -521,12 +522,16 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 }
 
 // switchToProjectRoot resolves a Projects-section row's repo root and switches
-// the rail to it, reusing the #1461 switchProject path. A root that no longer
-// resolves (repo moved/removed) surfaces an error rather than silently doing
-// nothing. Switching to the already-active project is a no-op inside
-// switchProject.
-func (m *home) switchToProjectRoot(root string) (tea.Model, tea.Cmd) {
-	repo, err := m.repoContextForSelection(root, "")
+// the rail to it, reusing the #1461 switchProject path. repoID and checkoutID
+// are the row's recorded identity; in local mode repoContextForSelection
+// refuses to switch when the checkout at root is not the one the row recorded
+// (a stale row whose checkout was replaced, re-initialized in place, or absorbed
+// by an enclosing repo), so the rail cannot be silently re-scoped onto a foreign
+// checkout. A root that no longer resolves (repo moved/removed) surfaces an
+// error rather than silently doing nothing. Switching to the already-active
+// project is a no-op inside switchProject.
+func (m *home) switchToProjectRoot(root, repoID, checkoutID string) (tea.Model, tea.Cmd) {
+	repo, err := m.repoContextForSelection(root, repoID, checkoutID)
 	if err != nil {
 		return m, m.handleError(fmt.Errorf("cannot open project %q: %w", filepath.Base(root), err))
 	}
@@ -592,7 +597,7 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 
 	var target *config.RepoContext
 	if proj, ok := m.projectPickerOverlay.SelectedProject(); ok {
-		repo, err := m.repoContextForSelection(proj.Root, proj.RepoID)
+		repo, err := m.repoContextForSelection(proj.Root, proj.RepoID, proj.RegistryCheckoutID)
 		if err != nil {
 			m.closeProjectPicker()
 			return m, m.handleError(fmt.Errorf("cannot open project %q: %w", proj.Name, err))

@@ -1,7 +1,6 @@
 package git
 
 import (
-	"bytes"
 	"errors"
 	"fmt"
 	"os"
@@ -29,7 +28,7 @@ import (
 //     repo was deleted out from under the record, taking its refs with it. A
 //     BARE repository legitimately carries no .git child (its metadata — HEAD,
 //     objects/, refs/ — lives directly at the root), so a missing .git alone is
-//     not absence: the bare layout is recognized by bareMetadataDirectory (the
+//     not absence: the bare layout is recognized by bareMetadataLayout (the
 //     same structural check resolveRepoMetadataRoot uses on this path) and
 //     falls through to the show-ref probe rather than fabricating absence for
 //     a branch that verifiably exists (#5136: af sessions prune over a
@@ -70,30 +69,39 @@ func LocalBranchExists(repoRoot, branch string) (bool, error) {
 
 // localBranchExists is the probe LocalBranchExists wraps. It returns the
 // existence verdict, the bare-layout flag the probe computed (`bare` is true only
-// when the repoRoot had no .git child and bareMetadataDirectory recognized the
+// when the repoRoot had no .git child and bareMetadataLayout recognized the
 // bare layout, so the probe pinned GIT_DIR to repoRoot), and any error. The
 // `bare` flag is preserved for DeleteLocalBranch so the deletion runs against the
 // same repo the probe verified instead of recomputing the layout — a recompute
 // is fail-open (a bare root that loses HEAD/objects/refs between probe and
 // delete would read as non-bare and let `git -C` discover an enclosing repo).
+//
+// Every filesystem observation here is bounded, not just the git calls: on the
+// stalled mount the git bound exists for, a raw stat of the root, of .git or of
+// the bare layout blocks just as hard, and the reset would never reach the
+// bounded git at all. The stats go through BoundedStat (it follows symlinks as
+// os.Stat does: a root may be a symlink, as macOS /tmp is, and .git may be a
+// symlink or a gitfile) and the loose-ref check through BoundedLstat. A stat
+// that hits its deadline is UNKNOWN and returns ErrBranchDeletionTimedOut, the
+// same class a stalled git gets; only ENOENT is determinate absence.
 func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 	if repoRoot == "" || branch == "" {
 		return false, false, nil
 	}
-	if _, err := os.Stat(repoRoot); err != nil {
+	if _, err := BoundedStat(repoRoot); err != nil {
 		if os.IsNotExist(err) {
 			return false, false, nil
 		}
-		return false, false, fmt.Errorf("stat repo %s: %w", repoRoot, err)
+		return false, false, branchProbeStall(fmt.Errorf("stat repo %s: %w", repoRoot, err))
 	}
 	// .git is a directory in a main worktree and a file in a linked one; Stat
 	// accepts either. A bare repository has NO .git child — its metadata lives
 	// directly at the root (HEAD, objects/, refs/) — so a missing .git is
 	// determinate absence only when the root is not a bare layout; otherwise
-	// fall through to the show-ref probe (bareMetadataDirectory is the same
+	// fall through to the show-ref probe (bareMetadataLayout is the same
 	// structural check resolveRepoMetadataRoot uses on this path).
 	//
-	// bareMetadataDirectory is STRUCTURAL: it proves the layout git clones
+	// bareMetadataLayout is STRUCTURAL: it proves the layout git clones
 	// produce, not that git accepts this directory as a bare repo. A de-git'd
 	// directory that happens to carry HEAD/config/objects/refs would satisfy
 	// it, and `git -C repoRoot` could then walk upward to discover an
@@ -103,11 +111,17 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 	// not accept as bare then errors (a failed probe, never absence) instead of
 	// reaching a parent.
 	gitPath := filepath.Join(repoRoot, ".git")
-	if _, err := os.Stat(gitPath); err != nil {
+	if _, err := BoundedStat(gitPath); err != nil {
 		if !os.IsNotExist(err) {
-			return false, false, fmt.Errorf("stat %s: %w", gitPath, err)
+			return false, false, branchProbeStall(fmt.Errorf("stat %s: %w", gitPath, err))
 		}
-		if !bareMetadataDirectory(repoRoot) {
+		// A stalled layout probe is an error, never "not bare": read as
+		// "not bare", it would make a missing .git determinate absence.
+		isBare, err := bareMetadataLayout(repoRoot, BoundedStat)
+		if err != nil {
+			return false, false, branchProbeStall(fmt.Errorf("inspect bare layout of %s: %w", repoRoot, err))
+		}
+		if !isBare {
 			return false, false, nil
 		}
 		// Bare origin: refs live at the root; fall through to show-ref.
@@ -133,16 +147,19 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		}
 		repoEnv = append(repoEnv, "GIT_DIR="+absRepoRoot)
 	}
-	check := exec.Command("git", "-C", repoRoot, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
-	check.Env = repoEnv
-	var stderr bytes.Buffer
-	check.Stderr = &stderr
-	err = check.Run()
+	// Bounded (#3096-equivalent for the branch-prune path): a stalled filesystem
+	// must surface as a timeout, not an unbounded hang. The show-ref probe is the
+	// existence gate for the destructive `git branch -D` that follows; an
+	// unbounded stall here wedges `af reset` with no completion time and no
+	// message. Output (not CombinedOutput) so the caller can read exit code and
+	// stderr separately: a silent exit 1 is determinate absence, a loud non-zero
+	// exit is a failed probe, and the two must not be collapsed (#3243).
+	_, err = runBoundedBranchGit(repoRoot, repoEnv, false, "show-ref", "--verify", "--quiet", "refs/heads/"+branch)
 	if err == nil {
 		return true, bare, nil
 	}
 	var exitErr *exec.ExitError
-	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && stderr.Len() == 0 {
+	if errors.As(err, &exitErr) && exitErr.ExitCode() == 1 && len(exitErr.Stderr) == 0 {
 		// The loose ref lives under the COMMON git dir, which is <root>/.git only
 		// when that is a directory. When .git is a gitfile — a linked worktree, or
 		// a main worktree made with --separate-git-dir — the refs live wherever it
@@ -150,26 +167,31 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		// Lstat under the gitfile would report ENOTDIR for every branch and
 		// "confirm" any silent exit 1 as absence. Let git resolve the indirection;
 		// a failed resolution is itself a failed probe, never absence.
-		common := exec.Command("git", "-C", repoRoot, "rev-parse", "--git-common-dir")
-		common.Env = repoEnv
-		var commonOut, commonErr bytes.Buffer
-		common.Stdout = &commonOut
-		common.Stderr = &commonErr
-		if err := common.Run(); err != nil {
+		//
+		// Bounded like the show-ref probe above: a stalled rev-parse must not
+		// wedge the reset, and a stalled loose-ref stat must not fabricate
+		// absence. Both surface as errors so the caller retains the record.
+		commonOut, commonErr := runBoundedBranchGit(repoRoot, repoEnv, false, "rev-parse", "--git-common-dir")
+		if commonErr != nil {
+			var commonExitErr *exec.ExitError
+			var detail string
+			if errors.As(commonErr, &commonExitErr) {
+				detail = strings.TrimSpace(string(commonExitErr.Stderr))
+			}
 			return false, bare, fmt.Errorf("git rev-parse --git-common-dir in %s: %w: %s",
-				repoRoot, err, strings.TrimSpace(commonErr.String()))
+				repoRoot, commonErr, detail)
 		}
 		// Strip ONLY the terminating newline: a --separate-git-dir path may
 		// legitimately end in whitespace, and TrimSpace would point the loose-ref
 		// observation at a nonexistent trimmed path, whose ENOENT then fabricates
 		// exactly the confirmed absence this arm exists to prevent.
-		commonDir := strings.TrimSuffix(commonOut.String(), "\n")
+		commonDir := strings.TrimSuffix(string(commonOut), "\n")
 		if !filepath.IsAbs(commonDir) {
 			// Relative output is relative to the -C directory.
 			commonDir = filepath.Join(repoRoot, commonDir)
 		}
 		loose := filepath.Join(commonDir, "refs", "heads", filepath.FromSlash(branch))
-		fi, statErr := os.Lstat(loose)
+		fi, statErr := BoundedLstat(loose)
 		switch {
 		case statErr == nil && fi.IsDir():
 			return false, bare, nil
@@ -178,11 +200,15 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 		case os.IsNotExist(statErr) || errors.Is(statErr, syscall.ENOTDIR):
 			return false, bare, nil
 		default:
-			return false, bare, fmt.Errorf("stat %s: %w", loose, statErr)
+			return false, bare, branchProbeStall(fmt.Errorf("stat %s: %w", loose, statErr))
 		}
 	}
+	var stderrDetail string
+	if exitErr != nil {
+		stderrDetail = strings.TrimSpace(string(exitErr.Stderr))
+	}
 	return false, bare, fmt.Errorf("git show-ref refs/heads/%s in %s: %w: %s",
-		branch, repoRoot, err, strings.TrimSpace(stderr.String()))
+		branch, repoRoot, err, stderrDetail)
 }
 
 // DeleteLocalBranch force-deletes the local branch `branch` in the repo at
@@ -208,7 +234,7 @@ func localBranchExists(repoRoot, branch string) (exists, bare bool, err error) {
 // the reset is deliberately discarding.
 func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 	// Reuse the probe's bare-layout determination rather than recomputing it
-	// here: a second `os.Stat(<repoRoot>/.git)` + `bareMetadataDirectory` pass
+	// here: a second stat of <repoRoot>/.git + bare-layout probe pass
 	// is fail-open if the bare metadata is lost between the probe and the
 	// delete (HEAD/objects/refs renamed or removed), which would drop the
 	// GIT_DIR pin and let `git -C repoRoot branch -D` discover an enclosing
@@ -238,10 +264,15 @@ func DeleteLocalBranch(repoRoot, branch string) (bool, error) {
 		}
 		delEnv = append(delEnv, "GIT_DIR="+absRepoRoot)
 	}
-	del := exec.Command("git", "-C", repoRoot, "branch", "-D", branch)
-	del.Env = delEnv
-	if out, err := del.CombinedOutput(); err != nil {
-		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, string(out))
+	// Bounded (#3096-equivalent for the branch-prune path): the same stalled-
+	// filesystem hazard the worktree-removal half of this flow already bounds.
+	// An unbounded `git branch -D` on a dead mount wedges `af reset` with no
+	// completion time and no message; a bounded one fails clearly and the caller
+	// (commands/reset.go) retains the session record in unverifiedBranches so a
+	// re-run can revisit the branch. CombinedOutput so the error message carries
+	// git's own diagnostic, matching the pre-fix error shape.
+	if out, err := runBoundedBranchGit(repoRoot, delEnv, true, "branch", "-D", branch); err != nil {
+		return false, fmt.Errorf("git branch -D %s in %s: %w: %s", branch, repoRoot, err, strings.TrimSpace(string(out)))
 	}
 	return true, nil
 }

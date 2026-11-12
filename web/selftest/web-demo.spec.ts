@@ -896,8 +896,20 @@ test("task completion catalog failure is visible and preserves the seed", async 
   await page.unrouteAll({ behavior: "wait" });
 });
 
-for (const scoped of [true, false]) {
-  test(scoped ? "account handoff requires a target account across agents" : "ambient handoff survives an unavailable account registry", async ({ page }) => {
+// The handoff dialog asks ListPrograms and ListAccounts at once, and either may
+// answer first. A registry failure must stay on screen whichever reply lands
+// last (#7102), so each failing case pins one order: "fails first" holds the
+// agent list until the registry error has rendered, "fails last" holds the
+// registry until the agent list has been served.
+const HANDOFF_CASES = [
+  { title: "account handoff requires a target account across agents", scoped: true, registry: "ok" },
+  { title: "ambient handoff survives an unavailable account registry · registry fails first", scoped: false, registry: "fails first" },
+  { title: "ambient handoff survives an unavailable account registry · registry fails last", scoped: false, registry: "fails last" },
+  { title: "scoped handoff names an unavailable account registry · registry fails first", scoped: true, registry: "fails first" },
+] as const;
+
+for (const { title, scoped, registry } of HANDOFF_CASES) {
+  test(title, async ({ page }) => {
     // This pin exists only in the mocked Snapshot. Real session.updated events
     // carry the fixture's ambient identity and must not overwrite the test case.
     await page.routeWebSocket((url) => url.pathname === "/v1/events", () => {});
@@ -911,14 +923,28 @@ for (const scoped of [true, false]) {
       }
       await route.fulfill({ response, json: body });
     });
-    await page.route("**/v1/ListPrograms", route => route.fulfill({ json: {
-      data: { programs: [{ name: "claude" }, { name: "codex" }] }, error: null,
-    } }));
-    await page.route("**/v1/ListAccounts", route => scoped
-      ? route.fulfill({ json: { data: { agents: ["claude", "codex"], entries: [
-        { agent: "codex", name: "personal", dir: "", logged_in: true, registration_only: false },
-      ] }, error: null } })
-      : route.fulfill({ status: 500, json: { data: null, error: { message: "registry unreadable" } } }));
+    // The gates apply only to the dialog's own loads, not to page boot.
+    let dialogOpen = false;
+    let releaseCatalog = (): void => {};
+    const catalogReleased = new Promise<void>(resolve => { releaseCatalog = resolve; });
+    let catalogServed = (): void => {};
+    const catalogLanded = new Promise<void>(resolve => { catalogServed = resolve; });
+    await page.route("**/v1/ListPrograms", async route => {
+      const gated = dialogOpen;
+      if (gated && registry === "fails first") await catalogReleased;
+      await route.fulfill({ json: { data: { programs: [{ name: "claude" }, { name: "codex" }] }, error: null } });
+      if (gated) catalogServed();
+    });
+    await page.route("**/v1/ListAccounts", async route => {
+      if (registry === "ok") {
+        await route.fulfill({ json: { data: { agents: ["claude", "codex"], entries: [
+          { agent: "codex", name: "personal", dir: "", logged_in: true, registration_only: false },
+        ] }, error: null } });
+        return;
+      }
+      if (dialogOpen && registry === "fails last") await catalogLanded;
+      await route.fulfill({ status: 500, json: { data: null, error: { message: "registry unreadable" } } });
+    });
     await page.route("**/v1/HandoffSessionV2", route => route.fulfill({ json: { data: {
       ok: true,
       from: "claude",
@@ -928,21 +954,36 @@ for (const scoped of [true, false]) {
     await openAfterInitialResync(page, async () => { await page.goto("/"); });
     await row(page, SESSION_JSON).click();
     await page.getByRole("button", { name: "More session actions", exact: true }).click();
+    dialogOpen = true;
     await page.getByRole("button", { name: "Handoff", exact: true }).click();
     const dialog = page.getByRole("dialog");
+    const error = dialog.locator(".af-modal-error");
     const agent = dialog.getByRole("combobox", { name: "New agent", exact: true });
+    const account = dialog.getByRole("combobox", { name: "New account", exact: true });
+    const confirm = dialog.getByRole("button", { name: "Hand off", exact: true });
+    if (registry === "fails first") {
+      await expect(error).toContainText("Could not load accounts");
+      releaseCatalog();
+    }
+    if (scoped && registry !== "ok") {
+      // No target can carry the scope without a readable registry. The account
+      // picker's placeholder appears only once both loads have settled.
+      await expect(account.locator("option")).toHaveText(["Choose an account"]);
+      await expect(error).toContainText("Could not load accounts. Try again to choose a registered target account.");
+      await expect(confirm).toBeDisabled();
+      await page.unrouteAll({ behavior: "wait" });
+      return;
+    }
     await expect(agent.locator('option[value="codex"]')).toHaveCount(1);
     await agent.selectOption("codex");
-    const account = dialog.getByRole("combobox", { name: "New account", exact: true });
     if (scoped) {
       await expect(account.locator('option[value="personal"]')).toHaveCount(1);
       await expect(account.locator('option[value=""]')).toHaveCount(0);
       await expect(account).toHaveValue("personal");
     } else {
-      await expect(dialog.locator(".af-modal-error")).toContainText("Could not load accounts");
+      await expect(error).toContainText("Could not load accounts");
       await expect(agent.locator('option[value="claude"]')).toHaveCount(0);
     }
-    const confirm = dialog.getByRole("button", { name: "Hand off", exact: true });
     await expect(confirm).toBeEnabled();
     const request = page.waitForRequest(req => req.url().endsWith("/v1/HandoffSessionV2"));
     await confirm.click();

@@ -1,4 +1,4 @@
-import { handoffAccountChoices } from "./handoff_accounts.js";
+import { handoffAccountChoices, handoffLoadError } from "./handoff_accounts.js";
 // The web client's modal overlays (#1592 Phase 5 PR5): the new-session form, the
 // send-prompt box, and the kill/archive confirms — the write surface that
 // completes the v1 loop (list → attach → type → create/kill). They mirror the
@@ -534,6 +534,10 @@ export function handoffModal(
   confirmBtn.disabled = true;
 
   let catalogChoices: ProgramChoice[] | null = null;
+  let catalogFailed = false;
+  // Offerable targets once both loads have settled (refreshAgentChoices).
+  let targetCount: number | null = null;
+  let loadError: string | null = null;
   const renderChoices = (choices: ProgramChoice[]): void => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -574,9 +578,18 @@ export function handoffModal(
     renderChoices(choices);
     if (choices.some(choice => choice.value === previous)) agentSelect.value = previous;
     refreshAccounts();
-    if (accountsLoaded) handle.setError(choices.length === 0
-      ? (callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.")
-      : null);
+    targetCount = choices.length;
+  };
+  // Every load reply ends here. The error line is derived from all the load
+  // facts at once, never written by whichever reply happens to land last: an
+  // agent list arriving after a registry failure used to clear it (#7102).
+  const settle = (): void => {
+    refreshAgentChoices();
+    const next = handoffLoadError({ catalogFailed, accountsFailed, scoped: !!callbacks.currentAccount, targets: targetCount });
+    // An unchanged message is not rewritten, so its role="alert" line is not
+    // announced again for every reply.
+    if (next !== loadError) handle.setError(next);
+    loadError = next;
   };
 
   body.append(
@@ -598,28 +611,26 @@ export function handoffModal(
       // whose name equals currentAgent can still resolve to a different
       // agent and must stay offerable (#4430 review).
       catalogChoices = handoffAgentChoices(catalog, "");
-      refreshAgentChoices();
+      settle();
     })
     .catch(() => {
       // A handoff needs a concrete target and the web cannot read the enum itself —
       // that is the whole reason ListPrograms is served — so an unreachable catalog
       // means the picker can't be offered. Say so rather than submit an empty `to`.
+      catalogFailed = true;
       renderChoices([]);
-      handle.setError("Could not load the agent list. Try again.");
+      settle();
     });
 
   agentSelect.addEventListener("change", refreshAccounts);
   accountSelect.addEventListener("change", syncAccountSelection);
   if (callbacks.loadAccounts) {
     void callbacks.loadAccounts().then((result) => {
-      accounts = result; accountsLoaded = true; refreshAgentChoices();
+      accounts = result; accountsLoaded = true; settle();
     }).catch(() => {
       accountsLoaded = true;
       accountsFailed = true;
-      refreshAgentChoices();
-      handle.setError(callbacks.currentAccount
-        ? "Could not load accounts. Try again to choose a registered target account."
-        : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      settle();
     });
   }
   const card = handle.el.firstElementChild as HTMLElement;

@@ -134,7 +134,8 @@ func TestProjectsSection_CursorSurvivesRefreshReorder(t *testing.T) {
 	})
 	h.relayout() // Project rows determine whether this section is visible.
 	h.focusRegion(layout.RegionProjects)
-	require.True(t, h.projects.SelectByRoot(repoBRoot))
+	_, found := h.projects.SelectProject(repoBRoot, "")
+	require.True(t, found)
 	sel, _ := h.projects.SelectedProject()
 	require.Equal(t, repoBRoot, sel.Root)
 

@@ -225,7 +225,7 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	switch msg.String() {
 	case "enter":
 		if proj, ok := m.projects.SelectedProject(); ok {
-			mod, cmd := m.switchToProjectRoot(proj.Root)
+			mod, cmd := m.switchToProjectRoot(proj.Root, proj.RepoID, proj.CheckoutID)
 			return mod, cmd, true
 		}
 		return m, nil, true

@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "ed62aeebe3fc";
+var CLIENT_VERSION = "a51054aa1a10";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -13549,6 +13549,16 @@ function handoffAccountChoices(accounts, agent, currentAccount = "") {
   const rows = accountChoices(accounts, agent);
   return accounts.entries.filter((entry) => entry.agent === agent && entry.name !== currentAccount && !entry.registration_only).map((entry) => ({ ...rows.find((row) => row.value === entry.name), logged_in: entry.logged_in }));
 }
+function handoffLoadError(state) {
+  if (state.catalogFailed) return "Could not load the agent list. Try again.";
+  if (state.accountsFailed) {
+    return state.scoped ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.";
+  }
+  if (state.targets === 0) {
+    return state.scoped ? "No registered target account is available to hand off to." : "No other agent is available to hand off to.";
+  }
+  return null;
+}
 
 // src/account_selection.ts
 var AccountSelection = class {
@@ -14080,6 +14090,9 @@ function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   agentSelect.setAttribute("aria-label", "New agent");
   confirmBtn.disabled = true;
   let catalogChoices = null;
+  let catalogFailed = false;
+  let targetCount = null;
+  let loadError = null;
   const renderChoices = (choices) => {
     agentSelect.replaceChildren();
     for (const choice of choices) {
@@ -14108,7 +14121,13 @@ function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
     renderChoices(choices);
     if (choices.some((choice) => choice.value === previous)) agentSelect.value = previous;
     refreshAccounts2();
-    if (accountsLoaded) handle.setError(choices.length === 0 ? callbacks.currentAccount ? "No registered target account is available to hand off to." : "No other agent is available to hand off to." : null);
+    targetCount = choices.length;
+  };
+  const settle = () => {
+    refreshAgentChoices();
+    const next = handoffLoadError({ catalogFailed, accountsFailed, scoped: !!callbacks.currentAccount, targets: targetCount });
+    if (next !== loadError) handle.setError(next);
+    loadError = next;
   };
   body.append(
     field("New agent", agentSelect),
@@ -14122,10 +14141,11 @@ function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
   );
   void callbacks.loadPrograms().then((catalog) => {
     catalogChoices = handoffAgentChoices(catalog, "");
-    refreshAgentChoices();
+    settle();
   }).catch(() => {
+    catalogFailed = true;
     renderChoices([]);
-    handle.setError("Could not load the agent list. Try again.");
+    settle();
   });
   agentSelect.addEventListener("change", refreshAccounts2);
   accountSelect.addEventListener("change", syncAccountSelection);
@@ -14133,12 +14153,11 @@ function handoffModal(sessionTitle, currentAgent, recordedProgram, callbacks) {
     void callbacks.loadAccounts().then((result) => {
       accounts = result;
       accountsLoaded = true;
-      refreshAgentChoices();
+      settle();
     }).catch(() => {
       accountsLoaded = true;
       accountsFailed = true;
-      refreshAgentChoices();
-      handle.setError(callbacks.currentAccount ? "Could not load accounts. Try again to choose a registered target account." : "Could not load accounts. You can still hand off to another agent using its ambient identity.");
+      settle();
     });
   }
   const card = handle.el.firstElementChild;
