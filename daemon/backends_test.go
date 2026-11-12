@@ -359,8 +359,9 @@ func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
 // them" — the code contradicted it from day one.
 //
 // After the fix, each globally listed host is emitted with Status=unknown and a
-// reason naming the unreadable in-repo file (mirroring backendOptionFor), and
-// default_host is sourced from the global config rather than hidden.
+// reason naming the source ResolveConfigForRepo actually failed on (carried by
+// cfgErr, so for a broken in-repo file it names that file), and default_host is
+// sourced from the global config rather than hidden.
 func TestListBackends_UnreadableRepoConfigStillReportsGlobalHosts(t *testing.T) {
 	// Global config with one host and a default pointing at it. The fixture is
 	// proven valid at runtime by the control sub-test below.
@@ -382,8 +383,9 @@ func TestListBackends_UnreadableRepoConfigStillReportsGlobalHosts(t *testing.T) 
 		resp := listBackends(t, repo)
 
 		// The host list must NOT disappear: each globally listed host is reported
-		// as unknown with a reason naming the unreadable in-repo file, so a
-		// client renders "cannot check" rows rather than "no hosts configured".
+		// as unknown with a reason naming the source that failed (for this fixture
+		// the in-repo file), so a client renders "cannot check" rows rather than
+		// "no hosts configured".
 		require.Len(t, resp.Hosts, 1, "the one globally configured host must appear as an unknown row, not be omitted")
 		host := resp.Hosts[0]
 		assert.Equal(t, "box1", host.Name)

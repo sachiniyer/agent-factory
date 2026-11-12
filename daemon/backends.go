@@ -152,8 +152,10 @@ type HostOption struct {
 // config can stop ResolveConfigForRepo from returning a resolved cfg, but the
 // host NAMES remain independently readable via config.LoadConfig. So when the
 // repo layer failed we still emit one HostOption per globally listed host with
-// Status=unknown and a reason naming the unreadable in-repo file — mirroring
-// backendOptionFor's contract for the same case. We only omit hosts when the
+// Status=unknown and a reason naming the source ResolveConfigForRepo actually
+// failed on — carried by cfgErr, so it points at the in-repo file, the legacy
+// per-repo config, or a personal project layer as appropriate rather than
+// unconditionally naming the in-repo file. We only omit hosts when the
 // GLOBAL config itself is unreadable or defines none, which is the one
 // situation where an absent Hosts key is an honest "no hosts configured".
 //
@@ -177,7 +179,7 @@ func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, global *config.Config
 				Name:    name,
 				Address: global.Hosts[name].Host,
 				Status:  BackendUnknown,
-				Reason:  fmt.Sprintf("cannot tell whether this repo can place a session on host=%s: its %s could not be read (%v). Fix that file to get a definite answer.", name, config.InRepoConfigFileName(repoRoot), cfgErr),
+				Reason:  fmt.Sprintf("cannot tell whether this repo can place a session on host=%s: its repo configuration could not be read (%v). The error names the source that actually failed (the in-repo file, the legacy per-repo config, or a personal project layer) — fix that source to get a definite answer.", name, cfgErr),
 			})
 		}
 		return out
