@@ -78,8 +78,28 @@ type claudeMCPServerDialog struct {
 
 // claudeMCPServerHoldAnchor is the part of the preamble that survives a narrow
 // pane: at 40 columns Claude Code wraps "New MCP server found in this" from
-// "project: <name>" (measured), so the full preamble is not on one row.
+// "project: <name>" (measured), so the full preamble is not on one row. A row
+// is the wrapped preamble when it is this anchor alone or continues with " in";
+// the older wording's "New MCP server found. Do you trust…" is neither.
 const claudeMCPServerHoldAnchor = "New MCP server found"
+
+func claudeMCPServerWrappedPreamble(label string) bool {
+	return label == claudeMCPServerHoldAnchor || strings.HasPrefix(label, claudeMCPServerHoldAnchor+" in")
+}
+
+// claudeMCPServerOptionStart reports whether label is how a narrow pane paints
+// the first row of option: the label itself, or a word-wrapped prefix of it of
+// at least claudeMCPServerMinOptionPrefix bytes. Wrapping only ever shortens
+// the first row, so a row that is not a prefix of an option is not that option.
+func claudeMCPServerOptionStart(label, option string) bool {
+	return len(label) >= claudeMCPServerMinOptionPrefix && strings.HasPrefix(option, label)
+}
+
+// claudeMCPServerMinOptionPrefix keeps a stray short row ("Use") from passing
+// for an option. "Use this" is the shortest first row a wrap can leave of the
+// two "Use" options, and it is shared by both, so the rows are matched in
+// order and must be distinct (claudeMCPServerUnreadableOf).
+const claudeMCPServerMinOptionPrefix = len("Use this")
 
 // claudeMCPServerDialogOf decides whether the 2.1.322 MCP-server dialog owns
 // the pane. Like claudeLegacyTrustDialogOf it decides from ONE property, because
@@ -150,18 +170,22 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 
 // claudeMCPServerUnreadableOf reports a dialog that is plainly on screen but
 // that the grammar could not read. It holds — never a key — so it is drawn only
-// from what a live dialog shows and a live session cannot:
+// from what THIS dialog shows and a live session cannot:
 //
-//   - a row starting "New MCP server found" (which survives a wrapped
-//     preamble) opens the region;
+//   - its wrapped preamble ("New MCP server found", alone or followed by
+//     " in") opens the region;
+//   - below it, three distinct rows in order begin the three 2.1.322 option
+//     labels (claudeMCPServerOptionStart), so an unrelated picker under a
+//     quoted question is not mistaken for this one;
 //   - the last content in the pane is the "Enter to confirm" footer, with frame
 //     rules counted as content, so a composer's bottom rule below a draft
 //     disqualifies it;
-//   - no frame rule between the two, so no composer is painted inside it;
-//   - exactly one ❯ in the pane, inside the region.
+//   - no frame rule between the preamble and the footer, so no composer is
+//     painted inside it;
+//   - exactly one ❯ in the pane, on one of those option rows.
 //
 // A working session has its composer at the bottom, so it can never meet the
-// second condition, and holding cannot wedge one.
+// footer condition, and holding cannot wedge one.
 func claudeMCPServerUnreadableOf(lines []string, rows []claudeTrustRow, cursorRows []int) bool {
 	last := -1
 	for i := len(lines) - 1; i >= 0; i-- {
@@ -170,7 +194,7 @@ func claudeMCPServerUnreadableOf(lines []string, rows []claudeTrustRow, cursorRo
 			break
 		}
 	}
-	if last < 0 || !claudeTrustIsFooter(rows[last].label) {
+	if last < 0 || !claudeTrustIsFooter(rows[last].label) || len(cursorRows) != 1 {
 		return false
 	}
 	anchor := -1
@@ -178,12 +202,22 @@ func claudeMCPServerUnreadableOf(lines []string, rows []claudeTrustRow, cursorRo
 		if claudeTrustFrameRule(lines[i]) {
 			break
 		}
-		if !rows[i].selected && strings.HasPrefix(rows[i].label, claudeMCPServerHoldAnchor) {
+		if !rows[i].selected && claudeMCPServerWrappedPreamble(rows[i].label) {
 			anchor = i
 			break
 		}
 	}
-	return anchor >= 0 && len(cursorRows) == 1 && cursorRows[0] > anchor && cursorRows[0] < last
+	if anchor < 0 {
+		return false
+	}
+	next, cursorOnOption := 0, false
+	for i := anchor + 1; i < last && next < len(claudeMCPServerOptionLabels); i++ {
+		if claudeMCPServerOptionStart(rows[i].label, claudeMCPServerOptionLabels[next]) {
+			cursorOnOption = cursorOnOption || i == cursorRows[0]
+			next++
+		}
+	}
+	return next == len(claudeMCPServerOptionLabels) && cursorOnOption
 }
 
 // claudeMCPServerGrammarOf walks the rows below the preamble through the
