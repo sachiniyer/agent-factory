@@ -121,3 +121,32 @@ func TestFollowFreezeIsReportedOnceWhenItLingers(t *testing.T) {
 	inst.SetInFlightOpForTest(session.OpNone)
 	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, recorded))
 }
+
+// TestRepairToTheAlreadyRecordedIDBecomesAnOperatorRepair: re-recording the id
+// a capture already holds is the operator saying "this one, not the thread the
+// pane is on now". It must become a standing repair — not a no-op that the
+// next follow check overwrites (#7120 Codex review).
+func TestRepairToTheAlreadyRecordedIDBecomesAnOperatorRepair(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
+	held := &heldOnly{}
+	held.set(fresh)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	// A capture recorded R; the pane has since started F, which the follow
+	// has not yet seen.
+	inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldUserThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	})
+
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
+	require.Equal(t, session.ConversationCaptureOperator, inst.AgentConversation().CaptureKind,
+		"repairing to the recorded id makes it the operator's")
+
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst,
+		inst.SessionCodexCaptureScope(), inst.AgentRuntimeToken(), inst.AgentConversation()))
+	require.Equal(t, heldUserThreadID, inst.AgentConversation().ID,
+		"the repair stands while the runtime holds what it held when the repair was made")
+}

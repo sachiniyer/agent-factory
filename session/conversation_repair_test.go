@@ -162,3 +162,20 @@ func TestUnderDirectoryIdentityMatchesByInode(t *testing.T) {
 	require.NoError(t, os.WriteFile(elsewhere, []byte("{}\n"), 0o644))
 	require.False(t, underDirectoryIdentity(elsewhere, id))
 }
+
+// TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone: the repair's
+// exemption covers only "a newer thread exists", never existence. A repaired
+// rollout deleted or archived out of the store must take the fresh-start path,
+// with the refusal that retires the unusable record (#7120 Codex review).
+func TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone(t *testing.T) {
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := t.TempDir()
+	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-11T14-42-50-"+repairHeldID+".jsonl", workDir)
+
+	repair := staleResumeInstance(t, workDir, operatorRecord(heldTestOwnID))
+	_, ok, reason := prepareExactResumeConversation(repair, repair.Program)
+	require.False(t, ok, "an operator repair whose rollout is gone cannot be resumed")
+	require.Contains(t, reason, "missing")
+	require.True(t, repair.exactResumeRefusal(reason).retire, "the unusable repair is retired once the fresh spawn commits")
+}
