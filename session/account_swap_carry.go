@@ -315,7 +315,8 @@ func (c *conversationCarry) locateCodex() string {
 	default:
 		c.transcript = source
 	}
-	return ""
+	// A plain rollout is not the thread's current one after a backtrack (#7141).
+	return c.codexRevertReason()
 }
 
 // staleCarryReason is what a replacement is told when the recorded
@@ -449,6 +450,10 @@ func (c *conversationCarry) launch(resolvedProgram string) (string, AgentConvers
 // starts a fresh conversation whose brief says why, which is exactly the
 // pre-quarantine behavior for a bookkeeping failure.
 func (c *conversationCarry) copy() error {
+	// The plan ran while the outgoing runtime could still backtrack (#7141).
+	if reason := c.codexRevertReason(); reason != "" {
+		return carryFailure(reason, nil)
+	}
 	outcome, err := carryConversationFileOutcome(c.srcRoot, c.dstRoot, c.transcript, !c.committed)
 	if err != nil {
 		return err
