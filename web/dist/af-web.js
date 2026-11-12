@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "1163fc97d80d";
+var CLIENT_VERSION = "56a0365e1905";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -24370,10 +24370,8 @@ function startStream(tok) {
       publishProposalResync();
     },
     onStatus: (s, retryAt) => {
-      if (s !== "open") {
-        markArchiveDirty();
-        sessionsSettled = false;
-      }
+      if (s !== "open") markArchiveDirty();
+      sessionsSettled = false;
       store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
@@ -24604,7 +24602,7 @@ function requestResync() {
         requestResync();
         return;
       }
-      sessionsSettled = true;
+      sessionsSettled = store.get().live === "open";
       applySessions(optimisticSessions.project(), {
         kind: "snapshot",
         generation: restoreSnapshot,

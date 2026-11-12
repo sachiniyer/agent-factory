@@ -285,8 +285,9 @@ let resyncCompletions: Array<{ resolve: () => void; reject: (error: unknown) => 
 // Whether the session projection has been re-read since the events stream last
 // opened (#7201). Events are not replayed, so between a drop and the resync that
 // the next open triggers, sessions started or ended meanwhile are missing from
-// the store; a count read then is one nobody observed. Cleared whenever the
-// stream leaves "open" or opens again, set when that resync's Snapshot commits.
+// the store; a count read then is one nobody observed. Cleared on every stream
+// status change, before it is published, and set when a resync's Snapshot
+// commits while the stream is open.
 let sessionsSettled = false;
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
@@ -3834,10 +3835,12 @@ function startStream(tok: string): void {
       publishProposalResync();
     },
     onStatus: (s: EventStreamStatus, retryAt?: number) => {
-      if (s !== "open") {
-        markArchiveDirty();
-        sessionsSettled = false;
-      }
+      if (s !== "open") markArchiveDirty();
+      // Cleared on EVERY status, "open" included, and before the store hears of
+      // it: an open is followed by onResync's re-read, and until that commits the
+      // rows are the pre-drop ones — so the watcher this store.set wakes must
+      // already read them as unsettled (#7201 review).
+      sessionsSettled = false;
       store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
@@ -4167,8 +4170,10 @@ function requestResync(): void {
           return;
         }
         // Set before the commit, so a watcher woken by it (the delete-project
-        // confirmation, #7201) already reads the projection as observed.
-        sessionsSettled = true;
+        // confirmation, #7201) already reads the projection as observed — and
+        // only while the stream is open: a re-read that lands during a drop is
+        // stale again by the time the stream reopens.
+        sessionsSettled = store.get().live === "open";
         applySessions(optimisticSessions.project(), {
           kind: "snapshot", generation: restoreSnapshot,
           operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
