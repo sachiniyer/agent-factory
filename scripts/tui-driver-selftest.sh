@@ -590,7 +590,9 @@ _expect_af_select_already_selected() (
 # <count> single-tab sessions (default 3: alpha, beta and alphax, as in the
 # live run; otherwise s1..s<count>). The cursor starts on session index
 # <start>, or on the Sessions header: folded when <start> is -1, open with no
-# session expanded when it is -2. <window> > 0 shows only that many rail rows,
+# session expanded when it is -2. -3 puts it on the first session's own row
+# with that session folded (h on its tab): k cannot climb, and j moves on to
+# the next session. <window> > 0 shows only that many rail rows,
 # scrolled around the cursor the way ui/sidebar_render.go's scrollToSelection
 # does, with its `▲ N more` and `▼ N more` rows. <busy> 1 puts an in-flight row
 # above the first session: no arrow, and not a stop for the cursor.
@@ -621,7 +623,8 @@ _af_select_behind_tui() (
     printf '0\n' > "$dir/captures"
     printf '0\n' > "$dir/offset"
     # _act <through> — the TUI acts on every queued key up to <through>. From
-    # either header k does nothing and j opens the first session.
+    # either header k does nothing and j opens the first session; from the
+    # folded first session (-3) k does nothing and j moves to the second.
     _act() {
         local cursor acted key
         read -r cursor < "$dir/cursor"
@@ -631,7 +634,9 @@ _af_select_behind_tui() (
                 case "$key" in
                     k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)) ;;
                     j)
-                        if [ "$cursor" -lt 0 ]; then
+                        if [ "$cursor" -eq -3 ]; then
+                            cursor=1
+                        elif [ "$cursor" -lt 0 ]; then
                             cursor=0
                         elif [ "$cursor" -lt $((${#sessions[@]} - 1)) ]; then
                             cursor=$((cursor + 1))
@@ -698,7 +703,7 @@ _af_select_behind_tui() (
         [ "$offset" -gt 0 ] && printf ' ▲ %d more              │\n' "$offset"
         for ((idx = offset; idx <= last; idx++)); do printf '%s\n' "${rail[$idx]}"; done
         [ "$last" -lt $((${#rail[@]} - 1)) ] && printf ' ▼ %d more              │\n' $((${#rail[@]} - 1 - last))
-        if [ "$cursor" -ge 0 ]; then
+        if [ "$cursor" -ge 0 ] || [ "$cursor" -eq -3 ]; then
             printf '%s\n' ' n new · D delete session · t new tab · ? help · q quit'
         else
             printf '%s\n' ' n new · ? help · q quit'
@@ -727,9 +732,9 @@ _af_select_behind_tui() (
 #
 # The other cases pin the anchor's review findings (#7198): the first VISIBLE
 # row of a rail scrolled past its top is not the first session; k cannot climb
-# off a section header, folded or not; one burst of 30 k presses cannot climb
-# more than 30 stops; and an in-flight row hidden above the first session
-# leaves `▲ 2 more` at the real top.
+# off a section header, folded or not, or off a folded first session; one
+# burst of 30 k presses cannot climb more than 30 stops; and an in-flight row
+# hidden above the first session leaves `▲ 2 more` at the real top.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_survives_a_lagging_tui() {
     local model start target got case
@@ -738,14 +743,16 @@ _expect_af_select_survives_a_lagging_tui() {
         for target in alpha beta alphax; do cases+=("late later batch|$start $target 3 0 0"); done
     done
     # A rail windowed to the expanded session's two rows; the cursor on the
-    # folded and the open Sessions header; a windowed scan that scrolls; rails
+    # folded and the open Sessions header, and on a folded first session; a
+    # windowed scan that scrolls; rails
     # longer than one burst of 30 k presses can climb; and a windowed rail with
     # an in-flight row above the first session. The long and in-flight rails
     # are slow enough to stub that fewer lag models cover them.
     cases+=("late later batch|2 alpha 3 2 0" "late later batch|2 beta 3 2 0"
         "late later batch|0 alphax 3 2 0" "late later batch|-1 alpha 3 0 0"
         "late later batch|-1 beta 3 0 0" "late later batch|-2 alpha 3 0 0"
-        "late later batch|-2 beta 3 0 0" "late|0 s8 10 4 0" "late|31 s1 32 0 0"
+        "late later batch|-2 beta 3 0 0" "late later batch|-3 beta 3 0 0"
+        "late later batch|-3 alphax 3 0 0" "late|0 s8 10 4 0" "late|31 s1 32 0 0"
         "late|33 s3 34 8 0" "late later|5 s1 8 4 1" "late|5 s3 8 4 1")
     for case in "${cases[@]}"; do
         for model in ${case%%|*}; do

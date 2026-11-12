@@ -402,26 +402,24 @@ _af_rail_cursor() {
         match($1, /▾[[:space:]]+[^[:space:]]+/) { print NR ":" substr($1, RSTART, RLENGTH); exit }'
 }
 
-# _af_rail_top_selected [max_hidden] — succeeds when the rail's FIRST visible
-# session row is the expanded one and the rail hides at most <max_hidden>
-# rows above it (default 1). Reads a screen on stdin. Rows the cursor cannot
-# stop on (an in-flight create or delete) draw no arrow, so the first ▸/▾ row
-# is the first session the cursor can stop on.
+# _af_rail_top_selected — succeeds when the rail's FIRST session row is the
+# expanded one. Reads a screen on stdin. Rows the cursor cannot stop on (an
+# in-flight create or delete) draw no arrow, so the first ▸/▾ row is the first
+# session the cursor can stop on.
 #
 # The rail windows its rows around the cursor and says how many it hides above
 # with a `▲ N more` row (ui/sidebar_render.go). Above the first session there
-# is only the Sessions header (rebuildVisibleItems), plus any in-flight rows,
-# and the window scrolls them away when the cursor climbs to that session. So
-# `▲ 1 more` still shows the first session, and a larger count usually hides a
-# session: the first VISIBLE row then proves nothing about the top (#7197
-# review). _af_anchor_at_first_session handles the in-flight exception.
+# is only the Sessions header (rebuildVisibleItems), which the window scrolls
+# away when the cursor climbs to that session, so `▲ 1 more` still shows the
+# first session. A larger count can hide a session, and the first VISIBLE row
+# then proves nothing about the top (#7197 review).
 _af_rail_top_selected() {
-    awk -F"$_AF_PANE_BORDER_FS" -v max="${1:-1}" '
+    awk -F"$_AF_PANE_BORDER_FS" '
         match($1, /▲[[:space:]]+[0-9]+/) {
             n = substr($1, RSTART, RLENGTH); gsub(/[^0-9]/, "", n); hidden = n + 0
         }
         $1 ~ /(▾|▸)[[:space:]]+[^[:space:]]/ { top = $1; exit }
-        END { exit (hidden <= max + 0 && top ~ /▾/) ? 0 : 1 }'
+        END { exit (hidden <= 1 && top ~ /▾/) ? 0 : 1 }'
 }
 
 # The instance-scoped verb the status-bar menu offers only while a session is
@@ -442,42 +440,31 @@ _af_select_state() {
 }
 
 # _af_anchor_at_first_session — af_select's anchor: press k until the tree
-# cursor rests on the first session, then return. Waits for that on the
-# screen rather than one fixed poll (#7197). k cannot move the cursor off the
-# first session, so any k still queued when this returns is harmless.
+# cursor can climb no further, waiting for that on the screen rather than for
+# one fixed poll (#7197), so that no k is still queued when the scan's first
+# `j` goes out. Sets _AF_ANCHOR_BURSTS to the bursts it sent, which af_select
+# uses to size its scan.
 #
-# k goes out in bursts of 30. A burst only reaches the top when the cursor
-# starts at most 30 tab stops below it, so when what the scan can see
-# (_af_select_state) stops changing short of the top for
-# AF_DRIVER_KEY_SETTLE_POLLS polls, this sends another burst, up to 10. A burst
-# sent while the TUI is merely slow does no harm: the extra k presses are
-# no-ops at the top. Each burst gets AF_DRIVER_TIMEOUT to settle. Sets
-# _AF_ANCHOR_BURSTS to the bursts it sent, which af_select uses to size its
-# scan.
-#
-# k cannot climb off a section header, folded or not (tryMoveVerticalNavStop),
-# so when the menu lacks the instance verb the burst goes after a single j.
-# From the Sessions header, j selects the first session's first tab and
-# unfolds the section if it was folded (selectTabStop), which is where the
-# anchor is going. Anywhere else, or on a stale frame, the burst climbs back
-# over the one stop j moved (#7198 review).
-#
-# The one top this cannot see is the first session with in-flight rows hidden
-# above it, which leaves `▲ 2 more` or more (#7198 review). A burst that moved
-# nothing the scan can see, while the first visible session is the expanded
-# one, means k has nowhere left to go. That is accepted only after four times
-# the usual quiet, so a TUI that has not yet started on the burst is not
-# mistaken for one that finished it.
+# k goes out in bursts of 30. The anchor is done when:
+#   * the first session is the expanded one (_af_rail_top_selected). k cannot
+#     move the cursor off it, so a k still queued then is harmless. This is
+#     the ordinary case.
+#   * a whole burst changed nothing the scan can see (_af_select_state) for
+#     four times AF_DRIVER_KEY_SETTLE_POLLS. The cursor is then where k cannot
+#     climb from: a section header, a folded session or section, or the first
+#     session with in-flight rows hidden above it (#7198 review). The scan's
+#     `j` presses take it from there, as the old fixed-poll scan's did. The
+#     long quiet keeps a TUI that has not yet started on the burst from being
+#     taken for one that finished it.
+# A burst that moved the cursor and then stopped short of the top started more
+# than 30 stops down, so another burst goes out, up to 10. Each burst gets
+# AF_DRIVER_TIMEOUT.
 _af_anchor_at_first_session() {
     local burst k screen state before last still deadline
     _AF_ANCHOR_BURSTS=0
     for ((burst = 0; burst < 10; burst++)); do
         _AF_ANCHOR_BURSTS=$((burst + 1))
-        screen="$(af_capture)"
-        before="$(printf '%s\n' "$screen" | _af_select_state)"
-        if ! printf '%s\n' "$screen" | _af_menu_row | grep -qE -- "$_AF_INSTANCE_VERB_RE"; then
-            af_send j
-        fi
+        before="$(af_capture | _af_select_state)"
         for ((k = 0; k < 30; k++)); do af_send k; done
         deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
         last="$before" still=0
@@ -490,18 +477,18 @@ _af_anchor_at_first_session() {
             else
                 still=0 last="$state"
             fi
-            if [ "$state" = "$before" ] && [ "$still" -ge $((4 * AF_DRIVER_KEY_SETTLE_POLLS)) ] &&
-                printf '%s\n' "$screen" | _af_rail_top_selected 999999; then
-                return 0
+            if [ "$state" = "$before" ]; then
+                [ "$still" -ge $((4 * AF_DRIVER_KEY_SETTLE_POLLS)) ] && return 0
+            elif [ "$still" -ge "$AF_DRIVER_KEY_SETTLE_POLLS" ]; then
+                break
             fi
-            [ "$state" != "$before" ] && [ "$still" -ge "$AF_DRIVER_KEY_SETTLE_POLLS" ] && break
             if [ "$(_af_now)" -ge "$deadline" ]; then
                 break 2
             fi
             sleep "$AF_DRIVER_POLL"
         done
     done
-    _af_log "the k anchor never brought the cursor to the first session"
+    _af_log "the k anchor never settled"
     printf '%s\n' "$screen" >&2
     return 1
 }
