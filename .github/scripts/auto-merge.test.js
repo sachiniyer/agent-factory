@@ -83,7 +83,7 @@ function fakeGithub(files) {
     if (q.includes('pullRequests(')) return { rateLimit, repository: { pullRequests: { pageInfo: { hasNextPage: false }, nodes: [pr({ number: 1 }), pr({ number: 2 })] } } };
     const repository = {};
     for (const n of [1, 2]) if (q.includes(`p${n}:`)) repository[`p${n}`] = q.includes('files(')
-      ? { files: { pageInfo: { hasNextPage: false }, nodes: files[n].map((path) => ({ path })) } }
+      ? { headRefOid: pr().headRefOid, files: { pageInfo: { hasNextPage: false }, nodes: files[n].map((path) => ({ path })) } }
       : { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
     return { rateLimit, repository };
   }, rest: { repos: { getBranch: async () => ({ data: { commit: { sha: HEAD } } }) }, actions: { listWorkflowRuns: async ({ workflow_id }) => ({ data: { workflow_runs: github_runs.byWf[workflow_id] } }), createWorkflowDispatch: async ({ workflow_id }) => { github_runs.dispatched.push(workflow_id); } }, pulls: { merge: async ({ pull_number }) => { merged.push(pull_number); return { data: { sha: 'f'.repeat(40) } }; } },

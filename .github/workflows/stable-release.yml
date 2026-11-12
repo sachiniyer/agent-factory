@@ -31,8 +31,12 @@ concurrency:
   group: stable-release
   cancel-in-progress: false
 
+# Read-only for every job but the one that publishes (#7200). The preflight and
+# the builds run the release commit's code, and contents: write alone can merge
+# a pull request (PUT /pulls/N/merge) or rewrite a published release, so a
+# merged PR's code holding it could land a change held for a hand merge.
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -47,6 +51,7 @@ jobs:
       with:
         ref: ${{ github.sha }}
         fetch-depth: 0
+        persist-credentials: false
 
     # Publishing merges the tagged commit's history into master (#7018), so a
     # dispatch from a branch master does not contain is refused. The publish job
@@ -57,11 +62,14 @@ jobs:
         BUILT: ${{ github.sha }}
       run: .github/scripts/require-on-master.sh "$BUILT"
 
+    # No cache, restored or saved (#7194, #7200): this job runs the release
+    # commit's tests, and a cache Build saved could carry code that has since
+    # been reverted. scripts/release_path_test.go pins it.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
         go-version: '1.25'
-        cache: true
+        cache: false
 
     # Validate against tags that have a PUBLISHED release, not every ref on
     # origin (#5159): a tag stranded without its release must neither count
@@ -125,12 +133,13 @@ jobs:
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
+        persist-credentials: false
 
     # No cache, restored or saved (#7194). Build runs the merged tree's tests
     # with setup-go's cache on this runner image and Go version, so it saves a
     # cache under the key this step would restore, and any job's code can write
     # a missing key: code merged and then reverted would keep reaching release
-    # binaries through it. scripts/release_cache_test.go pins this.
+    # binaries through it. scripts/release_path_test.go pins this.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
@@ -211,6 +220,10 @@ jobs:
     name: Bump and publish
     needs: [validate, build]
     runs-on: ubuntu-24.04
+    # The only job that writes (#7200). It runs no repository code but the
+    # .github/scripts/ release scripts, which change only by hand merge.
+    permissions:
+      contents: write
     steps:
     # Full history is required: release-bump.sh checks the built commit is on
     # origin/master (require-on-master.sh refuses a shallow checkout), and
@@ -228,6 +241,8 @@ jobs:
       uses: actions/download-artifact@v7
       with:
         path: dist
+        # Only the build jobs' archives (#7200).
+        pattern: agent-factory-*
         merge-multiple: true
 
     - name: Generate checksum manifest

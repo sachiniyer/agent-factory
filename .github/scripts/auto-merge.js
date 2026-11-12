@@ -91,15 +91,21 @@ function threadsQuery(numbers) {
 
 const WORKFLOW_SKIP_REASON =
   "workflow or .github/scripts files — needs AUTO_MERGE_TOKEN or a maintainer merge";
+const RENAME_SKIP_REASON =
+  "renames a file, and the file list names only its new path, so a move out of " +
+  ".github/scripts cannot be ruled out — needs AUTO_MERGE_TOKEN or a maintainer merge";
 
 // One aliased query, only for the PRs that survived phase 1 (and only when
-// merging with GITHUB_TOKEN, which cannot touch .github/workflows/).
+// merging with GITHUB_TOKEN, which cannot touch .github/workflows/). It reads
+// the head beside the files, in the same request, so the files can be tied to
+// the head the merge pins (#7200).
 function filesQuery(numbers) {
   const fields = numbers
     .map(
       (n) => `
     p${n}: pullRequest(number: ${Number(n)}) {
-      files(first: 100) { pageInfo { hasNextPage } nodes { path } }
+      headRefOid
+      files(first: 100) { pageInfo { hasNextPage } nodes { path changeType } }
     }`,
     )
     .join("");
@@ -116,15 +122,33 @@ function filesQuery(numbers) {
 // scripts run with write tokens too, so a PR that landed an edit to one would
 // run its code with that token from the next run on. auto-gate.js keeps the
 // same list, and auto-merge-hand-merge.test.js derives from the workflow files
-// what it has to cover. (GraphQL lists a renamed file under its new path only:
-// a rename out of .github/scripts/ removes a file the jobs load, so those jobs
-// fail; it cannot put code in its place.)
+// what it has to cover.
 const HAND_MERGE_PREFIXES = [".github/workflows/", ".github/scripts/"];
 
 // A truncated or missing file list fails closed (treated as touching workflows).
 function touchesWorkflows(files) {
   if (!files || (files.pageInfo && files.pageInfo.hasNextPage)) return true;
   return (files.nodes || []).some((f) => HAND_MERGE_PREFIXES.some((prefix) => f.path.startsWith(prefix)));
+}
+
+// Why a PR needs a hand merge, from its filesQuery node, or null. Each doubt
+// fails closed:
+// - a missing or truncated file list;
+// - files read at a head other than the one the merge pins. The PR list and
+//   the file list are two reads, and a force-push away and back between them
+//   (A, B, A) would merge A on B's files (#7200; the harness reproduced it);
+// - a rename. GraphQL names only the new path, so moving a script out of
+//   .github/scripts/ read as touching nothing there. It landed, and every
+//   later `land` failed to load the file (#7200). Renames are rare: one
+//   commit in 663 over two weeks.
+function handMergeSkipReason(node, pr) {
+  if (!node || touchesWorkflows(node.files)) return WORKFLOW_SKIP_REASON;
+  if (node.headRefOid !== pr.headRefOid) {
+    return `head moved: its files were read at ${node.headRefOid}, and the merge would pin ` +
+      `${pr.headRefOid}; the next run re-checks`;
+  }
+  if (node.files.nodes.some((f) => f.changeType === "RENAMED")) return RENAME_SKIP_REASON;
+  return null;
 }
 
 // BATCH-THEN-VERIFY. Under continuous merging every master Build is cancelled by
@@ -644,17 +668,18 @@ async function selectPrs({ github, core, owner, repo, onlyFix }) {
       noteRateLimit(core, "files", data.rateLimit);
       selected = selected.map((e) => {
         if (e.reason) return e;
-        const node = data.repository[`p${e.pr.number}`];
-        if (!touchesWorkflows(node && node.files)) return e;
+        const reason = handMergeSkipReason(data.repository[`p${e.pr.number}`], e.pr);
+        if (!reason) return e;
         workflowSkipped.push(e.pr.number);
-        return { pr: e.pr, reason: WORKFLOW_SKIP_REASON };
+        return { pr: e.pr, reason };
       });
     }
   }
   if (workflowSkipped.length) {
     await core.summary
       .addHeading("Skipped: PRs that touch workflows or .github/scripts", 3)
-      .addRaw(`${WORKFLOW_SKIP_REASON}\n\n`)
+      .addRaw("Each needs AUTO_MERGE_TOKEN or a maintainer merge, unless its head moved while it " +
+        "was read; the run log gives each one's reason.\n\n")
       .addList(workflowSkipped.map((n) => `#${n}`))
       .write();
   }

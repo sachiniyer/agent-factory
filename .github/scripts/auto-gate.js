@@ -3485,14 +3485,15 @@ function decisionIdentity(prNumber, headSha) {
   };
 }
 
-// How many commits the base branch holds that this PR's head does not.
+// How many commits the base branch holds that this PR's head does not, and the
+// files the comparison lists (the diff a merge of headSha lands, #7200).
 //
 // Read against the base BRANCH rather than a pinned SHA on purpose: the question
 // is where master is NOW, not where it was when anything about this PR was
 // recorded. `behind_by` stays accurate past the 250-commit listing cap the
 // compare endpoint applies to its `commits` array, which is why the count is
 // read rather than derived from that array.
-async function commitsBehindBase({ github, context, baseRefName, headSha }) {
+async function compareHeadWithBase({ github, context, baseRefName, headSha }) {
   const { owner, repo } = context.repo;
   const comparison = await retryRead(
     `could not compare ${baseRefName} with ${headSha}`,
@@ -3521,7 +3522,26 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
         `compare returned behind_by=${JSON.stringify(reported)}`,
     );
   }
-  return behindBy;
+  return { behindBy, files: comparison?.data?.files };
+}
+
+// The compare endpoint lists at most 300 files, and nothing past that.
+const COMPARE_FILE_CAP = 300;
+
+// Why the diff a merge of headSha would land needs a hand merge (#7194), read
+// from that commit's own comparison, or null. The evaluation listed the PR's
+// files at its CURRENT head, and the merge pins headSha: a force-push away and
+// back between the two (A, B, A) would merge A on B's file list (#7200). A list
+// that is missing, or may be truncated, fails closed.
+function pinnedHandMergeRefusal(files, headSha) {
+  if (!Array.isArray(files) || files.length >= COMPARE_FILE_CAP) {
+    return (
+      `the files of ${headSha} could not be read in full, so whether it changes a ` +
+      "workflow or a .github/scripts file is unknown; a maintainer must merge it by hand (#7194)"
+    );
+  }
+  const paths = handMergePaths(files);
+  return paths.length > 0 ? handMergeReason(paths) : null;
 }
 
 // Approve the workflow runs the gate's own update-branch parked (#3807).
@@ -4408,12 +4428,18 @@ async function merge({
   // between the compare below and the merge call a few lines down. Closing the
   // remainder is a server-side job — the ruleset's strict required-status-checks
   // policy — and is a separate decision (#3747).
-  const behindBy = await commitsBehindBase({
+  const { behindBy, files: pinnedFiles } = await compareHeadWithBase({
     github,
     context,
     baseRefName: gate.baseRefName,
     headSha: gate.headSha,
   });
+  // Before updating the branch: a PR that needs a hand merge gets no update
+  // from the gate either.
+  const handMergeRefusal = pinnedHandMergeRefusal(pinnedFiles, gate.headSha);
+  if (handMergeRefusal) {
+    throw new Error(`Refusing to merge PR #${prNumber}; ${handMergeRefusal}`);
+  }
   if (behindBy > 0) {
     const reason =
       `head is behind ${gate.baseRefName} by ${behindBy} ` +

@@ -37,7 +37,7 @@ function world(prs, { later = {}, runs, jobs = {} } = {}) {
       }
     } else {
       for (const p of prs) repository[`p${p.number}`] = q.includes('files(')
-        ? { files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'a.go' }] } }
+        ? { headRefOid: p.headRefOid, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'a.go' }] } }
         : { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
     }
     return { rateLimit, repository };

@@ -17468,7 +17468,7 @@ function fakeGateGithub({
           if (compareError) {
             throw compareError;
           }
-          // Two callers, two questions. `commitsBehindBase` asks about the HEAD;
+          // Two callers, two questions. `compareHeadWithBase` asks about the HEAD;
           // `updateBranchContentHead` asks whether a parent is contained in the
           // base branch, and only the second is answered with behind/identical.
           const target = String(options.basehead || "").split("...")[1] || "";

@@ -26,10 +26,10 @@ concurrency:
 # No code a PR controls runs where the write token or secrets are (#7165). The
 # composition checks (recheck, fixcheck, compose) run merged or PR-controlled
 # code, so each is a job of its own: contents: read, no secrets, no persisted
-# credentials, no Go cache saved (release builds restore default-branch
-# caches). The other jobs run only auto-merge.js, from a fresh checkout of the
-# commit this workflow file came from, and read nothing from a check but its
-# verdict: pass or fail, the sha checked, and the fixes that passed.
+# credentials, and no Go cache restored or saved. The other jobs run only
+# auto-merge.js, from a fresh checkout of the commit this workflow file came
+# from, and read nothing from a check but its verdict: pass or fail, the sha
+# checked, and the fixes that passed.
 #
 #   gate ──┬── recheck ──┬── land ── compose ── report
 #          └── fixcheck ─┘
