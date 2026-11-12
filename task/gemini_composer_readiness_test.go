@@ -38,6 +38,15 @@ func TestIsReadyContent_GeminiComposerNeedsALaterRenderAnchor(t *testing.T) {
 		{"banner and footer hidden: one frame cannot tell", geminiTrustCapture(t, "gemini_0_51_0_composer_banner_and_footer_hidden.ansi"), false},
 		{"a banner above an older composer anchors nothing", strings.TrimRight(footerHidden, "\n") + "\n" + bareFirstPaint, false},
 		{"the folder-trust dialog has replaced the composer", geminiTrustCapture(t, "gemini_0_51_0_folder_trust_below_tips.ansi"), true},
+		// #7169 review, P2-2: on a short pane the relaunch after the trust
+		// answer scrolls the restart notice — and the answered box above it —
+		// away (50x24, measured). The relaunched composer is then proven by its
+		// own later-render anchors, without the notice.
+		{"the relaunched composer once the notice has scrolled away", geminiTrustCapture(t, "gemini_0_51_0_restarted_composer_50_columns_notice_gone.ansi"), true},
+		// #7169 review, P3-2: an unrelated rounded box on screen (an update
+		// notice, say) must not make a first paint ready through the "╰" check.
+		{"a first paint with an unrelated rounded box above it", withRoundedBoxAbove(geminiTrustCapture(t, "gemini_0_51_0_composer_first_paint.ansi")), false},
+		{"a trusted first paint with an unrelated rounded box above it", withRoundedBoxAbove(geminiTrustCapture(t, "gemini_0_51_0_trusted_folder_first_paint.ansi")), false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			if got := isReadyContent(tt.content, tmux.ProgramGemini); got != tt.ready {
@@ -45,4 +54,13 @@ func TestIsReadyContent_GeminiComposerNeedsALaterRenderAnchor(t *testing.T) {
 			}
 		})
 	}
+}
+
+// withRoundedBoxAbove paints an unrelated rounded box — the shape of an
+// update-available notice — at the top of a capture.
+func withRoundedBoxAbove(content string) string {
+	box := " ╭──────────────────────────────────────╮\n" +
+		" │ Gemini CLI update available!         │\n" +
+		" ╰──────────────────────────────────────╯\n"
+	return box + content
 }
