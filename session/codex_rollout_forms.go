@@ -25,12 +25,20 @@ import (
 // rollouts to date it. Neither joins the store walk the staleness check reads
 // its candidates from — exactly as before this change — and the forms are
 // looked up only for the recorded id, and only when no plain rollout names it.
+//
+// The cost of that is accepted (#7134 review F-1): a newer thread the user
+// moved to that Codex has also compressed is no candidate, so a compressed
+// recorded thread is resumed over it where af used to call the record
+// missing and start fresh. Seeing it needs a zstd decoder to read its header.
 
 // codexRolloutFormRE names every file Codex keeps a thread under: group 1 is
 // the thread id, group 2 the revert's rollout id ("" for the thread's own
-// rollout), group 3 ".zst" when compressed. A plain thread rollout is the one
-// codexRolloutFileRE already reads.
-var codexRolloutFormRE = regexp.MustCompile(`(?i)^rollout-.+-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})` +
+// rollout), group 3 ".zst" when compressed. The timestamp is the exact
+// YYYY-MM-DDThh-mm-ss Codex's resolver requires (rollout_file_name.rs), so a
+// name `codex resume` would skip is never taken for the thread (#7134 review
+// F-4).
+var codexRolloutFormRE = regexp.MustCompile(`(?i)^rollout-[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}-[0-9]{2}-[0-9]{2}-` +
+	`([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})` +
 	`(?:_([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}))?\.jsonl(\.zst)?$`)
 
 const (
@@ -38,34 +46,37 @@ const (
 	codexRolloutDuplicatedReason = "af could not confirm the recorded conversation is still the newest one in this worktree: two rollouts record it"
 )
 
-// codexRolloutOtherForms returns the files beneath codexHome's store that
-// hold thread id in a form other than its plain rollout: compressed, a
-// thread/revert rollout, or a compressed revert rollout. Like the plain walk
-// it fails closed: a directory it cannot traverse is an error, never an
+// codexRolloutForms returns the regular files beneath codexHome's store that
+// hold thread id: plain, its plain rollouts, and other, the rest —
+// compressed, a thread/revert rollout, or a compressed revert rollout. A
+// symlink is skipped, as Codex's own filename scan skips it. Like the plain
+// walk it fails closed: a directory it cannot traverse is an error, never an
 // empty-looking store (#5471).
-func codexRolloutOtherForms(codexHome, id string) ([]string, error) {
+func codexRolloutForms(codexHome, id string) (plain, other []string, err error) {
 	if strings.TrimSpace(codexHome) == "" {
-		return nil, nil
+		return nil, nil, nil
 	}
-	var out []string
-	err := filepath.WalkDir(filepath.Join(codexHome, "sessions"), func(path string, d os.DirEntry, err error) error {
+	err = filepath.WalkDir(filepath.Join(codexHome, "sessions"), func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
 		}
-		if d == nil || d.IsDir() {
+		if d == nil || !d.Type().IsRegular() {
 			return nil
 		}
 		m := codexRolloutFormRE.FindStringSubmatch(d.Name())
-		if len(m) != 4 || !strings.EqualFold(m[1], id) || (m[2] == "" && m[3] == "") {
-			return nil
+		switch {
+		case len(m) != 4 || !strings.EqualFold(m[1], id):
+		case m[2] == "" && m[3] == "":
+			plain = append(plain, path)
+		default:
+			other = append(other, path)
 		}
-		out = append(out, path)
 		return nil
 	})
-	return out, err
+	return plain, other, err
 }
 
 // codexRolloutCompressed reports whether path names a compressed rollout.
@@ -75,16 +86,26 @@ func codexRolloutCompressed(path string) bool {
 }
 
 // recordedCodexRolloutInAnotherForm is the restore guard's answer when no
-// plain rollout names the recorded thread: the file that stands for it among
+// plain rollout named the recorded thread: the file that stands for it among
 // the forms Codex still resumes — the newest, since a revert rollout is where
 // the thread continued and a compressed rollout keeps its mtime — or why there
 // is none. Two compressed copies of the thread's own rollout are the
 // duplicated case the plain walk refuses; any number of revert rollouts are
 // one thread.
+//
+// A plain rollout found now is the thread itself: Codex writes a compressed
+// rollout back out as plain when it is resumed, and publishes the plain file
+// before it removes the compressed one, so a thread caught between the two
+// walks is found, not missing (#7134 review F-3).
 func recordedCodexRolloutInAnotherForm(codexHome, id string) (string, resumeDecline) {
-	forms, err := codexRolloutOtherForms(codexHome, id)
-	if err != nil {
+	plain, forms, err := codexRolloutForms(codexHome, id)
+	switch {
+	case err != nil:
 		return "", declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses")
+	case len(plain) == 1:
+		return plain[0], resumeDecline{}
+	case len(plain) > 1:
+		return "", declineResume(codexRolloutDuplicatedReason)
 	}
 	var newest string
 	var newestAt time.Time
@@ -113,10 +134,13 @@ func recordedCodexRolloutInAnotherForm(codexHome, id string) (string, resumeDecl
 // codexCarryOtherFormsReason is why a carry does not take a thread Codex holds
 // only compressed or in revert rollouts: it is not missing, but the carry
 // copies one plain rollout, and these forms need their siblings or a decoder.
-// "" when the source holds none (or cannot be walked, which the carry's own
-// enumeration reports).
+// "" when the source holds none.
 func codexCarryOtherFormsReason(srcHome, id string) string {
-	if forms, err := codexRolloutOtherForms(srcHome, id); err == nil && len(forms) > 0 {
+	_, forms, err := codexRolloutForms(srcHome, id)
+	switch {
+	case err != nil:
+		return "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
+	case len(forms) > 0:
 		return "its rollout is stored compressed or as a thread/revert rollout, which af does not carry yet"
 	}
 	return ""

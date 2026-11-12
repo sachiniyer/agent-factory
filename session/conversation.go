@@ -485,9 +485,35 @@ func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversat
 	if err != nil || strings.TrimSpace(home) == "" {
 		return declineResumeUnverified("af cannot resolve the Codex home this session writes to")
 	}
+	// Codex moves a thread between forms as it works: it compresses a rollout
+	// left idle and writes a compressed one back out when it is resumed, each
+	// time publishing the new file before removing the old. The file af chose
+	// can therefore be gone when it is dated although the thread never was,
+	// so a vanished rollout gets one more look before it reads as missing
+	// (#7134 review F-3).
+	decline, gone := i.judgeRecordedCodexRollout(home, program, workDir, conv)
+	if gone {
+		decline, gone = i.judgeRecordedCodexRollout(home, program, workDir, conv)
+	}
+	if gone {
+		return declineResume(codexRolloutMissingReason)
+	}
+	return decline
+}
+
+// recordedCodexRolloutLocatedHook is a test seam fired with the file that
+// stands for the recorded thread once judgeRecordedCodexRollout has found it
+// and before it dates it, so a test can move the thread between forms at that
+// instant. Nil in production.
+var recordedCodexRolloutLocatedHook func(path string)
+
+// judgeRecordedCodexRollout is one look at the store for
+// staleRecordedCodexDecline: the decline, or gone when the file found for the
+// recorded thread vanished before it could be dated.
+func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv AgentConversationData) (resumeDecline, bool) {
 	files, err := codexRolloutFiles(home)
 	if err != nil {
-		return declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses")
+		return declineResumeUnverified("af could not verify the recorded conversation against the Codex home this session uses"), false
 	}
 	var recordedPath string
 	for file := range files {
@@ -495,7 +521,7 @@ func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversat
 			if recordedPath != "" {
 				// Two rollouts claim the same id: "current" cannot be proven,
 				// now or later.
-				return declineResume(codexRolloutDuplicatedReason)
+				return declineResume(codexRolloutDuplicatedReason), false
 			}
 			recordedPath = file
 		}
@@ -505,29 +531,32 @@ func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversat
 		// thread/revert rollout (#7130).
 		path, decline := recordedCodexRolloutInAnotherForm(home, conv.ID)
 		if decline.reason != "" {
-			return decline
+			return decline, false
 		}
 		recordedPath = path
+	}
+	if hook := recordedCodexRolloutLocatedHook; hook != nil {
+		hook(recordedPath)
 	}
 	launchDir := LaunchCaptureWorkingDir(program, workDir)
 	var repair operatorRepairWindow
 	if conv.CaptureKind == ConversationCaptureOperator {
 		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
-			return decline
+			return decline, false
 		}
 		repair = operatorRepairWindowOf(conv, time.Now())
 	}
 	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutStale:
-		return declineResume(staleCarryReason)
+		return declineResume(staleCarryReason), false
 	case codexRolloutUncorrelated:
 		// A newer rollout whose header af cannot classify yet — Codex may be
 		// mid-write — is a look that failed, not evidence about the id.
-		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree")
+		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree"), false
 	case codexRolloutRecordedGone:
-		return declineResume(codexRolloutMissingReason)
+		return resumeDecline{}, true
 	}
-	return resumeDecline{}
+	return resumeDecline{}, false
 }
 
 // codexStalenessVerdict is the outcome of comparing a recorded rollout against
