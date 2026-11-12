@@ -704,10 +704,28 @@ func (c *ConfigPane) String() string {
 	if c.explaining {
 		return c.renderExplainView()
 	}
+	out, _ := c.renderRows()
+	return out
+}
+
+// renderRows draws the list view and reports, for each line it draws, the
+// index of the selectable row shown there or -1 — cut from the same window the
+// text is, so a click zone names the row the frame drew on its line (#7175).
+func (c *ConfigPane) renderRows() (string, []int) {
 	header := c.renderHeader()
 	footer := c.renderStatus() + c.renderHints()
-	rowLines, selStart, selEnd := c.renderRowLines()
-	return c.renderWindowed(header, footer, rowLines, selStart, selEnd)
+	rowLines, rowOf, selStart, selEnd := c.renderRowLinesTagged()
+	out, first, top, shown := c.renderWindowedAt(header, footer, rowLines, selStart, selEnd)
+	rows := make([]int, strings.Count(out, "\n")+1)
+	for i := range rows {
+		rows[i] = -1
+	}
+	for k := 0; k < shown; k++ {
+		if r := rowOf[top+k]; c.rows[r].isSelectable() && first+k < len(rows) {
+			rows[first+k] = r
+		}
+	}
+	return out, rows
 }
 
 // renderWindowed renders a header, a scrollable window of lines with overflow
@@ -718,6 +736,14 @@ func (c *ConfigPane) String() string {
 // whether the cues happen to show is circular — and it would make the list
 // grow and shrink by a line as the user scrolls past either end.
 func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selStart, selEnd int) string {
+	out, _, _, _ := c.renderWindowedAt(header, footer, lines, selStart, selEnd)
+	return out
+}
+
+// renderWindowedAt is renderWindowed, also reporting where the window landed:
+// the drawn line the first visible list line occupies, that line's index in
+// lines, and how many list lines are shown.
+func (c *ConfigPane) renderWindowedAt(header, footer string, lines []string, selStart, selEnd int) (out string, first, top, shown int) {
 	budget := c.windowBudget(header, footer)
 	visible, above, below := c.window(lines, selStart, selEnd, budget)
 
@@ -727,6 +753,7 @@ func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selSt
 		b.WriteString(configHintStyle.Render(fmt.Sprintf("  ↑ %d more", above)))
 		b.WriteString("\n")
 	}
+	first = strings.Count(b.String(), "\n")
 	b.WriteString(strings.Join(visible, "\n"))
 	if len(visible) > 0 {
 		b.WriteString("\n")
@@ -736,7 +763,7 @@ func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selSt
 		b.WriteString("\n")
 	}
 	b.WriteString(footer)
-	return b.String()
+	return b.String(), first, above, len(visible)
 }
 
 // renderHeader renders the title and where the rows came from — a path locally,
@@ -758,6 +785,13 @@ func (c *ConfigPane) renderHeader() string {
 }
 
 func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
+	lines, _, selStart, selEnd = c.renderRowLinesTagged()
+	return lines, selStart, selEnd
+}
+
+// renderRowLinesTagged is renderRowLines, also reporting the row each line
+// belongs to (rowOf[line] indexes c.rows).
+func (c *ConfigPane) renderRowLinesTagged() (lines []string, rowOf []int, selStart, selEnd int) {
 	selStart, selEnd = -1, -1
 	for i, row := range c.rows {
 		start := len(lines)
@@ -866,8 +900,11 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 				selEnd = len(lines)
 			}
 		}
+		for len(rowOf) < len(lines) {
+			rowOf = append(rowOf, i)
+		}
 	}
-	return lines, selStart, selEnd
+	return lines, rowOf, selStart, selEnd
 }
 
 // editSeedValue is the value the edit field opens on and compares against: the

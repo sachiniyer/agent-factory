@@ -314,11 +314,11 @@ func (m *home) View() string {
 		}
 		return placeOverlay(m.promptOverlay.Render(), mainView)
 	} else if m.state == stateHooks {
-		return placeOverlay(m.renderHooksOverlay(), mainView)
+		return m.placePaneOverlay(m.renderHooksOverlay(), mainView, m.hooksPane)
 	} else if m.state == stateTasks {
-		return placeOverlay(m.renderTasksOverlay(), mainView)
+		return m.placePaneOverlay(m.renderTasksOverlay(), mainView, m.automations.TaskPane())
 	} else if m.state == stateConfigEditor {
-		return placeOverlay(m.renderConfigOverlay(), mainView)
+		return m.placePaneOverlay(m.renderConfigOverlay(), mainView, m.configPane)
 	}
 
 	return mainView
