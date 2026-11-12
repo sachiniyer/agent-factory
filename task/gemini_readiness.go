@@ -54,7 +54,7 @@ func (j *readinessJudge) ready(content string) bool {
 		return false
 	}
 	composer, _ := tmux.GeminiComposerFrame(content)
-	if !composer || tmux.GeminiFolderTrustDialogOnScreen(content) {
+	if !composer || tmux.GeminiFolderTrustDialogOnScreen(content) || tmux.GeminiFolderTrustFingerprinted(content) {
 		j.bareSince = time.Time{}
 		return false
 	}
@@ -85,16 +85,28 @@ func isGeminiReadyContent(content string) bool {
 	// what the weak glyph check below used to read as ready, while the
 	// dialog was still painting or while Gemini was relaunching after the
 	// answer, and the prompt went into the dialog or the exiting process.
-	if tmux.GeminiFolderTrustDialogOnScreen(content) {
+	//
+	// Nor is anything else on a pane that carries the folder-trust flow's
+	// fingerprints — its question, its "Trust parent folder" label or its
+	// restart notice, found even when a narrow pane wraps or truncates
+	// them. Such a pane is ready only as the dialog the strict parser reads
+	// or as the relaunched composer above (#7169 review).
+	if tmux.GeminiFolderTrustDialogOnScreen(content) || tmux.GeminiFolderTrustFingerprinted(content) {
 		return false
 	}
-	// Gemini 0.51's composer, proven past its first render by an anchor in
-	// the same frame (#7168): the dialog decision is already on screen, so
-	// a composer here is not one the dialog is about to replace. A bare
-	// composer — no anchor — is not ready from one frame; waitForReadyOn's
-	// readinessJudge decides it across polls.
-	if composer, anchored := tmux.GeminiComposerFrame(content); composer && anchored {
-		return true
+	// Gemini 0.51's composer decides any frame it is on, by the composer rules
+	// alone (#7168):
+	//   - proven past its first render by an anchor in the same frame, it is
+	//     ready: the dialog decision is already on screen, so this is not a
+	//     composer the dialog is about to replace. That includes the composer
+	//     a relaunch paints after the trust answer once the restart notice has
+	//     scrolled away on a short pane (#7169 review, P2-2);
+	//   - bare — no anchor — it is not ready from one frame, whatever else is
+	//     on screen; waitForReadyOn's readinessJudge decides it across polls.
+	//     An unrelated rounded box (an update notice) must not make a first
+	//     paint ready through the "╰" check below (#7169 review, P3-2).
+	if composer, anchored := tmux.GeminiComposerFrame(content); composer {
+		return anchored
 	}
 	// Best-guess (#714) for everything else. The "╰" box-drawing corner of
 	// gemini-cli's frame is a weak readiness signal.

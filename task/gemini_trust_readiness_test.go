@@ -56,3 +56,35 @@ func TestIsReadyContent_GeminiFolderTrustIsAStopAndItsBoxIsNotReady(t *testing.T
 		})
 	}
 }
+
+// #7169's independent review, P1 and P2-1: the dialog's own box is never the
+// reason a launch proceeds. Below 44 columns the strict parser cannot read the
+// dialog, and during a narrow relaunch it cannot read the wrapped notice; the
+// old "╰" check called both ready. A pane carrying the flow's fingerprints is
+// ready only as the dialog itself or as the relaunched composer.
+func TestIsReadyContent_GeminiFolderTrustFingerprintsAreNeverReadyThroughTheBox(t *testing.T) {
+	for _, width := range []string{"36", "40", "43"} {
+		for _, cursor := range []string{"folder", "parent", "dont"} {
+			fixture := "gemini_0_51_0_folder_trust_" + width + "_columns_cursor_on_" + cursor + ".ansi"
+			t.Run(fixture, func(t *testing.T) {
+				if isReadyContent(geminiTrustCapture(t, fixture), tmux.ProgramGemini) {
+					t.Fatal("a narrow folder-trust dialog af cannot read is not a ready pane")
+				}
+			})
+		}
+	}
+	for _, tt := range []struct {
+		name    string
+		content string
+		ready   bool
+	}{
+		{"the relaunch with the notice wrapped at 50 columns", geminiTrustCapture(t, "gemini_0_51_0_trust_restarting_50_columns.ansi"), false},
+		{"the relaunched composer below the wrapped notice", geminiTrustCapture(t, "gemini_0_51_0_restarted_composer_50_columns.ansi"), true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isReadyContent(tt.content, tmux.ProgramGemini); got != tt.ready {
+				t.Fatalf("isReadyContent(gemini) = %t, want %t", got, tt.ready)
+			}
+		})
+	}
+}
