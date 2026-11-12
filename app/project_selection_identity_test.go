@@ -98,7 +98,7 @@ func moveProjectsCursorTo(t *testing.T, h *home, match func(ui.SidebarProject) b
 // TestProjectsSectionEnterRefusesReplacementCheckoutAtSameRoot is Codex P1
 // 4544477245 on #7116: a registered checkout replaced by another repository
 // initialized at the same root must be refused, not switched to. The row comes
-// from the real registry through buildProjectList, so this also pins that the
+// from the real registry through buildProjectListWithSnapshotStatus, so this also pins that the
 // row's checkout identity survives into the Projects section.
 func TestProjectsSectionEnterRefusesReplacementCheckoutAtSameRoot(t *testing.T) {
 	h := projectSelectionHome(t)

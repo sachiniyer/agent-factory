@@ -235,10 +235,12 @@ func (m *home) handleProjectsFocus(msg tea.KeyMsg) (tea.Model, tea.Cmd, bool) {
 	}
 	// Delete the cursor's project (#1735): archive restorable worktree sessions,
 	// tear down in-place ones, and remove its project registration. Routed explicitly
-	// like `/` so the captive-section no-op below does not swallow it.
+	// like `/` so the captive-section no-op below does not swallow it. The row's
+	// counts are only as good as the latest snapshot the section applied, so a
+	// failed one refuses the verb (#7180).
 	if key.Matches(msg, keys.GlobalKeyBindings[keys.KeyDeleteProject]) {
 		if proj, ok := m.projects.SelectedProject(); ok {
-			mod, cmd := m.handleDeleteProject(proj)
+			mod, cmd := m.handleDeleteProject(proj, m.sidebarSnapshotDegraded)
 			return mod, cmd, true
 		}
 		return m, nil, true

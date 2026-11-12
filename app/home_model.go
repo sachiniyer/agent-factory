@@ -363,8 +363,16 @@ type home struct {
 	// picker's overlay.Project shape. The section's own SidebarProject rows
 	// drop the registry fields, so a session-snapshot failure could not merge
 	// fresh registry truth into what is on screen without this copy (#4888
-	// review). Set only through setSidebarProjects.
+	// review). Set only through setSidebarProjects and applySidebarProjects.
 	sidebarProjects []overlay.Project
+	// sidebarSnapshotDegraded records that the latest snapshot fetch behind
+	// sidebarProjects FAILED, so its counts were not observed by it — they are
+	// the last-known tallies the error path kept, or zeros where it had none.
+	// The section's `D` reads it before a delete confirmation may state those
+	// counts as consent copy (#7180). Written beside sidebarProjects by the
+	// same two funnels, so rows and their provenance never come from
+	// different fetches.
+	sidebarSnapshotDegraded bool
 	// statusBar merges the menu hints and the error line
 	statusBar *ui.StatusBar
 	// hooksPane is the post-worktree hooks editor, hosted as an overlay

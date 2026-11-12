@@ -91,12 +91,32 @@ func deleteProjectResultMessage(name string, archived, killed int) string {
 	}
 }
 
+// deleteProjectUncheckedError is the refusal every delete-project entry point
+// gives when the snapshot behind its counts failed (#1973/#1985, #7180). The
+// confirmation states those counts as the terms of a destructive action, so it
+// never opens on one nobody observed — least of all the total == 0 copy, "It
+// has no live sessions", while the daemon archives and tears down whatever is
+// actually running. retry is the entry point's own way to a fresh snapshot.
+func deleteProjectUncheckedError(name, retry string) error {
+	return fmt.Errorf("cannot delete project %q: could not check live sessions (the session snapshot fetch failed); %s", name, retry)
+}
+
 // handleDeleteProject opens the delete-project confirmation for the cursor's
 // project in the Projects section (#1735). The copy states the real split — what
 // is archived and restorable, and what is torn down and is not (#1973) — because
 // this message is the entire basis on which the user consents to a destructive
 // action. On confirm it dispatches the async daemon archive-then-remove.
-func (m *home) handleDeleteProject(proj ui.SidebarProject) (tea.Model, tea.Cmd) {
+//
+// countsUnobserved reports that the latest snapshot behind proj's counts
+// FAILED: they are zeros nobody counted, or last-known tallies an outage has
+// since made stale. Every caller states it — the parameter exists so an entry
+// point cannot skip the gate the way the Projects section once did (#7180) —
+// and the dialog fails closed on it rather than offering consent on them.
+func (m *home) handleDeleteProject(proj ui.SidebarProject, countsUnobserved bool) (tea.Model, tea.Cmd) {
+	if countsUnobserved {
+		return m, m.handleNotice(deleteProjectUncheckedError(proj.Name,
+			"try again once the daemon answers"))
+	}
 	// The one view-completeness guard (#6986): the confirmation's counts come
 	// from the latest snapshot, and while that snapshot reports a skipped repo
 	// any count on screen may be hiding sessions the daemon will still archive

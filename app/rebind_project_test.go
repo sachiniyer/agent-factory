@@ -185,7 +185,7 @@ func activeRebindHome(t *testing.T) (*home, string) {
 	rec, err := config.RegisterProject(initTestGitRepo(t))
 	require.NoError(t, err)
 	// The row names the record's real root; it is the active project by its
-	// aggregation id, the way buildProjectList marks the scoped row.
+	// aggregation id, the way buildProjectListWithSnapshotStatus marks the scoped row.
 	h.projectPickerOverlay = overlay.NewProjectPickerOverlay([]overlay.Project{
 		{Name: "active", Root: rec.Root, RepoID: h.repoID, RegistryID: rec.ID, RegistryRoot: rec.Root, RegistryCheckoutID: rec.CheckoutID, MissingPath: true},
 	}, h.repoRoot)

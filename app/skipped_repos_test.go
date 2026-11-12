@@ -219,7 +219,7 @@ func TestDeleteProjectRefusedWhileRepoSkipped(t *testing.T) {
 
 	_, _ = h.handleDeleteProject(ui.SidebarProject{
 		RepoID: h.repoID, Name: "acme", Root: "/tmp/acme", SessionCount: 1,
-	})
+	}, false)
 	require.Nil(t, h.confirmationOverlay,
 		"the delete confirmation must never open while the list is incomplete")
 	full, _ := h.errBox.RetainedNotice()
@@ -243,7 +243,7 @@ func TestDeleteProjectRefusedForUnskippedRepo(t *testing.T) {
 
 	_, _ = h.handleDeleteProject(ui.SidebarProject{
 		RepoID: "healthy-repo", Name: "healthy", Root: "/tmp/healthy",
-	})
+	}, false)
 	require.Nil(t, h.confirmationOverlay)
 	full, _ := h.errBox.RetainedNotice()
 	assert.Contains(t, full, "corrupted-repo")

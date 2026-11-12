@@ -27,7 +27,7 @@ import (
 // registering a new repo on the fly. The picker navigates like the instances
 // rail (up/k, down/j over the full list); there is no search.
 func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
-	projects, registryDegraded, snapshotDegraded := m.buildProjectListWithSnapshotStatus()
+	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatus()
 	m.projectPickerOverlay = overlay.NewProjectPickerOverlay(projects, m.repoRoot)
 	m.projectPickerOverlay.SetDegraded(registryDegraded)
 	// Surface the snapshot-fetch failure as a first-class degraded state so
@@ -35,7 +35,7 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	// project's live count, and the consent copy reads those counts, so the
 	// dialog could otherwise claim "no live sessions" for a project whose
 	// live sessions the daemon will still archive and tear down (#1973/#1985).
-	m.projectPickerOverlay.SetSnapshotDegraded(snapshotDegraded)
+	m.projectPickerOverlay.SetSnapshotDegraded(snapshotErr != nil)
 	if isRemoteTarget() {
 		// The picker's registry rows come from the LOCAL config.ListProjects
 		// and its path input resolves on THIS filesystem, but a rebind would
@@ -52,19 +52,6 @@ func (m *home) showProjectPickerOverlay() (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-// buildProjectList derives the picker's project list with zero config: it fetches
-// the daemon's cross-repo session snapshot and groups it by repo root for the
-// session counts, then unions in the root_agents opt-ins and the active project.
-// Used by the on-demand ctrl+p picker, which fetches synchronously; the always-
-// visible Projects section rebuilds from buildProjectListFrom on the background
-// poll instead (no second on-loop RPC). The returned degraded flag covers only
-// the registry read; the picker's own snapshot-fetch failure is reported by
-// buildProjectListWithSnapshotStatus.
-func (m *home) buildProjectList() ([]overlay.Project, bool) {
-	projects, registryDegraded, _ := m.buildProjectListWithSnapshotStatus()
-	return projects, registryDegraded
-}
-
 // projectSnapshotFetchTimeout bounds the cross-repo snapshot read the project
 // picker and the Projects section make synchronously on the event loop. It is
 // deliberately short — the loop is parked for up to this long — where
@@ -72,33 +59,38 @@ func (m *home) buildProjectList() ([]overlay.Project, bool) {
 // ten seconds. A var so tests can shrink it.
 var projectSnapshotFetchTimeout = 3 * time.Second
 
-// buildProjectListWithSnapshotStatus is buildProjectList, also reporting whether
-// the picker's cross-repo session snapshot fetch FAILED. The failure is a
-// first-class degraded state, distinct from the registry read's: the union
-// still renders (registry, active root, root_agents), but every project's
+// buildProjectListWithSnapshotStatus derives the project list with zero
+// config: it fetches the daemon's cross-repo session snapshot and groups it by
+// repo root for the session counts, then unions in the root_agents opt-ins and
+// the active project. Used where the list is wanted NOW — the ctrl+p picker
+// and the Projects section's synchronous refresh (launch, project switch,
+// add/delete/rebind completion); the background poll rebuilds the section from
+// buildProjectListFrom on data it already fetched off-loop.
+//
+// The second return covers only the registry read. The third is the snapshot
+// fetch's error, a first-class degraded state of its own: the union still
+// renders (registry, active root, root_agents), but every project's
 // SessionCount/InPlaceCount in it is silently zeroed, so a confirm dialog built
 // from those counts can claim "It has no live sessions" for a project whose
-// live sessions the daemon will still archive and tear down (#1973/#1985). The
-// picker's destructive D path gates on this third return; callers that are not
-// destructive consumers of the counts (refreshSidebarProjects) drop it via
-// buildProjectList.
-func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bool) {
+// live sessions the daemon will still archive and tear down (#1973/#1985).
+// Every caller feeds a destructive `D` — the picker's and the section's — so
+// there is deliberately no variant that drops it (#7180: the one that did was
+// how the section lost the gate).
+func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, error) {
 	// This runs on the bubbletea event loop (Ctrl+P, launch, project switch,
 	// add/delete/rebind completion), and the local daemon transport bounds only
 	// the dial, so a daemon that accepts the connection and never answers would
 	// park Update — key input, repaint and the Ctrl+C hard exit with it — until
 	// the process is killed (#6045). The deadline rides the transport read, and
-	// its expiry lands in the same snapshotDegraded path as any failed fetch.
+	// its expiry lands in the same degraded-snapshot path as any failed fetch.
 	ctx, cancel := context.WithTimeout(context.Background(), projectSnapshotFetchTimeout)
 	defer cancel()
 	data, skipped, err := allReposSnapshotFetcher(ctx)
-	snapshotDegraded := false
 	if err != nil {
 		if ctx.Err() != nil {
 			err = fmt.Errorf("no answer from the daemon within %s: %w", projectSnapshotFetchTimeout, err)
 		}
-		log.WarningLog.Printf("project picker: failed to list cross-repo sessions: %v", err)
-		snapshotDegraded = true
+		log.WarningLog.Printf("project list: failed to list cross-repo sessions: %v", err)
 		data = nil
 	} else {
 		// The all-repos reply's skipped set is the completeness witness for the
@@ -108,15 +100,16 @@ func (m *home) buildProjectListWithSnapshotStatus() ([]overlay.Project, bool, bo
 		m.applySkippedRepos(skipped)
 	}
 	projects, registryDegraded := m.buildProjectListFrom(data)
-	return projects, registryDegraded, snapshotDegraded
+	return projects, registryDegraded, err
 }
 
 // buildProjectListFrom derives the project list from an already-fetched cross-repo
 // session snapshot: it groups the sessions by repo root for the counts, then
 // unions in the root_agents opt-ins and the active project so repos with no live
 // session still appear. Names are the repo basename; ties break by root. Split
-// out from buildProjectList so the background poll can reuse the all-repos data
-// it already fetched off-loop rather than issuing a second daemon RPC.
+// out from buildProjectListWithSnapshotStatus so the background poll can reuse
+// the all-repos data it already fetched off-loop rather than issuing a second
+// daemon RPC.
 // The second return reports a DEGRADED registry read (#3298): the union can
 // still render from the other sources, but presenting it as complete would be
 // a failed read shown as an empty result — every registered sessionless
@@ -447,18 +440,32 @@ func registryBackedRows(rows []overlay.Project) []overlay.Project {
 }
 
 // refreshSidebarProjects rebuilds the bottom Projects section from the same
-// cross-repo discovery the ctrl+p picker uses (buildProjectList). Pushed at
-// launch and on project switch (paths that fetch synchronously).
+// cross-repo discovery the ctrl+p picker uses
+// (buildProjectListWithSnapshotStatus). Pushed at launch and on project switch
+// (paths that fetch synchronously).
+//
+// A failed snapshot fetch takes the poll's error path (#7180): the list it
+// built carries zeroed counts and none of the session-derived rows, and
+// installing it wholesale would wipe the counts the section last observed and
+// replace them with zeros nobody counted. The merge keeps the last-known rows,
+// and the section is marked degraded so `D` does not consent on them either.
 func (m *home) refreshSidebarProjects() {
-	projects, registryDegraded := m.buildProjectList()
+	projects, registryDegraded, snapshotErr := m.buildProjectListWithSnapshotStatus()
+	if snapshotErr != nil {
+		m.applySidebarProjects(projects, registryDegraded, snapshotErr)
+		return
+	}
 	m.setSidebarProjects(projects, registryDegraded)
 }
 
-// setSidebarProjects is the funnel every Projects-section update flows
-// through: it records the applied row set in sidebarProjects (the merge
-// source a session-snapshot failure reads) before rendering it.
+// setSidebarProjects installs a row set whose session snapshot LANDED: it
+// records the applied rows in sidebarProjects (the merge source a later
+// session-snapshot failure reads) and clears the degraded-snapshot mark before
+// rendering them. A row set built after a failed fetch goes through
+// applySidebarProjects instead, which merges and sets the mark.
 func (m *home) setSidebarProjects(projects []overlay.Project, registryDegraded bool) {
 	m.sidebarProjects = projects
+	m.sidebarSnapshotDegraded = false
 	m.projects.SetProjects(m.projectRows(projects))
 	m.projects.SetDegraded(registryDegraded)
 	m.syncProjectsHint()
@@ -514,6 +521,10 @@ func (m *home) applySidebarProjects(projects []overlay.Project, registryDegraded
 	}
 	changed := m.projects.SetProjects(m.projectRows(projects))
 	m.sidebarProjects = projects
+	// The rows just installed are last-known, not observed, whenever the
+	// session half failed — whatever the merge kept, a count on them is no
+	// longer one this fetch saw (#7180).
+	m.sidebarSnapshotDegraded = fetchErr != nil
 	if m.projects.SetDegraded(registryDegraded) {
 		changed = true
 	}
@@ -552,10 +563,11 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 	if msg.String() == "D" {
 		if proj, ok := m.projectPickerOverlay.HighlightedProject(); ok {
 			// The picker's session counts come from the cross-repo snapshot
-			// buildProjectList fetches on Ctrl+P; a fetch failure zeros every
-			// project's count, and deleteProjectConfirmMessage's "total == 0"
-			// consent branch is "It has no live sessions — it just leaves the
-			// projects list" — a destructive action consented to on copy the
+			// buildProjectListWithSnapshotStatus fetches on Ctrl+P; a fetch
+			// failure zeros every project's count, and
+			// deleteProjectConfirmMessage's "total == 0" consent branch is "It
+			// has no live sessions — it just leaves the projects list" — a
+			// destructive action consented to on copy the
 			// data behind it never confirmed while the daemon still archives
 			// and tears down whatever live sessions actually exist (#1973/#1985).
 			// Fail closed like switchProject does on its own snapshot fetch:
@@ -563,12 +575,10 @@ func (m *home) handleStateSwitchProject(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// re-opens it (a fresh Ctrl+P triggers a fresh fetch) to retry once
 			// the daemon is healthy.
 			if m.projectPickerOverlay.SnapshotDegraded() {
-				return m, m.handleNotice(fmt.Errorf(
-					"cannot delete project %q: live-session counts are unavailable (the cross-repo snapshot fetch failed); "+
-						"close the picker (Esc) and reopen it (Ctrl+P) to retry",
-					proj.Name))
+				return m, m.handleNotice(deleteProjectUncheckedError(proj.Name,
+					"close the picker (Esc) and reopen it (Ctrl+P) to retry"))
 			}
-			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount})
+			model, cmd := m.handleDeleteProject(ui.SidebarProject{RepoID: proj.RepoID, Name: proj.Name, Root: proj.Root, SessionCount: proj.SessionCount, InPlaceCount: proj.InPlaceCount}, m.projectPickerOverlay.SnapshotDegraded())
 			if m.state == stateConfirm && m.confirmationOverlay != nil {
 				m.confirmationOverlay.OnCancel = func() { m.state = stateSwitchProject }
 			}
