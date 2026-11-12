@@ -59,26 +59,33 @@ var oneListedHost = map[string]config.HostConfig{"box1": {Host: "box1.example", 
 func TestListedAccountHostIsTheRuntimesOwnResolution(t *testing.T) {
 	f := newListedFixture(t, oneListedHost)
 
-	name, ok := listedAccountHost(BackendSSH, f.repo, "box1")
+	name, ok, err := listedAccountHost(BackendSSH, f.repo, "box1")
+	require.NoError(t, err)
 	assert.True(t, ok)
 	assert.Equal(t, "box1", name)
 
-	_, ok = listedAccountHost(BackendSSH, f.repo, "nope")
+	_, ok, err = listedAccountHost(BackendSSH, f.repo, "nope")
+	require.NoError(t, err)
 	assert.False(t, ok, "a host that is not in the list is not licensed")
-	_, ok = listedAccountHost(BackendSandbox, f.repo, "box1")
+	_, ok, err = listedAccountHost(BackendSandbox, f.repo, "box1")
+	require.NoError(t, err)
 	assert.False(t, ok, "a free-form sandbox command cannot be listed")
-	_, ok = listedAccountHost(BackendHook, f.repo, "box1")
+	_, ok, err = listedAccountHost(BackendHook, f.repo, "box1")
+	require.NoError(t, err)
 	assert.False(t, ok)
-	_, ok = listedAccountHost(BackendLocal, f.repo, "box1")
+	_, ok, err = listedAccountHost(BackendLocal, f.repo, "box1")
+	require.NoError(t, err)
 	assert.False(t, ok)
 
 	// A target the REPOSITORY chose — its own [ssh] section — is not licensed, even
 	// with a perfectly good host list in the operator's config.
 	writeInRepoConfig(t, f.repo, map[string]any{"backend": "ssh", "ssh": map[string]any{"host": "repo-chosen.example"}})
-	_, ok = listedAccountHost(BackendSSH, f.repo, "")
+	_, ok, err = listedAccountHost(BackendSSH, f.repo, "")
+	require.NoError(t, err)
 	assert.False(t, ok, "nothing repo-chosen can pick the destination of credentials")
 	// ...while an explicit pick of a listed host still is.
-	_, ok = listedAccountHost(BackendSSH, f.repo, "box1")
+	_, ok, err = listedAccountHost(BackendSSH, f.repo, "box1")
+	require.NoError(t, err)
 	assert.True(t, ok)
 }
 
