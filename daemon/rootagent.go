@@ -586,6 +586,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		resolution: resolution,
 		identity:   identity,
 		inst:       inst,
+		layers:     sweepLayers,
 	})
 }
 

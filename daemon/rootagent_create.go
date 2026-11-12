@@ -63,6 +63,9 @@ type rootCreateJob struct {
 	// ticket is this create's claim to commit, minted by launchRootCreate as
 	// its in-flight mark and withdrawn by a delete (rootagent_carry.go).
 	ticket *rootCreateTicket
+	// layers is the snapshot the sweep admitted this create against, so the
+	// launch re-asks the tombstone question exactly as the admission did.
+	layers *rootAgentSnapshot
 }
 
 // launchRootCreate starts one create for this repo, or does nothing because one
@@ -105,6 +108,19 @@ func (m *Manager) launchRootCreate(job rootCreateJob) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
+		return
+	}
+	// The admission's tombstone check, again, in the section that mints the
+	// ticket (PR #7190 review R1). The sweep checked in an earlier m.mu
+	// section, and a delete that suppressed in between found no ticket to
+	// withdraw. Now suppression either precedes this check or finds the ticket.
+	// Same layers as the admission, so an occupant admitted on a released
+	// tombstone is admitted here too; the next tick takes the suppressed path.
+	layers := job.layers
+	if layers == nil {
+		layers = m.rootAgentLayers.Load()
+	}
+	if m.rootDeletionTombstoneApplies(layers, job.repo.ID) {
 		return
 	}
 	job.ticket = &rootCreateTicket{repoID: job.repo.ID, workspace: job.repo.WorkspacePath()}
