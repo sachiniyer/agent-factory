@@ -349,12 +349,15 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if perr != nil {
 		return markRecoverRebuilt(rebuilt, fmt.Errorf("recover: session %q: %w", i.Title, perr))
 	}
-	refusedID := refusal.ID
+	refusedID := ""
+	if refusal.retire {
+		refusedID = refusal.ID
+	}
 	setLaunchProgram(ts, program, proof)
 	// A refused id must be reported as refused, with its reason, by the
 	// re-spawn that starts fresh because of it — not as "nothing recorded"
 	// (#7101). The zero value clears an earlier attempt's refusal.
-	ts.SetExactResumeRefusal(refusal)
+	ts.SetExactResumeRefusal(refusal.ExactResumeRefusal)
 	// A re-spawn resumes this session's own recorded conversation or starts fresh
 	// (#4797): never the latest one on a shared account home.
 	ts.SetExactResumeOnly(true)
@@ -686,33 +689,60 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 // the launch environment's project config cannot be read (#7077).
 func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	trustBase, resume bool, prepared *accountSwapLaunchPlan,
-) (string, sessionenv.AccountLaunchProof, tmux.ExactResumeRefusal, error) {
+) (string, sessionenv.AccountLaunchProof, resumeRefusal, error) {
 	if prepared != nil {
 		if prepared.conversation.HasID() {
 			i.SetAgentConversation(prepared.conversation)
 		}
-		return prepared.program, prepared.proof, tmux.ExactResumeRefusal{}, nil
+		return prepared.program, prepared.proof, resumeRefusal{}, nil
 	}
 	program := resolvedProgram
-	var refusal tmux.ExactResumeRefusal
+	var refusal resumeRefusal
 	if resume {
 		rewritten, ok, reason := prepareExactResumeConversation(i, program)
 		if ok {
 			program = rewritten
-		} else if reason != "" {
-			// The recorded conversation was refused as stale or unprovable, so
-			// this launch starts fresh. The caller retires the dead id when the
-			// spawn commits (#6769 review): leaving it recorded would suppress
-			// every later capture arm and make each restore start fresh again.
-			refusal = tmux.ExactResumeRefusal{Session: i.Title, ID: i.resumableConversation().ID, Reason: reason}
+		} else {
+			refusal = i.exactResumeRefusal(reason)
 		}
 	} else {
 		program = prepareLaunchConversation(i, program)
 	}
 	env, err := launchEnvFor(i, i.GetWorktreePath())
 	if err != nil {
-		return "", sessionenv.AccountLaunchProof{}, tmux.ExactResumeRefusal{}, err
+		return "", sessionenv.AccountLaunchProof{}, resumeRefusal{}, err
 	}
 	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 	return program, accountLaunchProof(declarationBase, program, trustBase, nil, ""), refusal, nil
+}
+
+// resumeRefusal is why a re-spawn did not resume the session's recorded
+// conversation, for the fresh-start log line (#7101), and whether the refused
+// id is retired once the fresh spawn commits.
+type resumeRefusal struct {
+	tmux.ExactResumeRefusal
+	// retire is set for a refusal of the id itself — stale, missing, or
+	// unprovable — which the caller retires when the spawn commits (#6769
+	// review): leaving it recorded would suppress every later capture arm and
+	// make each restore start fresh again. An id the launch command merely
+	// cannot express (a recorded conversation of another agent) is reported
+	// but kept: it may be exactly what a later handoff back resumes.
+	retire bool
+}
+
+// exactResumeRefusal turns prepareExactResumeConversation's refusal reason
+// into the record a re-spawn logs. reason is empty for the cases with nothing
+// to say — nothing recorded — and for an id the command cannot express, which
+// still gets a reason so the log never claims nothing was recorded (#7120
+// review F6).
+func (i *Instance) exactResumeRefusal(reason string) resumeRefusal {
+	conv := i.resumableConversation()
+	if !conv.HasID() {
+		return resumeRefusal{}
+	}
+	refusal := resumeRefusal{ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: reason}, retire: reason != ""}
+	if reason == "" {
+		refusal.Reason = fmt.Sprintf("its launch command cannot resume a recorded %s conversation", conv.Agent)
+	}
+	return refusal
 }

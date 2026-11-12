@@ -59,7 +59,9 @@ func TestSetConversationRecordsAProvenRollout(t *testing.T) {
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
 	conv := inst.AgentConversation()
 	assert.Equal(t, setConversationDaemonID, conv.ID)
-	assert.Equal(t, "codex_rollout", conv.CaptureKind)
+	// An operator's repair keeps its own kind so it outlives a restart as a
+	// repair: the follow and the staleness guards treat it differently (#7120).
+	assert.Equal(t, session.ConversationCaptureOperator, conv.CaptureKind)
 	assert.Equal(t, setConversationDaemonID, persistedConversationID(t, repoID))
 
 	// Same id again is a no-op success, not a rewrite.

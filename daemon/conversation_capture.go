@@ -184,7 +184,15 @@ func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, t
 	if inst == nil || inst.UserKilled() || inst.IsArchived() {
 		return false
 	}
-	if inst.AgentRuntimeToken() != token || snap.CodexBaselineFailed() {
+	if inst.AgentRuntimeToken() != token {
+		return false
+	}
+	// A failed before-image only ends an UNRECORDED row's loop — its diff is
+	// what needs the baseline. A recorded row only follows, which asks the
+	// runtime and never reads the baseline, so a store that cannot be walked
+	// must neither end its loop nor send the poll to re-walk it every tick
+	// (#7120 review).
+	if snap.CodexBaselineFailed() && !inst.AgentConversation().HasID() {
 		return false
 	}
 	switch inst.GetLiveness() {
@@ -270,7 +278,15 @@ func (m *Manager) ArmConversationCaptures() {
 		// every decline leaves it for the next tick — so the fallback
 		// baseline is built here unconditionally and the park wins whenever
 		// admission releases it (#6946).
-		snap := inst.SessionCodexCaptureBaseline()
+		// A recorded row only needs the follow check, which walks no store:
+		// bind its scope without a before-image, so the poll goroutine never
+		// walks the store for it (#7120 review).
+		var snap session.ConversationCaptureSnapshot
+		if inst.AgentConversation().HasID() {
+			snap = inst.SessionCodexCaptureScope()
+		} else {
+			snap = inst.SessionCodexCaptureBaseline()
+		}
 		repoID, _ := splitDaemonInstanceKey(key)
 		m.mu.Lock()
 		m.armDeferredConversationCaptureLocked(repoID, key, inst, snap, token)
@@ -343,9 +359,15 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// judgement, so a snapshot armed before the pane exists still attributes
 	// to the runtime the pane later holds.
 	snap = inst.BindConversationCaptureRuntime(snap)
-	conv, err := session.CaptureAgentConversation(agent, snap, timeout)
-	if err != nil {
-		return err
+	var conv session.AgentConversationData
+	var err error
+	if !snap.BaselineFree() {
+		// A scope-only snapshot (a loop armed to follow a row that has since
+		// lost its record) has no before-image for the diff to compare with;
+		// only the held query below may answer from it.
+		if conv, err = session.CaptureAgentConversation(agent, snap, timeout); err != nil {
+			return err
+		}
 	}
 	if !conv.HasID() {
 		// Nothing NEW appeared — which a late baseline guarantees when the

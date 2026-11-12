@@ -93,3 +93,31 @@ func TestRecordedRowFollowLoopNeedsNoStoreWalk(t *testing.T) {
 	require.True(t, armed, "a baseline the follow never uses must not end its loop")
 	require.Equal(t, token, still)
 }
+
+// TestFollowFreezeIsReportedOnceWhenItLingers is the review's F7: a freeze is
+// silent while a swap or handoff settles, but one that outlasts a few checks —
+// an obligation nobody is clearing — is reported, once.
+func TestFollowFreezeIsReportedOnceWhenItLingers(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	writeHeldTestRollout(t, codexHome, heldMissionThreadID, inst.GetWorktreePath())
+	recorded := session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldMissionThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	}
+	inst.SetAgentConversation(recorded)
+	snap := inst.SessionCodexCaptureScope()
+	token := inst.AgentRuntimeToken()
+	inst.SetInFlightOpForTest(session.OpRespawning)
+
+	reported := 0
+	for check := 0; check < 6; check++ {
+		if err := manager.followAgentConversation(repoID, key, inst, snap, token, recorded); err != nil {
+			reported++
+			require.ErrorContains(t, err, "not following recorded conversation")
+		}
+	}
+	require.Equal(t, 1, reported, "a lingering freeze is reported exactly once")
+
+	inst.SetInFlightOpForTest(session.OpNone)
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, recorded))
+}

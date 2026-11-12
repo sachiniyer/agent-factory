@@ -65,7 +65,9 @@ func (s ConversationCaptureSnapshot) heldCodexConversation() (AgentConversationD
 // judgeHeldCodexRollouts picks the conversation out of a runtime's held path
 // set and names the file it came from.
 func (s ConversationCaptureSnapshot) judgeHeldCodexRollouts(held map[string]struct{}) (AgentConversationData, string, error) {
-	root := pathutil.ResolveForCompare(filepath.Join(s.codexHome, "sessions")) + string(filepath.Separator)
+	sessions := filepath.Join(s.codexHome, "sessions")
+	root := pathutil.ResolveForCompare(sessions) + string(filepath.Separator)
+	rootID, rootIDOK := fileIdentityOf(sessions)
 	var matches []string
 	unclassified := 0
 	for path := range held {
@@ -74,8 +76,12 @@ func (s ConversationCaptureSnapshot) judgeHeldCodexRollouts(held map[string]stru
 		if codexConversationIDFromPath(path) == "" {
 			continue
 		}
-		if !strings.HasPrefix(pathutil.ResolveForCompare(path), root) {
-			// Another store — never this snapshot's conversation.
+		if !strings.HasPrefix(pathutil.ResolveForCompare(path), root) &&
+			!(rootIDOK && underDirectoryIdentity(path, rootID)) {
+			// Another store — never this snapshot's conversation. Spelling is
+			// checked first, then (device, inode) ancestry, as #6847's
+			// attribution does: on darwin a CODEX_HOME whose case differs
+			// from the on-disk name is the same store (#7120 review F7).
 			continue
 		}
 		cwd, subagent, ok := classifyHeldCodexRollout(path)
@@ -194,16 +200,61 @@ func (i *Instance) conversationFollowFrozenLocked() string {
 	return ""
 }
 
-// FollowAgentConversationForRuntime re-points the recorded conversation from
-// prev to conv — the thread the live runtime now holds open — and reports
-// whether it changed. It refuses unless token still names the live
-// generation, conv belongs to its provider, the record is still exactly prev
-// (an operator's set-conversation or a sibling write since the caller read it
-// is newer than this judgement), and nothing has frozen the record.
-func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, prev, conv AgentConversationData) bool {
+// conversationRepairStamp records, for one operator-set record, what the
+// runtime held when the repair was made ("" = it held nothing).
+type conversationRepairStamp struct {
+	recordID string
+	heldID   string
+}
+
+// StampConversationRepair records what the runtime held (heldID, "" for
+// nothing) when the operator's repair to recordID was committed. The follow
+// check leaves that record standing until the runtime holds something else
+// (#7120 review). A repair that could not be stamped — the held query failed —
+// is stamped by the first follow observation instead.
+func (i *Instance) StampConversationRepair(recordID, heldID string) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	if !conv.HasID() || !i.runtimeTokenCurrentLocked(token, conv) {
+	i.repairStamp = conversationRepairStamp{recordID: strings.ToLower(recordID), heldID: strings.ToLower(heldID)}
+}
+
+// ConversationFollowPermitted is FollowAgentConversationForRuntime's decision
+// without the write: whether held — the runtime's current answer, empty when
+// it holds no thread — may replace prev. The daemon asks it before taking the
+// op-lock, so a check that will not move the record never contends for it.
+func (i *Instance) ConversationFollowPermitted(token AgentRuntimeToken, prev, held AgentConversationData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	return i.followPermittedLocked(token, prev, held)
+}
+
+// FollowAgentConversationForRuntime re-points the recorded conversation from
+// prev to held — the thread the live runtime now holds open — and reports
+// whether it changed. It refuses unless token still names the live
+// generation, held belongs to its provider, the record is still exactly prev
+// (an operator's set-conversation or a sibling write since the caller read it
+// is newer than this judgement), and nothing has frozen the record.
+//
+// An operator's repair (ConversationCaptureOperator) stands until the
+// runtime's answer changes from what it held when the repair was made, and
+// only the thread it then holds may replace it (#7120 review): the repair's
+// whole point is that the pane may be on a thread the operator did not want
+// the next resume to use.
+func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, prev, held AgentConversationData) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if !i.followPermittedLocked(token, prev, held) {
+		return false
+	}
+	if !i.setAgentConversationLocked(held) {
+		return false
+	}
+	i.repairStamp = conversationRepairStamp{}
+	return true
+}
+
+func (i *Instance) followPermittedLocked(token AgentRuntimeToken, prev, held AgentConversationData) bool {
+	if !i.runtimeTokenLiveLocked(token) || (held.HasID() && held.Agent != token.agent) {
 		return false
 	}
 	if i.conversationFollowFrozenLocked() != "" {
@@ -212,5 +263,67 @@ func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, pr
 	if len(i.Tabs) == 0 || i.Tabs[0].Conversation != prev {
 		return false
 	}
-	return i.setAgentConversationLocked(conv)
+	if prev.CaptureKind == ConversationCaptureOperator {
+		stamp := i.repairStamp
+		if stamp.recordID != strings.ToLower(prev.ID) {
+			// This repair was never stamped — the daemon restarted since,
+			// or the held query failed when it was made — so this
+			// observation is its baseline, and it moves nothing.
+			i.repairStamp = conversationRepairStamp{recordID: strings.ToLower(prev.ID), heldID: strings.ToLower(held.ID)}
+			return false
+		}
+		if !held.HasID() || strings.EqualFold(held.ID, stamp.heldID) {
+			return false
+		}
+	}
+	return held.HasID() && !strings.EqualFold(held.ID, prev.ID)
+}
+
+// conversationFollowFreezeLogAfter is how many consecutive follow checks a
+// freeze may skip before the skip is logged (#7120 review F7). A swap or
+// handoff ordinarily settles within one or two checks; a freeze that outlasts
+// this is a pending obligation nobody is clearing, and the follow is idle.
+const conversationFollowFreezeLogAfter = 3
+
+// conversationFollowFreeze counts consecutive follow checks skipped for one
+// freeze reason. Guarded by mu.
+type conversationFollowFreeze struct {
+	reason string
+	checks int
+}
+
+// NoteConversationFollowFrozen records that a follow check was skipped for
+// reason and reports whether this skip is the one to log: the
+// conversationFollowFreezeLogAfter-th in a row for the same reason, once.
+func (i *Instance) NoteConversationFollowFrozen(reason string) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.followFreeze.reason != reason {
+		i.followFreeze = conversationFollowFreeze{reason: reason}
+	}
+	i.followFreeze.checks++
+	return i.followFreeze.checks == conversationFollowFreezeLogAfter
+}
+
+// ClearConversationFollowFrozen resets the skip count once a check runs.
+func (i *Instance) ClearConversationFollowFrozen() {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.followFreeze = conversationFollowFreeze{}
+}
+
+// underDirectoryIdentity reports whether one of path's ancestor directories is
+// the directory with identity dir — containment by (device, inode), immune to
+// how either side is spelled.
+func underDirectoryIdentity(path string, dir fileID) bool {
+	for d := filepath.Dir(path); ; {
+		if id, ok := fileIdentityOf(d); ok && id == dir {
+			return true
+		}
+		parent := filepath.Dir(d)
+		if parent == d {
+			return false
+		}
+		d = parent
+	}
 }

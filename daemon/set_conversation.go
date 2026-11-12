@@ -107,6 +107,7 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	if !instance.SetAgentConversation(conv) {
 		return nil
 	}
+	stampConversationRepair(instance, conv)
 
 	// opLock→repoStartLock is the ordering SetAttention and the kill/archive
 	// paths use: the write persists the whole row, so it must not checkpoint a

@@ -158,6 +158,7 @@ func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 		"a stale recorded rollout must surface as the id the commit retires")
 	require.Equal(t, inst.Title, refusal.Session, "the refusal names its session (#7101)")
 	require.NotEmpty(t, refusal.Reason, "the refusal carries the reason the restore logs (#7101)")
+	require.True(t, refusal.retire, "a stale id is retired once the fresh spawn commits")
 	require.NotContains(t, program, "resume",
 		"the refused launch comes back fresh, not resume-rewritten")
 

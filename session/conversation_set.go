@@ -127,6 +127,6 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 		Agent:       tmux.ProgramCodex,
 		ID:          strings.ToLower(id),
 		CapturedAt:  time.Now(),
-		CaptureKind: ConversationCaptureCodexRollout,
+		CaptureKind: ConversationCaptureOperator,
 	}, nil
 }

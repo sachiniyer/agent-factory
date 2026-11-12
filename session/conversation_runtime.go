@@ -245,7 +245,22 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 	i.mu.RLock()
 	override := i.codexRuntimeHeldOverride
 	i.mu.RUnlock()
-	gen, _, err := i.codexRuntimeJudgement()
+	// The roots and generation this answer judges from. Production uses only
+	// the verified launch evidence, never codexRuntimeRoots' active-pane
+	// fallback (#7120 review); the test override keeps its own resolution.
+	resolve := func() ([]proctree.Process, string, error) {
+		if override != nil {
+			gen, _, err := i.codexRuntimeJudgement()
+			return nil, gen, err
+		}
+		root, err := i.codexVerifiedRuntimeRoot()
+		if err != nil {
+			return nil, "", err
+		}
+		roots := []proctree.Process{root}
+		return roots, codexGenerationKey(roots), nil
+	}
+	roots, gen, err := resolve()
 	if err != nil {
 		return AgentConversationData{}, err
 	}
@@ -277,14 +292,8 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 		}
 		// A fixture has no per-process answer, so it never learns a holder.
 		byMember = map[int]heldMemberFiles{0: {paths: paths}}
-	} else {
-		roots, err := i.codexRuntimeRoots()
-		if err != nil {
-			return AgentConversationData{}, err
-		}
-		if byMember, err = heldPathsByMemberForRoots(roots); err != nil {
-			return AgentConversationData{}, err
-		}
+	} else if byMember, err = heldPathsByMemberForRoots(roots); err != nil {
+		return AgentConversationData{}, err
 	}
 	held := make(map[string]struct{})
 	for _, member := range byMember {
@@ -293,7 +302,7 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 		}
 	}
 	conv, path, judgeErr := judge(held)
-	if after, _, err := i.codexRuntimeJudgement(); err != nil || after != gen {
+	if _, after, err := resolve(); err != nil || after != gen {
 		return AgentConversationData{}, errors.New("the pane's runtime was replaced while its open files were read")
 	}
 	var learned codexConversationHolder
@@ -392,6 +401,28 @@ func codexGenerationKey(roots []proctree.Process) string {
 	}
 	sort.Strings(parts)
 	return strings.Join(parts, ",")
+}
+
+// codexVerifiedRuntimeRoot is the only root the held query may judge from:
+// the (pid, start-stamp) launch evidence setRuntimeLaunch pinned to this
+// runtime, still naming the same process. codexRuntimeRoots' fallback — the
+// session's ACTIVE pane — is not evidence of which process is the agent: it
+// can be a user's split or a new window running its own codex in the same
+// worktree and store, and the held query would then record that process's
+// thread and re-record it every interval (#7120 review). Without verified
+// evidence the answer is an error the capture loop logs, never a guess.
+func (i *Instance) codexVerifiedRuntimeRoot() (proctree.Process, error) {
+	i.mu.RLock()
+	pid, startID := i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid <= 0 {
+		return proctree.Process{}, errors.New("af has no launch record of this session's agent process, so it cannot tell which open thread is the agent's own")
+	}
+	root, err := proctree.Lookup(pid)
+	if err != nil || root.StartID != startID {
+		return proctree.Process{}, fmt.Errorf("the agent process af launched for this session (pid %d) is gone or replaced, so af cannot tell which open thread is the agent's own", pid)
+	}
+	return root, nil
 }
 
 // codexRuntimeRoots resolves the pane-root process this instance's agent
