@@ -673,7 +673,43 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 	return t.selectClaudeFolderTrust(content)
 }
 
-// selectClaudeFolderTrust moves the cursor onto the affirmative row and
+// trustPicker is a launch-time folder-trust picker af answers BY LABEL: it moves
+// the cursor onto the affirmative row and confirms only what a fresh capture
+// shows selected. Claude Code's folder-trust dialog (#3579) and Gemini CLI's
+// (#7162) share the one driver below, so the look-move-look-confirm discipline
+// cannot drift between two copies of it.
+//
+// The driver keeps its cross-poll memory in the session's claudeTrustState. A
+// pane runs one agent, so at most one picker is ever pending on it.
+type trustPicker struct {
+	// name is the dialog as a user would recognize it (dialog_keystroke.go).
+	name string
+	// affirmative is the option af confirms, in the words its logs and the
+	// keystroke record use.
+	affirmative string
+	// read parses one capture. It fails when the dialog does not own the pane
+	// or cannot be read, and every decision the driver makes comes from it.
+	read func(content string) (claudeFolderTrustDialog, error)
+}
+
+// claudeFolderTrustPicker is Claude Code's folder-trust dialog.
+var claudeFolderTrustPicker = trustPicker{
+	name:        claudeFolderTrustDialogName,
+	affirmative: claudeTrustAffirmativeLabel,
+	read: func(content string) (claudeFolderTrustDialog, error) {
+		if !claudeTrustPromptPresent(content) || !claudeFolderTrustDialogPresent(content) {
+			return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is no longer on screen")
+		}
+		return parseClaudeFolderTrustDialog(content)
+	},
+}
+
+// selectClaudeFolderTrust answers Claude Code's folder-trust dialog.
+func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
+	return t.selectTrustPickerOption(claudeFolderTrustPicker, content)
+}
+
+// selectTrustPickerOption moves the cursor onto the picker's affirmative row and
 // confirms it — reading the pane at every step instead of assuming a preselected
 // option or a fixed key sequence.
 //
@@ -682,17 +718,17 @@ func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
 // after a FRESH capture proves the affirmative row owns the cursor and the
 // dialog is still the thing on screen; without that second proof, a dialog that
 // closed underneath af would take the Enter into the agent's composer.
-func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
+func (t *TmuxSession) selectTrustPickerOption(p trustPicker, content string) bool {
 	state := &t.claudeTrust
-	dialog, err := parseClaudeFolderTrustDialog(content)
+	dialog, err := p.read(content)
 	if err != nil {
 		if state.pendingFrom != "" {
 			// A frame af cannot read is not evidence that a movement key it
 			// already sent did nothing either. Keep holding.
-			t.holdPendingClaudeTrustMove()
+			t.holdPendingTrustMove(p)
 			return true
 		}
-		t.refuseClaudeFolderTrust(err)
+		t.refuseTrustPicker(p, err)
 		return true
 	}
 
@@ -701,29 +737,29 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 	// Only an observed change of the selected row releases it. Elapsed time
 	// cannot: a key the agent has buffered but not yet processed looks exactly
 	// like a key it never received, and the two want opposite actions. Getting
-	// that wrong is not a small cost — this picker wraps, so a second movement
+	// that wrong is not a small cost — these pickers wrap, so a second movement
 	// key undoes the first, and a repaint landing between af's verification and
-	// confirmation captures would then let Enter reach "No, exit". That is
+	// confirmation captures would then let Enter reach the wrong option. That is
 	// #3579 again, so af holds instead, and the create fails loudly.
 	if state.pendingFrom != "" {
 		if dialog.selectedLabel() == state.pendingFrom {
-			t.holdPendingClaudeTrustMove()
+			t.holdPendingTrustMove(p)
 			return true
 		}
 		state.clearPendingMove()
 	}
 
-	// Do not type into a dialog Claude Code has only just painted: it is not
-	// reading input yet, and the key is dropped. See claudeTrustSettleDelay.
+	// Do not type into a dialog the agent has only just painted: Claude Code is
+	// not reading input yet, and the key is dropped. See claudeTrustSettleDelay.
 	if !state.settled() {
 		return true
 	}
 
 	for moves := 0; !dialog.onAffirmative(); moves++ {
 		if moves >= claudeTrustMaxMovementKeys {
-			t.refuseClaudeFolderTrust(fmt.Errorf(
+			t.refuseTrustPicker(p, fmt.Errorf(
 				"the cursor stayed on %q after %d movement keys and never reached %q",
-				dialog.selectedLabel(), moves, claudeTrustAffirmativeLabel))
+				dialog.selectedLabel(), moves, p.affirmative))
 			return true
 		}
 		key := dialog.keyTowardAffirmative()
@@ -732,50 +768,50 @@ func (t *TmuxSession) selectClaudeFolderTrust(content string) bool {
 		state.beginPendingMove(dialog.selectedLabel())
 		if err := t.tapPromptKeys(key); err != nil {
 			log.ErrorLog.Printf("could not move the %s cursor onto %q for session %q: %v",
-				claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, t.sanitizedName, err)
+				p.name, p.affirmative, t.sanitizedName, err)
 			return true
 		}
-		t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, key)
+		t.noteDialogKeystroke(p.name, p.affirmative, key)
 
-		moved, ok := t.awaitClaudeFolderTrustRepaint(dialog)
+		moved, ok := t.awaitTrustPickerRepaint(p, dialog)
 		if !ok {
 			// af has no proof of where the cursor is now, so it must not confirm
 			// — and the pending record above is what stops the next poll from
 			// re-sending this key against a cursor that may already have moved.
 			log.InfoLog.Printf("session %q: %s did not repaint within %s after af sent %s; sending nothing further until a frame proves the cursor moved",
-				t.sanitizedName, claudeFolderTrustDialogName, claudeTrustRepaintWindow, key)
+				t.sanitizedName, p.name, claudeTrustRepaintWindow, key)
 			return true
 		}
 		state.clearPendingMove()
 		dialog = moved
 	}
 
-	confirmed, err := t.captureClaudeFolderTrustDialog()
+	confirmed, err := t.captureTrustPicker(p)
 	if err != nil {
 		log.InfoLog.Printf("session %q: could not confirm the %s selection before accepting it: %v",
-			t.sanitizedName, claudeFolderTrustDialogName, err)
+			t.sanitizedName, p.name, err)
 		return true
 	}
 	if !confirmed.onAffirmative() {
 		log.InfoLog.Printf("session %q: %s shows %q selected, not %q; not confirming this frame",
-			t.sanitizedName, claudeFolderTrustDialogName, confirmed.selectedLabel(), claudeTrustAffirmativeLabel)
+			t.sanitizedName, p.name, confirmed.selectedLabel(), p.affirmative)
 		return true
 	}
 	if err := t.tapPromptKeys("Enter"); err != nil {
 		log.ErrorLog.Printf("could not confirm %q on the %s dialog for session %q: %v",
-			claudeTrustAffirmativeLabel, claudeFolderTrustDialogName, t.sanitizedName, err)
+			p.affirmative, p.name, t.sanitizedName, err)
 		return true
 	}
-	t.noteDialogKeystroke(claudeFolderTrustDialogName, claudeTrustAffirmativeLabel, "Enter")
+	t.noteDialogKeystroke(p.name, p.affirmative, "Enter")
 	state.refusalLogged = false
 	return true
 }
 
-// holdPendingClaudeTrustMove keeps a sent-but-unproven movement key pending and
+// holdPendingTrustMove keeps a sent-but-unproven movement key pending and
 // reports it once, after claudeTrustHoldReportAfter. af holds either way — the
 // report is the operator-visible signal, not a change of behavior. Mirrors
 // recordPendingCodexSafetySelection.
-func (t *TmuxSession) holdPendingClaudeTrustMove() {
+func (t *TmuxSession) holdPendingTrustMove(p trustPicker) {
 	state := &t.claudeTrust
 	state.pendingPolls++
 	elapsed := claudeTrustNow().Sub(state.pendingSince)
@@ -787,8 +823,8 @@ func (t *TmuxSession) holdPendingClaudeTrustMove() {
 		"session %q: %s has not shown the cursor leave %q in %s and %d polls since af sent a movement key; "+
 			"af will not send another, because a key the agent has buffered but not yet processed is indistinguishable "+
 			"from one it never received, and this picker wraps — a second key would move the cursor back off %q",
-		t.sanitizedName, claudeFolderTrustDialogName, state.pendingFrom,
-		elapsed.Round(time.Millisecond), state.pendingPolls, claudeTrustAffirmativeLabel)
+		t.sanitizedName, p.name, state.pendingFrom,
+		elapsed.Round(time.Millisecond), state.pendingPolls, p.affirmative)
 }
 
 // resetClaudeTrustState drops this handler's cross-poll memory at a proven
@@ -801,13 +837,13 @@ func (t *TmuxSession) resetClaudeTrustState() {
 	t.claudeTrust = claudeTrustState{}
 }
 
-// awaitClaudeFolderTrustRepaint waits for the pane to show the cursor on a
-// different option than prev did, bounded by claudeTrustRepaintWindow. The
-// comparison is by LABEL, not by line index: a redraw may reflow the rows.
-func (t *TmuxSession) awaitClaudeFolderTrustRepaint(prev claudeFolderTrustDialog) (claudeFolderTrustDialog, bool) {
+// awaitTrustPickerRepaint waits for the pane to show the cursor on a different
+// option than prev did, bounded by claudeTrustRepaintWindow. The comparison is
+// by LABEL, not by line index: a redraw may reflow the rows.
+func (t *TmuxSession) awaitTrustPickerRepaint(p trustPicker, prev claudeFolderTrustDialog) (claudeFolderTrustDialog, bool) {
 	deadline := claudeTrustNow().Add(claudeTrustRepaintWindow)
 	for {
-		dialog, err := t.captureClaudeFolderTrustDialog()
+		dialog, err := t.captureTrustPicker(p)
 		if err == nil && dialog.selectedLabel() != prev.selectedLabel() {
 			return dialog, true
 		}
@@ -818,32 +854,29 @@ func (t *TmuxSession) awaitClaudeFolderTrustRepaint(prev claudeFolderTrustDialog
 	}
 }
 
-// captureClaudeFolderTrustDialog re-reads the pane and parses it, requiring the
-// dialog to still be the thing on screen. A capture that no longer shows the
-// modal is an error and not an empty dialog: it is exactly the state in which
-// injecting a key would reach the agent's composer instead.
-func (t *TmuxSession) captureClaudeFolderTrustDialog() (claudeFolderTrustDialog, error) {
+// captureTrustPicker re-reads the pane and parses it, requiring the dialog to
+// still be the thing on screen. A capture that no longer shows the modal is an
+// error and not an empty dialog: it is exactly the state in which injecting a
+// key would reach the agent's composer instead.
+func (t *TmuxSession) captureTrustPicker(p trustPicker) (claudeFolderTrustDialog, error) {
 	content, err := t.CapturePaneContent()
 	if err != nil {
 		return claudeFolderTrustDialog{}, err
 	}
-	if !claudeTrustPromptPresent(content) || !claudeFolderTrustDialogPresent(content) {
-		return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is no longer on screen")
-	}
-	return parseClaudeFolderTrustDialog(content)
+	return p.read(content)
 }
 
-// refuseClaudeFolderTrust reports a dialog af will not answer, once per dialog
-// rather than once per poll. Refusing surfaces as the create's trust-prompt
-// budget expiring, which is a loud, recoverable failure; the alternative —
-// pressing Enter on whatever happens to be selected — is how #3579 quit users'
-// agents silently.
-func (t *TmuxSession) refuseClaudeFolderTrust(reason error) {
+// refuseTrustPicker reports a dialog af will not answer, once per dialog rather
+// than once per poll. Refusing surfaces as the create's trust-prompt budget
+// expiring, which is a loud, recoverable failure; the alternative — pressing
+// Enter on whatever happens to be selected — is how #3579 quit users' agents
+// silently.
+func (t *TmuxSession) refuseTrustPicker(p trustPicker, reason error) {
 	if t.claudeTrust.refusalLogged {
 		return
 	}
 	t.claudeTrust.refusalLogged = true
 	log.ErrorLog.Printf(
 		"refusing to answer the %s dialog for session %q: %v; af will not press a key it cannot aim at %q",
-		claudeFolderTrustDialogName, t.sanitizedName, reason, claudeTrustAffirmativeLabel)
+		p.name, t.sanitizedName, reason, p.affirmative)
 }

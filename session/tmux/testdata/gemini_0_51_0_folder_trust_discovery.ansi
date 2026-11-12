@@ -1,0 +1,24 @@
+ [38;5;229m│[39m                                                                            [38;5;229m│
+[39m [38;5;229m│[39m [1m[38;5;231mDo you trust the files in this folder?[0m                                     [38;5;229m│
+[39m [38;5;229m│[39m                                                                            [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mTrusting a folder allows Gemini CLI to load its local configurations,[39m      [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mincluding custom commands, hooks, MCP servers, agent skills, and settings.[39m [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mThese configurations could execute code on your behalf or change the[39m       [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mbehavior of the CLI.[39m                                                       [38;5;229m│
+[39m [38;5;229m│[39m                                                                            [38;5;229m│
+[39m [38;5;229m│[39m [1m[38;5;231mThis folder contains:[0m                                                      [38;5;229m│
+[39m [38;5;229m│[39m   [1m[38;5;231m• Commands (8):[0m                                                          [38;5;229m│
+[39m [38;5;229m│[39m     [38;5;231m- bench[39m                                                                [38;5;229m│
+[39m [38;5;229m│[39m     [38;5;231m- build[39m                                                                [38;5;229m│
+[39m [38;5;229m│[39m     [38;5;231m- deploy[39m                                                               [38;5;229m│
+[39m [38;5;229m│[39m     [38;5;231m- docs[39m                                                                 [38;5;229m│
+[39m [38;5;229m│[39m [38;5;248m... last 7 lines hidden (Ctrl+O to show) ...[39m                               [38;5;229m│
+[39m [38;5;229m│[39m                                                                            [38;5;229m│
+[39m [38;5;229m│[39m [38;5;194m[48;5;28m●[39m [38;5;194m1.[39m [38;5;194mTrust folder (wt)[39m                  [49m                                   [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231m [39m [38;5;231m2.[39m [38;5;231mTrust parent folder (af-trees)     [39m                                   [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231m [39m [38;5;231m3.[39m [38;5;231mDon't trust[39m                                                           [38;5;229m│
+[39m [38;5;229m│[39m                                                                            [38;5;229m│
+[39m [38;5;229m╰────────────────────────────────────────────────────────────────────────────╯
+[39m   [38;5;183mPress Ctrl+O to show more lines
+
+

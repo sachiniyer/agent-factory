@@ -256,8 +256,33 @@ func isReadyContent(content, agent string) bool {
 			strings.Contains(content, "Aider v") ||
 			isDocTrustPrompt(content)
 	case tmux.ProgramGemini:
-		// Best-guess (#714): no in-the-wild gemini-cli capture yet. The "╰"
-		// box-drawing corner of gemini-cli's frame is a weak readiness signal.
+		// Gemini CLI's folder-trust dialog is a readiness STOP, named the way
+		// the codex arm names CodexTrustPromptPresent: CheckAndHandleTrustPrompt
+		// positively identifies it and answers "Trust folder" by label before
+		// any prompt is sent (#7162). Gemini then relaunches itself, and the
+		// relaunched composer — painted below its own restart notice — is ready:
+		// that process has the folder's trust recorded and cannot open the
+		// dialog again.
+		if tmux.GeminiFolderTrustPromptPresent(content) || tmux.GeminiRelaunchedAfterTrust(content) {
+			return true
+		}
+		// Otherwise the dialog's own box is not a ready signal. Its "╰" is
+		// what the weak glyph check below used to read as ready, while the
+		// dialog was still painting or while Gemini was relaunching after the
+		// answer, and the prompt went into the dialog or the exiting process.
+		//
+		// Nor is anything else on a pane that carries the folder-trust flow's
+		// fingerprints — its question, its "Trust parent folder" label or its
+		// restart notice, found even when a narrow pane wraps or truncates
+		// them. Such a pane is ready only as the dialog the strict parser reads
+		// or as the relaunched composer above; otherwise the old box's "╰" made
+		// a narrow dialog, or a relaunch in progress, read as ready and the
+		// prompt went into it (#7169 review).
+		if tmux.GeminiFolderTrustDialogOnScreen(content) || tmux.GeminiFolderTrustFingerprinted(content) {
+			return false
+		}
+		// Best-guess (#714) for everything else. The "╰" box-drawing corner of
+		// gemini-cli's frame is a weak readiness signal.
 		// TODO(#714): replace with a confirmed gemini-specific ready string.
 		return strings.Contains(content, "╰") ||
 			isDocTrustPrompt(content)

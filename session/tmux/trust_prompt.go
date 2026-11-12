@@ -126,17 +126,33 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 			t.noteDialogKeystroke(codexDirectoryTrustDialogName, codexDirectoryTrustAffirmative, "Enter")
 			return true
 		}
-	default:
-		if DocTrustPromptPresent(content) {
-			if err := t.TapDAndEnter(); err != nil {
-				log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
-				return true
-			}
-			t.noteDialogKeystroke(docTrustDialogName, "", "D", "Enter")
-			return true
+	case ProgramGemini:
+		// Gemini CLI's folder-trust dialog (#7162): answered by label with
+		// "Trust folder", held while it paints and while Gemini relaunches
+		// after the answer. Without this branch af reported the dialog's pane
+		// clear and the create typed the prompt into it.
+		if handled, ok := t.handleGeminiFolderTrust(content); ok {
+			return handled
 		}
+		return t.handleDocTrustPrompt(content)
+	default:
+		return t.handleDocTrustPrompt(content)
 	}
 	return false
+}
+
+// handleDocTrustPrompt answers the aider-style documentation-link prompt
+// (DocTrustPromptPresent) with D+Enter, reporting whether it was in the way.
+func (t *TmuxSession) handleDocTrustPrompt(content string) bool {
+	if !DocTrustPromptPresent(content) {
+		return false
+	}
+	if err := t.TapDAndEnter(); err != nil {
+		log.ErrorLog.Printf("could not tap enter on trust screen: %v", err)
+		return true
+	}
+	t.noteDialogKeystroke(docTrustDialogName, "", "D", "Enter")
+	return true
 }
 
 // codexComposerGlyphs is the set of glyphs Codex draws at the START of its

@@ -1,0 +1,24 @@
+  [38;5;229mtrusted.
+
+[39m [38;5;229m╭──────────────────────────────────────────────╮
+[39m [38;5;229m│[39m                                              [38;5;229m│
+[39m [38;5;229m│[39m [1m[38;5;231mDo you trust the files in this folder?[0m       [38;5;229m│
+[39m [38;5;229m│[39m                                              [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mTrusting a folder allows Gemini CLI to load[39m  [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mits local configurations, including custom[39m   [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mcommands, hooks, MCP servers, agent skills,[39m  [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mand settings. These configurations could[39m     [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mexecute code on your behalf or change the[39m    [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231mbehavior of the CLI.[39m                         [38;5;229m│
+[39m [38;5;229m│[39m                                              [38;5;229m│
+[39m [38;5;229m│[39m                                              [38;5;229m│
+[39m [38;5;229m│[39m [38;5;194m[48;5;28m●[39m [38;5;248m1.[39m [38;5;194mTrust folder (wt)[39m                  [49m     [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231m [39m [38;5;248m2.[39m [38;5;231mTrust parent folder (af-trees)     [39m     [38;5;229m│
+[39m [38;5;229m│[39m [38;5;231m [39m [38;5;248m3.[39m [38;5;231mDon't trust[39m                             [38;5;229m│
+[39m [38;5;229m│[39m                                              [38;5;229m│
+[39m [38;5;229m╰──────────────────────────────────────────────╯
+
+
+[39m [38;5;229mGemini CLI is restarting to apply the trust
+[39m [38;5;229mchanges...
+
