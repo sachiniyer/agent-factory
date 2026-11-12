@@ -89,22 +89,34 @@ func TestRootHealCreateFailingAfterReapDoesNotReHoldCarryWhenDeleteRaces(t *test
 	// Run the delete concurrently with the parked create. DeleteProject's
 	// phase-1 gate sees no sessions (the reap deleted the only row), proceeds to
 	// suppressRootAgent (tombstone + retire carries) and deregister.
+	repoID := config.RepoIDFromRoot(repoPath)
 	var wg sync.WaitGroup
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
-		_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: config.RepoIDFromRoot(repoPath), RepoPath: repoPath})
+		_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
 		require.NoError(t, err, "DeleteProject must succeed: no in-flight session after the reap")
 	}()
 
-	// Give the delete a moment to install the projectDeletes fence and run
-	// suppressRootAgent (retiring any held carry + stamping the tombstone).
-	time.Sleep(200 * time.Millisecond)
+	// Wait until suppressRootAgent has actually run — it stamps the deletion
+	// tombstone in deletedRootRepos and retires the held carry — rather than
+	// sleeping an arbitrary 200 ms. On a loaded runner the delete goroutine may
+	// not reach suppression within a fixed sleep, and releasing the create
+	// before suppression completed would let the unfixed implementation re-hold
+	// the carry first and pass every assertion even though the regression is
+	// present.
+	require.Eventually(t, func() bool {
+		manager.mu.Lock()
+		defer manager.mu.Unlock()
+		_, suppressed := manager.deletedRootRepos[repoID]
+		return suppressed
+	}, 5*time.Second, time.Millisecond,
+		"suppressRootAgent must install the deletion tombstone before the parked create is released")
 
 	// Release the parked create. Its post-reap create now runs; the worktree
 	// listing is still stalled, so it fails and reaches the failure path that
 	// calls holdRootCarry. The fix makes holdRootCarry refuse while the
-	// tombstone applies / the delete fence is up.
+	// tombstone applies / the delete fence is up / the delete generation moved.
 	close(releaseCreate)
 	manager.waitRootAgentCreates()
 	wg.Wait()

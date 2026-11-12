@@ -50,7 +50,15 @@ func rootCarryBinding(repo *config.RepoContext, identity *resolvedProjectRoot) r
 // suppressed the repo (the deletion tombstone): the first covers a create that
 // fails after the fence went up but before suppressRootAgent ran, the second a
 // create that fails after suppression completed.
-func (m *Manager) holdRootCarry(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) {
+//
+// Neither current-state check alone catches a create that resumes only AFTER
+// the delete finished and a later prove disproved its tombstone (a new clone at
+// the reused legacy path): the fence is gone and the tombstone no longer
+// applies, so both read clean and the carry would be restored. deleteSeq is the
+// sample of m.projectDeleteSeq this create took at launch; a delete that ran
+// while it was parked stamped the repo's fence-transition counter past it, so
+// refuse when that stamp has moved (#7090 review, P1).
+func (m *Manager) holdRootCarry(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState, deleteSeq uint64) {
 	held := rootCarryBinding(repo, identity)
 	held.state = carried
 	m.mu.Lock()
@@ -59,6 +67,9 @@ func (m *Manager) holdRootCarry(st *rootEnsureState, repo *config.RepoContext, i
 		return
 	}
 	if m.rootDeletionTombstoneApplies(m.rootAgentLayers.Load(), repo.ID) {
+		return
+	}
+	if m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
 		return
 	}
 	st.carry = &held

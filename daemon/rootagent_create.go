@@ -60,6 +60,16 @@ type rootCreateJob struct {
 	resolution config.RootAgentResolution
 	identity   *resolvedProjectRoot
 	inst       *session.Instance
+	// deleteSeq samples m.projectDeleteSeq at the moment this create was
+	// launched (under m.mu, atomic with the in-flight mark). holdRootCarry
+	// consults it on the failure path: a delete that ran while this stalled
+	// create was parked past its reap stamps the repo's fence-transition
+	// counter past this sample, so holdRootCarry refuses to re-hold the carry
+	// the delete retired — even once the fence is gone AND the tombstone a
+	// later prove disproved no longer applies. The fence and tombstone checks
+	// alone miss that window; the generation sample closes it (#7090 review
+	// P1, rootagent_carry.go).
+	deleteSeq uint64
 }
 
 // launchRootCreate starts one create for this repo, or does nothing because one
@@ -104,6 +114,10 @@ func (m *Manager) launchRootCreate(job rootCreateJob) {
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
 		return
 	}
+	// Sample the delete-fence transition counter alongside the in-flight mark
+	// so a delete that stamps while this create is parked is observable later on
+	// the failure path. See rootCreateJob.deleteSeq.
+	job.deleteSeq = m.projectDeleteSeq
 	m.rootCreatesInFlight[job.repo.ID] = job.repo.WorkspacePath()
 	m.rootCreateWG.Add(1)
 
@@ -379,7 +393,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 	if err != nil {
 		if reapedRoot {
-			m.holdRootCarry(st, repo, identity, carried) // the next pass's create carries it
+			m.holdRootCarry(st, repo, identity, carried, job.deleteSeq) // the next pass's create carries it
 		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
