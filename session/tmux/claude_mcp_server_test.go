@@ -316,9 +316,8 @@ func TestCheckAndHandleTrustPrompt_PartiallyRenderedClaudeMCPServerDialogHolds(t
 // The structural guards the older wording relies on (#4254, #4735) hold for the
 // new one: a working agent paints its composer below its output, so the dialog
 // quoted in a transcript is never the last thing on screen and is never
-// answered. The multi-server dialog Claude Code shows for two or more servers
-// is a different picker — every server pre-checked, Enter toggles a row — and
-// af must not press a key into it either.
+// answered. (The multi-server picker Claude Code shows for two or more servers
+// is a different dialog; claude_mcp_multiselect_test.go covers it, #7166.)
 func TestCheckAndHandleTrustPrompt_QuotedClaudeMCPServerDialogInjectsNothing(t *testing.T) {
 	dialog := readTrustFixture(t, mcpServerDialogFixture)
 	composer := readTrustFixture(t, mcpServerComposerFixture)
@@ -327,7 +326,6 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeMCPServerDialogInjectsNothing(t *
 		{"the captured dialog with trailing prose", strings.TrimRight(dialog, "\n") + "\nThat is the dialog af answers at startup.\n"},
 		{"the decline label as a composer draft under the preamble", "  New MCP server found in this project: probe\n\n" +
 			strings.Repeat("─", 80) + "\n" + claudeTrustSelectionGlyph + " " + mcpServerDeclineLabel + "\n" + strings.Repeat("─", 80) + "\n"},
-		{"the multi-server dialog", readTrustFixture(t, mcpServerMultiServerFixture)},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			_, cmds := pollStaticPane(t, tt.content, 4)
