@@ -608,6 +608,11 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 }
 
 func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uint64) {
+	// Every caller is a launch boundary: whatever it records — even nothing
+	// beyond the command, when its pane query failed — describes the new
+	// runtime, so an identity kept from the old one's unanswerable reattach
+	// probe can never stand in for it (#7123).
+	i.captureEvidence = keptCaptureEvidence{}
 	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
@@ -637,15 +642,26 @@ func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uin
 // restart is the EXPECTED same-runtime case, so only a recorded claim that
 // failed verification marks a replacement there — a row carrying none (a
 // legacy record) has nothing to distrust and stays a pure reattach.
+//
+// Both verdicts, and the retire every reader of runtimePID sees, are the same
+// whether the probe answered "no pane is rooted at that identity" or could
+// not answer at all. Conversation capture alone tells them apart (#7123): an
+// answered mismatch is evidence of a replacement and keeps nothing, while an
+// unanswerable probe is no evidence either way, so its identity is kept as
+// captureEvidence for CheckConversationCaptureEvidence to re-verify later with
+// the same session-wide scan.
 func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, claimRetired bool) {
 	i.mu.RLock()
 	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
 	i.mu.RUnlock()
+	unanswered := false
 	if pid > 0 && ts != nil {
-		if same, err := ts.PaneRootProcessMatches(pid, startID); err == nil && same {
+		same, err := ts.PaneRootProcessMatches(pid, startID)
+		if err == nil && same {
 			// Provably the same launch: keep the claim.
 			return true, false
 		}
+		unanswered = err != nil && !tmux.PaneQueryFoundNoPane(err)
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -661,6 +677,9 @@ func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, c
 	i.runtimeProgram = ""
 	i.runtimePID = 0
 	i.runtimeStartID = 0
+	if unanswered {
+		i.captureEvidence = keptCaptureEvidence{pid: pid, startID: startID}
+	}
 	return false, true
 }
 

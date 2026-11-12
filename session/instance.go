@@ -500,6 +500,13 @@ type Instance struct {
 	// before this evidence existed and everywhere runtimeProgram is cleared.
 	runtimePID     int
 	runtimeStartID uint64
+	// captureEvidence is the launch identity a reattach probe could not answer
+	// about (#7123): the retire above still clears runtimePID/runtimeStartID for
+	// every consumer that reads them, but "could not answer" is no evidence of a
+	// replacement, so conversation capture — and only capture — keeps the pair
+	// here and re-verifies it with the session-wide pane scan before judging
+	// from it. Zero whenever runtimePID is set; every launch boundary clears it.
+	captureEvidence keptCaptureEvidence
 	// codexRuntimeHeldOverride, when set by a test, replaces the live
 	// descriptor walk capture attribution performs against this runtime.
 	codexRuntimeHeldOverride func() (map[string]struct{}, error)
