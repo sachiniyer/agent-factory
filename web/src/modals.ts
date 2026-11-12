@@ -33,6 +33,7 @@ import { type BackendCatalog, type BackendChoice, REPO_DEFAULT, backendChoices, 
 import { type DirectoryPickerHandle, directoryPicker } from "./dirpicker.js";
 import { h } from "./dom.js";
 import { PROGRAM_REPO_DEFAULT, type ProgramCatalog, type ProgramChoice, handoffAgentChoices, programChoices } from "./programs.js";
+import type { DeleteProjectStatement } from "./project.js";
 import type { AccountsResponse } from "./types.js";
 
 import { modalChrome, field, defaultsDisclosure, type ModalHandle } from "./components.js";
@@ -848,36 +849,49 @@ export function confirmModal(
   return handle;
 }
 
+/** The delete-project confirmation's message. Counts appear only in a checked
+ *  statement; an unchecked one says why the live sessions could not be checked
+ *  and states no count at all — least of all "No live sessions" (#7201). */
+export function deleteProjectMessage(statement: DeleteProjectStatement): string {
+  if (!statement.checked) {
+    return `Could not check live sessions — ${statement.reason}. You can delete once the session counts are current.`;
+  }
+  const { sessionCount, inPlaceCount } = statement;
+  const word = sessionCount === 1 ? "session" : "sessions";
+  let message = sessionCount === 0
+    ? "No live sessions to archive. Remove the project; the repo stays and you can add it again."
+    : `Archive ${sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (inPlaceCount > 0) {
+    const inPlaceWord = inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (sessionCount > 0) message += ` Archive ${sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (sessionCount === 0 && inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
+  return message;
+}
+
 /** Delete-project confirmation (#1735): archived sessions remain restorable and
  *  the real git repo is untouched, while the durable project registration is
- *  removed. */
+ *  removed. An unchecked statement (#7201) disables Delete project, and the form
+ *  never submits it. */
 export function confirmDeleteProjectModal(
-  opts: { projectLabel: string; sessionCount: number; inPlaceCount: number; onConfirm: () => void; onCancel: () => void },
+  opts: { projectLabel: string; statement: DeleteProjectStatement; onConfirm: () => void; onCancel: () => void },
 ): ModalHandle {
-  const word = opts.sessionCount === 1 ? "session" : "sessions";
-  const { handle, body } = modalChrome({
+  const { handle, body, confirmBtn } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
     confirmClass: "af-primary",
     onCancel: opts.onCancel,
   });
-
-  let message = opts.sessionCount === 0
-    ? "No live sessions to archive. Remove the project; the repo stays and you can add it again."
-    : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
-  if (opts.inPlaceCount > 0) {
-    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
-    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
-    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
-    message += " Remove the project; the repo stays.";
-  }
-  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
-    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
-  }
-  body.append(h("p", { class: "af-modal-text" }, message));
+  body.append(h("p", { class: "af-modal-text" }, deleteProjectMessage(opts.statement)));
+  confirmBtn.disabled = !opts.statement.checked;
 
   const card = handle.el.firstElementChild as HTMLElement;
   asForm(card, () => {
+    if (!opts.statement.checked) return;
     handle.setError(null);
     opts.onConfirm();
   });

@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "f58c626fb214";
+var CLIENT_VERSION = "1163fc97d80d";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -14338,27 +14338,36 @@ function confirmModal(opts) {
   }
   return handle;
 }
+function deleteProjectMessage(statement) {
+  if (!statement.checked) {
+    return `Could not check live sessions \u2014 ${statement.reason}. You can delete once the session counts are current.`;
+  }
+  const { sessionCount, inPlaceCount } = statement;
+  const word = sessionCount === 1 ? "session" : "sessions";
+  let message = sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
+  if (inPlaceCount > 0) {
+    const inPlaceWord = inPlaceCount === 1 ? "session is" : "sessions are";
+    message = `${inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
+    if (sessionCount > 0) message += ` Archive ${sessionCount} regular ${word}; restore those sessions anytime.`;
+    message += " Remove the project; the repo stays.";
+  }
+  if (sessionCount === 0 && inPlaceCount === 0) {
+    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
+  }
+  return message;
+}
 function confirmDeleteProjectModal(opts) {
-  const word = opts.sessionCount === 1 ? "session" : "sessions";
-  const { handle, body } = modalChrome({
+  const { handle, body, confirmBtn } = modalChrome({
     title: `Delete project ${opts.projectLabel}?`,
     confirmLabel: "Delete project",
     confirmClass: "af-primary",
     onCancel: opts.onCancel
   });
-  let message = opts.sessionCount === 0 ? "No live sessions to archive. Remove the project; the repo stays and you can add it again." : `Archive ${opts.sessionCount} ${word} and remove the project. Keep the repo; restore sessions anytime.`;
-  if (opts.inPlaceCount > 0) {
-    const inPlaceWord = opts.inPlaceCount === 1 ? "session is" : "sessions are";
-    message = `${opts.inPlaceCount} in-place ${inPlaceWord} ended permanently and cannot be restored. Their checkouts and branches are kept.`;
-    if (opts.sessionCount > 0) message += ` Archive ${opts.sessionCount} regular ${word}; restore those sessions anytime.`;
-    message += " Remove the project; the repo stays.";
-  }
-  if (opts.sessionCount === 0 && opts.inPlaceCount === 0) {
-    message += " Archived sessions and tasks stay. Tasks keep the project in the switcher; otherwise, add it again to see archives.";
-  }
-  body.append(h("p", { class: "af-modal-text" }, message));
+  body.append(h("p", { class: "af-modal-text" }, deleteProjectMessage(opts.statement)));
+  confirmBtn.disabled = !opts.statement.checked;
   const card = handle.el.firstElementChild;
   asForm(card, () => {
+    if (!opts.statement.checked) return;
     handle.setError(null);
     opts.onConfirm();
   });
@@ -14830,6 +14839,20 @@ function projectDeletionBreakdown(sessions, root2) {
   const live = sessions.filter((s) => s.worktree?.repo_path === root2 && !isArchived(s));
   const inPlaceCount = live.filter((s) => s.worktree?.external_worktree === true).length;
   return { sessionCount: live.length - inPlaceCount, inPlaceCount };
+}
+function deleteProjectStatement(view, settled, root2) {
+  if (view.live !== "open") return { checked: false, reason: "the live connection is down" };
+  if (!settled) return { checked: false, reason: "the session list is still catching up with the daemon" };
+  const skipped = view.skippedRepos?.length ?? 0;
+  if (skipped > 0) {
+    return { checked: false, reason: `the daemon could not load ${skipped} repo${skipped === 1 ? "" : "s"}, so some sessions are hidden` };
+  }
+  return { checked: true, ...projectDeletionBreakdown(view.sessions, root2) };
+}
+function sameDeleteProjectStatement(a, b) {
+  if (a.checked && b.checked) return a.sessionCount === b.sessionCount && a.inPlaceCount === b.inPlaceCount;
+  if (!a.checked && !b.checked) return a.reason === b.reason;
+  return false;
 }
 
 // src/sessions.ts
@@ -22152,6 +22175,7 @@ var loadPrograms = (repoPath) => token === null ? Promise.reject(new Error("not 
 var loadCreateAccounts = (repoPath) => token === null ? Promise.reject(new Error("not authorized")) : listAccounts(token, repoPath);
 var resyncTimer = null;
 var resyncCompletions = [];
+var sessionsSettled = false;
 var sessionEventGeneration = 0;
 var resyncRequestGeneration = 0;
 var taskResyncTimer = null;
@@ -22882,16 +22906,30 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     mountWith();
   }
 }
-function openDeleteProject(root2, label) {
+function openDeleteProject(root2, label, invoker) {
+  const statementNow = () => deleteProjectStatement(store.get(), sessionsSettled, root2);
+  const stated = statementNow();
+  if (invoker === void 0) {
+    invoker = captureModalInvoker();
+    if (!stated.checked && store.get().live === "open" && !sessionsSettled) requestResync();
+  }
+  const restate = () => openDeleteProject(root2, label, invoker);
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      ...projectDeletionBreakdown(store.get().sessions, root2),
+      statement: stated,
       onConfirm: () => {
         const tok = token;
         if (tok === null || !modal) {
           return;
         }
+        if (!sameDeleteProjectStatement(statementNow(), stated)) {
+          restate();
+          return;
+        }
+        if (!stated.checked) return;
+        stopModalProjectionWatch?.();
+        stopModalProjectionWatch = null;
         const m = modal;
         m.setBusy(true);
         const connection = connectionGeneration;
@@ -22931,8 +22969,13 @@ function openDeleteProject(root2, label) {
         });
       },
       onCancel: closeModal
-    })
+    }),
+    false,
+    invoker
   );
+  stopModalProjectionWatch = store.subscribe(() => {
+    if (!sameDeleteProjectStatement(statementNow(), stated)) restate();
+  });
 }
 function openAddProject() {
   const invoker = captureModalInvoker();
@@ -24321,12 +24364,16 @@ function startStream(tok) {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      sessionsSettled = false;
       markArchiveDirty();
       requestResync();
       publishProposalResync();
     },
     onStatus: (s, retryAt) => {
-      if (s !== "open") markArchiveDirty();
+      if (s !== "open") {
+        markArchiveDirty();
+        sessionsSettled = false;
+      }
       store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
@@ -24351,6 +24398,7 @@ function stopStream() {
   quotaRefetcher.invalidate();
   hostsCapabilityRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
+  sessionsSettled = false;
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -24556,6 +24604,7 @@ function requestResync() {
         requestResync();
         return;
       }
+      sessionsSettled = true;
       applySessions(optimisticSessions.project(), {
         kind: "snapshot",
         generation: restoreSnapshot,
