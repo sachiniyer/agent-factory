@@ -166,8 +166,22 @@ func TestCaptureAgentConversationSkipsARecordedRepair(t *testing.T) {
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
 	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
 
-	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
-		inst.AgentRuntimeToken(), 50*time.Millisecond))
+	// The fixture's runtime holds every rollout in the store, so a recorded
+	// row's follow check sees two threads it cannot tell apart (#7101): it
+	// keeps the operator's record and says why instead of guessing.
+	err := manager.captureAgentConversation(repoID, key, inst, snap,
+		inst.AgentRuntimeToken(), 50*time.Millisecond)
+	require.ErrorIs(t, err, session.ErrCodexConversationAmbiguous)
 	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID,
 		"a capture that discovered a rollout must not replace the operator's record")
+
+	// When the runtime holds only the repaired thread, the record is
+	// confirmed and nothing is reported.
+	held := &heldOnly{}
+	held.set(filepath.Join(configAgentCodexDayDir(codexHome, time.Now()),
+		"rollout-2026-08-10T10-17-35-"+setConversationDaemonID+".jsonl"))
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
+		inst.AgentRuntimeToken(), 50*time.Millisecond))
+	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
 }

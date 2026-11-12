@@ -348,7 +348,20 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 		return err
 	}
 	if !conv.HasID() {
-		return nil
+		// Nothing NEW appeared — which a late baseline guarantees when the
+		// runtime's rollout predates it: a daemon restart, a deferred arm that
+		// claimed a swap's replacement generation after its mission minted the
+		// file, a pane that `/resume`d an older thread (#7101). Ask the runtime
+		// itself, once per attempt. This lives in the loop, not in
+		// CaptureAgentConversation, so the swap's synchronous pre-delivery
+		// capture keeps treating "no rollout yet" as the expected fresh start
+		// rather than failing the handoff on a walk it does not need.
+		if conv, err = session.HeldAgentConversation(agent, snap); err != nil {
+			return err
+		}
+		if !conv.HasID() {
+			return nil
+		}
 	}
 
 	// Serialize the mutate+persist against this session's archive/kill/restore

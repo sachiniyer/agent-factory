@@ -51,22 +51,27 @@ func heldTestInstance(t *testing.T, held ...string) *Instance {
 	return inst
 }
 
-// TestCaptureAgentConversation_CodexRecordsTheHeldRolloutItsBaselineAlreadyHas
-// is the restart / mid-swap shape: the replacement's mission minted its
-// rollout BEFORE the capture that is now armed took its baseline. The file is
-// in the before-set, so the new-since-baseline diff can never see it — but
-// the runtime holds it open, which is positive evidence on its own.
-func TestCaptureAgentConversation_CodexRecordsTheHeldRolloutItsBaselineAlreadyHas(t *testing.T) {
+// TestHeldAgentConversation_NamesTheHeldRolloutItsBaselineAlreadyHas is the
+// restart / mid-swap shape: the replacement's mission minted its rollout
+// BEFORE the capture that is now armed took its baseline. The file is in the
+// before-set, so the new-since-baseline diff can never see it — which is why
+// the daemon's loop asks the runtime when the diff comes back empty — and the
+// runtime holding it open is positive evidence on its own.
+func TestHeldAgentConversation_NamesTheHeldRolloutItsBaselineAlreadyHas(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	own := writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", workDir)
 	// The late baseline: the daemon restarted, or the poll's deferred arm
 	// claimed the replacement's generation after the mission landed.
-	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
-	inst := heldTestInstance(t, own)
+	snap := heldTestInstance(t, own).BindConversationCaptureRuntime(
+		beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir))
 
-	conv, err := CaptureAgentConversation(tmux.ProgramCodex, inst.BindConversationCaptureRuntime(snap), 100*time.Millisecond)
+	diff, err := CaptureAgentConversation(tmux.ProgramCodex, snap, 100*time.Millisecond)
+	require.NoError(t, err)
+	require.False(t, diff.HasID(), "the baseline diff alone is blind to a rollout its baseline lists")
+
+	conv, err := HeldAgentConversation(tmux.ProgramCodex, snap)
 	require.NoError(t, err)
 	require.Equal(t, heldTestOwnID, conv.ID,
 		"the rollout the runtime holds open is its conversation even when a late baseline already lists it")
@@ -74,19 +79,19 @@ func TestCaptureAgentConversation_CodexRecordsTheHeldRolloutItsBaselineAlreadyHa
 	require.Equal(t, ConversationCaptureCodexRollout, conv.CaptureKind)
 }
 
-// TestCaptureAgentConversation_CodexRecordsAHeldResumedThreadOutsideTheScanWindow
-// is the `/resume` shape: the pane resumed a thread minted weeks ago, whose
-// day directory the bounded store scan never descends into (#6845). The
-// held-open answer names the file directly, so no store walk is needed.
-func TestCaptureAgentConversation_CodexRecordsAHeldResumedThreadOutsideTheScanWindow(t *testing.T) {
+// TestHeldAgentConversation_NamesAResumedThreadOutsideTheScanWindow is the
+// `/resume` shape: the pane resumed a thread minted weeks ago, whose day
+// directory the bounded store scan never descends into (#6845). The held-open
+// answer names the file directly, so no store walk is needed.
+func TestHeldAgentConversation_NamesAResumedThreadOutsideTheScanWindow(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	old := time.Now().Add(-30 * 24 * time.Hour)
 	resumed := writeCodexRolloutAt(t, codexHome, workDir, old, codexRolloutName(old, heldTestOwnID))
-	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
-	inst := heldTestInstance(t, resumed)
+	snap := heldTestInstance(t, resumed).BindConversationCaptureRuntime(
+		beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir))
 
-	conv, err := CaptureAgentConversation(tmux.ProgramCodex, inst.BindConversationCaptureRuntime(snap), 100*time.Millisecond)
+	conv, err := HeldAgentConversation(tmux.ProgramCodex, snap)
 	require.NoError(t, err)
 	require.Equal(t, heldTestOwnID, conv.ID,
 		"a resumed thread the runtime holds must be recorded wherever it sits in the store")
