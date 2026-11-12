@@ -1739,12 +1739,12 @@ _expect_task_editor_footer_ladder() {
         fi
     done
     for footer in \
-        'r run now · x toggle · D delete · esc list' \
-        'r run · x toggle · D del · esc list' \
-        'r run · x toggle · D del · esc' \
-        'x toggle · D delete · esc list' \
-        'x toggle · D del · esc list' \
-        'x toggle · D del · esc'; do
+        'r run now · [✓] x toggle · D delete · esc list' \
+        'r run · [✓] x toggle · D del · esc list' \
+        'r run · [✗] x toggle · D del · esc' \
+        '[✓] x toggle · D delete · esc list' \
+        '[✓] x toggle · D del · esc list' \
+        '[✗] x toggle · D del · esc'; do
         frame="$(_task_dialog_frame 56 'Trigger: ▸ cron' "$footer")"
         if ! printf '%s\n' "$frame" | _af_tasks_overlay_visible; then
             _af_fail "the task editor footer '${footer}' was not recognized"

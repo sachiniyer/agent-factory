@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
+	"runtime"
 	"testing"
 	"time"
 
@@ -339,10 +340,34 @@ func TestSweepNeverReapsALiveServersEditor(t *testing.T) {
 	require.True(t, secondEditor.alive())
 
 	// A third while the second is ALIVE: the lock is held, so it neither sweeps nor
-	// starts, and the second's editor survives.
+	// starts, and the second's editor survives. Nothing below names second, so
+	// collect first: a fixture that let the lock holder go unreachable would lose
+	// its flock to the *os.File finalizer on every run, not once in a hundred (#7139).
+	collectGarbage(t)
 	third := f.server("launch-3", "feature")
 	require.ErrorIs(t, third.acquireEditorNamespace(), errEditorWorkspaceBusy)
 	require.True(t, secondEditor.alive(), "a live owner's editor is never swept")
+}
+
+// collectGarbage runs the collector until every finalizer an earlier cycle queued
+// has run. runtime.GC returns with the sweep finished, so a cycle's finalizers are
+// all queued by then; the finalizer goroutine drains a batch before it takes the
+// next, so once the second cycle's sentinel has run, the first cycle's have too.
+func collectGarbage(t *testing.T) {
+	t.Helper()
+	for range 2 {
+		ran := make(chan struct{})
+		func() {
+			sentinel := new([16]uintptr) // too large for the tiny allocator, whose finalizers may never run
+			runtime.SetFinalizer(sentinel, func(*[16]uintptr) { close(ran) })
+		}()
+		runtime.GC()
+		select {
+		case <-ran:
+		case <-time.After(10 * time.Second):
+			t.Fatal("the finalizer goroutine did not run within 10s")
+		}
+	}
 }
 
 type crashEditorFixture struct {
@@ -355,8 +380,22 @@ func newCrashEditorFixture(t *testing.T) *crashEditorFixture {
 	return &crashEditorFixture{t: t, binary: writeFakeVSCodeBinary(t, "code-server", nil)}
 }
 
+// server makes a server that stays alive for the rest of the test, as a running
+// agent-server does: acquireEditorNamespace's flock lives in hs.editor.lock, and
+// nothing else points back at hs (the supervisor and its editors do not), so a
+// test that stops naming hs would otherwise hand the *os.File to its finalizer and
+// lose the lock mid-test (#7139). The cleanup closure keeps hs reachable, and
+// releases the lock deterministically — registered first, so it runs after the
+// supervisor stops.
 func (f *crashEditorFixture) server(id, title string) *headlessServer {
 	hs := &headlessServer{inst: &session.Instance{ID: id}, repoPath: "/srv/repo", title: title}
+	f.t.Cleanup(func() {
+		hs.editor.lockMu.Lock()
+		defer hs.editor.lockMu.Unlock()
+		if hs.editor.lock != nil {
+			_ = hs.editor.lock.Close() // a test that already closed it, to model an exit, gets os.ErrClosed
+		}
+	})
 	sup := hs.editorSupervisor()
 	sup.configuredBinary = func() string { return f.binary }
 	sup.startGrace = 5 * time.Second

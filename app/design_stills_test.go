@@ -202,7 +202,7 @@ func TestDesignDriverScenes(t *testing.T) {
 					// the body pages, the footer counts what is hidden in each
 					// direction, and the prompt stays pinned (#5171).
 					var warnings []string
-					warnings = append(warnings, "[!] Delete project 'atlas'?")
+					warnings = append(warnings, `[!] Delete project "atlas"?`)
 					for i := 1; i <= 16; i++ {
 						warnings = append(warnings, fmt.Sprintf("Warning %02d — could not verify workspace state before deletion; data may be lost.", i))
 					}

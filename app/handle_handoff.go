@@ -55,14 +55,14 @@ func handoffAgentChoices(current, recorded string, resolvedAgents map[string]str
 // goes first and the reassurance goes last.
 //
 // When the outgoing agent is unknown it drops the "from" clause entirely rather
-// than interpolating an empty string. "Hand 'alpha' from  to codex?" renders a
+// than interpolating an empty string. "Hand "alpha" from  to codex?" renders a
 // double space and reads as a rendering bug — on the one dialog that has to be
 // trusted before a running agent is replaced.
 func handoffConfirmMessage(title, from, target string) string {
 	if from == "" {
-		return fmt.Sprintf("Hand '%s' to %s?", title, target)
+		return fmt.Sprintf("Hand %q to %s?", title, target)
 	}
-	return fmt.Sprintf("Hand '%s' from %s to %s?", title, from, target)
+	return fmt.Sprintf("Hand %q from %s to %s?", title, from, target)
 }
 
 // handoffFreshStartDetail is the consent elaboration for every handoff the

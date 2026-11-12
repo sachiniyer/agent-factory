@@ -130,10 +130,10 @@ func TestNamingRowKeepsSelectionThroughAnExistingTitle(t *testing.T) {
 	h.reconcileSnapshot(snapshotOf(live...))
 	requireNamingRowSelected(t, h, naming, "snapshot reconcile during the exact match")
 
-	// Submitting the exact match is refused as a conflict and the form stays.
+	// Submitting the exact match is refused as a taken name and the form stays.
 	pressFormKey(t, h, tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNew, h.state, "a duplicate title is refused, not submitted")
-	require.Contains(t, h.errBox.String(), "conflicts with existing session")
+	require.Contains(t, h.errBox.String(), `session with title "alpha" already exists`)
 	requireNamingRowSelected(t, h, naming, "after the conflict refusal")
 
 	typeRunes(t, h, "x")

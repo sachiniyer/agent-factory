@@ -2,6 +2,7 @@ package session
 
 import (
 	"encoding/json"
+	"strconv"
 	"strings"
 	"time"
 
@@ -143,6 +144,13 @@ func (w operatorRepairWindow) disregards(path string, modified time.Time) bool {
 func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 	if strings.TrimSpace(launchDir) == "" {
 		return declineResumeUnverified("af cannot determine this session's launch directory, so it cannot confirm the operator-recorded conversation is this session's own")
+	}
+	if codexRolloutCompressed(rolloutPath) {
+		// Kept, not retired, but refused at every restore until the rollout
+		// is plain again: af never resumes it, so Codex never writes it back
+		// out. Say how to get it back (#7134 review F-5).
+		return declineResumeUnverified("the operator-recorded conversation's rollout is stored compressed, and af cannot read a compressed rollout to confirm it is this session's own; " +
+			"to resume it, decompress it in place (zstd -d --rm " + strconv.Quote(rolloutPath) + ") and run af sessions set-conversation again")
 	}
 	cwd, subagent, ok := codexRolloutSessionMeta(rolloutPath)
 	switch {

@@ -18,10 +18,10 @@ func TestTinyClipConfirmationOverlaysFit(t *testing.T) {
 		name    string
 		message string
 	}{
-		{name: "kill", message: "Delete session 'beta'?"},
+		{name: "kill", message: `Delete session "beta"?`},
 		{
 			name: "archive",
-			message: "[!] Archive session 'beta'?\n\n" +
+			message: "[!] Archive session \"beta\"?\n\n" +
 				"Its tmux is torn down and its worktree is moved out to the archive directory " +
 				"(branch + uncommitted changes preserved). Restore later with a.",
 		},

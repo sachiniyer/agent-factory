@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 
 	"github.com/sachiniyer/agent-factory/config"
@@ -72,7 +73,7 @@ func TestConfirmationModalStateTransitions(t *testing.T) {
 
 		// Manually trigger what would happen in handleKeyPress for 'D'
 		h.state = stateConfirm
-		h.confirmationOverlay = overlay.NewConfirmationOverlay("Delete session 'test'?")
+		h.confirmationOverlay = overlay.NewConfirmationOverlay(`Delete session "test"?`)
 
 		assert.Equal(t, stateConfirm, h.state)
 		assert.NotNil(t, h.confirmationOverlay)
@@ -214,40 +215,48 @@ func TestConfirmationModalKeyHandling(t *testing.T) {
 	}
 }
 
-// TestConfirmationMessageFormatting tests that confirmation messages are formatted correctly
+// TestConfirmationMessageFormatting pins the delete confirmation's first line.
+// Names in TUI confirmations take Go's %q double quotes, the style the tab
+// delete dialog already used (#7136): the session dialogs used single quotes,
+// so one screen read 'gamma' and the next "watch". %q also escapes a quote
+// inside a user-chosen title instead of letting it close the quotation early.
 func TestConfirmationMessageFormatting(t *testing.T) {
 	testCases := []struct {
-		name            string
-		sessionTitle    string
-		expectedMessage string
+		name         string
+		sessionTitle string
+		firstLine    string
 	}{
 		{
-			name:            "short session name",
-			sessionTitle:    "my-feature",
-			expectedMessage: "Delete session 'my-feature'? (y/n)",
+			name:         "short session name",
+			sessionTitle: "my-feature",
+			firstLine:    `Delete session "my-feature"?`,
 		},
 		{
-			name:            "long session name",
-			sessionTitle:    "very-long-feature-branch-name-here",
-			expectedMessage: "Delete session 'very-long-feature-branch-name-here'? (y/n)",
+			name:         "long session name",
+			sessionTitle: "very-long-feature-branch-name-here",
+			firstLine:    `Delete session "very-long-feature-branch-name-here"?`,
 		},
 		{
-			name:            "session with spaces",
-			sessionTitle:    "feature with spaces",
-			expectedMessage: "Delete session 'feature with spaces'? (y/n)",
+			name:         "session with spaces",
+			sessionTitle: "feature with spaces",
+			firstLine:    `Delete session "feature with spaces"?`,
 		},
 		{
-			name:            "session with special chars",
-			sessionTitle:    "feature/branch-123",
-			expectedMessage: "Delete session 'feature/branch-123'? (y/n)",
+			name:         "session with special chars",
+			sessionTitle: "feature/branch-123",
+			firstLine:    `Delete session "feature/branch-123"?`,
+		},
+		{
+			name:         "session with embedded quotes",
+			sessionTitle: `say "hi"`,
+			firstLine:    `Delete session "say \"hi\""?`,
 		},
 	}
 
 	for _, tc := range testCases {
 		t.Run(tc.name, func(t *testing.T) {
-			// Test the message formatting directly
-			actualMessage := fmt.Sprintf("Delete session '%s'? (y/n)", tc.sessionTitle)
-			assert.Equal(t, tc.expectedMessage, actualMessage)
+			message := killConfirmMessage(tc.sessionTitle, "", false, nil)
+			assert.Equal(t, tc.firstLine, strings.SplitN(message, "\n", 2)[0])
 		})
 	}
 }
@@ -281,7 +290,7 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 	require.NotNil(t, selected)
 
 	// This is what the KeyKill handler does
-	message := fmt.Sprintf("Delete session '%s'?", selected.Title)
+	message := killConfirmMessage(selected.Title, "", false, nil)
 	h.confirmationOverlay = overlay.NewConfirmationOverlay(message)
 	h.state = stateConfirm
 
@@ -291,7 +300,7 @@ func TestConfirmationFlowSimulation(t *testing.T) {
 	assert.False(t, h.confirmationOverlay.Dismissed)
 	// Test that overlay renders with the correct message
 	rendered := h.confirmationOverlay.Render()
-	assert.Contains(t, rendered, "Delete session 'test-session'?")
+	assert.Contains(t, rendered, `Delete session "test-session"?`)
 }
 
 // TestConfirmActionWithDifferentTypes tests that confirmAction works with different action types
@@ -483,7 +492,7 @@ func TestConfirmActionForwardsNonErrorMsg(t *testing.T) {
 	}
 
 	// Trigger the confirmation flow.
-	_ = h.confirmAction("Delete session 'test'?", action)
+	_ = h.confirmAction(`Delete session "test"?`, action)
 	require.Equal(t, stateConfirm, h.state)
 	require.NotNil(t, h.confirmationOverlay)
 

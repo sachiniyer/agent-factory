@@ -62,7 +62,7 @@ var restartDaemonAction = func() error {
 // remote target's daemon is on another machine, where a local restart would do
 // nothing, so the caller only reaches this for a local target.
 func (m *home) offerDaemonRestart(sessionTitle string) tea.Cmd {
-	message := fmt.Sprintf("[!] The daemon stopped responding while killing '%s'. Restart it?", sessionTitle)
+	message := fmt.Sprintf("[!] The daemon stopped responding while killing %q. Restart it?", sessionTitle)
 	detail := "Restarting recovers the daemon, but sessions it is running may be dropped. The kill may still finish on its own."
 	return m.confirmActionWithDetail(message, detail, func() tea.Msg {
 		return daemonRestartRequestedMsg{}
