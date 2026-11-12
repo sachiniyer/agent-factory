@@ -25,10 +25,27 @@ import (
 // no-rollout branch below handles that separate #4712 ordering constraint. The
 // boolean result asks the caller to capture again after delivery creates the
 // rollout and retires the pending recovery marker.
+//
+// The replacement has already launched when this runs, so an error here fails
+// a handoff after its runtime boundary was crossed. A fresh capture therefore
+// errors only on what the evidence said — two threads the runtime holds, a
+// rollout header that never became classifiable. A channel it merely cannot
+// read — a pre-launch baseline that failed, a store scan or open-file walk
+// that fails inside the window (session.ErrCodexCaptureChannelUnavailable) —
+// defers to the post-delivery capture like the no-rollout case, which asks the
+// runtime what it holds and reports why when it cannot (#7126). A carried
+// confirmation still refuses an unreadable store: confirming the carried
+// thread past it would hide the breakage.
 func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) (bool, error) {
 	token := instance.AgentRuntimeToken()
 	if token.Agent() != tmux.ProgramCodex {
 		return false, nil
+	}
+	carried := snap.CarriesConversation()
+	if !carried && snap.CodexBaselineErr() != nil {
+		// The diff can never answer from a failed before-image; spending the
+		// window re-reading that failure under the op-lock buys nothing.
+		return true, nil
 	}
 	// Rollout adoption needs the replacement's own runtime as evidence, not
 	// just the store and directory its launch was composed against (#6847).
@@ -55,6 +72,9 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	}
 	ticker.Stop()
 	if res.err != nil {
+		if !carried && errors.Is(res.err, session.ErrCodexCaptureChannelUnavailable) {
+			return true, nil
+		}
 		return false, fmt.Errorf("capture replacement Codex conversation: %w", res.err)
 	}
 	if !res.conversation.HasID() {
