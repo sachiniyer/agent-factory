@@ -3109,18 +3109,17 @@ rollout, and a session mid-operation all refuse with the reason.
 
 The running pane is not touched: the recorded id only matters the next time af
 builds a resume command (respawn, restore, handoff). The recorded id stands
-while the pane stays on the thread it was on when you set it; only if the
-pane's Codex process later moves to another thread does af record that thread
-instead (#7120). A pane that is on no thread yet (a fresh Codex that has not
-been prompted) moves when its first prompt starts one, so that prompt replaces
-the id: set it after the pane's first prompt, not before.
+while the pane stays on the thread it was on when you set it, and it outranks
+the other threads already in the session's worktree.
 
-The id outranks every thread that already existed in the session's worktree
-when you set it. A thread started there afterwards (for example with /new)
-means the id no longer names the thread you were last in: if af did not see
-the pane move to it, the next restore or handoff starts a fresh conversation
-rather than resume the id (#7122). Re-running with the same id renews the
-repair as of now, so it also outranks the threads started since the first run.
+Once the pane moves to another thread, the id no longer names the thread you
+were last in. af records the thread the pane moved to (#7120); if it could not
+see the move, the next restore or handoff starts a fresh conversation rather
+than resume the id (#7122). That covers a new thread (/new, or the first
+prompt of a fresh Codex, which is on no thread until then) and, when af could
+read which thread the pane was on as you set the id, an older one the pane
+resumes. So set the id after a fresh pane's first prompt, not before.
+Re-running with the same id renews the repair as of now.
 
 Example:
   af sessions set-conversation fix-auth 0195f8e2-7c3a-7b1d-9e4f-2a6c8d0b1e2f

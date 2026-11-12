@@ -80,7 +80,7 @@ func TestExactResumeBoundsAnOperatorRepairToThreadsThatExistedAtTheRepair(t *tes
 		_, workDir := setup(t)
 		repair := staleResumeInstance(t, workDir, operatorRecordAt(heldTestOwnID, repairedAt))
 		program, ok, reason := prepareExactResumeConversation(repair, repair.Program)
-		require.True(t, ok, "refused: %s", reason)
+		require.True(t, ok, "refused: %s", reason.reason)
 		require.Contains(t, program, "resume "+heldTestOwnID)
 	})
 
@@ -91,7 +91,7 @@ func TestExactResumeBoundsAnOperatorRepairToThreadsThatExistedAtTheRepair(t *tes
 		repair := staleResumeInstance(t, workDir, operatorRecordAt(heldTestOwnID, repairedAt))
 		_, ok, reason := prepareExactResumeConversation(repair, repair.Program)
 		require.False(t, ok, "a thread the user started after the repair must not be silently skipped")
-		require.Equal(t, staleCarryReason, reason)
+		require.Equal(t, staleCarryReason, reason.reason)
 	})
 
 	t.Run("the mint time is the header's UTC instant, not the filename's local stamp", func(t *testing.T) {
@@ -104,7 +104,7 @@ func TestExactResumeBoundsAnOperatorRepairToThreadsThatExistedAtTheRepair(t *tes
 		repair := staleResumeInstance(t, workDir, operatorRecordAt(heldTestOwnID, repairedAt))
 		_, ok, reason := prepareExactResumeConversation(repair, repair.Program)
 		require.False(t, ok)
-		require.Equal(t, staleCarryReason, reason)
+		require.Equal(t, staleCarryReason, reason.reason)
 	})
 
 	t.Run("an operator kind af cannot date gets no exemption", func(t *testing.T) {
@@ -117,7 +117,7 @@ func TestExactResumeBoundsAnOperatorRepairToThreadsThatExistedAtTheRepair(t *tes
 				repair := staleResumeInstance(t, workDir, operatorRecordAt(heldTestOwnID, capturedAt))
 				_, ok, reason := prepareExactResumeConversation(repair, repair.Program)
 				require.False(t, ok, "a hand-edited operator kind must be judged like any record")
-				require.Equal(t, staleCarryReason, reason)
+				require.Equal(t, staleCarryReason, reason.reason)
 			})
 		}
 	})
@@ -291,44 +291,73 @@ func TestCouldNotVerifyRefusalKeepsAnOperatorRepair(t *testing.T) {
 	require.True(t, captured.exactResumeRefusal(reason).retire, "a capture's refused record is still retired")
 }
 
-// The mint time is an instant, read from the header's zoned stamp, with the
-// thread's UUIDv7 as the fallback — never a zone-less reading.
-func TestCodexRolloutMintTime(t *testing.T) {
-	minted := time.Date(2026, 11, 11, 21, 50, 10, 432_000_000, time.UTC)
-	write := func(t *testing.T, id, line string) string {
+// A rollout is dated by when it entered the store — its session_meta line's
+// own stamp, an instant — and never by a construction date alone (#7125
+// review R-1).
+func TestCodexRolloutStoredAt(t *testing.T) {
+	stored := time.Date(2026, 11, 11, 21, 50, 10, 432_000_000, time.UTC)
+	write := func(t *testing.T, line string) string {
 		t.Helper()
-		path := filepath.Join(t.TempDir(), "rollout-2026-11-11T13-50-10-"+id+".jsonl")
+		path := filepath.Join(t.TempDir(), "rollout-2026-11-11T13-50-10-"+heldTestOwnID+".jsonl")
 		require.NoError(t, os.WriteFile(path, []byte(line+"\n"), 0o644))
 		return path
 	}
-	meta := func(stamp string) string {
-		return `{"type":"session_meta","payload":{"cwd":"/w","timestamp":"` + stamp + `"}}`
+	meta := func(lineStamp, payloadStamp string) string {
+		line := `{"type":"session_meta","payload":{"cwd":"/w"`
+		if payloadStamp != "" {
+			line += `,"timestamp":"` + payloadStamp + `"`
+		}
+		line += `}`
+		if lineStamp != "" {
+			line += `,"timestamp":"` + lineStamp + `"`
+		}
+		return line + `}`
 	}
 
-	t.Run("the header's UTC stamp", func(t *testing.T) {
-		got, ok := codexRolloutMintTime(write(t, newerConversationID, meta("2026-11-11T21:50:10.432Z")))
+	t.Run("the line's UTC stamp, not the earlier construction stamp", func(t *testing.T) {
+		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T21:50:10.432Z", "2026-11-11T21:40:00.000Z")))
 		require.True(t, ok)
-		require.True(t, got.Equal(minted))
+		require.True(t, got.Equal(stored), "got %s", got.UTC())
 	})
 	t.Run("an offset stamp is the same instant", func(t *testing.T) {
-		got, ok := codexRolloutMintTime(write(t, newerConversationID, meta("2026-11-11T13:50:10.432-08:00")))
+		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T13:50:10.432-08:00", "")))
 		require.True(t, ok)
-		require.True(t, got.Equal(minted))
+		require.True(t, got.Equal(stored))
 	})
-	t.Run("a stamp with no zone is not read as UTC; the UUIDv7 dates the thread", func(t *testing.T) {
-		got, ok := codexRolloutMintTime(write(t, heldTestOwnID, meta("2026-11-11T13:50:10.432")))
+	t.Run("a payload stamped after its line is never under-dated", func(t *testing.T) {
+		got, ok := codexRolloutStoredAt(write(t, meta("2026-11-11T21:40:00.000Z", "2026-11-11T21:50:10.432Z")))
 		require.True(t, ok)
-		require.True(t, got.Equal(time.UnixMilli(0x01a1cc9742b0)), "got %s", got.UTC())
+		require.True(t, got.Equal(stored))
 	})
-	t.Run("a v4 id with no stamp cannot be dated", func(t *testing.T) {
-		_, ok := codexRolloutMintTime(write(t, newerConversationID, `{"type":"session_meta","payload":{"cwd":"/w"}}`))
-		require.False(t, ok)
+	for name, line := range map[string]string{
+		"a construction stamp alone":        meta("", "2026-11-11T21:50:10.432Z"),
+		"a line stamp with no zone":         meta("2026-11-11T13:50:10.432", "2026-11-11T21:50:10.432Z"),
+		"a UUIDv7 id and no stamp at all":   meta("", ""),
+		"a header that is not session_meta": `{"type":"event_msg","timestamp":"2026-11-11T21:50:10.432Z"}`,
+	} {
+		t.Run(name+" cannot date it", func(t *testing.T) {
+			_, ok := codexRolloutStoredAt(write(t, line))
+			require.False(t, ok)
+		})
+	}
+	t.Run("a rollout stored in the repair's own millisecond is not disregarded", func(t *testing.T) {
+		path := write(t, meta("2026-11-11T21:50:10.432Z", ""))
+		window := operatorRepairWindow{at: stored.Add(500 * time.Microsecond)}
+		require.False(t, window.disregards(path, stored))
+		window.at = stored.Add(time.Millisecond)
+		require.True(t, window.disregards(path, stored))
 	})
-	t.Run("a thread minted in the repair's own millisecond counts as newer", func(t *testing.T) {
-		path := write(t, newerConversationID, meta("2026-11-11T21:50:10.432Z"))
-		require.Equal(t, []string{path}, codexRolloutsNotMintedBy([]string{path}, minted.Add(500*time.Microsecond)))
-		require.Empty(t, codexRolloutsNotMintedBy([]string{path}, minted.Add(time.Millisecond)))
-	})
+}
+
+// R-2: a repair stamped from an observation is dated no later than it.
+func TestWithRepairObservationDatesTheRepairNoLaterThanTheLook(t *testing.T) {
+	validated := time.Now()
+	looked := validated.Add(-3 * time.Second)
+	stamped := operatorRecordAt(heldTestOwnID, validated).WithRepairObservation(repairHeldID, looked)
+	require.True(t, stamped.CapturedAt.Equal(looked))
+	require.Equal(t, repairHeldID, stamped.RepairHeldID)
+	later := operatorRecordAt(heldTestOwnID, validated).WithRepairObservation(repairHeldID, validated.Add(time.Second))
+	require.True(t, later.CapturedAt.Equal(validated), "an observation never dates the repair later than it was validated")
 }
 
 // The repair a set-conversation writes carries the observation with it, and

@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -101,7 +102,10 @@ func heldThreadForLog(held session.AgentConversationData) string {
 type repairHeldObservation struct {
 	token  session.AgentRuntimeToken
 	heldID string
-	ok     bool
+	// at is taken before the walk starts, so a thread the pane moves to while
+	// the walk runs is after it.
+	at time.Time
+	ok bool
 }
 
 // observeRepairHeld takes that answer BEFORE the repair's op-lock (#7122,
@@ -119,20 +123,24 @@ func observeRepairHeld(inst *session.Instance) repairHeldObservation {
 	if token.Agent() != tmux.ProgramCodex {
 		return repairHeldObservation{}
 	}
+	at := time.Now()
 	held, err := session.HeldAgentConversation(token.Agent(), inst.BindConversationCaptureRuntime(scope))
 	if err != nil {
 		return repairHeldObservation{}
 	}
-	return repairHeldObservation{token: token, heldID: held.ID, ok: true}
+	return repairHeldObservation{token: token, heldID: held.ID, at: at, ok: true}
 }
 
 // stamp folds the observation into the repair it was taken for, under the
 // op-lock — only while the runtime it observed is still the live one, so a
 // respawn or swap that landed in between leaves the repair unstamped rather
-// than stamped with another runtime's thread.
+// than stamped with another runtime's thread. A stamped repair is dated no
+// later than the observation (#7125 review R-2): the staleness bound then
+// treats a thread the pane moved to after the look, while the op-lock wait
+// and the store walk ran, as the move the follow sees it as.
 func (o repairHeldObservation) stamp(inst *session.Instance, conv session.AgentConversationData) session.AgentConversationData {
 	if !o.ok || inst.AgentRuntimeToken() != o.token {
 		return conv
 	}
-	return conv.WithRepairStamp(o.heldID)
+	return conv.WithRepairObservation(o.heldID, o.at)
 }

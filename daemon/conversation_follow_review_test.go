@@ -3,6 +3,7 @@ package daemon
 import (
 	"encoding/json"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -220,4 +221,39 @@ func TestUnstampedOperatorRepairBaselineIsPersisted(t *testing.T) {
 	require.Equal(t, heldUserThreadID, stored.ID, "the baseline moves nothing")
 	require.True(t, stored.RepairStamped)
 	require.Equal(t, heldFreshThreadID, stored.RepairHeldID)
+}
+
+// TestOperatorRepairIsDatedNoLaterThanItsObservation is the #7125 review's
+// R-2: the repair's stamp says what the runtime held when set-conversation
+// looked, before it took the op-lock and walked the store, so the repair's
+// date — the instant the staleness bound disregards threads up to — must be
+// no later than that look. Otherwise a thread the pane started in between is
+// one the bound treats as overridden while the follow treats it as a move.
+func TestOperatorRepairIsDatedNoLaterThanItsObservation(t *testing.T) {
+	manager, inst, repoID, _, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
+	writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(fresh)
+	var mu sync.Mutex
+	var firstLook time.Time
+	inst.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		mu.Lock()
+		if firstLook.IsZero() {
+			firstLook = time.Now()
+		}
+		mu.Unlock()
+		return held.snapshot()
+	})
+
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
+	stored := persistedAgentConversation(t, repoID)
+	require.True(t, stored.RepairStamped)
+	mu.Lock()
+	look := firstLook
+	mu.Unlock()
+	require.False(t, look.IsZero(), "fixture: the observation must have read the runtime's held files")
+	require.False(t, stored.CapturedAt.After(look),
+		"the repair is dated %s, after the observation it was stamped with (%s)", stored.CapturedAt, look)
 }

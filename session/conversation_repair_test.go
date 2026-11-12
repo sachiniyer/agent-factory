@@ -161,13 +161,13 @@ func TestExactResumeRefusalNamesAnUnexpressibleRecord(t *testing.T) {
 	inst := retireTestInstance(t)
 	inst.SetAgentConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: heldTestOwnID})
 
-	refusal := inst.exactResumeRefusal("")
+	refusal := inst.exactResumeRefusal(resumeDecline{})
 	require.Equal(t, heldTestOwnID, refusal.ID)
 	require.Contains(t, refusal.Reason, "claude")
 	require.False(t, refusal.retire, "an id the command cannot express is reported, not retired")
 	require.NotContains(t, tmux.ExactResumeFreshStartMessage("af_x", refusal.ExactResumeRefusal), "no recorded conversation id")
 
-	require.Equal(t, resumeRefusal{}, (&Instance{Tabs: []*Tab{{}}}).exactResumeRefusal(""),
+	require.Equal(t, resumeRefusal{}, (&Instance{Tabs: []*Tab{{}}}).exactResumeRefusal(resumeDecline{}),
 		"nothing recorded is the one case with nothing to say")
 }
 
@@ -203,7 +203,7 @@ func TestExactResumeStillRefusesAnOperatorRepairWhoseRolloutIsGone(t *testing.T)
 	repair := staleResumeInstance(t, workDir, operatorRecord(heldTestOwnID))
 	_, ok, reason := prepareExactResumeConversation(repair, repair.Program)
 	require.False(t, ok, "an operator repair whose rollout is gone cannot be resumed")
-	require.Contains(t, reason, "missing")
+	require.Contains(t, reason.reason, "missing")
 	require.True(t, repair.exactResumeRefusal(reason).retire, "the unusable repair is retired once the fresh spawn commits")
 }
 

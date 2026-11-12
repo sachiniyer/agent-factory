@@ -198,8 +198,8 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		return nil, reason
 	}
 	// An operator's standing repair is judged by the restore guard's rule
-	// (staleRecordedCodexReason): its provenance is re-checked, and only the
-	// threads that existed when it was made are disregarded (#7122).
+	// (staleRecordedCodexDecline): its provenance is re-checked, and only the
+	// threads it overrode are disregarded (#7122).
 	if !carry.committed {
 		if reason := carry.staleReason(req.program, req.workDir, req.outgoing); reason != "" {
 			return nil, reason
@@ -369,14 +369,14 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 		launchDir = launch.WorkingDir
 	}
 	recordedPath := filepath.Join(c.srcHome, c.transcript)
-	var repairedAt time.Time
+	var repair operatorRepairWindow
 	if outgoing.CaptureKind == ConversationCaptureOperator {
-		if reason := operatorRepairProvenanceReason(recordedPath, launchDir); reason != "" {
-			return reason
+		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
+			return decline.reason
 		}
-		repairedAt = operatorRepairBound(outgoing, time.Now())
+		repair = operatorRepairWindowOf(outgoing, time.Now())
 	}
-	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repairedAt) {
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutRecordedGone:
 		return "its rollout is missing from the previous account's home"
 	case codexRolloutStale:

@@ -104,9 +104,9 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	prev := instance.AgentConversation()
 	// Re-running a repair is a fresh repair, never a no-op: it re-dates the
 	// record and re-stamps what the runtime holds now. The staleness guards
-	// disregard only the threads that existed when the repair was made
-	// (#7122), so a re-run is how an operator also overrides a thread the
-	// pane started since the first one. The same id recorded by a capture
+	// disregard only the threads the repair overrode (#7122), so a re-run is
+	// how an operator also overrides a thread the pane moved to since the
+	// first one. The same id recorded by a capture
 	// becomes the operator's, which the follow and the staleness guards treat
 	// as standing (#7120 review).
 	if !instance.SetAgentConversation(observed.stamp(instance, conv)) {
