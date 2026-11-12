@@ -155,11 +155,16 @@ func TestCaptureWithoutEvidenceEndsTheAttemptAtOnce(t *testing.T) {
 	old := conversationCaptureTimeout
 	conversationCaptureTimeout = window
 	t.Cleanup(func() { conversationCaptureTimeout = old })
+	// The trust pump is the swap's other obligation (#7140): bounded, and given
+	// a window of its own here, well inside a third of the capture window.
+	trust := shortSwapTrustWindow(t)
 	start = time.Now()
 	captureAfterDelivery, err := captureAccountSwapConversation(inst, snap)
+	elapsed := time.Since(start)
 	require.NoError(t, err)
 	require.True(t, captureAfterDelivery)
-	require.Less(t, time.Since(start), window/3, "the swap must not hold its op-lock for an answer that cannot come")
+	require.Less(t, elapsed, window/3, "the swap must not hold its op-lock for an answer that cannot come")
+	require.GreaterOrEqual(t, elapsed, trust, "only for the trust pump's own bounded window")
 }
 
 // TestAFailedBaselineIsRetakenOnceTheStoreHeals is the #7124 review's F3. The

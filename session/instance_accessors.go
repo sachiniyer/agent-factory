@@ -685,11 +685,15 @@ func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, c
 	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
 		return false, false
 	}
+	// A kept capture identity is trusted no longer than launch evidence would
+	// be, and launch evidence is re-proven at every reattach: the next capture
+	// attempt re-scans it (#7131). Counting the settle also voids any scan
+	// already in flight, whatever its answer — it began before this reattach
+	// (#7140).
+	i.captureEvidence.verified = false
+	i.captureSettles++
 	if i.runtimeProgram == "" && i.runtimePID == 0 {
-		// No launch claim to settle — but a kept capture identity is trusted no
-		// longer than launch evidence would be, and launch evidence is re-proven
-		// at every reattach: the next capture attempt re-scans it (#7131).
-		i.captureEvidence.verified = false
+		// No launch claim to settle.
 		return false, false
 	}
 	i.runtimeEvidenceGeneration.Add(1)
