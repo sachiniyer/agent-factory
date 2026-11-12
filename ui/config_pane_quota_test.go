@@ -641,10 +641,10 @@ func TestConfigPaneQuota_FooterDropsDeadVerbsOnUsageRows(t *testing.T) {
 		t.Fatalf("expected a quota row, an account-evidence row, and a config entry: %d %d %d", quotaIdx, accountIdx, entryIdx)
 	}
 
-	check := func(idx int, label string) {
+	check := func(p *ConfigPane, idx int, label string) {
 		t.Helper()
-		pane.selectedIdx = idx
-		hints := pane.renderHints()
+		p.selectedIdx = idx
+		hints := p.renderHints()
 		for _, dead := range []string{"↵ edit", "e explain"} {
 			if strings.Contains(hints, dead) {
 				t.Errorf("%s: footer must not advertise %q (it is a no-op there):\n%s", label, dead, hints)
@@ -656,8 +656,8 @@ func TestConfigPaneQuota_FooterDropsDeadVerbsOnUsageRows(t *testing.T) {
 			}
 		}
 	}
-	check(quotaIdx, "quota agent row")
-	check(accountIdx, "per-account evidence row")
+	check(pane, quotaIdx, "quota agent row")
+	check(pane, accountIdx, "per-account evidence row")
 
 	// The empty-accounts shape exercises the empty-accounts row too.
 	empty := quotaPane(t, []QuotaRow{
@@ -673,7 +673,7 @@ func TestConfigPaneQuota_FooterDropsDeadVerbsOnUsageRows(t *testing.T) {
 	if emptyIdx < 0 {
 		t.Fatal("expected an empty-accounts row")
 	}
-	check(emptyIdx, "empty-accounts row")
+	check(empty, emptyIdx, "empty-accounts row")
 
 	// Contrast: a config entry row keeps both verbs — the footer only drops
 	// them where they do not work.
