@@ -525,6 +525,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		m.rootEnsureSuppressed(st) // the carry is suppressRootAgent's to retire
 		return
 	}
+	testHookRootAdmitted()
 
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	m.mu.Lock()

@@ -88,6 +88,10 @@ var deregisterRootAgents = config.DeregisterRootAgentsForRepo
 // can hold it open: in a real daemon the two are microseconds apart.
 var deleteProjectPreSweepHookForTest func()
 
+// deleteProjectPostSuppressHookForTest, when non-nil, runs once suppression is
+// in place and before the archive loop tears the repository's sessions down.
+var deleteProjectPostSuppressHookForTest func()
+
 // deleteProjectPostClaimantHookForTest, when non-nil, runs after the claimant
 // scan and before the identity-transition check that follows it. That ordering
 // is #3530 review id 3917929613's subject — a checkout REAPPEARING while the
@@ -397,6 +401,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// suppressHistoricalRootAgent.
 	if historical != "" {
 		m.suppressHistoricalRootAgent(historical, repoID, resolved.claimantProjectID)
+	}
+	if deleteProjectPostSuppressHookForTest != nil {
+		deleteProjectPostSuppressHookForTest()
 	}
 	// A re-attribution probe for the deleted project is deliberately LEFT
 	// RUNNING (#3299 review rounds 9-11, converged): while its marker read

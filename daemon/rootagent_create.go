@@ -428,3 +428,8 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	m.retireRootCarries(repo.ID)
 	m.rootEnsureSucceeded(st)
 }
+
+// testHookRootAdmitted runs on the sweep right after a candidate passes its
+// deletion-tombstone check, before anything launches its create (PR #7190
+// review R1).
+var testHookRootAdmitted = func() {}

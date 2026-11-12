@@ -441,6 +441,141 @@ func TestADeleteFenceRefusalIsNotAResumeFailure(t *testing.T) {
 		"the replacement resumes the conversation the aborted delete left alone")
 }
 
+// parkSweepAtAdmission parks the first ensure sweep that admits a candidate —
+// right after its deletion-tombstone check, before its create is launched —
+// until release is called (PR #7190 review R1).
+func parkSweepAtAdmission(t *testing.T) (admitted <-chan struct{}, release func()) {
+	t.Helper()
+	reached := make(chan struct{})
+	gate := make(chan struct{})
+	var parked atomic.Bool
+	var once sync.Once
+	prev := testHookRootAdmitted
+	testHookRootAdmitted = func() {
+		if parked.CompareAndSwap(false, true) {
+			close(reached)
+			<-gate
+		}
+	}
+	release = func() { once.Do(func() { close(gate) }) }
+	t.Cleanup(func() {
+		release()
+		testHookRootAdmitted = prev
+	})
+	return reached, release
+}
+
+func waitClosed(t *testing.T, ch <-chan struct{}, what string) {
+	t.Helper()
+	select {
+	case <-ch:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("timed out waiting for %s", what)
+	}
+}
+
+// PR #7190 review R1 (P2): the sweep admits a create with its tombstone check
+// and launches it — minting its ticket — in a later m.mu section. A delete
+// that suppressed in between found no ticket to withdraw, and the first-ever
+// create it had admitted committed the deleted project's root after the delete.
+func TestARootCreateAdmittedJustBeforeASuppressionNeverLaunches(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	t.Cleanup(manager.waitRootAgentCreates)
+
+	admitted, release := parkSweepAtAdmission(t)
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		manager.EnsureRootAgents()
+	}()
+	waitClosed(t, admitted, "the sweep to admit the first-ever root")
+
+	_, err = manager.DeleteProject(DeleteProjectRequest{RepoID: repo.ID, RepoPath: repoPath})
+	require.NoError(t, err, "nothing has launched yet, so the delete succeeds")
+
+	release()
+	waitClosed(t, sweepDone, "the sweep to finish")
+	manager.waitRootAgentCreates()
+	require.Nil(t, findRootInstance(t, manager, repoPath),
+		"a create admitted before a delete's suppression must not commit the deleted project's root after it")
+	require.Empty(t, *seen, "no root may start for the deleted project")
+}
+
+// R1 for a heal: admitted, then the delete suppresses and is held before its
+// archive loop, so the dead root is still there for the heal to reap. Its
+// fresh ticket was never withdrawn, so the reap held the deleted project's
+// carry, and the fence refusal that followed kept it — after the delete.
+func TestARootHealAdmittedJustBeforeASuppressionNeverLaunches(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	t.Cleanup(manager.waitRootAgentCreates)
+	manager.ensureRootAgentsAndWait()
+	first := findRootInstance(t, manager, repoPath)
+	require.NotNil(t, first, "precondition: the first ensure creates the root")
+	prior := seedRootConversation(t, first)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	first.SetStatusForTest(session.Lost)
+
+	admitted, release := parkSweepAtAdmission(t)
+	sweepDone := make(chan struct{})
+	go func() {
+		defer close(sweepDone)
+		manager.EnsureRootAgents()
+	}()
+	waitClosed(t, admitted, "the sweep to admit the heal")
+
+	suppressed := make(chan struct{})
+	finish := make(chan struct{})
+	var finishOnce sync.Once
+	deleteProjectPostSuppressHookForTest = func() {
+		close(suppressed)
+		<-finish
+	}
+	t.Cleanup(func() {
+		finishOnce.Do(func() { close(finish) })
+		deleteProjectPostSuppressHookForTest = nil
+	})
+	deleteDone := make(chan struct{})
+	var deleteErr error
+	go func() {
+		defer close(deleteDone)
+		_, deleteErr = manager.DeleteProject(DeleteProjectRequest{RepoID: repo.ID, RepoPath: repoPath})
+	}()
+	waitClosed(t, suppressed, "the delete to suppress")
+
+	release()
+	waitClosed(t, sweepDone, "the sweep to finish")
+	manager.waitRootAgentCreates()
+	finishOnce.Do(func() { close(finish) })
+	waitClosed(t, deleteDone, "the delete to finish")
+	require.NoError(t, deleteErr)
+
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	require.NotNil(t, st, "the candidate's ensure state exists")
+	_, held := manager.heldRootCarry(st, repo, nil)
+	require.False(t, held, "a heal admitted before a delete's suppression must not hold the deleted project's carry after it")
+	require.Len(t, *seen, 1, "only the first-ever root may have started")
+	for _, opts := range *seen {
+		require.NotEqual(t, prior.ID, opts.ResumeConversation.ID,
+			"the deleted project's conversation must not be resumed by any create")
+	}
+}
+
 // Control for the race tests above: with NO concurrent delete, the same
 // post-reap-failed heal MUST still hold its carry so the next pass resumes the
 // conversation — the #7088 behavior the carry exists for.
