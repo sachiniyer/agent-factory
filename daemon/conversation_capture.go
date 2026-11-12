@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
@@ -166,7 +167,7 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 			return
 		case <-timer.C:
 		}
-		if !m.conversationCaptureArmed(key, inst, token, snap) {
+		if !m.conversationCaptureArmed(key, inst, token) {
 			return
 		}
 		m.beginConversationCapture(inst)
@@ -176,23 +177,18 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 
 // conversationCaptureArmed is the loop's gate: the row must still be the same
 // tracked instance, still own the armed marker for THIS generation, and still
-// be a live session whose baseline can be trusted. Failing any of those ends
-// the loop — a replaced runtime, a row that died or was archived, a baseline
-// whose store scan never worked. A recorded conversation no longer does: the
-// loop goes on following the runtime (#7101).
-func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, token session.AgentRuntimeToken, snap session.ConversationCaptureSnapshot) bool {
+// be a live session. Failing any of those ends the loop — a replaced runtime,
+// a row that died or was archived. A recorded conversation no longer does: the
+// loop goes on following the runtime (#7101). Nor does a baseline whose store
+// scan failed: the follow never reads it (#7120 review), and an unrecorded
+// row's attempt skips the diff that would and asks the held query, which
+// needs none (#7123). Ending the loop on it would hand the row back to the
+// poll, whose re-arm walks the store again for a fresh baseline every cycle.
+func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, token session.AgentRuntimeToken) bool {
 	if inst == nil || inst.UserKilled() || inst.IsArchived() {
 		return false
 	}
 	if inst.AgentRuntimeToken() != token {
-		return false
-	}
-	// A failed before-image only ends an UNRECORDED row's loop — its diff is
-	// what needs the baseline. A recorded row only follows, which asks the
-	// runtime and never reads the baseline, so a store that cannot be walked
-	// must neither end its loop nor send the poll to re-walk it every tick
-	// (#7120 review).
-	if snap.CodexBaselineFailed() && !inst.AgentConversation().HasID() {
 		return false
 	}
 	switch inst.GetLiveness() {
@@ -353,18 +349,23 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	}
 	// Rollout adoption is attributed to the runtime this attempt commits
 	// for: a new same-directory rollout is only a directory match until the
-	// pane's own process generation provably holds it open — a same-cwd
+	// agent's own process generation provably holds it open — a same-cwd
 	// sibling minted while the session waits unprompted is provably foreign
-	// and stays unrecorded (#6847). The binding re-resolves the pane on each
-	// judgement, so a snapshot armed before the pane exists still attributes
-	// to the runtime the pane later holds.
+	// and stays unrecorded (#6847). The binding re-reads the launch evidence
+	// on each judgement, so a snapshot armed before the launch recorded it
+	// still attributes to that runtime once it has; without that evidence
+	// nothing is attributed — never the active pane's thread (#7123).
 	snap = inst.BindConversationCaptureRuntime(snap)
 	var conv session.AgentConversationData
 	var err error
-	if !snap.BaselineFree() {
-		// A scope-only snapshot (a loop armed to follow a row that has since
-		// lost its record) has no before-image for the diff to compare with;
-		// only the held query below may answer from it.
+	// The diff needs a before-image to compare with. A scope-only snapshot (a
+	// loop armed to follow a row that has since lost its record) has none,
+	// and a failed one can never answer: asking it would only re-read the
+	// same error for the attempt's whole window and then return before the
+	// held query below — which needs no baseline — got its turn (#7123). Both
+	// go straight to the held query.
+	baselineErr := snap.CodexBaselineErr()
+	if !snap.BaselineFree() && baselineErr == nil {
 		if conv, err = session.CaptureAgentConversation(agent, snap, timeout); err != nil {
 			return err
 		}
@@ -382,6 +383,11 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 			return err
 		}
 		if !conv.HasID() {
+			if baselineErr != nil {
+				// Say so once: until the agent holds a rollout open there is
+				// nothing to record, and the store is broken either way.
+				return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
+			}
 			return nil
 		}
 	}
