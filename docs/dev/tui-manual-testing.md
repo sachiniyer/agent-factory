@@ -79,10 +79,10 @@ On a cold boot the cursor sits on the **section header** (no instance selected
 `j` moves the cursor down onto the first instance. `af_select` is robust to
 any starting position: it anchors at the top (`k` is idempotent there), then
 steps down with `j` until the target row shows `▾` **and** the tree cursor is
-actually on it. It judges no key by a fixed poll (#7197). It waits for the
-anchor to put `▾` on the first session, then for each `j` to show. A TUI
-running behind its keys could otherwise skip the target, or let `af_select`
-return on a stale frame with a `j` still on its way.
+actually on it. It judges no key by a fixed poll (#7197). It presses `k` in
+bursts of 30 until `▾` is on the first session, then waits for each `j` to
+show. A TUI running behind its keys could otherwise skip the target, or let
+`af_select` return on a stale frame with a `j` still on its way.
 
 > **Display-selected ≠ cursor-on-row (#1174 / #1199).** The sticky `▾` is only
 > a *display* signal. A **single** auto-selected instance renders `▾` while the

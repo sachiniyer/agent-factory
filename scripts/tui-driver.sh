@@ -406,10 +406,61 @@ _af_rail_cursor() {
 # expanded one. Reads a screen on stdin. Rows the cursor cannot stop on (an
 # in-flight create or delete) draw no arrow, so the first ▸/▾ row is the
 # session that owns the topmost tab stop.
+#
+# The rail windows its rows around the cursor and says how many it hides above
+# with a `▲ N more` row (ui/sidebar_render.go). The only row above the first
+# session is the Sessions header (rebuildVisibleItems), and the window scrolls
+# the header away when the cursor climbs to that session, so `▲ 1 more` still
+# shows the first session. Any larger count hides a session, and the first
+# VISIBLE row proves nothing about the top (#7197 review).
 _af_rail_top_selected() {
     awk -F"$_AF_PANE_BORDER_FS" '
+        match($1, /▲[[:space:]]+[0-9]+/) {
+            n = substr($1, RSTART, RLENGTH); gsub(/[^0-9]/, "", n); hidden = n + 0
+        }
         $1 ~ /(▾|▸)[[:space:]]+[^[:space:]]/ { top = $1; exit }
-        END { exit (top ~ /▾/) ? 0 : 1 }'
+        END { exit (hidden <= 1 && top ~ /▾/) ? 0 : 1 }'
+}
+
+# _af_anchor_at_first_session — af_select's anchor: press k until the tree
+# cursor rests on the first session, then return. Waits for that on the
+# screen rather than one fixed poll (#7197). k cannot move the cursor off the
+# first session, so any k still queued when this returns is harmless.
+#
+# k goes out in bursts of 30. A burst only reaches the top when the cursor
+# starts at most 30 tab stops below it, so when the expanded session stops
+# changing short of the top for AF_DRIVER_KEY_SETTLE_POLLS polls, this sends
+# another burst, up to 10. A burst sent while the TUI is merely slow does no
+# harm: the extra k presses are no-ops at the top. Each burst gets
+# AF_DRIVER_TIMEOUT to settle. Sets _AF_ANCHOR_BURSTS to the bursts it sent,
+# which af_select uses to size its scan.
+_af_anchor_at_first_session() {
+    local burst k screen cursor last still deadline
+    _AF_ANCHOR_BURSTS=0
+    for ((burst = 0; burst < 10; burst++)); do
+        _AF_ANCHOR_BURSTS=$((burst + 1))
+        for ((k = 0; k < 30; k++)); do af_send k; done
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        last="" still=0
+        while :; do
+            screen="$(af_capture)"
+            printf '%s\n' "$screen" | _af_rail_top_selected && return 0
+            cursor="$(printf '%s\n' "$screen" | _af_rail_cursor)"
+            if [ "$cursor" = "$last" ]; then
+                still=$((still + 1))
+            else
+                still=0 last="$cursor"
+            fi
+            [ "$still" -ge "$AF_DRIVER_KEY_SETTLE_POLLS" ] && break
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                break 2
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    done
+    _af_log "the k anchor never brought the cursor to the first session"
+    printf '%s\n' "$screen" >&2
+    return 1
 }
 
 # The instance-scoped verb the status-bar menu offers only while a session is
@@ -702,16 +753,19 @@ af_select() {
     # first session, which is the cursor's stop after the anchor, and reports a
     # false selection failure. Or a stale frame shows the target with a `j`
     # still on its way, af_select returns, and that `j` moves the cursor off
-    # the target. So wait for the anchor to land: k never leaves the first
-    # session once it is there, so any k still queued at that point cannot
-    # move the selection. Then wait for each `j` to show (_af_select_state;
-    # _af_wait_key_effect explains the bound).
-    for i in $(seq -1 40); do
+    # the target. So wait for the anchor to land (_af_anchor_at_first_session),
+    # then for each `j` to show (_af_select_state; _af_wait_key_effect explains
+    # the bound).
+    #
+    # The scan used to cover 40 stops below an anchor 30 stops above the
+    # cursor, so it reached 10 stops past where the cursor started. The anchor
+    # now climbs all the way to the first session, in as many bursts of 30 as
+    # that takes, so the scan grows by 30 stops a burst to keep that reach.
+    local limit=40
+    for ((i = -1; i <= limit; i++)); do
         if [ "$i" -eq 0 ]; then
-            local anchor
-            for ((anchor = 0; anchor < 30; anchor++)); do af_send k; done
-            _af_wait_for_screen_state _af_rail_top_selected 1 "$AF_DRIVER_TIMEOUT" \
-                "the k anchor to reach the first session" || return 1
+            _af_anchor_at_first_session || return 1
+            limit=$((10 + 30 * _AF_ANCHOR_BURSTS))
         elif [ "$i" -gt 0 ]; then
             local before
             before="$(printf '%s\n' "$screen" | _af_select_state)"

@@ -584,29 +584,39 @@ _expect_af_select_already_selected() (
     fi
 )
 
-# _af_select_behind_tui <model> <start> <target> — drive af_select against a
-# stubbed TUI that falls behind its keys, then let the TUI catch up and report
-# where the cursor finally rests. The rail holds three single-tab sessions,
-# alpha, beta and alphax, as in the live run, with the cursor starting on
-# session index <start>. File-backed state, because af_capture runs in a
-# command substitution. Two ways of falling behind, both from #7197:
+# _af_select_behind_tui <model> <start> <target> [count] [window] — drive
+# af_select against a stubbed TUI that falls behind its keys, then let the TUI
+# catch up and report where the cursor finally rests. The rail holds <count>
+# single-tab sessions (default 3: alpha, beta and alphax, as in the live run;
+# otherwise s1..s<count>), with the cursor starting on session index <start>.
+# <window> > 0 shows only that many rail rows, scrolled around the cursor the
+# way ui/sidebar_render.go's scrollToSelection does, with its `▲ N more` and
+# `▼ N more` rows. File-backed state, because af_capture runs in a command
+# substitution. Two ways of falling behind, both from #7197:
 #   late  every frame shows the keys sent before the PREVIOUS capture, so the
 #         frame one poll after a key predates that key;
+#   later the same, two captures behind;
 #   batch the TUI acts on nothing for two captures, then on every queued key
 #         at once before the third.
 # Prints the session the cursor rests on once every key has landed, and fails
 # when af_select itself fails.
 # shellcheck disable=SC2317  # af_capture/af_send/sleep are called by af_select.
 _af_select_behind_tui() (
-    local model="$1" target="$3" dir
+    local model="$1" target="$3" count="${4:-3}" window="${5:-0}" dir i
     local -a sessions=(alpha beta alphax)
+    if [ "$count" -ne 3 ]; then
+        sessions=()
+        for ((i = 1; i <= count; i++)); do sessions+=("s$i"); done
+    fi
     dir="$(mktemp -d "${TMPDIR:-/tmp}/af-7197.XXXXXX")" || exit 1
     trap 'rm -rf "$dir"' EXIT
     : > "$dir/keys"
     printf '%s\n' "$2" > "$dir/cursor"
     printf '0\n' > "$dir/acted"
     printf '0\n' > "$dir/mark"
+    printf '0\n' > "$dir/mark2"
     printf '0\n' > "$dir/captures"
+    printf '0\n' > "$dir/offset"
     # _act <through> — the TUI acts on every queued key up to <through>.
     _act() {
         local cursor acted key
@@ -623,31 +633,61 @@ _af_select_behind_tui() (
             printf '%s\n' "$1" > "$dir/acted"
         fi
     }
+    # _rail_item <index> <cursor> — rail item <index>: the Sessions header,
+    # then one row per session, with the cursor's session expanded onto its
+    # tab row.
+    _rail_item() {
+        local idx="$1" cursor="$2"
+        if [ "$idx" -eq 0 ]; then
+            printf ' ▼ Sessions (%d)          │\n' "${#sessions[@]}"
+        elif [ "$idx" -le $((cursor + 1)) ]; then
+            [ "$idx" -eq $((cursor + 1)) ] && printf '  ▾  %-15s●  │\n' "${sessions[$((idx - 1))]}" ||
+                printf '  ▸  %-15s●  │\n' "${sessions[$((idx - 1))]}"
+        elif [ "$idx" -eq $((cursor + 2)) ]; then
+            printf '%s\n' '    └ 1 Agent            │'
+        else
+            printf '  ▸  %-15s●  │\n' "${sessions[$((idx - 2))]}"
+        fi
+    }
     af_ensure_nav() { :; }
     af_focus_tree() { return 0; }
     sleep() { :; }
     af_send() { printf '%s\n' "$1" >> "$dir/keys"; }
     af_capture() {
-        local sent mark captures cursor i
+        local sent mark mark2 captures cursor offset items last idx
         sent="$(wc -l < "$dir/keys")"
         read -r mark < "$dir/mark"
+        read -r mark2 < "$dir/mark2"
         read -r captures < "$dir/captures"
         captures=$((captures + 1))
         printf '%s\n' "$captures" > "$dir/captures"
         case "$model" in
             late) _act "$mark"; printf '%s\n' "$sent" > "$dir/mark" ;;
+            later)
+                _act "$mark2"
+                printf '%s\n' "$mark" > "$dir/mark2"
+                printf '%s\n' "$sent" > "$dir/mark"
+                ;;
             batch) [ $((captures % 3)) -eq 0 ] && _act "$sent" ;;
         esac
         read -r cursor < "$dir/cursor"
-        printf '%s\n' ' Agent Factory           │' " ▼ Sessions (${#sessions[@]})          │"
-        for i in "${!sessions[@]}"; do
-            if [ "$i" -eq "$cursor" ]; then
-                printf '  ▾  %-15s●  │\n' "${sessions[$i]}"
-                printf '%s\n' '    └ 1 Agent            │'
-            else
-                printf '  ▸  %-15s●  │\n' "${sessions[$i]}"
-            fi
-        done
+        read -r offset < "$dir/offset"
+        items=$((${#sessions[@]} + 2))
+        last=$((items - 1))
+        if [ "$window" -gt 0 ]; then
+            # Scroll up to the cursor's session row, down until its tab row
+            # shows, then back up over any slack at the bottom.
+            [ $((cursor + 1)) -lt "$offset" ] && offset=$((cursor + 1))
+            while [ $((cursor + 2)) -ge $((offset + window)) ]; do offset=$((offset + 1)); done
+            while [ "$offset" -gt 0 ] && [ $((items - offset + 1)) -le "$window" ]; do offset=$((offset - 1)); done
+            last=$((offset + window - 1))
+            [ "$last" -ge "$items" ] && last=$((items - 1))
+        fi
+        printf '%s\n' "$offset" > "$dir/offset"
+        printf '%s\n' ' Agent Factory           │'
+        [ "$offset" -gt 0 ] && printf ' ▲ %d more              │\n' "$offset"
+        for ((idx = offset; idx <= last; idx++)); do _rail_item "$idx" "$cursor"; done
+        [ "$last" -lt $((items - 1)) ] && printf ' ▼ %d more              │\n' $((items - 1 - last))
         printf '%s\n' ' n new · D delete session · t new tab · ? help · q quit'
     }
     af_select "$target" >/dev/null 2>&1 || exit 1
@@ -666,21 +706,35 @@ _af_select_behind_tui() (
 # it opened, holding the output of the steps that typed into "beta's" pane. The
 # only af_select before that pane opened was the reselect of beta after the
 # #7060 create.
+#
+# The windowed and 40-session cases pin the anchor's two review findings: the
+# first VISIBLE row of a rail scrolled past its top is not the first session,
+# and one burst of 30 k presses cannot climb more than 30 stops.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_survives_a_lagging_tui() {
-    local model start target got
-    for model in late batch; do
-        for start in 0 1 2; do
-            for target in alpha beta alphax; do
-                if ! got="$(_af_select_behind_tui "$model" "$start" "$target")"; then
-                    _af_fail "af_select '$target' from session $start against a '$model' TUI reported failure"
-                    return 1
-                fi
-                if [ "$got" != "$target" ]; then
-                    _af_fail "af_select '$target' from session $start against a '$model' TUI returned while keys were still queued; the cursor settled on '$got'"
-                    return 1
-                fi
-            done
+    local model start target got case
+    local -a cases=()
+    for start in 0 1 2; do
+        for target in alpha beta alphax; do cases+=("late later batch|$start $target 3 0"); done
+    done
+    # A rail windowed to the expanded session's two rows, a windowed scan that
+    # scrolls, and rails longer than one burst of 30 k presses can climb. The
+    # long rails are slow enough to stub that one lag model covers them.
+    cases+=("late later batch|2 alpha 3 2" "late later batch|2 beta 3 2"
+        "late later batch|0 alphax 3 2" "late|0 s8 10 4" "late|31 s1 32 0"
+        "late|33 s3 34 8")
+    for case in "${cases[@]}"; do
+        for model in ${case%%|*}; do
+            # shellcheck disable=SC2086  # each case is four words by design
+            set -- ${case#*|}
+            if ! got="$(_af_select_behind_tui "$model" "$1" "$2" "$3" "$4")"; then
+                _af_fail "af_select '$2' from session $1 of $3 (window $4) against a '$model' TUI reported failure"
+                return 1
+            fi
+            if [ "$got" != "$2" ]; then
+                _af_fail "af_select '$2' from session $1 of $3 (window $4) against a '$model' TUI returned while keys were still queued; the cursor settled on '$got'"
+                return 1
+            fi
         done
     done
 }
