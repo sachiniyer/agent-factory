@@ -65,8 +65,14 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		}
 		// The 2.1.322 MCP-server dialog is painted top-down too. A frame that is
 		// a proper prefix of it — preamble, body, some of the options, no footer
-		// yet — holds the same way (#7163).
-		if claudeMCPServerDialogOf(content).verdict == claudeMCPServerPartial {
+		// yet — holds the same way (#7163). So does the dialog in a shape af
+		// cannot read, such as a pane narrow enough that Claude Code wraps its
+		// rows: hold, say why once, and send nothing.
+		switch claudeMCPServerDialogOf(content).verdict {
+		case claudeMCPServerPartial:
+			return true
+		case claudeMCPServerUnreadable:
+			t.refuseClaudeMCPServer("its rows do not read as the dialog af knows (a pane too narrow for them wraps them)")
 			return true
 		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
@@ -308,8 +314,11 @@ func sgrSetsReverse(params string, current bool) bool {
 }
 
 // claudeTrustPromptPresent reports whether the captured pane content is showing
-// one of Claude Code's launch-time gates that af auto-dismisses with Enter: the
-// folder-trust prompt (either wording) or the "new MCP server" trust prompt.
+// one of Claude Code's launch-time gates that af answers: the folder-trust
+// prompt (either wording) or an MCP-server prompt (either wording). Being
+// present is not consent to a key: answerClaudeTrustPrompt navigates by label,
+// confirms only what it has read, and refuses — holding without a key — a
+// dialog whose selection is not one af may confirm.
 //
 // This runs on the daemon's CONTINUOUS Snapshot poll (session/agentserver_local.go
 // CheckAndHandleTrustPrompt), and CapturePaneContent is visible-only

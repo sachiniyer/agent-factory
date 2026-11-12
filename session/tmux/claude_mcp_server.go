@@ -60,8 +60,13 @@ const (
 	// Claude Code is still painting it. Hold: send nothing, and do not report
 	// the pane clear.
 	claudeMCPServerPartial
-	// claudeMCPServerComplete: the whole dialog, footer last. selected names the
-	// row that owns the cursor, or is empty when no single row does.
+	// claudeMCPServerUnreadable: the dialog is on screen, but in a shape af
+	// cannot read (a pane narrow enough that Claude Code wraps its rows, a
+	// server name that wraps, a future label tweak). Hold without a key, and
+	// say why once: "I could not read the dialog" is not "there is no dialog".
+	claudeMCPServerUnreadable
+	// claudeMCPServerComplete: the whole dialog, footer last, with the pane's
+	// one ❯ on one of its options. selected names that option.
 	claudeMCPServerComplete
 )
 
@@ -70,6 +75,11 @@ type claudeMCPServerDialog struct {
 	verdict  claudeMCPServerVerdict
 	selected string
 }
+
+// claudeMCPServerHoldAnchor is the part of the preamble that survives a narrow
+// pane: at 40 columns Claude Code wraps "New MCP server found in this" from
+// "project: <name>" (measured), so the full preamble is not on one row.
+const claudeMCPServerHoldAnchor = "New MCP server found"
 
 // claudeMCPServerDialogOf decides whether the 2.1.322 MCP-server dialog owns
 // the pane. Like claudeLegacyTrustDialogOf it decides from ONE property, because
@@ -85,28 +95,100 @@ type claudeMCPServerDialog struct {
 //	option block  one unbroken run of the three option rows, each exactly once
 //	footer        "Enter to confirm…", then nothing but blank rows and frame chrome
 //
+// And the pane holds exactly ONE ❯ row, on one of those options — the rule
+// parseClaudeFolderTrustDialog keeps for the folder-trust dialog.
+//
 // The footer being the last content is the structural guard every Claude branch
 // relies on (#4254, #4735): a working agent paints its composer — framed by
 // rules, led by ❯ — below its output, so a dialog quoted in a transcript always
-// has something painted after it, and a live one does not.
+// has something painted after it, and a live one does not. The single ❯ covers
+// the one quote that is not BELOW the composer but INSIDE it: a multi-line
+// draft that reproduces the dialog, with nothing painted under the composer.
+// The composer's own ❯ line sits above the pasted preamble, so such a pane has
+// two (#7167 review).
 //
 // A region that is a proper prefix of the grammar — preamble and body with no
-// options yet, some options, or all three with no footer yet — is partial.
-// Anything else below the preamble, at any point, means this is not the dialog.
+// options yet, some options, or all three with no footer yet — is partial, under
+// the same ❯ rule. A dialog that breaks the grammar while still plainly owning
+// the pane is unreadable (claudeMCPServerUnreadableOf). Anything else is not
+// the dialog.
 func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	rows := make([]claudeTrustRow, len(lines))
 	preamble := -1
+	var cursorRows []int
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
+		if rows[i].selected {
+			cursorRows = append(cursorRows, i)
+		}
 		if !rows[i].selected && strings.HasPrefix(rows[i].label, claudeMCPServerPreamble) {
 			preamble = i
 		}
 	}
-	if preamble < 0 {
-		return claudeMCPServerDialog{}
+	// At most one ❯ in the pane, and none above the preamble. The live dialog
+	// is the only thing on screen and paints exactly one; a composer anywhere
+	// paints another.
+	oneCursorBelow := func(from int) bool {
+		return len(cursorRows) <= 1 && (len(cursorRows) == 0 || cursorRows[0] > from)
 	}
+	if preamble >= 0 && oneCursorBelow(preamble) {
+		switch verdict, selected := claudeMCPServerGrammarOf(lines, rows, preamble); verdict {
+		case claudeMCPServerPartial:
+			return claudeMCPServerDialog{verdict: claudeMCPServerPartial}
+		case claudeMCPServerComplete:
+			if len(cursorRows) == 1 && selected != "" {
+				return claudeMCPServerDialog{verdict: claudeMCPServerComplete, selected: selected}
+			}
+		}
+	}
+	if claudeMCPServerUnreadableOf(lines, rows, cursorRows) {
+		return claudeMCPServerDialog{verdict: claudeMCPServerUnreadable}
+	}
+	return claudeMCPServerDialog{}
+}
 
+// claudeMCPServerUnreadableOf reports a dialog that is plainly on screen but
+// that the grammar could not read. It holds — never a key — so it is drawn only
+// from what a live dialog shows and a live session cannot:
+//
+//   - a row starting "New MCP server found" (which survives a wrapped
+//     preamble) opens the region;
+//   - the last content in the pane is the "Enter to confirm" footer, with frame
+//     rules counted as content, so a composer's bottom rule below a draft
+//     disqualifies it;
+//   - no frame rule between the two, so no composer is painted inside it;
+//   - exactly one ❯ in the pane, inside the region.
+//
+// A working session has its composer at the bottom, so it can never meet the
+// second condition, and holding cannot wedge one.
+func claudeMCPServerUnreadableOf(lines []string, rows []claudeTrustRow, cursorRows []int) bool {
+	last := -1
+	for i := len(lines) - 1; i >= 0; i-- {
+		if strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(lines[i], "\r"), "")) != "" {
+			last = i
+			break
+		}
+	}
+	if last < 0 || !claudeTrustIsFooter(rows[last].label) {
+		return false
+	}
+	anchor := -1
+	for i := last - 1; i >= 0; i-- {
+		if claudeTrustFrameRule(lines[i]) {
+			break
+		}
+		if !rows[i].selected && strings.HasPrefix(rows[i].label, claudeMCPServerHoldAnchor) {
+			anchor = i
+			break
+		}
+	}
+	return anchor >= 0 && len(cursorRows) == 1 && cursorRows[0] > anchor && cursorRows[0] < last
+}
+
+// claudeMCPServerGrammarOf walks the rows below the preamble through the
+// dialog's grammar. selected is the option carrying ❯ when exactly one does.
+func claudeMCPServerGrammarOf(lines []string, rows []claudeTrustRow, preamble int) (claudeMCPServerVerdict, string) {
 	const (
 		inBody = iota
 		inOptions
@@ -123,19 +205,23 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 		case inBody:
 			switch {
 			case rule || claudeTrustIsFooter(row.label):
-				return claudeMCPServerDialog{}
+				return claudeMCPServerNone, ""
 			case row.blank:
 				continue
 			case option >= 0:
 				phase = inOptions
 			case row.selected:
 				// A ❯ row that is not an option is a composer, not this picker.
-				return claudeMCPServerDialog{}
+				return claudeMCPServerNone, ""
 			default:
 				continue
 			}
 		case inOptions:
 			switch {
+			case rule:
+				// The live dialog paints no rule between its options and its
+				// footer; a composer does.
+				return claudeMCPServerNone, ""
 			case row.blank:
 				phase = afterOptions
 				continue
@@ -143,27 +229,29 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 				phase = afterFooter
 				continue
 			case option < 0:
-				return claudeMCPServerDialog{}
+				return claudeMCPServerNone, ""
 			}
 		case afterOptions:
 			switch {
+			case rule:
+				return claudeMCPServerNone, ""
 			case row.blank:
 			case claudeTrustIsFooter(row.label):
 				phase = afterFooter
 			default:
-				return claudeMCPServerDialog{}
+				return claudeMCPServerNone, ""
 			}
 			continue
 		case afterFooter:
 			// Frame chrome may close a boxed variant; content may not follow.
 			if !row.blank && !rule {
-				return claudeMCPServerDialog{}
+				return claudeMCPServerNone, ""
 			}
 			continue
 		}
 		// An option row.
 		if seen[option] {
-			return claudeMCPServerDialog{}
+			return claudeMCPServerNone, ""
 		}
 		seen[option] = true
 		if row.selected {
@@ -173,19 +261,19 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 	}
 
 	if phase != afterFooter {
-		return claudeMCPServerDialog{verdict: claudeMCPServerPartial}
+		return claudeMCPServerPartial, ""
 	}
 	for _, ok := range seen {
 		if !ok {
 			// A footer under an incomplete option block is not a shape this
 			// dialog paints in any order — Claude Code paints the footer last.
-			return claudeMCPServerDialog{}
+			return claudeMCPServerNone, ""
 		}
 	}
 	if cursors != 1 {
 		selected = ""
 	}
-	return claudeMCPServerDialog{verdict: claudeMCPServerComplete, selected: selected}
+	return claudeMCPServerComplete, selected
 }
 
 // declineClaudeMCPServer answers a complete 2.1.322 MCP-server dialog by
@@ -201,7 +289,7 @@ func claudeMCPServerDialogOf(content string) claudeMCPServerDialog {
 // keeps.
 func (t *TmuxSession) declineClaudeMCPServer(dialog claudeMCPServerDialog) bool {
 	if dialog.selected != claudeMCPServerDeclineLabel {
-		t.refuseClaudeMCPServer(dialog.selected)
+		t.refuseClaudeMCPServer(fmt.Sprintf("%q is selected", dialog.selected))
 		return true
 	}
 	content, err := t.CapturePaneContent()
@@ -227,20 +315,17 @@ func (t *TmuxSession) declineClaudeMCPServer(dialog claudeMCPServerDialog) bool 
 }
 
 // refuseClaudeMCPServer reports, once per dialog rather than once per poll, a
-// dialog whose cursor is not on the decline row. af will not move it there: the
-// contract is to accept Claude Code's own preselection, and a preselection that
-// is anything but the decline row is not one af may confirm on the user's
-// behalf. Refusing surfaces as the create's trust-prompt budget expiring — loud
-// and recoverable — where Enter would have enabled an MCP server.
-func (t *TmuxSession) refuseClaudeMCPServer(selected string) {
+// dialog af will not answer: one whose cursor is not on the decline row, or one
+// it cannot read. af will not move the cursor itself: the contract is to accept
+// Claude Code's own preselection, and a preselection that is anything but the
+// decline row is not one af may confirm on the user's behalf. Refusing surfaces
+// as the create's trust-prompt budget expiring — loud and recoverable — where
+// Enter could have enabled an MCP server.
+func (t *TmuxSession) refuseClaudeMCPServer(reason string) {
 	if t.claudeTrust.refusalLogged {
 		return
 	}
 	t.claudeTrust.refusalLogged = true
-	reason := fmt.Sprintf("%q is selected", selected)
-	if selected == "" {
-		reason = fmt.Sprintf("no single row carries the %q cursor", claudeTrustSelectionGlyph)
-	}
 	log.ErrorLog.Printf(
 		"refusing to answer the %s dialog for session %q: %s, and af only ever confirms %q, the option Claude Code preselects; answer it in the session",
 		claudeMCPServerDialogName, t.sanitizedName, reason, claudeMCPServerDeclineLabel)
