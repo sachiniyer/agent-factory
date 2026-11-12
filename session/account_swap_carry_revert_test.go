@@ -185,4 +185,5 @@ func TestCommittedCarryResumesAThreadTheNewAccountBacktracked(t *testing.T) {
 	require.Empty(t, plan.carryFallback)
 	require.Equal(t, original, plan.carry.transcript)
 	require.Equal(t, "codex -c check_for_update_on_startup=false resume "+carryTestID, plan.program)
+	require.NoError(t, plan.carry.copy(), "the respawn-time copy re-check must not refuse it either")
 }
