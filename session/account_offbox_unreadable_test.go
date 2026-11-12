@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -115,4 +116,23 @@ func TestAccountCarriedReturnsTrueForDockerRegardlessOfConfig(t *testing.T) {
 	carried, err := accountCarried(BackendDocker, f.repo, "")
 	require.NoError(t, err)
 	assert.True(t, carried, "docker carries by mount, not by listed-host licence")
+}
+
+// An accountless ssh create under an UNREADABLE project config is not an
+// account question: nobody named an account, so nothing may fail on, or
+// mention, account resolution. Provisioning must reach the runtime, and the
+// runtime's own answer (the backend's config failure) is the error the operator
+// sees, exactly as before accountCarried learned to surface config-resolve
+// errors. Only a create that names an account takes the new path.
+func TestAccountlessCreateUnderUnreadableConfigReportsTheRuntimesError(t *testing.T) {
+	f := newListedFixture(t, oneListedHost)
+	writeInvalidInRepoConfig(t, f.repo, "{not json")
+	backendErr := errors.New("ssh backend: the project config is invalid")
+	t.Cleanup(SetRuntimeForTest(BackendSSH, func() Runtime { return failingRuntime{err: backendErr} }))
+
+	_, err := f.create(t, InstanceOptions{Host: "box1"})
+	require.Error(t, err)
+	assert.ErrorIs(t, err, backendErr,
+		"an accountless create must reach the runtime, and the runtime's own config failure is the answer")
+	assert.NotContains(t, err.Error(), "account", "no account was requested, so the error must not mention one")
 }
