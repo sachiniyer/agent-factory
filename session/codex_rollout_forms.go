@@ -53,15 +53,30 @@ const (
 // walk it fails closed: a directory it cannot traverse is an error, never an
 // empty-looking store (#5471).
 func codexRolloutForms(codexHome, id string) (plain, other []string, err error) {
+	return codexRolloutFormsSince(codexHome, id, time.Time{})
+}
+
+// codexRolloutFormsSince is codexRolloutForms that never descends into a
+// sessions/YYYY/MM/DD directory whose date provably predates floor's
+// (codexRolloutDirBeforeFloor), so a directory outside the window is never
+// opened and cannot fail the walk. A zero floor walks the whole store.
+func codexRolloutFormsSince(codexHome, id string, floor time.Time) (plain, other []string, err error) {
 	if strings.TrimSpace(codexHome) == "" {
 		return nil, nil, nil
 	}
-	err = filepath.WalkDir(filepath.Join(codexHome, "sessions"), func(path string, d os.DirEntry, err error) error {
+	root := filepath.Join(codexHome, "sessions")
+	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
 			}
 			return err
+		}
+		if d != nil && d.IsDir() {
+			if rel, relErr := filepath.Rel(root, path); relErr == nil && codexRolloutDirBeforeFloor(rel, floor) {
+				return filepath.SkipDir
+			}
+			return nil
 		}
 		if d == nil || !d.Type().IsRegular() {
 			return nil
