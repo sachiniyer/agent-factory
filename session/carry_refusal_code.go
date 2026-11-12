@@ -33,6 +33,7 @@ const (
 	carryOtherFormsUnlistedReason      = "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
 	carryOtherFormsReason              = "its rollout is stored compressed or as a thread/revert rollout, which af does not carry yet"
 	carryTargetHoldsOtherRolloutReason = "the new account already files this conversation under a different rollout"
+	carryForkUnreadableReason          = "af could not read its rollout's session metadata to confirm the rollout holds the whole conversation"
 )
 
 // The refusals that name their subject, as formats.
@@ -70,6 +71,8 @@ var carryRefusalCodeOf = map[string]string{
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,
 	carryOtherFormsReason:              handoff.CarryCompressed,
 	carryTargetHoldsOtherRolloutReason: handoff.CarryDuplicated,
+	carryForkUnreadableReason:          handoff.CarryUnverified,
+	codexForkCarryReason:               handoff.CarryForked,
 	codexRevertCarrySourceReason:       handoff.CarryBacktracked,
 	codexRevertCarryTargetReason:       handoff.CarryBacktracked,
 	staleCarryReason:                   handoff.CarryStale,

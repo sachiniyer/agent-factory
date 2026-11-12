@@ -135,6 +135,8 @@ func TestCarryRefusalCodes(t *testing.T) {
 		carryStoreUnlistedReason:                                handoff.CarryUnverified,
 		carryOtherFormsReason:                                   handoff.CarryCompressed,
 		codexRevertCarrySourceReason:                            handoff.CarryBacktracked,
+		codexForkCarryReason:                                    handoff.CarryForked,
+		carryForkUnreadableReason:                               handoff.CarryUnverified,
 		staleCarryReason:                                        handoff.CarryStale,
 		carryUnresumableReason:                                  handoff.CarryUnresumable,
 		carryNothingAppliesReason:                               handoff.CarryUnconfirmed,

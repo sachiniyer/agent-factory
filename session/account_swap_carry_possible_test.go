@@ -78,6 +78,15 @@ func TestAccountSwapCarryPossibleAgreesWithTheSwapPlan(t *testing.T) {
 			},
 		},
 		{
+			name: "a paginated fork of another thread", agent: tmux.ProgramCodex, code: handoff.CarryForked,
+			setup: func(t *testing.T, inst *Instance, source string) {
+				writeCarryFile(t, source, codexRolloutRelDay(carryOtherThreadID, time.Date(2026, 9, 15, 0, 0, 0, 0, time.Local)),
+					codexRollout(inst.GetWorktreePath()))
+				writeCarryFile(t, source, codexRolloutRel(carryTestID),
+					codexForkRollout(inst.GetWorktreePath(), carryTestID, carryOtherThreadID, true))
+			},
+		},
+		{
 			name: "a claude transcript of the recorded conversation", agent: tmux.ProgramClaude, carries: true,
 			setup: func(t *testing.T, inst *Instance, source string) {
 				writeCarryFile(t, source, claudeTranscriptRel(inst.GetWorktreePath(), carryTestID), "{}\n")
