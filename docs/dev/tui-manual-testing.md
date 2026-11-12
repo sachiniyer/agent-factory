@@ -79,7 +79,10 @@ On a cold boot the cursor sits on the **section header** (no instance selected
 `j` moves the cursor down onto the first instance. `af_select` is robust to
 any starting position: it anchors at the top (`k` is idempotent there), then
 steps down with `j` until the target row shows `▾` **and** the tree cursor is
-actually on it.
+actually on it. It judges no key by a fixed poll (#7197). It presses `k` in
+bursts of 30 until `▾` is on the first session, then waits for each `j` to
+show. A TUI running behind its keys could otherwise skip the target, or let
+`af_select` return on a stale frame with a `j` still on its way.
 
 > **Display-selected ≠ cursor-on-row (#1174 / #1199).** The sticky `▾` is only
 > a *display* signal. A **single** auto-selected instance renders `▾` while the
@@ -215,6 +218,8 @@ compose across `docker exec` invocations.
 `AGENT_FACTORY_AUTO_UPDATE` (driver sets to `false` to prevent mid-test
 self-updates that would timeout instance creation),
 `AF_DRIVER_TIMEOUT` (`25`s), `AF_DRIVER_POLL` (`0.25`s),
+`AF_DRIVER_KEY_SETTLE_POLLS` (`8` polls a navigation key gets to show before
+it counts as a key that changed nothing),
 `AF_DRIVER_DETACH_KEY` (`C-w`), `AF_DRIVER_BIN` (auto-resolved),
 `AF_DRIVER_HELP_SEEN` (`15`).
 

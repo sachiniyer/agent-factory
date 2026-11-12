@@ -48,6 +48,7 @@
 : "${AF_DRIVER_LAUNCH_ENV:=}"                    # env prefix for the af launch line
 : "${AF_DRIVER_TIMEOUT:=25}"                      # default wait timeout (s)
 : "${AF_DRIVER_POLL:=0.25}"                       # capture-pane poll interval
+: "${AF_DRIVER_KEY_SETTLE_POLLS:=8}"              # polls a nav key gets to show its effect
 : "${AF_DRIVER_DETACH_KEY:=C-w}"                 # tmux key that detaches attach
 : "${AF_DRIVER_STATE_DIR:=${TMPDIR:-/tmp}/af-driver}"  # cross-call scratch
 : "${AF_DRIVER_SEND_LINE_ATTEMPTS:=4}"           # af_send_line paste retries
@@ -388,17 +389,149 @@ _af_menu_row() {
         END { if (row != "") print row }'
 }
 
+# _af_rail_cursor — the rail's expanded session row, as "<screen row>:▾ <first
+# word of its title>", or nothing when no session row is expanded. Reads a
+# screen on stdin. Vertical tree navigation stops only on tab rows, and the
+# session that owns the cursor's tab is the one drawn ▾, so this changes
+# exactly when a key carries the cursor onto another session. Only the rail
+# cell (left of the first pane border) is read, so pane text cannot pose as a
+# row, and the title is cut at its first word, so a status glyph repainting
+# beside it does not read as the cursor moving.
+_af_rail_cursor() {
+    awk -F"$_AF_PANE_BORDER_FS" '
+        match($1, /▾[[:space:]]+[^[:space:]]+/) { print NR ":" substr($1, RSTART, RLENGTH); exit }'
+}
+
+# _af_rail_top_selected — succeeds when the rail's FIRST session row is the
+# expanded one. Reads a screen on stdin. Rows the cursor cannot stop on (an
+# in-flight create or delete) draw no arrow, so the first ▸/▾ row is the first
+# session the cursor can stop on.
+#
+# The rail windows its rows around the cursor and says how many it hides above
+# with a `▲ N more` row (ui/sidebar_render.go). Above the first session there
+# is only the Sessions header (rebuildVisibleItems), which the window scrolls
+# away when the cursor climbs to that session, so `▲ 1 more` still shows the
+# first session. A larger count can hide a session, and the first VISIBLE row
+# then proves nothing about the top (#7197 review).
+_af_rail_top_selected() {
+    awk -F"$_AF_PANE_BORDER_FS" '
+        match($1, /▲[[:space:]]+[0-9]+/) {
+            n = substr($1, RSTART, RLENGTH); gsub(/[^0-9]/, "", n); hidden = n + 0
+        }
+        $1 ~ /(▾|▸)[[:space:]]+[^[:space:]]/ { top = $1; exit }
+        END { exit (hidden <= 1 && top ~ /▾/) ? 0 : 1 }'
+}
+
+# The instance-scoped verb the status-bar menu offers only while a session is
+# under the tree cursor (`D delete session`, or legacy `D kill`).
+_AF_INSTANCE_VERB_RE='(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'
+
+# _af_select_state — what one af_select scan key can visibly change: which
+# session the rail expands (_af_rail_cursor), and whether the menu offers the
+# instance verb. The second covers the first `j` off a section header, which
+# lands on the session the header already shows ▾ for.
+_af_select_state() {
+    local screen
+    screen="$(cat)"
+    printf '%s\n' "$screen" | _af_rail_cursor
+    if printf '%s\n' "$screen" | _af_menu_row | grep -qE -- "$_AF_INSTANCE_VERB_RE"; then
+        printf 'verb\n'
+    fi
+}
+
+# _af_anchor_at_first_session — af_select's anchor: press k until the tree
+# cursor can climb no further, waiting for that on the screen rather than for
+# one fixed poll (#7197), so that no k is still queued when the scan's first
+# `j` goes out. Sets _AF_ANCHOR_BURSTS to the bursts it sent, which af_select
+# uses to size its scan.
+#
+# k goes out in bursts of 30. The anchor is done when:
+#   * the first session is the expanded one (_af_rail_top_selected). k cannot
+#     move the cursor off it, so a k still queued then is harmless. This is
+#     the ordinary case.
+#   * a whole burst changed nothing the scan can see (_af_select_state) for
+#     four times AF_DRIVER_KEY_SETTLE_POLLS. The cursor is then where k cannot
+#     climb from: a section header, a folded session or section, or the first
+#     session with in-flight rows hidden above it (#7198 review). The scan's
+#     `j` presses take it from there, as the old fixed-poll scan's did. The
+#     long quiet keeps a TUI that has not yet started on the burst from being
+#     taken for one that finished it.
+# A burst that moved the cursor and then stopped short of the top started more
+# than 30 stops down, so another burst goes out, up to 10. Each burst gets
+# AF_DRIVER_TIMEOUT.
+_af_anchor_at_first_session() {
+    local burst k screen state before last still deadline
+    _AF_ANCHOR_BURSTS=0
+    for ((burst = 0; burst < 10; burst++)); do
+        _AF_ANCHOR_BURSTS=$((burst + 1))
+        before="$(af_capture | _af_select_state)"
+        for ((k = 0; k < 30; k++)); do af_send k; done
+        deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
+        last="$before" still=0
+        while :; do
+            screen="$(af_capture)"
+            printf '%s\n' "$screen" | _af_rail_top_selected && return 0
+            state="$(printf '%s\n' "$screen" | _af_select_state)"
+            if [ "$state" = "$last" ]; then
+                still=$((still + 1))
+            else
+                still=0 last="$state"
+            fi
+            if [ "$state" = "$before" ]; then
+                [ "$still" -ge $((4 * AF_DRIVER_KEY_SETTLE_POLLS)) ] && return 0
+            elif [ "$still" -ge "$AF_DRIVER_KEY_SETTLE_POLLS" ]; then
+                break
+            fi
+            if [ "$(_af_now)" -ge "$deadline" ]; then
+                break 2
+            fi
+            sleep "$AF_DRIVER_POLL"
+        done
+    done
+    _af_log "the k anchor never settled"
+    printf '%s\n' "$screen" >&2
+    return 1
+}
+
+# _af_wait_key_effect <filter> <before> — after a navigation key, wait until
+# the key shows: poll until `af_capture | <filter>` differs from <before>, the
+# same filter's output on the frame the key was sent from. Returns 1 after
+# AF_DRIVER_KEY_SETTLE_POLLS polls with no change, which is what a key with no
+# visible effect looks like (a scan already at its last stop).
+#
+# A fixed poll here is what #7197 was. When the TUI falls behind the keys, a
+# frame captured one poll after a key can predate it. A scan that reads such a
+# frame accepts a target the cursor is about to leave, with that key still on
+# its way, or sends its next key before the last one has landed, so the TUI
+# can act on both between two captures and the scan never sees the row it was
+# looking for. Waiting for the key's own effect keeps at most one key in
+# flight. The bound is a poll COUNT rather than a deadline so a stubbed
+# `sleep` returns at once.
+_af_wait_key_effect() {
+    local filter="$1" before="$2" n
+    for ((n = 0; n < AF_DRIVER_KEY_SETTLE_POLLS; n++)); do
+        sleep "$AF_DRIVER_POLL"
+        [ "$(af_capture | "$filter")" != "$before" ] && return 0
+    done
+    return 1
+}
+
 # af_focus_tree — put ring focus on the instances tree (the state whose menu
 # advertises `n new`). Checks BEFORE pressing, so it never Tabs off the tree
-# when already there. Assumes nav mode (call af_ensure_nav first).
+# when already there. Assumes nav mode (call af_ensure_nav first). Each Tab
+# moves the focus ring one region and swaps the status-bar menu, so wait for
+# that swap before judging the next frame: a frame that still shows the old
+# menu would send a second Tab, and the two together can carry focus past the
+# tree (#7197).
 af_focus_tree() {
-    local _
+    local _ menu
     for _ in $(seq 1 8); do
-        if af_capture | _af_menu_row | grep -qE -- 'n new'; then
+        menu="$(af_capture | _af_menu_row)"
+        if printf '%s\n' "$menu" | grep -qE -- 'n new'; then
             return 0
         fi
         af_send Tab
-        sleep "$AF_DRIVER_POLL"
+        _af_wait_key_effect _af_menu_row "$menu" || true
     done
     _af_fail "could not focus the tree ('n new' hint never appeared)"
 }
@@ -624,21 +757,38 @@ af_select() {
     # never evaluated: a row that only became actionable on that last step was
     # missed and af_select reported a false selection failure (#1759). Check the
     # current position (i=-1), then the anchor (i=0, no `j`), then after each
-    # of the 40 downward steps, with a settle poll between the `j` and the
-    # capture so the post-`j` frame is the one we inspect.
-    for i in $(seq -1 40); do
+    # of the 40 downward steps.
+    #
+    # Neither the anchor nor a `j` is judged one fixed poll after it is sent
+    # (#7197). A TUI working through 30 queued k presses can still be drawing
+    # the old row when the first `j` goes out, and then act on the rest of the
+    # k presses and that `j` between two captures: the scan never sees the
+    # first session, which is the cursor's stop after the anchor, and reports a
+    # false selection failure. Or a stale frame shows the target with a `j`
+    # still on its way, af_select returns, and that `j` moves the cursor off
+    # the target. So wait for the anchor to land (_af_anchor_at_first_session),
+    # then for each `j` to show (_af_select_state; _af_wait_key_effect explains
+    # the bound).
+    #
+    # The scan used to cover 40 stops below an anchor 30 stops above the
+    # cursor, so it reached 10 stops past where the cursor started. The anchor
+    # now climbs all the way to the first session, in as many bursts of 30 as
+    # that takes, so the scan grows by 30 stops a burst to keep that reach.
+    local limit=40
+    for ((i = -1; i <= limit; i++)); do
         if [ "$i" -eq 0 ]; then
-            local anchor
-            for ((anchor = 0; anchor < 30; anchor++)); do af_send k; done
-            sleep "$AF_DRIVER_POLL"
+            _af_anchor_at_first_session || return 1
+            limit=$((10 + 30 * _AF_ANCHOR_BURSTS))
         elif [ "$i" -gt 0 ]; then
+            local before
+            before="$(printf '%s\n' "$screen" | _af_select_state)"
             af_send j
-            sleep "$AF_DRIVER_POLL"
+            _af_wait_key_effect _af_select_state "$before" || true
         fi
         screen="$(af_capture)"
         printf '%s\n' "$screen" | grep -qE -- "▾[[:space:]]+${name_re}([[:space:]]|\$)" || continue
         menu="$(printf '%s\n' "$screen" | _af_menu_row)"
-        if printf '%s\n' "$menu" | grep -qE -- '(^|[[:space:]])D (kill|delete session)([[:space:]]|$)'; then
+        if printf '%s\n' "$menu" | grep -qE -- "$_AF_INSTANCE_VERB_RE"; then
             return 0
         fi
         # The target is display-selected (▾) but the footer is the pane menu, not

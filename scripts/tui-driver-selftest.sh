@@ -471,8 +471,12 @@ _expect_multipane_hide() {
     fi
 
     # Single-pane case: the last pane leaves, focus returns to the tree.
+    # af_hide_pane returns on the first frame whose pane header row changed,
+    # and the status bar is the last row a repaint reaches, so wait for the
+    # menu rather than judging that one frame (#7197). If focus never comes
+    # back to the tree this still fails, at the timeout.
     af_hide_pane || return 1
-    af_assert_screen 'n new' 'focus back on the tree after the last pane is hidden' || return 1
+    af_wait_for 'n new' 10 'focus back on the tree after the last pane is hidden' || return 1
 }
 
 # _expect_hide_pane_rejects_tree_focus — the NEGATIVE check for af_hide_pane
@@ -580,6 +584,192 @@ _expect_af_select_already_selected() (
     fi
 )
 
+# _af_select_behind_tui <model> <start> <target> [count] [window] [busy] —
+# drive af_select against a stubbed TUI that falls behind its keys, then let
+# the TUI catch up and report where the cursor finally rests. The rail holds
+# <count> single-tab sessions (default 3: alpha, beta and alphax, as in the
+# live run; otherwise s1..s<count>). The cursor starts on session index
+# <start>, or on the Sessions header: folded when <start> is -1, open with no
+# session expanded when it is -2. -3 puts it on the first session's own row
+# with that session folded (h on its tab): k cannot climb, and j moves on to
+# the next session. <window> > 0 shows only that many rail rows,
+# scrolled around the cursor the way ui/sidebar_render.go's scrollToSelection
+# does, with its `▲ N more` and `▼ N more` rows. <busy> 1 puts an in-flight row
+# above the first session: no arrow, and not a stop for the cursor.
+# File-backed state, because af_capture runs in a command substitution. The
+# ways of falling behind, all from #7197:
+#   late  every frame shows the keys sent before the PREVIOUS capture, so the
+#         frame one poll after a key predates that key;
+#   later the same, two captures behind;
+#   batch the TUI acts on nothing for two captures, then on every queued key
+#         at once before the third.
+# Prints the session the cursor rests on once every key has landed, and fails
+# when af_select itself fails.
+# shellcheck disable=SC2317  # af_capture/af_send/sleep are called by af_select.
+_af_select_behind_tui() (
+    local model="$1" target="$3" count="${4:-3}" window="${5:-0}" busy="${6:-0}" dir i
+    local -a sessions=(alpha beta alphax)
+    if [ "$count" -ne 3 ]; then
+        sessions=()
+        for ((i = 1; i <= count; i++)); do sessions+=("s$i"); done
+    fi
+    dir="$(mktemp -d "${TMPDIR:-/tmp}/af-7197.XXXXXX")" || exit 1
+    trap 'rm -rf "$dir"' EXIT
+    : > "$dir/keys"
+    printf '%s\n' "$2" > "$dir/cursor"
+    printf '0\n' > "$dir/acted"
+    printf '0\n' > "$dir/mark"
+    printf '0\n' > "$dir/mark2"
+    printf '0\n' > "$dir/captures"
+    printf '0\n' > "$dir/offset"
+    # _act <through> — the TUI acts on every queued key up to <through>. From
+    # either header k does nothing and j opens the first session; from the
+    # folded first session (-3) k does nothing and j moves to the second.
+    _act() {
+        local cursor acted key
+        read -r cursor < "$dir/cursor"
+        read -r acted < "$dir/acted"
+        if [ "$1" -gt "$acted" ]; then
+            while read -r key; do
+                case "$key" in
+                    k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)) ;;
+                    j)
+                        if [ "$cursor" -eq -3 ]; then
+                            cursor=1
+                        elif [ "$cursor" -lt 0 ]; then
+                            cursor=0
+                        elif [ "$cursor" -lt $((${#sessions[@]} - 1)) ]; then
+                            cursor=$((cursor + 1))
+                        fi
+                        ;;
+                esac
+            done < <(sed -n "$((acted + 1)),$1p" "$dir/keys")
+            printf '%s\n' "$cursor" > "$dir/cursor"
+            printf '%s\n' "$1" > "$dir/acted"
+        fi
+    }
+    af_ensure_nav() { :; }
+    af_focus_tree() { return 0; }
+    sleep() { :; }
+    af_send() { printf '%s\n' "$1" >> "$dir/keys"; }
+    af_capture() {
+        local sent mark mark2 captures cursor offset anchor last idx
+        local -a rail=()
+        sent="$(wc -l < "$dir/keys")"
+        read -r mark < "$dir/mark"
+        read -r mark2 < "$dir/mark2"
+        read -r captures < "$dir/captures"
+        captures=$((captures + 1))
+        printf '%s\n' "$captures" > "$dir/captures"
+        case "$model" in
+            late) _act "$mark"; printf '%s\n' "$sent" > "$dir/mark" ;;
+            later)
+                _act "$mark2"
+                printf '%s\n' "$mark" > "$dir/mark2"
+                printf '%s\n' "$sent" > "$dir/mark"
+                ;;
+            batch) [ $((captures % 3)) -eq 0 ] && _act "$sent" ;;
+        esac
+        read -r cursor < "$dir/cursor"
+        printf '%s\n' ' Agent Factory           │'
+        if [ "$cursor" -eq -1 ]; then
+            printf ' ▶ Sessions (%d)          │\n' "${#sessions[@]}"
+            printf '%s\n' ' n new · ? help · q quit'
+            return
+        fi
+        rail+=("$(printf ' ▼ Sessions (%d)          │' "${#sessions[@]}")")
+        [ "$busy" -eq 1 ] && rail+=('     busy-session    ⟳  │')
+        anchor=0
+        for i in "${!sessions[@]}"; do
+            if [ "$i" -eq "$cursor" ]; then
+                anchor=${#rail[@]}
+                rail+=("$(printf '  ▾  %-15s●  │' "${sessions[$i]}")" '    └ 1 Agent            │')
+            else
+                rail+=("$(printf '  ▸  %-15s●  │' "${sessions[$i]}")")
+            fi
+        done
+        read -r offset < "$dir/offset"
+        last=$((${#rail[@]} - 1))
+        if [ "$window" -gt 0 ]; then
+            # Scroll up to the cursor's session row, down until its tab row
+            # shows, then back up over any slack at the bottom.
+            [ "$anchor" -lt "$offset" ] && offset=$anchor
+            [ "$cursor" -ge 0 ] && while [ $((anchor + 1)) -ge $((offset + window)) ]; do offset=$((offset + 1)); done
+            while [ "$offset" -gt 0 ] && [ $((${#rail[@]} - offset + 1)) -le "$window" ]; do offset=$((offset - 1)); done
+            last=$((offset + window - 1))
+            [ "$last" -ge "${#rail[@]}" ] && last=$((${#rail[@]} - 1))
+        fi
+        printf '%s\n' "$offset" > "$dir/offset"
+        [ "$offset" -gt 0 ] && printf ' ▲ %d more              │\n' "$offset"
+        for ((idx = offset; idx <= last; idx++)); do printf '%s\n' "${rail[$idx]}"; done
+        [ "$last" -lt $((${#rail[@]} - 1)) ] && printf ' ▼ %d more              │\n' $((${#rail[@]} - 1 - last))
+        if [ "$cursor" -ge 0 ] || [ "$cursor" -eq -3 ]; then
+            printf '%s\n' ' n new · D delete session · t new tab · ? help · q quit'
+        else
+            printf '%s\n' ' n new · ? help · q quit'
+        fi
+    }
+    af_select "$target" >/dev/null 2>&1 || exit 1
+    _act "$(wc -l < "$dir/keys")"
+    local cursor
+    read -r cursor < "$dir/cursor"
+    if [ "$cursor" -lt 0 ]; then
+        printf '%s\n' '(the Sessions header)'
+    else
+        printf '%s\n' "${sessions[$cursor]}"
+    fi
+)
+
+# _expect_af_select_survives_a_lagging_tui — regression proof for #7197.
+# af_select used to judge every key one fixed poll after sending it. Against a
+# TUI that falls behind, that either skips the target or accepts a frame from
+# before a `j` that then moves the cursor on. The first case is the "could not
+# select" failure of the first two sightings. The second fits the third: its
+# last frame shows a pane on alphax still open after the #1822 step hid the two
+# it opened, holding the output of the steps that typed into "beta's" pane. The
+# only af_select before that pane opened was the reselect of beta after the
+# #7060 create.
+#
+# The other cases pin the anchor's review findings (#7198): the first VISIBLE
+# row of a rail scrolled past its top is not the first session; k cannot climb
+# off a section header, folded or not, or off a folded first session; one
+# burst of 30 k presses cannot climb more than 30 stops; and an in-flight row
+# hidden above the first session leaves `▲ 2 more` at the real top.
+# shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
+_expect_af_select_survives_a_lagging_tui() {
+    local model start target got case
+    local -a cases=()
+    for start in 0 1 2; do
+        for target in alpha beta alphax; do cases+=("late later batch|$start $target 3 0 0"); done
+    done
+    # A rail windowed to the expanded session's two rows; the cursor on the
+    # folded and the open Sessions header, and on a folded first session; a
+    # windowed scan that scrolls; rails
+    # longer than one burst of 30 k presses can climb; and a windowed rail with
+    # an in-flight row above the first session. The long and in-flight rails
+    # are slow enough to stub that fewer lag models cover them.
+    cases+=("late later batch|2 alpha 3 2 0" "late later batch|2 beta 3 2 0"
+        "late later batch|0 alphax 3 2 0" "late later batch|-1 alpha 3 0 0"
+        "late later batch|-1 beta 3 0 0" "late later batch|-2 alpha 3 0 0"
+        "late later batch|-2 beta 3 0 0" "late later batch|-3 beta 3 0 0"
+        "late later batch|-3 alphax 3 0 0" "late|0 s8 10 4 0" "late|31 s1 32 0 0"
+        "late|33 s3 34 8 0" "late later|5 s1 8 4 1" "late|5 s3 8 4 1")
+    for case in "${cases[@]}"; do
+        for model in ${case%%|*}; do
+            # shellcheck disable=SC2086  # each case is five words by design
+            set -- ${case#*|}
+            if ! got="$(_af_select_behind_tui "$model" "$1" "$2" "$3" "$4" "$5")"; then
+                _af_fail "af_select '$2' from session $1 of $3 (window $4, busy row $5) against a '$model' TUI reported failure"
+                return 1
+            fi
+            if [ "$got" != "$2" ]; then
+                _af_fail "af_select '$2' from session $1 of $3 (window $4, busy row $5) against a '$model' TUI returned while keys were still queued; the cursor settled on '$got'"
+                return 1
+            fi
+        done
+    done
+}
+
 # _expect_af_select_boundary — regression proof for #1759. af_select must
 # evaluate its ready condition AFTER the final downward `j`, not only before it.
 # Drive af_select against stubbed send/capture (no live TUI, no real sleeps) in
@@ -622,7 +812,8 @@ _expect_af_select_boundary() {
 # a `j` counter flips the target to display-selected-with-pane-menu at the loop
 # midpoint, and af_focus_tree restores the tree footer. The old af_select never
 # saw 'D delete session' and failed; the fixed one detects the pane menu, re-focuses the
-# tree, and finalizes.
+# tree, and finalizes. Until then the cursor rests on the session above the
+# target, which is where af_select's k anchor leaves it in a real rail (#7197).
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_open_pane() {
     (
@@ -641,11 +832,11 @@ _expect_af_select_open_pane() {
         }
         af_capture() {
             if [ "$_AF_OPENPANE_JCOUNT" -lt 5 ]; then
-                printf '%s\n' ' ▸ target' 'n new · ? help · q quit'
+                printf '%s\n' ' ▾ above' ' ▸ target' 'n new · D delete session · ? help · q quit'
             elif [ "$_AF_OPENPANE_FOCUS" = pane ]; then
-                printf '%s\n' ' ▾ target' '← prev pane · → next pane · s open pane · x hide pane · ? help · q quit'
+                printf '%s\n' ' ▸ above' ' ▾ target' '← prev pane · → next pane · s open pane · x hide pane · ? help · q quit'
             else
-                printf '%s\n' ' ▾ target' 'n new · D delete session · ? help · q quit'
+                printf '%s\n' ' ▸ above' ' ▾ target' 'n new · D delete session · ? help · q quit'
             fi
         }
         af_select target
@@ -1421,6 +1612,7 @@ step "task frame accepts earlier rail corners on both edges" _expect_tasks_frame
 step "task frame beside a foreign same-row box retains its own geometry" _expect_tasks_frame_beside_foreign_box
 
 step "af_select leaves an already actionable selection in place (#4056)" _expect_af_select_already_selected
+step "af_select settles on its target when the TUI lags its keys (#7197)" _expect_af_select_survives_a_lagging_tui
 step "af_select rejects delete-session text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "delete session"
 step "af_select rejects legacy kill text in a pane (#4055 review)" _expect_af_select_ignores_pane_verb "kill"
 
