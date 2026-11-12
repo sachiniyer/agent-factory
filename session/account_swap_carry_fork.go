@@ -60,7 +60,7 @@ func (c *conversationCarry) codexForkReason(fromSource bool) string {
 	based, err := codexRolloutHistoryBase(filepath.Join(c.srcHome, c.transcript))
 	switch {
 	case err != nil:
-		return "af could not read its rollout's session metadata to confirm the rollout holds the whole conversation"
+		return carryForkUnreadableReason
 	case based:
 		return codexForkCarryReason
 	}

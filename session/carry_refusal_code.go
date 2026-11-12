@@ -33,6 +33,7 @@ const (
 	carryOtherFormsUnlistedReason      = "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
 	carryOtherFormsReason              = "its rollout is stored compressed or as a thread/revert rollout, which af does not carry yet"
 	carryTargetHoldsOtherRolloutReason = "the new account already files this conversation under a different rollout"
+	carryForkUnreadableReason          = "af could not read its rollout's session metadata to confirm the rollout holds the whole conversation"
 )
 
 // The refusals that name their subject, as formats.
