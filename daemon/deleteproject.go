@@ -659,7 +659,9 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 // unrelated clone (#7090 review). Retiring them is also what a root create in
 // flight finds at its commit, and refuses on (rootCommitRefusalLocked, #7182).
 // carryWorkspace retires carries held at the deleted path under any identity
-// (retireRootCarriesAtLocked).
+// (retireRootCarriesAtLocked). It also withdraws every root create in flight
+// for the repository, so none that began before the delete commits after it
+// (withdrawRootCreateTicketsLocked, PR #7190 review F1/F2).
 func (m *Manager) suppressRootAgent(repoID, carryWorkspace, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -670,6 +672,7 @@ func (m *Manager) suppressRootAgent(repoID, carryWorkspace, claimantProjectID st
 	delete(m.rootKilledAt, repoID)
 	m.retireRootCarriesLocked(repoID)
 	m.retireRootCarriesAtLocked(carryWorkspace)
+	m.withdrawRootCreateTicketsLocked(repoID, carryWorkspace)
 }
 
 // suppressHistoricalRootAgent stamps historicalID, the identity a derived-id
@@ -715,6 +718,7 @@ func (m *Manager) suppressHistoricalRootAgent(historicalID, derivedID, claimantP
 	m.deletedRootEvidence[historicalID] = derivedID
 	delete(m.rootKilledAt, historicalID)
 	m.retireRootCarriesLocked(historicalID)
+	m.withdrawRootCreateTicketsLocked(historicalID, "")
 }
 
 // retireHistoricalStandInsLocked ends every stand-in stamped on behalf of

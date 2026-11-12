@@ -1,7 +1,6 @@
 package daemon
 
 import (
-	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -61,6 +60,9 @@ type rootCreateJob struct {
 	resolution config.RootAgentResolution
 	identity   *resolvedProjectRoot
 	inst       *session.Instance
+	// ticket is this create's claim to commit, minted by launchRootCreate as
+	// its in-flight mark and withdrawn by a delete (rootagent_carry.go).
+	ticket *rootCreateTicket
 }
 
 // launchRootCreate starts one create for this repo, or does nothing because one
@@ -105,7 +107,8 @@ func (m *Manager) launchRootCreate(job rootCreateJob) {
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
 		return
 	}
-	m.rootCreatesInFlight[job.repo.ID] = job.repo.WorkspacePath()
+	job.ticket = &rootCreateTicket{repoID: job.repo.ID, workspace: job.repo.WorkspacePath()}
+	m.rootCreatesInFlight[job.repo.ID] = job.ticket
 	m.rootCreateWG.Add(1)
 
 	// Both defers are registered before any work, so every exit path of
@@ -167,8 +170,8 @@ func (m *Manager) waitRootAgentCreates() {
 func (m *Manager) waitRootAgentCreatesForShutdown() {
 	m.mu.Lock()
 	pending := make([]string, 0, len(m.rootCreatesInFlight))
-	for _, workspace := range m.rootCreatesInFlight {
-		pending = append(pending, workspace)
+	for _, ticket := range m.rootCreatesInFlight {
+		pending = append(pending, ticket.workspace)
 	}
 	m.mu.Unlock()
 	if len(pending) > 0 {
@@ -197,6 +200,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	stateKey, st, repo := job.stateKey, job.st, job.repo
 	resolution, identity, inst := job.resolution, job.identity, job.inst
 	workspace := repo.WorkspacePath()
+	// The workspace resolved for comparison with a delete's path, taken here
+	// because resolving touches the filesystem and m.mu must not wait on it.
+	compareWorkspace := m.resolveRootCreateWorkspace(job.ticket, workspace)
 
 	// The project config first, and ALL of it, before the reap below can destroy
 	// the record that holds the conversation (#2616) and tab roster (#2628) the
@@ -274,8 +280,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		m.warn().Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
 		var err error
 		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst, func(reaped reapedRootState) {
-			if !haveHeld { // a held carry outranks the record reaped since
-				carryRef = m.installRootCarryLocked(st, repo, identity, reaped)
+			// A held carry outranks the record reaped since, and a withdrawn
+			// ticket means a delete suppressed while the reap tore down: what it
+			// reaped is the deleted project's, so nothing is held (F1).
+			if !haveHeld && (job.ticket == nil || !job.ticket.withdrawn) {
+				carryRef = m.installRootCarryLocked(st, repo, identity, compareWorkspace, reaped)
 			}
 		})
 		if err != nil {
@@ -347,16 +356,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 		configSnapshot:        primed,
-		// The create commits only if the carry it resumes is still held —
-		// checked under the same m.mu section where reserveCreate checks the
-		// delete fence and reserves the title (#7182).
-		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, carryRef) },
+		// The create commits only while its ticket stands and the carry it
+		// resumes is still held — checked under the same m.mu section where
+		// reserveCreate checks the delete fence and reserves the title (#7182).
+		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, job.ticket, carryRef) },
 	}
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
 	data, err := m.createVerifiedRoot(repo.ID, identity, req)
-	if err != nil && !isRootCheckoutRefusal(err) && !errors.Is(err, errRootCommitWithdrawn) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
 		// longer has) makes the resumed command exit at startup — and since the
@@ -382,7 +391,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			}
 		}
 	}
-	if err != nil && !isRootCheckoutRefusal(err) && !errors.Is(err, errRootCommitWithdrawn) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
 		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
@@ -393,7 +402,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// next pass's create carries it. Never put back: a retired carry stays
 		// retired (#7182).
 		m.updateRootCarry(st, carryRef, carried)
-		if errors.Is(err, errRootCommitWithdrawn) {
+		if rootCreateWithdrawn(err) {
 			// Not a failure to back off from: the next pass decides afresh
 			// whether this candidate wants a root, and with what.
 			m.info().Printf("root agent for %s: %v", workspace, err)

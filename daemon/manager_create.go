@@ -541,8 +541,17 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 	if !inProgress {
 		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
 	}
-	return err
+	return projectDeleteFenceError{err}
 }
+
+// errProjectDeleteFenced is what every projectDeleteRefusal Is, wording
+// unchanged, so a caller can tell a delete's fence from a failed create — the
+// root heal must not answer it with a fresh agent (PR #7190 review F3).
+var errProjectDeleteFenced = errors.New("refused by a project delete's fence")
+
+type projectDeleteFenceError struct{ error }
+
+func (e projectDeleteFenceError) Is(target error) bool { return target == errProjectDeleteFenced }
 
 // admitTaskRunFast is the pre-resolver half of the task-run cap, for a caller
 // that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as

@@ -317,7 +317,8 @@ func TestATombstonedTickLeavesTheCarryToTheDelete(t *testing.T) {
 // holdCarryForTest holds carried on st the way a heal's reap does
 // (installRootCarryLocked), for tests that start from a carry already held.
 func holdCarryForTest(m *Manager, st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) {
+	compare := pathutil.ResolveForCompare(filepath.Clean(repo.WorkspacePath()))
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	m.installRootCarryLocked(st, repo, identity, carried)
+	m.installRootCarryLocked(st, repo, identity, compare, carried)
 }
