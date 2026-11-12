@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -117,11 +118,18 @@ func (i *Instance) markCaptureEvidenceVerified(kept keptCaptureEvidence) bool {
 // dropCaptureEvidence retires kept after an answer that it is not the agent,
 // unless something replaced it meanwhile. The drop reaches disk with the
 // row's next write; until then a restart only re-proves the same answer.
+//
+// Both answers that drop it — the process is gone or its pid was reused, or
+// no pane of the session is rooted at it — are evidence that the runtime af
+// launched is no longer the one in the pane, so a standing operator repair
+// records the replacement exactly as the reattach settle's answered mismatch
+// does (#7147 G-3).
 func (i *Instance) dropCaptureEvidence(kept keptCaptureEvidence) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.captureEvidence.pid == kept.pid && i.captureEvidence.startID == kept.startID {
 		i.captureEvidence = keptCaptureEvidence{}
+		i.markRepairRuntimeReplacedLocked(time.Now())
 	}
 }
 

@@ -385,6 +385,9 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if refusedID != "" {
 		preSpawnCapture = i.sessionCodexCaptureBaselineFor(resolvedProgram)
 	}
+	// Before the spawn: the instant a standing operator repair's runtime is
+	// recorded as replaced at (#7147 G-2).
+	spawnedAt := time.Now()
 	if resume {
 		restoreResult, err = ts.RestoreWithResult(workDir)
 	} else {
@@ -411,7 +414,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		if prepared != nil {
 			runtimeBase = prepared.runtimeBase
 		}
-		i.setRuntimeLaunch(runtimeBase, ts)
+		i.setRuntimeLaunch(runtimeBase, ts, spawnedAt)
 		// A respawn produced a replacement process: the run-end classifier at
 		// ConfirmLive reads this verdict to interrupt a still-in-flight task
 		// run rather than let the fresh agent's first idle edge complete it

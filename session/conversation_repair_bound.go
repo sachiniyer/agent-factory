@@ -151,15 +151,22 @@ func (c AgentConversationData) withoutRepairStamp() AgentConversationData {
 
 // markRepairRuntimeReplacedLocked is N-1 at the moment af learns the live
 // runtime is not the one a standing repair was made against: a launch
-// boundary, which records a runtime started after any repair the row carries,
-// or a reattach that found another process behind the tmux name (#7132
-// review F-2). Without it the stamp would go on naming the old runtime's
+// boundary, which records a runtime started after any repair the row carries;
+// a reattach that found another process behind the tmux name (#7132 review
+// F-2); or a re-scan that found the kept identity gone or rooting no pane
+// (#7147 G-3). Without it the stamp would go on naming the old runtime's
 // thread, which the follow and the bound would both exempt in the new pane,
 // or an unstamped repair would let the follow baseline from the new pane.
-// at is taken when af records the runtime, a moment after the process
-// started; a Codex pane opens a thread already in the store only on a user's
-// /resume, which cannot land in that moment. The surrounding launch owns
-// UpdatedAt and the checkpoint that persists it. Callers hold i.mu.
+//
+// at is as early as af can defend. A launch passes the instant it took just
+// before it spawned the process (launchReplacementInstant), so writes the new
+// pane makes while af is still recording the launch — the ready poll and the
+// tmux calls after it, seconds under load — are already moves (#7147 G-2).
+// The old runtime is dead before any af launch spawns, so none of its writes
+// can land after that instant. A replacement af only detects is dated at
+// detection; the process may have started earlier. The surrounding launch or
+// settle owns UpdatedAt and the checkpoint that persists it. Callers hold
+// i.mu.
 func (i *Instance) markRepairRuntimeReplacedLocked(at time.Time) {
 	if len(i.Tabs) == 0 {
 		return
@@ -184,17 +191,39 @@ type operatorRepairWindow struct {
 // record with no capture time (a hand-edited operator kind), or one dated
 // after now, which no repair is and which would otherwise override every
 // thread still to come.
+//
+// A replacement instant dated after now is one af cannot place either — a
+// launch recorded while the clock ran fast, before NTP stepped it back — so
+// it is read as the repair's own date: every write since the repair is a
+// move, which fails closed exactly as the CapturedAt guard does (#7147 G-1).
 func operatorRepairWindowOf(conv AgentConversationData, now time.Time) operatorRepairWindow {
 	if conv.CaptureKind != ConversationCaptureOperator || conv.CapturedAt.IsZero() || conv.CapturedAt.After(now) {
 		return operatorRepairWindow{}
+	}
+	replacedAt := conv.RepairRuntimeReplacedAt
+	if replacedAt.After(now) {
+		replacedAt = conv.CapturedAt
 	}
 	return operatorRepairWindow{
 		at:         conv.CapturedAt,
 		stamped:    conv.RepairStamped,
 		heldID:     strings.ToLower(conv.RepairHeldID),
 		observed:   conv.RepairStamped && conv.RepairHeldObserved,
-		replacedAt: conv.RepairRuntimeReplacedAt,
+		replacedAt: replacedAt,
 	}
+}
+
+// launchReplacementInstant is the instant a launch records a standing
+// repair's runtime as replaced at: spawnedAt, which the launch took just
+// before it spawned the process, or now when it has none — or when spawnedAt
+// is after now, which only a clock stepped back during the launch produces,
+// and which would otherwise hand the new pane's first writes to the old
+// stamp.
+func launchReplacementInstant(spawnedAt, now time.Time) time.Time {
+	if spawnedAt.IsZero() || spawnedAt.After(now) {
+		return now
+	}
+	return spawnedAt
 }
 
 // disregards reports whether a rollout newer than the repaired one (path,
