@@ -380,6 +380,21 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// mismatch can release it only for the deleted claimant itself (#3299
 	// review round 15). Resolved before the lock — see deleteProjectTarget.
 	m.suppressRootAgent(repoID, resolved.claimantProjectID)
+	// Stamp the HISTORICAL/real identity too, mirroring the fenced list and
+	// the optInIDs durable sweep above. The ensure sweep consults the
+	// tombstone under the repo's real git identity (repo.ID), and a delete
+	// whose recorded path was unavailable resolved to the derived id alone —
+	// so without this stamp the sweep finds no tombstone under the real id
+	// and can create the always-on root before the re-attribution probe moves
+	// the tombstone. The probe's attribution-pending gate is not a reliable
+	// bridge: a settled negative probe carries no candidate, so the gate is
+	// open between probe retries, and a single slow probe inverts the
+	// probe-vs-sweep timing permanently. Stamping both ids closes that window
+	// regardless of probe timing, the same way the fence and the durable
+	// sweep already cover both.
+	if historical != "" {
+		m.suppressRootAgent(historical, resolved.claimantProjectID)
+	}
 	// A re-attribution probe for the deleted project is deliberately LEFT
 	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
 	// is unfinished, the attribution-pending gate fails the candidate repo

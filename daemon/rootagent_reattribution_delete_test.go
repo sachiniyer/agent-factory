@@ -5,6 +5,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
@@ -477,5 +478,118 @@ func TestRefreshedMismatchKeepsReleasingTheTombstone(t *testing.T) {
 		if applies {
 			t.Fatalf("pass %d: a mismatch the probe keeps re-proving must keep releasing the dead claimant's tombstone, or the live occupant's own root stays suppressed (#3299 review round 15)", pass)
 		}
+	}
+}
+
+// TestDerivedIDDeleteStampsTheHistoricalIdentityTombstone pins the fix for the
+// inverted-timing respawn bug. DeleteProject promises that after a project is
+// deleted, its always-on root agent never respawns for the rest of the daemon's
+// life: the root_agents opt-in is removed from the on-disk config and an
+// in-memory deletion tombstone (m.deletedRootRepos) is consulted by the
+// root-agent ensure sweeps on every poll tick.
+//
+// A delete of a project whose recorded path is unavailable resolves to a
+// provisional derived id (d-...) and used to stamp the tombstone under that
+// derived key ONLY. The ensure sweep consults the tombstone under the repo's
+// REAL git identity — and the re-attribution probe that was supposed to bridge
+// the two keys only does so if it happens to verify the checkout before the
+// legacy sweep resolves the path. That ordering rests on an unstated
+// backoff-synchronization invariant that permanently inverts after a single
+// slow probe, after which restoring the checkout deterministically respawns
+// the deleted project's root.
+//
+// The fix stamps the tombstone under BOTH the derived id and the historical/real
+// id at delete time, mirroring the fenced list and the durable opt-in sweep, so
+// the ensure sweep finds a tombstone under the real id regardless of probe
+// timing.
+func TestDerivedIDDeleteStampsTheHistoricalIdentityTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	realID := repoID(t, repoPath)
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+	if derivedID == realID {
+		t.Fatalf("fixture must produce disjoint identities, both %s", realID)
+	}
+
+	// The checkout is hidden before NewManager so the boot snapshot files the
+	// project under the derived id — the shape a legacy row (no recorded
+	// RepoID) produces when its path stopped resolving before the daemon
+	// started.
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[derivedID]; !ok {
+		t.Fatalf("fixture must start with the record unresolved under its provisional identity %s", derivedID)
+	}
+
+	// Let the probe settle negative with a nil candidate — the path is absent,
+	// so the probe resolves nothing and settles inconclusive. This is the state
+	// where the attribution-pending gate is OPEN for the real id: no probe
+	// holds a candidate matching the real id, so rootAttributionPendingFor
+	// returns false.
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+
+	// Override the durable root_agents sweep so the test does not depend on
+	// the config file being writable; the in-memory m.cfg.RootAgents is
+	// immutable and still drives the legacy ensure sweep.
+	originalDeregister := deregisterRootAgents
+	deregisterRootAgents = func(ids ...string) ([]string, error) { return nil, nil }
+	t.Cleanup(func() { deregisterRootAgents = originalDeregister })
+
+	// DeleteProject by the path resolves to the derived id and succeeds: the
+	// record is deregistered, the tombstone is stamped, the claimant is
+	// recorded.
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+
+	// The tombstone must be stamped under BOTH the derived id and the
+	// historical/real id, mirroring the fenced list and the durable opt-in
+	// sweep. Without the real-id stamp, the ensure sweep — which consults the
+	// tombstone under the repo's real git identity — finds nothing and creates
+	// the always-on root when the checkout returns.
+	manager.mu.Lock()
+	_, tombDerived := manager.deletedRootRepos[derivedID]
+	_, tombReal := manager.deletedRootRepos[realID]
+	manager.mu.Unlock()
+	if !tombDerived {
+		t.Fatalf("the derived id %s must be tombstoned by the delete", derivedID)
+	}
+	if !tombReal {
+		t.Fatalf("the historical/real id %s must be tombstoned too — without it the ensure sweep recreates the deleted project's root when the checkout returns", realID)
+	}
+
+	// The checkout returns. Simulate the inverted-timing state that exposes the
+	// bug: the legacy sweep is due (so it resolves the restored path to the real
+	// id), but the re-attribution probe is NOT due (so it does not re-verify and
+	// move the tombstone from the derived id to the real id). Without the fix,
+	// the sweep finds no tombstone at the real id and creates the root; with
+	// the fix, the tombstone is already there and suppresses the create.
+	if err := os.Rename(hidden, repoPath); err != nil {
+		t.Fatalf("restore repo dir: %v", err)
+	}
+	manager.mu.Lock()
+	if st := manager.rootEnsureStates[repoPath]; st != nil {
+		st.nextAttempt = time.Time{}
+	}
+	if probe := manager.rootHealProbes[derivedID]; probe != nil {
+		probe.retryAt = nowFunc().Add(time.Hour)
+	}
+	manager.mu.Unlock()
+
+	manager.ensureRootAgentsAndWait()
+
+	if len(*seen) != 0 {
+		t.Fatalf("a deleted project's root must not respawn when its checkout returns — the tombstone at the real id suppresses the ensure sweep regardless of probe timing; got %d create(s)", len(*seen))
 	}
 }
