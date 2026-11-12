@@ -593,3 +593,123 @@ func TestDerivedIDDeleteStampsTheHistoricalIdentityTombstone(t *testing.T) {
 		t.Fatalf("a deleted project's root must not respawn when its checkout returns — the tombstone at the real id suppresses the ensure sweep regardless of probe timing; got %d create(s)", len(*seen))
 	}
 }
+
+// TestDerivedMismatchReleasesTheHistoricalTombstone pins PR #7189's Codex P1
+// (review thread 4554400603). TestDisproofReleasesSamePathTombstone's
+// scenario, for a LEGACY row: the project recorded no identity, so its delete
+// while absent targets the derived id and, since #7181, also stamps the
+// historical identity of its recorded path — which IS the real id of any
+// repository later main-rooted there. The probe records its proof that such
+// an occupant is a different clone under the DERIVED id, so a historical
+// stamp that looks only for evidence under its own id is never released, and
+// the occupant's legitimate legacy opt-in stays suppressed for the daemon's
+// lifetime by a dead third party.
+func TestDerivedMismatchReleasesTheHistoricalTombstone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	writePersonalRootAgent(t, project.ID, "enabled = true")
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, ok := manager.rootAgentLayers.Load().unresolvedRoots[derivedID]; !ok {
+		t.Fatalf("fixture must start with the record unresolved under its provisional identity %s", derivedID)
+	}
+	// The project is deleted while its path is absent…
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+	manager.mu.Lock()
+	claimant, stamped := manager.deletedRootRepos[historical]
+	manager.mu.Unlock()
+	if !stamped || claimant != project.ID {
+		t.Fatalf("fixture must stamp the historical identity %s for the deleted claimant %s (#7181), got %q (present=%v)", historical, project.ID, claimant, stamped)
+	}
+	// …and an unrelated clone occupies the path; the legacy entry is ITS
+	// opt-in (in-memory: the delete's durable sweep already ran).
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init occupant: %v", err)
+	}
+	if occupant := repoID(t, repoPath); occupant != historical {
+		t.Fatalf("fixture needs the occupant main-rooted at the recorded path, so its real id is the historical one: got %s, want %s", occupant, historical)
+	}
+
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+
+	record, ok := manager.rootAgentLayers.Load().unresolvedRoots[derivedID]
+	if !ok || !record.identityMismatch || record.projectID != project.ID {
+		t.Fatalf("fixture must prove the mismatch under the derived id %s for %s, got %+v (present=%v)", derivedID, project.ID, record, ok)
+	}
+	if len(*seen) != 1 {
+		t.Fatalf("the derived id's proven mismatch must release the historical stamp too, or the occupant's legacy opt-in is suppressed by a dead third party for the daemon's lifetime; got %d creates", len(*seen))
+	}
+	if got := manager.rootAgentMaterializeVerdictFor(historical).reason; got == rootAgentProjectDeleted {
+		t.Fatalf("the occupant's verdict must not report a dead third party's deletion")
+	}
+}
+
+// TestPromotionElsewhereRetiresTheHistoricalStandIn pins the other half of
+// that release. The historical stamp stands in for the identity the deleted
+// project's probe has not established yet. When the probe does establish it
+// and it is somewhere ELSE — a recorded root that is a linked workspace, a
+// subdirectory registration, a spelling through a symlink — the derived
+// tombstone moves to that identity and the record leaves unresolvedRoots, so
+// no mismatch can ever be proven against the stand-in again. Left behind, it
+// would suppress whatever repository is later main-rooted at the recorded
+// path for the daemon's lifetime, on behalf of a project proven to live
+// elsewhere.
+func TestPromotionElsewhereRetiresTheHistoricalStandIn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	project := registerTestProject(t, repoPath)
+	clearRecordedRepoID(t, project.ID)
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
+	derivedID := config.DerivedRepoIDForUnresolvedRoot(filepath.Clean(repoPath))
+
+	hidden := repoPath + ".hidden"
+	if err := os.Rename(repoPath, hidden); err != nil {
+		t.Fatalf("hide repo dir: %v", err)
+	}
+	manager, err := NewManager(config.DefaultConfig())
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject while absent: %v", err)
+	}
+
+	// The probe verifies the project's checkout and establishes an identity
+	// that is not its recorded path's own hash.
+	elsewhere, err := config.RepoFromPath(setupControlRepo(t))
+	if err != nil {
+		t.Fatalf("RepoFromPath: %v", err)
+	}
+	if elsewhere.ID == historical || elsewhere.ID == derivedID {
+		t.Fatalf("fixture needs an identity distinct from %s and %s, got %s", historical, derivedID, elsewhere.ID)
+	}
+	installVerifiedProbe(t, manager, derivedID, elsewhere)
+	manager.ensureRootAgentsAndWait()
+
+	manager.mu.Lock()
+	movedClaimant, moved := manager.deletedRootRepos[elsewhere.ID]
+	_, standIn := manager.deletedRootRepos[historical]
+	manager.mu.Unlock()
+	if !moved || movedClaimant != project.ID {
+		t.Fatalf("fixture must promote the derived tombstone to the established identity %s for %s, got %q (present=%v)", elsewhere.ID, project.ID, movedClaimant, moved)
+	}
+	if standIn {
+		t.Fatalf("the historical stand-in at %s must retire once the probe proves the deleted project lives at %s — nothing can disprove it any more, so it would suppress an unrelated repository main-rooted at %s for the daemon's lifetime", historical, elsewhere.ID, repoPath)
+	}
+}
