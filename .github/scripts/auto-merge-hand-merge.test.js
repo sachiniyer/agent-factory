@@ -77,10 +77,10 @@ function loadsOf(file) {
   });
 }
 
-// Every file loaded with a write token or a secret, mapped to the first
-// workflow job that loads it.
-function writeTokenLoads() {
-  const loads = new Map();
+// Every job of every workflow, as { workflow, head, id, text }: `head` is the
+// workflow's text before `jobs:`, `text` the job's own lines.
+function workflowJobs() {
+  const jobs = [];
   for (const workflow of fs.readdirSync(WORKFLOWS).filter((f) => /\.ya?ml$/.test(f)).sort()) {
     const text = fs.readFileSync(path.join(WORKFLOWS, workflow), 'utf8');
     const jobsAt = text.search(/^jobs:[ \t]*$/m);
@@ -90,17 +90,79 @@ function writeTokenLoads() {
     const starts = [...body.matchAll(/^ {2}([\w-]+):[ \t]*$/gm)];
     starts.forEach((start, i) => {
       const job = body.slice(start.index, i + 1 < starts.length ? starts[i + 1].index : body.length);
-      if (!holdsToken(head, job)) return;
-      const queue = named(job);
-      while (queue.length) {
-        const file = queue.shift();
-        if (loads.has(file)) continue;
-        loads.set(file, `${workflow} ${start[1]}`);
-        queue.push(...loadsOf(file));
-      }
+      jobs.push({ workflow, head, id: start[1], text: job });
     });
   }
+  return jobs;
+}
+
+// Every file loaded with a write token or a secret, mapped to the first
+// workflow job that loads it.
+function writeTokenLoads() {
+  const loads = new Map();
+  for (const job of workflowJobs().filter((j) => holdsToken(j.head, j.text))) {
+    const queue = named(job.text);
+    while (queue.length) {
+      const file = queue.shift();
+      if (loads.has(file)) continue;
+      loads.set(file, `${job.workflow} ${job.id}`);
+      queue.push(...loadsOf(file));
+    }
+  }
   return loads;
+}
+
+// A job can merge a pull request when the permissions in force grant contents:
+// write (PUT /pulls/N/merge needs nothing more) or it names a secret other than
+// its own GITHUB_TOKEN. Unset permissions mean the repository default, which may
+// be write.
+function mergeCapable(job) {
+  const own = permissionsAt(job.text, 4);
+  const perms = own !== null ? own : permissionsAt(job.head, 0);
+  if (perms === null || /write-all|\bcontents:\s*write\b/.test(perms)) return true;
+  return [...code(job.text).matchAll(/\bsecrets\.(\w+)/g)].some(([, name]) => name !== 'GITHUB_TOKEN');
+}
+
+// The shell a job's `run:` steps execute, block scalars included.
+function runScripts(text) {
+  const scripts = [];
+  const lines = text.split('\n');
+  lines.forEach((line, i) => {
+    const key = line.match(/^(\s*(?:- )?)run:[ \t]*(.*)$/);
+    if (!key) return;
+    if (!/^[|>][-+]?$/.test(key[2].trim())) {
+      scripts.push(key[2]);
+      return;
+    }
+    const block = [];
+    for (const next of lines.slice(i + 1)) {
+      if (next.trim() && next.search(/\S/) <= key[1].length) break;
+      block.push(next);
+    }
+    scripts.push(block.join('\n'));
+  });
+  return scripts.join('\n');
+}
+
+// What in a merge-capable job would run repository code outside the hand-merge
+// prefixes: a toolchain, a `go` command (go test and go run run the tree's code,
+// and go build makes a binary to run), a built af binary, or a repository file
+// outside the prefixes named anywhere a step could run or require it.
+function runsRepositoryCode(job) {
+  const text = code(job.text);
+  const shell = runScripts(text);
+  const found = [];
+  for (const [step] of text.matchAll(/uses:\s*actions\/setup-[\w-]+/g)) found.push(step);
+  for (const [, command] of shell.matchAll(/(?:^|[\s;&|(`])((?:go|make|npm|npx|node|python3?|pip3?|docker)\s+\S+)/gm)) found.push(command);
+  for (const [binary] of shell.matchAll(/\S*\/agent-factory\b(?![-.])\S*/g)) found.push(binary);
+  for (const [token] of text.matchAll(/[\w./-]*[\w-]/g)) {
+    const file = token.replace(/^\.\//, '');
+    if (!file.includes('/') && !fs.existsSync(path.join(ROOT, file))) continue;
+    const at = path.join(ROOT, file);
+    if (!fs.existsSync(at) || !fs.statSync(at).isFile()) continue;
+    if (!['.github/workflows/', '.github/scripts/'].some((prefix) => file.startsWith(prefix))) found.push(file);
+  }
+  return found;
 }
 
 const files = (...paths) => ({ pageInfo: { hasNextPage: false }, nodes: paths.map((p) => ({ path: p })) });
@@ -123,6 +185,34 @@ test('every .github/ file a job holding a write token or a secret loads needs a 
   const ungated = [...loads].filter(([file]) => !gate.handMergePaths([{ filename: file }]).length);
   assert.deepEqual(ungated.map(([file, job]) => `${file} (${job})`), [],
     'Auto Gate would auto-merge a PR that changes these');
+});
+
+// #7200 R2: a job that can merge a pull request must not run code a merged PR
+// controls, or that code merges a PR this rule holds back. The release
+// preflight ran `go test ./...` with contents: write, which would let any
+// auto-merged Go change merge a held .github/scripts/ PR.
+test('a job that can merge a pull request runs no repository code outside the hand-merge prefixes', () => {
+  const capable = workflowJobs().filter(mergeCapable);
+  // Anti-vacuity: the merger, the gate and the release publishers can merge.
+  for (const [workflow, id] of [['auto-merge.yml', 'land'], ['auto-gate.yml', 'auto-gate'],
+    ['auto-release.yml', 'release'], ['stable-release.yml', 'publish']]) {
+    assert.ok(capable.some((job) => job.workflow === workflow && job.id === id), `${workflow} ${id} no longer reads as merge-capable`);
+  }
+  const offenders = capable.map((job) => [job, runsRepositoryCode(job)]).filter(([, found]) => found.length)
+    .map(([job, found]) => `${job.workflow} ${job.id}: ${[...new Set(found)].join(', ')}`);
+  assert.deepEqual(offenders, [], 'these jobs could merge a held PR from code a merged PR wrote');
+});
+
+test('the merge-capable lint sees a go command, a toolchain, a built binary and a script outside the prefixes', () => {
+  const job = (steps) => ({ workflow: 'x.yml', id: 'j', head: 'permissions:\n  contents: write\n', text: `  j:\n    steps:\n${steps}` });
+  assert.deepEqual(runsRepositoryCode(job('      - run: go test ./...\n')), ['go test']);
+  assert.deepEqual(runsRepositoryCode(job('      - uses: actions/setup-go@v6\n')), ['uses: actions/setup-go']);
+  assert.deepEqual(runsRepositoryCode(job('      - run: "$tmp/agent-factory" version\n')), ['"$tmp/agent-factory"']);
+  assert.deepEqual(runsRepositoryCode(job('      - run: scripts/ci-apt-install.sh zsh\n')), ['scripts/ci-apt-install.sh']);
+  assert.deepEqual(runsRepositoryCode(job('      - run: .github/scripts/write-sha256sums.sh dist\n      - run: gh release create v1 dist/*.tar.gz\n')), []);
+  assert.equal(mergeCapable(job('')), true);
+  assert.equal(mergeCapable({ ...job(''), head: 'permissions:\n  contents: read\n' }), false);
+  assert.equal(mergeCapable({ ...job('        env:\n          K: ${{ secrets.DEPLOY_KEY }}\n'), head: 'permissions:\n  contents: read\n' }), true);
 });
 
 test('a PR touching neither workflows nor scripts still auto-merges', () => {
@@ -173,4 +263,45 @@ test('with AUTO_MERGE_TOKEN set, a halted master still lands no fix that edits w
     assert.deepEqual(github.merged, [], edit);
     assert.equal(jobOutput(run, 'gate', 'candidates'), '', `${edit}: the gate picked it`);
   }
+});
+
+// #7200 R3: the merge pins the head the PR list read, so the file list must be
+// that head's. A force-push between the two reads (clean head B for the files
+// query, the script-editing head A back for the merge) once landed the edit.
+// The reviewer's probe, kept as a regression test.
+test('a head that moves between the PR list and the file list is not merged on the other head\'s files', async () => {
+  const origin = makeOrigin();
+  origin.squash(origin.heads[12], 'the fix, hand-merged'); // master passes
+  origin.addPr(19, { '.github/scripts/auto-merge.js': tamper('auto-merge.js') }, 'A: edits the merger');
+  const a = origin.heads[19];
+  origin.addPr(98, { 'feature2.txt': 'x\n' }, 'B: clean');
+  const b = origin.heads[98];
+  delete origin.heads[98];
+  const github = fakeGithub(origin, [[19]], { broken: false });
+  const inner = github.graphql;
+  github.graphql = async (query) => {
+    if (!query.includes('files(')) return inner(query);
+    origin.heads[19] = b; // force-pushed B before the files query...
+    try { return await inner(query); } finally { origin.heads[19] = a; } // ...and A back after it
+  };
+  const run = await runWorkflow(origin, github);
+  assert.deepEqual(github.merged, [], 'the merge landed head A on head B\'s file list');
+  assert.doesNotMatch(origin.file('.github/scripts/auto-merge.js'), /tampered/);
+  assert.match(skipped(run, 19).join('\n'), /head moved/);
+});
+
+// #7200 R6: GraphQL names a renamed file by its new path only, so a rename out
+// of .github/scripts/ read as touching nothing there. It landed, and every
+// later run's `land` failed to load the file it had moved.
+test('a green PR that renames a script out of .github/scripts/ is skipped, not merged', async () => {
+  const origin = makeOrigin();
+  origin.squash(origin.heads[12], 'the fix, hand-merged'); // master passes
+  origin.addPr(22, {
+    '.github/scripts/macos-verdict.js': null, '.github/macos-verdict.js': read('.github/scripts/macos-verdict.js'),
+  }, 'moves a script the merger requires');
+  const github = fakeGithub(origin, [[13], [22]], { broken: false });
+  const run = await runWorkflow(origin, github);
+  assert.deepEqual(github.merged, [13]);
+  assert.match(skipped(run, 22).join('\n'), /renam/);
+  assert.ok(origin.file('.github/scripts/macos-verdict.js').length > 0);
 });

@@ -139,12 +139,13 @@ function makeOrigin() {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'go'), STUB_GO, { mode: 0o755 });
   git(root, 'init', '-q', '-b', 'master', work);
-  // A body of { symlink: target } commits a symlink.
+  // A body of { symlink: target } commits a symlink, and null deletes the file.
   const commit = (files, message) => {
     for (const [file, body] of Object.entries(files)) {
       const at = path.join(work, file);
       fs.mkdirSync(path.dirname(at), { recursive: true });
       fs.rmSync(at, { force: true });
+      if (body === null) continue;
       if (body.symlink) fs.symlinkSync(body.symlink, at);
       else fs.writeFileSync(at, body, { mode: file.endsWith('.sh') ? 0o755 : 0o644 });
     }
@@ -207,9 +208,14 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
   // selection saw nothing wrong.
   const g = { prs, issue, merged: [], dispatched: [], comments: [], opened: [], refuse: new Set() };
   const open = () => prs.filter((p) => !g.merged.includes(p.number));
-  // The paths a PR changes, as GitHub lists them: its head against its merge
-  // base with master.
-  const changed = (n) => git(origin.bare, 'diff', '--name-only', `refs/heads/master...${origin.heads[n]}`).split('\n').filter(Boolean);
+  // The files a PR changes, as GitHub's GraphQL lists them: its head against its
+  // merge base with master, a rename under its new path only.
+  const CHANGE = { A: 'ADDED', M: 'MODIFIED', D: 'DELETED', R: 'RENAMED', C: 'COPIED', T: 'CHANGED' };
+  const changed = (n) => git(origin.bare, 'diff', '--name-status', '-M', `refs/heads/master...${origin.heads[n]}`)
+    .split('\n').filter(Boolean).map((line) => {
+      const [status, ...paths] = line.split('\t');
+      return { path: paths[paths.length - 1], changeType: CHANGE[status[0]] };
+    });
   const rateLimit = { cost: 1, remaining: 4999, resetAt: 'later' };
   g.graphql = async (query) => {
     if (query.includes('pullRequests(')) {
@@ -217,8 +223,10 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
     }
     const repository = {};
     for (const [, n] of query.matchAll(/p(\d+): pullRequest/g)) {
+      // The head is read when the query is, like the files: a test that moves
+      // origin.heads[n] mid-run sees both move together.
       repository[`p${n}`] = query.includes('files(')
-        ? { files: { pageInfo: { hasNextPage: false }, nodes: changed(n).map((path) => ({ path })) } }
+        ? { headRefOid: origin.heads[n], files: { pageInfo: { hasNextPage: false }, nodes: changed(n) } }
         : query.includes('reviewThreads')
           ? { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } }
           : { mergeable: 'MERGEABLE' };

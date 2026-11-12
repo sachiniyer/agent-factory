@@ -1553,6 +1553,38 @@ test("#7194: a merge-queue batch that changes the merger is not certified for th
   );
 });
 
+// #7200 R3: the evaluation lists the PR's files at its CURRENT head, and the
+// merge pins gate.headSha. A force-push away and back between the two (A→B→A)
+// would merge A on B's file list, so merge() re-reads the files at the pinned
+// head itself, from the compare it already makes, and fails closed.
+for (const [name, options, refusal] of [
+  [
+    "a head whose own diff edits the merger, though the listed files did not",
+    { files: ["session/storage.go"], compareFiles: ["session/storage.go", ".github/scripts/auto-merge.js"] },
+    /a maintainer must merge it by hand/,
+  ],
+  [
+    "a pinned head whose files the compare does not list",
+    { files: ["session/storage.go"], compareFiles: null },
+    /could not be read in full/,
+  ],
+  [
+    "a pinned head with more files than the compare lists",
+    { files: ["session/storage.go"], compareFiles: Array.from({ length: 300 }, (_, i) => `pkg/f${i}.go`) },
+    /could not be read in full/,
+  ],
+]) {
+  test(`#7200: merge refuses ${name}`, async () => {
+    const github = fakeGateGithub(options);
+
+    await assert.rejects(
+      autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+      refusal,
+    );
+    assert.equal(github.mergedWith, null);
+  });
+}
+
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
   const error = new Error("cannot disable native auto-merge");
   error.status = 500;
@@ -16969,6 +17001,9 @@ function fakeGateGithub({
   // the batch — and a single global status cannot answer them differently.
   compareStatusByTarget = {},
   compareError = null,
+  // The files the compare of base...head lists: by default the PR's own
+  // `files`, read at the pinned head (#7200 R3). null omits the field.
+  compareFiles = undefined,
   updateBranchError = null,
   pullGetSnapshots = null,
   pullGetErrors = [],
@@ -17468,6 +17503,9 @@ function fakeGateGithub({
               behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
               ahead_by: 1,
               status: behindBy > 0 ? "diverged" : "ahead",
+              ...(compareFiles === null
+                ? {}
+                : { files: (compareFiles === undefined ? files : compareFiles).map(pullRequestFile) }),
               // Only for the PR head itself — the one comparison whose merge base
               // the TUI gate's comment-only proof reads (#4477).
               ...(target === headSha ? { merge_base_commit: { sha: mergeBaseSha } } : {}),
