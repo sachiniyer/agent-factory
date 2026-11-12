@@ -1068,10 +1068,7 @@ stays Lost. A rebuilt worktree runs the repository's `post_worktree_commands`
 again, so installs or builds with side effects repeat on that recovery. When the
 worktree still exists, the branch, the tree and any uncommitted work are untouched
 and no hooks re-run. Either way nothing is pushed,
-reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a
-dead agent — and reports back whether its respawn resumed the session's own
-conversation, which is what the retry's `conversation` answer relays (a
-re-provision, or a sandbox build too old to report, answers not-carried instead). A sandbox built before the relaunch route existed (it advertises the
+reaped, re-cloned or re-provisioned. The same relaunch serves `retry-limit` on a dead agent. The driving daemon cannot prove whether the respawn carried the conversation, so the retry's `conversation` answer never reports `carried` for a sandbox session — `carry_failure` names that, whichever branch the respawn takes. A sandbox built before the relaunch route existed (it advertises the
 `relaunch` feature on `/v1/health`) falls back to replacing the sandbox: recovery
 then pushes its work to `origin` first (anything unpushed would be destroyed by
 the re-clone) — and refuses to replace if that push fails. Unreachability alone

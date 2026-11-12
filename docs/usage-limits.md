@@ -578,14 +578,7 @@ program. Retiring the swap's delivery obligation writes the same answer onto
 the recorded handoff entry, so `af sessions get` reports it afterwards.
 `af sessions retry-limit` reports the same object for its own resume — the
 swap's carry, a re-spawn that resumed the recorded conversation, or a fresh
-start it names. For a session running in a sandbox the answer comes from the
-sandbox's own recovery: `carried` only when the in-place relaunch it actually
-performed reported resuming this session's own conversation — the relaunch
-returns the verdict with its result, so the answer always matches the branch
-that ran. Every other case answers `carry_failure` with the true reason: a
-re-provision (including `--force-reap`), a fresh start the relaunch reported,
-an older sandbox build that sent no report, or a report that did not bind to
-this session and its conversation.
+start it names. For a session running in a sandbox the driving daemon cannot prove whether the respawn carried the conversation, so it never reports `carried` — `carry_failure` names that, whichever branch the respawn takes (an in-place relaunch or a re-provision, including `--force-reap`).
 
 If an agent or account handoff starts its replacement but cannot confirm whether
 the mission was submitted, af suppresses automatic redelivery because the first
