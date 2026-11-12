@@ -29,10 +29,14 @@ import (
 const (
 	claudeFolderTrustDialogName = "Claude folder-trust"
 	// claudeLaunchGateDialogName covers the two Claude gates af answers by
-	// accepting whatever Claude Code preselected: the MCP-server trust prompt
-	// and the legacy folder-trust wording. af cannot say which of them it
-	// answered from the keystroke alone, so it does not claim to.
+	// accepting whatever Claude Code preselected: the older MCP-server trust
+	// prompt and the legacy folder-trust wording. af cannot say which of them
+	// it answered from the keystroke alone, so it does not claim to.
 	claudeLaunchGateDialogName = "Claude trust/MCP"
+	// claudeMCPServerDialogName is Claude Code 2.1.322's MCP-server dialog. af
+	// confirms only its decline row, verified by label, so the diagnostic can
+	// name exactly what af chose (#7163).
+	claudeMCPServerDialogName = "Claude MCP-server"
 	// Codex's directory-trust modal preselects its affirmative option and af
 	// accepts that preselection, so the option is named to keep the diagnostic
 	// honest about what af confirmed.
