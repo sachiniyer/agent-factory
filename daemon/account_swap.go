@@ -647,6 +647,13 @@ var accountSwapTrustDismissInterval = 200 * time.Millisecond
 // Zero means conversationCaptureTimeout — the window the ordinary fresh swap's
 // capture always spent pumping, since no rollout exists before its first
 // prompt.
+//
+// The window is held where the swap runs: under the session's op-lock and,
+// for automatic swaps, inline on the daemon's poll loop, which resumes limited
+// sessions one after another (ResumeLimitedSessions). N swaps in one pass
+// therefore suspend the status poll, Lost restore and handoff resume for about
+// N windows — the same class as the readiness wait each of them already
+// spends, which can run to waitForReadyTimeout (#7155).
 var accountSwapTrustWindow time.Duration
 
 func swapTrustWindow() time.Duration {
@@ -771,11 +778,21 @@ func (m *Manager) settleReplacementRuntime(
 	}
 	if launched {
 		captureAfterDelivery, err := captureAccountSwapConversation(instance, snap)
-		if err != nil {
+		switch {
+		case errors.Is(err, errCarriedConversationUnconfirmed):
+			// What happened and what comes next: the next attempt finds the
+			// replacement live and complete, takes the non-respawn arm, and
+			// delivers the notice without re-confirming. A durable refusal
+			// would turn a store af cannot read into a swap stuck for as long as
+			// it stays unreadable, while the runtime's follow still attributes
+			// from its open files (#7155).
+			return false, fmt.Errorf("account replacement for %q: %w; the swap retries after its backoff and then delivers the notice without re-confirming", requestedTitle, err)
+		case err != nil:
 			return false, fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, err)
 		}
 		return captureAfterDelivery, nil
 	}
+	pumpReplacementTrustWindow(instance)
 	return false, nil
 }
 
