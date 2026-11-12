@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"sort"
@@ -330,6 +331,20 @@ func backendLabel(kind session.BackendKind, cfg *config.ResolvedConfig) string {
 // their sessions would land on a backend they never chose.
 func defaultFor(backends []BackendOption, cfg *config.ResolvedConfig, cfgErr error, repoRoot string) (string, BackendAvailability, string) {
 	kind, kerr := session.BackendKindFor(session.InstanceOptions{}, repoRoot)
+	// BackendKindFor re-reads the project config independently of the daemon's own
+	// resolve (cfgErr). After #7078 that re-read can fail transiently — every git
+	// probe unanswered under load — and return a wrapped *ProjectConfigUnknownError
+	// even when the daemon's own resolve succeeded (cfgErr == nil). That is "could
+	// not be evaluated" (BackendUnknown, retry-oriented), not "the config named an
+	// unrecognized backend" (BackendUnavailable, fix-the-key): the branch below
+	// would fabricate an "unknown backend" claim about a config that is perfectly
+	// valid. Classify the unknown outcome before the branches whose contracts
+	// assume BackendKindFor only fails on the backend VALUE — the audit #7078
+	// performed over the launch/configure callers but missed this read-only catalog.
+	var unknown *session.ProjectConfigUnknownError
+	if errors.As(kerr, &unknown) {
+		return "", BackendUnknown, kerr.Error()
+	}
 	if kerr != nil && cfgErr != nil {
 		// The repo's config exists but could not be resolved, so a create with no
 		// explicit backend REFUSES (#5801) rather than guessing local. That is not
