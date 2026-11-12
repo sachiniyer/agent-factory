@@ -1,6 +1,7 @@
 package session
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -350,4 +351,68 @@ func TestHeldAgentConversation_HolderFastPathFollowsAThreadSwitch(t *testing.T) 
 		return err == nil && conv.ID == heldTestOwnID
 	}, 5*time.Second, 20*time.Millisecond,
 		"a holder that moved threads must not pin the old answer: last %+v, %v", conv, err)
+}
+
+// TestHeldAgentConversation_FastPathNeverOverridesAMovedRecord is the #7120
+// review case. The holder fast path is only equivalent to the full walk while
+// the record is the holder's own answer: once an operator repaired the record
+// to a thread ANOTHER pane member holds, answering from the cached holder
+// would re-point the repair, where the full walk sees both threads and keeps
+// it. So a record that moved forces the full walk.
+func TestHeldAgentConversation_FastPathNeverOverridesAMovedRecord(t *testing.T) {
+	codexHome := t.TempDir()
+	workDir := t.TempDir()
+	first := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-49-03-"+heldTestSiblingID+".jsonl", workDir)
+	second := writeCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-11-11T13-50-27-"+heldTestOwnID+".jsonl", workDir)
+	fifo := filepath.Join(t.TempDir(), "spawn")
+	require.NoError(t, syscall.Mkfifo(fifo, 0o600))
+	snap := beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, workDir)
+
+	// The root holds the first thread throughout; on the signal it starts a
+	// second member that holds only the second thread.
+	holder := exec.Command("sh", "-c", `exec 3<"$1"; read _ < "$3"; (exec 3<&- 4<"$2"; exec sleep 30) & wait`,
+		"sh", first, second, fifo)
+	holder.SysProcAttr = &syscall.SysProcAttr{Setsid: true}
+	require.NoError(t, holder.Start())
+	t.Cleanup(func() {
+		_ = syscall.Kill(-holder.Process.Pid, syscall.SIGKILL)
+		_, _ = holder.Process.Wait()
+	})
+	var root proctree.Process
+	require.Eventually(t, func() bool {
+		p, err := proctree.Lookup(holder.Process.Pid)
+		root = p
+		return err == nil
+	}, 5*time.Second, 20*time.Millisecond)
+	inst := &Instance{Tabs: []*Tab{{}}}
+	inst.runtimePID, inst.runtimeStartID = root.PID, root.StartID
+	bound := inst.BindConversationCaptureRuntime(snap)
+	inst.SetAgentConversation(AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestSiblingID})
+
+	require.Eventually(t, func() bool {
+		conv, err := HeldAgentConversation(tmux.ProgramCodex, bound)
+		return err == nil && conv.ID == heldTestSiblingID
+	}, 5*time.Second, 20*time.Millisecond, "the first thread must be named and its holder learned")
+
+	writer, err := os.OpenFile(fifo, os.O_WRONLY, 0)
+	require.NoError(t, err)
+	_, err = writer.WriteString("go\n")
+	require.NoError(t, err)
+	require.NoError(t, writer.Close())
+	require.Eventually(t, func() bool {
+		snapshot, err := proctree.Snapshot()
+		return err == nil && len(proctree.TreeOf(snapshot, root.PID)) >= 2
+	}, 5*time.Second, 20*time.Millisecond, "the second member must start")
+
+	// The operator repairs the record to the thread the second member holds.
+	inst.SetAgentConversation(AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestOwnID})
+	require.Eventually(t, func() bool {
+		conv, err := HeldAgentConversation(tmux.ProgramCodex, bound)
+		require.NotEqual(t, heldTestSiblingID, conv.ID,
+			"the cached holder's answer must never re-point a record that moved")
+		return errors.Is(err, ErrCodexConversationAmbiguous)
+	}, 5*time.Second, 20*time.Millisecond,
+		"with two threads held, the full walk reports the ambiguity and the repair stands")
 }

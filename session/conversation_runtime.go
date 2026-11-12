@@ -232,11 +232,12 @@ func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapsh
 // recorded Codex session, and the full walk reads the whole process table —
 // one stat per process on the box — to find the pane's members. So when the
 // member that named the conversation last time is still the same process in
-// the same runtime generation, its own descriptors are read first: if judge
-// gives the same answer from them, nothing else could change the verdict (a
-// second top-level rollout anywhere else would only make the full walk
-// ambiguous, which keeps the record exactly as this answer does). Any other
-// outcome falls through to the full walk, which also re-learns the holder.
+// the same runtime generation, and the record is still that answer, its own
+// descriptors are read first: if judge gives the same answer from them,
+// nothing else could change the verdict (a second top-level rollout anywhere
+// else would only make the full walk ambiguous, which keeps the record
+// exactly as this answer does). Any other outcome falls through to the full
+// walk, which also re-learns the holder.
 //
 // A generation that changes mid-walk discards the walk — its files belong to
 // no live process set — exactly as attributeCodexRolloutPaths does.
@@ -251,7 +252,14 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 	i.codexAttrMu.Lock()
 	holder := i.codexHolder
 	i.codexAttrMu.Unlock()
-	if override == nil && holder.pid > 0 && holder.gen == gen {
+	// The fast path may only CONFIRM the record, never change it: its
+	// equivalence with the full walk ("anything else could only make the walk
+	// ambiguous, which keeps the record too") holds only while the record is
+	// the holder's own answer. A record that moved since — an operator's
+	// set-conversation to a thread another member holds — needs the full walk,
+	// which reports that ambiguity instead of re-pointing the repair (#7120
+	// review).
+	if override == nil && holder.pid > 0 && holder.gen == gen && holder.id == i.AgentConversation().ID {
 		if p, err := proctree.Lookup(holder.pid); err == nil && p.StartID == holder.startID {
 			if paths, err := proctree.OpenFilePaths(holder.pid); err == nil {
 				if conv, _, err := judge(paths); err == nil && conv.ID == holder.id {
