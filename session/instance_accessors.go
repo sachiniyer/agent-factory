@@ -578,7 +578,7 @@ func (i *Instance) CommitRuntimeProgramEvidence(evidence RuntimeProgramEvidence,
 // owns UpdatedAt and the durable checkpoint; touching here would count one
 // runtime replacement twice.
 func (i *Instance) setRuntimeProgram(program string) {
-	i.setRuntimeLaunch(program, nil)
+	i.setRuntimeLaunch(program, nil, time.Time{})
 }
 
 // setRuntimeLaunch records a positively established launch: the resolved base
@@ -587,7 +587,12 @@ func (i *Instance) setRuntimeProgram(program string) {
 // behind the reused tmux name is still the launch af made (#5066). A pane query
 // that cannot answer records the command alone; the record then verifies
 // nothing on reattach and ages out exactly like a pre-evidence launch.
-func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession) {
+//
+// spawnedAt is the instant just before the launch spawned the process — ts's
+// SpawnedAt, taken after tmux confirmed no session stood behind the name —
+// or zero when it has none. It dates the replacement of the runtime a
+// standing operator repair was made against (#7147 G-2).
+func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession, spawnedAt time.Time) {
 	if strings.TrimSpace(program) == "" {
 		return
 	}
@@ -600,7 +605,7 @@ func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession) {
 	}
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.setRuntimeEvidenceLocked(program, pid, startID)
+	i.setRuntimeEvidenceSinceLocked(program, pid, startID, spawnedAt)
 }
 
 func (i *Instance) setRuntimeProgramLocked(program string) {
@@ -608,13 +613,17 @@ func (i *Instance) setRuntimeProgramLocked(program string) {
 }
 
 func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uint64) {
+	i.setRuntimeEvidenceSinceLocked(program, pid, startID, time.Time{})
+}
+
+func (i *Instance) setRuntimeEvidenceSinceLocked(program string, pid int, startID uint64, spawnedAt time.Time) {
 	// Every caller is a launch boundary: whatever it records — even nothing
 	// beyond the command, when its pane query failed — describes the new
 	// runtime, so an identity kept from the old one's unanswerable reattach
 	// probe can never stand in for it (#7123). A standing operator repair
 	// records that its runtime was replaced (#7129).
 	i.captureEvidence = keptCaptureEvidence{}
-	i.markRepairRuntimeReplacedLocked(time.Now())
+	i.markRepairRuntimeReplacedLocked(launchReplacementInstant(spawnedAt, time.Now()))
 	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
@@ -676,11 +685,15 @@ func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, c
 	if i.runtimeProgram != oldProgram || i.runtimePID != pid || i.runtimeStartID != startID {
 		return false, false
 	}
+	// A kept capture identity is trusted no longer than launch evidence would
+	// be, and launch evidence is re-proven at every reattach: the next capture
+	// attempt re-scans it (#7131). Counting the settle also voids any scan
+	// already in flight, whatever its answer — it began before this reattach
+	// (#7140).
+	i.captureEvidence.verified = false
+	i.captureSettles++
 	if i.runtimeProgram == "" && i.runtimePID == 0 {
-		// No launch claim to settle — but a kept capture identity is trusted no
-		// longer than launch evidence would be, and launch evidence is re-proven
-		// at every reattach: the next capture attempt re-scans it (#7131).
-		i.captureEvidence.verified = false
+		// No launch claim to settle.
 		return false, false
 	}
 	i.runtimeEvidenceGeneration.Add(1)

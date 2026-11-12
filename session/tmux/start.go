@@ -272,6 +272,9 @@ func (t *TmuxSession) start(workDir string) error {
 	// for an already-running server whose global environment predates this fix.
 	cmd.Env = append([]string(nil), launchEnv...)
 
+	// The gate above proved no session behind the name; the pane process
+	// starts inside this call (#7147).
+	t.setSpawnedAt(time.Now())
 	ptmx, commandDone, err := startPtyTracked(t.ptyFactory, cmd)
 	if err != nil {
 		if systemdScoped {

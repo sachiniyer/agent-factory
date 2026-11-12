@@ -323,7 +323,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		if restoreResult == tmux.RestoreRespawned {
 			if strings.TrimSpace(runtimeProgram) != "" {
-				i.setRuntimeLaunch(runtimeProgram, tmuxSession)
+				i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
@@ -458,7 +458,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			return setupErr
 		}
-		i.setRuntimeLaunch(runtimeProgram, tmuxSession)
+		i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 	}
 
 	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
@@ -630,7 +630,7 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
-	i.setRuntimeLaunch(plan.baseProgram, ts)
+	i.setRuntimeLaunch(plan.baseProgram, ts, ts.SpawnedAt())
 
 	resetAgentBrokerCaptures(i, true)
 	return nil

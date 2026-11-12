@@ -15,6 +15,14 @@ import (
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
+// captureAgentConversation runs one capture attempt the way the loop's first
+// attempt does — the loop's snapshot, no baseline retake — and commits any id
+// it finds. It is a test helper: the loop calls captureAgentConversationAttempt
+// directly (#7140).
+func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) error {
+	return m.captureAgentConversationAttempt(repoID, key, inst, &snap, token, timeout, false)
+}
+
 // Rollouts these fixtures write must sit in the day dir a real recorder
 // would mint them in now — the bounded capture scan prunes directories
 // provably older than the snapshot window, so a file dated in the past is

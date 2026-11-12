@@ -3,6 +3,7 @@ package session
 import (
 	"errors"
 	"fmt"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -56,6 +57,7 @@ func (i *Instance) CheckConversationCaptureEvidence() error {
 	override := i.codexRuntimeHeldOverride != nil
 	launched := i.runtimePID > 0
 	kept := i.captureEvidence
+	settles := i.captureSettles
 	ts := i.tmuxLocked()
 	i.mu.RUnlock()
 	if override {
@@ -88,13 +90,23 @@ func (i *Instance) CheckConversationCaptureEvidence() error {
 		return fmt.Errorf("af could not yet re-verify that the agent process it launched for this session (pid %d) still roots one of its panes (%v), so %w",
 			kept.pid, err, ErrNoConversationCaptureEvidence)
 	}
+	// The scan's answer is tmux's from before any reattach that settled while it
+	// ran, so it may decide nothing after one (#7140): the next attempt scans
+	// again.
+	stale := fmt.Errorf("the session reattached while af was re-verifying the agent process it launched (pid %d), so %w",
+		kept.pid, ErrNoConversationCaptureEvidence)
 	if err != nil || !same {
-		i.dropCaptureEvidence(kept)
+		if !i.dropScannedCaptureEvidence(kept, settles) {
+			return stale
+		}
 		return fmt.Errorf("no pane of this session is rooted at the agent process af launched (pid %d) any more, so %w",
 			kept.pid, ErrNoConversationCaptureEvidence)
 	}
-	if i.markCaptureEvidenceVerified(kept) {
+	switch i.markCaptureEvidenceVerified(kept, settles) {
+	case captureMarkVerified:
 		return nil
+	case captureMarkStale:
+		return stale
 	}
 	// A launch boundary replaced the identity while the scan ran; the new
 	// evidence answers for itself.
@@ -102,15 +114,40 @@ func (i *Instance) CheckConversationCaptureEvidence() error {
 	return err
 }
 
-// markCaptureEvidenceVerified records a positive re-verification of kept,
-// unless a launch boundary superseded it while the scan ran.
-func (i *Instance) markCaptureEvidenceVerified(kept keptCaptureEvidence) bool {
+type captureMark int
+
+const (
+	captureMarkVerified   captureMark = iota
+	captureMarkStale                  // a reattach settled while the scan ran
+	captureMarkSuperseded             // a launch boundary replaced the identity
+)
+
+// markCaptureEvidenceVerified records a positive re-verification of kept from
+// a scan that began at settle count settles, unless a launch boundary
+// superseded kept or a reattach settled while the scan ran.
+func (i *Instance) markCaptureEvidenceVerified(kept keptCaptureEvidence, settles uint64) captureMark {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if i.runtimePID != 0 || i.captureEvidence.pid != kept.pid || i.captureEvidence.startID != kept.startID {
-		return false
+		return captureMarkSuperseded
+	}
+	if i.captureSettles != settles {
+		return captureMarkStale
 	}
 	i.captureEvidence.verified = true
+	return captureMarkVerified
+}
+
+// dropScannedCaptureEvidence is dropCaptureEvidence for a pane scan's "no pane
+// is rooted at it". It reports false, dropping nothing, when a reattach
+// settled while the scan ran.
+func (i *Instance) dropScannedCaptureEvidence(kept keptCaptureEvidence, settles uint64) bool {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.captureSettles != settles {
+		return false
+	}
+	i.dropCaptureEvidenceLocked(kept)
 	return true
 }
 
@@ -120,8 +157,20 @@ func (i *Instance) markCaptureEvidenceVerified(kept keptCaptureEvidence) bool {
 func (i *Instance) dropCaptureEvidence(kept keptCaptureEvidence) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.dropCaptureEvidenceLocked(kept)
+}
+
+// dropCaptureEvidenceLocked is every drop of kept. Each answer that drops it —
+// the process is gone or its pid was reused, or a scan that no reattach
+// straddled found no pane of the session rooted at it — is evidence that the
+// runtime af launched is no longer the one in the pane, so a standing
+// operator repair records the replacement here, exactly as the reattach
+// settle's answered mismatch does (#7147 G-3). A scan a reattach straddled
+// drops nothing and so records nothing. Callers hold i.mu.
+func (i *Instance) dropCaptureEvidenceLocked(kept keptCaptureEvidence) {
 	if i.captureEvidence.pid == kept.pid && i.captureEvidence.startID == kept.startID {
 		i.captureEvidence = keptCaptureEvidence{}
+		i.markRepairRuntimeReplacedLocked(time.Now())
 	}
 }
 
@@ -151,6 +200,7 @@ func (i *Instance) KeepCaptureEvidenceForTest(p proctree.Process) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	i.runtimeEvidenceGeneration.Add(1)
+	i.captureSettles++
 	i.runtimeProgram = ""
 	i.runtimePID = 0
 	i.runtimeStartID = 0

@@ -569,15 +569,24 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 		// error it is rather than as absence.
 		return AgentConversationData{}, true, err
 	}
-	candidates, uncorrelated := codexRolloutFilesForWorkingDir(observed, snap.workingDir)
+	candidates, uncorrelated, unreadable := classifyCodexRolloutFiles(observed, snap.workingDir)
 	if uncorrelated > 0 {
 		// Codex can create each file before its first JSONL record is visible.
 		// Retry unknowns instead of treating an incomplete session_meta as either
 		// a match or proof that the rollout belongs to another process. The error
 		// is returned only if the caller's bounded retry window expires.
-		return AgentConversationData{}, true, fmt.Errorf(
-			"%w: %d new rollout files appeared and %d had uncorrelatable session metadata",
+		err := fmt.Errorf("%w: %d new rollout files appeared and %d had uncorrelatable session metadata",
 			errCodexCaptureUndecided, len(observed), uncorrelated)
+		if unreadable != nil {
+			// A header af could not open or read at all — permissions, an I/O
+			// error, a symlink it refuses to follow — is a channel it could not
+			// look through, not a header still being written: it says nothing
+			// about which thread the runtime is on (#7140). It keeps the
+			// undecided wrap, so the same settle gives it time to become
+			// readable.
+			err = captureChannelUnavailable(fmt.Errorf("%w; af could not read one: %w", err, unreadable))
+		}
+		return AgentConversationData{}, true, err
 	}
 	if len(candidates) == 0 {
 		return AgentConversationData{}, true, nil

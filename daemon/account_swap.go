@@ -634,10 +634,34 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation sessio
 
 // accountSwapTrustDismissInterval paces the guarded trust-dialog dismissal a
 // replacement Codex's conversation capture runs while it waits. The interval
-// must stay a fraction of conversationCaptureTimeout: the dialog has to be
-// answered early enough that Codex can still finish its session file inside
-// the capture window.
+// must stay a fraction of conversationCaptureTimeout and accountSwapTrustWindow:
+// the dialog has to be answered early enough that Codex can still finish its
+// session file inside the capture window.
 var accountSwapTrustDismissInterval = 200 * time.Millisecond
+
+// accountSwapTrustWindow is how long after readiness a launched Codex
+// replacement's pane is pumped for a late-painting trust dialog before the swap
+// goes on to its notice (#4393, #7140). It is the pump's own bounded
+// obligation, separate from the capture's work: a capture that cannot answer
+// still returns at once and does no store walk or attribution wait for it.
+// Zero means conversationCaptureTimeout — the window the ordinary fresh swap's
+// capture always spent pumping, since no rollout exists before its first
+// prompt.
+//
+// The window is held where the swap runs: under the session's op-lock and,
+// for automatic swaps, inline on the daemon's poll loop, which resumes limited
+// sessions one after another (ResumeLimitedSessions). N swaps in one pass
+// therefore suspend the status poll, Lost restore and handoff resume for about
+// N windows — the same class as the readiness wait each of them already
+// spends, which can run to waitForReadyTimeout (#7155).
+var accountSwapTrustWindow time.Duration
+
+func swapTrustWindow() time.Duration {
+	if accountSwapTrustWindow > 0 {
+		return accountSwapTrustWindow
+	}
+	return conversationCaptureTimeout
+}
 
 // beginLiveAccountSwapConversationCapture establishes the missing before-image
 // when recovery inherited an already-running replacement pane. Its original
@@ -754,11 +778,21 @@ func (m *Manager) settleReplacementRuntime(
 	}
 	if launched {
 		captureAfterDelivery, err := captureAccountSwapConversation(instance, snap)
-		if err != nil {
+		switch {
+		case errors.Is(err, errCarriedConversationUnconfirmed):
+			// What happened and what comes next: the next attempt finds the
+			// replacement live and complete, takes the non-respawn arm, and
+			// delivers the notice without re-confirming. A durable refusal
+			// would turn a store af cannot read into a swap stuck for as long as
+			// it stays unreadable, while the runtime's follow still attributes
+			// from its open files (#7155).
+			return false, fmt.Errorf("account replacement for %q: %w; the swap retries after its backoff and then delivers the notice without re-confirming", requestedTitle, err)
+		case err != nil:
 			return false, fmt.Errorf("failed to preserve the replacement conversation for %q: %w", requestedTitle, err)
 		}
 		return captureAfterDelivery, nil
 	}
+	pumpReplacementTrustWindow(instance)
 	return false, nil
 }
 

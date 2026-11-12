@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/preflight"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -530,8 +531,8 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		return nil
 	}
 	i.mu.Lock()
-	defer i.mu.Unlock()
 	if i.inFlightOp != OpRespawning {
+		i.mu.Unlock()
 		return fmt.Errorf("account swap for %q lost the limit-resume fence during launch preflight", i.Title)
 	}
 	i.accountSwapLaunch = &accountSwapLaunchPlan{
@@ -539,6 +540,13 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
+	}
+	i.mu.Unlock()
+	// The pane and the API response say why; af's log must too (#7152). A
+	// re-plan after a failed copy is the copy's own refusal, logged there.
+	if carry == nil && carryFallback != "" && carryFailure == "" {
+		log.WarningLog.Printf("account swap for %q cannot carry conversation %q into account %q, so the replacement starts a fresh conversation: %s",
+			i.Title, outgoing.ID, name, carryFallback)
 	}
 	return nil
 }
@@ -786,35 +794,6 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 		case err != nil:
 			return fmt.Errorf("account swap: failed to stop credential-bearing tab %q for %q: %w", tab.Name, i.Title, err)
 		}
-	}
-	return nil
-}
-
-func (b *LocalBackend) respawnFresh(i *Instance) error {
-	plan, err := i.accountSwapLaunchForRespawn()
-	if err != nil {
-		return err
-	}
-	// The outgoing panes are already stopped: every environment refresh below —
-	// worktree hooks, the agent pane, each sibling tab — applies the list
-	// admission resolved instead of re-reading config, which could now fail only
-	// after refusing would have kept an agent running (#7077).
-	if plan.passthroughFrozen {
-		defer i.freezeEnvPassthrough(plan.passthrough)()
-	}
-	// Idempotent, and the only copy a restarted daemon performs. A carry that
-	// can no longer complete — at this copy or already at validation — leaves
-	// this launch and the pending record as a stated fresh start.
-	if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
-		return err
-	}
-	if plan.carry != nil {
-		i.markCarriedLaunchStarted(plan.account)
-	}
-	if err := b.respawnWithConversation(i, false, plan); err != nil {
-		stopErr := b.stopForAccountSwap(i, false)
-		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",
-			i.Title, errors.Join(err, stopErr))
 	}
 	return nil
 }

@@ -259,6 +259,13 @@ jobs:
       - name: Test auto-gate helper
         run: node --test .github/scripts/auto-gate.test.js .github/scripts/codex-outage.test.js .github/scripts/go-inert.test.js
 
+      # The auto-merger's tests had the same gap: .github/auto-merge.md named
+      # them as its coverage, but nothing ran them. They include a run of
+      # auto-merge.yml's own steps against a fake GitHub and a scratch git
+      # origin (#7151), so they need only Node and git, both on the runner.
+      - name: Test auto-merge helper
+        run: node --test .github/scripts/auto-merge*.test.js
+
       # Same rationale again, one layer up: this helper decides whether the web
       # selftest RUNS, and its tests also assert the wiring that gives a red run
       # teeth — that every job in this file is in Build's `needs`, that Build still
