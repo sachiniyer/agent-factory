@@ -521,7 +521,7 @@ var httpRoutes = []HTTPRoute{
 	{
 		Method:      http.MethodPost,
 		Path:        "/v1/UnsetConfigValue",
-		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, require_token, require_loopback_token, cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh) — exactly as `af config unset` does (both alias spellings, atomically).",
+		Description: "Clear one migrated global setting — a `network.*` key (listen_addr, preview_listen_addr, editor_origin_ports, require_token, require_loopback_token, allow_unauthenticated_network, cors_allowed_origins, allowed_hosts) or a backend key (docker.mount_agent_credentials, ssh.host_key_verification, sandbox.ssh, sandbox.binary) — exactly as `af config unset` does (both alias spellings, atomically).",
 		requestType: reflect.TypeOf(UnsetConfigValueRequest{}),
 		handler:     func(cs *controlServer) http.HandlerFunc { return rpcHandler(cs.UnsetConfigValue) },
 	},

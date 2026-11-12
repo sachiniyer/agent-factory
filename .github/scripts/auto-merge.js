@@ -758,10 +758,20 @@ async function mergeHaltFix({ github, core, context, passed, fixes, base }) {
   await landSelected({ github, core, owner, repo, selected: ready, batchSize: 1 });
 }
 
+// The post-merge check runs merged code, which can forge its own job's outputs
+// (a runner gives it sudo), so its sha is used only if it is one. Anything else
+// falls back to master's head, and is never echoed (#7172 review, F3).
+const SHA_RE = /^[0-9a-f]{40}$/;
+
 // Step 4: composition check failed after a batch — open/update ONE issue.
 async function reportBroken({ github, core, context, merged }) {
   const { owner, repo } = context.repo;
-  const sha = (process.env.MASTER_SHA || "").slice(0, 10);
+  let full = process.env.MASTER_SHA || "";
+  if (!SHA_RE.test(full)) {
+    full = (await github.rest.repos.getBranch({ owner, repo, branch: BASE })).data.commit.sha;
+    core.warning(`The post-merge check reported no valid sha; naming master's head ${full} instead.`);
+  }
+  const sha = full.slice(0, 10);
   const title = `${BROKEN_TITLE_PREFIX} ${sha}`;
   const body =
     `The post-merge composition check (\`go build ./...\`, \`go vet ./...\`, ` +

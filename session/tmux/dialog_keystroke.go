@@ -47,6 +47,9 @@ const (
 	codexDirectoryTrustAffirmative = "Yes, continue"
 	codexUpdateDialogName          = "Codex update"
 	docTrustDialogName             = "documentation-link trust"
+	// geminiFolderTrustDialogName is Gemini CLI's folder-trust dialog. af
+	// selects "Trust folder" on it by label, never "Trust parent folder" (#7162).
+	geminiFolderTrustDialogName = "Gemini folder-trust"
 )
 
 // dialogKeystroke is the last key af injected into a modal on this pane.
