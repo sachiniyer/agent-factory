@@ -448,6 +448,9 @@ const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 const MANUAL_MERGE_AUTHOR_REASON =
   "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
   "merge manually.";
+const HAND_MERGE_BATCH_REMEDY =
+  "a maintainer merges the pull request that changes them by hand, outside the queue; " +
+  "the queue never lands it";
 // The unmet item a usage-limit degradation leaves when nobody has reviewed. It
 // names the exit rather than the problem, because the problem — Codex is out of
 // quota — is not something anyone can act on, and the exit is.
@@ -1112,13 +1115,14 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // real one (#3396).
   const subject = resolvedPullRequest({ github, context, pr });
   const files = await listPullRequestFiles({ github, context, number: pr.number, subject });
-  // The dispatch set this run will use comes from master's copy of this file, so
-  // a merge that CHANGES workflow definitions may be re-raising a stale set —
-  // most sharply when it adds a push-gated workflow, which cannot be in the list
-  // the running copy holds.
-  const workflowsChanged = files
-    .flatMap(pullRequestFilePaths)
-    .some((path) => path.startsWith(".github/workflows/"));
+  // Maintainer-merged, as auto-merge.js skips it (#7194): a PR that changes a
+  // workflow, or a script that jobs holding a write token load, would otherwise
+  // run its own code with that token from the next run on. It also means a merge
+  // made here never changes the dispatch set merge() re-raises (see there).
+  const handMerge = handMergePaths(files);
+  if (handMerge.length > 0) {
+    manualMergeReasons.push(handMergeReason(handMerge));
+  }
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   // The branch a head with no PR Validation run may have one dispatched on
@@ -1183,14 +1187,21 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       // A batch head never merges itself, but its PASSING manual decision is
       // what the queue merges on — so the hold has to reach this list too, or a
       // held batch head would be certified for the queue (#4576).
-      manualMergeBlockers: [...holdBlockers, ...batch.blockers],
+      // The same goes for a batch that changes a workflow or a write-token
+      // job's script (#7194): its pass would let the queue land it.
+      manualMergeBlockers: [
+        ...holdBlockers,
+        ...(handMerge.length > 0
+          ? [{ reason: handMergeReason(handMerge), remedy: HAND_MERGE_BATCH_REMEDY }]
+          : []),
+        ...batch.blockers,
+      ],
       mergeQueueBatch: true,
       isOpen: pr.state === "OPEN" && !pr.merged,
       baseRefName: pr.baseRefName,
       headRefName: pr.headRefName,
       headRepository: pr.headRepository,
       headSha: pr.headRefOid,
-      workflowsChanged,
       requiredCheckObservations: requiredChecks.observations,
       reasons,
       transientReasons,
@@ -1436,7 +1447,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headRefName: pr.headRefName,
     headRepository: pr.headRepository,
     headSha: pr.headRefOid,
-    workflowsChanged,
     requiredCheckObservations: requiredChecks.observations,
     reasons,
     transientReasons,
@@ -3475,14 +3485,15 @@ function decisionIdentity(prNumber, headSha) {
   };
 }
 
-// How many commits the base branch holds that this PR's head does not.
+// How many commits the base branch holds that this PR's head does not, and the
+// files the comparison lists (the diff a merge of headSha lands, #7200).
 //
 // Read against the base BRANCH rather than a pinned SHA on purpose: the question
 // is where master is NOW, not where it was when anything about this PR was
 // recorded. `behind_by` stays accurate past the 250-commit listing cap the
 // compare endpoint applies to its `commits` array, which is why the count is
 // read rather than derived from that array.
-async function commitsBehindBase({ github, context, baseRefName, headSha }) {
+async function compareHeadWithBase({ github, context, baseRefName, headSha }) {
   const { owner, repo } = context.repo;
   const comparison = await retryRead(
     `could not compare ${baseRefName} with ${headSha}`,
@@ -3511,7 +3522,26 @@ async function commitsBehindBase({ github, context, baseRefName, headSha }) {
         `compare returned behind_by=${JSON.stringify(reported)}`,
     );
   }
-  return behindBy;
+  return { behindBy, files: comparison?.data?.files };
+}
+
+// The compare endpoint lists at most 300 files, and nothing past that.
+const COMPARE_FILE_CAP = 300;
+
+// Why the diff a merge of headSha would land needs a hand merge (#7194), read
+// from that commit's own comparison, or null. The evaluation listed the PR's
+// files at its CURRENT head, and the merge pins headSha: a force-push away and
+// back between the two (A, B, A) would merge A on B's file list (#7200). A list
+// that is missing, or may be truncated, fails closed.
+function pinnedHandMergeRefusal(files, headSha) {
+  if (!Array.isArray(files) || files.length >= COMPARE_FILE_CAP) {
+    return (
+      `the files of ${headSha} could not be read in full, so whether it changes a ` +
+      "workflow or a .github/scripts file is unknown; a maintainer must merge it by hand (#7194)"
+    );
+  }
+  const paths = handMergePaths(files);
+  return paths.length > 0 ? handMergeReason(paths) : null;
 }
 
 // Approve the workflow runs the gate's own update-branch parked (#3807).
@@ -4398,12 +4428,18 @@ async function merge({
   // between the compare below and the merge call a few lines down. Closing the
   // remainder is a server-side job — the ruleset's strict required-status-checks
   // policy — and is a separate decision (#3747).
-  const behindBy = await commitsBehindBase({
+  const { behindBy, files: pinnedFiles } = await compareHeadWithBase({
     github,
     context,
     baseRefName: gate.baseRefName,
     headSha: gate.headSha,
   });
+  // Before updating the branch: a PR that needs a hand merge gets no update
+  // from the gate either.
+  const handMergeRefusal = pinnedHandMergeRefusal(pinnedFiles, gate.headSha);
+  if (handMergeRefusal) {
+    throw new Error(`Refusing to merge PR #${prNumber}; ${handMergeRefusal}`);
+  }
   if (behindBy > 0) {
     const reason =
       `head is behind ${gate.baseRefName} by ${behindBy} ` +
@@ -4693,19 +4729,11 @@ async function merge({
     }
   }
   // auto-gate.yml pins every checkout to the default branch, so the loop above
-  // ran from master's PRE-merge copy of MASTER_PUSH_WORKFLOWS. A merge that adds
-  // a push-gated workflow therefore cannot re-raise it for its own landing
-  // commit; every later merge picks it up. Nothing here can close that — deriving
-  // the set from the merged tree means re-parsing workflow triggers at merge
-  // time, where a misparse either skips a dispatch silently or reds a merge that
-  // has already landed. What it can do is stop the gap being invisible.
-  if (gate.workflowsChanged) {
-    core.warning(
-      `PR #${prNumber} changed workflow definitions, and this run re-raised the set known to ` +
-        "master's pre-merge copy of the gate. If it added or renamed a workflow gated on a " +
-        "master push, that one did not run for this commit; dispatch it by hand.",
-    );
-  }
+  // ran from master's PRE-merge copy of MASTER_PUSH_WORKFLOWS. That copy is
+  // never stale for a merge made here: a PR that changes a workflow or this file
+  // is maintainer-merged (#7194), and a maintainer's merge fires master's push
+  // workflows itself. (Before #7194 a merge here that added a push-gated
+  // workflow could not re-raise it, and this place warned.)
 
   try {
     await headRefPruner.deleteMergedHeadRef({ github, context, core, gate, prNumber });
@@ -7102,6 +7130,26 @@ function pullRequestFilePaths(file) {
     : [file.filename];
 }
 
+// The paths a PR changes only through a maintainer's hand merge (#7194), the
+// list auto-merge.js skips: the workflows, and the scripts their jobs load,
+// this file among them, several of them with a write token. Either side of a
+// rename counts. auto-merge-hand-merge.test.js derives from the workflow files
+// what this has to cover.
+const HAND_MERGE_PREFIXES = [".github/workflows/", ".github/scripts/"];
+
+function handMergePaths(files) {
+  const paths = new Set(files.flatMap(pullRequestFilePaths));
+  return [...paths].filter((path) => HAND_MERGE_PREFIXES.some((prefix) => path.startsWith(prefix)));
+}
+
+function handMergeReason(paths) {
+  const named = paths.slice(0, 3).join(", ") + (paths.length > 3 ? ` and ${paths.length - 3} more` : "");
+  return (
+    `PR changes ${named}, which jobs holding a write token load or define; a maintainer must ` +
+    "merge it by hand (#7194)."
+  );
+}
+
 // A required check PR Validation reports: Build or Lint, from GitHub Actions or
 // without a source app.
 function isPRValidationSpec(spec) {
@@ -9106,6 +9154,7 @@ module.exports = {
     updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
+  handMergePaths,
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,

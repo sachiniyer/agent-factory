@@ -25,8 +25,12 @@ concurrency:
   group: auto-release
   cancel-in-progress: false
 
+# Read-only for every job but the one that publishes (#7200). The preflight and
+# the builds run the release commit's code, and contents: write alone can merge
+# a pull request (PUT /pulls/N/merge) or rewrite a published release, so a
+# merged PR's code holding it could land a change held for a hand merge.
 permissions:
-  contents: write
+  contents: read
   actions: read
 
 jobs:
@@ -41,12 +45,16 @@ jobs:
     - uses: actions/checkout@v6
       with:
         fetch-depth: 0
+        persist-credentials: false
 
+    # No cache, restored or saved (#7194, #7200): this job's output and
+    # artifacts reach the release, and a cache Build saved could carry code
+    # that has since been reverted. scripts/release_path_test.go pins it.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
         go-version: '1.25'
-        cache: true
+        cache: false
 
     # Release state, not tag state, decides what "latest" means: a tag pushed
     # without its release (a cancelled run under the pre-#5159 scheme, or any
@@ -127,6 +135,12 @@ jobs:
       if: steps.check.outputs.should_release == 'true'
       run: |
         NEW_VERSION=$(.github/scripts/next-preview-version.sh < "$RUNNER_TEMP/released-tags.txt")
+        # It becomes a tag, archive names and a linker flag downstream, so
+        # anything but a preview version stops the release here (#7200).
+        if ! [[ $NEW_VERSION =~ ^[0-9]+\.[0-9]+\.[0-9]+-preview-[0-9]+$ ]]; then
+          echo "::error::next-preview-version.sh did not print a preview version (X.Y.Z-preview-N)"
+          exit 1
+        fi
         echo "New preview version: $NEW_VERSION"
         echo "new_version=$NEW_VERSION" >> "$GITHUB_OUTPUT"
 
@@ -145,19 +159,25 @@ jobs:
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
+        persist-credentials: false
 
+    # No cache, restored or saved (#7194). Build runs the merged tree's tests
+    # with setup-go's cache on this runner image and Go version, so it saves a
+    # cache under the key this step would restore, and any job's code can write
+    # a missing key: code merged and then reverted would keep reaching release
+    # binaries through it. scripts/release_path_test.go pins this.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
         go-version: '1.25'
-        cache: true
+        cache: false
 
     - name: Build
       env:
         GOOS: ${{ matrix.goos }}
         GOARCH: ${{ matrix.goarch }}
+        VERSION: ${{ needs.check.outputs.new_version }}
       run: |
-        VERSION="${{ needs.check.outputs.new_version }}"
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}
         mkdir -p dist
         go build -v -ldflags "-X main.version=${VERSION}" -o dist/agent-factory
@@ -179,8 +199,8 @@ jobs:
         GOOS: linux
         GOARCH: ${{ matrix.goarch }}
         CGO_ENABLED: "0"
+        VERSION: ${{ needs.check.outputs.new_version }}
       run: |
-        VERSION="${{ needs.check.outputs.new_version }}"
         ARCHIVE_NAME=agent-factory-${{ matrix.goos }}-${{ matrix.goarch }}-static
         mkdir -p dist-static
         go build -v -ldflags "-X main.version=${VERSION}" -o dist-static/agent-factory
@@ -221,15 +241,23 @@ jobs:
     name: Release
     needs: [check, build]
     runs-on: ubuntu-24.04
+    # The only job that writes (#7200). It runs no repository code but the
+    # .github/scripts/ release scripts, which change only by hand merge.
+    permissions:
+      contents: write
     steps:
     - uses: actions/checkout@v6
       with:
         ref: ${{ github.sha }}
+        persist-credentials: false
 
+    # Only the build jobs' archives: an artifact any other job of the run
+    # uploaded is not downloaded into the release (#7200).
     - name: Download build artifacts
       uses: actions/download-artifact@v7
       with:
         path: dist
+        pattern: agent-factory-*
         merge-multiple: true
 
     - name: Generate checksum manifest

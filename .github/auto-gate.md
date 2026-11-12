@@ -512,6 +512,21 @@ Gate manually by PR number from the base repository. The `pull_request_target`
 lifecycle trigger only executes the default-branch helper; it never checks out
 or executes pull-request code.
 
+## Workflow and script changes
+
+A pull request that changes a file under `.github/workflows/` or
+`.github/scripts/`, on either side of a rename, is maintainer-merged (#7194).
+Those files define the jobs that hold write tokens, and hold the code those jobs
+load: this gate's own script among them. A merge-queue batch that changes one is
+blocked rather than certified, so the queue never lands it. `auto-merge.js` skips
+the same paths, and `.github/scripts/auto-merge-hand-merge.test.js` checks both
+lists against every `.github/` file a write-token job loads.
+
+The evaluation lists the PR's files at its current head, and the merge pins the
+head it evaluated. So before merging, the gate reads the files again, from its
+compare of the base with that exact head. It refuses if they touch those paths,
+or if the list is missing or may be truncated (300 files or more) (#7200).
+
 ## Ruleset
 
 The `master` ruleset requires the fixed `Auto Gate decision` check from the

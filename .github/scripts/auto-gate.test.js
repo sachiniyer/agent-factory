@@ -1516,6 +1516,75 @@ test("a lookalike trunk-merge branch by a human author takes the ordinary path",
   assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
 });
 
+// #7194: the files a job holding a write token loads change only through a
+// maintainer's hand merge, as auto-merge.js treats them. Either side of a rename
+// counts: renaming the merger away removes it from where the jobs load it.
+for (const [name, file] of [
+  ["a workflow", ".github/workflows/build.yml"],
+  ["the merger", ".github/scripts/auto-merge.js"],
+  ["a script the merger requires", ".github/scripts/macos-verdict.js"],
+  ["the gate itself", ".github/scripts/auto-gate.js"],
+  ["a release script", ".github/scripts/release-bump.sh"],
+  ["the merger's path by renaming it away", { filename: "docs/old-merger.js", previous_filename: ".github/scripts/auto-merge.js", status: "renamed" }],
+]) {
+  test(`#7194: a PR that changes ${name} is maintainer-merged`, async () => {
+    const result = await evaluateGate({ files: ["session/storage.go", file] });
+
+    assert.equal(result.shouldMerge, false);
+    assert.equal(result.manualMergeRequired, true);
+    assert.match(result.manualMergeReasons.join("\n"), /a maintainer must merge it by hand/);
+  });
+}
+
+test("#7194: a PR that changes only docs beside the scripts still auto-merges", async () => {
+  const result = await evaluateGate({ files: [".github/auto-merge.md", "scripts/lint-file-length.sh"] });
+
+  assert.equal(result.manualMergeRequired, false);
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("#7194: a merge-queue batch that changes the merger is not certified for the queue", async () => {
+  const result = await evaluateBatch(mergeQueueBatchGithub({ files: [".github/scripts/auto-merge.js"] }));
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(
+    result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"),
+    /a maintainer must merge it by hand/,
+  );
+});
+
+// #7200 R3: the evaluation lists the PR's files at its CURRENT head, and the
+// merge pins gate.headSha. A force-push away and back between the two (A→B→A)
+// would merge A on B's file list, so merge() re-reads the files at the pinned
+// head itself, from the compare it already makes, and fails closed.
+for (const [name, options, refusal] of [
+  [
+    "a head whose own diff edits the merger, though the listed files did not",
+    { files: ["session/storage.go"], compareFiles: ["session/storage.go", ".github/scripts/auto-merge.js"] },
+    /a maintainer must merge it by hand/,
+  ],
+  [
+    "a pinned head whose files the compare does not list",
+    { files: ["session/storage.go"], compareFiles: null },
+    /could not be read in full/,
+  ],
+  [
+    "a pinned head with more files than the compare lists",
+    { files: ["session/storage.go"], compareFiles: Array.from({ length: 300 }, (_, i) => `pkg/f${i}.go`) },
+    /could not be read in full/,
+  ],
+]) {
+  test(`#7200: merge refuses ${name}`, async () => {
+    const github = fakeGateGithub(options);
+
+    await assert.rejects(
+      autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+      refusal,
+    );
+    assert.equal(github.mergedWith, null);
+  });
+}
+
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
   const error = new Error("cannot disable native auto-merge");
   error.status = 500;
@@ -13336,29 +13405,22 @@ test("an auto-gate merge re-raises every gate its own push suppressed", async ()
   }
 });
 
-test("a merge that changes workflows warns that its own set may be stale", async () => {
+test("a merge that changes workflows is refused, so the set it re-raises is never stale", async () => {
   // Codex P2: auto-gate.yml pins every checkout to the default branch, so this
   // loop re-raises the set known to master's PRE-merge copy of the gate. A merge
-  // that ADDS a push-gated workflow cannot re-raise it for its own landing
-  // commit — the running copy's list predates it. Deriving the set from the
-  // merged tree would mean re-parsing triggers at merge time, where a misparse
-  // silently skips a dispatch or reds a merge that already landed; the gap is
-  // made visible instead.
-  const warnings = [];
-  const github = fakeGateGithub({ files: [".github/workflows/new-gate.yml"] });
-
-  await autoGate.merge({
-    github,
-    context: fakeContext(),
-    core: { ...fakeCore(), warning: (message) => warnings.push(message) },
-    prNumber: 1465,
-  });
-
-  assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.ok(
-    warnings.some((warning) => /changed workflow definitions/.test(warning)),
-    `a workflow-changing merge must say its dispatch set may be stale; got ${JSON.stringify(warnings)}`,
-  );
+  // that ADDED a push-gated workflow could not re-raise it for its own landing
+  // commit, and the gate warned. Since #7194 a PR that changes a workflow, or
+  // this gate's own script, is maintainer-merged, so the gate never makes such a
+  // merge, and a maintainer's merge fires master's push workflows itself.
+  for (const file of [".github/workflows/new-gate.yml", ".github/scripts/auto-gate.js"]) {
+    const github = fakeGateGithub({ files: [file] });
+    await assert.rejects(
+      autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+      /a maintainer must merge it by hand/,
+    );
+    assert.equal(github.mergedWith, null, file);
+    assert.deepEqual(github.dispatchedWorkflows, [], file);
+  }
 
   // A merge that touches no workflow definition says nothing.
   const quiet = [];
@@ -16939,6 +17001,9 @@ function fakeGateGithub({
   // the batch — and a single global status cannot answer them differently.
   compareStatusByTarget = {},
   compareError = null,
+  // The files the compare of base...head lists: by default the PR's own
+  // `files`, read at the pinned head (#7200 R3). null omits the field.
+  compareFiles = undefined,
   updateBranchError = null,
   pullGetSnapshots = null,
   pullGetErrors = [],
@@ -17403,7 +17468,7 @@ function fakeGateGithub({
           if (compareError) {
             throw compareError;
           }
-          // Two callers, two questions. `commitsBehindBase` asks about the HEAD;
+          // Two callers, two questions. `compareHeadWithBase` asks about the HEAD;
           // `updateBranchContentHead` asks whether a parent is contained in the
           // base branch, and only the second is answered with behind/identical.
           const target = String(options.basehead || "").split("...")[1] || "";
@@ -17438,6 +17503,9 @@ function fakeGateGithub({
               behind_by: behindByRaw === undefined ? behindBy : behindByRaw,
               ahead_by: 1,
               status: behindBy > 0 ? "diverged" : "ahead",
+              ...(compareFiles === null
+                ? {}
+                : { files: (compareFiles === undefined ? files : compareFiles).map(pullRequestFile) }),
               // Only for the PR head itself — the one comparison whose merge base
               // the TUI gate's comment-only proof reads (#4477).
               ...(target === headSha ? { merge_base_commit: { sha: mergeBaseSha } } : {}),

@@ -26,10 +26,10 @@ concurrency:
 # No code a PR controls runs where the write token or secrets are (#7165). The
 # composition checks (recheck, fixcheck, compose) run merged or PR-controlled
 # code, so each is a job of its own: contents: read, no secrets, no persisted
-# credentials, no Go cache saved (release builds restore default-branch
-# caches). The other jobs run only auto-merge.js, from a fresh checkout of the
-# commit this workflow file came from, and read nothing from a check but its
-# verdict: pass or fail, the sha checked, and the fixes that passed.
+# credentials, and no Go cache restored or saved. The other jobs run only
+# auto-merge.js, from a fresh checkout of the commit this workflow file came
+# from, and read nothing from a check but its verdict: pass or fail, the sha
+# checked, and the fixes that passed.
 #
 #   gate ──┬── recheck ──┬── land ── compose ── report
 #          └── fixcheck ─┘
@@ -84,12 +84,13 @@ jobs:
       # once its would-be merge result passes the same composition check (#7151).
       # Picked whenever master is broken, so fixcheck runs beside recheck; if
       # the re-check then passes, the halt is over and the pick goes unused.
+      # No USING_PAT here: a job receives every secret it names, even in a test
+      # of whether one is set, so this job names none (#7194). The pick
+      # therefore skips PRs touching workflows or .github/scripts on any token.
       - name: Pick fix-master PRs for the halted master
         id: fixes
         if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         uses: actions/github-script@v8
-        env:
-          USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
         with:
           script: |
             await require('./.github/scripts/auto-merge.js').pickHaltFixes({ github, core, context });

@@ -48,7 +48,7 @@ function world(prs, { protectedNames = [], stackedBases = [], gone = [], movedTi
       if (q.includes('pullRequests(')) return { rateLimit, repository: { pullRequests: { pageInfo: { hasNextPage: false }, nodes: prs } } };
       const repository = {};
       for (const p of prs) repository[`p${p.number}`] = q.includes('files(')
-        ? { files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'a.go' }] } }
+        ? { headRefOid: p.headRefOid, files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'a.go' }] } }
         : { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
       return { rateLimit, repository };
     },

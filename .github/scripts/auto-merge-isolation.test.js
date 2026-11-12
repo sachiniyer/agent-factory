@@ -105,6 +105,12 @@ test('the workflow-wide token can only read the repository; each job asks for it
   for (const job of JOBS) assert.ok(Object.keys(job.permissions).length > 0, `${job.id} sets no permissions`);
 });
 
+// A job receives only the secrets it names, so naming one, even to test whether
+// it is set, ships it to that runner (#7194). Only land merges.
+test('only land names a secret', () => {
+  assert.deepEqual(JOBS.filter((job) => /\bsecrets\./.test(job.text)).map((job) => job.id), ['land']);
+});
+
 test('step ids are unique across the workflow, so each names one step', () => {
   const ids = JOBS.flatMap((job) => job.steps.map((step) => step.id).filter(Boolean));
   assert.deepEqual(ids.filter((id, i) => ids.indexOf(id) !== i), []);

@@ -53,10 +53,11 @@ test('selection is ordered by PR number', () => {
   assert.deepEqual(selectMergeable([pr({ number: 9 }), pr({ number: 3 })]).map((e) => e.pr.number), [3, 9]);
 });
 
-test('touchesWorkflows detects .github/workflows paths and fails closed on truncation', () => {
+test('touchesWorkflows detects .github/workflows and .github/scripts paths and fails closed on truncation', () => {
   const f = (...paths) => ({ pageInfo: { hasNextPage: false }, nodes: paths.map((path) => ({ path })) });
-  assert.equal(touchesWorkflows(f('a.go', '.github/scripts/x.js')), false);
+  assert.equal(touchesWorkflows(f('a.go', 'scripts/x.sh', '.github/auto-merge.md')), false);
   assert.equal(touchesWorkflows(f('a.go', '.github/workflows/build.yml')), true);
+  assert.equal(touchesWorkflows(f('a.go', '.github/scripts/x.js')), true); // #7194
   assert.equal(touchesWorkflows({ pageInfo: { hasNextPage: true }, nodes: [] }), true);
   assert.equal(touchesWorkflows(null), true);
   assert.match(filesQuery([7]), /p7: pullRequest\(number: 7\)/);
@@ -82,7 +83,7 @@ function fakeGithub(files) {
     if (q.includes('pullRequests(')) return { rateLimit, repository: { pullRequests: { pageInfo: { hasNextPage: false }, nodes: [pr({ number: 1 }), pr({ number: 2 })] } } };
     const repository = {};
     for (const n of [1, 2]) if (q.includes(`p${n}:`)) repository[`p${n}`] = q.includes('files(')
-      ? { files: { pageInfo: { hasNextPage: false }, nodes: files[n].map((path) => ({ path })) } }
+      ? { headRefOid: pr().headRefOid, files: { pageInfo: { hasNextPage: false }, nodes: files[n].map((path) => ({ path })) } }
       : { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } };
     return { rateLimit, repository };
   }, rest: { repos: { getBranch: async () => ({ data: { commit: { sha: HEAD } } }) }, actions: { listWorkflowRuns: async ({ workflow_id }) => ({ data: { workflow_runs: github_runs.byWf[workflow_id] } }), createWorkflowDispatch: async ({ workflow_id }) => { github_runs.dispatched.push(workflow_id); } }, pulls: { merge: async ({ pull_number }) => { merged.push(pull_number); return { data: { sha: 'f'.repeat(40) } }; } },
