@@ -713,3 +713,43 @@ func TestPromotionElsewhereRetiresTheHistoricalStandIn(t *testing.T) {
 		t.Fatalf("the historical stand-in at %s must retire once the probe proves the deleted project lives at %s — nothing can disprove it any more, so it would suppress an unrelated repository main-rooted at %s for the daemon's lifetime", historical, elsewhere.ID, repoPath)
 	}
 }
+
+// TestUnclaimedDerivedDeleteStampsNoHistoricalStandIn pins the stand-in's
+// precondition. Release needs the deleted claimant's own record to disprove,
+// so a delete that names no claimant — an unregistered path, here — could
+// never lift a historical stamp: it would suppress whatever repository is
+// later main-rooted at that path for the daemon's lifetime. That is the trade
+// rootDeletionTombstoneApplies already declines for an unclaimed tombstone,
+// and deleting a path af does not know is documented as a no-op.
+func TestUnclaimedDerivedDeleteStampsNoHistoricalStandIn(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := filepath.Join(testguard.CanonicalTempDir(t), "not-yet-a-repo")
+	historical := config.RepoIDFromRoot(filepath.Clean(repoPath))
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	if err != nil {
+		t.Fatalf("NewManager: %v", err)
+	}
+	if _, err := manager.DeleteProject(DeleteProjectRequest{RepoPath: repoPath}); err != nil {
+		t.Fatalf("DeleteProject of an unregistered absent path: %v", err)
+	}
+	manager.mu.Lock()
+	claimant, stamped := manager.deletedRootRepos[historical]
+	manager.mu.Unlock()
+	if stamped {
+		t.Fatalf("an unclaimed delete must not stamp the historical identity %s — nothing can ever release it — got claimant %q", historical, claimant)
+	}
+
+	// A repository is created there later, and the legacy entry is its opt-in.
+	if err := exec.Command("git", "init", repoPath).Run(); err != nil {
+		t.Fatalf("git init: %v", err)
+	}
+	if got := repoID(t, repoPath); got != historical {
+		t.Fatalf("fixture needs the repository main-rooted at the deleted path: got %s, want %s", got, historical)
+	}
+	manager.ensureRootAgentsAndWait()
+	manager.ensureRootAgentsAndWait()
+	if len(*seen) != 1 {
+		t.Fatalf("a repository created at a path af never registered must not be suppressed by the no-op delete of that path; got %d creates", len(*seen))
+	}
+}
