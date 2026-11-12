@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "a51054aa1a10";
+var CLIENT_VERSION = "f58c626fb214";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -7553,7 +7553,7 @@ async function listAccounts(token2, repoPath = "") {
 }
 async function quotaReport(token2) {
   const resp = await af("QuotaReport", {}, token2);
-  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [], mover: resp?.mover ?? "" };
+  return { agents: resp?.agents ?? [], warnings: resp?.warnings ?? [], accounts: resp?.accounts ?? [], mover: resp?.mover ?? "" };
 }
 async function registerAccount(agent, name, token2) {
   return af("RegisterAccount", { agent, name }, token2);
@@ -8472,9 +8472,42 @@ function appendStatus(row, status, agent, name) {
 
 // src/quota.ts
 function emptyQuotaState() {
-  return { agents: [], warnings: [], mover: "", loaded: false, error: "" };
+  return { agents: [], warnings: [], accounts: [], mover: "", loaded: false, error: "" };
 }
 var QUOTA_NOTE = "Quota is what the provider reports \u2014 today \u201Cnot reported\u201D everywhere, af declining to guess a ceiling. Observed is what af\u2019s own sessions show. af quota prints the same report.";
+var QUOTA_ACCOUNTS_NOTE = "ACCOUNTS is what af recorded in each account\u2019s own rollout files \u2014 observed evidence, never a provider claim. It appears only when [account_handoff] mode is enabled (or its machinery left a state file), and is codex-only today: no other agent writes an equivalent record. mover: is the configured mode plus any halt the engine recorded.";
+function renderQuotaAccountsSection(state) {
+  if (state.accounts.length === 0 && state.mover === "") {
+    return null;
+  }
+  const block = h("div", { class: "af-quota-accounts" });
+  block.setAttribute("aria-label", "Account evidence");
+  block.append(h("div", { class: "af-quota-accounts-head" }, "Account evidence"));
+  if (state.accounts.length === 0) {
+    block.append(h("p", { class: "af-quota-accounts-empty" }, "(no codex accounts registered)"));
+  } else {
+    block.append(
+      h("div", { class: "af-quota-accounts-header" }, "ACCOUNT  OBSERVED  WINDOWS  DETAIL")
+    );
+    const list = h("div", { class: "af-quota-list" });
+    for (const acct of state.accounts) {
+      const row = h(
+        "div",
+        { class: "af-quota-row" },
+        h("span", { class: "af-quota-agent af-quota-account-agent" }, `${acct.agent}/${acct.name}`),
+        h("span", { class: "af-quota-cell" }, acct.observed),
+        h("span", { class: "af-quota-cell" }, acct.windows)
+      );
+      list.append(row, h("p", { class: "af-quota-detail" }, acct.detail));
+    }
+    block.append(list);
+  }
+  if (state.mover !== "") {
+    block.append(h("p", { class: "af-quota-note" }, `mover: ${state.mover}`));
+  }
+  block.append(h("p", { class: "af-quota-accounts-note" }, QUOTA_ACCOUNTS_NOTE));
+  return block;
+}
 function renderQuotaSection(state) {
   const section = h("section", { class: "af-quota" });
   section.setAttribute("aria-label", "Usage");
@@ -8495,9 +8528,6 @@ function renderQuotaSection(state) {
     );
     return section;
   }
-  if (state.mover !== "") {
-    section.append(h("p", { class: "af-quota-note" }, `mover: ${state.mover}`));
-  }
   for (const warning of state.warnings) {
     section.append(h("p", { class: "af-quota-warning", role: "alert" }, warning));
   }
@@ -8505,24 +8535,28 @@ function renderQuotaSection(state) {
     section.append(
       h("p", { class: "af-quota-empty" }, "No agent CLIs are configured, so there is nothing to report.")
     );
-    return section;
+  } else {
+    const list = h("div", { class: "af-quota-list" });
+    for (const agent of state.agents) {
+      const row = h(
+        "div",
+        { class: "af-quota-row" },
+        h("span", { class: "af-quota-agent" }, agent.program),
+        h("span", { class: "af-quota-cell" }, agent.quota),
+        h(
+          "span",
+          { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
+          agent.observed
+        )
+      );
+      list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+    }
+    section.append(list);
   }
-  const list = h("div", { class: "af-quota-list" });
-  for (const agent of state.agents) {
-    const row = h(
-      "div",
-      { class: "af-quota-row" },
-      h("span", { class: "af-quota-agent" }, agent.program),
-      h("span", { class: "af-quota-cell" }, agent.quota),
-      h(
-        "span",
-        { class: agent.limited_sessions > 0 ? "af-quota-cell af-quota-limited" : "af-quota-cell" },
-        agent.observed
-      )
-    );
-    list.append(row, h("p", { class: "af-quota-detail" }, agent.detail));
+  const accounts = renderQuotaAccountsSection(state);
+  if (accounts !== null) {
+    section.append(accounts);
   }
-  section.append(list);
   return section;
 }
 
@@ -23447,7 +23481,7 @@ var quotaRefetcher = createFencedRefetcher({
   fetch: quotaReport,
   commit: (resp) => {
     store.set({
-      quota: { agents: resp.agents, warnings: resp.warnings ?? [], mover: resp.mover ?? "", error: "", loaded: true }
+      quota: { agents: resp.agents, warnings: resp.warnings ?? [], accounts: resp.accounts ?? [], mover: resp.mover ?? "", error: "", loaded: true }
     });
   },
   onError: (err) => {

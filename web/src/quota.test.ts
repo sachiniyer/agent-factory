@@ -55,6 +55,8 @@ test("quotaReport: a sparse response yields empty lists, never undefined", async
   const resp = await quotaReport("tok");
   assert.deepEqual(resp.agents, []);
   assert.deepEqual(resp.warnings, []);
+  assert.deepEqual(resp.accounts, []);
+  assert.equal(resp.mover, "");
   assert.equal(cap.calls, 1);
 });
 
@@ -84,9 +86,51 @@ test("quotaReport: the rendered rows and warnings pass through untouched", async
   assert.equal(resp.mover, "halted: move-failed since 2026-01-01T09:00:00Z");
 });
 
+test("quotaReport: per-account evidence rows pass through untouched (#6776)", async () => {
+  stubFetch({
+    agents: [],
+    accounts: [
+      {
+        agent: "codex",
+        name: "work",
+        observed: "observed",
+        windows: "primary 42%, secondary 4%",
+        detail: "recorded 2026-01-01T09:00:00Z",
+      },
+      {
+        agent: "codex",
+        name: "personal",
+        observed: "no evidence",
+        windows: "—",
+        detail: "no rate_limits claims found",
+      },
+    ],
+    mover: "shadow",
+  });
+  const resp = await quotaReport("tok");
+  assert.equal(resp.accounts?.length, 2);
+  assert.equal(resp.accounts?.[0].agent, "codex");
+  assert.equal(resp.accounts?.[0].name, "work");
+  assert.equal(resp.accounts?.[0].observed, "observed");
+  assert.equal(resp.accounts?.[0].windows, "primary 42%, secondary 4%");
+  assert.equal(resp.accounts?.[0].detail, "recorded 2026-01-01T09:00:00Z");
+  // The "no evidence" row's windows sentinel travels verbatim too: a blank in
+  // a usage table reads as zero remaining, which af does not know.
+  assert.equal(resp.accounts?.[1].windows, "—");
+  assert.equal(resp.accounts?.[1].observed, "no evidence");
+});
+
+test("quotaReport: accounts defaults to [] when the daemon sends none (older daemon)", async () => {
+  stubFetch({ agents: [], warnings: [], mover: "" });
+  const resp = await quotaReport("tok");
+  assert.deepEqual(resp.accounts, []);
+});
+
 test("emptyQuotaState: the shell's starting point renders as 'nothing yet', not as an error", () => {
   const state = emptyQuotaState();
   assert.equal(state.loaded, false);
   assert.equal(state.error, "");
   assert.deepEqual(state.agents, []);
+  assert.deepEqual(state.accounts, []);
+  assert.equal(state.mover, "");
 });

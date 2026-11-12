@@ -2992,6 +2992,11 @@ body[data-project-color] [data-af-theme=dark] {
   font-size: var(--af-type-body);
   color: var(--af-ink);
 }
+.af-quota-account-agent {
+  overflow-wrap: anywhere;
+  word-break: break-all;
+  min-width: 0;
+}
 .af-quota-cell {
   font-size: var(--af-type-caption);
   color: var(--af-ink);
@@ -3010,6 +3015,36 @@ body[data-project-color] [data-af-theme=dark] {
   margin: 0;
   font-size: var(--af-type-caption);
   color: var(--af-dead);
+  line-height: 1.5;
+}
+.af-quota-accounts {
+  display: flex;
+  flex-direction: column;
+  gap: var(--af-space-1);
+  margin-top: var(--af-space-2);
+  padding-top: var(--af-space-2);
+  border-top: calc(var(--af-space-1) * 0.25) solid var(--af-border);
+}
+.af-quota-accounts-head {
+  font-size: var(--af-type-body);
+  font-weight: 600;
+  color: var(--af-ink);
+}
+.af-quota-accounts-header {
+  font-family: var(--af-font-mono);
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+}
+.af-quota-accounts-empty {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
+  line-height: 1.5;
+}
+.af-quota-accounts-note {
+  margin: 0;
+  font-size: var(--af-type-caption);
+  color: var(--af-ink-muted);
   line-height: 1.5;
 }
 .af-hosts {

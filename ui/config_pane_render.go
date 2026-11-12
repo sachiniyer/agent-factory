@@ -33,12 +33,13 @@ func (c *ConfigPane) window(rowLines []string, selStart, selEnd, budget int) (vi
 		return rowLines, 0, 0
 	}
 
-	if selStart >= 0 {
+	if selStart >= 0 && !c.scrolledWithinSelection(selStart, selEnd, budget) {
 		if selStart < c.scrollTop {
 			c.scrollTop = selStart
 		}
 		// A selected row taller than the window (a long purpose line) pins to its
-		// top: showing its tail and hiding its key would be worse than clipping.
+		// top on arrival: showing its tail and hiding its key would be worse than
+		// clipping. ↑/↓ then scroll through the rest of it (scrollSelection).
 		if selEnd > c.scrollTop+budget {
 			c.scrollTop = min(selStart, selEnd-budget)
 		}
@@ -47,6 +48,57 @@ func (c *ConfigPane) window(rowLines []string, selStart, selEnd, budget int) (vi
 	c.scrollTop = max(0, min(c.scrollTop, maxTop))
 
 	return rowLines[c.scrollTop : c.scrollTop+budget], c.scrollTop, len(rowLines) - (c.scrollTop + budget)
+}
+
+// scrolledWithinSelection reports whether the view sits inside a selection
+// taller than the window — a top line from the selection's own first line down
+// to the one that shows its last line. window() leaves such a view alone
+// instead of snapping it back to the row's top, which would undo every ↓ the
+// user spent reading the row. Arriving on an over-tall row never starts in that
+// range — from above, the last frame's top line was above the row; from below,
+// that frame showed the next row, so its top was past the row's last
+// window-full — so arrival still pins the row's top, exactly as before.
+func (c *ConfigPane) scrolledWithinSelection(selStart, selEnd, budget int) bool {
+	return selEnd-selStart > budget && c.scrollTop >= selStart && c.scrollTop <= selEnd-budget
+}
+
+// scrollSelection moves the view one line through a selection taller than the
+// window and reports whether it did; the caller moves the cursor only when it
+// did not. Without it, every line of such a row below its first window-full was
+// unreachable — the list scrolls only to reveal the selection, and an over-tall
+// selection pins to its top. On a 40x10 terminal the list is one line tall, so
+// that is every line of every multi-line row: a quota or account-evidence row's
+// detail, a long purpose, and the mover line and footnote the last
+// account-evidence row's span carries (#7056 review). A selection that fits
+// the window never scrolls here, so ↑/↓ on a normal-sized pane are unchanged.
+func (c *ConfigPane) scrollSelection(delta int) bool {
+	if c.height <= 0 {
+		return false
+	}
+	lines, selStart, selEnd := c.renderRowLines()
+	budget := max(1, c.windowBudget(c.renderHeader(), c.renderStatus()+c.renderHints()))
+	if selStart < 0 || selEnd-selStart <= budget || len(lines) <= budget {
+		return false
+	}
+	// Settle the view to what the last frame showed for this selection, so the
+	// step below starts from the screen rather than from a stale scrollTop.
+	c.window(lines, selStart, selEnd, budget)
+	switch {
+	case delta > 0 && c.scrollTop+budget < selEnd:
+		c.scrollTop++
+		return true
+	case delta < 0 && c.scrollTop > selStart:
+		c.scrollTop--
+		return true
+	}
+	return false
+}
+
+// windowBudget is how many list lines fit between a header and a footer once
+// the cue rows are reserved — the one budget renderWindowed draws with and
+// scrollSelection steps by, so the two can never disagree about what is shown.
+func (c *ConfigPane) windowBudget(header, footer string) int {
+	return c.height - countLines(header) - countLines(footer) - cueRows
 }
 
 // cueRows is the vertical space reserved for the "↑ n more" / "↓ n more" cues.
@@ -262,6 +314,24 @@ func (c *ConfigPane) renderHints() string {
 			configHint{text: "C assistant", drop: 5},
 			configHint{text: "esc close"})
 		return "\n" + configHintStyle.Render(c.fitHints(hints)) + "\n"
+	}
+	if c.selectedUsageRow() {
+		// A Usage row (quota agent, per-account evidence, or the empty-accounts
+		// row) takes the cursor so the window can scroll the section into view,
+		// but nothing on it opens: selectedEntry returns nil, so `↵ edit` and
+		// `e explain` are no-ops there (#7047). List only what works — move,
+		// the advanced toggle, the assistant, and the exit — so the footer is
+		// not advertising verbs the row refuses.
+		advanced := "a show advanced"
+		if c.showAdvanced {
+			advanced = "a hide advanced"
+		}
+		return "\n" + configHintStyle.Render(c.fitHints([]configHint{
+			{text: "↑/↓ move", drop: 2},
+			{text: advanced, drop: 1},
+			{text: "C assistant", drop: 3},
+			{text: "esc close"},
+		})) + "\n"
 	}
 	advanced := "a show advanced"
 	if c.showAdvanced {

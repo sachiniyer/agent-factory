@@ -55,7 +55,7 @@ func (m *home) handleQuotaLoaded(msg quotaLoadedMsg) {
 func (m *home) applyQuotaToPane(resp daemon.QuotaReportResponse, err error) {
 	if err != nil {
 		log.WarningLog.Printf("quota: could not read the usage report for the config pane: %v", err)
-		m.configPane.SetQuota(nil, nil, "", err)
+		m.configPane.SetQuota(nil, nil, nil, "", err)
 		return
 	}
 	rows := make([]ui.QuotaRow, 0, len(resp.Agents))
@@ -70,5 +70,18 @@ func (m *home) applyQuotaToPane(resp daemon.QuotaReportResponse, err error) {
 			Detail:          agent.Detail,
 		})
 	}
-	m.configPane.SetQuota(rows, resp.Warnings, resp.Mover, nil)
+	// The daemon pre-renders the per-account evidence section (#6776) the same
+	// way it pre-renders the agent table; the pane mirrors it verbatim so the
+	// TUI shows the daemon's own words rather than re-deriving the vocabulary.
+	accounts := make([]ui.QuotaAccountRow, 0, len(resp.Accounts))
+	for _, acct := range resp.Accounts {
+		accounts = append(accounts, ui.QuotaAccountRow{
+			Agent:    acct.Agent,
+			Name:     acct.Name,
+			Observed: acct.Observed,
+			Windows:  acct.Windows,
+			Detail:   acct.Detail,
+		})
+	}
+	m.configPane.SetQuota(rows, resp.Warnings, accounts, resp.Mover, nil)
 }

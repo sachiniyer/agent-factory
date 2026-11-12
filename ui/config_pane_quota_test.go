@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/sachiniyer/agent-factory/config"
 )
 
@@ -27,7 +28,7 @@ func quotaPane(t *testing.T, rows []QuotaRow, warnings []string) *ConfigPane {
 		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
 	}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(nil, nil, nil)
-	pane.SetQuota(rows, warnings, "", nil)
+	pane.SetQuota(rows, warnings, nil, "", nil)
 	pane.SetFocus(true)
 	return pane
 }
@@ -97,7 +98,7 @@ func TestConfigPaneQuota_RowsAreSelectableSoTheWindowCanReachThem(t *testing.T) 
 // exists to refuse.
 func TestConfigPaneQuota_FailedReadRendersUnavailableRatherThanEmpty(t *testing.T) {
 	pane := quotaPane(t, nil, nil)
-	pane.SetQuota(nil, nil, "", errors.New("daemon: cannot read session records: boom"))
+	pane.SetQuota(nil, nil, nil, "", errors.New("daemon: cannot read session records: boom"))
 
 	out := pane.String()
 	if !strings.Contains(out, "Cannot read usage limits") || !strings.Contains(out, "boom") {
@@ -108,11 +109,14 @@ func TestConfigPaneQuota_FailedReadRendersUnavailableRatherThanEmpty(t *testing.
 // The served mover line is fleet state the section must not drop: a recorded
 // halt renders where the operator opens the config view (#6776 R16), and an
 // absent line renders nothing — the absent-table shape stays no line at all.
+// After the accounts section wiring, the mover rides in the per-account
+// evidence section (matching the CLI's RenderAccountSection), so this also
+// confirms the section materializes for the mover-only case.
 func TestConfigPaneQuota_MoverLineRendersWhenServed(t *testing.T) {
 	pane := quotaPane(t, []QuotaRow{
 		{Program: "codex", Quota: "not reported", Observed: "limit reached", Sessions: 1, LimitedSessions: 1, Detail: "parked"},
 	}, nil)
-	pane.SetQuota(pane.quota.rows, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+	pane.SetQuota(pane.quota.rows, nil, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
 
 	out := pane.String()
 	if !strings.Contains(out, "mover: halted: move-failed") {
@@ -187,7 +191,7 @@ func registerQuotaPane(t *testing.T, agents []string, quota []QuotaRow) *ConfigP
 	}}, "/tmp/config.toml", nil)
 	pane.SetAccounts(nil, agents, nil)
 	if quota != nil {
-		pane.SetQuota(quota, nil, "", nil)
+		pane.SetQuota(quota, nil, nil, "", nil)
 	}
 	pane.SetFocus(true)
 	return pane
@@ -340,5 +344,364 @@ func TestConfigPaneNavigateToBottomOpensRegisterWithoutQuota(t *testing.T) {
 	if !pane.IsEditing() {
 		t.Fatalf("enter at the bottom must open the inline register field; "+
 			"landed on %s (idx %d) and IsEditing stayed false", describeConfigRow(row), pane.selectedIdx)
+	}
+}
+
+// The per-account evidence section (#6776): the daemon pre-renders the same
+// rows `af quota`'s ACCOUNTS block prints, and the pane displays the daemon's
+// own words verbatim — agent/name, observed, windows, detail — after the agent
+// table. This is the bug the wiring fixed: the daemon served the field but the
+// TUI dropped it, so an operator with handoff engaged saw the evidence only via
+// `af quota`, never in the config view.
+func TestConfigPaneQuota_AccountsEvidenceRendersAfterAgentRows(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "limit reached", Sessions: 1, LimitedSessions: 1, Detail: "parked"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%, secondary 4%", Detail: "recorded 2026-01-01T09:00:00Z"},
+		{Agent: "codex", Name: "personal", Observed: "no evidence", Windows: "—", Detail: "no rate_limits claims found"},
+	}, "shadow", nil)
+
+	out := pane.String()
+	// The section label, column header, and both rows' rendered words must all
+	// appear — a client that re-derives vocabulary from the rows is exactly the
+	// drift the served-rendered-rows design prevents.
+	for _, want := range []string{
+		quotaAccountsHeading,
+		quotaAccountColHeader,
+		"codex/work",
+		"observed",
+		"primary 42%, secondary 4%",
+		"recorded 2026-01-01T09:00:00Z",
+		"codex/personal",
+		"no evidence",
+		"no rate_limits claims found",
+	} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("per-account evidence section is missing %q:\n%s", want, out)
+		}
+	}
+	// The mover rides inside the section, matching the CLI's RenderAccountSection.
+	if !strings.Contains(out, "mover: shadow") {
+		t.Fatalf("the mover line must render inside the per-account evidence section:\n%s", out)
+	}
+	// The closing explanation the CLI prints must ride after the rows.
+	if !strings.Contains(out, "ACCOUNTS is what af recorded") {
+		t.Fatalf("the section's closing note must render:\n%s", out)
+	}
+}
+
+// Per-account evidence rows take the cursor for the same scroll-reach reason
+// the agent rows do: selection is the only scroll driver this list has, so a
+// non-selectable section the cursor cannot land on renders but never scrolls
+// into view. Enter does nothing — there is no entry to edit.
+func TestConfigPaneQuota_AccountRowsAreSelectable(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "", nil)
+
+	var acctIdx = -1
+	for i, row := range pane.rows {
+		if row.quotaAccount != nil {
+			if !row.isSelectable() {
+				t.Fatalf("account row %d is not selectable: the cursor could never scroll the section into view", i)
+			}
+			acctIdx = i
+		}
+	}
+	if acctIdx < 0 {
+		t.Fatal("no account rows")
+	}
+	// Navigation must be able to land on the account row, not just declare it.
+	pane.selectedIdx = 0
+	for pane.selectedIdx < acctIdx {
+		before := pane.selectedIdx
+		pane.move(1)
+		if pane.selectedIdx == before {
+			t.Fatalf("navigation stalled at %d before reaching account row %d", before, acctIdx)
+		}
+	}
+	pane.selectedIdx = acctIdx
+	if pane.selectedEntry() != nil || pane.selectedAccount() != nil {
+		t.Fatal("an account evidence row must carry neither a config entry nor an account")
+	}
+	pane.HandleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+	if pane.IsEditing() {
+		t.Fatal("enter on an account evidence row must not open the editor")
+	}
+}
+
+// The empty-table line the CLI prints when the machinery is engaged but no
+// codex account is registered must surface in the pane too — otherwise an
+// operator with a recorded mover halt and zero accounts sees the halt line
+// but no signal that the accounts section is the empty table, not absent.
+func TestConfigPaneQuota_NoCodexAccountsLineWhenMoverServedButNoAccounts(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	out := pane.String()
+	if !strings.Contains(out, quotaAccountsNoCodex) {
+		t.Fatalf("the empty-table line must render when the mover is served but no account is registered:\n%s", out)
+	}
+	if !strings.Contains(out, "mover: halted: move-failed") {
+		t.Fatalf("the mover line must still render in the empty-accounts case:\n%s", out)
+	}
+}
+
+// The absent-table shape — no accounts AND no mover — is no per-account
+// evidence section at all, byte-identical to before the machinery existed. A
+// home the feature never touched must not gain a phantom section.
+func TestConfigPaneQuota_NoAccountsSectionWhenAbsentTable(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	// No accounts, no mover — the absent-table condition.
+	pane.SetQuota(pane.quota.rows, nil, nil, "", nil)
+
+	out := pane.String()
+	for _, absent := range []string{quotaAccountsHeading, quotaAccountColHeader, quotaAccountsNoCodex, "ACCOUNTS is what af recorded"} {
+		if strings.Contains(out, absent) {
+			t.Fatalf("the absent-table shape is no per-account evidence section at all: found %q\n%s", absent, out)
+		}
+	}
+}
+
+// The per-account evidence section's trailing end row (mover line + footnote)
+// is non-selectable, so the cursor cannot land on it; selection is the list's
+// only scroll driver, so the end row would sit permanently behind the "↓ more"
+// cue when the cursor rests on the last selectable row above it. The selection
+// span extends through the end row so window() can scroll it into view — the
+// reach the empty-table row's own comment already promises (#6776).
+func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromLastAccountRow(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+		{Agent: "codex", Name: "personal", Observed: "no evidence", Windows: "—", Detail: "no rate_limits claims found"},
+	}, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	var lastAcct, endIdx int = -1, -1
+	for i, row := range pane.rows {
+		if row.quotaAccount != nil {
+			lastAcct = i
+		}
+		if row.quotaAccountsEnd {
+			endIdx = i
+		}
+	}
+	if lastAcct < 0 || endIdx < 0 || endIdx != lastAcct+1 {
+		t.Fatalf("expected the last account row immediately followed by the end row: lastAcct=%d endIdx=%d", lastAcct, endIdx)
+	}
+
+	// Cursor on the last account row: the span must run through the mover line
+	// and footnote so window() scrolls them into view rather than clipping them
+	// behind "↓ more" — and stop there, before the Accounts section.
+	pane.selectedIdx = lastAcct
+	assertSpanEndsWithTheEndRow(t, pane)
+}
+
+// assertSpanEndsWithTheEndRow checks that the selection span runs exactly
+// through the evidence section's end row: its last line is the footnote's last
+// line, and the Accounts section rendered after Usage (#7053) lies outside it.
+// A span that ran to the end of the list made window() reveal — and ↑/↓ scroll
+// through — the whole Accounts section while the cursor sat in Usage.
+func assertSpanEndsWithTheEndRow(t *testing.T, pane *ConfigPane) {
+	t.Helper()
+	lines, selStart, selEnd := pane.renderRowLines()
+	if selStart < 0 {
+		t.Fatal("expected a selection span")
+	}
+	foot := strings.Split(strings.TrimSuffix(pane.wrapIndented(quotaAccountsFootNote, configHintStyle), "\n"), "\n")
+	footEnd := -1
+	for i := range lines {
+		if lines[i] == foot[len(foot)-1] {
+			footEnd = i + 1
+		}
+	}
+	if footEnd < 0 {
+		t.Fatal("the closing footnote did not render")
+	}
+	if selEnd != footEnd {
+		t.Fatalf("selection span must end with the trailing end row: selEnd=%d, footnote ends at %d, %d lines in all", selEnd, footEnd, len(lines))
+	}
+	for _, l := range lines[selStart:selEnd] {
+		if strings.TrimSpace(xansi.Strip(l)) == "Accounts" {
+			t.Fatalf("selection span reaches into the Accounts section:\n%s", strings.Join(lines[selStart:selEnd], "\n"))
+		}
+	}
+}
+
+// The same reach must hold for the empty-accounts shape: the empty-table row is
+// the only selectable row in the section, and the mover line + footnote ride on
+// the non-selectable end row below it.
+func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromEmptyRow(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, nil, "halted: move-failed since 2026-01-01T09:00:00Z", nil)
+
+	var emptyIdx, endIdx int = -1, -1
+	for i, row := range pane.rows {
+		if row.quotaAccountsEmpty {
+			emptyIdx = i
+		}
+		if row.quotaAccountsEnd {
+			endIdx = i
+		}
+	}
+	if emptyIdx < 0 || endIdx < 0 || endIdx != emptyIdx+1 {
+		t.Fatalf("expected the empty row immediately followed by the end row: emptyIdx=%d endIdx=%d", emptyIdx, endIdx)
+	}
+	pane.selectedIdx = emptyIdx
+	assertSpanEndsWithTheEndRow(t, pane)
+}
+
+// At a narrow pane the composed account row once exceeded the pane and
+// fitPaneLine truncated it from the right, discarding the verdict and window
+// shares the section exists to show. observed · windows now ride on a wrapped
+// (non-clipped) line so they survive at any width (#6776). Checked at the
+// renderRowLines level so the list's window does not hide the row's lines
+// behind a "↓ more" cue — the bug is in the row's own rendering, not the
+// window.
+func TestConfigPaneQuota_AccountRowObservedAndWindowsSurviveNarrowWidth(t *testing.T) {
+	pane := NewConfigPane()
+	pane.SetSize(30, 40)
+	pane.SetEntries([]config.ConfigEntry{{
+		Key: "default_program", Value: "claude", Purpose: "the agent a new session runs", Tier: 1,
+	}}, "/tmp/config.toml", nil)
+	pane.SetAccounts(nil, nil, nil)
+	pane.SetQuota([]QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%, secondary 4%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "shadow", nil)
+	pane.SetFocus(true)
+
+	lines, _, _ := pane.renderRowLines()
+	var b strings.Builder
+	for _, l := range lines {
+		b.WriteString(l)
+		b.WriteString("\n")
+	}
+	out := b.String()
+	// observed and both window shares must survive — fitPaneLine used to drop
+	// everything right of the name; wrapping keeps each fragment on its own line.
+	for _, want := range []string{"codex/work", "observed", "primary 42%", "secondary 4%"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("narrow pane must not clip away %q:\n%s", want, out)
+		}
+	}
+}
+
+// The per-account evidence section renders AFTER the agent table, matching the
+// CLI's RenderAccountSection (which prints after RenderRows) — a reader who
+// knows `af quota` sees the same shape in the pane.
+func TestConfigPaneQuota_AccountsSectionRendersAfterAgentRows(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "limit reached", Sessions: 1, LimitedSessions: 1, Detail: "parked"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "shadow", nil)
+
+	var lastAgentIdx, headingIdx int = -1, -1
+	for i, row := range pane.rows {
+		if row.quota != nil {
+			lastAgentIdx = i
+		}
+		if row.quotaAccountsHeading {
+			headingIdx = i
+		}
+	}
+	if lastAgentIdx < 0 || headingIdx < 0 {
+		t.Fatalf("expected an agent table followed by the accounts section: last agent %d, heading %d", lastAgentIdx, headingIdx)
+	}
+	if headingIdx <= lastAgentIdx {
+		t.Fatalf("per-account evidence section must render after the agent table: last agent at %d, heading at %d", lastAgentIdx, headingIdx)
+	}
+}
+
+// The footer must advertise only what works on the row under the cursor (#7047).
+// A Usage row (a quota agent row, a per-account evidence row, or the
+// empty-accounts row) takes the cursor so the window can scroll the section into
+// view, but nothing on it opens: selectedEntry returns nil, so `↵ edit` and
+// `e explain` are no-ops there. The default footer nonetheless lists both, so a
+// user pressing enter or e on a Usage row gets a silent no-op. While one of
+// these rows is selected the footer lists only what works there — move, the
+// advanced toggle, the assistant, and the exit — and drops the two dead verbs.
+func TestConfigPaneQuota_FooterDropsDeadVerbsOnUsageRows(t *testing.T) {
+	pane := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	pane.SetQuota(pane.quota.rows, nil, []QuotaAccountRow{
+		{Agent: "codex", Name: "work", Observed: "observed", Windows: "primary 42%", Detail: "recorded 2026-01-01T09:00:00Z"},
+	}, "shadow", nil)
+
+	// Find one row of each selectable Usage kind the cursor can land on.
+	var quotaIdx, accountIdx, emptyIdx, entryIdx int = -1, -1, -1, -1
+	for i, row := range pane.rows {
+		switch {
+		case row.quota != nil && quotaIdx < 0:
+			quotaIdx = i
+		case row.quotaAccount != nil && accountIdx < 0:
+			accountIdx = i
+		case row.quotaAccountsEmpty:
+			emptyIdx = i
+		case row.entry != nil && entryIdx < 0:
+			entryIdx = i
+		}
+	}
+	if quotaIdx < 0 || accountIdx < 0 || entryIdx < 0 {
+		t.Fatalf("expected a quota row, an account-evidence row, and a config entry: %d %d %d", quotaIdx, accountIdx, entryIdx)
+	}
+
+	check := func(p *ConfigPane, idx int, label string) {
+		t.Helper()
+		p.selectedIdx = idx
+		hints := p.renderHints()
+		for _, dead := range []string{"↵ edit", "e explain"} {
+			if strings.Contains(hints, dead) {
+				t.Errorf("%s: footer must not advertise %q (it is a no-op there):\n%s", label, dead, hints)
+			}
+		}
+		for _, live := range []string{"↑/↓ move", "C assistant", "esc close"} {
+			if !strings.Contains(hints, live) {
+				t.Errorf("%s: footer must still advertise %q:\n%s", label, live, hints)
+			}
+		}
+	}
+	check(pane, quotaIdx, "quota agent row")
+	check(pane, accountIdx, "per-account evidence row")
+
+	// The empty-accounts shape exercises the empty-accounts row too.
+	empty := quotaPane(t, []QuotaRow{
+		{Program: "codex", Quota: "not reported", Observed: "no sessions", Detail: "none"},
+	}, nil)
+	empty.SetQuota(empty.quota.rows, nil, nil, "shadow", nil)
+	for i, row := range empty.rows {
+		if row.quotaAccountsEmpty {
+			emptyIdx = i
+			break
+		}
+	}
+	if emptyIdx < 0 {
+		t.Fatal("expected an empty-accounts row")
+	}
+	check(empty, emptyIdx, "empty-accounts row")
+
+	// Contrast: a config entry row keeps both verbs — the footer only drops
+	// them where they do not work.
+	pane.selectedIdx = entryIdx
+	entryHints := pane.renderHints()
+	for _, live := range []string{"↵ edit", "e explain"} {
+		if !strings.Contains(entryHints, live) {
+			t.Errorf("a config entry row must still advertise %q:\n%s", live, entryHints)
+		}
 	}
 }

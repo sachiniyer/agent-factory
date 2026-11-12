@@ -54,3 +54,36 @@ test("SnapshotResponse still mirrors the fields the rail already rendered (no re
   assert.match(body, /operation_lock_timeout_ms\?:\s*number/);
   assert.match(body, /operation_clock_ms\?:\s*number/);
 });
+
+// The daemon serves a per-account evidence section on QuotaReportResponse
+// (#6776, commit 354f26e2). It was added to the wire type and the CLI but never
+// mirrored into web/ — exactly the response-field drift class this suite was
+// built for (#4742): the parity audit covers only REQUEST-side fields, so a Go
+// RESPONSE field added without a web mirror is invisible to CI. These guards
+// pin the mirror so the drift cannot recur.
+
+test("QuotaReportResponse mirrors the daemon's accounts evidence channel (#6776)", () => {
+  const body = interfaceBody("QuotaReportResponse");
+  // The field MUST be present and typed as RenderedAccount[] — the Usage section
+  // renders the per-account evidence from it. omitempty on the Go side makes it
+  // optional here. An absent field is the original bug (the daemon's accounts
+  // silently discarded at the mapping layer); a wrong type would force a cast.
+  assert.match(body, /accounts\?:\s*RenderedAccount\[/,
+    "QuotaReportResponse must declare `accounts?: RenderedAccount[]` to mirror daemon/control_types_quota.go");
+  // The sibling fields must stay mirrored too — this guard must not swallow a
+  // regression that drops one the Usage section already renders.
+  assert.match(body, /agents:\s*QuotaAgentRow\[/, "agents is the per-agent table");
+  assert.match(body, /warnings\?:\s*string\[/, "warnings carries completeness caveats");
+  assert.match(body, /mover\?:\s*string/, "mover is the rendered auto-handoff line");
+});
+
+test("RenderedAccount mirrors the daemon's per-account evidence shape (#6776)", () => {
+  const body = interfaceBody("RenderedAccount");
+  // Every field is non-optional on the Go side (RenderedAccount has no omitempty
+  // tags) and is the daemon's own rendered text, so the web renders it verbatim.
+  assert.match(body, /agent:\s*string/, "RenderedAccount.agent is the agent the account belongs to (required)");
+  assert.match(body, /name:\s*string/, "RenderedAccount.name is the registered account name (required)");
+  assert.match(body, /observed:\s*string/, "RenderedAccount.observed is the evidence verdict (required)");
+  assert.match(body, /windows:\s*string/, "RenderedAccount.windows is the rendered window list (required)");
+  assert.match(body, /detail:\s*string/, "RenderedAccount.detail is the row's sentence (required)");
+});

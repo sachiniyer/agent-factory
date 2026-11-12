@@ -182,6 +182,22 @@ type configRow struct {
 	// report line. It takes the cursor so the scroll window can reach it, but
 	// nothing on it opens for editing.
 	quota *QuotaRow
+	// quotaAccount is set for a row of the per-account evidence sub-section
+	// (#6776) — a daemon-rendered observed-window row, like quota. Selectable
+	// for the same scroll-reach reason.
+	quotaAccount *QuotaAccountRow
+	// quotaAccountsHeading marks the per-account evidence sub-section's heading
+	// row (#6776). Non-selectable, like other section headings.
+	quotaAccountsHeading bool
+	// quotaAccountsEmpty marks the empty-table row inside the per-account
+	// evidence sub-section (#6776), shown when the machinery is engaged but no
+	// codex account is registered. Selectable so the cursor reaches the
+	// section (and reveals the trailing mover line) even with no account rows.
+	quotaAccountsEmpty bool
+	// quotaAccountsEnd marks the trailing row of the per-account evidence
+	// sub-section (#6776), which renders the mover line and the explanatory
+	// footer — matching the CLI's RenderAccountSection. Non-selectable.
+	quotaAccountsEnd bool
 	// host is set for a row of the Hosts section (#5571 W10.5) — a saved host
 	// or one of the section's action rows (add, check-all), derived from the
 	// `hosts`/`default_host` manifest entries themselves.
@@ -199,9 +215,11 @@ type configRow struct {
 // (#2983): the selection is the only scroll driver this list has — window()
 // scrolls just far enough to reveal it — so a non-selectable Usage section
 // below the last editable row would render but never scroll into view. Enter
-// on one is a no-op because selectedEntry returns nil for it.
+// on one is a no-op because selectedEntry returns nil for it. The per-account
+// evidence rows and the empty-table row follow the same rule for the same
+// reason (#6776).
 func (r configRow) isSelectable() bool {
-	return r.entry != nil || r.account != nil || r.quota != nil || r.host != nil
+	return r.entry != nil || r.account != nil || r.quota != nil || r.quotaAccount != nil || r.quotaAccountsEmpty || r.host != nil
 }
 
 var (
@@ -497,10 +515,14 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		c.SetFocus(false)
 		return true
 	case "up", "k":
-		c.move(-1)
+		if !c.scrollSelection(-1) {
+			c.move(-1)
+		}
 		return true
 	case "down", "j":
-		c.move(1)
+		if !c.scrollSelection(1) {
+			c.move(1)
+		}
 		return true
 	case "a":
 		c.showAdvanced = !c.showAdvanced
@@ -696,7 +718,7 @@ func (c *ConfigPane) String() string {
 // whether the cues happen to show is circular — and it would make the list
 // grow and shrink by a line as the user scrolls past either end.
 func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selStart, selEnd int) string {
-	budget := c.height - countLines(header) - countLines(footer) - cueRows
+	budget := c.windowBudget(header, footer)
 	visible, above, below := c.window(lines, selStart, selEnd, budget)
 
 	var b strings.Builder
@@ -746,6 +768,30 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		case row.quota != nil:
 			rendered := c.renderQuotaRow(i, *row.quota)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.quotaAccount != nil:
+			rendered := c.renderQuotaAccountRow(i, *row.quotaAccount)
+			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
+		case row.quotaAccountsEmpty:
+			lines = append(lines, c.renderQuotaAccountsEmpty(i))
+		case row.quotaAccountsHeading:
+			lines = append(lines, configHeadingStyle.Render(quotaAccountsHeading))
+			// The column header names the columns the CLI names, so the pane
+			// does not ask the reader to infer them. Only when there are rows
+			// to head — the empty-table line replaces it otherwise.
+			if len(c.quota.accounts) > 0 {
+				lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaAccountColHeader, configHintStyle), "\n"), "\n")...)
+			}
+		case row.quotaAccountsEnd:
+			// The mover line and the closing explanation ride at the end of the
+			// per-account evidence section, exactly as the CLI's
+			// RenderAccountSection prints them after the table (#6776). The
+			// mover moved here from the Usage heading so the TUI matches the
+			// CLI's shape; a halt is still never silent (R16) — it remains in
+			// the section the daemon sourced it for.
+			if c.quota.mover != "" {
+				lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("mover: "+c.quota.mover, configHintStyle), "\n"), "\n")...)
+			}
+			lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaAccountsFootNote, configHintStyle), "\n"), "\n")...)
 		case row.host != nil:
 			rendered := c.renderHostRow(i, *row.host)
 			lines = append(lines, strings.Split(strings.TrimSuffix(rendered, "\n"), "\n")...)
@@ -773,12 +819,12 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 					lines = append(lines, strings.Split(c.renderQuotaUnavailable(), "\n")...)
 				default:
 					lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented(quotaHeadingNote, configHintStyle), "\n"), "\n")...)
-					// The mover line is daemon-rendered and only present when
-					// the auto-handoff machinery is engaged or left records —
-					// a halt in it must surface here, never silently (#6776).
-					if c.quota.mover != "" {
-						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("mover: "+c.quota.mover, configHintStyle), "\n"), "\n")...)
-					}
+					// The mover line no longer rides under the Usage heading: it moved
+					// into the per-account evidence section (quotaAccountsEnd) so the
+					// TUI matches the CLI's RenderAccountSection shape (#6776). It
+					// still surfaces wherever the report renders (R16: a halted mover
+					// is never silent) — just at the end of the section the daemon
+					// sourced it for, exactly like `af quota`.
 					if len(c.quota.rows) == 0 {
 						lines = append(lines, strings.Split(strings.TrimSuffix(c.wrapIndented("No agent CLIs are configured, so there is nothing to report.", configHintStyle), "\n"), "\n")...)
 					}
@@ -805,6 +851,20 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		}
 		if i == c.selectedIdx {
 			selStart, selEnd = start, len(lines)
+		}
+		// The per-account evidence section's trailing end row (the mover line
+		// and the closing footnote) is non-selectable, so the cursor cannot land
+		// on it; window() scrolls only far enough to reveal the selection, which
+		// would leave the end row hidden behind the "↓ more" cue when the cursor
+		// sits on the last selectable row above it (#6776). Extend that row's
+		// selection span through the end row's lines — and no further: the
+		// Accounts section renders after Usage (#7053), so the span must stop
+		// where the end row does, not at the end of the list. A span taller than
+		// the window is then read through with ↑/↓ (scrollSelection).
+		if row.quotaAccountsEnd && i == c.selectedIdx+1 && selStart >= 0 {
+			if sel := c.rows[c.selectedIdx]; sel.quotaAccount != nil || sel.quotaAccountsEmpty {
+				selEnd = len(lines)
+			}
 		}
 	}
 	return lines, selStart, selEnd
