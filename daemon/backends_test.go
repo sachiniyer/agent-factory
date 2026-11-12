@@ -343,6 +343,99 @@ func TestListBackends_UnreadableConfigIsUnknownNotUnavailable(t *testing.T) {
 	assert.Contains(t, resp.DefaultReason, "config.json", "the reason names the file")
 }
 
+// TestListBackends_UnreadableRepoConfigStillReportsGlobalHosts is the regression
+// for the host half of the unreadable-config contract — the same property
+// TestListBackends_UnreadableConfigIsUnknownNotUnavailable pins for backends.
+//
+// Hosts (and default_host) are GLOBAL-only configuration: a broken in-repo
+// config can stop ResolveConfigForRepo from returning a resolved cfg, but the
+// host names remain independently readable via config.LoadConfig. Before the
+// fix, hostCatalog returned nil whenever cfgErr != nil, silently dropping the
+// operator's entire host list — so a user with one syntax error in
+// .agent-factory/config.json saw zero host rows and an empty default_host in
+// every picker, indistinguishable from "no hosts configured", exactly when they
+// most needed an honest answer. The doc comment on hostCatalog already promised
+// "An unreadable config is reported as unknown per host rather than by omitting
+// them" — the code contradicted it from day one.
+//
+// After the fix, each globally listed host is emitted with Status=unknown and a
+// reason naming the unreadable in-repo file (mirroring backendOptionFor), and
+// default_host is sourced from the global config rather than hidden.
+func TestListBackends_UnreadableRepoConfigStillReportsGlobalHosts(t *testing.T) {
+	// Global config with one host and a default pointing at it. The fixture is
+	// proven valid at runtime by the control sub-test below.
+	home := t.TempDir()
+	t.Setenv("AGENT_FACTORY_HOME", home)
+	global := config.DefaultConfig()
+	global.Hosts = map[string]config.HostConfig{
+		"box1": {Host: "box1.tailnet.ts.net"},
+	}
+	global.DefaultHost = "box1"
+	require.NoError(t, config.SaveConfig(global))
+
+	t.Run("broken repo config: hosts unknown, default_host preserved", func(t *testing.T) {
+		repo := setupControlRepo(t)
+		dir := filepath.Join(repo, config.InRepoConfigDirName)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{ this is not json"), 0o644))
+
+		resp := listBackends(t, repo)
+
+		// The host list must NOT disappear: each globally listed host is reported
+		// as unknown with a reason naming the unreadable in-repo file, so a
+		// client renders "cannot check" rows rather than "no hosts configured".
+		require.Len(t, resp.Hosts, 1, "the one globally configured host must appear as an unknown row, not be omitted")
+		host := resp.Hosts[0]
+		assert.Equal(t, "box1", host.Name)
+		assert.Equal(t, "box1.tailnet.ts.net", host.Address, "address comes from the global config, the only place hosts are defined")
+		assert.Equal(t, BackendUnknown, host.Status, "an unreadable repo config means we cannot check the host — neither yes nor no is honest")
+		assert.NotEmpty(t, host.Reason, "the row must say what stopped the check")
+		assert.Contains(t, host.Reason, "box1", "the reason names the host")
+		assert.Contains(t, host.Reason, config.InRepoConfigDirName, "the reason names the in-repo config file")
+		assert.NotContains(t, host.Reason, "requires", "must not invent a missing-key finding it never checked for")
+
+		// default_host is global-only, so it survives the broken repo layer and
+		// stays honest in both pickers' "· default" marker.
+		assert.Equal(t, "box1", resp.DefaultHost, "default_host must be sourced from the global config when only the repo layer is broken")
+	})
+
+	t.Run("valid repo config: hosts available, default_host set (control)", func(t *testing.T) {
+		// Identical global fixture, but a readable repo config. Proves the
+		// fixture is right and only the broken-config path was dropping hosts.
+		stubLookPath(t)
+		repo := setupControlRepo(t)
+		addOrigin(t, repo)
+		// No host-specific precondition beyond what stubLookPath + origin give,
+		// so the listed host resolves to available.
+		resp := listBackends(t, repo)
+
+		require.Len(t, resp.Hosts, 1)
+		host := resp.Hosts[0]
+		assert.Equal(t, "box1", host.Name)
+		assert.Equal(t, "box1.tailnet.ts.net", host.Address)
+		assert.NotEqual(t, BackendUnknown, host.Status, "with a readable repo config the host is checked, not reported as unknown")
+		assert.Equal(t, "box1", resp.DefaultHost)
+	})
+
+	t.Run("broken repo config and no global hosts: hosts key absent", func(t *testing.T) {
+		// When the global config itself defines no hosts, an absent Hosts key is
+		// the honest answer — the omission must not be relied on to mean
+		// "unreadable". Pin the one situation where omitting is correct.
+		emptyHome := t.TempDir()
+		t.Setenv("AGENT_FACTORY_HOME", emptyHome)
+		require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+
+		repo := setupControlRepo(t)
+		dir := filepath.Join(repo, config.InRepoConfigDirName)
+		require.NoError(t, os.MkdirAll(dir, 0o755))
+		require.NoError(t, os.WriteFile(filepath.Join(dir, "config.json"), []byte("{ this is not json"), 0o644))
+
+		resp := listBackends(t, repo)
+		assert.Empty(t, resp.Hosts, "no hosts configured globally: the key is honestly absent")
+		assert.Empty(t, resp.DefaultHost)
+	})
+}
+
 // TestListBackends_NewBackendReachesClientsWithNoClientChange is THE anti-drift
 // test for #1933 (the daemon half; web/src/backends.test.ts is the other half).
 //
