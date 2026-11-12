@@ -147,8 +147,44 @@ type HostOption struct {
 
 // hostCatalog answers for the operator's host list. An unreadable config is
 // reported as unknown per host rather than by omitting them.
-func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, repoRoot string) []HostOption {
-	if cfgErr != nil || cfg == nil || len(cfg.Hosts) == 0 {
+//
+// Hosts (and default_host) are global-only configuration: a broken in-repo
+// config can stop ResolveConfigForRepo from returning a resolved cfg, but the
+// host NAMES remain independently readable via config.LoadConfig. So when the
+// repo layer failed we still emit one HostOption per globally listed host with
+// Status=unknown and a reason naming the source ResolveConfigForRepo actually
+// failed on — carried by cfgErr, so it points at the in-repo file, the legacy
+// per-repo config, or a personal project layer as appropriate rather than
+// unconditionally naming the in-repo file. We only omit hosts when the
+// GLOBAL config itself is unreadable or defines none, which is the one
+// situation where an absent Hosts key is an honest "no hosts configured".
+//
+// The global config is passed in by the caller (which already loaded it for
+// DefaultHost) so a single read fixes both halves consistently: a config edit
+// between two loads could otherwise give hosts from one snapshot and a default
+// from another.
+func hostCatalog(cfg *config.ResolvedConfig, cfgErr error, global *config.Config, globalErr error, repoRoot string) []HostOption {
+	if cfgErr != nil || cfg == nil {
+		if global == nil || globalErr != nil || len(global.Hosts) == 0 {
+			return nil
+		}
+		names := make([]string, 0, len(global.Hosts))
+		for name := range global.Hosts {
+			names = append(names, name)
+		}
+		sort.Strings(names)
+		out := make([]HostOption, 0, len(names))
+		for _, name := range names {
+			out = append(out, HostOption{
+				Name:    name,
+				Address: global.Hosts[name].Host,
+				Status:  BackendUnknown,
+				Reason:  fmt.Sprintf("cannot tell whether this repo can place a session on host=%s: its repo configuration could not be read (%v). The error names the source that actually failed (the in-repo file, the legacy per-repo config, or a personal project layer) — fix that source to get a definite answer.", name, cfgErr),
+			})
+		}
+		return out
+	}
+	if len(cfg.Hosts) == 0 {
 		return nil
 	}
 	names := make([]string, 0, len(cfg.Hosts))
@@ -193,9 +229,22 @@ func (s *controlServer) ListBackends(req ListBackendsRequest, resp *ListBackends
 	}
 	resp.Backends = backendCatalog(config.SupportedBackends, cfg, cfgErr, workspace, callbackReason)
 	resp.Default, resp.DefaultStatus, resp.DefaultReason = defaultFor(resp.Backends, cfg, cfgErr, workspace)
-	resp.Hosts = hostCatalog(cfg, cfgErr, workspace)
-	if cfgErr == nil && cfg != nil {
+	// default_host and the host list are both global-only, so they survive a
+	// broken repo layer. Load the global config once for both halves: when the
+	// repo layer is unreadable we still report each listed host as unknown
+	// (hostCatalog) and keep the global default honest, rather than hiding both
+	// exactly when the user most needs to see them.
+	var global *config.Config
+	var globalErr error
+	if cfgErr != nil || cfg == nil {
+		global, globalErr = config.LoadConfig()
+	}
+	resp.Hosts = hostCatalog(cfg, cfgErr, global, globalErr, workspace)
+	switch {
+	case cfgErr == nil && cfg != nil:
 		resp.DefaultHost = cfg.DefaultHost
+	case global != nil && globalErr == nil:
+		resp.DefaultHost = global.DefaultHost
 	}
 	return nil
 }
