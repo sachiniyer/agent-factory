@@ -650,6 +650,12 @@ func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
 	return i.sessionCodexCaptureBaselineFor(program)
 }
 
+// RetakeSessionCodexCaptureBaseline: compile-only stub for the failing-first
+// commit.
+func (i *Instance) RetakeSessionCodexCaptureBaseline() (ConversationCaptureSnapshot, error) {
+	return i.SessionCodexCaptureBaseline(), nil
+}
+
 // sessionCodexCaptureBaselineFor builds the snapshot against an explicit
 // launch command. Only a local workspace can answer it: a remote pane writes
 // its provider store inside its own sandbox, the daemon's account registry is

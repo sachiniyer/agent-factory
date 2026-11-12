@@ -220,4 +220,11 @@ func TestAgentServerCaptureSaysWhyItCouldNotAttribute(t *testing.T) {
 			strings.Contains(out, "restoring this session starts a fresh conversation")
 	}, 3*time.Second, 20*time.Millisecond, "the agent-server must log why it recorded nothing")
 	require.False(t, inst.AgentConversation().HasID())
+	// #7131 R2: the host refuses set-conversation for a row that runs off this
+	// host, and the in-sandbox agent-server serves no such route, so the warning
+	// must not name that repair — nor promise a retry its one-shot capture
+	// never makes.
+	out := warnings.String()
+	require.NotContains(t, out, "set-conversation", "the sandbox warning names a repair that would be refused")
+	require.NotContains(t, out, "Until it can", "the one-shot capture never tries again")
 }

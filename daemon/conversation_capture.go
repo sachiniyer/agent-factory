@@ -155,8 +155,9 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 		m.disarmConversationCapture(inst, token)
 	}()
 	var lastErr string
+	retake := false
 	for {
-		if err := m.captureAgentConversation(repoID, key, inst, snap, token, timeout); err != nil && err.Error() != lastErr {
+		if err := m.captureAgentConversationAttempt(repoID, key, inst, &snap, token, timeout, retake); err != nil && err.Error() != lastErr {
 			lastErr = err.Error()
 			m.warn().Printf("conversation capture for %q keeps failing: %v", inst.Title, err)
 		}
@@ -174,17 +175,7 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 		}
 		m.beginConversationCapture(inst)
 		held = true
-		// A failed before-image never answers the diff, and keeping it for
-		// the runtime's life turned a transient store failure — EMFILE, EIO —
-		// into the permanent loss of the one channel that can answer while the
-		// runtime holds two top-level threads (#7124 review F3). Take it again:
-		// one walk per rearm, never per poll. A late baseline only hides a
-		// rollout minted before it, which the held query still finds.
-		if snap.CodexBaselineErr() != nil && !inst.AgentConversation().HasID() {
-			if retaken := inst.SessionCodexCaptureBaseline(); retaken.CapturesCodex() {
-				snap = retaken
-			}
-		}
+		retake = true
 	}
 }
 
@@ -357,6 +348,17 @@ func unrecordedCaptureError(title string, err error) error {
 	}
 	return fmt.Errorf("%w. Until it can, restoring this session starts a fresh conversation; if you know which one it is in, record it with `%s <id>`",
 		err, shellsuggest.PositionalCommand("af", []string{"sessions", "set-conversation"}, title))
+}
+
+// captureAgentConversationAttempt: compile-only stub for the failing-first
+// commit — master's loop retake, moved here unchanged.
+func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *session.Instance, snap *session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration, retake bool) error {
+	if retake && snap.CodexBaselineErr() != nil && !inst.AgentConversation().HasID() {
+		if retaken := inst.SessionCodexCaptureBaseline(); retaken.CapturesCodex() {
+			*snap = retaken
+		}
+	}
+	return m.captureAgentConversation(repoID, key, inst, *snap, token, timeout)
 }
 
 // captureAgentConversation runs one capture attempt and commits any id it
