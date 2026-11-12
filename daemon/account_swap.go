@@ -634,10 +634,27 @@ func accountSwapPrompt(swap *autoAccountSwap, prompt string, conversation sessio
 
 // accountSwapTrustDismissInterval paces the guarded trust-dialog dismissal a
 // replacement Codex's conversation capture runs while it waits. The interval
-// must stay a fraction of conversationCaptureTimeout: the dialog has to be
-// answered early enough that Codex can still finish its session file inside
-// the capture window.
+// must stay a fraction of conversationCaptureTimeout and accountSwapTrustWindow:
+// the dialog has to be answered early enough that Codex can still finish its
+// session file inside the capture window.
 var accountSwapTrustDismissInterval = 200 * time.Millisecond
+
+// accountSwapTrustWindow is how long after readiness a launched Codex
+// replacement's pane is pumped for a late-painting trust dialog before the swap
+// goes on to its notice (#4393, #7140). It is the pump's own bounded
+// obligation, separate from the capture's work: a capture that cannot answer
+// still returns at once and does no store walk or attribution wait for it.
+// Zero means conversationCaptureTimeout — the window the ordinary fresh swap's
+// capture always spent pumping, since no rollout exists before its first
+// prompt.
+var accountSwapTrustWindow time.Duration
+
+func swapTrustWindow() time.Duration {
+	if accountSwapTrustWindow > 0 {
+		return accountSwapTrustWindow
+	}
+	return conversationCaptureTimeout
+}
 
 // beginLiveAccountSwapConversationCapture establishes the missing before-image
 // when recovery inherited an already-running replacement pane. Its original

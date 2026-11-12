@@ -44,17 +44,32 @@ func (b *latePaintTrustBackend) wasAnswered() bool {
 	return b.answered
 }
 
-// latePaintWindow sets the capture window, paces the pump inside it, and
-// installs a dialog that paints a quarter of the way in.
+// latePaintWindow sets the capture and trust windows, paces the pump inside
+// them, and installs a dialog that paints a quarter of the way in.
 func latePaintWindow(t *testing.T, inst *session.Instance) (*latePaintTrustBackend, time.Duration) {
 	t.Helper()
 	const window = 800 * time.Millisecond
-	oldTimeout, oldInterval := conversationCaptureTimeout, accountSwapTrustDismissInterval
-	conversationCaptureTimeout, accountSwapTrustDismissInterval = window, window/16
-	t.Cleanup(func() { conversationCaptureTimeout, accountSwapTrustDismissInterval = oldTimeout, oldInterval })
+	oldTimeout, oldTrust, oldInterval := conversationCaptureTimeout, accountSwapTrustWindow, accountSwapTrustDismissInterval
+	conversationCaptureTimeout, accountSwapTrustWindow, accountSwapTrustDismissInterval = window, window, window/16
+	t.Cleanup(func() {
+		conversationCaptureTimeout, accountSwapTrustWindow, accountSwapTrustDismissInterval = oldTimeout, oldTrust, oldInterval
+	})
 	backend := &latePaintTrustBackend{FakeBackend: session.NewFakeBackend(), paintAt: time.Now().Add(window / 4)}
 	inst.SetBackend(backend)
 	return backend, window
+}
+
+// shortSwapTrustWindow gives the trust pump a window well inside a test's
+// capture window, so the two obligations can be told apart: a swap that
+// returns before a third of the capture window did no capture work for it,
+// and one that returns no sooner than the trust window still pumped (#7140).
+func shortSwapTrustWindow(t *testing.T) time.Duration {
+	t.Helper()
+	const trust = 300 * time.Millisecond
+	oldTrust, oldInterval := accountSwapTrustWindow, accountSwapTrustDismissInterval
+	accountSwapTrustWindow, accountSwapTrustDismissInterval = trust, trust/6
+	t.Cleanup(func() { accountSwapTrustWindow, accountSwapTrustDismissInterval = oldTrust, oldInterval })
+	return trust
 }
 
 func TestAccountSwapCaptureAnswersALatePaintedTrustDialogBeforeTheNotice(t *testing.T) {

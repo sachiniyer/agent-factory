@@ -22,10 +22,11 @@ import (
 // status poll skips a pending-swap row, and an automatic swap's notice is sent
 // by a path that dismisses nothing (deliverAutomaticAccountNotice). Pump the
 // existing guarded recognizer so the replacement can reach its composer. The
-// window belongs to the pump, not to the capture: a capture that answers at
-// once — a carried confirmation, a failed baseline, no evidence to judge from
-// — still pumps until the window ends before the swap moves on to its notice
-// (#7140). Reaching the composer does not itself mint a rollout; the
+// pump is an obligation of its own, bounded by accountSwapTrustWindow and
+// separate from the capture's work: a capture that answers at once — a carried
+// confirmation, a failed baseline, no evidence to judge from — does no store
+// walk or attribution wait, yet the pump still runs to the end of its window
+// before the swap moves on to its notice (#7140). Reaching the composer does not itself mint a rollout; the
 // no-rollout branch below handles that separate #4712 ordering constraint. The
 // boolean result asks the caller to capture again after delivery creates the
 // rollout and retires the pending recovery marker.
@@ -44,7 +45,7 @@ func captureAccountSwapConversation(instance *session.Instance, snap session.Con
 	if instance.AgentRuntimeToken().Agent() != tmux.ProgramCodex {
 		return false, nil
 	}
-	pump := startReplacementTrustPump(instance, conversationCaptureTimeout)
+	pump := startReplacementTrustPump(instance, swapTrustWindow())
 	defer pump.stop()
 	captureAfterDelivery, err := captureReplacementCodexConversation(instance, snap, pump)
 	if err == nil {
@@ -69,7 +70,7 @@ func captureReplacementCodexConversation(instance *session.Instance, snap sessio
 	_ = instance.CheckConversationCaptureEvidence()
 	snap = instance.BindConversationCaptureRuntime(snap)
 	resultCh := make(chan swapCaptureResult, 1)
-	captureTimeout := pump.window // read at spawn: the pump below may abandon the worker
+	captureTimeout := conversationCaptureTimeout // read at spawn: the pump below may abandon the worker
 	go func() {
 		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, captureTimeout)
 		resultCh <- swapCaptureResult{conversation, err}
@@ -107,7 +108,6 @@ type swapCaptureResult struct {
 // until at least window has passed.
 type replacementTrustPump struct {
 	instance  *session.Instance
-	window    time.Duration
 	windowEnd time.Time
 	ticker    *time.Ticker
 }
@@ -115,7 +115,6 @@ type replacementTrustPump struct {
 func startReplacementTrustPump(instance *session.Instance, window time.Duration) *replacementTrustPump {
 	return &replacementTrustPump{
 		instance:  instance,
-		window:    window,
 		windowEnd: time.Now().Add(window),
 		ticker:    time.NewTicker(accountSwapTrustDismissInterval),
 	}

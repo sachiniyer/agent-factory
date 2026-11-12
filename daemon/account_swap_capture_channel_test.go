@@ -45,26 +45,26 @@ func blockSwapStoreDay(t *testing.T, codexHome string) {
 // TestFreshAccountSwapDefersWhenItsBaselineFailed is #7126's sequence: the
 // pre-launch snapshot of the incoming store failed its baseline, the
 // replacement launched, and the synchronous capture must neither fail the
-// handoff nor re-read the same failure. The window itself is the trust pump's
-// (#7140 F2), so the swap returns when it ends — not after a capture's
-// timeout plus settle.
+// handoff nor spend its window under the op-lock re-reading the same failure.
+// The trust pump's own bounded window still runs (#7140).
 func TestFreshAccountSwapDefersWhenItsBaselineFailed(t *testing.T) {
 	inst, codexHome := swapCaptureChannelRow(t)
 	blockSwapStoreDay(t, codexHome)
 	snap := session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, inst.GetWorktreePath())
 	require.Error(t, snap.CodexBaselineErr(), "fixture: the pre-launch baseline must fail")
 
-	const window = time.Second
+	const window = 3 * time.Second
 	old := conversationCaptureTimeout
 	conversationCaptureTimeout = window
 	t.Cleanup(func() { conversationCaptureTimeout = old })
+	trust := shortSwapTrustWindow(t)
 	start := time.Now()
 	captureAfterDelivery, err := captureAccountSwapConversation(inst, snap)
+	elapsed := time.Since(start)
 	require.NoError(t, err, "an unavailable capture channel must not fail a committed handoff")
 	require.True(t, captureAfterDelivery, "the swap defers to its post-delivery capture")
-	elapsed := time.Since(start)
-	require.GreaterOrEqual(t, elapsed, window, "the trust pump owns the whole window")
-	require.Less(t, elapsed, window+window/2, "a failed baseline is known before the capture starts, so nothing runs past the window")
+	require.Less(t, elapsed, window/3, "a failed baseline is known before the capture starts")
+	require.GreaterOrEqual(t, elapsed, trust, "the trust pump still runs its own window")
 	require.False(t, inst.AgentConversation().HasID())
 }
 
