@@ -187,6 +187,7 @@ func TestOperatorRepairStampIsPersistedWithTheRecord(t *testing.T) {
 	require.Equal(t, session.ConversationCaptureOperator, stored.CaptureKind)
 	require.True(t, stored.RepairStamped, "the observation must reach disk with the repair")
 	require.Equal(t, heldFreshThreadID, stored.RepairHeldID)
+	require.True(t, stored.RepairHeldObserved, "the request's own look is an observation (#7129)")
 
 	next := writeHeldTestRollout(t, codexHome, heldNextThreadID, dir)
 	held.set(next)
@@ -221,6 +222,7 @@ func TestUnstampedOperatorRepairBaselineIsPersisted(t *testing.T) {
 	require.Equal(t, heldUserThreadID, stored.ID, "the baseline moves nothing")
 	require.True(t, stored.RepairStamped)
 	require.Equal(t, heldFreshThreadID, stored.RepairHeldID)
+	require.False(t, stored.RepairHeldObserved, "a baseline is taken after the repair, not by it (#7129)")
 }
 
 // TestOperatorRepairIsDatedNoLaterThanItsObservation is the #7125 review's

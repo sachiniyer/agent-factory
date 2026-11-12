@@ -251,6 +251,11 @@ var unplantableInstanceFields = map[string]string{
 	"PendingTabs[].Conversation.RepairStamped":    "same repair-stamp bool under the staging roster",
 	"Tabs[].Handoffs[].From.RepairStamped":        "same repair-stamp bool on the outgoing record a handoff ledger keeps",
 	"PendingTabs[].Handoffs[].From.RepairStamped": "same repair-stamp bool under the staging roster",
+	// RepairHeldObserved says only how that stamp was taken (#7129).
+	"Tabs[].Conversation.RepairHeldObserved":           "bool — whether the repair's stamp was observed by the request or taken later (#7129)",
+	"PendingTabs[].Conversation.RepairHeldObserved":    "same stamp-kind bool under the staging roster",
+	"Tabs[].Handoffs[].From.RepairHeldObserved":        "same stamp-kind bool on the outgoing record a handoff ledger keeps",
+	"PendingTabs[].Handoffs[].From.RepairHeldObserved": "same stamp-kind bool under the staging roster",
 }
 
 // ---------------------------------------------------------------------------

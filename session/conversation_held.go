@@ -211,7 +211,8 @@ const (
 	ConversationFollowMoved
 	// ConversationFollowBaselined: an operator repair that carried no
 	// observation of the runtime now records this one as what the runtime
-	// held at the repair. The repair itself stands.
+	// held at the repair — a baseline, not an observation (#7129). The
+	// repair itself stands.
 	ConversationFollowBaselined
 )
 
@@ -239,9 +240,11 @@ func (i *Instance) ConversationFollowPermitted(token AgentRuntimeToken, prev, he
 // only the thread it then holds may replace it (#7120 review): the repair's
 // whole point is that the pane may be on a thread the operator did not want
 // the next resume to use. What it held is part of the record
-// (RepairStamped/RepairHeldID), so it survives a daemon restart (#7122); a
-// repair that carries none takes this observation as that baseline, and the
-// caller persists it like any other write.
+// (RepairStamped/RepairHeldID), so it survives a daemon restart (#7122), and
+// it describes the runtime live when the repair was requested: one launched
+// since held nothing then (#7129). A repair that carries none takes this
+// observation as that baseline, and the caller persists it like any other
+// write.
 func (i *Instance) FollowAgentConversationForRuntime(token AgentRuntimeToken, prev, held AgentConversationData) ConversationFollowOutcome {
 	i.mu.Lock()
 	defer i.mu.Unlock()
@@ -267,10 +270,13 @@ func (i *Instance) followDecisionLocked(token AgentRuntimeToken, prev, held Agen
 	if prev.CaptureKind == ConversationCaptureOperator {
 		if !prev.RepairStamped {
 			// Never observed: the held query could not answer when the
-			// repair was made, the runtime changed under it, or the record
-			// predates the stamp's persistence. This observation is its
-			// baseline, and it moves nothing.
-			return ConversationFollowBaselined, prev.WithRepairStamp(held.ID)
+			// repair was made, or the record predates the stamp's
+			// persistence. The runtime is still the one the repair was made
+			// against — a launch since would have stamped it "" (#7129) — so
+			// this observation is its baseline, and it moves nothing. It
+			// stands in for the repair's own observation without being one
+			// (withRepairBaseline).
+			return ConversationFollowBaselined, prev.withRepairBaseline(held.ID)
 		}
 		// Any thread other than the one held at the repair is a move the
 		// follow takes — including the repaired thread itself: once the pane

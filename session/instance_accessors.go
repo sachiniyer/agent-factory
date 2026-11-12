@@ -611,8 +611,10 @@ func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uin
 	// Every caller is a launch boundary: whatever it records — even nothing
 	// beyond the command, when its pane query failed — describes the new
 	// runtime, so an identity kept from the old one's unanswerable reattach
-	// probe can never stand in for it (#7123).
+	// probe can never stand in for it (#7123). An operator repair's stamp of
+	// what the old one held is retired the same way (#7129).
 	i.captureEvidence = keptCaptureEvidence{}
+	i.restampRepairAtLaunchLocked()
 	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}

@@ -366,8 +366,35 @@ func TestWithRepairStamp(t *testing.T) {
 	stamped := operatorRecord(heldTestOwnID).WithRepairStamp(" 01A1CCD0-1111-7222-8333-444455556666 ")
 	require.True(t, stamped.RepairStamped)
 	require.Equal(t, repairHeldID, stamped.RepairHeldID)
+	require.True(t, stamped.RepairHeldObserved, "the request's own look is an observation")
 	nothing := operatorRecord(heldTestOwnID).WithRepairStamp("")
 	require.True(t, nothing.RepairStamped, "holding nothing is an observation too")
 	require.Empty(t, nothing.RepairHeldID)
 	require.False(t, AgentConversationData{RepairStamped: true}.Empty())
+	require.False(t, AgentConversationData{RepairHeldObserved: true}.Empty())
+
+	// #7129: the follow's baseline and a launch boundary's "" are stamps,
+	// never observations of the repair.
+	baseline := operatorRecord(heldTestOwnID).withRepairBaseline(" 01A1CCD0-1111-7222-8333-444455556666 ")
+	require.True(t, baseline.RepairStamped)
+	require.Equal(t, repairHeldID, baseline.RepairHeldID)
+	require.False(t, baseline.RepairHeldObserved)
+	replaced := stamped.WithRepairRuntimeReplaced()
+	require.True(t, replaced.RepairStamped)
+	require.Empty(t, replaced.RepairHeldID)
+	require.False(t, replaced.RepairHeldObserved)
+	require.Equal(t, AgentConversationData{}, AgentConversationData{}.withoutRepairStamp())
+	require.Equal(t, AgentConversationData{Agent: stamped.Agent, ID: stamped.ID, CapturedAt: stamped.CapturedAt, CaptureKind: stamped.CaptureKind},
+		stamped.withoutRepairStamp())
+}
+
+// N-4: a repair is dated no later than the request, and never later than it
+// was: the date only ever moves earlier.
+func TestWithRepairRequestedAt(t *testing.T) {
+	validated := time.Now()
+	requested := validated.Add(-3 * time.Second)
+	repair := operatorRecordAt(heldTestOwnID, validated)
+	require.Equal(t, requested, repair.WithRepairRequestedAt(requested).CapturedAt)
+	require.Equal(t, validated, repair.WithRepairRequestedAt(validated.Add(time.Second)).CapturedAt)
+	require.Equal(t, validated, repair.WithRepairRequestedAt(time.Time{}).CapturedAt)
 }

@@ -68,6 +68,7 @@ func TestRemoteLaunchLeavesTheRepairStampBehind(t *testing.T) {
 	assert.Equal(t, ConversationCaptureOperator, conv["capture_kind"])
 	assert.NotContains(t, conv, "repair_stamped")
 	assert.NotContains(t, conv, "repair_held_id")
+	assert.NotContains(t, conv, "repair_held_observed")
 	assert.Equal(t, repair, inst.AgentConversation(), "the daemon's own record keeps its stamp")
 }
 

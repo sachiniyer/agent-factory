@@ -65,4 +65,5 @@ func TestOperatorRepairAcrossARuntimeReplacementRecordsThatNothingWasHeld(t *tes
 	require.Equal(t, heldUserThreadID, stored.ID)
 	require.True(t, stored.RepairStamped, "the replacement's first answer must not become the repair's baseline")
 	require.Empty(t, stored.RepairHeldID, "a runtime launched after the request began held nothing when it began")
+	require.False(t, stored.RepairHeldObserved)
 }

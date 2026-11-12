@@ -141,3 +141,115 @@ func TestOperatorRepairExemptsTheObservedHeldThreadHoweverLateItWasStored(t *tes
 		require.False(t, ok, "F entered the store after the repair, and the baseline that names it was taken after it too")
 	})
 }
+
+// N-1 across a restart: the launch boundary's "" is part of the persisted
+// record, so a daemon that restarts after af launched the new pane still
+// reads its threads as moves rather than baselining one of them.
+func TestOperatorRepairRestampedAtALaunchSurvivesADaemonRestart(t *testing.T) {
+	inst := retireTestInstance(t)
+	require.True(t, inst.SetAgentConversation(operatorRecord(heldTestOwnID)))
+	inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+	require.True(t, inst.AgentConversation().RepairStamped, "the launch must stamp the standing repair")
+
+	restarted := reloadedAgentConversation(t, inst)
+	conv := restarted.AgentConversation()
+	require.Equal(t, ConversationCaptureOperator, conv.CaptureKind, "the repair itself still stands")
+	require.True(t, conv.RepairStamped)
+	require.Empty(t, conv.RepairHeldID)
+	require.Equal(t, ConversationFollowMoved,
+		restarted.FollowAgentConversationForRuntime(restarted.AgentRuntimeToken(), conv, heldAnswer(repairOlderID)))
+}
+
+// N-3: what a baseline means. When the request could not see the pane, the
+// follow's first look stands in for it, and from then on every other thread
+// written to since the repair counts as a move, as it does for an observed
+// repair. Before that look, a pre-repair thread the pane is writing to is
+// still disregarded (an unobserved repair cannot tell the pane's thread from
+// the others). The set-conversation help text says the same.
+func TestOperatorRepairBaselineCountsThreadsWrittenSinceTheRepairAsMoves(t *testing.T) {
+	now := time.Now()
+	repairedAt := now.Add(-10 * time.Minute)
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := t.TempDir()
+	writeStoredCodexRollout(t, codexHome, heldTestOwnID, workDir, now.Add(-3*time.Hour), now.Add(-3*time.Hour), now.Add(-2*time.Hour))
+	// H: stored before the repair, written to since.
+	writeStoredCodexRollout(t, codexHome, repairHeldID, workDir, repairedAt.Add(-time.Hour), repairedAt.Add(-time.Hour), now.Add(-time.Minute))
+	unobserved := operatorRecordAt(heldTestOwnID, repairedAt)
+
+	before := staleResumeInstance(t, workDir, unobserved)
+	_, ok, decline := prepareExactResumeConversation(before, before.Program)
+	require.True(t, ok, "before af has read the pane: refused %v", decline)
+
+	inst := staleResumeInstance(t, workDir, unobserved)
+	require.Equal(t, ConversationFollowBaselined,
+		inst.FollowAgentConversationForRuntime(inst.AgentRuntimeToken(), unobserved, heldAnswer("")))
+	baselined := inst.AgentConversation()
+	require.True(t, baselined.RepairStamped)
+	require.False(t, baselined.RepairHeldObserved, "a baseline is not the request's observation")
+	require.Equal(t, repairedAt, baselined.CapturedAt, "the repair keeps its own date")
+
+	after := staleResumeInstance(t, workDir, baselined)
+	_, ok, _ = prepareExactResumeConversation(after, after.Program)
+	require.False(t, ok, "once read, a thread written to since the repair that the pane is not on is a move")
+}
+
+// N-5: disregards now settles a stamped window's written-since test, which
+// needs only the name and mtime, before reading the rollout's header. That
+// order cannot be seen in its answer, so this pins the answer for every
+// window kind and branch, which the reordering must keep.
+func TestOperatorRepairWindowVerdicts(t *testing.T) {
+	now := time.Now()
+	at := now.Add(-10 * time.Minute)
+	pre, post := at.Add(-time.Hour), at.Add(time.Minute)
+	codexHome := t.TempDir()
+	cwd := t.TempDir()
+	const otherPre, otherPost, undatable = "01a1cc00-7777-7222-8333-444455556666", "01a1cc00-8888-7222-8333-444455556666", "01a1cc00-9999-7222-8333-444455556666"
+	paths := map[string]string{
+		"H stored before":      writeStoredCodexRollout(t, codexHome, repairHeldID, cwd, pre, pre, pre),
+		"X stored before":      writeStoredCodexRollout(t, codexHome, otherPre, cwd, pre, pre, pre),
+		"X stored after":       writeStoredCodexRollout(t, codexHome, otherPost, cwd, pre, post, post),
+		"X with no line stamp": writeStoredCodexRollout(t, codexHome, undatable, cwd, pre, pre, pre),
+	}
+	// The undatable rollout: rewrite its first line without the line stamp.
+	require.NoError(t, os.WriteFile(paths["X with no line stamp"],
+		[]byte(`{"type":"session_meta","payload":{"id":"`+undatable+`","cwd":"`+cwd+`","source":"cli"}}`+"\n"), 0o644))
+	hStoredAfter := t.TempDir()
+	paths["H stored after"] = writeStoredCodexRollout(t, hStoredAfter, repairHeldID, cwd, pre, post, post)
+
+	record := operatorRecordAt(heldTestOwnID, at)
+	windows := map[string]operatorRepairWindow{
+		"capture":    operatorRepairWindowOf(AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestOwnID, CapturedAt: at, CaptureKind: ConversationCaptureCodexRollout}, now),
+		"unstamped":  operatorRepairWindowOf(record, now),
+		"observed H": operatorRepairWindowOf(record.WithRepairStamp(repairHeldID), now),
+		"baseline H": operatorRepairWindowOf(record.withRepairBaseline(repairHeldID), now),
+		"replaced":   operatorRepairWindowOf(record.WithRepairStamp(repairHeldID).WithRepairRuntimeReplaced(), now),
+	}
+	cases := []struct {
+		window, path string
+		modified     time.Time
+		want         bool
+	}{
+		{"capture", "X stored before", pre, false},
+		{"unstamped", "X stored before", post, true},
+		{"unstamped", "X stored after", post, false},
+		{"unstamped", "X with no line stamp", pre, false},
+		{"observed H", "H stored after", post, true},
+		{"observed H", "H stored before", post, true},
+		{"observed H", "X stored before", pre, true},
+		{"observed H", "X stored before", post, false},
+		{"observed H", "X stored after", post, false},
+		{"observed H", "X with no line stamp", pre, false},
+		{"baseline H", "H stored before", post, true},
+		{"baseline H", "H stored after", post, false},
+		{"baseline H", "X stored before", pre, true},
+		{"baseline H", "X stored before", post, false},
+		{"replaced", "H stored before", post, false},
+		{"replaced", "X stored before", pre, true},
+		{"replaced", "X stored before", post, false},
+	}
+	for _, c := range cases {
+		got := windows[c.window].disregards(paths[c.path], c.modified)
+		require.Equal(t, c.want, got, "%s window, %s, modified %s after the repair", c.window, c.path, c.modified.Sub(at))
+	}
+}

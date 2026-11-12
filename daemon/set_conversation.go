@@ -3,6 +3,7 @@ package daemon
 import (
 	"fmt"
 	"strings"
+	"time"
 
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/session"
@@ -64,6 +65,9 @@ func (s *controlServer) setConversationGuarded(req SetConversationRequest, resp 
 // account swap is in flight, whose own conversation bookkeeping must settle
 // first; the refusal names the owner so the operator knows what to wait for.
 func (m *Manager) setConversation(req SetConversationRequest, guard func(*session.Instance, string) error) error {
+	// The repair is dated by when it was asked for, not by when it could be
+	// written (#7129 N-4).
+	requestedAt := time.Now()
 	if strings.TrimSpace(req.ConversationID) == "" {
 		return fmt.Errorf("a conversation id is required")
 	}
@@ -74,7 +78,7 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	if instance == nil {
 		return fmt.Errorf("session %q not found", title)
 	}
-	observed := observeRepairHeld(instance)
+	observed := observeRepairHeld(instance, requestedAt)
 	key := daemonInstanceKey(repoID, instance.Title)
 	opLock := m.opLockFor(key)
 	opLock.Lock()

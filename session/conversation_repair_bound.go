@@ -23,6 +23,10 @@ import (
 // rollouts were already in the store when the repair was made, and of those —
 // when the repair knows which thread the pane held — only that one and the
 // ones nobody has written since.
+//
+// "The repair" is the request (#7129): it is dated no later than the moment
+// the request began, and its stamp describes the runtime live then. A runtime
+// launched afterwards held nothing at the repair.
 
 // resumeDecline is why prepareExactResumeConversation did not resume the
 // recorded conversation; reason is "" when there is nothing to say. unverified
@@ -56,11 +60,27 @@ func (d resumeDecline) retiresRecord(conv AgentConversationData) bool {
 // milliseconds.
 const codexRolloutStampPrecision = time.Millisecond
 
-// WithRepairStamp returns the operator record c stamped with what the runtime
-// held open when the repair was made: heldID, or "" when it held no thread.
+// WithRepairStamp returns the operator record c stamped with what the request
+// saw the runtime hold open as it began: heldID, or "" when it held no thread.
+// The stamp is an observation, so that thread is the repair's own however
+// late its rollout entered the store (#7129 N-2).
 func (c AgentConversationData) WithRepairStamp(heldID string) AgentConversationData {
 	c.RepairStamped = true
 	c.RepairHeldID = strings.ToLower(strings.TrimSpace(heldID))
+	c.RepairHeldObserved = true
+	return c
+}
+
+// WithRepairRequestedAt dates the repair no later than requestedAt, the
+// moment the request began (#7129 N-4). "The repair" is the request: a thread
+// the pane started while the request waited for the op-lock or walked the
+// store is one the operator never saw, so it must not count as one the repair
+// overrode — stamped or not. It only ever moves the date earlier, which only
+// ever disregards less.
+func (c AgentConversationData) WithRepairRequestedAt(requestedAt time.Time) AgentConversationData {
+	if !requestedAt.IsZero() && requestedAt.Before(c.CapturedAt) {
+		c.CapturedAt = requestedAt
+	}
 	return c
 }
 
@@ -71,10 +91,30 @@ func (c AgentConversationData) WithRepairStamp(heldID string) AgentConversationD
 // so the bound must not count it as one the operator overrode merely because
 // it entered the store before the repair was validated and written.
 func (c AgentConversationData) WithRepairObservation(heldID string, observedAt time.Time) AgentConversationData {
-	c = c.WithRepairStamp(heldID)
-	if !observedAt.IsZero() && observedAt.Before(c.CapturedAt) {
-		c.CapturedAt = observedAt
-	}
+	return c.WithRepairStamp(heldID).WithRepairRequestedAt(observedAt)
+}
+
+// WithRepairRuntimeReplaced is the stamp of a repair that has outlived the
+// runtime it was made against (#7129 N-1): a runtime launched after the
+// request began did not exist when it began, so it held nothing then, and
+// whatever it holds is a move — for the follow, and for a restore the follow
+// never saw. The repair itself still stands until then.
+func (c AgentConversationData) WithRepairRuntimeReplaced() AgentConversationData {
+	c.RepairStamped = true
+	c.RepairHeldID = ""
+	c.RepairHeldObserved = false
+	return c
+}
+
+// withRepairBaseline is the stamp the follow gives a repair the request could
+// not observe: what the runtime holds at the follow's first look, standing in
+// for what it held at the repair. It is no observation of the repair — the
+// pane may have moved in between — so it earns no exemption beyond the
+// window's own date (#7129 N-2, N-3).
+func (c AgentConversationData) withRepairBaseline(heldID string) AgentConversationData {
+	c.RepairStamped = true
+	c.RepairHeldID = strings.ToLower(strings.TrimSpace(heldID))
+	c.RepairHeldObserved = false
 	return c
 }
 
@@ -83,15 +123,33 @@ func (c AgentConversationData) WithRepairObservation(heldID string, observedAt t
 func (c AgentConversationData) withoutRepairStamp() AgentConversationData {
 	c.RepairStamped = false
 	c.RepairHeldID = ""
+	c.RepairHeldObserved = false
 	return c
+}
+
+// restampRepairAtLaunchLocked is the launch boundary's half of N-1: the
+// runtime being recorded was launched after any repair the row carries, so a
+// standing repair's stamp no longer describes the live runtime. It is
+// re-stamped "" rather than left to name the old runtime's thread (which the
+// follow and the bound would both exempt in the new pane) or left unstamped
+// (which the follow would baseline from the new pane). The surrounding launch
+// owns UpdatedAt and the checkpoint that persists it. Callers hold i.mu.
+func (i *Instance) restampRepairAtLaunchLocked() {
+	if len(i.Tabs) == 0 {
+		return
+	}
+	if conv := i.Tabs[0].Conversation; conv.CaptureKind == ConversationCaptureOperator {
+		i.Tabs[0].Conversation = conv.WithRepairRuntimeReplaced()
+	}
 }
 
 // operatorRepairWindow is what an operator repair overrode. Its zero value
 // overrides nothing: the record is judged like any capture.
 type operatorRepairWindow struct {
-	at      time.Time
-	stamped bool
-	heldID  string
+	at       time.Time
+	stamped  bool
+	heldID   string
+	observed bool
 }
 
 // operatorRepairWindowOf reads the window from the record alone. It is the
@@ -103,34 +161,48 @@ func operatorRepairWindowOf(conv AgentConversationData, now time.Time) operatorR
 	if conv.CaptureKind != ConversationCaptureOperator || conv.CapturedAt.IsZero() || conv.CapturedAt.After(now) {
 		return operatorRepairWindow{}
 	}
-	return operatorRepairWindow{at: conv.CapturedAt, stamped: conv.RepairStamped, heldID: strings.ToLower(conv.RepairHeldID)}
+	return operatorRepairWindow{
+		at:       conv.CapturedAt,
+		stamped:  conv.RepairStamped,
+		heldID:   strings.ToLower(conv.RepairHeldID),
+		observed: conv.RepairStamped && conv.RepairHeldObserved,
+	}
 }
 
 // disregards reports whether a rollout newer than the repaired one (path,
 // last written at modified) is a thread the operator chose over, so it does
-// not make the repair stale. It must have been in the store when the repair
-// was made (codexRolloutStoredAt) — a thread whose rollout appeared later,
-// even one Codex constructed earlier, is one the user moved to afterwards
-// (#7125 review R-1). And when the repair knows which thread the pane held,
-// it must be that thread or one nobody has written to since the repair: an
-// older thread the pane resumed after the repair is a move too (R-3). A
-// repair with no observation cannot tell the pane's own thread from the
-// others, so every thread already in the store counts as overridden.
+// not make the repair stale.
+//
+//   - The thread the request saw the runtime hold is the repair's own, however
+//     late its rollout entered the store: a fresh pane's first prompt can
+//     stamp its first line while the request's walk runs (#7129 N-2). A
+//     baseline's thread is not — the follow took it after the repair.
+//   - Otherwise its rollout must have been in the store when the repair was
+//     made (codexRolloutStoredAt) — a thread whose rollout appeared later,
+//     even one Codex constructed earlier, is one the user moved to afterwards
+//     (#7125 review R-1).
+//   - And when the repair carries a stamp, a thread other than the stamped one
+//     must not have been written since the repair: an older thread the pane
+//     resumed after the repair is a move too (R-3). A repair with no stamp
+//     cannot tell the pane's own thread from the others, so every thread
+//     already in the store counts as overridden.
+//
+// The written-since test needs only the name and the mtime the caller already
+// has, so it runs before the header read it makes unnecessary (#7129 N-5): in
+// a shared home every other worktree's active thread fails it.
 func (w operatorRepairWindow) disregards(path string, modified time.Time) bool {
 	if w.at.IsZero() {
 		return false
 	}
-	stored, ok := codexRolloutStoredAt(path)
-	if !ok || stored.Add(codexRolloutStampPrecision).After(w.at) {
+	held := w.heldID != "" && codexConversationIDFromPath(path) == w.heldID
+	switch {
+	case held && w.observed:
+		return true
+	case w.stamped && !held && modified.After(w.at):
 		return false
 	}
-	if !w.stamped {
-		return true
-	}
-	if w.heldID != "" && codexConversationIDFromPath(path) == w.heldID {
-		return true
-	}
-	return !modified.After(w.at)
+	stored, ok := codexRolloutStoredAt(path)
+	return ok && !stored.Add(codexRolloutStampPrecision).After(w.at)
 }
 
 // operatorRepairProvenance re-checks, when a repair is about to be resumed or

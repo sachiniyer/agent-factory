@@ -104,52 +104,60 @@ func heldThreadForLog(held session.AgentConversationData) string {
 	return "no conversation yet"
 }
 
-// repairHeldObservation is which thread the runtime held open when an
-// operator's set-conversation repair was requested, for the stamp the repair
-// record carries (#7120 review): the follow check leaves the repair standing
-// until the runtime holds something else.
+// repairHeldObservation is what an operator's set-conversation request saw
+// of the runtime as it began, for the stamp the repair record carries (#7120
+// review): the follow check leaves the repair standing until the runtime
+// holds something else.
 type repairHeldObservation struct {
-	token  session.AgentRuntimeToken
+	// token is the runtime live when the request began; the stamp describes
+	// it and no other (#7129).
+	token session.AgentRuntimeToken
+	// heldID is what it held open, when ok says the held query answered.
 	heldID string
-	// at is taken before the walk starts, so a thread the pane moves to while
-	// the walk runs is after it.
+	ok     bool
+	// at is when the request began — before the walk and the op-lock — and
+	// dates the repair whether or not anything was observed (#7129 N-4).
 	at time.Time
-	ok bool
 }
 
 // observeRepairHeld takes that answer BEFORE the repair's op-lock (#7122,
 // #7120 review F-H): it walks the process table, which on darwin can block
 // on a member that is mid-exec, and a slow walk must never hold the lock a
 // kill or archive waits on. A query that cannot answer leaves the repair
-// unstamped; the first follow observation then becomes its baseline, which
-// can only keep the repair longer.
-func observeRepairHeld(inst *session.Instance) repairHeldObservation {
+// unstamped; the follow's first look at the same runtime then becomes its
+// baseline.
+func observeRepairHeld(inst *session.Instance, requestedAt time.Time) repairHeldObservation {
+	o := repairHeldObservation{token: inst.AgentRuntimeToken(), at: requestedAt}
 	scope := inst.SessionCodexCaptureScope()
-	if !scope.CapturesCodex() {
-		return repairHeldObservation{}
+	if !scope.CapturesCodex() || o.token.Agent() != tmux.ProgramCodex {
+		return o
 	}
-	token := inst.AgentRuntimeToken()
-	if token.Agent() != tmux.ProgramCodex {
-		return repairHeldObservation{}
-	}
-	at := time.Now()
-	held, err := session.HeldAgentConversation(token.Agent(), inst.BindConversationCaptureRuntime(scope))
+	held, err := session.HeldAgentConversation(o.token.Agent(), inst.BindConversationCaptureRuntime(scope))
 	if err != nil {
-		return repairHeldObservation{}
+		return o
 	}
-	return repairHeldObservation{token: token, heldID: held.ID, at: at, ok: true}
+	o.heldID, o.ok = held.ID, true
+	return o
 }
 
 // stamp folds the observation into the repair it was taken for, under the
-// op-lock — only while the runtime it observed is still the live one, so a
-// respawn or swap that landed in between leaves the repair unstamped rather
-// than stamped with another runtime's thread. A stamped repair is dated no
-// later than the observation (#7125 review R-2): the staleness bound then
-// treats a thread the pane moved to after the look, while the op-lock wait
-// and the store walk ran, as the move the follow sees it as.
+// op-lock. Every repair is dated no later than the request (#7129 N-4; #7125
+// review R-2): the staleness bound then treats a thread the pane moved to
+// while the op-lock wait and the store walk ran as the move the follow sees
+// it as. The stamp names what the runtime held only while that runtime is
+// still the live one. A respawn or swap that landed in between launched a
+// runtime after the request began, which held nothing then (#7129 N-1), so
+// the repair records exactly that rather than going unstamped and letting
+// the follow baseline the replacement. A token that moved without a new
+// launch (a reverted handoff) reads the same way, which can only end the
+// repair sooner.
 func (o repairHeldObservation) stamp(inst *session.Instance, conv session.AgentConversationData) session.AgentConversationData {
-	if !o.ok || inst.AgentRuntimeToken() != o.token {
-		return conv
+	conv = conv.WithRepairRequestedAt(o.at)
+	switch {
+	case inst.AgentRuntimeToken() != o.token:
+		return conv.WithRepairRuntimeReplaced()
+	case o.ok:
+		return conv.WithRepairStamp(o.heldID)
 	}
-	return conv.WithRepairObservation(o.heldID, o.at)
+	return conv
 }
