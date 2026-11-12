@@ -6,6 +6,7 @@ import (
 	"testing"
 
 	tea "github.com/charmbracelet/bubbletea"
+	xansi "github.com/charmbracelet/x/ansi"
 	"github.com/sachiniyer/agent-factory/config"
 )
 
@@ -498,16 +499,41 @@ func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromLastAccountRow(t *te
 		t.Fatalf("expected the last account row immediately followed by the end row: lastAcct=%d endIdx=%d", lastAcct, endIdx)
 	}
 
-	// Cursor on the last account row: the span must reach the end of all lines
-	// (the end row is last), covering the mover line and footnote so window()
-	// scrolls them into view rather than clipping them behind "↓ more".
+	// Cursor on the last account row: the span must run through the mover line
+	// and footnote so window() scrolls them into view rather than clipping them
+	// behind "↓ more" — and stop there, before the Accounts section.
 	pane.selectedIdx = lastAcct
+	assertSpanEndsWithTheEndRow(t, pane)
+}
+
+// assertSpanEndsWithTheEndRow checks that the selection span runs exactly
+// through the evidence section's end row: its last line is the footnote's last
+// line, and the Accounts section rendered after Usage (#7053) lies outside it.
+// A span that ran to the end of the list made window() reveal — and ↑/↓ scroll
+// through — the whole Accounts section while the cursor sat in Usage.
+func assertSpanEndsWithTheEndRow(t *testing.T, pane *ConfigPane) {
+	t.Helper()
 	lines, selStart, selEnd := pane.renderRowLines()
 	if selStart < 0 {
 		t.Fatal("expected a selection span")
 	}
-	if selEnd != len(lines) {
-		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
+	foot := strings.Split(strings.TrimSuffix(pane.wrapIndented(quotaAccountsFootNote, configHintStyle), "\n"), "\n")
+	footEnd := -1
+	for i := range lines {
+		if lines[i] == foot[len(foot)-1] {
+			footEnd = i + 1
+		}
+	}
+	if footEnd < 0 {
+		t.Fatal("the closing footnote did not render")
+	}
+	if selEnd != footEnd {
+		t.Fatalf("selection span must end with the trailing end row: selEnd=%d, footnote ends at %d, %d lines in all", selEnd, footEnd, len(lines))
+	}
+	for _, l := range lines[selStart:selEnd] {
+		if strings.TrimSpace(xansi.Strip(l)) == "Accounts" {
+			t.Fatalf("selection span reaches into the Accounts section:\n%s", strings.Join(lines[selStart:selEnd], "\n"))
+		}
 	}
 }
 
@@ -533,13 +559,7 @@ func TestConfigPaneQuota_TrailingAccountsEndRowReachableFromEmptyRow(t *testing.
 		t.Fatalf("expected the empty row immediately followed by the end row: emptyIdx=%d endIdx=%d", emptyIdx, endIdx)
 	}
 	pane.selectedIdx = emptyIdx
-	lines, selStart, selEnd := pane.renderRowLines()
-	if selStart < 0 {
-		t.Fatal("expected a selection span")
-	}
-	if selEnd != len(lines) {
-		t.Fatalf("selection span must extend through the trailing end row: selEnd=%d lines=%d", selEnd, len(lines))
-	}
+	assertSpanEndsWithTheEndRow(t, pane)
 }
 
 // At a narrow pane the composed account row once exceeded the pane and

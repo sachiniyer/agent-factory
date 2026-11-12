@@ -515,10 +515,14 @@ func (c *ConfigPane) HandleKeyPress(msg tea.KeyMsg) bool {
 		c.SetFocus(false)
 		return true
 	case "up", "k":
-		c.move(-1)
+		if !c.scrollSelection(-1) {
+			c.move(-1)
+		}
 		return true
 	case "down", "j":
-		c.move(1)
+		if !c.scrollSelection(1) {
+			c.move(1)
+		}
 		return true
 	case "a":
 		c.showAdvanced = !c.showAdvanced
@@ -714,7 +718,7 @@ func (c *ConfigPane) String() string {
 // whether the cues happen to show is circular — and it would make the list
 // grow and shrink by a line as the user scrolls past either end.
 func (c *ConfigPane) renderWindowed(header, footer string, lines []string, selStart, selEnd int) string {
-	budget := c.height - countLines(header) - countLines(footer) - cueRows
+	budget := c.windowBudget(header, footer)
 	visible, above, below := c.window(lines, selStart, selEnd, budget)
 
 	var b strings.Builder
@@ -848,18 +852,19 @@ func (c *ConfigPane) renderRowLines() (lines []string, selStart, selEnd int) {
 		if i == c.selectedIdx {
 			selStart, selEnd = start, len(lines)
 		}
-	}
-	// The per-account evidence section's trailing end row (the mover line and the
-	// closing footnote) is non-selectable, so the cursor cannot land on it;
-	// window() scrolls only far enough to reveal the selection, which would
-	// leave the end row hidden behind the "↓ more" cue when the cursor sits on
-	// the last selectable row above it (#6776). Extend the selection span to
-	// include the end row's lines so window() reveals them too — the reach the
-	// empty-table row's own comment already promises.
-	if selStart >= 0 && c.selectedIdx+1 < len(c.rows) {
-		sel := c.rows[c.selectedIdx]
-		if (sel.quotaAccount != nil || sel.quotaAccountsEmpty) && c.rows[c.selectedIdx+1].quotaAccountsEnd {
-			selEnd = len(lines)
+		// The per-account evidence section's trailing end row (the mover line
+		// and the closing footnote) is non-selectable, so the cursor cannot land
+		// on it; window() scrolls only far enough to reveal the selection, which
+		// would leave the end row hidden behind the "↓ more" cue when the cursor
+		// sits on the last selectable row above it (#6776). Extend that row's
+		// selection span through the end row's lines — and no further: the
+		// Accounts section renders after Usage (#7053), so the span must stop
+		// where the end row does, not at the end of the list. A span taller than
+		// the window is then read through with ↑/↓ (scrollSelection).
+		if row.quotaAccountsEnd && i == c.selectedIdx+1 && selStart >= 0 {
+			if sel := c.rows[c.selectedIdx]; sel.quotaAccount != nil || sel.quotaAccountsEmpty {
+				selEnd = len(lines)
+			}
 		}
 	}
 	return lines, selStart, selEnd
