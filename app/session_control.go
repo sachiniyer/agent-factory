@@ -29,6 +29,14 @@ import (
 // microseconds AFTER the control socket EnsureDaemon waits for. The values
 // mirror the net/rpc callDaemon admission retry (daemonReadyTimeout / a 100ms
 // cadence), preserving transport parity.
+//
+// daemonHTTPRetryWait also bounds the EnsureDaemon phase for a TUI HTTP caller
+// that has no deadline of its own, mirroring callDaemon's
+// daemonAdmissionRetryWait: a wedged control socket (accepts the dial, never
+// services the RPC) cannot park the ensure's ping on an unanswered read or hold
+// ensureDaemonMu against every later daemon operation in the process. A caller
+// that fronts its own deadline (the conflict refresh) passes it through
+// withDaemonHTTPCtx so its deadline bounds the ensure too.
 const (
 	daemonHTTPRetryWait = 5 * time.Second
 	daemonHTTPRetryPoll = 100 * time.Millisecond
@@ -99,12 +107,76 @@ func callDaemonHTTP(fn func(*apiclient.Client) error, retryable func(error) bool
 // daemonHTTPClient ensures a daemon and returns a Client targeting it. A package
 // var so a test can point the production retry policy at a socket it owns,
 // without EnsureDaemon; tests that swap it must not run in parallel.
+//
+// The ensure phase is bounded at daemonHTTPRetryWait so a wedged control socket
+// (accepts the dial, never services the RPC) cannot park the ping on an
+// unanswered read forever or hold ensureDaemonMu against every later daemon
+// operation in the process — the same bound callDaemon applies to its admission
+// phase. Callers that front a deadline of their own route through
+// withDaemonHTTPCtx so that deadline, not this default floor, bounds the ensure.
 var daemonHTTPClient = func() (*apiclient.Client, error) {
 	// A remote target's daemon runs on another machine — EnsureDaemon would spawn
 	// a superfluous LOCAL daemon we never talk to, so skip it and dial the remote
 	// directly (#1592 Phase 3 PR4). The local default is unchanged: ensure + dial.
 	if !apiclient.IsRemoteTarget() {
-		if err := daemon.EnsureDaemon(); err != nil {
+		if err := daemon.EnsureDaemonUntil(time.Now().Add(daemonHTTPRetryWait)); err != nil {
+			return nil, err
+		}
+	}
+	return apiclient.NewTargeted()
+}
+
+// withDaemonHTTPCtx is withDaemonHTTP for a caller whose context bounds the
+// WHOLE chain — the ensure phase as well as the HTTP read. The rebind conflict
+// refresh uses it: rebindConflictRefreshTimeout is the bound the doc comment
+// promises re-arms the form, and that promise must hold for the entire fetch,
+// not only the HTTP read that sits downstream of daemonHTTPClient's
+// EnsureDaemonUntil call. The deadline is forwarded to EnsureDaemonUntil, so a
+// wedged control socket cannot leave the ensure parked on the ping past the
+// caller's deadline; a ctx with no deadline falls back to daemonHTTPRetryWait
+// so this seam never hands EnsureDaemon a zero deadline (the unbounded RPC-read
+// hazard the runtime-files probe floors its deadline for the same reason). A
+// package var, like withDaemonHTTP, so a test can stand in a fetcher without a
+// real daemon; tests that swap it must not run in parallel.
+var withDaemonHTTPCtx = func(ctx context.Context, fn func(*apiclient.Client) error) error {
+	return callDaemonHTTPCtx(ctx, fn, httpCallRetryable)
+}
+
+// callDaemonHTTPCtx is callDaemonHTTP with a caller deadline that bounds the
+// ensure phase too. The retry window keeps daemonHTTPRetryWait: the deadline
+// rules only the ensure and the per-attempt HTTP read, not the transient-failure
+// retry budget, so a fast-refusing socket still gets the same admission retry a
+// ctx-free caller does.
+func callDaemonHTTPCtx(ctx context.Context, fn func(*apiclient.Client) error, retryable func(error) bool) error {
+	c, err := daemonHTTPClientCtx(ctx)
+	if err != nil {
+		return err
+	}
+	defer c.CloseIdleConnections()
+	err = fn(c)
+	deadline := time.Now().Add(daemonHTTPRetryWait)
+	for retryable(err) && time.Now().Before(deadline) {
+		time.Sleep(daemonHTTPRetryPoll)
+		err = fn(c)
+	}
+	return err
+}
+
+// daemonHTTPClientCtx is daemonHTTPClient with the ensure phase bounded by the
+// caller's context deadline (falling back to daemonHTTPRetryWait when none). A
+// package var for the same reason as daemonHTTPClient; tests that swap it must
+// not run in parallel.
+var daemonHTTPClientCtx = func(ctx context.Context) (*apiclient.Client, error) {
+	// A remote target's daemon runs on another machine — EnsureDaemon would
+	// spawn a superfluous LOCAL daemon we never talk to, so skip it and dial the
+	// remote directly (#1592 Phase 3 PR4). The local default is unchanged:
+	// ensure + dial, with the ensure bounded by the caller's deadline.
+	if !apiclient.IsRemoteTarget() {
+		deadline, ok := ctx.Deadline()
+		if !ok {
+			deadline = time.Now().Add(daemonHTTPRetryWait)
+		}
+		if err := daemon.EnsureDaemonUntil(deadline); err != nil {
 			return nil, err
 		}
 	}
@@ -684,7 +756,7 @@ func SetLiveTaskArmingFetcherForTest(f func() ([]task.Task, error)) func() {
 // home.snapshotFetcher(m.repoID).
 var allReposSnapshotFetcher = func(ctx context.Context) ([]session.InstanceData, []daemon.SkippedRepo, error) {
 	var resp daemon.SnapshotResponse
-	err := withDaemonHTTP(func(c *apiclient.Client) error {
+	err := withDaemonHTTPCtx(ctx, func(c *apiclient.Client) error {
 		var e error
 		resp, e = c.SnapshotWithAlarmsCtx(ctx, daemon.SnapshotRequest{RepoID: ""})
 		return e
