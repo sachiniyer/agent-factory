@@ -29,13 +29,15 @@ type ClaudeProjectConversationState struct {
 
 // InspectClaudeProjectConversations checks the exact transcript store selected
 // by program and returns the newest direct transcript for workingDir. Claude
-// encodes every non-alphanumeric character in an absolute project path as '-'.
+// encodes every non-alphanumeric character in an absolute project path as '-',
+// and may file the conversation under either spelling of that path
+// (claudeProjectCandidates), so both are read (#7177).
 func InspectClaudeProjectConversations(program, workingDir string, recorded AgentConversationData) (ClaudeProjectConversationState, error) {
 	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workingDir)
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	transcripts, err := claudeProjectTranscripts(filepath.Join(configDir, "projects", claudeProjectName(launchDir)))
+	transcripts, err := claudeWorktreeTranscripts(configDir, claudeProjectCandidates(launchDir))
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
@@ -64,8 +66,10 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 // claudeTranscript is one direct conversation file in a Claude project
 // directory.
 type claudeTranscript struct {
-	id      string
-	name    string
+	id   string
+	name string
+	// dir is the project directory it was listed from.
+	dir     string
 	modTime time.Time
 }
 
@@ -95,7 +99,7 @@ func claudeProjectTranscripts(projectDir string) ([]claudeTranscript, error) {
 		if !info.Mode().IsRegular() {
 			continue
 		}
-		transcripts = append(transcripts, claudeTranscript{id: match[1], name: entry.Name(), modTime: info.ModTime()})
+		transcripts = append(transcripts, claudeTranscript{id: match[1], name: entry.Name(), dir: projectDir, modTime: info.ModTime()})
 	}
 	return transcripts, nil
 }
@@ -186,6 +190,66 @@ func claudeProjectCandidates(dir string) []string {
 		out = append(out, filepath.Join("projects", claudeProjectName(resolved)))
 	}
 	return out
+}
+
+// claudeWorktreeTranscripts lists the direct conversation files of every
+// project directory in projects, relative to configDir: the spellings
+// claudeProjectCandidates names for one worktree. A directory that cannot be
+// listed fails the whole listing, since what it holds would be invisible to
+// the caller; one that is missing holds nothing.
+func claudeWorktreeTranscripts(configDir string, projects []string) ([]claudeTranscript, error) {
+	var all []claudeTranscript
+	listed := make(map[string]bool, len(projects))
+	for _, project := range projects {
+		dir := filepath.Join(configDir, project)
+		if listed[dir] {
+			continue
+		}
+		listed[dir] = true
+		transcripts, err := claudeProjectTranscripts(dir)
+		if err != nil {
+			return nil, err
+		}
+		all = append(all, transcripts...)
+	}
+	return all, nil
+}
+
+// claudeCarryStaleness is a Claude carry's staleness check: whether the copy
+// of conversation id the carry would take, transcript (relative to configDir,
+// under one of projects), is still the newest conversation in the worktree.
+// It reads every spelling in projects, not only the one the transcript was
+// found under, so a /clear filed under the other spelling still refuses
+// (#7177). A newer copy of the same conversation under another spelling
+// refuses too: the carry would take the older copy, without the latest turns.
+func claudeCarryStaleness(configDir string, projects []string, transcript, id string) string {
+	transcripts, err := claudeWorktreeTranscripts(configDir, projects)
+	if err != nil {
+		return carryTranscriptsUnlistedReason
+	}
+	boundDir := filepath.Join(configDir, filepath.Dir(transcript))
+	var recorded *claudeTranscript
+	for idx := range transcripts {
+		if transcripts[idx].dir == boundDir && strings.EqualFold(transcripts[idx].id, id) {
+			recorded = &transcripts[idx]
+		}
+	}
+	if recorded == nil {
+		return carryTranscriptMissingReason
+	}
+	reason := ""
+	for _, other := range transcripts {
+		if !other.modTime.After(recorded.modTime) {
+			continue
+		}
+		// Newer is never the recorded file itself, so a newer file in its own
+		// directory is another conversation.
+		if other.dir == recorded.dir || !strings.EqualFold(other.id, recorded.id) {
+			return staleCarryReason
+		}
+		reason = carryTranscriptCopiesReason
+	}
+	return reason
 }
 
 // ErrNotClaude is returned for a session whose program is not Claude Code.

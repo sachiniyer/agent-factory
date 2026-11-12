@@ -28,6 +28,7 @@ const (
 	carryStoreUnlistedReason           = "af could not enumerate the Codex rollout store"
 	carrySourceStoreUnlistedReason     = "af could not enumerate the previous account's rollout store"
 	carryTranscriptsUnlistedReason     = "af could not list the conversations in this worktree to confirm the recorded one is current"
+	carryTranscriptCopiesReason        = "Claude holds a newer copy of this conversation under another spelling of the worktree's path than the one af would carry"
 	carryUncorrelatedReason            = "af could not confirm the recorded conversation is still the newest one in this worktree"
 	carryRolloutMisplacedReason        = "af could not place the Codex rollout inside its home"
 	carryOtherFormsUnlistedReason      = "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
@@ -66,6 +67,7 @@ var carryRefusalCodeOf = map[string]string{
 	carryStoreUnlistedReason:           handoff.CarryUnverified,
 	carrySourceStoreUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptsUnlistedReason:     handoff.CarryUnverified,
+	carryTranscriptCopiesReason:        handoff.CarryDuplicated,
 	carryUncorrelatedReason:            handoff.CarryUnverified,
 	carryRolloutMisplacedReason:        handoff.CarryUnverified,
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,

@@ -561,7 +561,10 @@ tried to carry the conversation and why it could not, when:
 - the file is missing, or reached through a symbolic link;
 - the new account already holds a different version of it;
 - the conversation af recorded is no longer the newest one in this worktree,
-  because a new one was started with `/clear` or `/new`;
+  because a new one was started with `/clear` or `/new`. For a worktree reached
+  through a symlink, Claude can file conversations under the path as given or
+  as resolved, so af checks both, and also refuses when the copy it would carry
+  is older than another copy of the same conversation;
 - a replacement already launched on the carried conversation stopped before it
   was confirmed working.
 
