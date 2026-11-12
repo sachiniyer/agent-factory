@@ -69,6 +69,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPServerDialogOf(content).verdict == claudeMCPServerPartial {
 			return true
 		}
+		// The multi-server picker (#7166) the same way.
+		if claudeMCPServersPickerOf(content) == claudeMCPServersPartial {
+			return true
+		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
 		// paints its question, then its body, then its options one row at a
 		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
@@ -369,6 +373,10 @@ func claudeTrustPromptPresent(content string) bool {
 	// owns the cursor, because a dialog af will refuse is still in the way.
 	mcpServer := claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete
 
+	// The multi-server picker Claude Code shows for two or more servers
+	// (#7166): its header opens the trailing region and its footer is last.
+	mcpServers := claudeMCPServersPickerOf(content) == claudeMCPServersComplete
+
 	// Legacy folder-trust dialog — the question as a whole row, opening a
 	// trailing region that holds only rows the dialog paints, complete, with
 	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
@@ -377,5 +385,5 @@ func claudeTrustPromptPresent(content string) bool {
 	// agent."
 	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
 
-	return reworded || mcpDialog || mcpServer || legacy
+	return reworded || mcpDialog || mcpServer || mcpServers || legacy
 }
