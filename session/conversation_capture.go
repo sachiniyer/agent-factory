@@ -374,6 +374,15 @@ func (s *ConversationCaptureSnapshot) CodexBaselineFailed() bool {
 	return s != nil && s.codexBeforeErr != nil
 }
 
+// CodexBaselineErr reports why the snapshot's before-image scan failed, or nil
+// when it held or the snapshot took none.
+func (s *ConversationCaptureSnapshot) CodexBaselineErr() error {
+	if s == nil {
+		return nil
+	}
+	return s.codexBeforeErr
+}
+
 // CaptureAgentConversation waits until a supported provider exposes the
 // conversation id for a just-spawned tab. Unsupported providers return empty
 // data and nil error so callers gracefully keep existing --last/latest behavior.

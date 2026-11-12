@@ -82,7 +82,7 @@ func TestRecordedRowFollowLoopNeedsNoStoreWalk(t *testing.T) {
 	require.NoError(t, os.Chmod(blocked, 0))
 	t.Cleanup(func() { _ = os.Chmod(blocked, 0o755) })
 	walked := inst.SessionCodexCaptureBaseline()
-	require.True(t, walked.CodexBaselineFailed(), "fixture: a store walk now fails")
+	require.Error(t, walked.CodexBaselineErr(), "fixture: a store walk now fails")
 
 	manager.ArmConversationCaptures()
 	token, armed := armedConversationToken(t, manager, inst)
