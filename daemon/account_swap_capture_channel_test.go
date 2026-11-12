@@ -92,3 +92,30 @@ func TestCarriedAccountSwapStillRefusesAnUnreadableStore(t *testing.T) {
 	_, err := captureAccountSwapConversation(inst, snap)
 	require.Error(t, err, "a carried confirmation must not hide a broken store")
 }
+
+// TestDeferredCaptureReachesTheHeldQueryWhenTheStoreScanFails is where a
+// deferral lands (#7128 review). The post-delivery capture reuses the swap's
+// snapshot, whose baseline held; when the store scan then fails, the diff's
+// error must not end the attempt before the held query — which reads the
+// runtime's open files, not the store — gets to answer. Otherwise a deferral
+// on an unreadable store records nothing for as long as the store stays
+// unreadable, even though the runtime's own rollout is readable.
+func TestDeferredCaptureReachesTheHeldQueryWhenTheStoreScanFails(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permission bits do not constrain root")
+	}
+	shrinkConversationCaptureForTest(t)
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	held := &heldOnly{}
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	snap := session.BeginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, inst.GetWorktreePath())
+	require.NoError(t, snap.CodexBaselineErr())
+	// The delivered mission minted the replacement's thread, which it holds.
+	held.set(writeHeldTestRollout(t, codexHome, heldMissionThreadID, inst.GetWorktreePath()))
+	blockSwapStoreDay(t, codexHome)
+
+	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap, inst.AgentRuntimeToken(), conversationCaptureTimeout))
+	require.Equal(t, heldMissionThreadID, inst.AgentConversation().ID,
+		"an unreadable store must not keep the held query from recording the runtime's thread")
+	require.Equal(t, heldMissionThreadID, persistedConversationID(t, repoID))
+}
