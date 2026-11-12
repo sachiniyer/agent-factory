@@ -588,7 +588,8 @@ _expect_af_select_already_selected() (
 # af_select against a stubbed TUI that falls behind its keys, then let the TUI
 # catch up and report where the cursor finally rests. The rail holds <count>
 # single-tab sessions (default 3: alpha, beta and alphax, as in the live run;
-# otherwise s1..s<count>), with the cursor starting on session index <start>.
+# otherwise s1..s<count>), with the cursor starting on session index <start>,
+# or on the Sessions header with the section folded when <start> is -1.
 # <window> > 0 shows only that many rail rows, scrolled around the cursor the
 # way ui/sidebar_render.go's scrollToSelection does, with its `▲ N more` and
 # `▼ N more` rows. File-backed state, because af_capture runs in a command
@@ -624,6 +625,7 @@ _af_select_behind_tui() (
         read -r acted < "$dir/acted"
         if [ "$1" -gt "$acted" ]; then
             while read -r key; do
+                # Folded (-1), k does nothing and j opens the first session.
                 case "$key" in
                     k) [ "$cursor" -gt 0 ] && cursor=$((cursor - 1)) ;;
                     j) [ "$cursor" -lt $((${#sessions[@]} - 1)) ] && cursor=$((cursor + 1)) ;;
@@ -671,6 +673,12 @@ _af_select_behind_tui() (
             batch) [ $((captures % 3)) -eq 0 ] && _act "$sent" ;;
         esac
         read -r cursor < "$dir/cursor"
+        if [ "$cursor" -lt 0 ]; then
+            printf '%s\n' ' Agent Factory           │'
+            printf ' ▶ Sessions (%d)          │\n' "${#sessions[@]}"
+            printf '%s\n' ' n new · ? help · q quit'
+            return
+        fi
         read -r offset < "$dir/offset"
         items=$((${#sessions[@]} + 2))
         last=$((items - 1))
@@ -694,7 +702,11 @@ _af_select_behind_tui() (
     _act "$(wc -l < "$dir/keys")"
     local cursor
     read -r cursor < "$dir/cursor"
-    printf '%s\n' "${sessions[$cursor]}"
+    if [ "$cursor" -lt 0 ]; then
+        printf '%s\n' '(folded Sessions header)'
+    else
+        printf '%s\n' "${sessions[$cursor]}"
+    fi
 )
 
 # _expect_af_select_survives_a_lagging_tui — regression proof for #7197.
@@ -707,9 +719,10 @@ _af_select_behind_tui() (
 # only af_select before that pane opened was the reselect of beta after the
 # #7060 create.
 #
-# The windowed and 40-session cases pin the anchor's two review findings: the
-# first VISIBLE row of a rail scrolled past its top is not the first session,
-# and one burst of 30 k presses cannot climb more than 30 stops.
+# The windowed, folded and long-rail cases pin the anchor's review findings:
+# the first VISIBLE row of a rail scrolled past its top is not the first
+# session, k cannot climb out of a folded Sessions section, and one burst of
+# 30 k presses cannot climb more than 30 stops.
 # shellcheck disable=SC2317  # dispatched indirectly via step(); not dead code.
 _expect_af_select_survives_a_lagging_tui() {
     local model start target got case
@@ -717,11 +730,13 @@ _expect_af_select_survives_a_lagging_tui() {
     for start in 0 1 2; do
         for target in alpha beta alphax; do cases+=("late later batch|$start $target 3 0"); done
     done
-    # A rail windowed to the expanded session's two rows, a windowed scan that
-    # scrolls, and rails longer than one burst of 30 k presses can climb. The
-    # long rails are slow enough to stub that one lag model covers them.
+    # A rail windowed to the expanded session's two rows, a folded Sessions
+    # section, a windowed scan that scrolls, and rails longer than one burst
+    # of 30 k presses can climb. The long rails are slow enough to stub that
+    # one lag model covers them.
     cases+=("late later batch|2 alpha 3 2" "late later batch|2 beta 3 2"
-        "late later batch|0 alphax 3 2" "late|0 s8 10 4" "late|31 s1 32 0"
+        "late later batch|0 alphax 3 2" "late later batch|-1 alpha 3 0"
+        "late later batch|-1 beta 3 0" "late|0 s8 10 4" "late|31 s1 32 0"
         "late|33 s3 34 8")
     for case in "${cases[@]}"; do
         for model in ${case%%|*}; do

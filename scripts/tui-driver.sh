@@ -422,6 +422,14 @@ _af_rail_top_selected() {
         END { exit (hidden <= 1 && top ~ /▾/) ? 0 : 1 }'
 }
 
+# _af_rail_sessions_folded — succeeds when the rail draws the Sessions section
+# folded (`▶ Sessions`, ui/sidebar_render.go renderHeader). Reads a screen on
+# stdin. A folded section draws no session rows, and k on its header does
+# nothing (ui/sidebar_nav.go tryMoveVerticalNavStop).
+_af_rail_sessions_folded() {
+    awk -F"$_AF_PANE_BORDER_FS" '$1 ~ /▶[[:space:]]+Se/ { found = 1; exit } END { exit found ? 0 : 1 }'
+}
+
 # _af_anchor_at_first_session — af_select's anchor: press k until the tree
 # cursor rests on the first session, then return. Waits for that on the
 # screen rather than one fixed poll (#7197). k cannot move the cursor off the
@@ -434,11 +442,20 @@ _af_rail_top_selected() {
 # harm: the extra k presses are no-ops at the top. Each burst gets
 # AF_DRIVER_TIMEOUT to settle. Sets _AF_ANCHOR_BURSTS to the bursts it sent,
 # which af_select uses to size its scan.
+#
+# A folded Sessions section is the one place k cannot climb from, so a burst
+# there goes after a single j: from the folded header, j selects the first
+# session's first tab and unfolds the section (selectTabStop), which is where
+# the anchor is going (#7198 review). If that frame was stale and the section
+# already open, the burst's k presses climb back over the one stop j moved.
 _af_anchor_at_first_session() {
     local burst k screen cursor last still deadline
     _AF_ANCHOR_BURSTS=0
     for ((burst = 0; burst < 10; burst++)); do
         _AF_ANCHOR_BURSTS=$((burst + 1))
+        if af_capture | _af_rail_sessions_folded; then
+            af_send j
+        fi
         for ((k = 0; k < 30; k++)); do af_send k; done
         deadline=$(( $(_af_now) + AF_DRIVER_TIMEOUT ))
         last="" still=0
