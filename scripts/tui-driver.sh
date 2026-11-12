@@ -1012,7 +1012,8 @@ _af_tab_count() {
 # (TestTaskPaneEditActionFooterFollowsFocus) and one no other built-in dialog
 # prints (they say esc back, esc cancel or esc close), so it anchors the edit
 # form. The one row without it, a selector stop's narrowest
-# "r run · x toggle · D del · esc", still carries `x toggle`.
+# "r run · [✓] x toggle · D del · esc", still carries `x toggle` (the glyph is
+# the task's enabled state, #7135, and leads the verb so this fragment holds).
 : "${_AF_TASKS_FOOTER:=(n new ·|[?] actions ·|x toggle ·|tab(/shift[+]tab)? fields ·).*esc.*│|(^|[^[:alnum:]])esc list.*│}"
 
 # _AF_TASKS_FRAME_TOP/BOTTOM are the rounded borders shared by every task

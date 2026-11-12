@@ -578,18 +578,31 @@ func (s *TaskPane) renderEditMode() string {
 			// ("back to the list", not "out of the manager") is not guessable
 			// from the glyph. The middle tier abbreviates the verbs and keeps
 			// every destination.
+			//
+			// x flips the draft's enabled flag, and the form has no Enabled
+			// field, so the toggle carries the list row's [✓]/[✗] glyph
+			// (#7135). Without it x changed nothing on screen, and a second
+			// press silently undid the first. It rides on this row, not the
+			// title, because this is the one row that is always visible when
+			// x is advertised: the title scrolls away at the lower stops of
+			// a windowed form. The narrowest tier is 34 cells, the overlay's
+			// content width at the 40-column hard minimum.
+			toggle := "x toggle"
+			if s.selectedTaskInRange() {
+				toggle = taskEnabledGlyph(s.tasks[s.selectedIdx].Enabled) + " " + toggle
+			}
 			tiers = []string{
-				"r run now · x toggle · D delete · esc list",
-				"r run · x toggle · D del · esc list",
-				"r run · x toggle · D del · esc",
+				"r run now · " + toggle + " · D delete · esc list",
+				"r run · " + toggle + " · D del · esc list",
+				"r run · " + toggle + " · D del · esc",
 			}
 			// A watch task can't be manually run (#1758): drop "r run" so the
 			// editor never advertises an action that always fails.
 			if s.selectedTaskIsWatch() {
 				tiers = []string{
-					"x toggle · D delete · esc list",
-					"x toggle · D del · esc list",
-					"x toggle · D del · esc",
+					toggle + " · D delete · esc list",
+					toggle + " · D del · esc list",
+					toggle + " · D del · esc",
 				}
 			}
 		}
