@@ -4,14 +4,20 @@ import (
 	"context"
 	"errors"
 	tea "github.com/charmbracelet/bubbletea"
+	"os"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/daemon"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/task"
+	"github.com/sachiniyer/agent-factory/ui"
+	"github.com/sachiniyer/agent-factory/ui/layout"
 	"github.com/sachiniyer/agent-factory/ui/overlay"
 )
 
@@ -105,7 +111,7 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 	require.True(t, degraded)
 	_, err := m.activeTasks(m.repoRoot, m.repoID)
 	require.ErrorContains(t, err, "http://box.example:8443 did not answer", "the poll's timeout, from the cache")
-	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa")
+	_, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa", "")
 	require.NoError(t, err)
 	require.Less(t, time.Since(loopStart), 250*time.Millisecond, "no loop-side call waited on the hung target")
 }
@@ -114,13 +120,13 @@ func TestRemoteHungTargetNeverBlocksTheEventLoop(t *testing.T) {
 func TestRemoteSelectionNeverProbesLocalGit(t *testing.T) {
 	stubRemote(t)
 	m := &home{sidebarProjects: []overlay.Project{{Root: "/srv/box/alpha", RepoID: "aaaaaaaaaaaa"}}}
-	rc, err := m.repoContextForSelection("/srv/box/alpha", "") // sidebar Enter / mouse: root only
+	rc, err := m.repoContextForSelection("/srv/box/alpha", "", "") // sidebar Enter / mouse: root only
 	require.NoError(t, err)
 	require.Equal(t, "aaaaaaaaaaaa", rc.ID)
-	rc, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa") // picker
+	rc, err = m.repoContextForSelection("/srv/box/alpha", "aaaaaaaaaaaa", "") // picker
 	require.NoError(t, err)
 	require.Equal(t, "/srv/box/alpha", rc.Root)
-	_, err = m.repoContextForSelection("/srv/box/unknown", "")
+	_, err = m.repoContextForSelection("/srv/box/unknown", "", "")
 	require.ErrorContains(t, err, "not in the daemon's project list")
 }
 
@@ -422,4 +428,256 @@ func TestQuitDiscardConfirmationSurvivesDismissingRecovery(t *testing.T) {
 			require.True(t, h.quitting, "so the next quit is the user's choice to discard and leave")
 		})
 	}
+}
+
+// setupEnclosingRepoFixture builds the state the bug lives in: a registered
+// checkout (nested) whose .git metadata is gone while its directory survives
+// inside an outer repository, so config.RepoFromPath(nested) walks upward and
+// resolves to the OUTER repo's identity. Returns the outer root, the nested
+// root, the nested repo's original id (the row's recorded identity), and the
+// outer repo's id (what the probe now finds at nested).
+func setupEnclosingRepoFixture(t *testing.T) (outer, nested, nestedID, outerID string) {
+	t.Helper()
+	outer = initTestGitRepo(t)
+	nested = filepath.Join(outer, "nested")
+	require.NoError(t, os.Mkdir(nested, 0o755))
+	runGit(t, nested, "init")
+	runGit(t, nested, "config", "user.email", "test@example.com")
+	runGit(t, nested, "config", "user.name", "test")
+	nestedRepo, err := config.RepoFromPath(nested)
+	require.NoError(t, err)
+	nestedID = nestedRepo.ID
+	// Remove nested's .git so the probe walks up to the enclosing outer repo.
+	require.NoError(t, os.RemoveAll(filepath.Join(nested, ".git")))
+	outerRepo, err := config.RepoFromPath(outer)
+	require.NoError(t, err)
+	outerID = outerRepo.ID
+	require.NotEqual(t, nestedID, outerID, "fixture: the two repos must have distinct ids")
+	// Confirm the probe now resolves nested to the enclosing outer repo.
+	probed, err := config.RepoFromPath(nested)
+	require.NoError(t, err)
+	require.Equal(t, outerID, probed.ID, "fixture: the de-gitted nested dir must resolve to the enclosing repo")
+	return outer, nested, nestedID, outerID
+}
+
+// TestLocalSelectionRefusesForeignCheckout is the core fix: in local mode a
+// row's recorded identity that disagrees with what git finds at the root is
+// refused rather than silently re-scoping the TUI onto the foreign checkout.
+// Before the fix repoContextForSelection discarded the repoID argument and
+// returned the probe's answer unconditionally — so pressing Enter on a row
+// whose checkout was absorbed by an enclosing repo opened that foreign repo.
+func TestLocalSelectionRefusesForeignCheckout(t *testing.T) {
+	_, nested, nestedID, _ := setupEnclosingRepoFixture(t)
+	m := &home{}
+	_, err := m.repoContextForSelection(nested, nestedID, "")
+	require.Error(t, err)
+	require.ErrorContains(t, err, "no longer the registered repository")
+	require.ErrorContains(t, err, "af projects rebind")
+}
+
+// TestLocalSelectionSwitchesWhenIdentityMatches: when the probe agrees with the
+// row's recorded identity the switch proceeds — the guard only refuses
+// divergence.
+func TestLocalSelectionSwitchesWhenIdentityMatches(t *testing.T) {
+	repoRoot := initTestGitRepo(t)
+	repoID := config.RepoIDFromRoot(repoRoot)
+	m := &home{}
+	rc, err := m.repoContextForSelection(repoRoot, repoID, "")
+	require.NoError(t, err)
+	require.Equal(t, repoID, rc.ID)
+	require.Equal(t, repoRoot, rc.Root)
+}
+
+// TestLocalSelectionSwitchesWhenIdentityAbsent: a caller that passes no identity
+// (the rebind follow-up, or a pre-registry path) probes and switches — the guard
+// only fires when a non-empty identity is supplied.
+func TestLocalSelectionSwitchesWhenIdentityAbsent(t *testing.T) {
+	_, nested, _, outerID := setupEnclosingRepoFixture(t)
+	m := &home{}
+	rc, err := m.repoContextForSelection(nested, "", "")
+	require.NoError(t, err)
+	require.Equal(t, outerID, rc.ID, "an empty identity probes and switches without the guard")
+}
+
+// TestLocalSelectionExemptsInventedIDs: a legacy row whose recorded id is an
+// invented d- value (DerivedRepoIDForUnresolvedRoot, predating the RepoID field)
+// can never equal a probe result, so the guard skips it and switches on the
+// probe — an intact legacy checkout still switches as it always did.
+func TestLocalSelectionExemptsInventedIDs(t *testing.T) {
+	_, nested, _, outerID := setupEnclosingRepoFixture(t)
+	invented := config.DerivedRepoIDForUnresolvedRoot(nested)
+	require.True(t, config.IsDerivedRepoID(invented), "fixture: the id must be invented")
+	m := &home{}
+	rc, err := m.repoContextForSelection(nested, invented, "")
+	require.NoError(t, err)
+	require.Equal(t, outerID, rc.ID, "an invented id is exempt and switches on the probe")
+}
+
+// TestLocalSelectionSurfacesProbeFailure: a root that is not a git repo and has
+// no enclosing repo surfaces the probe error rather than switching.
+func TestLocalSelectionSurfacesProbeFailure(t *testing.T) {
+	m := &home{}
+	_, err := m.repoContextForSelection(t.TempDir(), "aaaaaaaaaaaa", "")
+	require.Error(t, err)
+}
+
+// TestSwitchToProjectRootRefusesStaleRowInLocalMode: the sidebar Enter / mouse
+// click path (switchToProjectRoot) passes the row's RepoID through, so a stale
+// row whose checkout was replaced by an enclosing repo is refused rather than
+// silently switching the rail to the foreign checkout.
+func TestSwitchToProjectRootRefusesStaleRowInLocalMode(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+
+	_, nested, nestedID, outerID := setupEnclosingRepoFixture(t)
+	beforeRepoID := h.repoID
+	require.NotEqual(t, nestedID, beforeRepoID, "fixture: the active project must not be the stale row")
+	require.NotEqual(t, outerID, beforeRepoID, "fixture: the active project must not be the enclosing repo")
+
+	mod, cmd := h.switchToProjectRoot(nested, nestedID, "")
+	require.NotNil(t, mod)
+	_ = cmd
+	// The switch was refused: the rail stays on the active project, not the
+	// enclosing repo the probe would have silently opened.
+	assert.Equal(t, beforeRepoID, h.repoID, "a stale row must not re-scope the rail onto the enclosing repo")
+	assert.NotEqual(t, outerID, h.repoID, "the enclosing repo's id must not have been committed")
+}
+
+// TestSwitchToProjectRootSwitchesOnMatchingIdentity: the happy path — a row
+// whose recorded identity matches the probe switches the rail as before.
+func TestSwitchToProjectRootSwitchesOnMatchingIdentity(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+
+	repoRoot := initTestGitRepo(t)
+	repoID := config.RepoIDFromRoot(repoRoot)
+	require.NotEqual(t, repoID, h.repoID, "fixture: the target must differ from the active project")
+
+	mod, _ := h.switchToProjectRoot(repoRoot, repoID, "")
+	require.NotNil(t, mod)
+	assert.Equal(t, repoID, h.repoID, "a matching identity switches the rail to the target project")
+	assert.Equal(t, repoRoot, h.repoRoot)
+}
+
+// TestSwitchToProjectRootSwitchesOnAbsentIdentity: the rebind follow-up path
+// (switchToProjectRoot with no identity) probes and switches — the guard only
+// fires when a non-empty identity is supplied.
+func TestSwitchToProjectRootSwitchesOnAbsentIdentity(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+
+	repoRoot := initTestGitRepo(t)
+	repoID := config.RepoIDFromRoot(repoRoot)
+	require.NotEqual(t, repoID, h.repoID)
+
+	mod, _ := h.switchToProjectRoot(repoRoot, "", "")
+	require.NotNil(t, mod)
+	assert.Equal(t, repoID, h.repoID, "an empty identity probes and switches")
+	assert.Equal(t, repoRoot, h.repoRoot)
+}
+
+// TestProjectsSectionEnterRefusesStaleRow: pressing Enter on a Projects-section
+// row whose recorded identity no longer matches the checkout at its root (the
+// directory was absorbed by an enclosing repo) is refused rather than silently
+// switching the rail to the foreign checkout. The row's RepoID is passed through
+// switchToProjectRoot, so the local-mode guard in repoContextForSelection fires.
+func TestProjectsSectionEnterRefusesStaleRow(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	resizeHome(h, 100, 30)
+
+	_, nested, nestedID, outerID := setupEnclosingRepoFixture(t)
+	beforeRepoID := h.repoID
+	require.NotEqual(t, nestedID, beforeRepoID)
+	require.NotEqual(t, outerID, beforeRepoID)
+
+	// Push a Projects list with the stale row first (cursor rests on it).
+	h.projects.SetProjects([]ui.SidebarProject{
+		{Name: "nested", Root: nested, RepoID: nestedID, SessionCount: 0},
+		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
+	})
+	h.relayout()
+	h.focusRegion(layout.RegionProjects)
+	require.Equal(t, layout.RegionProjects, h.ring.Active())
+
+	proj, ok := h.projects.SelectedProject()
+	require.True(t, ok)
+	require.Equal(t, nested, proj.Root, "cursor rests on the stale row")
+
+	// Enter on the stale row: the switch is refused, the rail stays put.
+	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, consumed, "Enter must be consumed by the focused Projects section")
+	assert.Equal(t, beforeRepoID, h.repoID, "Enter on a stale row must not re-scope the rail")
+	assert.NotEqual(t, outerID, h.repoID, "the enclosing repo must not have been opened")
+}
+
+// TestProjectsSectionEnterSwitchesHealthyRowWithIdentity: the happy path
+// alongside the guard — Enter on a row whose recorded identity matches the
+// checkout switches the rail, now passing the row's RepoID through so the
+// guard can verify it.
+func TestProjectsSectionEnterSwitchesHealthyRowWithIdentity(t *testing.T) {
+	h := newTestHome(t)
+	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
+		return newSnapshotTestInstance(t, d.Title), nil
+	}))
+	h.snapshotFetcher = func(string) (daemon.SnapshotResponse, error) {
+		return daemon.SnapshotResponse{}, nil
+	}
+	t.Cleanup(SetAllReposSnapshotFetcherForTest(func(context.Context) ([]session.InstanceData, error) {
+		return nil, nil
+	}))
+	resizeHome(h, 100, 30)
+
+	repoBRoot := initTestGitRepo(t)
+	repoBID := config.RepoIDFromRoot(repoBRoot)
+	require.NotEqual(t, repoBID, h.repoID)
+
+	h.projects.SetProjects([]ui.SidebarProject{
+		{Name: filepath.Base(repoBRoot), Root: repoBRoot, RepoID: repoBID, SessionCount: 0},
+		{Name: filepath.Base(h.repoRoot), Root: h.repoRoot, SessionCount: 1, Active: true},
+	})
+	h.relayout()
+	h.focusRegion(layout.RegionProjects)
+	require.Equal(t, layout.RegionProjects, h.ring.Active())
+
+	proj, ok := h.projects.SelectedProject()
+	require.True(t, ok)
+	require.Equal(t, repoBRoot, proj.Root)
+
+	_, _, consumed := h.handleProjectsFocus(tea.KeyMsg{Type: tea.KeyEnter})
+	require.True(t, consumed)
+	assert.Equal(t, repoBID, h.repoID, "Enter on a healthy row switches to it")
+	assert.Equal(t, repoBRoot, h.repoRoot)
 }

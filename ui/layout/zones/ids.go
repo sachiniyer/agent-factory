@@ -47,13 +47,21 @@ func TreeInstanceTitle(id string) (title string, ok bool) {
 }
 
 // Project is the zone id of a row in the bottom Projects section (#1588
-// follow-up), keyed by the project's absolute repo root (unique per project, so
-// a click resolves the right one).
-func Project(root string) string { return "projects:row:" + root }
+// follow-up), keyed by the row's repo id AND its absolute root. The root alone
+// does not name a row: discovery can list two rows at one root — a stale
+// registration that recorded another identity there beside the repository now
+// at that path — and a root-keyed click resolved to whichever came first
+// (#7116 review). The repo id leads because it never contains a colon; the
+// root, which may, is the final segment.
+func Project(repoID, root string) string { return "projects:row:" + repoID + ":" + root }
 
-// ProjectRoot parses a Project id back to its repo root.
-func ProjectRoot(id string) (root string, ok bool) {
-	return strings.CutPrefix(id, "projects:row:")
+// ProjectRow parses a Project id back to the row's repo id and root.
+func ProjectRow(id string) (repoID, root string, ok bool) {
+	rest, found := strings.CutPrefix(id, "projects:row:")
+	if !found {
+		return "", "", false
+	}
+	return strings.Cut(rest, ":")
 }
 
 // TreeArrow is the zone id of an instance row's expand/collapse arrow glyph.

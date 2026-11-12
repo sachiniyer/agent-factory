@@ -21,7 +21,13 @@ import (
 type SidebarProject struct {
 	// RepoID is the identity established while aggregating the row. Destructive
 	// actions must carry it rather than infer identity again from Root.
-	RepoID       string
+	RepoID string
+	// CheckoutID is the checkout marker the row's registration recorded, empty
+	// when no registration backs the row or the record predates markers. A
+	// repository re-initialized at the same root hashes to the same RepoID, so
+	// this is what lets a switch tell the registered checkout from a
+	// replacement at its path (#7116 review).
+	CheckoutID   string
 	Name         string
 	Root         string
 	SessionCount int
@@ -103,21 +109,24 @@ func NewProjectsPane() *ProjectsPane {
 // always-visible counts stay live). Reports whether the row list actually
 // changed, so a background refresh only repaints on a real diff.
 //
-// The cursor tracks the selected project by IDENTITY (repo root), not by row
-// index: the list is re-sorted by name on every rebuild, so a poll that inserts
-// or removes a project ahead of the cursor would otherwise slide it onto a
-// different project (and Enter would switch to the wrong one). After the swap we
-// re-locate the previously-selected root; if it is gone (project removed), the
-// cursor clamps to the row that took its place — the nearest sensible neighbor.
+// The cursor tracks the selected project by IDENTITY, not by row index: the
+// list is re-sorted by name on every rebuild, so a poll that inserts or removes
+// a project ahead of the cursor would otherwise slide it onto a different
+// project (and Enter would switch to the wrong one). After the swap we
+// re-locate the previously-selected row — by root and repo id, since two rows
+// can share a root (#7116 review), then by root alone, so a row whose recorded
+// id was just written down keeps the cursor; if it is gone (project removed),
+// the cursor clamps to the row that took its place — the nearest sensible
+// neighbor.
 func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 	changed := !reflect.DeepEqual(p.projects, projects)
 
-	// Remember which project the cursor pointed at (by root), plus its old row,
-	// before the swap.
+	// Remember which project the cursor pointed at, plus its old row, before
+	// the swap.
 	oldIndex := p.selected
-	var selectedRoot string
+	var selectedRoot, selectedRepoID string
 	if oldIndex >= 0 && oldIndex < len(p.projects) {
-		selectedRoot = p.projects[oldIndex].Root
+		selectedRoot, selectedRepoID = p.projects[oldIndex].Root, p.projects[oldIndex].RepoID
 	}
 
 	p.projects = projects
@@ -127,10 +136,13 @@ func (p *ProjectsPane) SetProjects(projects []SidebarProject) bool {
 	// in the re-sorted list, not an arbitrary jump to the top.
 	p.selected = -1
 	if selectedRoot != "" {
-		for i, proj := range projects {
-			if proj.Root == selectedRoot {
-				p.selected = i
-				break
+		p.selected = p.indexOf(selectedRoot, selectedRepoID)
+		if p.selected < 0 {
+			for i, proj := range projects {
+				if proj.Root == selectedRoot {
+					p.selected = i
+					break
+				}
 			}
 		}
 	}
@@ -214,16 +226,28 @@ func (p *ProjectsPane) SelectedProject() (SidebarProject, bool) {
 	return p.projects[sel], true
 }
 
-// SelectByRoot moves the cursor onto the project with the given repo root — the
-// click action for a project row. Reports whether the project was found.
-func (p *ProjectsPane) SelectByRoot(root string) bool {
+// SelectProject moves the cursor onto the row with exactly this root and repo
+// id — the click action for a project row — and returns that row. Root alone is
+// not a row's identity: two rows can share one, and selecting the first match
+// handed a click on one row the other's identity (#7116 review). Reports false,
+// leaving the cursor alone, when no row has that identity.
+func (p *ProjectsPane) SelectProject(root, repoID string) (SidebarProject, bool) {
+	i := p.indexOf(root, repoID)
+	if i < 0 {
+		return SidebarProject{}, false
+	}
+	p.selected = i
+	return p.projects[i], true
+}
+
+// indexOf is the row with exactly this root and repo id, or -1.
+func (p *ProjectsPane) indexOf(root, repoID string) int {
 	for i, proj := range p.projects {
-		if proj.Root == root {
-			p.selected = i
-			return true
+		if proj.Root == root && proj.RepoID == repoID {
+			return i
 		}
 	}
-	return false
+	return -1
 }
 
 // ScrollUp moves the section cursor up (wheel/key routing).
@@ -450,7 +474,7 @@ func (p *ProjectsPane) String() string {
 		rowStart := len(lines)
 		lines = append(lines, p.projectRow(p.projects[i], selected))
 		if p.zones != nil {
-			p.zones.Register(zones.Project(p.projects[i].Root), layout.Rect{
+			p.zones.Register(zones.Project(p.projects[i].RepoID, p.projects[i].Root), layout.Rect{
 				X: p.rect.X, Y: p.rect.Y + rowStart, W: p.rect.W, H: 1,
 			})
 		}

@@ -218,12 +218,14 @@ func (m *home) activeTasks(repoRoot, repoID string) ([]task.Task, error) {
 
 // repoContextForSelection resolves a chosen project row to a RepoContext — the
 // one place every selection entry point (picker, sidebar Enter, mouse, rebind
-// follow-up) goes through. Remotely the row's root is a path on the daemon's
-// host, so the context comes from the row's registry identity, never from a
-// local git probe.
-func (m *home) repoContextForSelection(root, repoID string) (*config.RepoContext, error) {
+// follow-up) goes through. repoID and checkoutID are the identity the row
+// recorded; either may be empty. Remotely the row's root is a path on the
+// daemon's host, so the context comes from the row's registry identity, never
+// from a local git probe — and the checkout marker, which lives in that host's
+// checkout, is not checked here.
+func (m *home) repoContextForSelection(root, repoID, checkoutID string) (*config.RepoContext, error) {
 	if !isRemoteTarget() {
-		return config.RepoFromPath(root)
+		return localRepoContextForSelection(root, repoID, checkoutID)
 	}
 	if repoID == "" {
 		for _, p := range m.sidebarProjects {
@@ -237,6 +239,49 @@ func (m *home) repoContextForSelection(root, repoID string) (*config.RepoContext
 		return nil, fmt.Errorf("%s is not in the daemon's project list yet; wait for the next refresh", root)
 	}
 	return remoteRepoContext(root, repoID), nil
+}
+
+// localRepoContextForSelection is repoContextForSelection on this machine. The
+// row's root IS probed (the checkout's working tree is here), but the probe's
+// answer is accepted only when it is the exact project the row stands for: a
+// registered root that no longer holds the registered checkout can resolve
+// upward into an unrelated enclosing repository, or to a different checkout
+// that took the path over (#7109). Switching onto either is refused rather than
+// silently re-scoping the TUI onto a foreign repo — the same mismatch the
+// daemon refuses for the row's delete verb.
+//
+// Two checks, because neither sees what the other does:
+//
+//   - the repo id. An enclosing repository resolves to its own id. Legacy
+//     invented ids (d-…) predate the recorded RepoID field and can never equal
+//     a probe result, so they are exempt from this comparison and switch on the
+//     probe as they always did.
+//   - the checkout marker (#7116 review). A repository re-initialized at the
+//     same root hashes to the same path-derived id, so only the registry's
+//     marker tells it from the registered checkout — the evidence
+//     config.ProjectCheckoutMatches gives the daemon's delete-project claimant
+//     check. A row with no recorded marker (no registration behind it, or a
+//     record that predates markers) has nothing to compare and keeps the repo
+//     id check alone.
+func localRepoContextForSelection(root, repoID, checkoutID string) (*config.RepoContext, error) {
+	repo, err := config.RepoFromPath(root)
+	if err != nil {
+		return nil, err
+	}
+	if repoID != "" && !config.IsDerivedRepoID(repoID) && repo.ID != repoID {
+		return nil, fmt.Errorf("%s is no longer the registered repository (git found a different one there); run `af projects rebind` if the replacement is intentional", root)
+	}
+	if checkoutID == "" {
+		return repo, nil
+	}
+	matches, err := config.ProjectCheckoutMatches(root, checkoutID)
+	if err != nil {
+		return nil, fmt.Errorf("cannot confirm %s is still the registered checkout: %w", root, err)
+	}
+	if !matches {
+		return nil, fmt.Errorf("%s is no longer the registered checkout (a different clone now occupies that path); run `af projects rebind` if the replacement is intentional", root)
+	}
+	return repo, nil
 }
 
 // filterTasksToProject keeps the tasks owned by one project. The recorded

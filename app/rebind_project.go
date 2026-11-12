@@ -290,7 +290,10 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	if !ok || samePath(root, recorded) || samePath(root, m.repoRoot) {
 		return m, nil
 	}
-	return m.switchToProjectRoot(root)
+	// A confirmed rebind re-resolved the identity at the new root, so the probe
+	// is authoritative there — pass no recorded identity so the local branch's
+	// mismatch guard does not refuse the move the rebind just made.
+	return m.switchToProjectRoot(root, "", "")
 }
 
 // samePath compares two roots under the #2110 spelling rule; an empty side

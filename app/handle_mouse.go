@@ -558,12 +558,22 @@ func (m *home) handleClick(msg tea.MouseMsg) (tea.Model, tea.Cmd) {
 	if title, idx, ok := zones.TreeTabParts(id); ok {
 		return m, m.handleTreeTabClick(title, idx, double)
 	}
-	if root, ok := zones.ProjectRoot(id); ok {
+	if repoID, root, ok := zones.ProjectRow(id); ok {
 		// Click a Projects-section row: focus the section and switch the rail to
-		// that project (the row's primary action, like Enter on it).
+		// that project (the row's primary action, like Enter on it). The zone
+		// names the row by repo id as well as root, because two rows can share a
+		// root (#7116 review); the switch carries exactly that row's recorded
+		// identity, so a stale row is refused as itself and a healthy one never
+		// borrows its sibling's.
 		m.focusRegionClick(layout.RegionProjects)
-		m.projects.SelectByRoot(root)
-		return m.switchToProjectRoot(root)
+		proj, found := m.projects.SelectProject(root, repoID)
+		if !found {
+			// The row left the list between the frame that drew it and this
+			// click. Switching on the bare root would re-derive the identity the
+			// row existed to carry; the next frame shows the current rows.
+			return m, nil
+		}
+		return m.switchToProjectRoot(proj.Root, proj.RepoID, proj.CheckoutID)
 	}
 	if region, kind, ok := zones.PaneZone(id); ok {
 		// Click a pane header (or an unfocused pane's body): focus that pane
