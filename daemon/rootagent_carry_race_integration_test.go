@@ -46,10 +46,29 @@ type parkedRootHeal struct {
 	stalled   *atomic.Bool
 }
 
+// rootHealParkPoint is where parkRootHeal holds the heal create.
+type rootHealParkPoint int
+
+const (
+	// parkAfterReap: the reap has finished, so its carry is held and the dead
+	// record is gone (testHookRootAfterReap).
+	parkAfterReap rootHealParkPoint = iota
+	// parkInReapTeardown: the reap has torn the root down but not yet run its
+	// final m.mu section, so the dead record is still in m.instances and no
+	// carry is held yet (testHookRootReapTornDown, PR #7190 review F1).
+	parkInReapTeardown
+)
+
 // parkRootHealAfterReap builds a legacy root_agents root at the checkout
 // newRepo makes, seeds its conversation, and parks its heal after the reap.
 // stall says whether the released create fails on the worktree listing.
 func parkRootHealAfterReap(t *testing.T, newRepo func(*testing.T) string, stall bool) parkedRootHeal {
+	t.Helper()
+	return parkRootHeal(t, newRepo, stall, parkAfterReap)
+}
+
+// parkRootHeal is parkRootHealAfterReap with the park point chosen.
+func parkRootHeal(t *testing.T, newRepo func(*testing.T) string, stall bool, at rootHealParkPoint) parkedRootHeal {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	claudeConfigDir := t.TempDir()
@@ -74,7 +93,7 @@ func parkRootHealAfterReap(t *testing.T, newRepo func(*testing.T) string, stall 
 	}
 	p.stallable.Store(stall)
 	reapReached := make(chan struct{})
-	prevBindings, prevHook := worktreeBranchBindings, testHookRootAfterReap
+	prevBindings, prevHook, prevTornDown := worktreeBranchBindings, testHookRootAfterReap, testHookRootReapTornDown
 	worktreeBranchBindings = func(repo string) ([]git.WorktreeBranchBinding, error) {
 		if p.stalled.Load() {
 			return nil, fmt.Errorf("git worktree list: %w", context.DeadlineExceeded)
@@ -82,7 +101,7 @@ func parkRootHealAfterReap(t *testing.T, newRepo func(*testing.T) string, stall 
 		return prevBindings(repo)
 	}
 	var parked atomic.Bool
-	testHookRootAfterReap = func() {
+	park := func() {
 		if !parked.CompareAndSwap(false, true) {
 			return // only the first heal parks; later passes run straight through
 		}
@@ -90,10 +109,16 @@ func parkRootHealAfterReap(t *testing.T, newRepo func(*testing.T) string, stall 
 		close(reapReached)
 		<-p.release
 	}
+	switch at {
+	case parkInReapTeardown:
+		testHookRootReapTornDown = park
+	default:
+		testHookRootAfterReap = park
+	}
 	t.Cleanup(func() {
 		p.released.Do(func() { close(p.release) })
 		manager.waitRootAgentCreates()
-		worktreeBranchBindings, testHookRootAfterReap = prevBindings, prevHook
+		worktreeBranchBindings, testHookRootAfterReap, testHookRootReapTornDown = prevBindings, prevHook, prevTornDown
 	})
 
 	// Vanish the root's tmux so the next ensure pass heals (reap + recreate).
@@ -106,8 +131,10 @@ func parkRootHealAfterReap(t *testing.T, newRepo func(*testing.T) string, stall 
 	case <-time.After(10 * time.Second):
 		t.Fatalf("heal create never reached the post-reap hook")
 	}
-	require.Nil(t, findRootInstance(t, manager, repoPath),
-		"the reaped root's record must be gone before the delete races")
+	if at == parkAfterReap {
+		require.Nil(t, findRootInstance(t, manager, repoPath),
+			"the reaped root's record must be gone before the delete races")
+	}
 	return p
 }
 
@@ -270,6 +297,148 @@ func TestADeleteOfAVanishedWorktreeRetiresTheCarryUnderItsRealIdentity(t *testin
 
 	p.releaseAndWait()
 	p.assertCarryGone(t, "a delete of the root's path must retire its carry whatever identity the delete could name")
+}
+
+// PR #7190 review F1 (P1): the reap's teardown runs with m.mu released, before
+// its final section, and DeleteProject's gate does not count it — the reap sets
+// no in-flight op. A delete there suppresses while no carry exists yet, so
+// retires nothing; the reap's final section then held a fresh carry nobody had
+// retired, and the heal either committed resuming the deleted project's
+// conversation or kept it held after the delete — #7182's state.
+func TestADeleteDuringTheRootReapTeardownLeavesNoCarryAndNoRoot(t *testing.T) {
+	p := parkRootHeal(t, setupControlRepo, false, parkInReapTeardown)
+
+	var (
+		wg        sync.WaitGroup
+		deleteErr error
+	)
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		_, deleteErr = p.manager.DeleteProject(DeleteProjectRequest{RepoID: p.repo.ID, RepoPath: p.repoPath})
+	}()
+	require.Eventually(t, func() bool {
+		p.manager.mu.Lock()
+		defer p.manager.mu.Unlock()
+		_, stamped := p.manager.deletedRootRepos[p.repo.ID]
+		return stamped
+	}, 10*time.Second, 5*time.Millisecond, "the delete never reached suppression while the reap was tearing down")
+
+	p.releaseAndWait()
+	wg.Wait()
+	// The delete may also meet the reap's own claim on the root and report a
+	// partial failure; its suppression stands either way, and that is what this
+	// pins.
+	t.Logf("DeleteProject: %v", deleteErr)
+	p.assertCarryGone(t, "a delete that suppressed during the reap's teardown must leave no carry of the deleted project held")
+	require.Nil(t, findRootInstance(t, p.manager, p.repoPath),
+		"a heal whose reap straddled a delete must not commit the deleted project's root")
+}
+
+// PR #7190 review F2 (P2): a create that carries nothing — a first-ever root —
+// can begin before a delete and reach CreateSession after it, which samples the
+// delete sequence too late to see it. It committed a live, persistent root for
+// the project the user had just deleted, breaking #7181.
+func TestACarryLessRootCreateBegunBeforeADeleteNeverCommits(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	seen := installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+
+	reached := make(chan struct{})
+	release := make(chan struct{})
+	var parked atomic.Bool
+	var releaseOnce sync.Once
+	rootCreateVerifyHookForTest = func() {
+		if parked.CompareAndSwap(false, true) {
+			close(reached)
+			<-release
+		}
+	}
+	t.Cleanup(func() {
+		releaseOnce.Do(func() { close(release) })
+		manager.waitRootAgentCreates()
+		rootCreateVerifyHookForTest = nil
+	})
+
+	manager.EnsureRootAgents() // the first-ever create launches and parks before CreateSession
+	select {
+	case <-reached:
+	case <-time.After(10 * time.Second):
+		t.Fatalf("the first-ever root create never reached createVerifiedRoot")
+	}
+	_, err = manager.DeleteProject(DeleteProjectRequest{RepoID: repo.ID, RepoPath: repoPath})
+	require.NoError(t, err, "nothing is reserved yet, so the delete succeeds")
+
+	releaseOnce.Do(func() { close(release) })
+	manager.waitRootAgentCreates()
+	require.Nil(t, findRootInstance(t, manager, repoPath),
+		"a root create that began before the delete must not commit the deleted project's root after it")
+	require.Empty(t, *seen, "no root may start for the deleted project")
+}
+
+// PR #7190 review F3 (P3): a delete-fence refusal is not a resume failure. The
+// heal used to answer it with the fresh-agent fallback, so a delete that
+// aborted between the two attempts let the second commit a blank root and drop
+// the carry the aborted delete had promised to leave alone.
+func TestADeleteFenceRefusalIsNotAResumeFailure(t *testing.T) {
+	p := parkRootHealAfterReap(t, setupControlRepo, false)
+
+	prevSweep := deregisterRootAgents
+	deregisterRootAgents = func(...string) ([]string, error) { return nil, errors.New("config write failed") }
+	fenceUp := make(chan struct{})
+	letAbort := make(chan struct{})
+	var abortOnce sync.Once
+	abort := func() { abortOnce.Do(func() { close(letAbort) }) }
+	deleteProjectPreSweepHookForTest = func() {
+		close(fenceUp)
+		<-letAbort
+	}
+	t.Cleanup(func() {
+		abort()
+		deregisterRootAgents, deleteProjectPreSweepHookForTest = prevSweep, nil
+	})
+
+	deleteDone := make(chan struct{})
+	var deleteErr error
+	go func() {
+		defer close(deleteDone)
+		_, deleteErr = p.manager.DeleteProject(DeleteProjectRequest{RepoID: p.repo.ID, RepoPath: p.repoPath})
+	}()
+	<-fenceUp
+
+	// The first attempt meets the fence. Should there be a second, the delete
+	// aborts — taking its fence down — before it runs.
+	var attempts atomic.Int32
+	rootCreateVerifyHookForTest = func() {
+		if attempts.Add(1) == 2 {
+			abort()
+			<-deleteDone
+		}
+	}
+	t.Cleanup(func() { rootCreateVerifyHookForTest = nil })
+
+	p.releaseAndWait()
+	abort()
+	<-deleteDone
+	require.Error(t, deleteErr, "fixture: the delete aborts after installing its fence")
+	require.Contains(t, deleteErr.Error(), "nothing was changed")
+
+	held, ok := p.heldCarry(t)
+	require.True(t, ok, "a heal refused by a delete's fence keeps its carry for the next pass")
+	require.Equal(t, p.prior.ID, held.conversation.ID)
+	require.Nil(t, findRootInstance(t, p.manager, p.repoPath), "no blank root may be committed in the carry's place")
+
+	rootCreateVerifyHookForTest = nil
+	resetRootEnsureBackoff(p.manager)
+	p.manager.ensureRootAgentsAndWait()
+	require.NotNil(t, findRootInstance(t, p.manager, p.repoPath), "the next pass re-creates the root")
+	last := (*p.seen)[len(*p.seen)-1]
+	require.Equal(t, p.prior.ID, last.ResumeConversation.ID,
+		"the replacement resumes the conversation the aborted delete left alone")
 }
 
 // Control for the race tests above: with NO concurrent delete, the same

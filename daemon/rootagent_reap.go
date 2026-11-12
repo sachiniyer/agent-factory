@@ -180,6 +180,7 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance, holdLocked
 		m.info().Printf("dead root reap for repo %s skipped storage delete: current root record has a different instance identity", repoID)
 		return reapedRootState{}, false, nil
 	}
+	testHookRootReapTornDown()
 	m.mu.Lock()
 	if m.instances[key] == inst {
 		delete(m.instances, key)
@@ -194,3 +195,9 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance, holdLocked
 	m.mu.Unlock()
 	return carried, true, nil
 }
+
+// testHookRootReapTornDown runs once the reap's teardown is done and before its
+// final m.mu section: the span in which the dead record is still in
+// m.instances, m.mu is free, and DeleteProject's gate does not count the reap
+// (PR #7190 review F1).
+var testHookRootReapTornDown = func() {}
