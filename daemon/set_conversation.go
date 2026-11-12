@@ -101,9 +101,12 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 		return err
 	}
 	prev := instance.AgentConversation()
-	if prev.Agent == conv.Agent && prev.ID == conv.ID {
-		return nil // already recorded: same id is a no-op success
+	if prev.Agent == conv.Agent && prev.ID == conv.ID && prev.CaptureKind == session.ConversationCaptureOperator {
+		return nil // already this repair: same id is a no-op success
 	}
+	// The same id recorded by a capture is NOT a no-op: the repair makes it
+	// the operator's, which the follow and the staleness guards treat as
+	// standing (#7120 review).
 	if !instance.SetAgentConversation(conv) {
 		return nil
 	}

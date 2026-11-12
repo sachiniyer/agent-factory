@@ -416,15 +416,8 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 	if !ok {
 		return program, false, ""
 	}
-	// An operator's repair is exempt, like a carried id: set-conversation
-	// proved its rollout belongs to this worktree and is a top-level thread,
-	// and the follow check replaces the record (dropping the operator kind)
-	// as soon as the runtime moves to another thread after the repair. An
-	// operator record that is still standing is therefore the conversation
-	// the operator chose for exactly this resume — refusing it because some
-	// newer thread exists would defeat the repair (#7120 review).
-	if !carried && conv.Agent == tmux.ProgramCodex && conv.CaptureKind != ConversationCaptureOperator {
-		if reason := i.staleRecordedCodexReason(program, conv.ID); reason != "" {
+	if !carried && conv.Agent == tmux.ProgramCodex {
+		if reason := i.staleRecordedCodexReason(program, conv.ID, conv.CaptureKind == ConversationCaptureOperator); reason != "" {
 			return program, false, reason
 		}
 	}
@@ -461,7 +454,15 @@ func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool
 // cannot be correlated either way. Fail closed: "we cannot prove current"
 // and "provably stale" both refuse, because silently resuming the wrong
 // thread is the bug this guard exists to kill.
-func (i *Instance) staleRecordedCodexReason(program, id string) string {
+//
+// operatorRepair skips only the newer-thread comparison, never the existence
+// checks: set-conversation proved the repair's rollout belongs to this
+// worktree and is a top-level thread, and the follow check replaces the record
+// (dropping the operator kind) as soon as the runtime moves to another thread
+// after the repair. A standing repair is the conversation the operator chose
+// for exactly this resume, so a newer thread in the worktree is no reason to
+// refuse it (#7120 review) — but a rollout that is gone or ambiguous still is.
+func (i *Instance) staleRecordedCodexReason(program, id string, operatorRepair bool) string {
 	workDir := i.GetWorktreePath()
 	home, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -483,6 +484,9 @@ func (i *Instance) staleRecordedCodexReason(program, id string) string {
 	}
 	if recordedPath == "" {
 		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+	}
+	if operatorRepair {
+		return ""
 	}
 	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
 	case codexRolloutStale:
