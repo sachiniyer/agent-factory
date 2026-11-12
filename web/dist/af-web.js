@@ -7064,7 +7064,7 @@ function isMutationOutcomeUncertain(e) {
   return isMutationCommittedError(e) || !(e instanceof ApiError) || !e.daemonRejected;
 }
 var CLIENT_VERSION_HEADER = "X-AF-Client-Version";
-var CLIENT_VERSION = "56a0365e1905";
+var CLIENT_VERSION = "708c3464d485";
 async function af(method, body, token2, signal) {
   const headers = {
     "Content-Type": "application/json",
@@ -22906,14 +22906,22 @@ function openConfirm(action, session, invoker = captureModalInvoker()) {
     mountWith();
   }
 }
-function openDeleteProject(root2, label, invoker) {
+function openDeleteProject(root2, label, invoker, refusal) {
   const statementNow = () => deleteProjectStatement(store.get(), sessionsSettled, root2);
   const stated = statementNow();
   if (invoker === void 0) {
     invoker = captureModalInvoker();
     if (!stated.checked && store.get().live === "open" && !sessionsSettled) requestResync();
   }
-  const restate = () => openDeleteProject(root2, label, invoker);
+  const restate = (carry) => openDeleteProject(root2, label, invoker, carry);
+  const watchStatement = (carry) => {
+    stopModalProjectionWatch?.();
+    const reconcile = () => {
+      if (!sameDeleteProjectStatement(statementNow(), stated)) restate(carry);
+    };
+    stopModalProjectionWatch = store.subscribe(reconcile);
+    reconcile();
+  };
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
@@ -22965,6 +22973,7 @@ function openDeleteProject(root2, label, invoker) {
             }
             m.setBusy(false);
             m.setError(errorText(e));
+            if (modal === m) watchStatement(errorText(e));
           });
         });
       },
@@ -22973,9 +22982,8 @@ function openDeleteProject(root2, label, invoker) {
     false,
     invoker
   );
-  stopModalProjectionWatch = store.subscribe(() => {
-    if (!sameDeleteProjectStatement(statementNow(), stated)) restate();
-  });
+  if (refusal !== void 0) modal?.setError(refusal);
+  watchStatement(refusal);
 }
 function openAddProject() {
   const invoker = captureModalInvoker();

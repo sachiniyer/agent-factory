@@ -1429,8 +1429,11 @@ function openConfirm(
  *  watches the projection while it waits for an answer and restates itself
  *  whenever what it would say changes — counts that move, or a check that lands
  *  or lapses — and the confirm re-reads the statement before acting, so a
- *  delete never goes out on a statement the dialog no longer makes. */
-function openDeleteProject(root: string, label: string, invoker?: ModalInvoker): void {
+ *  delete never goes out on a statement the dialog no longer makes. The watch
+ *  pauses while a confirmed delete is in flight and resumes if it is refused;
+ *  `refusal` carries that refusal into a restated dialog, so the user still sees
+ *  why the last attempt failed. */
+function openDeleteProject(root: string, label: string, invoker?: ModalInvoker, refusal?: string): void {
   const statementNow = () => deleteProjectStatement(store.get(), sessionsSettled, root);
   const stated = statementNow();
   if (invoker === undefined) {
@@ -1441,7 +1444,15 @@ function openDeleteProject(root: string, label: string, invoker?: ModalInvoker):
     // re-read it is waiting for.
     if (!stated.checked && store.get().live === "open" && !sessionsSettled) requestResync();
   }
-  const restate = () => openDeleteProject(root, label, invoker);
+  const restate = (carry?: string) => openDeleteProject(root, label, invoker, carry);
+  const watchStatement = (carry?: string) => {
+    stopModalProjectionWatch?.();
+    const reconcile = () => {
+      if (!sameDeleteProjectStatement(statementNow(), stated)) restate(carry);
+    };
+    stopModalProjectionWatch = store.subscribe(reconcile);
+    reconcile();
+  };
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
@@ -1508,6 +1519,9 @@ function openDeleteProject(root: string, label: string, invoker?: ModalInvoker):
               }
               m.setBusy(false);
               m.setError(errorText(e));
+              // Interactive again: the dialog goes back to stating the current
+              // projection, at once if it moved while the request was out.
+              if (modal === m) watchStatement(errorText(e));
             });
         });
       },
@@ -1516,11 +1530,10 @@ function openDeleteProject(root: string, label: string, invoker?: ModalInvoker):
     false,
     invoker,
   );
+  if (refusal !== undefined) modal?.setError(refusal);
   // openModal's close of the previous dialog dropped any earlier watch, so this
   // is the only one live.
-  stopModalProjectionWatch = store.subscribe(() => {
-    if (!sameDeleteProjectStatement(statementNow(), stated)) restate();
-  });
+  watchStatement(refusal);
 }
 
 /** Opens the add-project modal (#2456): the user names a path to a git checkout
