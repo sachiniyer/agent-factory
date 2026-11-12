@@ -11,7 +11,6 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
-	"syscall"
 	"testing"
 	"time"
 
@@ -586,21 +585,12 @@ func TestSandboxRunReapsStragglerOnNormalCompletion(t *testing.T) {
 	pid, perr := strconv.Atoi(strings.TrimSpace(string(data)))
 	require.NoError(t, perr)
 	require.Positive(t, pid, "the recorded straggler pid must be a real pid")
-	proc, ferr := os.FindProcess(pid)
-	require.NoError(t, ferr)
-	// Poll briefly: the reap sent SIGKILL, but the kernel may take a moment to
-	// reap the corpse. A 3s window is ample for a SIGKILL'd sleep and far below
-	// the 30s the straggler would live without the reap.
-	deadline := time.Now().Add(3 * time.Second)
-	var signalErr error
-	for time.Now().Before(deadline) {
-		signalErr = proc.Signal(syscall.Signal(0))
-		if signalErr != nil {
-			break // ESRCH / os.ErrProcessDone — the reap killed it
-		}
-		time.Sleep(20 * time.Millisecond)
-	}
-	assert.Error(t, signalErr,
+	// Poll briefly: the reap sent SIGKILL, and the sleep takes a moment to die. A
+	// 3s window is ample for a SIGKILLed sleep and far below the 30s the
+	// straggler lives without the reap. A zombie counts as killed: under a
+	// container PID 1 that never collects orphans, kill(pid, 0) keeps succeeding
+	// on a sleep the reap did kill (see processGone).
+	assert.True(t, waitProcessGone(pid, 3*time.Second),
 		"the straggler must be reaped (SIGKILLed) on normal completion — a survivor is a leaked transport helper")
 }
 
