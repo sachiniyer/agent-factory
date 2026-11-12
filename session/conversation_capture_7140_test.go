@@ -60,6 +60,27 @@ func TestUnreadableNewRolloutHeaderIsAnUnavailableChannel(t *testing.T) {
 		require.ErrorIs(t, err, ErrCodexCaptureChannelUnavailable)
 	})
 
+	// #7160 F1-a: a header af read but cannot classify is an answer, and an
+	// unreadable one beside it in the same window must not turn that answer
+	// into "could not read". Only a window whose every uncorrelated header was
+	// unreadable is an unavailable channel.
+	t.Run("an unreadable header beside a read-but-unparseable one", func(t *testing.T) {
+		if os.Geteuid() == 0 {
+			t.Skip("permission bits do not constrain root")
+		}
+		snap, codexHome, workDir := newRollout(t)
+		unreadable := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-11-12T10-00-00-"+heldTestOwnID+".jsonl", workDir)
+		require.NoError(t, os.Chmod(unreadable, 0))
+		malformed := filepath.Join(codexRolloutDayDir(codexHome, snap.startedAt), "rollout-2026-11-12T10-00-01-"+heldTestSiblingID+".jsonl")
+		require.NoError(t, os.WriteFile(malformed, []byte("not a session_meta record\n"), 0o600))
+
+		_, retry, err := captureCodexConversationOnce(snap)
+		require.True(t, retry)
+		require.ErrorIs(t, err, errCodexCaptureUndecided)
+		require.NotErrorIs(t, err, ErrCodexCaptureChannelUnavailable,
+			"a header af read but cannot classify is an answer, whatever else the window holds")
+	})
+
 	// The guard: a header Codex has not finished writing is readable, just not
 	// classifiable yet. That stays an undecided answer, never a channel.
 	t.Run("a header still being written", func(t *testing.T) {

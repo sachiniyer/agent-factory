@@ -63,7 +63,7 @@ func TestOperatorRepairStampDescribesOnlyTheRuntimeItWasMadeAgainst(t *testing.T
 		t.Run(c.name+": the follow takes the move", func(t *testing.T) {
 			workDir, paths := setup(t)
 			inst := staleResumeInstance(t, workDir, c.repair)
-			inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+			inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 			writtenInTheNewPane(t, inst, paths[c.resumedIn])
 
 			outcome := inst.FollowAgentConversationForRuntime(inst.AgentRuntimeToken(), inst.AgentConversation(), heldAnswer(c.resumedIn))
@@ -73,7 +73,7 @@ func TestOperatorRepairStampDescribesOnlyTheRuntimeItWasMadeAgainst(t *testing.T
 		t.Run(c.name+": a blind restore refuses the repair", func(t *testing.T) {
 			workDir, paths := setup(t)
 			inst := staleResumeInstance(t, workDir, c.repair)
-			inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+			inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 			writtenInTheNewPane(t, inst, paths[c.resumedIn])
 
 			restore := staleResumeInstance(t, workDir, inst.AgentConversation())
@@ -100,7 +100,7 @@ func TestOperatorRepairStampDescribesOnlyTheRuntimeItWasMadeAgainst(t *testing.T
 		workDir, _ := setup(t)
 		capture := AgentConversationData{Agent: tmux.ProgramCodex, ID: heldTestOwnID, CapturedAt: repairedAt, CaptureKind: ConversationCaptureCodexRollout}
 		inst := staleResumeInstance(t, workDir, capture)
-		inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+		inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 		require.Equal(t, capture, inst.AgentConversation())
 	})
 }
@@ -163,7 +163,7 @@ func TestOperatorRepairRestampedAtALaunchSurvivesADaemonRestart(t *testing.T) {
 	} {
 		inst := retireTestInstance(t)
 		require.True(t, inst.SetAgentConversation(repair))
-		inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+		inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 		launched := inst.AgentConversation()
 		require.False(t, launched.RepairRuntimeReplacedAt.IsZero(), "the launch must mark the standing repair")
 
@@ -345,7 +345,7 @@ func TestOperatorRepairKeepsTheOldRuntimesOwnWritesAcrossALaunch(t *testing.T) {
 				require.True(t, ok, "fixture: before any launch the repair resumes R; refused %v", decline)
 
 				inst := staleResumeInstance(t, workDir, r.repair)
-				inst.setRuntimeLaunch(tmux.ProgramCodex, nil)
+				inst.setRuntimeLaunch(tmux.ProgramCodex, nil, time.Time{})
 				l.look(inst)
 
 				restore := staleResumeInstance(t, workDir, inst.AgentConversation())

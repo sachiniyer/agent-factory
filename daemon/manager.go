@@ -431,21 +431,21 @@ type Manager struct {
 	// deletedRootRepos records repos (by repo ID) whose project was deleted at
 	// runtime (#1735), so the ensure loop STOPS re-creating their always-on root
 	// agent even though m.cfg is immutable in memory after start. DeleteProject
-	// also removes the repo from root_agents ON DISK, so a daemon restart drops it
-	// for good; this in-memory set is what suppresses the respawn for the rest of
-	// the running daemon's life (matching the existing "root_agents changes take
-	// effect on the next daemon start" contract — a re-added project's root
-	// materializes on restart, not mid-run). Guarded by m.mu.
+	// also removes the repo from root_agents ON DISK, so a restart drops it for
+	// good; this set suppresses the respawn for the rest of the running daemon's
+	// life (a re-added project's root materializes on restart, not mid-run).
 	// The value is the deleted claimant's project ID ("" when the delete
 	// targeted an unregistered repo, e.g. a path occupant): a later PROVEN
-	// mismatch releases the tombstone only when the disproven claimant IS
-	// the deleted one (#3299 review round 15), so an occupant's own deletion
-	// can never be released by a dead third party's mismatch. It is also what
-	// scopes an ALIAS tombstone to the record that owns the alias (#3299
-	// review id 3884615898). Since #3611 that mismatch must also be CURRENT:
-	// a verdict nobody has re-proved since the checkout could have changed is
-	// unknown rather than disproof, and unknown holds the tombstone.
-	deletedRootRepos map[string]string
+	// mismatch releases the tombstone only when the disproven claimant IS the
+	// deleted one (#3299 review round 15), so an occupant's own deletion can
+	// never be released by a dead third party's mismatch. It also scopes an
+	// ALIAS tombstone to the record that owns the alias (#3299 review id
+	// 3884615898). Since #3611 that mismatch must also be CURRENT: a verdict
+	// nobody has re-proved is unknown rather than disproof, and unknown holds.
+	// deletedRootEvidence maps a historical stand-in to the derived id holding
+	// its release evidence (suppressHistoricalRootAgent). Both guarded by m.mu.
+	deletedRootRepos    map[string]string
+	deletedRootEvidence map[string]string
 	// deferredTaskLifecycle parks a task's declared on_complete verb (#2595) for a
 	// session whose run finished while a TUI was attached, mapping the session's
 	// daemon key to the stable id of the session that finished. The paused poll

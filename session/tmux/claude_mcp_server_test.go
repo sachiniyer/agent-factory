@@ -50,6 +50,8 @@ const (
 	mcpServerDialogOnAllFixture    = "claude_2_1_322_mcp_server_dialog_cursor_on_all_future.ansi"
 	mcpServerComposerFixture       = "claude_2_1_322_composer_after_mcp_decline.ansi"
 	mcpServerMultiServerFixture    = "claude_2_1_322_mcp_multi_server_dialog.ansi"
+	mcpServerDialog50Fixture       = "claude_2_1_322_mcp_server_dialog_50_columns.ansi"
+	mcpServerDialog40Fixture       = "claude_2_1_322_mcp_server_dialog_40_columns.ansi"
 	mcpServerCapturedPreselection  = mcpServerDeclineLabel
 	mcpServerCapturedAfterOneUpRow = mcpServerUseAllLabel
 )
@@ -321,7 +323,24 @@ func TestCheckAndHandleTrustPrompt_PartiallyRenderedClaudeMCPServerDialogHolds(t
 func TestCheckAndHandleTrustPrompt_QuotedClaudeMCPServerDialogInjectsNothing(t *testing.T) {
 	dialog := readTrustFixture(t, mcpServerDialogFixture)
 	composer := readTrustFixture(t, mcpServerComposerFixture)
+	rule := strings.Repeat("─", 80)
+	// A user pasting the dialog into the composer (#7167 review, P2): Claude
+	// Code paints a multi-line draft INSIDE the composer, its continuation lines
+	// indented two columns, between the composer's own rules. Nothing is
+	// painted below the bottom rule, so footer-is-last cannot tell it from the
+	// live dialog; the composer's own ❯ line above the pasted preamble can.
+	var draft strings.Builder
+	draft.WriteString(rule + "\n" + claudeTrustSelectionGlyph + " what is this dialog asking me?\n")
+	for _, line := range strings.Split(strings.TrimRight(plainMCPServerFrame(t, mcpServerDeclineLabel), "\n"), "\n") {
+		if strings.TrimSpace(strings.Trim(strings.TrimSpace(line), "─")) == "" {
+			continue // the dialog's own top rule and blank tail stay out of the paste
+		}
+		draft.WriteString("  " + line + "\n")
+	}
+	draft.WriteString(rule + "\n")
 	for _, tt := range []struct{ name, content string }{
+		{"the dialog pasted into a multi-line composer draft, nothing below the composer", draft.String()},
+		{"the 50-column capture above the agent's composer", strings.TrimRight(readTrustFixture(t, mcpServerDialog50Fixture), "\n") + "\n" + composer},
 		{"the captured dialog above the agent's composer", strings.TrimRight(dialog, "\n") + "\n" + composer},
 		{"the captured dialog with trailing prose", strings.TrimRight(dialog, "\n") + "\nThat is the dialog af answers at startup.\n"},
 		{"the decline label as a composer draft under the preamble", "  New MCP server found in this project: probe\n\n" +
@@ -330,6 +349,23 @@ func TestCheckAndHandleTrustPrompt_QuotedClaudeMCPServerDialogInjectsNothing(t *
 		t.Run(tt.name, func(t *testing.T) {
 			_, cmds := pollStaticPane(t, tt.content, 4)
 			require.Empty(t, sentKeystrokes(cmds), "no key may be injected into a pane that only quotes the dialog; got %v", cmds)
+		})
+	}
+}
+
+// A dialog af can see but not read — measured: below about 56 columns Claude
+// Code wraps the "all future" row (50 columns) and then the preamble itself (40
+// columns) — is still in the way of the composer. af holds without a key and
+// says why once, instead of reporting the pane clear and letting the caller
+// paste the prompt into the picker (#7167 review, P3-1).
+func TestCheckAndHandleTrustPrompt_UnreadableClaudeMCPServerDialogHoldsWithoutAKey(t *testing.T) {
+	for _, fixture := range []string{mcpServerDialog50Fixture, mcpServerDialog40Fixture} {
+		t.Run(fixture, func(t *testing.T) {
+			_, _, errLog := captureTrustPromptLogs(t)
+			handled, cmds := pollStaticPane(t, readTrustFixture(t, fixture), 4)
+			require.True(t, handled, "a dialog af cannot read is still in the way; reporting the pane clear types the prompt into it")
+			require.Empty(t, sentKeystrokes(cmds), "af presses no key into a dialog it cannot read; got %v", cmds)
+			require.Equal(t, 1, strings.Count(errLog.String(), "refusing to answer"), "the hold is reported once, not once per poll")
 		})
 	}
 }

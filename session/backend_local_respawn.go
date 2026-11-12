@@ -411,7 +411,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		if prepared != nil {
 			runtimeBase = prepared.runtimeBase
 		}
-		i.setRuntimeLaunch(runtimeBase, ts)
+		i.setRuntimeLaunch(runtimeBase, ts, ts.SpawnedAt())
 		// A respawn produced a replacement process: the run-end classifier at
 		// ConfirmLive reads this verdict to interrupt a still-in-flight task
 		// run rather than let the fresh agent's first idle edge complete it

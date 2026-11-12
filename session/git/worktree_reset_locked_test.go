@@ -344,6 +344,142 @@ func TestRemoveWorktreeDir_CorruptedPointerIsCleanedNotDeadEnded(t *testing.T) {
 	assert.True(t, os.IsNotExist(statErr), "the corrupted worktree directory must be removed")
 }
 
+// localeSensitiveGitFor puts a `git` earlier on PATH that emulates git's
+// gettext-translated die() message for `worktree remove`: when LC_ALL is the C
+// locale it emits the English "validation failed, cannot remove working tree:"
+// string mayDeleteWorktreeDir matches; under any other LC_ALL it emits the
+// German msgstr from git's po/de.po, which does NOT contain "validation failed".
+// Every other subcommand delegates to the real git so the registration probe
+// and prune run against a real repo.
+//
+// This stands in for a real git with a German translation catalog installed
+// running under a non-English shell locale — the conjunction the dev/test
+// containers never exercise because they ship no git.mo and only the C locale
+// (the same reason the existing English-stub tests in cleanup_retry_test.go are
+// blind to translation by construction).
+func localeSensitiveGitFor(t *testing.T) {
+	t.Helper()
+	real, err := findRealGit()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	// The die() spelling is picked from LC_ALL, mirroring git's actual behavior
+	// with a translated catalog installed: gettext selects the catalog by the
+	// process locale, which git inherits from LC_ALL (then LANG, then LANGUAGE).
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = \"remove\" ]; then\n" +
+		"    case \"$LC_ALL\" in\n" +
+		"      C|POSIX|\"\") echo 'fatal: validation failed, cannot remove working tree: corrupt' >&2 ;;\n" +
+		"      *) echo 'fatal: Validierung fehlgeschlagen, kann Arbeitsverzeichnis nicht loeschen: corrupt' >&2 ;;\n" +
+		"    esac\n" +
+		"    exit 128\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec " + real + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+}
+
+// TestRemoveWorktreeDir_CorruptedPointerCleanupIsLocaleIndependent pins the
+// LC_ALL=C pin in runBoundedWorktreeGit: mayDeleteWorktreeDir's
+// strings.Contains(..., "validation failed") match must not be defeated by an
+// ambient non-English shell locale that localizes git's die() stderr.
+//
+// runBoundedWorktreeGit previously built the child env from os.Environ() plus
+// only GIT_TERMINAL_PROMPT=0; the reset path inherited the caller's
+// LC_ALL/LANG/LANGUAGE, so under a non-English locale with git translations
+// installed git emitted a translated die() message (e.g. German "Validierung
+// fehlgeschlagen"), the "validation failed" substring match silently failed,
+// and the #726 corrupted-.git-pointer deletion allowance was disabled —
+// stranding both the session record and the worktree directory on
+// ErrWorktreeStillRegistered with unactionable "unlock" advice (#2531). The fix
+// pins LC_ALL=C, matching gitCommandEnvironment and the sibling free-function
+// runners (branch_holds.go, worktree_repo_gone_authorization.go) that already
+// carry the same invariant.
+//
+// The fake git emulates the translated catalog: it picks the die() spelling
+// from LC_ALL, the same way cleanup_retry_test.go stubs the English message
+// for the C-locale case. Under the pre-fix runner the ambient de_DE.UTF-8 leaks
+// through os.Environ(), the fake emits the German msgstr, the gate misses, and
+// RemoveWorktreeDir returns ErrWorktreeStillRegistered — the exact stranded-
+// record dead end. With the pin, LC_ALL=C reaches the child, the fake emits the
+// English message, the gate matches, and the corrupted worktree is cleaned up.
+func TestRemoveWorktreeDir_CorruptedPointerCleanupIsLocaleIndependent(t *testing.T) {
+	repoRoot, worktreePath, _ := resetRepoWithWorktree(t, "corrupt-locale")
+	corruptWorktreePointer(t, worktreePath)
+
+	// An ambient non-English shell locale: under the pre-fix runner, this
+	// leaks through os.Environ() to git, which would localize its die()
+	// message. Set all three locale vectors a shell could have exported.
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de_DE:de")
+
+	// Fake git emulates a German git catalog for `worktree remove` (picking
+	// the spelling from LC_ALL) and delegates the probe/prune subcommands to
+	// the real git so the registration state is real. Setup already ran against
+	// the real git before this override.
+	localeSensitiveGitFor(t)
+
+	removed, err := RemoveWorktreeDir(repoRoot, worktreePath)
+	require.NoError(t, err,
+		"the C-locale pin must reach git's stderr so the #726 corrupted-pointer "+
+			"allowance fires under a non-English ambient locale (#2531)")
+	assert.True(t, removed,
+		"the corrupted worktree directory must be removed, not stranded")
+	_, statErr := os.Stat(worktreePath)
+	assert.True(t, os.IsNotExist(statErr),
+		"the corrupted worktree directory must be gone — the gate must match in any locale")
+}
+
+// TestRemoveWorktreeDir_CorruptedPointerCleanupIsLocaleIndependent_NegativeCase
+// is the negative-side lock: when the runner does NOT pin LC_ALL=C (simulated
+// here by clearing the pin via a fake git that always emits the German msgstr
+// regardless of LC_ALL), the gate must refuse and RemoveWorktreeDir must report
+// ErrWorktreeStillRegistered — the stranded-record dead end the fix prevents.
+// This locks the gate's locale-sensitivity as the deciding branch in the
+// corrupted-pointer scenario, so a regression that removes the pin (or re-arms
+// the ambient locale) fails RED here rather than silently degrading.
+func TestRemoveWorktreeDir_CorruptedPointerCleanupIsLocaleIndependent_NegativeCase(t *testing.T) {
+	repoRoot, worktreePath, _ := resetRepoWithWorktree(t, "corrupt-locale-neg")
+	corruptWorktreePointer(t, worktreePath)
+
+	// Simulate the pre-fix runner: ambient German locale reaches git unchanged.
+	t.Setenv("LC_ALL", "de_DE.UTF-8")
+	t.Setenv("LANG", "de_DE.UTF-8")
+	t.Setenv("LANGUAGE", "de_DE:de")
+
+	// A fake git that ALWAYS emits the German msgstr, ignoring LC_ALL — this is
+	// what real git with a German catalog does under a non-C locale, and what
+	// the pre-fix runner exposed the gate to. The probe and prune delegate to
+	// real git so the registration state is real.
+	real, err := findRealGit()
+	require.NoError(t, err)
+	dir := t.TempDir()
+	script := "#!/bin/sh\n" +
+		"for a in \"$@\"; do\n" +
+		"  if [ \"$a\" = \"remove\" ]; then\n" +
+		"    echo 'fatal: Validierung fehlgeschlagen, kann Arbeitsverzeichnis nicht loeschen: corrupt' >&2\n" +
+		"    exit 128\n" +
+		"  fi\n" +
+		"done\n" +
+		"exec " + real + " \"$@\"\n"
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "git"), []byte(script), 0o755))
+	t.Setenv("PATH", dir+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	_, err = RemoveWorktreeDir(repoRoot, worktreePath)
+	require.Error(t, err,
+		"a localized die() message the gate cannot match must surface as a failure, "+
+			"not silent success — this is the stranded-record dead end the LC_ALL=C pin prevents")
+	require.ErrorIs(t, err, ErrWorktreeStillRegistered,
+		"the gate must refuse when the substring match misses, so reset retains the record (#2531)")
+	assert.NotContains(t, err.Error(), "validation failed",
+		"sanity: the German message must not accidentally contain the English substring the gate matches")
+	_, statErr := os.Stat(worktreePath)
+	assert.NoError(t, statErr,
+		"the directory must survive a refused gate — deletion is the gate's to authorize")
+}
+
 // TestRemoveWorktreeDir_CorruptedPointerRemovalFailureRetainsRecord is the #2531
 // end-to-end lock — the scenario the direct-helper unit test could not prove
 // reachable. A corrupted pointer routes to the os.RemoveAll fallback (reachable only

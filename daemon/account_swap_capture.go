@@ -41,6 +41,15 @@ import (
 // runtime what it holds and reports why when it cannot (#7126). A carried
 // confirmation still refuses an unreadable store: confirming the carried
 // thread past it would hide the breakage.
+//
+// Only a Codex replacement is pumped, because only Codex was observed painting
+// its trust dialog after af's readiness check (#7155). Claude Code paints its
+// folder-trust and MCP-approval dialogs as setup screens before its REPL
+// (measured on 2.1.322), so af's first ready frame is the dialog itself and
+// the readiness contract's own dismissal answers it. Gemini CLI (0.51.0) does
+// paint its folder-trust dialog after its composer, but af has no recognizer
+// for that dialog, so a pump could not answer it either; that gap is the
+// readiness contract's for every Gemini launch, not this window's.
 func captureAccountSwapConversation(instance *session.Instance, snap session.ConversationCaptureSnapshot) (bool, error) {
 	if instance.AgentRuntimeToken().Agent() != tmux.ProgramCodex {
 		return false, nil
@@ -70,15 +79,20 @@ func captureReplacementCodexConversation(instance *session.Instance, snap sessio
 	_ = instance.CheckConversationCaptureEvidence()
 	snap = instance.BindConversationCaptureRuntime(snap)
 	resultCh := make(chan swapCaptureResult, 1)
-	captureTimeout := conversationCaptureTimeout // read at spawn: the pump below may abandon the worker
+	captureTimeout := conversationCaptureTimeout
 	go func() {
 		conversation, err := session.CaptureAgentConversation(token.Agent(), snap, captureTimeout)
 		resultCh <- swapCaptureResult{conversation, err}
 	}()
 	res := pump.until(resultCh)
 	if res.err != nil {
-		if !carried && errors.Is(res.err, session.ErrCodexCaptureChannelUnavailable) {
-			return true, nil
+		if errors.Is(res.err, session.ErrCodexCaptureChannelUnavailable) {
+			if !carried {
+				return true, nil
+			}
+			// The copy landed and the replacement resumed the carried thread;
+			// only its confirmation could not read the store (#7155).
+			return false, fmt.Errorf("%w: %w", errCarriedConversationUnconfirmed, res.err)
 		}
 		return false, fmt.Errorf("capture replacement Codex conversation: %w", res.err)
 	}
@@ -96,6 +110,25 @@ func captureReplacementCodexConversation(instance *session.Instance, snap sessio
 		return false, errors.New("replacement Codex runtime changed before its conversation id could be recorded")
 	}
 	return false, nil
+}
+
+// errCarriedConversationUnconfirmed is a carried swap whose confirmation could
+// not read a capture channel. The swap still refuses this attempt, since
+// confirming the carried thread past a store af cannot read would hide the
+// breakage, but nothing was lost: the replacement runs the carried thread.
+var errCarriedConversationUnconfirmed = errors.New("the replacement is running the carried conversation, but af could not confirm it")
+
+// pumpReplacementTrustWindow runs the trust pump on its own, for a replacement
+// this attempt did not launch: recovery that inherited a live, complete pane
+// set (#7155). The readiness contract looked once; a Codex dialog that paints
+// after that look is answered here, before the notice.
+func pumpReplacementTrustWindow(instance *session.Instance) {
+	if instance.AgentRuntimeToken().Agent() != tmux.ProgramCodex {
+		return
+	}
+	pump := startReplacementTrustPump(instance, swapTrustWindow())
+	defer pump.stop()
+	pump.throughWindow()
 }
 
 type swapCaptureResult struct {
@@ -141,6 +174,9 @@ func (p *replacementTrustPump) throughWindow() {
 	for {
 		select {
 		case <-end.C:
+			// The window's end is the last check before the notice, not
+			// whichever tick happened to precede it (#7155).
+			p.instance.CheckAndHandleTrustPrompt()
 			return
 		case <-p.ticker.C:
 			p.instance.CheckAndHandleTrustPrompt()

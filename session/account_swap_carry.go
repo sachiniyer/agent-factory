@@ -44,6 +44,11 @@ type conversationCarry struct {
 	// committed marks a carry re-planned from a pending record: the identity
 	// checkpoint only records a carry whose pre-commit copy landed.
 	committed bool
+	// srcFiles is the source store's plain rollouts as locateCodex enumerated
+	// them, reused by the staleness check of the same plan rather than walked
+	// again under the swap's fences (#7152). The plan clears it before it
+	// returns, so a recorded plan never holds the listing.
+	srcFiles map[string]struct{}
 }
 
 // HandoffConversation reports what the agent serving a session after a
@@ -205,6 +210,7 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 			return nil, reason
 		}
 	}
+	carry.srcFiles = nil
 	return carry, ""
 }
 
@@ -285,7 +291,12 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 }
 
 func (c *conversationCarry) locateCodex() string {
-	source, reason := codexRolloutRelPath(c.srcHome, c.id)
+	srcFiles, err := codexRolloutFiles(c.srcHome)
+	if err != nil {
+		return "af could not enumerate the Codex rollout store"
+	}
+	c.srcFiles = srcFiles
+	source, reason := codexRolloutRelPathIn(c.srcHome, srcFiles, c.id)
 	if reason != "" {
 		return reason
 	}
@@ -316,13 +327,17 @@ func (c *conversationCarry) locateCodex() string {
 		c.transcript = source
 	}
 	// A plain rollout is not the thread's current one after a backtrack (#7141).
-	return c.codexRevertReason()
+	if reason := c.codexRevertReason(); reason != "" {
+		return reason
+	}
+	// A paginated fork's rollout holds only the turns after the fork (#7153).
+	return c.codexForkReason(source != "")
 }
 
 // staleCarryReason is what a replacement is told when the recorded
 // conversation is not the one the user was last in.
 const staleCarryReason = "the conversation af recorded is no longer the newest one in this worktree " +
-	"(a new one was started, for example with /clear or /new)"
+	"(a new one was started, for example with /clear or /new, or an older one was resumed)"
 
 // staleReason refuses a carry whose recorded conversation is no longer the
 // newest in this worktree. The recorded id is written at launch and at
@@ -364,9 +379,12 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
-	files, err := codexRolloutFiles(c.srcHome)
-	if err != nil {
-		return "af could not enumerate the previous account's rollout store"
+	files := c.srcFiles
+	if files == nil {
+		var err error
+		if files, err = codexRolloutFiles(c.srcHome); err != nil {
+			return "af could not enumerate the previous account's rollout store"
+		}
 	}
 	launchDir := workDir
 	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
@@ -394,7 +412,6 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 // codexRolloutRelPath returns the one rollout for id beneath home, relative to
 // home, or "" when there is none.
 func codexRolloutRelPath(home, id string) (string, string) {
-	var matches []string
 	// A store that cannot be enumerated is not "no match": the walk stops at
 	// the first failure, so the map it leaves behind is partial and the one
 	// match it may hold proves nothing about uniqueness (#5471 review).
@@ -402,6 +419,13 @@ func codexRolloutRelPath(home, id string) (string, string) {
 	if err != nil {
 		return "", "af could not enumerate the Codex rollout store"
 	}
+	return codexRolloutRelPathIn(home, files, id)
+}
+
+// codexRolloutRelPathIn is codexRolloutRelPath over a store already
+// enumerated in full.
+func codexRolloutRelPathIn(home string, files map[string]struct{}, id string) (string, string) {
+	var matches []string
 	for path := range files {
 		if strings.EqualFold(codexConversationIDFromPath(path), id) {
 			matches = append(matches, path)

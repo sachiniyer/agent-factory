@@ -102,7 +102,15 @@ func runBoundedWorktreeGit(repoRoot string, combined bool, args ...string) ([]by
 	// Preserve ambient runtime/credential settings, but not repository selection:
 	// Git hooks export GIT_DIR, which otherwise overrides the explicit -C path
 	// and can turn a registered worktree into a false "ours to delete" answer.
-	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0")
+	// Pin LC_ALL=C so git's die() messages are emitted in the C locale, keeping
+	// mayDeleteWorktreeDir's "validation failed" substring match locale-independent
+	// — the same invariant gitCommandEnvironment and the sibling free-function
+	// runners (branch_holds.go, worktree_repo_gone_authorization.go) already
+	// carry. Without this pin, a non-English shell locale localizes git's stderr
+	// (e.g. German "Validierung fehlgeschlagen ..."), the gate's match silently
+	// fails, and the #726 corrupted-.git-pointer deletion allowance is disabled —
+	// stranding both the session record and the worktree directory (#2531).
+	cmd.Env = append(repositoryPathEnvironment(os.Environ()), "GIT_TERMINAL_PROMPT=0", "LC_ALL=C")
 	// Own process group, so the deadline tears down git AND anything it spawned.
 	// exec.CommandContext's default Cancel SIGKILLs only the direct child, which on
 	// a stalled unlink leaves the work still running against the dead mount.

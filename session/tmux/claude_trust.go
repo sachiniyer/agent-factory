@@ -361,9 +361,11 @@ func (d claudeFolderTrustDialog) selectedLabel() string {
 }
 
 // claudeFolderTrustDialogPresent reports whether the capture shows the dialog
-// whose affirmative row af locates by label. The MCP-server prompt and the
+// whose affirmative row af locates by label. The older MCP-server prompt and the
 // legacy "Do you trust the files in this folder?" wording render no such row;
-// they keep the historical Enter tap.
+// they keep the historical Enter tap. Claude Code 2.1.322's MCP-server dialog
+// never reaches this check: answerClaudeTrustPrompt routes it to
+// declineClaudeMCPServer first.
 func claudeFolderTrustDialogPresent(content string) bool {
 	return strings.Contains(ansiCSISequence.ReplaceAllString(content, ""), claudeTrustAffirmativeLabel)
 }
