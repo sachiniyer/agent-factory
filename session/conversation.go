@@ -635,6 +635,19 @@ func (i *Instance) SessionCodexHomeDir() string {
 // program_overrides edit cannot move (#6769 review) — falling back to a fresh
 // resolution only for rows that predate runtime evidence.
 func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
+	snap, err := i.RetakeSessionCodexCaptureBaseline()
+	if err != nil {
+		log.WarningLog.Printf("session %q: %v", i.Title, err)
+	}
+	return snap
+}
+
+// RetakeSessionCodexCaptureBaseline is SessionCodexCaptureBaseline for a
+// caller that takes the baseline again on a cadence — the capture loop after a
+// failed before-image — and so must not log the same failure on every call:
+// it returns why there is no baseline, and the caller's per-error dedup warns
+// once (#7131).
+func (i *Instance) RetakeSessionCodexCaptureBaseline() (ConversationCaptureSnapshot, error) {
 	program := i.RuntimeProgram()
 	if strings.TrimSpace(program) == "" {
 		// An unreadable project config is "cannot baseline", the empty
@@ -642,18 +655,11 @@ func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
 		// bound to the global config's command (#7077).
 		resolution, err := resolveLaunchProgramForInstance(i)
 		if err != nil {
-			log.WarningLog.Printf("session %q: no conversation capture baseline: %v", i.Title, err)
-			return ConversationCaptureSnapshot{}
+			return ConversationCaptureSnapshot{}, fmt.Errorf("no conversation capture baseline: %w", err)
 		}
 		program = resolution.command
 	}
-	return i.sessionCodexCaptureBaselineFor(program)
-}
-
-// RetakeSessionCodexCaptureBaseline: compile-only stub for the failing-first
-// commit.
-func (i *Instance) RetakeSessionCodexCaptureBaseline() (ConversationCaptureSnapshot, error) {
-	return i.SessionCodexCaptureBaseline(), nil
+	return i.sessionCodexCaptureBaselineFor(program), nil
 }
 
 // sessionCodexCaptureBaselineFor builds the snapshot against an explicit

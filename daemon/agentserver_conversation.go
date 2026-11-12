@@ -39,8 +39,12 @@ func (hs *headlessServer) captureCodexConversation(snap session.ConversationCapt
 		// F5) — a server restarted over a surviving tmux session rebuilds its
 		// instance with no launch record at all.
 		if err := hs.inst.CheckConversationCaptureEvidence(); err != nil {
-			log.WarningLog.Printf("agent-server: conversation capture for %q recorded nothing: %v",
-				hs.inst.Title, unrecordedCaptureError(hs.inst.Title, err))
+			// Its own wording, not the loop's: this capture runs once and never
+			// retries, and the set-conversation repair the loop names is refused
+			// for a row that runs off its host, while this server serves no such
+			// route (#7131).
+			log.WarningLog.Printf("agent-server: conversation capture for %q recorded nothing, so restoring this session starts a fresh conversation: %v",
+				hs.inst.Title, err)
 			return
 		}
 		// Adoption is attributed to the launched runtime's own open files,

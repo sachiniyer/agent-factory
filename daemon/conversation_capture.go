@@ -186,8 +186,8 @@ func (m *Manager) conversationCaptureLoop(repoID, key string, inst *session.Inst
 // loop goes on following the runtime (#7101). Nor does a baseline whose store
 // scan failed: the follow never reads it (#7120 review), and an unrecorded
 // row's attempt skips the diff that would and asks the held query, which
-// needs none (#7123), while the loop itself takes the baseline again on its
-// next re-ask. Ending the loop on it would hand the row back to the poll,
+// needs none (#7123), and a later attempt that can use one takes the baseline
+// again (#7131). Ending the loop on it would hand the row back to the poll,
 // whose re-arm walks the store again for a fresh baseline every cycle.
 func (m *Manager) conversationCaptureArmed(key string, inst *session.Instance, token session.AgentRuntimeToken) bool {
 	if inst == nil || inst.UserKilled() || inst.IsArchived() {
@@ -350,23 +350,23 @@ func unrecordedCaptureError(title string, err error) error {
 		err, shellsuggest.PositionalCommand("af", []string{"sessions", "set-conversation"}, title))
 }
 
-// captureAgentConversationAttempt: compile-only stub for the failing-first
-// commit — master's loop retake, moved here unchanged.
-func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *session.Instance, snap *session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration, retake bool) error {
-	if retake && snap.CodexBaselineErr() != nil && !inst.AgentConversation().HasID() {
-		if retaken := inst.SessionCodexCaptureBaseline(); retaken.CapturesCodex() {
-			*snap = retaken
-		}
-	}
-	return m.captureAgentConversation(repoID, key, inst, *snap, token, timeout)
-}
-
 // captureAgentConversation runs one capture attempt and commits any id it
 // finds; on a row that already recorded one it runs the follow check instead
 // (#7101). A non-nil return is the attempt's failure for the loop's
 // rate-limited warning; ordinary absence (no rollout yet) returns nil —
 // nothing wrong.
 func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration) error {
+	return m.captureAgentConversationAttempt(repoID, key, inst, &snap, token, timeout, false)
+}
+
+// captureAgentConversationAttempt is one attempt of the capture loop, which
+// owns loopSnap. With retake set, an unrecorded row whose before-image failed
+// takes it again — but only once the attempt has an agent process to judge
+// from, since the diff it feeds is the only use of a store walk and an attempt
+// without evidence returns before any diff (#7124 review F3, #7131). The
+// retaken snapshot replaces the loop's, so later attempts diff against it.
+func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *session.Instance, loopSnap *session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, timeout time.Duration, retake bool) error {
+	snap := *loopSnap
 	if inst == nil || inst.UserKilled() {
 		return nil
 	}
@@ -393,6 +393,23 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// than polling the store for its whole window (#7123, #7124 review F1/F2).
 	if err := inst.CheckConversationCaptureEvidence(); err != nil {
 		return unrecordedCaptureError(inst.Title, err)
+	}
+	// A failed before-image never answers the diff, and keeping it for the
+	// runtime's life turned a transient store failure — EMFILE, EIO — into the
+	// permanent loss of the one channel that can answer while the runtime
+	// holds two top-level threads (#7124 review F3). Take it again, now that
+	// the attempt can use it: one walk per rearm, never per poll. A late
+	// baseline only hides a rollout minted before it, which the held query
+	// still finds. Why a retake has no baseline is returned, not logged, so
+	// the loop warns once.
+	var retakeErr error
+	if retake && snap.CodexBaselineErr() != nil {
+		if retaken, err := inst.RetakeSessionCodexCaptureBaseline(); err != nil {
+			retakeErr = err
+		} else if retaken.CapturesCodex() {
+			*loopSnap = retaken
+			snap = retaken
+		}
 	}
 	snap = inst.BindConversationCaptureRuntime(snap)
 	var conv session.AgentConversationData
@@ -425,6 +442,9 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 			if baselineErr != nil {
 				// Say so once: until the agent holds a rollout open there is
 				// nothing to record, and the store is broken either way.
+				if retakeErr != nil {
+					return fmt.Errorf("the Codex rollout store could not be scanned for a baseline (%v), and taking it again failed: %w", baselineErr, retakeErr)
+				}
 				return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
 			}
 			return nil

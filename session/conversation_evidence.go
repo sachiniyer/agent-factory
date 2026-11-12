@@ -140,12 +140,20 @@ func (i *Instance) captureRuntimeEvidence() error {
 	return err
 }
 
-// KeepCaptureEvidenceForTest leaves p as the identity an unanswerable
-// reattach probe keeps for capture, unverified. Production reaches it only
-// through settleReattachVerification.
+// KeepCaptureEvidenceForTest leaves the instance exactly as
+// settleReattachVerification's retire does after a probe that could not
+// answer about p: the launch command and evidence cleared under a bumped
+// runtime-evidence generation, and p kept for capture, unverified. The real
+// shape matters — a retired row re-resolves its capture baseline from config,
+// not from RuntimeProgram (#7131). Production reaches it only through the
+// settle.
 func (i *Instance) KeepCaptureEvidenceForTest(p proctree.Process) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
+	i.runtimeEvidenceGeneration.Add(1)
+	i.runtimeProgram = ""
+	i.runtimePID = 0
+	i.runtimeStartID = 0
 	i.captureEvidence = keptCaptureEvidence{pid: p.PID, startID: p.StartID}
 }
 
