@@ -114,13 +114,14 @@ func readOwnedHookProgress(worktreePath, sessionID string) (*hookProgress, strin
 func (g *GitWorktree) AbandonHookProgress() {
 	g.hooksResumeDisabled = true
 	worktreePath, sessionID := g.worktreePath, g.hookScopeID()
-	if err := abandonHookProgress(worktreePath, sessionID); err != nil {
+	p, err := abandonHookProgress(worktreePath, sessionID)
+	if err != nil {
 		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, err)
 		done := make(chan struct{})
 		g.hooksRetirementDone = done
 		go func() {
 			defer close(done)
-			retryHookProgressAbandonment(worktreePath, sessionID)
+			retryHookProgressAbandonment(worktreePath, sessionID, p)
 		}()
 	}
 }
@@ -145,7 +146,7 @@ func (g *GitWorktree) installHookProgressAbandonment(worktreePath, sessionID str
 			}
 		}
 		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, readErr)
-		retryHookProgressAbandonment(worktreePath, sessionID)
+		retryHookProgressAbandonment(worktreePath, sessionID, p)
 	}()
 }
 

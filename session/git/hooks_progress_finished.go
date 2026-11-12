@@ -17,6 +17,25 @@ import (
 // the journal as inconclusive in the meantime.
 var hookProgressMarkFinished = writeHookProgressFinished
 
+// HookProgressMarkFinishedForTest returns the current terminal-marker writer.
+// SetHookProgressMarkFinishedForTest installs a replacement and returns a
+// restore function. Cross-package tests (for example the daemon-level
+// abandonment/rebuild E2E) use these to inject a transient marker-storage
+// failure so the bounded abandonment retry is scheduled, mirroring the
+// production trigger the bug describes.
+func HookProgressMarkFinishedForTest() func(string, []byte, os.FileMode) error {
+	return hookProgressMarkFinished
+}
+
+// SetHookProgressMarkFinishedForTest installs a terminal-marker writer and
+// returns a restore function. Production never calls this; it is the
+// cross-package equivalent of the in-package `hookProgressMarkFinished` seam.
+func SetHookProgressMarkFinishedForTest(fn func(string, []byte, os.FileMode) error) func() {
+	previous := hookProgressMarkFinished
+	hookProgressMarkFinished = fn
+	return func() { hookProgressMarkFinished = previous }
+}
+
 type hookProgressFinishedFlight struct {
 	done chan struct{}
 	err  error
