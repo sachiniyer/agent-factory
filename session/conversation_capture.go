@@ -596,9 +596,9 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 		// descriptor set that failed mid-walk. Like a mid-write
 		// session_meta it is a not-yet-answer, so it gets the same
 		// bounded settle rather than a verdict.
-		return AgentConversationData{}, true, fmt.Errorf(
+		return AgentConversationData{}, true, captureChannelUnavailable(fmt.Errorf(
 			"%w: could not enumerate the runtime's open files to attribute %d new rollout files",
-			errCodexCaptureUndecided, len(candidates))
+			errCodexCaptureUndecided, len(candidates)))
 	case len(attributed) == 1:
 		return AgentConversationData{
 			Agent:       tmux.ProgramCodex,
@@ -625,7 +625,7 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 		return nil, nil
 	}
 	if snap.codexBeforeErr != nil {
-		return nil, fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr)
+		return nil, captureChannelUnavailable(fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr))
 	}
 	// The diff scan descends only into day directories that could hold a
 	// rollout minted around or after the snapshot; the daemon re-asks this on
@@ -634,7 +634,7 @@ func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
 	// the user's whole Codex history (#6845).
 	after, err := codexRolloutFilesSince(snap.codexHome, codexRolloutScanFloor(snap.startedAt))
 	if err != nil {
-		return nil, fmt.Errorf("scan of the Codex rollout store failed: %w", err)
+		return nil, captureChannelUnavailable(fmt.Errorf("scan of the Codex rollout store failed: %w", err))
 	}
 	var candidates []string
 	for path := range after {

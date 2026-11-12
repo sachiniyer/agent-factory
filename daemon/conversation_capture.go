@@ -402,9 +402,19 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 	// held query below — which needs no baseline — got its turn (#7123). Both
 	// go straight to the held query.
 	baselineErr := snap.CodexBaselineErr()
+	// A diff that fails only because a channel it needs could not be read —
+	// the store scan inside its window — has said nothing about the runtime's
+	// thread, and the held query below reads the runtime's open files, not the
+	// store. So it still gets its turn; ending the attempt here would leave a
+	// swap that deferred on that same failure recording nothing for as long as
+	// the store stays unreadable (#7126, #7128 review).
+	var diffErr error
 	if !snap.BaselineFree() && baselineErr == nil {
 		if conv, err = session.CaptureAgentConversation(agent, snap, timeout); err != nil {
-			return err
+			if !errors.Is(err, session.ErrCodexCaptureChannelUnavailable) {
+				return err
+			}
+			diffErr = err
 		}
 	}
 	if !conv.HasID() {
@@ -424,6 +434,9 @@ func (m *Manager) captureAgentConversation(repoID, key string, inst *session.Ins
 				// Say so once: until the agent holds a rollout open there is
 				// nothing to record, and the store is broken either way.
 				return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
+			}
+			if diffErr != nil {
+				return fmt.Errorf("af can record only a rollout the agent holds open until the Codex rollout store can be scanned: %w", diffErr)
 			}
 			return nil
 		}
