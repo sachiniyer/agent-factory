@@ -144,6 +144,9 @@ func operatorRepairProvenance(rolloutPath, launchDir string) resumeDecline {
 	if strings.TrimSpace(launchDir) == "" {
 		return declineResumeUnverified("af cannot determine this session's launch directory, so it cannot confirm the operator-recorded conversation is this session's own")
 	}
+	if codexRolloutCompressed(rolloutPath) {
+		return declineResumeUnverified("the operator-recorded conversation's rollout is compressed, and af does not read compressed rollouts, so it cannot confirm it is this session's own")
+	}
 	cwd, subagent, ok := codexRolloutSessionMeta(rolloutPath)
 	switch {
 	case !ok:

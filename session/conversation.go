@@ -495,13 +495,19 @@ func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversat
 			if recordedPath != "" {
 				// Two rollouts claim the same id: "current" cannot be proven,
 				// now or later.
-				return declineResume("af could not confirm the recorded conversation is still the newest one in this worktree: two rollouts record it")
+				return declineResume(codexRolloutDuplicatedReason)
 			}
 			recordedPath = file
 		}
 	}
 	if recordedPath == "" {
-		return declineResume("the recorded conversation's rollout is missing from the Codex home this session uses")
+		// Not missing while Codex still resumes it compressed or from a
+		// thread/revert rollout (#7130).
+		path, decline := recordedCodexRolloutInAnotherForm(home, conv.ID)
+		if decline.reason != "" {
+			return decline
+		}
+		recordedPath = path
 	}
 	launchDir := LaunchCaptureWorkingDir(program, workDir)
 	var repair operatorRepairWindow
@@ -519,7 +525,7 @@ func (i *Instance) staleRecordedCodexDecline(program string, conv AgentConversat
 		// mid-write — is a look that failed, not evidence about the id.
 		return declineResumeUnverified("af could not confirm the recorded conversation is still the newest one in this worktree")
 	case codexRolloutRecordedGone:
-		return declineResume("the recorded conversation's rollout is missing from the Codex home this session uses")
+		return declineResume(codexRolloutMissingReason)
 	}
 	return resumeDecline{}
 }

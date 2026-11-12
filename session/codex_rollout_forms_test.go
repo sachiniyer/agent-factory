@@ -166,3 +166,50 @@ func TestCarryDoesNotCallACompressedRolloutMissing(t *testing.T) {
 	require.NotContains(t, inst.accountSwapLaunch.carryFallback, "missing")
 	require.Contains(t, inst.accountSwapLaunch.carryFallback, "compressed")
 }
+
+// The forms are recognised for the recorded thread only: the plain walk the
+// staleness check reads its candidates from still names plain rollouts alone.
+func TestCodexRolloutOtherForms(t *testing.T) {
+	codexHome := t.TempDir()
+	cwd := t.TempDir()
+	minted := time.Now().Add(-9 * 24 * time.Hour)
+	plain := writeStoredCodexRollout(t, codexHome, formsThreadID, cwd, minted, minted, minted)
+	compressed := writeCompressedCodexRollout(t, codexHome, formsThreadID, "", minted, minted)
+	revert := writeRevertCodexRollout(t, codexHome, formsThreadID, formsRevertID, cwd, minted, minted)
+	revertCompressed := writeCompressedCodexRollout(t, codexHome, formsThreadID, formsRevert2ID, minted, minted)
+	other := writeCompressedCodexRollout(t, codexHome, formsOtherID, "", minted, minted)
+	require.NoError(t, os.WriteFile(filepath.Join(filepath.Dir(plain), "rollout-compress-x.tmp"), nil, 0o644))
+
+	forms, err := codexRolloutOtherForms(codexHome, formsThreadID)
+	require.NoError(t, err)
+	require.ElementsMatch(t, []string{compressed, revert, revertCompressed}, forms)
+
+	files, err := codexRolloutFiles(codexHome)
+	require.NoError(t, err)
+	require.Contains(t, files, plain)
+	for _, path := range []string{compressed, revert, revertCompressed, other} {
+		require.NotContains(t, files, path, "the staleness walk must not take %s as a candidate", filepath.Base(path))
+	}
+	require.True(t, codexRolloutCompressed(compressed))
+	require.True(t, codexRolloutCompressed(revertCompressed))
+	require.False(t, codexRolloutCompressed(revert))
+	require.False(t, codexRolloutCompressed(plain))
+}
+
+// Control: a compressed rollout is never a staleness candidate — af cannot
+// read its header to say whose it is, and in a shared home every other cold
+// thread is one, so counting them would refuse every long-idle restore as
+// could-not-look.
+func TestRestoreDoesNotJudgeByACompressedThread(t *testing.T) {
+	now := time.Now()
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+	workDir := t.TempDir()
+	recorded := now.Add(-20 * 24 * time.Hour)
+	writeStoredCodexRollout(t, codexHome, formsThreadID, workDir, recorded, recorded, recorded)
+	writeCompressedCodexRollout(t, codexHome, formsOtherID, "", now.Add(-10*24*time.Hour), now.Add(-9*24*time.Hour))
+
+	inst := staleResumeInstance(t, workDir, codexCaptureRecord(formsThreadID))
+	_, ok, decline := prepareExactResumeConversation(inst, inst.Program)
+	require.True(t, ok, "refused: %v", decline)
+}

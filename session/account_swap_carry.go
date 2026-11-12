@@ -302,6 +302,9 @@ func (c *conversationCarry) locateCodex() string {
 				return symlinkCarryReason(path)
 			}
 		}
+		if reason := codexCarryOtherFormsReason(c.srcHome, c.id); reason != "" {
+			return reason
+		}
 		return "its rollout is missing from the previous account's home"
 	case source == "":
 		c.transcript = existing
