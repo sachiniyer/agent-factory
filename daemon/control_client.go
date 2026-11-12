@@ -111,6 +111,29 @@ func EnsureDaemon() error {
 	return ensureDaemonWithLauncherUntil(launchDaemonProcessFn, time.Time{})
 }
 
+// EnsureDaemonUntil is EnsureDaemon with an admission deadline that bounds the
+// WHOLE ensure phase — mutex acquisition, the initial control-socket ping, and
+// any spawn-then-ready wait. The public zero-deadline EnsureDaemon relies on
+// every inner dial being bounded by daemonDialTimeout, but the RPC read after a
+// successful dial is unbounded without a non-zero deadline: pingDaemonUntil →
+// callDaemonNoEnsureAttemptBefore gates conn.SetDeadline on !deadline.IsZero(),
+// so against a control socket that accepts the connection and never services the
+// RPC, client.Call blocks forever — and the unbounded lockEnsureDaemonUntil
+// holds ensureDaemonMu against every later daemon operation in the process.
+//
+// The runtime-files probe floors its deadline for the same reason ("a wedged
+// listener ... would make the dial succeed and client.Call block forever");
+// callDaemon bounds its whole admission phase at daemonAdmissionRetryWait.
+// EnsureDaemonUntil gives a caller that fronts a user-visible deadline of its
+// own — the TUI's HTTP transport, whose conflict refresh promises its
+// rebindConflictRefreshTimeout re-arms the form — the same bound, so a wedged
+// control socket cannot leave the ensure phase parked on the ping or holding
+// the mutex. A zero deadline is forwarded unchanged and keeps EnsureDaemon's
+// historical unbounded behavior for the callers that still rely on it.
+func EnsureDaemonUntil(deadline time.Time) error {
+	return ensureDaemonWithLauncherUntil(launchDaemonProcessFn, deadline)
+}
+
 var launchDaemonProcessAtFn = launchDaemonProcessAt
 
 // EnsureDaemonFromPath starts the daemon from execPath if the control socket is

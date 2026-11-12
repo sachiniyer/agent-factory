@@ -53,7 +53,11 @@ func hookProgressPath(worktree string) (string, error) {
 		return "", err
 	}
 	dir := filepath.Join(home, "logs", "hooks")
-	return filepath.Join(dir, "progress-"+worktreePathScopeIdentity(worktree)+".json"), nil
+	return filepath.Join(dir, hookProgressName(worktree)), nil
+}
+
+func hookProgressName(worktree string) string {
+	return "progress-" + worktreePathScopeIdentity(worktree) + ".json"
 }
 
 func newHookProgress(run hookRun, commands []string, prefix, generation string) (*hookProgress, error) {
@@ -169,6 +173,10 @@ func publishHookProgress(run hookRun, commands []string, prefix, generation, pat
 	if !currentParent.IsDir() || !os.SameFile(parentIdentity, currentParent) {
 		return nil, nil, rollback, fmt.Errorf("hook journal directory changed while publication lock was held")
 	}
+	// Counted before the rename, so no reader that sees the new journal can see
+	// the old count. A failed rename leaves a raised count, which only makes a
+	// pending abandonment leave this path alone.
+	recordHookProgressPublication(filepath.Base(path))
 	if err := os.Rename(prepared.temporary, path); err != nil {
 		return nil, nil, rollback, err
 	}

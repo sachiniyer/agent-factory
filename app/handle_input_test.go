@@ -734,12 +734,12 @@ func TestCancelNamingClearsPlaceholder(t *testing.T) {
 func TestHandleStateNewTitleSeverity(t *testing.T) {
 	t.Run("default snapshot fetchers preserve existing rows", func(t *testing.T) {
 		h := newTestHome(t)
-		previousHTTP := withDaemonHTTP
-		withDaemonHTTP = func(func(*apiclient.Client) error) error {
+		previousHTTP := withDaemonHTTPCtx
+		withDaemonHTTPCtx = func(context.Context, func(*apiclient.Client) error) error {
 			t.Error("newTestHome snapshot poll reached the daemon launcher")
 			return errTestFetcherUnstubbed
 		}
-		t.Cleanup(func() { withDaemonHTTP = previousHTTP })
+		t.Cleanup(func() { withDaemonHTTPCtx = previousHTTP })
 
 		rows, _, err := allReposSnapshotFetcher(context.Background())
 		require.ErrorIs(t, err, errTestFetcherUnstubbed)

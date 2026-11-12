@@ -40,6 +40,15 @@ func readPendingHookProgress(worktreePath, sessionID string) (*hookProgress, err
 	return nil, os.ErrNotExist
 }
 
+// ReadPendingHookProgressForTest is the cross-package export of
+// readPendingHookProgress. Cross-package tests (for example the daemon-level
+// abandonment/rebuild E2E) use it to assert that a rebuilt journal remains
+// resumable after an abandonment retry has drained — the silent command-loss
+// class the journal subsystem exists to prevent.
+func ReadPendingHookProgressForTest(worktreePath, sessionID string) (*hookProgress, error) {
+	return readPendingHookProgress(worktreePath, sessionID)
+}
+
 func waitForHookProgressRead(ctx context.Context, ticks <-chan time.Time, worktreePath, sessionID string, err error) (*hookProgress, error) {
 	var lastError string
 	for {
