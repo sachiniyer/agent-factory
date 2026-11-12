@@ -659,10 +659,7 @@ func (m *Manager) resumeFromLimitLockedOutcome(repoID, key string, instance *ses
 		instance.SetRebuildTeardownNotify(m.rebuildTeardownNotify(repoID))
 		instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error { return m.stopVSCodeForInstance(key, i.ID) })
 		if accountSwap != nil {
-			accountConversationCapture, rerr = instance.AccountSwapConversationCapture()
-			if rerr == nil {
-				rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
-			}
+			accountConversationCapture, rerr = instance.RespawnForAccountSwapWithLiveBoundary(beforeLive)
 			// The launch can demote a committed carry to a fresh start;
 			// the answer is the pending record's state as it now stands
 			// (#6768).
