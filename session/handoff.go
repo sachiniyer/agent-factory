@@ -281,7 +281,7 @@ func (i *Instance) currentAgentNameLocked() string {
 // irreversible teardown and cheap to test on its own.
 //
 // Clearing Tab.Conversation is load-bearing, not tidiness. respawn feeds the
-// program through prepareResumeConversation, which would otherwise hand the
+// program through prepareExactResumeConversation, which would otherwise hand the
 // INCOMING agent the outgoing agent's recorded conversation id. That specific
 // call is already guarded (ResumeProgramWithConversationID refuses a
 // provider mismatch), but leaving a stale codex id on a tab now running claude

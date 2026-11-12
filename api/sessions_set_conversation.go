@@ -28,7 +28,9 @@ rollout, and a session mid-operation all refuse with the reason.
 
 The running pane is NOT touched: the recorded id only matters the next time af
 builds a resume command (respawn, restore, handoff). Re-running with the same
-id is a no-op success.
+id is a no-op success. The recorded id stands while the pane stays on the
+thread it was on when you set it; only if the pane's Codex process later moves
+to another thread does af record that thread instead (#7120).
 
 Example:
   af sessions set-conversation fix-auth 0195f8e2-7c3a-7b1d-9e4f-2a6c8d0b1e2f`,

@@ -59,7 +59,9 @@ func TestSetConversationRecordsAProvenRollout(t *testing.T) {
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
 	conv := inst.AgentConversation()
 	assert.Equal(t, setConversationDaemonID, conv.ID)
-	assert.Equal(t, "codex_rollout", conv.CaptureKind)
+	// An operator's repair keeps its own kind so it outlives a restart as a
+	// repair: the follow and the staleness guards treat it differently (#7120).
+	assert.Equal(t, session.ConversationCaptureOperator, conv.CaptureKind)
 	assert.Equal(t, setConversationDaemonID, persistedConversationID(t, repoID))
 
 	// Same id again is a no-op success, not a rewrite.
@@ -166,8 +168,22 @@ func TestCaptureAgentConversationSkipsARecordedRepair(t *testing.T) {
 	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil))
 	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
 
-	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
-		inst.AgentRuntimeToken(), 50*time.Millisecond))
+	// The fixture's runtime holds every rollout in the store, so a recorded
+	// row's follow check sees two threads it cannot tell apart (#7101): it
+	// keeps the operator's record and says why instead of guessing.
+	err := manager.captureAgentConversation(repoID, key, inst, snap,
+		inst.AgentRuntimeToken(), 50*time.Millisecond)
+	require.ErrorIs(t, err, session.ErrCodexConversationAmbiguous)
 	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID,
 		"a capture that discovered a rollout must not replace the operator's record")
+
+	// When the runtime holds only the repaired thread, the record is
+	// confirmed and nothing is reported.
+	held := &heldOnly{}
+	held.set(filepath.Join(configAgentCodexDayDir(codexHome, time.Now()),
+		"rollout-2026-08-10T10-17-35-"+setConversationDaemonID+".jsonl"))
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
+		inst.AgentRuntimeToken(), 50*time.Millisecond))
+	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
 }

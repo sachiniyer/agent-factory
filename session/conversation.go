@@ -18,6 +18,13 @@ const (
 	// ConversationCaptureCarried marks a conversation a same-agent account
 	// swap copied into the incoming account's home and resumed (#4367).
 	ConversationCaptureCarried = "carried"
+	// ConversationCaptureOperator marks an id an operator recorded with
+	// `af sessions set-conversation` (#6769). It is persisted so the repair
+	// keeps its standing across a daemon restart: the follow check leaves it
+	// until the runtime moves to another thread, and the restore and carry
+	// staleness guards accept it — its provenance was proven when it was set
+	// (#7120 review).
+	ConversationCaptureOperator = "operator"
 )
 
 // AgentConversationData is the provider-specific conversation identity for a
@@ -410,7 +417,7 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 		return program, false, ""
 	}
 	if !carried && conv.Agent == tmux.ProgramCodex {
-		if reason := i.staleRecordedCodexReason(program, conv.ID); reason != "" {
+		if reason := i.staleRecordedCodexReason(program, conv.ID, conv.CaptureKind == ConversationCaptureOperator); reason != "" {
 			return program, false, reason
 		}
 	}
@@ -447,7 +454,15 @@ func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool
 // cannot be correlated either way. Fail closed: "we cannot prove current"
 // and "provably stale" both refuse, because silently resuming the wrong
 // thread is the bug this guard exists to kill.
-func (i *Instance) staleRecordedCodexReason(program, id string) string {
+//
+// operatorRepair skips only the newer-thread comparison, never the existence
+// checks: set-conversation proved the repair's rollout belongs to this
+// worktree and is a top-level thread, and the follow check replaces the record
+// (dropping the operator kind) as soon as the runtime moves to another thread
+// after the repair. A standing repair is the conversation the operator chose
+// for exactly this resume, so a newer thread in the worktree is no reason to
+// refuse it (#7120 review) — but a rollout that is gone or ambiguous still is.
+func (i *Instance) staleRecordedCodexReason(program, id string, operatorRepair bool) string {
 	workDir := i.GetWorktreePath()
 	home, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil || strings.TrimSpace(home) == "" {
@@ -469,6 +484,9 @@ func (i *Instance) staleRecordedCodexReason(program, id string) string {
 	}
 	if recordedPath == "" {
 		return "the recorded conversation's rollout is missing from the Codex home this session uses"
+	}
+	if operatorRepair {
+		return ""
 	}
 	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(LaunchCaptureWorkingDir(program, workDir))) {
 	case codexRolloutStale:
@@ -609,8 +627,51 @@ func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
 // remote session's identity. Remote identities arrive through the
 // agent-server reporting path in conversation_remote.go (#6769 review).
 func (i *Instance) sessionCodexCaptureBaselineFor(program string) ConversationCaptureSnapshot {
-	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+	home, workingDir, ok := i.sessionCodexCaptureStoreFor(program)
+	if !ok {
 		return ConversationCaptureSnapshot{}
+	}
+	return BeginConversationCaptureAtCodexHomeAndWorkingDir(home, workingDir)
+}
+
+// SessionCodexCaptureScope binds the same store and launch directory as
+// SessionCodexCaptureBaseline but walks nothing: no before-image is taken. A
+// recorded row's loop only runs the follow check, which asks the runtime what
+// it holds and never reads a baseline, so arming it must not walk the store
+// on the poll goroutine — ~15 walks of one shared store after every restart,
+// a stalled poll on a hung mount — nor let a failing walk end the loop
+// (#7120 review).
+func (i *Instance) SessionCodexCaptureScope() ConversationCaptureSnapshot {
+	program := i.RuntimeProgram()
+	if strings.TrimSpace(program) == "" {
+		resolution, err := resolveLaunchProgramForInstance(i)
+		if err != nil {
+			log.WarningLog.Printf("session %q: no conversation capture scope: %v", i.Title, err)
+			return ConversationCaptureSnapshot{}
+		}
+		program = resolution.command
+	}
+	home, workingDir, ok := i.sessionCodexCaptureStoreFor(program)
+	if !ok {
+		return ConversationCaptureSnapshot{}
+	}
+	if workingDir != "" {
+		workingDir = pathutil.ResolveForCompare(workingDir)
+	}
+	return ConversationCaptureSnapshot{
+		startedAt:    time.Now(),
+		codexHome:    home,
+		workingDir:   workingDir,
+		receiptState: newCodexReceiptState(),
+		scopeOnly:    true,
+	}
+}
+
+// sessionCodexCaptureStoreFor resolves the Codex store and launch directory a
+// capture for this session binds to, or ok=false when there is none.
+func (i *Instance) sessionCodexCaptureStoreFor(program string) (home, workingDir string, ok bool) {
+	if i.Capabilities().Workspace != WorkspaceLocalWorktree {
+		return "", "", false
 	}
 	workDir := i.GetWorktreePath()
 	// The provider is what the launch command resolves to, not the
@@ -622,13 +683,13 @@ func (i *Instance) sessionCodexCaptureBaselineFor(program string) ConversationCa
 	// conjunct only ever rejected this override case — matching
 	// SessionCodexHomeDir and the create-time capture gate above.
 	if tmux.DetectAgentFromCommand(program) != tmux.ProgramCodex || i.ResolvedAgent() != tmux.ProgramCodex {
-		return ConversationCaptureSnapshot{}
+		return "", "", false
 	}
 	home, err := i.codexHomeForLaunch(program, workDir)
 	if err != nil || strings.TrimSpace(home) == "" {
-		return ConversationCaptureSnapshot{}
+		return "", "", false
 	}
-	return BeginConversationCaptureAtCodexHomeAndWorkingDir(home, LaunchCaptureWorkingDir(program, workDir))
+	return home, LaunchCaptureWorkingDir(program, workDir), true
 }
 
 // conversationResumableHere is ConversationResumableHere with the session's own

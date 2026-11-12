@@ -279,9 +279,17 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				return setupErr
 			}
 			runtimeProgram = resolution.command
-			program := injectSystemPromptWithEnv(prepareResumeConversation(i, resolution.command), resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
+			resumeProgram, resumed, refusal := prepareExactResumeConversation(i, resolution.command)
+			program := injectSystemPromptWithEnv(resumeProgram, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
 			setLaunchProgram(tmuxSession, program,
 				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
+			// Logged only if this restore actually re-spawns: a reattach to a
+			// live pane resumes nothing, so a refusal there is not news (#7101).
+			var refused tmux.ExactResumeRefusal
+			if !resumed {
+				refused = i.exactResumeRefusal(refusal).ExactResumeRefusal
+			}
+			tmuxSession.SetExactResumeRefusal(refused)
 			// A re-spawn here resumes the session's own recorded conversation or
 			// starts fresh (#4797), never the latest one on a shared account home.
 			tmuxSession.SetExactResumeOnly(true)

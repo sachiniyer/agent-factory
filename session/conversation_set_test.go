@@ -66,7 +66,8 @@ func TestValidateSettableConversation_HappyPath(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, tmux.ProgramCodex, conv.Agent)
 	assert.Equal(t, setConversationID, conv.ID)
-	assert.Equal(t, ConversationCaptureCodexRollout, conv.CaptureKind)
+	assert.Equal(t, ConversationCaptureOperator, conv.CaptureKind,
+		"a repair records its own kind so it keeps standing across a restart (#7120)")
 	assert.False(t, conv.CapturedAt.IsZero())
 }
 

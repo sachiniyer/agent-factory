@@ -197,7 +197,11 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		}
 		return nil, reason
 	}
-	if !carry.committed {
+	// An operator's standing repair is exempt for the reason the restore
+	// guard gives (prepareExactResumeConversation): its provenance was proven
+	// when it was set, and it stops being an operator record as soon as the
+	// runtime moves to another thread (#7120 review).
+	if !carry.committed && req.outgoing.CaptureKind != ConversationCaptureOperator {
 		if reason := carry.staleReason(req.program, req.workDir); reason != "" {
 			return nil, reason
 		}

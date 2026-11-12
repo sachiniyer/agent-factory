@@ -104,6 +104,12 @@ type ConversationCaptureSnapshot struct {
 	// nothing and adopts nothing — a rollout's appearance inside the window
 	// is not evidence of which process wrote it (#6847).
 	runtime *codexRuntimeAttribution
+	// scopeOnly marks a snapshot that binds a store and launch directory but
+	// took no before-image (SessionCodexCaptureScope): it serves the held
+	// query and the follow check, which need no baseline, and the
+	// new-since-baseline diff refuses it — with no before-set, every file in
+	// the window would read as new (#7120 review).
+	scopeOnly bool
 }
 
 // codexReceiptState is the receipt-check memory carried inside a snapshot.
@@ -352,6 +358,13 @@ func (s *ConversationCaptureSnapshot) CapturesCodex() bool {
 	return s != nil && strings.TrimSpace(s.codexHome) != ""
 }
 
+// BaselineFree reports whether the snapshot binds a store without a
+// before-image (SessionCodexCaptureScope): only the held query may answer from
+// it, never the new-since-baseline diff.
+func (s *ConversationCaptureSnapshot) BaselineFree() bool {
+	return s != nil && s.scopeOnly
+}
+
 // CodexBaselineFailed reports whether the snapshot's before-image scan itself
 // failed: the map can no longer distinguish "new" from "pre-existing" inside
 // the capture window, so a capture armed on it would guess. A re-arm that
@@ -593,6 +606,9 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 }
 
 func newCodexRolloutFiles(snap ConversationCaptureSnapshot) ([]string, error) {
+	if snap.scopeOnly {
+		return nil, nil
+	}
 	if snap.codexBeforeErr != nil {
 		return nil, fmt.Errorf("the snapshot's scan of the Codex rollout store failed: %w", snap.codexBeforeErr)
 	}

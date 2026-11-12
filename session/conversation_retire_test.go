@@ -152,10 +152,13 @@ func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 	t.Setenv("CODEX_HOME", t.TempDir()) // empty store: the recorded rollout is missing
 	inst := retireTestInstance(t)
 
-	program, _, refusedID, err := respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	program, _, refusal, err := respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
 	require.NoError(t, err)
-	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", refusedID,
+	require.Equal(t, "019f386f-7206-7fc2-803b-f7045e07a242", refusal.ID,
 		"a stale recorded rollout must surface as the id the commit retires")
+	require.Equal(t, inst.Title, refusal.Session, "the refusal names its session (#7101)")
+	require.NotEmpty(t, refusal.Reason, "the refusal carries the reason the restore logs (#7101)")
+	require.True(t, refusal.retire, "a stale id is retired once the fresh spawn commits")
 	require.NotContains(t, program, "resume",
 		"the refused launch comes back fresh, not resume-rewritten")
 
@@ -165,9 +168,9 @@ func TestRespawnLaunchProgramReportsTheRefusedID(t *testing.T) {
 	t.Setenv("CODEX_HOME", codexHome)
 	writeCodexRolloutFileWithCwd(t, codexHome,
 		"rollout-2026-08-10T10-17-35-019f386f-7206-7fc2-803b-f7045e07a242.jsonl", inst.Path)
-	program, _, refusedID, err = respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
+	program, _, refusal, err = respawnLaunchProgram(inst, "codex", "codex", false, true, nil)
 	require.NoError(t, err)
-	require.Empty(t, refusedID)
+	require.Empty(t, refusal.ID)
 	require.Contains(t, program, "resume 019f386f-7206-7fc2-803b-f7045e07a242")
 }
 

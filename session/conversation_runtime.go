@@ -45,6 +45,25 @@ import (
 // — unknown is not foreign, but it is not attribution either.
 type codexRuntimeAttribution struct {
 	attribute func(candidates []string) (attributed []string, inconclusive bool)
+	// answerHeld is the baseline-free half of the channel (#7101): it hands
+	// judge what the bound runtime holds open right now, and a rollout that
+	// set contains is the runtime's own thread however long ago it was
+	// minted. nil on channels that can only judge candidates (test fixtures,
+	// older shapes).
+	answerHeld func(judge heldRolloutJudge) (AgentConversationData, error)
+}
+
+// heldRolloutJudge decides a conversation from a held path set and names the
+// path its answer came from.
+type heldRolloutJudge func(held map[string]struct{}) (conv AgentConversationData, path string, err error)
+
+// codexConversationHolder remembers which pane member's descriptors named the
+// conversation last time, under which runtime generation, and what they named.
+type codexConversationHolder struct {
+	gen     string
+	pid     int
+	startID uint64
+	id      string
 }
 
 // attributeCodexRollouts asks the bound runtime to judge candidates. An
@@ -201,8 +220,104 @@ func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapsh
 	if !snap.CapturesCodex() {
 		return snap
 	}
-	snap.runtime = &codexRuntimeAttribution{attribute: i.attributeCodexRolloutPaths}
+	snap.runtime = &codexRuntimeAttribution{
+		attribute:  i.attributeCodexRolloutPaths,
+		answerHeld: i.answerHeldCodexConversation,
+	}
 	return snap
+}
+
+// answerHeldCodexConversation is the instance-side answer behind a bound
+// channel's held query. The follow check asks it on every rearm for every
+// recorded Codex session, and the full walk reads the whole process table —
+// one stat per process on the box — to find the pane's members. So when the
+// member that named the conversation last time is still the same process in
+// the same runtime generation, and the record is still that answer, its own
+// descriptors are read first: if judge gives the same answer from them,
+// nothing else could change the verdict (a second top-level rollout anywhere
+// else would only make the full walk ambiguous, which keeps the record
+// exactly as this answer does). Any other outcome falls through to the full
+// walk, which also re-learns the holder.
+//
+// A generation that changes mid-walk discards the walk — its files belong to
+// no live process set — exactly as attributeCodexRolloutPaths does.
+func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentConversationData, error) {
+	i.mu.RLock()
+	override := i.codexRuntimeHeldOverride
+	i.mu.RUnlock()
+	// The roots and generation this answer judges from. Production uses only
+	// the verified launch evidence, never codexRuntimeRoots' active-pane
+	// fallback (#7120 review); the test override keeps its own resolution.
+	resolve := func() ([]proctree.Process, string, error) {
+		if override != nil {
+			gen, _, err := i.codexRuntimeJudgement()
+			return nil, gen, err
+		}
+		root, err := i.codexVerifiedRuntimeRoot()
+		if err != nil {
+			return nil, "", err
+		}
+		roots := []proctree.Process{root}
+		return roots, codexGenerationKey(roots), nil
+	}
+	roots, gen, err := resolve()
+	if err != nil {
+		return AgentConversationData{}, err
+	}
+	i.codexAttrMu.Lock()
+	holder := i.codexHolder
+	i.codexAttrMu.Unlock()
+	// The fast path may only CONFIRM the record, never change it: its
+	// equivalence with the full walk ("anything else could only make the walk
+	// ambiguous, which keeps the record too") holds only while the record is
+	// the holder's own answer. A record that moved since — an operator's
+	// set-conversation to a thread another member holds — needs the full walk,
+	// which reports that ambiguity instead of re-pointing the repair (#7120
+	// review).
+	if override == nil && holder.pid > 0 && holder.gen == gen && holder.id == i.AgentConversation().ID {
+		if p, err := proctree.Lookup(holder.pid); err == nil && p.StartID == holder.startID {
+			if paths, err := proctree.OpenFilePaths(holder.pid); err == nil {
+				if conv, _, err := judge(paths); err == nil && conv.ID == holder.id {
+					return conv, nil
+				}
+			}
+		}
+	}
+
+	var byMember map[int]heldMemberFiles
+	if override != nil {
+		paths, err := override()
+		if err != nil {
+			return AgentConversationData{}, err
+		}
+		// A fixture has no per-process answer, so it never learns a holder.
+		byMember = map[int]heldMemberFiles{0: {paths: paths}}
+	} else if byMember, err = heldPathsByMemberForRoots(roots); err != nil {
+		return AgentConversationData{}, err
+	}
+	held := make(map[string]struct{})
+	for _, member := range byMember {
+		for path := range member.paths {
+			held[path] = struct{}{}
+		}
+	}
+	conv, path, judgeErr := judge(held)
+	if _, after, err := resolve(); err != nil || after != gen {
+		return AgentConversationData{}, errors.New("the pane's runtime was replaced while its open files were read")
+	}
+	var learned codexConversationHolder
+	if judgeErr == nil && conv.HasID() {
+		for pid, member := range byMember {
+			if _, ok := member.paths[path]; ok && pid > 0 {
+				learned = codexConversationHolder{gen: gen, pid: pid, startID: member.startID, id: conv.ID}
+				break
+			}
+		}
+	}
+	i.codexAttrMu.Lock()
+	i.codexHolder = learned
+	i.codexAttrMu.Unlock()
+	return conv, judgeErr
 }
 
 // attributeCodexRolloutPaths is the instance-side judgement behind every bound
@@ -288,6 +403,28 @@ func codexGenerationKey(roots []proctree.Process) string {
 	return strings.Join(parts, ",")
 }
 
+// codexVerifiedRuntimeRoot is the only root the held query may judge from:
+// the (pid, start-stamp) launch evidence setRuntimeLaunch pinned to this
+// runtime, still naming the same process. codexRuntimeRoots' fallback — the
+// session's ACTIVE pane — is not evidence of which process is the agent: it
+// can be a user's split or a new window running its own codex in the same
+// worktree and store, and the held query would then record that process's
+// thread and re-record it every interval (#7120 review). Without verified
+// evidence the answer is an error the capture loop logs, never a guess.
+func (i *Instance) codexVerifiedRuntimeRoot() (proctree.Process, error) {
+	i.mu.RLock()
+	pid, startID := i.runtimePID, i.runtimeStartID
+	i.mu.RUnlock()
+	if pid <= 0 {
+		return proctree.Process{}, errors.New("af has no launch record of this session's agent process, so it cannot tell which open thread is the agent's own")
+	}
+	root, err := proctree.Lookup(pid)
+	if err != nil || root.StartID != startID {
+		return proctree.Process{}, fmt.Errorf("the agent process af launched for this session (pid %d) is gone or replaced, so af cannot tell which open thread is the agent's own", pid)
+	}
+	return root, nil
+}
+
 // codexRuntimeRoots resolves the pane-root process this instance's agent
 // runtime launched as. The recorded launch evidence — the (pid, kernel
 // start-stamp) pair setRuntimeLaunch pinned to the runtime claim — is the
@@ -325,6 +462,29 @@ func (i *Instance) codexRuntimeRoots() ([]proctree.Process, error) {
 // the process holding the rollout being judged — "I could not look" must
 // never arrive as "nobody holds it".
 func (i *Instance) heldPathsForRoots(roots []proctree.Process) (map[string]struct{}, error) {
+	byMember, err := heldPathsByMemberForRoots(roots)
+	if err != nil {
+		return nil, err
+	}
+	held := make(map[string]struct{})
+	for _, member := range byMember {
+		for path := range member.paths {
+			held[path] = struct{}{}
+		}
+	}
+	return held, nil
+}
+
+// heldMemberFiles is one runtime member's open files, with the start stamp
+// that proves a later lookup of the same pid is the same process.
+type heldMemberFiles struct {
+	startID uint64
+	paths   map[string]struct{}
+}
+
+// heldPathsByMemberForRoots is heldPathsForRoots keyed by member pid, for the
+// follow check's holder fast path (#7101).
+func heldPathsByMemberForRoots(roots []proctree.Process) (map[int]heldMemberFiles, error) {
 	snapshot, err := proctree.Snapshot()
 	if err != nil {
 		return nil, err
@@ -345,14 +505,12 @@ func (i *Instance) heldPathsForRoots(roots []proctree.Process) (map[string]struc
 	if len(members) == 0 {
 		return nil, errors.New("the pane's root process is no longer in the process table")
 	}
-	held := make(map[string]struct{})
+	held := make(map[int]heldMemberFiles, len(members))
 	for pid := range members {
 		paths, err := proctree.OpenFilePaths(pid)
 		switch {
 		case err == nil:
-			for path := range paths {
-				held[path] = struct{}{}
-			}
+			held[pid] = heldMemberFiles{startID: snapshot[pid].StartID, paths: paths}
 		case errors.Is(err, proctree.ErrProcessExited),
 			errors.Is(err, fs.ErrNotExist),
 			errors.Is(err, syscall.ESRCH):
