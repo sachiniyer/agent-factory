@@ -86,17 +86,77 @@ jobs:
               number: process.env.BROKEN_NUMBER,
             });
 
+      # While a composition halt holds, only a fix-master PR may land, and only
+      # once its would-be merge result passes the same composition check (#7151).
+      - name: Pick fix-master PRs for the halted master
+        id: fixes
+        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted == 'true')
+        uses: actions/github-script@v8
+        env:
+          USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
+        with:
+          script: |
+            await require('./.github/scripts/auto-merge.js').pickHaltFixes({ github, core, context });
+
+      # Each candidate is squash-merged onto master in its own scratch worktree,
+      # so this checkout, whose auto-merge.js the merge step loads, is never
+      # touched. The checkout is depth 1, and a squash merge needs the merge
+      # base, hence --unshallow. The first candidate that passes is the one the
+      # merge step may land.
+      - name: Compose-check a fix on the halted master
+        id: fixcheck
+        if: steps.debounce.outputs.skip != 'true' && (steps.fixes.outputs.candidates != '')
+        continue-on-error: true
+        env:
+          CANDIDATES: ${{ steps.fixes.outputs.candidates }}
+        run: |
+          git fetch --no-tags --quiet --unshallow origin master
+          base=$(git rev-parse FETCH_HEAD)
+          for candidate in $CANDIDATES; do
+            number=${candidate%%:*}
+            head=${candidate#*:}
+            tree="$RUNNER_TEMP/fix-$number"
+            if git fetch --no-tags --quiet origin "$head" &&
+              git worktree add --quiet --detach "$tree" "$base" &&
+              (cd "$tree" &&
+                git -c user.name=auto-merge -c user.email=auto-merge@invalid merge --squash --quiet "$head" &&
+                go build ./... &&
+                go vet ./... &&
+                scripts/lint-file-length.sh); then
+              printf 'number=%s\nhead=%s\nbase=%s\n' "$number" "$head" "$base" >> "$GITHUB_OUTPUT"
+              exit 0
+            fi
+            echo "::warning::#$number does not pass the composition check once merged onto master $base."
+          done
+          exit 1
+
       - name: Merge ready PRs
         id: merge
-        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true')
+        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true' || steps.fixcheck.outcome == 'success')
         uses: actions/github-script@v8
         env:
           USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
           AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
+          HALTED: ${{ steps.settle.outputs.halted }}
+          FIX_CHECK: ${{ steps.fixcheck.outcome }}
+          FIX_NUMBER: ${{ steps.fixcheck.outputs.number }}
+          FIX_HEAD: ${{ steps.fixcheck.outputs.head }}
+          FIX_BASE: ${{ steps.fixcheck.outputs.base }}
         with:
           github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
           script: |
-            await require('./.github/scripts/auto-merge.js').mergeAll({ github, core, context });
+            const merger = require('./.github/scripts/auto-merge.js');
+            if (process.env.HALTED !== 'true') {
+              await merger.mergeAll({ github, core, context });
+            } else {
+              await merger.mergeHaltFix({
+                github, core, context,
+                passed: process.env.FIX_CHECK === 'success',
+                number: process.env.FIX_NUMBER,
+                head: process.env.FIX_HEAD,
+                base: process.env.FIX_BASE,
+              });
+            }
 
       - name: Move to the new master head
         id: head

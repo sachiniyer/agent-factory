@@ -288,6 +288,7 @@ const UNKNOWN_RETRY_ATTEMPTS = 3;
 const UNKNOWN_RETRY_DELAY_MS = 12000;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const usingPat = () => process.env.USING_PAT === "true";
 
 function mergeableQuery(numbers) {
   const fields = numbers
@@ -353,6 +354,7 @@ const hasUnansweredP1 = (pr) => hasUnansweredFinding(pr, ["P1"]);
 // other PR keeps the throughput-mode rule: only P1 blocks.
 const DETAIL_BRANCH_PREFIX = "detail/";
 const isDetailPr = (pr) => typeof pr.headRefName === "string" && pr.headRefName.startsWith(DETAIL_BRANCH_PREFIX);
+const isFixMaster = (pr) => ((pr.labels && pr.labels.nodes) || []).some((l) => l.name === FIX_LABEL);
 const UNANSWERED_P1_REASON = "unanswered P1 Codex finding";
 const UNANSWERED_DETAIL_P2_REASON = "unanswered Codex P2 on a Detail PR";
 
@@ -591,6 +593,17 @@ async function mergeAll({ github, core, context }) {
     // required on its head) may land, since nothing else could turn master green.
     core.warning(`Master ${verdict.head} failed verification; only ${FIX_LABEL} PRs may merge.`);
   }
+  const selected = await selectPrs({ github, core, owner, repo, onlyFix: red ? "master is red" : null });
+  const batchSize = Number(process.env.AUTO_MERGE_BATCH_SIZE) > 0
+    ? Math.floor(Number(process.env.AUTO_MERGE_BATCH_SIZE))
+    : DEFAULT_BATCH_SIZE;
+  await landSelected({ github, core, owner, repo, selected, batchSize });
+}
+
+// Every open master PR as a {pr, reason} entry in PR-number order (reason null:
+// mergeable): phase 1, then review threads, then `onlyFix` as the reason of each
+// remaining PR not labelled fix-master, then the workflow-files skip.
+async function selectPrs({ github, core, owner, repo, onlyFix }) {
   const prs = await fetchOpenPrs(github, core, owner, repo);
   await resolveUnknownMergeable({
     github, core, owner, repo, prs,
@@ -603,18 +616,15 @@ async function mergeAll({ github, core, context }) {
     const reason = e.reason === null ? reviewBlockReason(e.pr) : null;
     return reason ? { pr: e.pr, reason } : e;
   });
-  if (red) {
+  if (onlyFix) {
     selected = selected.map((e) =>
-      e.reason === null && !e.pr.labels.nodes.some((l) => l.name === FIX_LABEL)
-        ? { pr: e.pr, reason: "master is red" }
-        : e,
+      e.reason === null && !isFixMaster(e.pr) ? { pr: e.pr, reason: onlyFix } : e,
     );
   }
   // AUTO_MERGE_TOKEN (a PAT with the workflows permission) can merge workflow
   // PRs; GITHUB_TOKEN cannot, and GitHub refuses the merge. Detect them up front.
-  const usingPat = process.env.USING_PAT === "true";
   const workflowSkipped = [];
-  if (!usingPat) {
+  if (!usingPat()) {
     const cands = selected.filter((e) => !e.reason).map((e) => e.pr);
     if (cands.length) {
       const data = await github.graphql(filesQuery(cands.map((c) => c.number)), { owner, repo });
@@ -635,9 +645,12 @@ async function mergeAll({ github, core, context }) {
       .addList(workflowSkipped.map((n) => `#${n}`))
       .write();
   }
-  const batchSize = Number(process.env.AUTO_MERGE_BATCH_SIZE) > 0
-    ? Math.floor(Number(process.env.AUTO_MERGE_BATCH_SIZE))
-    : DEFAULT_BATCH_SIZE;
+  return selected;
+}
+
+// Squash-merge the selected entries (head SHA pinned), at most batchSize, then
+// re-raise master verification once for the new head.
+async function landSelected({ github, core, owner, repo, selected, batchSize }) {
   const merged = [];
   let lastSha = "";
   for (const { pr, reason } of selected) {
@@ -671,7 +684,7 @@ async function mergeAll({ github, core, context }) {
 
   // GITHUB_TOKEN merges fire no push workflows: dispatch once for the new head.
   // A PAT merge fires them itself, so dispatching would duplicate every run.
-  if (usingPat) return;
+  if (usingPat()) return;
   for (const workflow_id of MASTER_WORKFLOWS) {
     try {
       await github.rest.actions.createWorkflowDispatch({
@@ -685,6 +698,49 @@ async function mergeAll({ github, core, context }) {
   }
 }
 
+// A composition halt (an open broken-master issue whose re-check still fails)
+// skips mergeAll entirely, and its red-master exception with it, so before
+// #7151 only a hand merge could clear one. While it is open, one fix-master PR
+// per run may land, and only once its would-be merge result passes the same
+// composition check: a "fix" must never make master worse. The check is the
+// workflow's shell step between these two:
+//   pickHaltFixes  the selectable fix-master PRs, as `candidates`
+//   (fixcheck)     squash-merges each onto master in a scratch worktree and
+//                  runs the check; the first that passes -> number, head, base
+//   mergeHaltFix   lands that PR if nothing moved since it was checked
+// The next run's re-check then finds master passing and closes the issue.
+const HALT_REASON = "master fails the composition check";
+
+async function pickHaltFixes({ github, core, context }) {
+  const { owner, repo } = context.repo;
+  const selected = await selectPrs({ github, core, owner, repo, onlyFix: HALT_REASON });
+  for (const { pr, reason } of selected) if (reason) core.info(`#${pr.number}: skip (${reason})`);
+  const fixes = selected.filter((e) => !e.reason).map((e) => e.pr);
+  core.notice(fixes.length
+    ? `Composition halt: checking ${FIX_LABEL} candidate(s) ${fixes.map((pr) => `#${pr.number}`).join(", ")}.`
+    : `Composition halt: no mergeable ${FIX_LABEL} PR; merging stays halted.`);
+  core.setOutput("candidates", fixes.map((pr) => `${pr.number}:${pr.headRefOid}`).join(" "));
+}
+
+async function mergeHaltFix({ github, core, context, passed, number, head, base }) {
+  const { owner, repo } = context.repo;
+  const refuse = (why) => {
+    core.warning(`Composition halt: #${number || "?"} not merged (${why}); merging stays halted.`);
+    core.setOutput("merged", "false");
+    core.setOutput("merged_prs", "");
+  };
+  if (!passed || !number) return refuse("no merge result passed the composition check");
+  const master = (await github.rest.repos.getBranch({ owner, repo, branch: BASE })).data.commit.sha;
+  if (master !== base) return refuse(`master moved to ${master} after the check on ${base}`);
+  // Re-select: a hold, a new head or a lost label since the pick all count.
+  const selected = await selectPrs({ github, core, owner, repo, onlyFix: HALT_REASON });
+  const entry = selected.find((e) => e.pr.number === Number(number));
+  if (!entry) return refuse("no longer an open master PR");
+  if (entry.reason) return refuse(entry.reason);
+  if (entry.pr.headRefOid !== head) return refuse(`head moved to ${entry.pr.headRefOid} after the check on ${head}`);
+  await landSelected({ github, core, owner, repo, selected: [entry], batchSize: 1 });
+}
+
 // Step 4: composition check failed after a batch — open/update ONE issue.
 async function reportBroken({ github, core, context, merged }) {
   const { owner, repo } = context.repo;
@@ -694,8 +750,9 @@ async function reportBroken({ github, core, context, merged }) {
     `The post-merge composition check (\`go build ./...\`, \`go vet ./...\`, ` +
     `\`scripts/lint-file-length.sh\`) failed on master ${sha} after auto-merging ` +
     `${merged ? "#" + merged.split(",").join(", #") : "a batch"}.\n\n` +
-    `Auto-merge is halted until master passes again; fix forward on master. The next ` +
-    `scheduled run re-checks and closes this issue automatically.\n\n` +
+    `Auto-merge is halted until master passes again. Fix forward on master with a PR ` +
+    `labelled \`${FIX_LABEL}\`: the merger lands it once its merge onto master passes ` +
+    `this check. The next scheduled run re-checks and closes this issue automatically.\n\n` +
     `Run: ${context.serverUrl}/${owner}/${repo}/actions/runs/${context.runId}\n\n— Captain Claude (throughput-infra)`;
   const existing = await findBrokenIssue(github, owner, repo);
   if (existing) {
@@ -707,7 +764,7 @@ async function reportBroken({ github, core, context, merged }) {
 
 module.exports = {
   runReadState,
-  checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, reportBroken,
+  checkHalt, checkDebounce, shouldDebounce, settleBroken, mergeAll, pickHaltFixes, mergeHaltFix, reportBroken,
   workflowState, combineVerification, touchesWorkflows, filesQuery, WORKFLOW_SKIP_REASON, selectCandidates, selectMergeable, hasUnansweredP1, hasUnansweredFinding, isDetailPr, reviewBlockReason, checksGreen, evaluate,
   MASTER_WORKFLOWS, BROKEN_TITLE_PREFIX,
   resolveUnknownMergeable, isTruncated, ACK_RE, branchDeletionDecision,
