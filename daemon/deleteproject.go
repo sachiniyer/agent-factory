@@ -380,20 +380,19 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// mismatch can release it only for the deleted claimant itself (#3299
 	// review round 15). Resolved before the lock — see deleteProjectTarget.
 	m.suppressRootAgent(repoID, resolved.claimantProjectID)
-	// Stamp the HISTORICAL/real identity too, mirroring the fenced list and
-	// the optInIDs durable sweep above. The ensure sweep consults the
-	// tombstone under the repo's real git identity (repo.ID), and a delete
-	// whose recorded path was unavailable resolved to the derived id alone —
-	// so without this stamp the sweep finds no tombstone under the real id
-	// and can create the always-on root before the re-attribution probe moves
-	// the tombstone. The probe's attribution-pending gate is not a reliable
-	// bridge: a settled negative probe carries no candidate, so the gate is
-	// open between probe retries, and a single slow probe inverts the
-	// probe-vs-sweep timing permanently. Stamping both ids closes that window
-	// regardless of probe timing, the same way the fence and the durable
-	// sweep already cover both.
+	// Stamp the HISTORICAL identity too (#7181), mirroring the fenced list and
+	// the optInIDs durable sweep above. A repository main-rooted at the recorded
+	// path has this id as its real one, and the ensure sweep consults the
+	// tombstone under that real id — so without this stamp, a restored checkout
+	// could have its root created before the re-attribution probe moved the
+	// derived tombstone across. The probe's attribution-pending gate is not a
+	// reliable bridge: a settled negative carries no candidate, so the gate is
+	// open between retries, and one slow probe inverts the probe-vs-sweep
+	// timing for good. The stamp is a STAND-IN for the identity the probe has
+	// not established, and it keeps that probe's evidence — see
+	// suppressHistoricalRootAgent.
 	if historical != "" {
-		m.suppressRootAgent(historical, resolved.claimantProjectID)
+		m.suppressHistoricalRootAgent(historical, repoID, resolved.claimantProjectID)
 	}
 	// A re-attribution probe for the deleted project is deliberately LEFT
 	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
@@ -658,8 +657,76 @@ func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedRootRepos[repoID] = claimantProjectID
+	// A direct stamp replaces any historical stand-in here: it is this
+	// identity's own delete, released by evidence filed under this identity.
+	delete(m.deletedRootEvidence, repoID)
 	delete(m.rootKilledAt, repoID)
 	m.retireRootCarriesLocked(repoID)
+}
+
+// suppressHistoricalRootAgent stamps historicalID, the identity a derived-id
+// delete's recorded path hashes to, as a STAND-IN for the identity the deleted
+// project's re-attribution probe has not established yet (#7181), and records
+// derivedID as where the evidence that releases it lives.
+//
+// The pointer is the point (PR #7189, review thread 4554400603). A repository
+// later main-rooted at the recorded path has historicalID as its real id, and
+// the probe files its proof that this occupant is a different clone under
+// derivedID, the id the deleted record is filed under — never under
+// historicalID. A stamp that looked for disproof only under its own id would
+// keep the occupant's root down for the rest of the daemon's life on behalf of
+// a dead third party. promoteRecordedIdentity ends the stand-in once the probe
+// does establish the project's identity.
+//
+// Two cases stamp nothing:
+//
+//   - No claimant. Release needs the deleted claimant's own record to disprove
+//     (deletedClaimDisproven), so an unclaimed stand-in — an unregistered
+//     path, a row whose checkout could not be proven — could never be lifted.
+//     rootDeletionTombstoneApplies already declines that trade for an
+//     unclaimed tombstone: suppressing a possibly unrelated live repository
+//     for the daemon's life is worse than a root this run recreates, whose
+//     durable opt-in is already gone.
+//   - A tombstone already at historicalID, which is left exactly as it is, the
+//     way promoteRecordedIdentity treats one at its destination. It belongs to
+//     a delete of whatever owned that identity, and re-pointing it here would
+//     let this project's evidence release that delete.
+func (m *Manager) suppressHistoricalRootAgent(historicalID, derivedID, claimantProjectID string) {
+	if claimantProjectID == "" {
+		return
+	}
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if _, stamped := m.deletedRootRepos[historicalID]; stamped {
+		return
+	}
+	m.deletedRootRepos[historicalID] = claimantProjectID
+	if m.deletedRootEvidence == nil {
+		m.deletedRootEvidence = make(map[string]string)
+	}
+	m.deletedRootEvidence[historicalID] = derivedID
+	delete(m.rootKilledAt, historicalID)
+	m.retireRootCarriesLocked(historicalID)
+}
+
+// retireHistoricalStandInsLocked ends every stand-in stamped on behalf of
+// recordedID now that its probe has established the deleted project's
+// identity as realID. A stand-in AT realID is proven to be that project's own
+// identity, so it stays as an ordinary tombstone and stops consulting evidence
+// that is leaving unresolvedRoots. One anywhere else was a guess the proof has
+// just refuted, and with its evidence gone nothing could ever release it — it
+// would suppress whatever repository is later main-rooted at the recorded
+// path. m.mu must be held.
+func (m *Manager) retireHistoricalStandInsLocked(recordedID, realID string) {
+	for id, evidenceID := range m.deletedRootEvidence {
+		if evidenceID != recordedID {
+			continue
+		}
+		delete(m.deletedRootEvidence, id)
+		if id != realID {
+			delete(m.deletedRootRepos, id)
+		}
+	}
 }
 
 // boundedRecordRootAbsentTimeout bounds one recorded-root stat taken while

@@ -266,6 +266,10 @@ func promoteRecordedIdentity(m *Manager, healed *rootAgentSnapshot, recordedID, 
 		}
 		delete(m.deletedRootRepos, recordedID)
 	}
+	// Its historical stand-in (#7181) ends here too: this proof settles which
+	// identity the deleted project has, and the record carrying the stand-in's
+	// release evidence leaves unresolvedRoots with this promotion.
+	m.retireHistoricalStandInsLocked(recordedID, realID)
 	m.mu.Unlock()
 	return true
 }
