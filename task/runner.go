@@ -270,7 +270,15 @@ func isReadyContent(content, agent string) bool {
 		// what the weak glyph check below used to read as ready, while the
 		// dialog was still painting or while Gemini was relaunching after the
 		// answer, and the prompt went into the dialog or the exiting process.
-		if tmux.GeminiFolderTrustDialogOnScreen(content) {
+		//
+		// Nor is anything else on a pane that carries the folder-trust flow's
+		// fingerprints — its question, its "Trust parent folder" label or its
+		// restart notice, found even when a narrow pane wraps or truncates
+		// them. Such a pane is ready only as the dialog the strict parser reads
+		// or as the relaunched composer above; otherwise the old box's "╰" made
+		// a narrow dialog, or a relaunch in progress, read as ready and the
+		// prompt went into it (#7169 review).
+		if tmux.GeminiFolderTrustDialogOnScreen(content) || tmux.GeminiFolderTrustFingerprinted(content) {
 			return false
 		}
 		// Best-guess (#714) for everything else. The "╰" box-drawing corner of

@@ -166,8 +166,10 @@ func geminiFolderTrustDialogOf(content string) geminiTrustScan {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	rows := make([]claudeTrustRow, len(lines))
 	question := -1
+	optionShaped := make([]bool, len(lines))
 	for i, line := range lines {
 		rows[i] = geminiTrustRowOf(line)
+		optionShaped[i] = rows[i].selected || geminiTrustHasOrdinal(line)
 		if !rows[i].selected && rows[i].label == geminiFolderTrustQuestion && geminiTrustSideBordered(line) {
 			question = i
 		}
@@ -207,13 +209,18 @@ func geminiFolderTrustDialogOf(content string) geminiTrustScan {
 		}
 	}
 
-	dialog, err := parseGeminiFolderTrustRows(rows, question, bottom)
+	dialog, err := parseGeminiFolderTrustRows(rows, optionShaped, question, bottom)
 	return geminiTrustScan{verdict: verdict, dialog: dialog, err: err}
 }
 
 // parseGeminiFolderTrustRows reads the option block between the question and the
 // box's bottom border into the shape the shared trustPicker drives.
-func parseGeminiFolderTrustRows(rows []claudeTrustRow, question, bottom int) (claudeFolderTrustDialog, error) {
+//
+// A row shaped like an option — an "N. " ordinal or the ● — that is not one of
+// the known options makes the dialog unreadable, wherever it sits. Read as body
+// text, a relabelled build's "1. Trust this folder" above "2. Trust folder
+// (<parent>)" would make af aim at the parent (#7169 review, P3-1).
+func parseGeminiFolderTrustRows(rows []claudeTrustRow, optionShaped []bool, question, bottom int) (claudeFolderTrustDialog, error) {
 	dialog := claudeFolderTrustDialog{rows: rows, cursor: -1, affirmative: -1}
 	const (
 		inBody = iota
@@ -233,9 +240,8 @@ func parseGeminiFolderTrustRows(rows []claudeTrustRow, question, bottom int) (cl
 				continue
 			case option != geminiTrustNotAnOption:
 				phase = inOptions
-			case row.selected:
-				return claudeFolderTrustDialog{}, fmt.Errorf("a row carries the %q cursor but is not one of the dialog's options: %q",
-					geminiTrustSelectionGlyph, row.label)
+			case optionShaped[i]:
+				return claudeFolderTrustDialog{}, fmt.Errorf("a row is shaped like an option but is not one af knows: %q", row.label)
 			default:
 				continue
 			}
@@ -301,6 +307,18 @@ func (t *TmuxSession) handleGeminiFolderTrust(content string) (handled, ok bool)
 	case geminiTrustPartial, geminiTrustRestarting:
 		return true, true
 	}
+	// The strict parser cannot read the dialog, but the folder-trust flow is
+	// still what the pane shows: its fingerprints with no composer below them.
+	// A pane narrower than 44 columns wraps the question and truncates the
+	// labels (measured), and a narrow relaunch wraps the restart notice. Hold
+	// without a key; only the strict parser above ever sends one (#7169 review).
+	if fingerprinted, last, relaunching := geminiTrustFingerprints(content); fingerprinted && !geminiComposerBelow(content, last) {
+		if !relaunching {
+			t.refuseTrustPicker(geminiFolderTrustPicker, errors.New(
+				"the folder-trust dialog is on screen in a shape af cannot read, such as a pane too narrow for its rows; holding without a key"))
+		}
+		return true, true
+	}
 	// No dialog: retire the refusal notice and the settle clock, exactly as the
 	// Claude branch does. A pending movement key stays pending — see there.
 	t.claudeTrust.refusalLogged = false
@@ -328,7 +346,8 @@ func GeminiFolderTrustDialogOnScreen(content string) bool {
 // relaunched process, which reads the trust level just recorded and so cannot
 // open the dialog again. That ordering is the proof, not a timer — the composer
 // of a first launch paints before Gemini decides whether to open the dialog, so
-// a composer on its own says nothing about what comes next.
+// a composer on its own says nothing about what comes next. The notice is
+// found as a phrase, so a pane narrow enough to wrap it still qualifies.
 //
 // The composer is Gemini 0.51.0's input box: a row of ▄, the "> " prompt row
 // (plus any continuation rows), then a row of ▀.
@@ -336,18 +355,92 @@ func GeminiRelaunchedAfterTrust(content string) bool {
 	if GeminiFolderTrustDialogOnScreen(content) {
 		return false
 	}
-	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
-	restart := -1
-	for i, line := range lines {
-		plain := strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
-		switch {
-		case plain == geminiTrustRestartingNotice:
-			restart = i
-		case restart >= 0 && geminiComposerOpensAt(lines, i):
+	lines := geminiTrustLines(content)
+	end := geminiTrustPhraseEnd(lines, geminiTrustRestartingNotice)
+	return end >= 0 && geminiComposerBelow(content, end)
+}
+
+// GeminiFolderTrustFingerprinted reports whether any of the folder-trust
+// flow's fingerprints is on screen: its question, its "Trust parent folder"
+// label, or its restart notice, each found as a phrase so that wrapping and
+// truncation cannot hide it. Readiness treats such a pane as not ready unless
+// it is the dialog itself (a handled stop) or the relaunched composer; the old
+// box's "╰" is never the reason a launch proceeds.
+func GeminiFolderTrustFingerprinted(content string) bool {
+	fingerprinted, _, _ := geminiTrustFingerprints(content)
+	return fingerprinted
+}
+
+// geminiTrustFingerprints finds the folder-trust flow's fingerprints. last is
+// the row where the lowest of them ends, and relaunching reports that the
+// restart notice is among them.
+func geminiTrustFingerprints(content string) (fingerprinted bool, last int, relaunching bool) {
+	lines := geminiTrustLines(content)
+	last = -1
+	for _, phrase := range []string{geminiFolderTrustQuestion, geminiTrustParentLabel, geminiTrustRestartingNotice} {
+		if end := geminiTrustPhraseEnd(lines, phrase); end >= 0 {
+			last = max(last, end)
+			relaunching = relaunching || phrase == geminiTrustRestartingNotice
+		}
+	}
+	return last >= 0, last, relaunching
+}
+
+// geminiComposerBelow reports whether any part of Gemini's composer is painted
+// below row from: a full composer opening there, or either of its edges (a row
+// of ▄ or of ▀). An edge alone is enough, because a draft pasted INTO the
+// composer sits between its edges, so only the bottom edge is below it.
+func geminiComposerBelow(content string, from int) bool {
+	lines := geminiTrustLines(content)
+	for i := from + 1; i < len(lines); i++ {
+		text := strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(lines[i], "\r"), ""))
+		if geminiComposerOpensAt(lines, i) ||
+			(text != "" && (strings.Trim(text, "▄") == "" || strings.Trim(text, "▀") == "")) {
 			return true
 		}
 	}
 	return false
+}
+
+func geminiTrustLines(content string) []string {
+	return strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+}
+
+// geminiTrustPhraseEnd finds phrase in the pane's text as Gemini wraps it —
+// each row stripped of ANSI and box borders, rows joined by a single space —
+// and returns the row its LAST occurrence ends on, or -1.
+func geminiTrustPhraseEnd(lines []string, phrase string) int {
+	var joined strings.Builder
+	var rowAt []int // rowAt[k] is the row byte k of joined came from
+	for i, line := range lines {
+		text := strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+		text = strings.Join(strings.Fields(strings.Trim(text, claudeTrustBoxDrawing)), " ")
+		if text == "" {
+			continue
+		}
+		if joined.Len() > 0 {
+			joined.WriteByte(' ')
+			rowAt = append(rowAt, i)
+		}
+		joined.WriteString(text)
+		for range len(text) {
+			rowAt = append(rowAt, i)
+		}
+	}
+	at := strings.LastIndex(joined.String(), phrase)
+	if at < 0 {
+		return -1
+	}
+	return rowAt[at+len(phrase)-1]
+}
+
+// geminiTrustHasOrdinal reports whether a pane line, stripped of ANSI, its box
+// borders and the ● indicator, opens with an "N. " picker ordinal.
+func geminiTrustHasOrdinal(line string) bool {
+	text := strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), ""))
+	text = strings.TrimSpace(strings.Trim(text, claudeTrustBoxDrawing))
+	text = strings.TrimSpace(strings.TrimPrefix(text, geminiTrustSelectionGlyph))
+	return text != "" && trimClaudeTrustOrdinal(text) != text
 }
 
 // geminiComposerOpensAt reports whether lines[i] is the top edge of Gemini's
