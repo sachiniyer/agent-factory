@@ -297,20 +297,27 @@ func TestCheckAndHandleTrustPrompt_GeminiFolderTrustNotOwningThePaneInjectsNothi
 	for _, line := range plainComposer[bottom:] {
 		draft.WriteString(line + "\n")
 	}
-	for _, tt := range []struct{ name, content string }{
-		{"the dialog pasted into a composer draft", draft.String()},
-		{"the captured dialog above a live composer", strings.TrimRight(dialog, "\n") + "\n" + composer},
-		{"the captured dialog with trailing output", strings.TrimRight(dialog, "\n") + "\nThat is the dialog af answers at startup.\n"},
-		{"the question quoted in prose above the composer", "Gemini asked:\nDo you trust the files in this folder?\n" + composer},
-		{"the answered dialog above the relaunched composer", geminiTrustFixture(t, "gemini_0_51_0_restarted_composer_below_dialog.ansi")},
-		{"the composer's first paint", geminiTrustFixture(t, "gemini_0_51_0_composer_first_paint.ansi")},
-		{"the unauthenticated waiting box", geminiTrustFixture(t, "gemini_0_51_0_waiting_for_auth.ansi")},
+	for _, tt := range []struct {
+		name    string
+		content string
+		// held: the pane carries the dialog's fingerprints with no composer
+		// below them, so af holds it (#7169 review, P1) — still with no key.
+		held bool
+	}{
+		{"the dialog pasted into a composer draft", draft.String(), false},
+		{"the captured dialog above a live composer", strings.TrimRight(dialog, "\n") + "\n" + composer, false},
+		{"the captured dialog with trailing output and no composer", strings.TrimRight(dialog, "\n") + "\nThat is the dialog af answers at startup.\n", true},
+		{"the question quoted in prose above the composer", "Gemini asked:\nDo you trust the files in this folder?\n" + composer, false},
+		{"the answered dialog above the relaunched composer", geminiTrustFixture(t, "gemini_0_51_0_restarted_composer_below_dialog.ansi"), false},
+		{"the composer's first paint", geminiTrustFixture(t, "gemini_0_51_0_composer_first_paint.ansi"), false},
+		{"the unauthenticated waiting box", geminiTrustFixture(t, "gemini_0_51_0_waiting_for_auth.ansi"), false},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			content := tt.content
 			session, keys := geminiTrustSession(t, nil, &content)
-			require.False(t, pollGeminiPane(t, session, 4), "this pane is not showing the dialog")
-			require.Empty(t, *keys, "no key may be injected into a pane that is not showing the dialog; got %v", *keys)
+			require.Equal(t, tt.held, pollGeminiPane(t, session, 4),
+				"held only when the dialog's fingerprints have no composer below them")
+			require.Empty(t, *keys, "no key may be injected into a pane the strict parser does not read as the dialog; got %v", *keys)
 		})
 	}
 }
@@ -366,4 +373,81 @@ func TestCheckAndHandleTrustPrompt_PartiallyPaintedGeminiFolderTrustDialogHolds(
 			require.Empty(t, *keys, "a partially painted dialog receives no key; got %v", *keys)
 		})
 	}
+}
+
+// #7169's independent review, P1. Below 44 columns Gemini wraps the dialog's
+// question ("Do you trust the files in this" / "folder?") and truncates its
+// labels ("Trust parent folder (af-tree…"), measured at 36, 40 and 43. The
+// strict parser cannot read that, and af used to report the pane clear; the
+// create then typed the prompt into the dialog, whose digit shortcut commits —
+// "fix the 2 failing tests" chose Trust parent folder. Whatever the cursor, a
+// pane carrying the dialog's fingerprints with no composer below is held: no
+// key, reported in the way, said once.
+func TestCheckAndHandleTrustPrompt_NarrowGeminiFolderTrustDialogIsHeldWithoutAKey(t *testing.T) {
+	for _, width := range []string{"36", "40", "43"} {
+		for _, cursor := range []string{"folder", "parent", "dont"} {
+			fixture := "gemini_0_51_0_folder_trust_" + width + "_columns_cursor_on_" + cursor + ".ansi"
+			t.Run(fixture, func(t *testing.T) {
+				_, _, errLog := captureTrustPromptLogs(t)
+				content := geminiTrustFixture(t, fixture)
+				session, keys := geminiTrustSession(t, nil, &content)
+				require.True(t, pollGeminiPane(t, session, 4), "the dialog is on screen; the pane is not clear")
+				require.Empty(t, *keys, "af presses no key into a dialog it cannot read; got %v", *keys)
+				require.Equal(t, 1, strings.Count(errLog.String(), "refusing to answer"), "the hold is said once, not once per poll")
+			})
+		}
+	}
+}
+
+// #7169's independent review, P2-1. The relaunch hold must survive the shapes
+// the strict parser cannot read: the restart notice wrapped onto two rows (50
+// columns, measured), and the relaunched process painting something below the
+// notice before its composer. Both are held with no key; the relaunched
+// composer below the wrapped notice is clear.
+func TestCheckAndHandleTrustPrompt_GeminiRelaunchHoldSurvivesAWrappedNoticeAndAnEarlyPaint(t *testing.T) {
+	restarting := geminiTrustFixture(t, "gemini_0_51_0_trust_restarting.ansi")
+	banner := ansiCSISequence.ReplaceAllString(geminiTrustFixture(t, "gemini_0_51_0_restarted_composer.ansi"), "")
+	bannerRow := ""
+	for _, line := range strings.Split(banner, "\n") {
+		if strings.Contains(line, "Gemini CLI v") {
+			bannerRow = line
+		}
+	}
+	require.NotEmpty(t, bannerRow, "the relaunched capture paints the banner")
+	for _, tt := range []struct {
+		name    string
+		content string
+		held    bool
+	}{
+		{"the notice wrapped at 50 columns", geminiTrustFixture(t, "gemini_0_51_0_trust_restarting_50_columns.ansi"), true},
+		{"a stdout line below the notice, no composer yet", strings.TrimRight(restarting, "\n") + "\nLoaded cached credentials.\n", true},
+		{"the banner below the notice, no composer yet", strings.TrimRight(restarting, "\n") + "\n\n" + bannerRow + "\n", true},
+		{"the relaunched composer below the wrapped notice", geminiTrustFixture(t, "gemini_0_51_0_restarted_composer_50_columns.ansi"), false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, errLog := captureTrustPromptLogs(t)
+			content := tt.content
+			session, keys := geminiTrustSession(t, nil, &content)
+			require.Equal(t, tt.held, pollGeminiPane(t, session, 4))
+			require.Empty(t, *keys, "nothing is typed while Gemini relaunches; got %v", *keys)
+			require.Empty(t, errLog.String(), "a relaunch in progress is a wait, not a refusal")
+		})
+	}
+}
+
+// #7169's independent review, P3-1. A row shaped like an option ("N. " or the
+// ●) that is not one af knows makes the dialog unreadable. Read as body text, a
+// relabelled build painting "1. Trust this folder (wt)" above "2. Trust folder
+// (af-trees)" — the parent — had af send Up and aim at the parent.
+func TestCheckAndHandleTrustPrompt_UnknownGeminiOptionRowIsRefused(t *testing.T) {
+	_, _, errLog := captureTrustPromptLogs(t)
+	relabelled := geminiTrustFrameWithCursor(t, "gemini_0_51_0_folder_trust.ansi", 2)
+	relabelled = strings.Replace(relabelled, "1. "+geminiTestTrustFolder+"     ", "1. Trust this folder (wt)", 1)
+	relabelled = strings.Replace(relabelled, "2. "+geminiTestTrustParent, "2. Trust folder (af-trees)       ", 1)
+	require.Contains(t, relabelled, "Trust this folder (wt)")
+	require.Contains(t, relabelled, "2. Trust folder (af-trees)")
+	session, keys := geminiTrustSession(t, nil, &relabelled)
+	require.True(t, pollGeminiPane(t, session, 4), "an unreadable dialog is still in the way")
+	require.Empty(t, *keys, "af must not aim at a relabelled option it does not know; got %v", *keys)
+	require.Contains(t, errLog.String(), "refusing to answer")
 }
