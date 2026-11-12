@@ -479,14 +479,12 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 	} else {
 		out, err = cmd.Output()
 	}
-	// Reap any process that outlived the leader on every exit path, normal
-	// completion included — a backgrounded transport child (a wedged
-	// `af ssh-relay` or the operator's ProxyCommand) that inherited the
-	// capture pipe would otherwise survive a step that reported success and
-	// leak as a live process holding open upstream connections. Lead bound
-	// the group; this SIGKILLs its survivors (#769 pattern, same as every
-	// other bounded runner that uses execgroup).
-	execgroup.Reap(cmd)
+	// Read the deadline as the command returned, before anything below can spend
+	// time. On darwin the reap re-signals the group for up to resignalBound
+	// (2 s), and the timeout label must describe the command, not how long its
+	// cleanup took: read afterwards, a deadline that passed during the sweep
+	// would relabel a genuine *exec.ExitError as a timeout.
+	deadlineErr := ctx.Err()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The child exited cleanly (a non-zero exit surfaces as an *exec.ExitError,
 		// not ErrWaitDelay) and only a descendant held the capture pipe open past
@@ -497,10 +495,29 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 		// orphaned pipe-holder made the unconditional ctx.Err() check rewrite a
 		// completed command as context.DeadlineExceeded, misrouting reap's
 		// sentinel-present case into ErrWorkspaceStateUnknown instead of latching.)
+		//
+		// ErrWaitDelay is also the proof that a group member outlived the leader
+		// while holding the capture pipe, such as a wedged transport helper. That
+		// member would otherwise keep running after a step that reported success,
+		// so SIGKILL the group the leader bound (#7108).
+		//
+		// This is the only exit that reaps. Do not widen it to every successful
+		// exit. Under ControlMaster/ControlPersist, OpenSSH detaches the master
+		// into its own session but leaves its ProxyCommand, or ProxyJump's
+		// `ssh -W`, in this group as the master's transport. Since OpenSSH 8.0
+		// that proxy's stderr is /dev/null, so it holds none of our pipes and the
+		// step returns err == nil with the proxy still a member. Reaping there
+		// kills the master: every later step re-authenticates, a concurrent step
+		// multiplexed over it fails with exit 255 (ssh's own failure code, see
+		// reap), and forwards attached to it die (#7115). A member that
+		// holds none of our pipes is not evidence of a leak, so it is left alone.
+		// A step still running at its deadline is different: KillOnCancel tears
+		// down the whole group, members like that included.
+		execgroup.Reap(cmd)
 		err = nil
 	}
-	if err != nil && ctx.Err() != nil {
-		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
+	if err != nil && deadlineErr != nil {
+		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, deadlineErr)
 	}
 	return out, err
 }
