@@ -381,6 +381,26 @@ test('a fix is not merged if master moved after it was checked', async () => {
   assert.ok(job.warnings.some((w) => /master moved/.test(w)), job.warnings.join('\n'));
 });
 
+test('a fix is not merged if master moved while the merge step re-read the PRs', async () => {
+  const origin = makeOrigin();
+  const github = fakeGithub(origin, [[12, FIX]]);
+  // The merge step re-selects before it lands; a hand merge lands mid-read.
+  const moveMasterDuringNextPrRead = () => {
+    const read = github.graphql;
+    github.graphql = async (query, vars) => {
+      if (query.includes('pullRequests(')) {
+        github.graphql = read;
+        origin.squash(origin.heads[13], 'hand merge');
+      }
+      return read(query, vars);
+    };
+  };
+  const job = await runJob(origin, github, { after: { fixcheck: moveMasterDuringNextPrRead } });
+  assert.equal(outcome(job, 'fixcheck'), 'success');
+  assert.deepEqual(github.merged, []);
+  assert.ok(job.warnings.some((w) => /master moved/.test(w)), job.warnings.join('\n'));
+});
+
 test('a fix is not merged if it was held after it was checked', async () => {
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[12, FIX]]);

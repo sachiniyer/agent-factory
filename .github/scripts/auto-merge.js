@@ -730,14 +730,16 @@ async function mergeHaltFix({ github, core, context, passed, number, head, base 
     core.setOutput("merged_prs", "");
   };
   if (!passed || !number) return refuse("no merge result passed the composition check");
-  const master = (await github.rest.repos.getBranch({ owner, repo, branch: BASE })).data.commit.sha;
-  if (master !== base) return refuse(`master moved to ${master} after the check on ${base}`);
   // Re-select: a hold, a new head or a lost label since the pick all count.
   const selected = await selectPrs({ github, core, owner, repo, onlyFix: HALT_REASON });
   const entry = selected.find((e) => e.pr.number === Number(number));
   if (!entry) return refuse("no longer an open master PR");
   if (entry.reason) return refuse(entry.reason);
   if (entry.pr.headRefOid !== head) return refuse(`head moved to ${entry.pr.headRefOid} after the check on ${head}`);
+  // Last read before the merge, which pins only the PR head: the base must still
+  // be the master the check ran on (the re-select above can take ~36 s).
+  const master = (await github.rest.repos.getBranch({ owner, repo, branch: BASE })).data.commit.sha;
+  if (master !== base) return refuse(`master moved to ${master} after the check on ${base}`);
   await landSelected({ github, core, owner, repo, selected: [entry], batchSize: 1 });
 }
 
