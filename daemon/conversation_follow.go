@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	"strings"
 
 	"github.com/sachiniyer/agent-factory/session"
 )
@@ -65,8 +66,13 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	repoStartLock.Lock()
 	persistErr := persistInstanceData(repoID, inst.ToInstanceData())
 	repoStartLock.Unlock()
-	m.info().Printf("session %q: its Codex pane moved from conversation %s to %s; recorded the thread its runtime now holds open (#7101)",
-		inst.Title, recorded.ID, current.ID)
+	if strings.EqualFold(recorded.ID, current.ID) {
+		m.info().Printf("session %q: its Codex pane is now on the conversation %s an operator recorded; following it like any capture from here (#7120)",
+			inst.Title, current.ID)
+	} else {
+		m.info().Printf("session %q: its Codex pane moved from conversation %s to %s; recorded the thread its runtime now holds open (#7101)",
+			inst.Title, recorded.ID, current.ID)
+	}
 	if persistErr != nil {
 		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, persistErr)
 	}

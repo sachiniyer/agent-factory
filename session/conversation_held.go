@@ -272,9 +272,12 @@ func (i *Instance) followPermittedLocked(token AgentRuntimeToken, prev, held Age
 			i.repairStamp = conversationRepairStamp{recordID: strings.ToLower(prev.ID), heldID: strings.ToLower(held.ID)}
 			return false
 		}
-		if !held.HasID() || strings.EqualFold(held.ID, stamp.heldID) {
-			return false
-		}
+		// Any thread other than the one held at the repair is a move the
+		// follow takes — including the repaired thread itself: once the pane
+		// is on it, the repair has done its job and the record becomes an
+		// ordinary capture, so a later move back to the pre-repair thread is
+		// followed like any other (#7120 Codex review).
+		return held.HasID() && !strings.EqualFold(held.ID, stamp.heldID)
 	}
 	return held.HasID() && !strings.EqualFold(held.ID, prev.ID)
 }
