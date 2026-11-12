@@ -1,0 +1,205 @@
+package session
+
+import (
+	"os"
+	"path/filepath"
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/testguard"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
+	"github.com/sachiniyer/agent-factory/session/tmux"
+)
+
+// #7206: a restore resumes a tab-recorded Claude conversation only while it is
+// still the newest conversation in the worktree, under any spelling of the
+// worktree's path, by the account swap's own rule (judgeClaudeRecorded).
+
+// claudeRestoreWorktree is a worktree reached through a symlinked parent, and
+// its two project-directory spellings: as recorded first, then as resolved.
+func claudeRestoreWorktree(t *testing.T) (string, string, string) {
+	t.Helper()
+	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
+	require.NoError(t, os.MkdirAll(filepath.Join(real, "repo"), 0o755))
+	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
+	require.NoError(t, os.Symlink(real, link))
+	workDir := filepath.Join(link, "repo")
+	projects := claudeProjectCandidates(workDir)
+	require.Len(t, projects, 2, "the worktree must have two project-directory spellings")
+	return workDir, projects[0], projects[1]
+}
+
+// claudeRestoreInstance is a Claude session in workDir whose agent tab
+// recorded conversation id.
+func claudeRestoreInstance(t *testing.T, workDir, id string) *Instance {
+	t.Helper()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(workDir, workDir, "t", "main", "", false, true)
+	require.NoError(t, err)
+	return &Instance{
+		Title:       "t",
+		Program:     tmux.ProgramClaude,
+		Path:        workDir,
+		gitWorktree: gw,
+		Tabs: []*Tab{{Conversation: AgentConversationData{
+			Agent: tmux.ProgramClaude, ID: id, CapturedAt: time.Now(), CaptureKind: ConversationCaptureInjected,
+		}}},
+	}
+}
+
+func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing.T) {
+	const otherID = "7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name   string
+		layout func(t *testing.T, file func(project, id string, at time.Time), recorded, resolved string)
+		// refusal is the decline's reason; "" means the restore resumes.
+		refusal string
+		why     string
+	}{
+		{
+			name: "a newer conversation under the same spelling",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(recorded, carryTestID, past)
+				file(recorded, newerConversationID, past.Add(time.Minute))
+			},
+			refusal: staleCarryReason,
+			why:     "after a /clear the recorded id names the conversation the user abandoned",
+		},
+		{
+			name: "a newer conversation under the resolved spelling",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(recorded, carryTestID, past)
+				file(resolved, newerConversationID, past.Add(time.Minute))
+			},
+			refusal: staleCarryReason,
+			why:     "a /clear filed under the other spelling is still a newer conversation in this worktree",
+		},
+		{
+			name: "a newer conversation under the recorded spelling",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(resolved, carryTestID, past)
+				file(recorded, newerConversationID, past.Add(time.Minute))
+			},
+			refusal: staleCarryReason,
+			why:     "the spelling the recorded transcript is under is not the only one Claude writes",
+		},
+		{
+			name: "no newer conversation under either spelling",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(recorded, carryTestID, past.Add(time.Minute))
+				file(resolved, newerConversationID, past)
+			},
+			why: "an older conversation does not make the recorded one stale",
+		},
+		{
+			name: "a newer copy of the recorded conversation under the other spelling",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(recorded, carryTestID, past)
+				file(resolved, carryTestID, past.Add(time.Minute))
+			},
+			why: "a copy of the same conversation is not another conversation",
+		},
+		{
+			name: "a conversation newer than one copy but older than the newest copy",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(recorded, carryTestID, past)
+				file(recorded, otherID, past.Add(time.Minute))
+				file(resolved, carryTestID, past.Add(2*time.Minute))
+			},
+			why: "a resume by id continues the newest copy, and nothing is newer than that",
+		},
+		{
+			name: "a recorded transcript af does not find",
+			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
+				file(resolved, newerConversationID, past)
+			},
+			why: "a missing transcript says nothing about whether the user moved on, so the restore resumes as it always has",
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+			workDir, recorded, resolved := claudeRestoreWorktree(t)
+			tc.layout(t, func(project, id string, at time.Time) {
+				t.Helper()
+				setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), "{}\n"), at)
+			}, recorded, resolved)
+			inst := claudeRestoreInstance(t, workDir, carryTestID)
+
+			rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+			if tc.refusal == "" {
+				require.True(t, ok, tc.why)
+				require.Equal(t, "claude --resume "+carryTestID, rewritten, tc.why)
+				require.Empty(t, decline.reason, tc.why)
+				return
+			}
+			require.False(t, ok, tc.why)
+			require.Equal(t, "claude", rewritten, "a refused resume launches fresh")
+			require.Equal(t, tc.refusal, decline.reason, tc.why)
+			refusal := inst.exactResumeRefusal(decline)
+			require.Equal(t, carryTestID, refusal.ID)
+			require.True(t, refusal.retire, "the stale id is retired once the fresh spawn commits")
+		})
+	}
+}
+
+// A spelling af found but could not list may hold the newer conversation, so
+// the restore cannot confirm the recorded one is current.
+func TestExactResumeRefusesAClaudeConversationItCannotConfirm(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, recorded, resolved := claudeRestoreWorktree(t)
+	writeCarryFile(t, configDir, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n")
+	unlistable := filepath.Join(configDir, resolved)
+	require.NoError(t, os.MkdirAll(unlistable, 0o755))
+	require.NoError(t, os.Chmod(unlistable, 0))
+	t.Cleanup(func() { _ = os.Chmod(unlistable, 0o755) })
+
+	_, ok, decline := prepareExactResumeConversation(claudeRestoreInstance(t, workDir, carryTestID), "claude")
+	require.False(t, ok)
+	require.Equal(t, carryTranscriptsUnlistedReason, decline.reason)
+	require.True(t, decline.unverified, "af could not look, which is no evidence about the id")
+}
+
+// An account-scoped session writes to the account's registry dir, not the
+// ambient one its command resolves, and the guard reads that store.
+func TestExactResumeJudgesAnAccountSessionByTheAccountsStore(t *testing.T) {
+	ambient := carryAmbientProviderHomes(t)
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	account := registerAccount(t, tmux.ProgramClaude, "work")
+	workDir, recorded, _ := claudeRestoreWorktree(t)
+	past := time.Now().Add(-time.Hour)
+	// The ambient store alone would say the recorded conversation is current.
+	setModTime(t, writeCarryFile(t, filepath.Join(ambient, ".claude"), filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
+	setModTime(t, writeCarryFile(t, account, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
+	setModTime(t, writeCarryFile(t, account, filepath.Join(recorded, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	inst.Account = "work"
+	_, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.False(t, ok, "the /clear happened in the account's store")
+	require.Equal(t, staleCarryReason, decline.reason)
+}
+
+// Only the tab's own record is judged: a carried id is a pin whose provenance
+// was checked where it was set.
+func TestExactResumeLeavesACarriedClaudeConversationAlone(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, recorded, _ := claudeRestoreWorktree(t)
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(recorded, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	inst.Tabs = []*Tab{{}}
+	inst.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
+	rewritten, ok, _ := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok)
+	require.Equal(t, "claude --resume "+carryTestID, rewritten)
+}

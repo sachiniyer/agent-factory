@@ -436,8 +436,10 @@ func prepareResumeConversation(i *Instance, program string) string {
 // provably stale (a newer top-level rollout for the same working directory
 // exists), or unconfirmable (a newer rollout cannot be correlated either way)
 // no longer names the conversation the pane is in, so a restore must start
-// fresh rather than continue a thread the user left (#6769). A refused
-// Codex resume comes back with its typed reason; every other non-resume case
+// fresh rather than continue a thread the user left (#6769). A recorded
+// Claude id is refused when a newer conversation exists under any spelling
+// of the worktree's path (#7206, staleRecordedClaudeDecline). A refused
+// resume comes back with its typed reason; every other non-resume case
 // (nothing recorded, the command cannot express a resume) is the zero decline
 // because there is nothing to warn about.
 func prepareExactResumeConversation(i *Instance, program string) (string, bool, resumeDecline) {
@@ -449,8 +451,15 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 	if !ok {
 		return program, false, resumeDecline{}
 	}
-	if !carried && conv.Agent == tmux.ProgramCodex {
-		if decline := i.staleRecordedCodexDecline(program, conv); decline.reason != "" {
+	if !carried {
+		var decline resumeDecline
+		switch conv.Agent {
+		case tmux.ProgramCodex:
+			decline = i.staleRecordedCodexDecline(program, conv)
+		case tmux.ProgramClaude:
+			decline = i.staleRecordedClaudeDecline(program, conv)
+		}
+		if decline.reason != "" {
 			return program, false, decline
 		}
 	}
