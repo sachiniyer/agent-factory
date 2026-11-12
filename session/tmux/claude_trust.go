@@ -115,10 +115,10 @@ type claudeTrustState struct {
 	// not yet reading input.
 	firstSeen time.Time
 	// mcpServersFirstSeen is the same settle clock for the multi-server MCP
-	// picker, and mcpServersRejectSent records that af has sent that picker
-	// its one Esc. Neither is cleared by a dialog-free frame — only a new pane
-	// process (Start) clears them — so af never sends this pane a second Esc
-	// (#7166).
+	// picker; a dialog-free frame clears it, as it clears firstSeen.
+	// mcpServersRejectSent records that af has sent that picker its one Esc;
+	// only a new pane process (Start) clears it, so af never sends this pane a
+	// second Esc (#7166).
 	mcpServersFirstSeen  time.Time
 	mcpServersRejectSent bool
 }

@@ -1,6 +1,7 @@
 package tmux
 
 import (
+	"fmt"
 	"regexp"
 	"strings"
 	"unicode/utf8"
@@ -30,9 +31,11 @@ import (
 // server. af never enables an MCP server for the user, so it does not accept
 // this preselection. It answers with Esc, the picker's own "reject all", which
 // is the outcome the single-server dialog preselects ("Continue without using
-// this MCP server"). Measured on 2.1.322 with two and three servers: Esc closes
-// the picker, the composer follows, and no server is enabled. The user can
-// enable any of them later with Claude Code's /mcp.
+// this MCP server"). Measured on 2.1.322 with two, three and six servers: Esc
+// closes the picker, the composer follows, and no server is enabled. Claude
+// Code records every server — scrolled-out ones too — as rejected, in the
+// worktree's .claude/settings.local.json (claudeMCPServersRemedy says how to
+// undo that; Claude's /mcp does not list rejected servers).
 //
 // af sends Esc and nothing else: never Space (it toggles a server) and never
 // Enter (it toggles the cursor row, or enables the checked servers from the
@@ -45,9 +48,31 @@ const (
 	claudeMCPServersFooter      = "Space to select · Esc to reject all"
 	// claudeMCPServersChoice is what af chose, in the words the keystroke
 	// record and the death diagnostic carry, so a start that fails or comes up
-	// without the servers says where to turn them on.
-	claudeMCPServersChoice = "reject all (enable any later with /mcp)"
+	// without the servers says how to undo it.
+	claudeMCPServersChoice = "reject all (undo with claude mcp reset-project-choices)"
+	// claudeMCPServersRemedy is how a user gets the servers back. Every part
+	// was measured on 2.1.322 (#7170 review, P2-2): after reject-all, /mcp and
+	// `claude mcp list` show nothing; `claude mcp reset-project-choices`, run
+	// in the worktree, empties the rejection and Claude asks again on its next
+	// start; and enabledMcpjsonServers or enableAllProjectMcpServers in Claude's
+	// USER settings.json skips the picker for those servers — the one place
+	// that outlives af's per-session worktrees.
+	claudeMCPServersRemedy = "Claude Code records them as rejected in the worktree's .claude/settings.local.json (disabledMcpjsonServers); " +
+		"to be asked again, run `claude mcp reset-project-choices` in the worktree and restart the agent; " +
+		"to approve project servers for every af session, list them in enabledMcpjsonServers (or set enableAllProjectMcpServers) in Claude Code's user settings.json"
 )
+
+// claudeMCPServersScrollArrows are the glyphs Claude Code paints in the pointer
+// column of an unfocused server row when the list scrolls: ↓ on the last
+// visible row while more are below, ↑ on the first once some are above. Its
+// default window is five rows, so six or more servers always show one
+// (measured: "  ↓ [✔] probe-5", and "  ↑ [✔] probe-2" after scrolling).
+const claudeMCPServersScrollArrows = "↑↓"
+
+// claudeMCPServersHeaderStart is what survives of the header when a narrow
+// pane wraps it ("3 new MCP servers found in this" / "project", measured at 40
+// columns). It anchors the unreadable hold, never a key.
+var claudeMCPServersHeaderStart = regexp.MustCompile(`^([2-9]|[1-9][0-9]+) new MCP servers( |$)`)
 
 // claudeMCPServersHeader is the picker's first row: the server count, then the
 // fixed wording. A count below two is the single-server dialog's job.
@@ -60,22 +85,38 @@ const (
 	claudeMCPServersNone claudeMCPServersVerdict = iota
 	// claudeMCPServersPartial: a proper prefix of the picker, still painting.
 	claudeMCPServersPartial
+	// claudeMCPServersUnreadable: the picker is plainly on screen but in a
+	// shape af cannot read — a pane narrow enough to wrap its header, a server
+	// name long enough to wrap. Hold without a key and say why once (#7170
+	// review, P2-1), as claudeMCPServerUnreadable does for the single dialog.
+	claudeMCPServersUnreadable
 	// claudeMCPServersComplete: the whole picker, its footer the last content.
 	claudeMCPServersComplete
 )
 
 // claudeMCPServerCheckboxRow reports whether label is one server row: a
-// one-rune checkbox ("[✔]" or "[ ]") then the server's name.
+// one-rune checkbox ("[✔]" or "[ ]") then the server's name, after any scroll
+// arrow in the pointer column.
 func claudeMCPServerCheckboxRow(label string) bool {
+	rest, ok := claudeMCPServerCheckboxStart(label)
+	return ok && strings.TrimSpace(rest) != ""
+}
+
+// claudeMCPServerCheckboxStart strips a leading scroll arrow and a one-rune
+// checkbox from label, returning what follows.
+func claudeMCPServerCheckboxStart(label string) (string, bool) {
+	if r, size := utf8.DecodeRuneInString(label); size > 0 && strings.ContainsRune(claudeMCPServersScrollArrows, r) {
+		label = strings.TrimSpace(label[size:])
+	}
 	rest, ok := strings.CutPrefix(label, "[")
 	if !ok {
-		return false
+		return "", false
 	}
 	_, size := utf8.DecodeRuneInString(rest)
 	if size == 0 || !strings.HasPrefix(rest[size:], "] ") {
-		return false
+		return "", false
 	}
-	return strings.TrimSpace(rest[size+len("] "):]) != ""
+	return rest[size+len("] "):], true
 }
 
 // claudeMCPServersPickerOf decides whether the multi-select picker owns the
@@ -96,6 +137,18 @@ func claudeMCPServerCheckboxRow(label string) bool {
 // footer and never matches (#4254, #4735). A proper prefix of the grammar is
 // partial.
 func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
+	if v := claudeMCPServersGrammarOf(content); v != claudeMCPServersNone {
+		return v
+	}
+	if claudeMCPServersUnreadableOf(content) {
+		return claudeMCPServersUnreadable
+	}
+	return claudeMCPServersNone
+}
+
+// claudeMCPServersGrammarOf is the strict grammar claudeMCPServersPickerOf
+// documents; it never returns claudeMCPServersUnreadable.
+func claudeMCPServersGrammarOf(content string) claudeMCPServersVerdict {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	rows := make([]claudeTrustRow, len(lines))
 	header := -1
@@ -183,6 +236,56 @@ func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
 	return claudeMCPServersPartial
 }
 
+// claudeMCPServersUnreadableOf reports a picker that is plainly on screen but
+// that the grammar could not read. It holds — never a key — so it is drawn only
+// from what THIS picker shows and a live session cannot, following
+// claudeMCPServerUnreadableOf:
+//
+//   - its header, or what a wrap leaves of it ("<N> new MCP servers"), opens
+//     the region;
+//   - below it are this picker's own rows: at least one checkbox row and the
+//     "Enable selected" row, so an unrelated picker is not mistaken for it;
+//   - the last content in the pane is the footer, with frame rules counted as
+//     content, so a composer's bottom rule below a draft disqualifies it;
+//   - no frame rule between the header and the footer;
+//   - exactly one ❯ in the pane, inside the region.
+//
+// A working session has its composer at the bottom, so it can never meet the
+// footer condition, and holding cannot wedge one.
+func claudeMCPServersUnreadableOf(content string) bool {
+	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
+	rows := make([]claudeTrustRow, len(lines))
+	var cursorRows []int
+	last := -1
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+		if rows[i].selected {
+			cursorRows = append(cursorRows, i)
+		}
+		if strings.TrimSpace(ansiCSISequence.ReplaceAllString(strings.TrimSuffix(line, "\r"), "")) != "" {
+			last = i
+		}
+	}
+	if last < 0 || rows[last].label != claudeMCPServersFooter || len(cursorRows) != 1 {
+		return false
+	}
+	header, checkbox, submit := -1, false, false
+	for i := last - 1; i >= 0; i-- {
+		if claudeTrustFrameRule(lines[i]) {
+			break
+		}
+		if _, ok := claudeMCPServerCheckboxStart(rows[i].label); ok {
+			checkbox = true
+		}
+		submit = submit || rows[i].label == claudeMCPServersSubmitLabel
+		if !rows[i].selected && claudeMCPServersHeaderStart.MatchString(rows[i].label) {
+			header = i
+			break
+		}
+	}
+	return header >= 0 && checkbox && submit && cursorRows[0] > header && cursorRows[0] < last
+}
+
 // rejectClaudeMCPServers answers a complete multi-select picker with Esc, once,
 // and then re-reads the pane. It always reports true: the picker was
 // positively identified, so the caller owes another check before it may type
@@ -201,13 +304,22 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 	}
 	// The picker's own clock, not the shared firstSeen: the folder-trust
 	// dialog af answered a moment ago may have started that one, and this
-	// picker may have been painted only now.
+	// picker may have been painted only now. A dialog-free frame clears it
+	// (CheckAndHandleTrustPrompt), so the picker must have stayed on screen.
 	now := claudeTrustNow()
 	if state.mcpServersFirstSeen.IsZero() {
 		state.mcpServersFirstSeen = now
 		return true
 	}
 	if now.Sub(state.mcpServersFirstSeen) < claudeTrustSettleDelay {
+		return true
+	}
+	// Look again before the one key: the frame af decided on must still be the
+	// complete picker (#7170 review, P3-1), as declineClaudeMCPServer re-reads
+	// before its Enter.
+	if content, err := t.CapturePaneContent(); err != nil || claudeMCPServersPickerOf(content) != claudeMCPServersComplete {
+		log.InfoLog.Printf("session %q: the %s picker was not on screen when af re-read the pane before its Esc (read error: %v); sending nothing",
+			t.sanitizedName, claudeMCPServersDialogName, err)
 		return true
 	}
 	state.mcpServersRejectSent = true // before the send: an errored send-keys may still have landed
@@ -219,17 +331,30 @@ func (t *TmuxSession) rejectClaudeMCPServers() bool {
 	t.noteDialogKeystroke(claudeMCPServersDialogName, claudeMCPServersChoice, "Escape")
 
 	// Re-read: the picker must leave the screen. A repaint lags send-keys, so
-	// look for the bounded repaint window before calling it stuck.
+	// look for the bounded repaint window before calling it stuck. What af
+	// reports at the end is what it saw (#7170 review, P3-2): a pane it could
+	// never read is not a picker that stayed.
 	deadline := claudeTrustNow().Add(claudeTrustRepaintWindow)
+	sawPicker := false
+	var readErr error
 	for {
 		content, err := t.CapturePaneContent()
-		if err == nil && claudeMCPServersPickerOf(content) == claudeMCPServersNone {
-			log.InfoLog.Printf("session %q: rejected every server on the %s picker with Esc; enable any of them later with /mcp",
-				t.sanitizedName, claudeMCPServersDialogName)
+		switch {
+		case err != nil:
+			readErr = err
+		case claudeMCPServersPickerOf(content) == claudeMCPServersNone:
+			log.InfoLog.Printf("session %q: rejected every server on the %s picker with Esc; %s",
+				t.sanitizedName, claudeMCPServersDialogName, claudeMCPServersRemedy)
 			return true
+		default:
+			sawPicker = true
 		}
 		if !claudeTrustNow().Before(deadline) {
-			t.refuseClaudeMCPServers("the picker is still on screen after af sent Esc")
+			reason := fmt.Sprintf("the picker was still on screen %s after af sent Esc", claudeTrustRepaintWindow)
+			if !sawPicker {
+				reason = fmt.Sprintf("af could not read the pane after sending Esc (%v), so it cannot tell whether the picker closed", readErr)
+			}
+			t.refuseClaudeMCPServers(reason)
 			return true
 		}
 		claudeTrustSleep(claudeTrustRepaintPoll)
@@ -246,6 +371,6 @@ func (t *TmuxSession) refuseClaudeMCPServers(reason string) {
 	}
 	t.claudeTrust.refusalLogged = true
 	log.ErrorLog.Printf(
-		"refusing to answer the %s picker for session %q: %s; af sends at most one Esc (reject all) and never Space or Enter. Answer it in the session; enable servers later with /mcp",
+		"refusing to answer the %s picker for session %q: %s; af sends at most one Esc (reject all) and never Space or Enter. Answer it in the session",
 		claudeMCPServersDialogName, t.sanitizedName, reason)
 }
