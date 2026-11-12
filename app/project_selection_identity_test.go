@@ -27,12 +27,17 @@ import (
 // rather than repoContextForSelection directly, so a row that drops its
 // identity anywhere on the way to the switch is caught.
 
-// projectSelectionHome is a home whose project switch completes without a
-// daemon: the incoming project's snapshot and the cross-repo list both answer
-// empty, and no root_agents opt-in adds rows of its own.
+// projectSelectionHome is a home scoped to a real active repository whose
+// project switch completes without a daemon: the incoming project's snapshot
+// and the cross-repo list both answer empty, and no root_agents opt-in adds
+// rows of its own. The active repository is load-bearing, not decoration: the
+// rail draws no Projects section for a single project (layout.Grid), so a
+// registry with one project and no active one leaves nothing to focus.
 func projectSelectionHome(t *testing.T) *home {
 	t.Helper()
 	h := newTestHome(t)
+	active := initTestGitRepo(t)
+	h.repoRoot, h.repoID = active, config.RepoIDFromRoot(active)
 	t.Cleanup(SetInstanceBuilderForTest(func(d session.InstanceData) (*session.Instance, error) {
 		return newSnapshotTestInstance(t, d.Title), nil
 	}))
