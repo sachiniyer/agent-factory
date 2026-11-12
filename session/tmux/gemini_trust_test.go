@@ -269,7 +269,36 @@ func TestCheckAndHandleTrustPrompt_GeminiFolderTrustHoldsUntilGeminiRelaunches(t
 func TestCheckAndHandleTrustPrompt_GeminiFolderTrustNotOwningThePaneInjectsNothing(t *testing.T) {
 	dialog := geminiTrustFixture(t, "gemini_0_51_0_folder_trust.ansi")
 	composer := geminiTrustFixture(t, "gemini_0_51_0_trusted_folder_composer.ansi")
+	// The dialog pasted INTO a composer draft (#7167's review found this shape
+	// answered on Claude's MCP dialog). Gemini paints the draft inside its input
+	// box, so the box's ▀ bottom edge — and the footer — always follow it, and
+	// the dialog grammar admits nothing below the dialog's own box.
+	plainComposer := strings.Split(ansiCSISequence.ReplaceAllString(composer, ""), "\n")
+	top, bottom := -1, -1
+	for i, line := range plainComposer {
+		switch trimmed := strings.TrimSpace(line); {
+		case trimmed != "" && strings.Trim(trimmed, "▄") == "":
+			top = i
+		case trimmed != "" && strings.Trim(trimmed, "▀") == "":
+			bottom = i
+		}
+	}
+	require.True(t, top >= 0 && bottom > top, "the composer capture must paint its ▄ and ▀ edges")
+	var draft strings.Builder
+	for _, line := range plainComposer[:top+1] {
+		draft.WriteString(line + "\n")
+	}
+	draft.WriteString(" >   what does this dialog want?\n")
+	for _, line := range strings.Split(ansiCSISequence.ReplaceAllString(dialog, ""), "\n") {
+		if strings.TrimSpace(line) != "" {
+			draft.WriteString("     " + strings.TrimSpace(line) + "\n")
+		}
+	}
+	for _, line := range plainComposer[bottom:] {
+		draft.WriteString(line + "\n")
+	}
 	for _, tt := range []struct{ name, content string }{
+		{"the dialog pasted into a composer draft", draft.String()},
 		{"the captured dialog above a live composer", strings.TrimRight(dialog, "\n") + "\n" + composer},
 		{"the captured dialog with trailing output", strings.TrimRight(dialog, "\n") + "\nThat is the dialog af answers at startup.\n"},
 		{"the question quoted in prose above the composer", "Gemini asked:\nDo you trust the files in this folder?\n" + composer},
