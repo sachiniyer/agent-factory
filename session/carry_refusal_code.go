@@ -71,6 +71,8 @@ var carryRefusalCodeOf = map[string]string{
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,
 	carryOtherFormsReason:              handoff.CarryCompressed,
 	carryTargetHoldsOtherRolloutReason: handoff.CarryDuplicated,
+	carryForkUnreadableReason:          handoff.CarryUnverified,
+	codexForkCarryReason:               handoff.CarryForked,
 	codexRevertCarrySourceReason:       handoff.CarryBacktracked,
 	codexRevertCarryTargetReason:       handoff.CarryBacktracked,
 	staleCarryReason:                   handoff.CarryStale,
