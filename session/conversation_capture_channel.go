@@ -8,7 +8,10 @@ import "errors"
 //
 //   - the rollout store: a before-image that failed, or a scan that failed
 //     inside the window;
-//   - a new rollout's header af could not open or read (#7140);
+//   - a new rollout's header af could not open or read (#7140), when every
+//     uncorrelated header in the window was unreadable. One af read but could
+//     not classify is an answer, and an unreadable header beside it does not
+//     turn that answer into "could not read" (#7160);
 //   - the runtime's open files, when their walk failed;
 //   - the runtime's process generation changing mid-walk. That one is "the
 //     runtime moved", not an unreadable channel, but it is no answer either,
@@ -42,6 +45,12 @@ func captureChannelUnavailable(err error) error {
 		return nil
 	}
 	return captureChannelError{err: err}
+}
+
+// CodexScope names the Codex store and working directory this snapshot binds
+// discovery to.
+func (s *ConversationCaptureSnapshot) CodexScope() (home, workingDir string) {
+	return s.codexHome, s.workingDir
 }
 
 // CarriesConversation reports whether this snapshot confirms a conversation an
