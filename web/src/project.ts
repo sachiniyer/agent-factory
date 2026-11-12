@@ -302,3 +302,39 @@ export function projectDeletionBreakdown(sessions: SessionData[], root: string):
   const inPlaceCount = live.filter(s => s.worktree?.external_worktree === true).length;
   return { sessionCount: live.length - inPlaceCount, inPlaceCount };
 }
+
+/** What a delete-project confirmation may say about live sessions (#7201): the
+ *  counts it observed, or why it could not observe them. */
+export type DeleteProjectStatement =
+  | { checked: true; sessionCount: number; inPlaceCount: number }
+  | { checked: false; reason: string };
+
+/** The delete-project confirmation states its counts as the terms of a destructive
+ *  action, so it never states one the session projection did not observe (#7201,
+ *  the web half of #7180). The projection is observed only while the events stream
+ *  is open AND the re-read that its last open triggered has landed (`settled`):
+ *  until then, sessions started or ended while it was down are missing. And it is
+ *  complete only while the daemon skipped no repo: a skipped repo's sessions are
+ *  hidden, so every count may be short — the TUI refuses on the same condition
+ *  (#6986). In any of those states the statement is a reason, never a number. */
+export function deleteProjectStatement(
+  view: { sessions: SessionData[]; live: string; skippedRepos?: readonly unknown[] },
+  settled: boolean,
+  root: string,
+): DeleteProjectStatement {
+  if (view.live !== "open") return { checked: false, reason: "the live connection is down" };
+  if (!settled) return { checked: false, reason: "the session list is still catching up with the daemon" };
+  const skipped = view.skippedRepos?.length ?? 0;
+  if (skipped > 0) {
+    return { checked: false, reason: `the daemon could not load ${skipped} repo${skipped === 1 ? "" : "s"}, so some sessions are hidden` };
+  }
+  return { checked: true, ...projectDeletionBreakdown(view.sessions, root) };
+}
+
+/** Whether two statements say the same thing — the test a confirmation applies
+ *  before it acts on the one it showed. */
+export function sameDeleteProjectStatement(a: DeleteProjectStatement, b: DeleteProjectStatement): boolean {
+  if (a.checked && b.checked) return a.sessionCount === b.sessionCount && a.inPlaceCount === b.inPlaceCount;
+  if (!a.checked && !b.checked) return a.reason === b.reason;
+  return false;
+}

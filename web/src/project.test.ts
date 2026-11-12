@@ -9,14 +9,17 @@ import assert from "node:assert/strict";
 
 import {
   defaultProject,
+  deleteProjectStatement,
   pickerProjects,
   projectMeta,
   projectName,
   projectDeletionBreakdown,
   projectSummaries,
   reconcileProject,
+  sameDeleteProjectStatement,
   scopeToProject,
 } from "./project.js";
+import { deleteProjectMessage } from "./modals.js";
 import { Liveness, type SessionData, type TaskData } from "./types.js";
 
 function sess(title: string, over: Partial<SessionData> = {}): SessionData {
@@ -262,4 +265,56 @@ test("project deletion counts only this root's non-archived regular and external
   ];
   assert.deepEqual(projectDeletionBreakdown(sessions, "/a"), { sessionCount: 1, inPlaceCount: 2 });
   assert.deepEqual(projectDeletionBreakdown(sessions, "/empty"), { sessionCount: 0, inPlaceCount: 0 });
+});
+
+// #7201: the delete-project confirmation states its counts as the terms of a
+// destructive action, so it states only counts an open, re-read, complete
+// projection observed — otherwise a reason, and never "No live sessions".
+test("delete-project statement states counts only from an observed, complete projection", () => {
+  const sessions = [
+    sess("regular", { worktree: { repo_path: "/a" } }),
+    sess("here", { worktree: { repo_path: "/a", external_worktree: true } }),
+  ];
+  const view = { sessions, live: "open", skippedRepos: [] };
+  assert.deepEqual(deleteProjectStatement(view, true, "/a"), { checked: true, sessionCount: 1, inPlaceCount: 1 });
+  assert.deepEqual(deleteProjectStatement(view, true, "/empty"), { checked: true, sessionCount: 0, inPlaceCount: 0 });
+
+  for (const live of ["connecting", "reconnecting"]) {
+    assert.deepEqual(deleteProjectStatement({ ...view, live }, true, "/a"),
+      { checked: false, reason: "the live connection is down" }, `stream ${live}`);
+    // An empty-looking project is exactly the case a stale list would call idle.
+    assert.equal(deleteProjectStatement({ ...view, live }, true, "/empty").checked, false, `stream ${live}, empty`);
+  }
+  assert.deepEqual(deleteProjectStatement(view, false, "/a"),
+    { checked: false, reason: "the session list is still catching up with the daemon" },
+    "an open stream whose re-read has not landed is not observed yet");
+  assert.deepEqual(deleteProjectStatement({ ...view, skippedRepos: [{ repo_id: "x" }] }, true, "/a"),
+    { checked: false, reason: "the daemon could not load 1 repo, so some sessions are hidden" });
+  assert.deepEqual(deleteProjectStatement({ ...view, skippedRepos: [{ repo_id: "x" }, { repo_id: "y" }] }, true, "/empty"),
+    { checked: false, reason: "the daemon could not load 2 repos, so some sessions are hidden" },
+    "a skip anywhere makes every project's count unreliable, as in the TUI (#6986)");
+});
+
+test("delete-project statements compare by what they say", () => {
+  const counts = (sessionCount: number, inPlaceCount: number) => ({ checked: true as const, sessionCount, inPlaceCount });
+  const unchecked = (reason: string) => ({ checked: false as const, reason });
+  assert.equal(sameDeleteProjectStatement(counts(1, 0), counts(1, 0)), true);
+  assert.equal(sameDeleteProjectStatement(counts(1, 0), counts(2, 0)), false);
+  assert.equal(sameDeleteProjectStatement(counts(1, 0), counts(1, 1)), false);
+  assert.equal(sameDeleteProjectStatement(unchecked("a"), unchecked("a")), true);
+  assert.equal(sameDeleteProjectStatement(unchecked("a"), unchecked("b")), false);
+  assert.equal(sameDeleteProjectStatement(unchecked("a"), counts(0, 0)), false);
+  assert.equal(sameDeleteProjectStatement(counts(0, 0), unchecked("a")), false);
+});
+
+test("the delete-project message states no count for an unchecked statement", () => {
+  const message = deleteProjectMessage({ checked: false, reason: "the live connection is down" });
+  assert.equal(message, "Could not check live sessions — the live connection is down. You can delete once the session counts are current.");
+  assert.doesNotMatch(message, /No live sessions|Archive|ended permanently/);
+
+  assert.match(deleteProjectMessage({ checked: true, sessionCount: 0, inPlaceCount: 0 }), /^No live sessions to archive\./);
+  assert.match(deleteProjectMessage({ checked: true, sessionCount: 1, inPlaceCount: 0 }), /^Archive 1 session and remove the project\./);
+  const mixed = deleteProjectMessage({ checked: true, sessionCount: 2, inPlaceCount: 1 });
+  assert.match(mixed, /^1 in-place session is ended permanently/);
+  assert.match(mixed, /Archive 2 regular sessions/);
 });

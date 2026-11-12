@@ -109,7 +109,7 @@ import { InstallAffordance } from "./install.js";
 import { decideKey, type KeyboardFocus, type View } from "./nav.js";
 import { shortcutRepeatGuard, tabCreateKey } from "./tab_create.js";
 import { defaultFilter, filterSessions, loadFilter, persistFilter, withKind } from "./filter.js";
-import { loadProjectChoice, persistProjectChoice, pickerProjects, projectDeletionBreakdown, projectSummaries, reconcileProject, scopeToProject } from "./project.js";
+import { deleteProjectStatement, loadProjectChoice, persistProjectChoice, pickerProjects, projectSummaries, reconcileProject, sameDeleteProjectStatement, scopeToProject } from "./project.js";
 import {
   clampActiveTab,
   pickSelection,
@@ -282,6 +282,13 @@ const loadCreateAccounts = (repoPath: string): Promise<AccountsResponse> =>
 // so a burst of events collapses into a single authoritative refetch.
 let resyncTimer: number | null = null;
 let resyncCompletions: Array<{ resolve: () => void; reject: (error: unknown) => void }> = [];
+// Whether the session projection has been re-read since the events stream last
+// opened (#7201). Events are not replayed, so between a drop and the resync that
+// the next open triggers, sessions started or ended meanwhile are missing from
+// the store; a count read then is one nobody observed. Cleared on every stream
+// status change, before it is published, and set when a resync's Snapshot
+// commits while the stream is open.
+let sessionsSettled = false;
 // Snapshot and events are two asynchronous projections of the same session state.
 // Fence them independently so a Snapshot requested before a session event cannot
 // resolve afterwards and rewind the event's newer roster (#2330).
@@ -1414,18 +1421,58 @@ function openConfirm(
 /** Opens the delete-project confirm for a project row (#1735). On confirm it
  *  archives the repo's regular live sessions, tears down in-place ones, and
  *  removes any durable project registration via DeleteProject; the lifecycle
- *  events + projects.changed resync the rail and drop the project from the view. */
-function openDeleteProject(root: string, label: string): void {
+ *  events + projects.changed resync the rail and drop the project from the view.
+ *
+ *  The dialog's counts are the terms of that consent, so it states only counts
+ *  the projection observed (#7201): while the projection is stale or incomplete
+ *  it reads "Could not check live sessions" and Delete project is disabled. It
+ *  watches the projection while it waits for an answer and restates itself
+ *  whenever what it would say changes — counts that move, or a check that lands
+ *  or lapses — and the confirm re-reads the statement before acting, so a
+ *  delete never goes out on a statement the dialog no longer makes. The watch
+ *  pauses while a confirmed delete is in flight and resumes if it is refused;
+ *  `refusal` carries that refusal into a restated dialog, so the user still sees
+ *  why the last attempt failed. */
+function openDeleteProject(root: string, label: string, invoker?: ModalInvoker, refusal?: string): void {
+  const statementNow = () => deleteProjectStatement(store.get(), sessionsSettled, root);
+  const stated = statementNow();
+  if (invoker === undefined) {
+    invoker = captureModalInvoker();
+    // A user's open asks for the re-read an unsettled statement waits on: the
+    // one the stream's last open requested may have failed, and nothing else
+    // would ask again. Restatements below do not, or each would supersede the
+    // re-read it is waiting for.
+    if (!stated.checked && store.get().live === "open" && !sessionsSettled) requestResync();
+  }
+  const restate = (carry?: string) => openDeleteProject(root, label, invoker, carry);
+  const watchStatement = (carry?: string) => {
+    stopModalProjectionWatch?.();
+    const reconcile = () => {
+      if (!sameDeleteProjectStatement(statementNow(), stated)) restate(carry);
+    };
+    stopModalProjectionWatch = store.subscribe(reconcile);
+    reconcile();
+  };
   openModal(
     confirmDeleteProjectModal({
       projectLabel: label,
-      ...projectDeletionBreakdown(store.get().sessions, root),
+      statement: stated,
       onConfirm: () => {
         const tok = token;
         // `=== null` not `!tok`: "" is the authorized-tokenless credential (#1696).
         if (tok === null || !modal) {
           return;
         }
+        if (!sameDeleteProjectStatement(statementNow(), stated)) {
+          restate();
+          return;
+        }
+        if (!stated.checked) return;
+        // Answered: the counts this delete acts on are the ones just confirmed,
+        // so the dialog stops restating itself — its own archive events would
+        // otherwise redraw it mid-flight.
+        stopModalProjectionWatch?.();
+        stopModalProjectionWatch = null;
         const m = modal;
         m.setBusy(true);
         const connection = connectionGeneration;
@@ -1472,12 +1519,21 @@ function openDeleteProject(root: string, label: string): void {
               }
               m.setBusy(false);
               m.setError(errorText(e));
+              // Interactive again: the dialog goes back to stating the current
+              // projection, at once if it moved while the request was out.
+              if (modal === m) watchStatement(errorText(e));
             });
         });
       },
       onCancel: closeModal,
     }),
+    false,
+    invoker,
   );
+  if (refusal !== undefined) modal?.setError(refusal);
+  // openModal's close of the previous dialog dropped any earlier watch, so this
+  // is the only one live.
+  watchStatement(refusal);
 }
 
 /** Opens the add-project modal (#2456): the user names a path to a git checkout
@@ -3785,6 +3841,7 @@ function startStream(tok: string): void {
   stream = new EventStream(tok, {
     onEvent,
     onResync: () => {
+      sessionsSettled = false;
       markArchiveDirty();
       requestResync();
       // Missed events are not replayed, so open Docs tabs refresh themselves.
@@ -3792,6 +3849,11 @@ function startStream(tok: string): void {
     },
     onStatus: (s: EventStreamStatus, retryAt?: number) => {
       if (s !== "open") markArchiveDirty();
+      // Cleared on EVERY status, "open" included, and before the store hears of
+      // it: an open is followed by onResync's re-read, and until that commits the
+      // rows are the pre-drop ones — so the watcher this store.set wakes must
+      // already read them as unsettled (#7201 review).
+      sessionsSettled = false;
       store.set({ live: s, liveRetryAt: retryAt ?? null });
     },
     // The WS upgrade keeps closing before open (see events.ts). Probe with an
@@ -3830,6 +3892,7 @@ function stopStream(): void {
   quotaRefetcher.invalidate();
   hostsCapabilityRefetcher.invalidate();
   root?.removeAttribute("data-af-resync-settled");
+  sessionsSettled = false;
   if (resyncTimer !== null) {
     window.clearTimeout(resyncTimer);
     resyncTimer = null;
@@ -4119,6 +4182,11 @@ function requestResync(): void {
           requestResync();
           return;
         }
+        // Set before the commit, so a watcher woken by it (the delete-project
+        // confirmation, #7201) already reads the projection as observed — and
+        // only while the stream is open: a re-read that lands during a drop is
+        // stale again by the time the stream reopens.
+        sessionsSettled = store.get().live === "open";
         applySessions(optimisticSessions.project(), {
           kind: "snapshot", generation: restoreSnapshot,
           operationLockTimeoutMs: snapshot.operationLockTimeoutMs,
