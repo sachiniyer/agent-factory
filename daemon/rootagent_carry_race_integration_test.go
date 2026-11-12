@@ -561,31 +561,33 @@ func TestARootHealAdmittedJustBeforeASuppressionNeverLaunches(t *testing.T) {
 	manager.waitRootAgentCreates()
 	finishOnce.Do(func() { close(finish) })
 	waitClosed(t, deleteDone, "the delete to finish")
-	// With the heal kept from launching, the dead root is still there for the
-	// delete's archive loop. The fake backend's root has no external worktree,
-	// so the loop takes the archive branch, which refuses the reserved root
-	// title (archive.go) — a real in-place root is killed instead — and the
-	// delete reports that partial failure. Its suppression ran before the loop.
-	require.Error(t, deleteErr, "fixture: the delete meets the dead root it was not reaped from under")
-	require.Contains(t, deleteErr.Error(), "reserved", "fixture: the partial failure is the archive branch refusing the reserved root")
-	manager.mu.Lock()
-	_, stamped := manager.deletedRootRepos[repo.ID]
-	manager.mu.Unlock()
-	require.True(t, stamped, "the delete's suppression stands")
-	require.Same(t, first, findRootInstance(t, manager, repoPath),
-		"the heal never launched: the dead root is still the record the delete found, neither reaped nor replaced")
 
+	// The property: no launch, no carry, no root after the suppression.
 	manager.mu.Lock()
 	st := manager.rootEnsureStates[repoPath]
 	manager.mu.Unlock()
 	require.NotNil(t, st, "the candidate's ensure state exists")
 	_, held := manager.heldRootCarry(st, repo, nil)
 	require.False(t, held, "a heal admitted before a delete's suppression must not hold the deleted project's carry after it")
+	require.Same(t, first, findRootInstance(t, manager, repoPath),
+		"the heal never launched: the dead root is still the record the delete found, neither reaped nor replaced")
 	require.Len(t, *seen, 1, "only the first-ever root may have started")
 	for _, opts := range *seen {
 		require.NotEqual(t, prior.ID, opts.ResumeConversation.ID,
 			"the deleted project's conversation must not be resumed by any create")
 	}
+	manager.mu.Lock()
+	_, stamped := manager.deletedRootRepos[repo.ID]
+	manager.mu.Unlock()
+	require.True(t, stamped, "the delete's suppression stands")
+
+	// The fixture's partial delete. With the heal kept from launching, the dead
+	// root is still there for the delete's archive loop. The fake backend's root
+	// has no external worktree, so the loop takes the archive branch, which
+	// refuses the reserved root title (archive.go) — a real in-place root is
+	// killed instead. Its suppression ran before the loop.
+	require.Error(t, deleteErr, "fixture: the delete meets the dead root the heal never reaped")
+	require.Contains(t, deleteErr.Error(), "reserved", "fixture: the partial failure is the archive branch refusing the reserved root")
 }
 
 // Control for the race tests above: with NO concurrent delete, the same
