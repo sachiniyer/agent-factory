@@ -256,28 +256,7 @@ func isReadyContent(content, agent string) bool {
 			strings.Contains(content, "Aider v") ||
 			isDocTrustPrompt(content)
 	case tmux.ProgramGemini:
-		// Gemini CLI's folder-trust dialog is a readiness STOP, named the way
-		// the codex arm names CodexTrustPromptPresent: CheckAndHandleTrustPrompt
-		// positively identifies it and answers "Trust folder" by label before
-		// any prompt is sent (#7162). Gemini then relaunches itself, and the
-		// relaunched composer — painted below its own restart notice — is ready:
-		// that process has the folder's trust recorded and cannot open the
-		// dialog again.
-		if tmux.GeminiFolderTrustPromptPresent(content) || tmux.GeminiRelaunchedAfterTrust(content) {
-			return true
-		}
-		// Otherwise the dialog's own box is not a ready signal. Its "╰" is
-		// what the weak glyph check below used to read as ready, while the
-		// dialog was still painting or while Gemini was relaunching after the
-		// answer, and the prompt went into the dialog or the exiting process.
-		if tmux.GeminiFolderTrustDialogOnScreen(content) {
-			return false
-		}
-		// Best-guess (#714) for everything else. The "╰" box-drawing corner of
-		// gemini-cli's frame is a weak readiness signal.
-		// TODO(#714): replace with a confirmed gemini-specific ready string.
-		return strings.Contains(content, "╰") ||
-			isDocTrustPrompt(content)
+		return isGeminiReadyContent(content)
 	case tmux.ProgramAmp:
 		// Amp is ready when its input-prompt frame is visible. A bare
 		// box-drawing character is too broad: loading frames, banners, and
@@ -626,9 +605,13 @@ func (t instanceReadinessTarget) ClaudeActiveLimitReset(now time.Time, banner st
 type readinessClock struct {
 	after     func(time.Duration) <-chan time.Time
 	newTicker func(time.Duration) (<-chan time.Time, func())
+	// now reads the clock the cross-poll readiness judgement measures with
+	// (readinessJudge). Nil means the wall clock.
+	now func() time.Time
 }
 
 var wallReadinessClock = readinessClock{
+	now:   time.Now,
 	after: time.After,
 	newTicker: func(interval time.Duration) (<-chan time.Time, func()) {
 		ticker := time.NewTicker(interval)
@@ -653,6 +636,9 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 	// program's readiness heuristic, and a non-agent override gets the
 	// generic one instead of waiting 60s for a claude glyph (#1116, #1131).
 	agent := target.ResolvedAgent()
+	// One judge per wait: it carries the only readiness memory that spans
+	// polls (a bare Gemini composer's first sighting, #7168).
+	judge := newReadinessJudge(agent, clock)
 	// Resolve the usage-limit detector once so a pane that shows a limit banner
 	// mid-startup is recognized and PARKED, not spun into a failure (#1146 PR4).
 	// Only agents with a matcher park here — claude/codex (with a reset time) and
@@ -725,7 +711,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			!expiredRecordedLimitWall(target, perr, freshRuntime) {
 			return true, perr
 		}
-		return isReadyContent(content, agent), nil
+		return judge.ready(content), nil
 	}
 
 	// Look once before waiting for the first tick (#4464). The ticker's first
@@ -802,7 +788,7 @@ func waitForReadyOn(ctx context.Context, target ReadinessTarget, clock readiness
 			// reporting a timeout would make the create path kill a healthy, ready
 			// session (#1783). Checked after limitParkError, mirroring the ticker
 			// branch's ordering.
-			if isReadyContent(content, agent) {
+			if judge.ready(content) {
 				return nil
 			}
 			log.ErrorLog.Printf("waitForReady timed out. Last pane content: %s", content)
