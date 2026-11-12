@@ -39,11 +39,28 @@ func rootCarryBinding(repo *config.RepoContext, identity *resolvedProjectRoot) r
 }
 
 // holdRootCarry keeps carried on st for the next pass's create.
+//
+// The create runs on its own goroutine (#3721), so a delete that ran while it
+// was in flight retired this carry in suppressRootAgent (rootagent_carry.go's
+// retireRootCarriesLocked). Re-holding it here would re-arm the deleted
+// project's conversation and tabs for an unrelated clone later re-registered at
+// the same path, once the tombstone releases — exactly the leak the retirement
+// invariant exists to prevent (#7090 review, P3-2). Refuse to re-hold while a
+// delete for this repo is in flight (the projectDeletes fence) or has already
+// suppressed the repo (the deletion tombstone): the first covers a create that
+// fails after the fence went up but before suppressRootAgent ran, the second a
+// create that fails after suppression completed.
 func (m *Manager) holdRootCarry(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) {
 	held := rootCarryBinding(repo, identity)
 	held.state = carried
 	m.mu.Lock()
 	defer m.mu.Unlock()
+	if _, deleting := m.projectDeletes[repo.ID]; deleting {
+		return
+	}
+	if m.rootDeletionTombstoneApplies(m.rootAgentLayers.Load(), repo.ID) {
+		return
+	}
 	st.carry = &held
 }
 

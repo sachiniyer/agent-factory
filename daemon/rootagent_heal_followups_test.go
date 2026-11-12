@@ -201,6 +201,85 @@ func TestDeletingAProjectRetiresItsHeldRootCarries(t *testing.T) {
 	require.False(t, stillHeld, "a deleted project's carry must not outlive it for a clone at the same path to inherit")
 }
 
+// #7090 review, P3-2 (race the existing retirement test does not cover): the
+// root create runs on its own goroutine (#3721), so a create that launched
+// before the delete and reaches its failure path AFTER suppressRootAgent ran
+// must not re-hold the carry that suppression just retired. holdRootCarry is
+// the single point that re-arms a carry on the failure path, so it consults the
+// deletion tombstone and refuses while one applies — preventing the deleted
+// project's conversation and tabs from being resumed inside an unrelated clone
+// later re-registered at the same path once the tombstone releases.
+func TestHoldRootCarryRefusesToReHoldAfterSuppressRootAgent(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	repo := &config.RepoContext{Root: repoPath, ID: repoID}
+	held := &rootEnsureState{}
+	manager.mu.Lock()
+	manager.rootEnsureStates[repoPath] = held
+	manager.mu.Unlock()
+	carried := reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
+	}}
+
+	// The create's failure path held its carry before the delete ran.
+	manager.holdRootCarry(held, repo, nil, carried)
+	_, ok := manager.heldRootCarry(held, repo, nil)
+	require.True(t, ok, "precondition: the carry is held before suppression")
+
+	// The delete retires the carry and raises the suppression tombstone.
+	manager.suppressRootAgent(repoID, "")
+	_, ok = manager.heldRootCarry(held, repo, nil)
+	require.False(t, ok, "suppression retires the held carry")
+
+	// The racing create reaches its failure path now and tries to re-hold.
+	manager.holdRootCarry(held, repo, nil, carried)
+	_, reHeld := manager.heldRootCarry(held, repo, nil)
+	require.False(t, reHeld,
+		"a create whose failure path runs after suppression must not re-arm the retired carry for an unrelated clone to inherit")
+}
+
+// The same re-hold must also be refused while the delete FENCE is up — the
+// window between DeleteProject installing projectDeletes and suppressRootAgent
+// running — since a create that fails there would re-arm a carry the about-to-run
+// retirement is meant to make final.
+func TestHoldRootCarryRefusesToReHoldWhileDeleteFenceIsUp(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	repo := &config.RepoContext{Root: repoPath, ID: repoID}
+	held := &rootEnsureState{}
+	manager.mu.Lock()
+	manager.rootEnsureStates[repoPath] = held
+	manager.projectDeletes = map[string]struct{}{repoID: {}}
+	manager.mu.Unlock()
+	carried := reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
+	}}
+
+	manager.holdRootCarry(held, repo, nil, carried)
+	_, reHeld := manager.heldRootCarry(held, repo, nil)
+	require.False(t, reHeld,
+		"a create whose failure path runs while the delete fence is up must not re-arm a carry for the deleting repo")
+}
+
+// Control for the two refusal tests above: with no delete in flight and no
+// tombstone, holdRootCarry still re-holds the carry so the next pass's create
+// can resume it — the #7088 behavior the carry exists for.
+func TestHoldRootCarryReholdsWhenNoDeleteIsInProgress(t *testing.T) {
+	manager, repoID, repoPath := newStatusTestManager(t)
+	repo := &config.RepoContext{Root: repoPath, ID: repoID}
+	held := &rootEnsureState{}
+	manager.mu.Lock()
+	manager.rootEnsureStates[repoPath] = held
+	manager.mu.Unlock()
+	carried := reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "carried-conversation",
+	}}
+
+	manager.holdRootCarry(held, repo, nil, carried)
+	got, ok := manager.heldRootCarry(held, repo, nil)
+	require.True(t, ok, "the carry is held when no delete is in progress")
+	require.Equal(t, carried.conversation.ID, got.conversation.ID,
+		"the held carry is the one that was held")
+}
+
 // #7090 review, P3-4: a held carry outranks a record reaped since. While it is
 // held no replacement has launched, so any root record reaped in the meantime
 // is a failed replacement (persistFailedCreate can leave one): the heal carries
