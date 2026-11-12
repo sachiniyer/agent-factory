@@ -208,7 +208,19 @@ func TestCheckAndHandleTrustPrompt_PartiallyRenderedClaudeMCPServersPickerHolds(
 func TestCheckAndHandleTrustPrompt_QuotedClaudeMCPServersPickerInjectsNothing(t *testing.T) {
 	picker := readTrustFixture(t, mcpServersThreeFixture)
 	composer := readTrustFixture(t, mcpServersRejectedFixture)
+	// The picker pasted into a multi-line composer draft: the composer's own ❯
+	// line sits above the pasted header, so the pane has two ❯ rows.
+	rule := strings.Repeat("─", 80)
+	var draft strings.Builder
+	draft.WriteString(rule + "\n" + claudeTrustSelectionGlyph + " why does this picker check every server?\n")
+	for _, line := range strings.Split(ansiCSISequence.ReplaceAllString(picker, ""), "\n") {
+		if text := strings.TrimSpace(line); text != "" && strings.Trim(text, "─") != "" {
+			draft.WriteString("  " + line + "\n")
+		}
+	}
+	draft.WriteString(rule + "\n")
 	for _, tt := range []struct{ name, content string }{
+		{"the picker pasted into a multi-line composer draft", draft.String()},
 		{"the captured picker above the agent's composer", strings.TrimRight(picker, "\n") + "\n" + composer},
 		{"the captured picker with trailing prose", strings.TrimRight(picker, "\n") + "\nThat is the picker af rejects.\n"},
 		{"the header quoted above the composer", "  2 new MCP servers found in this project\n" + composer},

@@ -99,13 +99,22 @@ func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
 	lines := strings.Split(strings.ReplaceAll(content, "\r\n", "\n"), "\n")
 	rows := make([]claudeTrustRow, len(lines))
 	header := -1
+	var cursorRows []int
 	for i, line := range lines {
 		rows[i] = claudeTrustRowOf(line)
+		if rows[i].selected {
+			cursorRows = append(cursorRows, i)
+		}
 		if !rows[i].selected && claudeMCPServersHeader.MatchString(rows[i].label) {
 			header = i
 		}
 	}
-	if header < 0 {
+	// The pane's ❯ rows: at most one, and none above the header. The live
+	// picker is the only thing on screen and paints exactly one; a composer
+	// anywhere paints another — the rule claudeMCPServerDialogOf and
+	// parseClaudeFolderTrustDialog keep (#7167 review). An Esc that reached a
+	// working composer would interrupt the agent.
+	if header < 0 || len(cursorRows) > 1 || (len(cursorRows) == 1 && cursorRows[0] < header) {
 		return claudeMCPServersNone
 	}
 
@@ -165,6 +174,10 @@ func claudeMCPServersPickerOf(content string) claudeMCPServersVerdict {
 		}
 	}
 	if phase == afterFooter {
+		if len(cursorRows) != 1 {
+			// A picker always has its cursor on one row.
+			return claudeMCPServersNone
+		}
 		return claudeMCPServersComplete
 	}
 	return claudeMCPServersPartial
