@@ -588,8 +588,9 @@ func (i *Instance) setRuntimeProgram(program string) {
 // that cannot answer records the command alone; the record then verifies
 // nothing on reattach and ages out exactly like a pre-evidence launch.
 //
-// spawnedAt is the instant the launch took just before it spawned the
-// process (zero when it has none). It dates the replacement of the runtime a
+// spawnedAt is the instant just before the launch spawned the process — ts's
+// SpawnedAt, taken after tmux confirmed no session stood behind the name —
+// or zero when it has none. It dates the replacement of the runtime a
 // standing operator repair was made against (#7147 G-2).
 func (i *Instance) setRuntimeLaunch(program string, ts *tmux.TmuxSession, spawnedAt time.Time) {
 	if strings.TrimSpace(program) == "" {

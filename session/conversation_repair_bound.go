@@ -158,12 +158,13 @@ func (c AgentConversationData) withoutRepairStamp() AgentConversationData {
 // thread, which the follow and the bound would both exempt in the new pane,
 // or an unstamped repair would let the follow baseline from the new pane.
 //
-// at is as early as af can defend. A launch passes the instant it took just
-// before it spawned the process (launchReplacementInstant), so writes the new
-// pane makes while af is still recording the launch — the ready poll and the
-// tmux calls after it, seconds under load — are already moves (#7147 G-2).
-// The old runtime is dead before any af launch spawns, so none of its writes
-// can land after that instant. A replacement af only detects is dated at
+// at is as early as af can defend. A launch passes the instant tmux took
+// just before it ran new-session, after its existence gate confirmed no
+// session behind the name (TmuxSession.SpawnedAt, launchReplacementInstant),
+// so writes the new pane makes while af is still recording the launch — the
+// ready poll and the tmux calls after it, seconds under load — are already
+// moves (#7147 G-2). The old pane was gone by then, so none of its writes can
+// land after that instant. A replacement af only detects is dated at
 // detection; the process may have started earlier. The surrounding launch or
 // settle owns UpdatedAt and the checkpoint that persists it. Callers hold
 // i.mu.
@@ -214,12 +215,15 @@ func operatorRepairWindowOf(conv AgentConversationData, now time.Time) operatorR
 }
 
 // launchReplacementInstant is the instant a launch records a standing
-// repair's runtime as replaced at: spawnedAt, which the launch took just
-// before it spawned the process, or now when it has none — or when spawnedAt
-// is after now, which only a clock stepped back during the launch produces,
-// and which would otherwise hand the new pane's first writes to the old
-// stamp.
+// repair's runtime as replaced at: spawnedAt, taken just before the process
+// was spawned, or now when it has none — or when spawnedAt is after now,
+// which only a clock stepped back during the launch produces, and which
+// would otherwise hand the new pane's first writes to the old stamp. Both
+// are compared as wall-clock readings: the instant is persisted and compared
+// with file mtimes, and two time.Now() readings compare by their monotonic
+// clock, which a step of the wall clock does not move.
 func launchReplacementInstant(spawnedAt, now time.Time) time.Time {
+	spawnedAt, now = spawnedAt.Round(0), now.Round(0)
 	if spawnedAt.IsZero() || spawnedAt.After(now) {
 		return now
 	}

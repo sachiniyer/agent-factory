@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"time"
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
@@ -304,7 +303,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// and keep the row listed.
 		var restoreResult tmux.RestoreResult
 		var err error
-		spawnedAt := time.Now() // before any re-spawn (#7147 G-2)
 		if worktreeMissing {
 			restoreResult, err = tmux.RestoreReattached, tmuxSession.ReattachInert()
 		} else {
@@ -325,7 +323,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		}
 		if restoreResult == tmux.RestoreRespawned {
 			if strings.TrimSpace(runtimeProgram) != "" {
-				i.setRuntimeLaunch(runtimeProgram, tmuxSession, spawnedAt)
+				i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
@@ -425,7 +423,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		setLaunchProgram(tmuxSession, program, proof)
 
 		// Create new session
-		spawnedAt := time.Now() // before the spawn (#7147 G-2)
 		if err := tmuxSession.Start(gw.GetWorktreePath()); err != nil {
 			// Fail closed: only Start's positive "the new-session process never
 			// began" marker authorizes deleting this worktree. An unclassified
@@ -461,7 +458,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			return setupErr
 		}
-		i.setRuntimeLaunch(runtimeProgram, tmuxSession, spawnedAt)
+		i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 	}
 
 	// Rebuild the tab roster a reaped record handed this create, if any (#2628).
@@ -627,14 +624,13 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}
-	spawnedAt := time.Now() // before the spawn (#7147 G-2)
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)
 		}
 		return fmt.Errorf("swap agent: failed to start %s for %q: %w", i.AgentProgram(), i.Title, err)
 	}
-	i.setRuntimeLaunch(plan.baseProgram, ts, spawnedAt)
+	i.setRuntimeLaunch(plan.baseProgram, ts, ts.SpawnedAt())
 
 	resetAgentBrokerCaptures(i, true)
 	return nil

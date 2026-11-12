@@ -71,8 +71,9 @@ func TestOperatorRepairReplacementInstantAfterNowFailsClosed(t *testing.T) {
 	})
 }
 
-// G-2: a launch dates the replacement at the instant it took just before the
-// spawn, not when it finished recording the launch. Between the two — the
+// G-2: a launch dates the replacement at the instant tmux took just before
+// the spawn (TmuxSession.SpawnedAt), not when af finished recording the
+// launch. Between the two — the
 // ready poll and the tmux calls after it, seconds under load — the new pane is
 // already interactive, and a thread it resumes and writes there is a move. The
 // old runtime is dead before af spawns, so nothing it wrote is after that
@@ -117,6 +118,12 @@ func TestOperatorRepairReplacementIsDatedAtTheSpawn(t *testing.T) {
 		require.True(t, launchReplacementInstant(before.Add(time.Hour), before).Equal(before),
 			"a spawn instant after now would hand the new pane's first writes to the old stamp")
 		require.True(t, launchReplacementInstant(spawnedAt, before).Equal(spawnedAt))
+		// Codex review on #7150: two time.Now() readings compare by their
+		// monotonic clock, which a wall-clock step does not move, so the
+		// rollback check must compare — and the launch must persist — wall
+		// readings.
+		got := launchReplacementInstant(time.Now(), time.Now())
+		require.Equal(t, got.Round(0), got, "the instant must be a wall-clock reading, not a monotonic one")
 	})
 }
 
