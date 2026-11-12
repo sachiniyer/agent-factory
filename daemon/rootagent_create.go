@@ -60,6 +60,12 @@ type rootCreateJob struct {
 	resolution config.RootAgentResolution
 	identity   *resolvedProjectRoot
 	inst       *session.Instance
+	// ticket is this create's claim to commit, minted by launchRootCreate as
+	// its in-flight mark and withdrawn by a delete (rootagent_carry.go).
+	ticket *rootCreateTicket
+	// layers is the snapshot the sweep admitted this create against, so the
+	// launch re-asks the tombstone question exactly as the admission did.
+	layers *rootAgentSnapshot
 }
 
 // launchRootCreate starts one create for this repo, or does nothing because one
@@ -104,7 +110,21 @@ func (m *Manager) launchRootCreate(job rootCreateJob) {
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
 		return
 	}
-	m.rootCreatesInFlight[job.repo.ID] = job.repo.WorkspacePath()
+	// The admission's tombstone check, again, in the section that mints the
+	// ticket (PR #7190 review R1). The sweep checked in an earlier m.mu
+	// section, and a delete that suppressed in between found no ticket to
+	// withdraw. Now suppression either precedes this check or finds the ticket.
+	// Same layers as the admission, so an occupant admitted on a released
+	// tombstone is admitted here too; the next tick takes the suppressed path.
+	layers := job.layers
+	if layers == nil {
+		layers = m.rootAgentLayers.Load()
+	}
+	if m.rootDeletionTombstoneApplies(layers, job.repo.ID) {
+		return
+	}
+	job.ticket = &rootCreateTicket{repoID: job.repo.ID, workspace: job.repo.WorkspacePath()}
+	m.rootCreatesInFlight[job.repo.ID] = job.ticket
 	m.rootCreateWG.Add(1)
 
 	// Both defers are registered before any work, so every exit path of
@@ -166,8 +186,8 @@ func (m *Manager) waitRootAgentCreates() {
 func (m *Manager) waitRootAgentCreatesForShutdown() {
 	m.mu.Lock()
 	pending := make([]string, 0, len(m.rootCreatesInFlight))
-	for _, workspace := range m.rootCreatesInFlight {
-		pending = append(pending, workspace)
+	for _, ticket := range m.rootCreatesInFlight {
+		pending = append(pending, ticket.workspace)
 	}
 	m.mu.Unlock()
 	if len(pending) > 0 {
@@ -196,6 +216,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	stateKey, st, repo := job.stateKey, job.st, job.repo
 	resolution, identity, inst := job.resolution, job.identity, job.inst
 	workspace := repo.WorkspacePath()
+	// The workspace resolved for comparison with a delete's path, taken here
+	// because resolving touches the filesystem and m.mu must not wait on it.
+	compareWorkspace := m.resolveRootCreateWorkspace(job.ticket, workspace)
 
 	// The project config first, and ALL of it, before the reap below can destroy
 	// the record that holds the conversation (#2616) and tab roster (#2628) the
@@ -229,8 +252,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// What an earlier heal carried, if its create failed after its reap
 	// (rootagent_carry.go). It is the last working root's, so it outranks a
 	// record reaped since: no replacement has launched, and any record reaped
-	// meanwhile is a failed one.
-	held, haveHeld := m.heldRootCarry(st, repo, identity)
+	// meanwhile is a failed one. carryRef is the carry this create resumes,
+	// held on st until its commit and compared there (rootCommitRefusalLocked).
+	carryRef, held := m.heldRootCarryRef(st, repo, identity)
+	haveHeld := carryRef != nil
 
 	if inst != nil {
 		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
@@ -270,7 +295,14 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// tab, an editor — would vanish with the record that listed it.
 		m.warn().Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
 		var err error
-		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
+		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst, func(reaped reapedRootState) {
+			// A held carry outranks the record reaped since, and a withdrawn
+			// ticket means a delete suppressed while the reap tore down: what it
+			// reaped is the deleted project's, so nothing is held (F1).
+			if !haveHeld && (job.ticket == nil || !job.ticket.withdrawn) {
+				carryRef = m.installRootCarryLocked(st, repo, identity, compareWorkspace, reaped)
+			}
+		})
 		if err != nil {
 			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
 			return
@@ -340,12 +372,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 		configSnapshot:        primed,
+		// The create commits only while its ticket stands and the carry it
+		// resumes is still held — checked under the same m.mu section where
+		// reserveCreate checks the delete fence and reserves the title (#7182).
+		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, job.ticket, carryRef) },
 	}
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
 	data, err := m.createVerifiedRoot(repo.ID, identity, req)
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
 		// longer has) makes the resumed command exit at startup — and since the
@@ -371,15 +407,22 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			}
 		}
 	}
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
 		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.createVerifiedRoot(repo.ID, identity, req)
 	}
 	if err != nil {
-		if reapedRoot {
-			m.holdRootCarry(st, repo, identity, carried) // the next pass's create carries it
+		// The carry is still held on st unless something retired it, so the
+		// next pass's create carries it. Never put back: a retired carry stays
+		// retired (#7182).
+		m.updateRootCarry(st, carryRef, carried)
+		if rootCreateWithdrawn(err) {
+			// Not a failure to back off from: the next pass decides afresh
+			// whether this candidate wants a root, and with what.
+			m.info().Printf("root agent for %s: %v", workspace, err)
+			return
 		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
@@ -401,3 +444,8 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	m.retireRootCarries(repo.ID)
 	m.rootEnsureSucceeded(st)
 }
+
+// testHookRootAdmitted runs on the sweep right after a candidate passes its
+// deletion-tombstone check, before anything launches its create (PR #7190
+// review R1).
+var testHookRootAdmitted = func() {}

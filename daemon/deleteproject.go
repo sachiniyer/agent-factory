@@ -88,6 +88,10 @@ var deregisterRootAgents = config.DeregisterRootAgentsForRepo
 // can hold it open: in a real daemon the two are microseconds apart.
 var deleteProjectPreSweepHookForTest func()
 
+// deleteProjectPostSuppressHookForTest, when non-nil, runs once suppression is
+// in place and before the archive loop tears the repository's sessions down.
+var deleteProjectPostSuppressHookForTest func()
+
 // deleteProjectPostClaimantHookForTest, when non-nil, runs after the claimant
 // scan and before the identity-transition check that follows it. That ordering
 // is #3530 review id 3917929613's subject — a checkout REAPPEARING while the
@@ -180,6 +184,10 @@ type deleteProjectTarget struct {
 	// question, or when none could be this project's.
 	unattributedRecordRoot    string
 	unattributedRecordProject string
+	// carryWorkspace is repoPath resolved for comparison with a held root
+	// carry's workspace (retireRootCarriesAtLocked). Resolved here, before
+	// taskTargetMu, because resolving touches the filesystem (#3361).
+	carryWorkspace string
 }
 
 // deleteProject performs DeleteProject while taskTargetMu is already held from
@@ -379,7 +387,7 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// The tombstone records WHOSE delete this was, so a later proven
 	// mismatch can release it only for the deleted claimant itself (#3299
 	// review round 15). Resolved before the lock — see deleteProjectTarget.
-	m.suppressRootAgent(repoID, resolved.claimantProjectID)
+	m.suppressRootAgent(repoID, resolved.carryWorkspace, resolved.claimantProjectID)
 	// Stamp the HISTORICAL identity too (#7181), mirroring the fenced list and
 	// the optInIDs durable sweep above. A repository main-rooted at the recorded
 	// path has this id as its real one, and the ensure sweep consults the
@@ -393,6 +401,9 @@ func (m *Manager) deleteProject(resolved deleteProjectTarget) (DeleteProjectResu
 	// suppressHistoricalRootAgent.
 	if historical != "" {
 		m.suppressHistoricalRootAgent(historical, repoID, resolved.claimantProjectID)
+	}
+	if deleteProjectPostSuppressHookForTest != nil {
+		deleteProjectPostSuppressHookForTest()
 	}
 	// A re-attribution probe for the deleted project is deliberately LEFT
 	// RUNNING (#3299 review rounds 9-11, converged): while its marker read
@@ -652,8 +663,13 @@ func (m *Manager) preflightDeleteProjectTaskTargets(repoID string) (map[string][
 // released in that time — a different clone proven at the same path — a
 // legacy root_agents carry, which has no checkout to tell the two apart,
 // would bring the deleted project's conversation and tabs back into the
-// unrelated clone (#7090 review).
-func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
+// unrelated clone (#7090 review). Retiring them is also what a root create in
+// flight finds at its commit, and refuses on (rootCommitRefusalLocked, #7182).
+// carryWorkspace retires carries held at the deleted path under any identity
+// (retireRootCarriesAtLocked). It also withdraws every root create in flight
+// for the repository, so none that began before the delete commits after it
+// (withdrawRootCreateTicketsLocked, PR #7190 review F1/F2).
+func (m *Manager) suppressRootAgent(repoID, carryWorkspace, claimantProjectID string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.deletedRootRepos[repoID] = claimantProjectID
@@ -662,6 +678,8 @@ func (m *Manager) suppressRootAgent(repoID, claimantProjectID string) {
 	delete(m.deletedRootEvidence, repoID)
 	delete(m.rootKilledAt, repoID)
 	m.retireRootCarriesLocked(repoID)
+	m.retireRootCarriesAtLocked(carryWorkspace)
+	m.withdrawRootCreateTicketsLocked(repoID, carryWorkspace)
 }
 
 // suppressHistoricalRootAgent stamps historicalID, the identity a derived-id
@@ -707,6 +725,7 @@ func (m *Manager) suppressHistoricalRootAgent(historicalID, derivedID, claimantP
 	m.deletedRootEvidence[historicalID] = derivedID
 	delete(m.rootKilledAt, historicalID)
 	m.retireRootCarriesLocked(historicalID)
+	m.withdrawRootCreateTicketsLocked(historicalID, "")
 }
 
 // retireHistoricalStandInsLocked ends every stand-in stamped on behalf of

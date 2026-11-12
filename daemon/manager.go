@@ -343,9 +343,9 @@ type Manager struct {
 	// the state key above, because two root_agents spellings of one repository are
 	// two states and one repo — see launchRootCreate. Guarded by mu; set with the
 	// launch and cleared by the create's own deferred exit, whatever ends it. The
-	// value is that repo's workspace path, so the shutdown wait can name the
-	// checkout holding it rather than a repo-ID hash.
-	rootCreatesInFlight map[string]string
+	// value is that create's ticket (rootagent_carry.go): what a delete withdraws,
+	// and the workspace the shutdown wait names instead of a repo-ID hash.
+	rootCreatesInFlight map[string]*rootCreateTicket
 	// rootCreateWG counts those goroutines, so shutdown can JOIN them instead of
 	// abandoning a half-provisioned session (waitRootAgentCreates). A WaitGroup is
 	// internally synchronized and needs no lock of its own; the Add nonetheless
@@ -848,7 +848,7 @@ func newManagerShellWithOptions(cfg *config.Config, transactionID string, opts m
 		rootProgramDriftLogged:    make(map[string]bool),
 		rootProgramDriftInFlight:  make(map[string]int),
 		rootCreateRefusals:        make(map[string]rootCreateRefusal),
-		rootCreatesInFlight:       make(map[string]string),
+		rootCreatesInFlight:       make(map[string]*rootCreateTicket),
 		rootKilledAt:              make(map[string]time.Time),
 		deletedRootRepos:          make(map[string]string),
 		killsInFlight:             make(map[string]struct{}),

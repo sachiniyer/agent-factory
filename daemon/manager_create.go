@@ -541,8 +541,17 @@ func projectDeleteRefusal(repoID string, inProgress bool) error {
 	if !inProgress {
 		err = fmt.Errorf("project %s was being deleted while this session create resolved its backend; nothing was created — retry if the project still exists", repoID)
 	}
-	return err
+	return projectDeleteFenceError{err}
 }
+
+// errProjectDeleteFenced is what every projectDeleteRefusal Is, wording
+// unchanged, so a caller can tell a delete's fence from a failed create — the
+// root heal must not answer it with a fresh agent (PR #7190 review F3).
+var errProjectDeleteFenced = errors.New("refused by a project delete's fence")
+
+type projectDeleteFenceError struct{ error }
+
+func (e projectDeleteFenceError) Is(target error) bool { return target == errProjectDeleteFenced }
 
 // admitTaskRunFast is the pre-resolver half of the task-run cap, for a caller
 // that does not hold m.mu. It returns the SAME errAtConcurrencyLimit sentinel as
@@ -727,6 +736,14 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	_, deleting := m.projectDeletes[repo.ID]
 	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
 		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleting)
+	}
+	// A root-agent create's own commit check, in this same section: the title
+	// reserved below is what DeleteProject's fence installation is serialized
+	// against (rootCommitRefusalLocked, #7182).
+	if req.rootCommitGuard != nil {
+		if err := req.rootCommitGuard(); err != nil {
+			return nil, "", nil, nil, err
+		}
 	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err

@@ -522,9 +522,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	deleted := m.rootDeletionTombstoneApplies(sweepLayers, repo.ID)
 	m.mu.Unlock()
 	if deleted {
-		m.rootEnsureSucceeded(st)
+		m.rootEnsureSuppressed(st) // the carry is suppressRootAgent's to retire
 		return
 	}
+	testHookRootAdmitted()
 
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	m.mu.Lock()
@@ -585,6 +586,7 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		resolution: resolution,
 		identity:   identity,
 		inst:       inst,
+		layers:     sweepLayers,
 	})
 }
 
@@ -758,14 +760,19 @@ type reapedRootState struct {
 // healthy root in place (freshly created or adopted).
 func (m *Manager) rootEnsureSucceeded(st *rootEnsureState) {
 	m.mu.Lock()
+	resetRootEnsureLocked(st)
+	st.carry = nil
+	m.mu.Unlock()
+}
+
+// resetRootEnsureLocked clears a repo's retry state. m.mu held.
+func resetRootEnsureLocked(st *rootEnsureState) {
 	st.consecutiveFailures = 0
 	st.unansweredFailures = 0
 	st.escalated = false
 	st.escalatedPersistent = false
 	st.nextAttempt = time.Time{}
 	st.suppressLogged = false
-	st.carry = nil
-	m.mu.Unlock()
 }
 
 // rootEnsureFailed records a failed ensure attempt: exponential backoff up to

@@ -3,6 +3,8 @@ package daemon
 import (
 	"context"
 	"fmt"
+	"os"
+	"path/filepath"
 	"slices"
 	"sync/atomic"
 	"testing"
@@ -11,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/config"
+	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/git"
@@ -138,7 +141,7 @@ func TestAHeldRootCarryIsBoundToTheRepositoryItCameFrom(t *testing.T) {
 	b := &config.RepoContext{Root: "/repo-b", ID: "repo-b"}
 	carried := reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "conversation-a"}}
 
-	m.holdRootCarry(st, a, nil, carried)
+	holdCarryForTest(m, st, a, nil, carried)
 	got, held := m.heldRootCarry(st, a, nil)
 	require.True(t, held, "precondition: the same target gets its carry")
 	require.Equal(t, carried.conversation.ID, got.conversation.ID)
@@ -167,7 +170,7 @@ func TestARootLaunchedForTheRepositoryRetiresEveryCandidatesHeldCarry(t *testing
 	manager.mu.Lock()
 	manager.rootEnsureStates["other spelling of the repository"] = other
 	manager.mu.Unlock()
-	manager.holdRootCarry(other, repo, nil,
+	holdCarryForTest(manager, other, repo, nil,
 		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "older-conversation"}})
 
 	manager.ensureRootAgentsAndWait() // this candidate launches the root
@@ -191,7 +194,7 @@ func TestDeletingAProjectRetiresItsHeldRootCarries(t *testing.T) {
 	manager.mu.Lock()
 	manager.rootEnsureStates[repoPath] = held // the legacy root_agents spelling
 	manager.mu.Unlock()
-	manager.holdRootCarry(held, repo, nil,
+	holdCarryForTest(manager, held, repo, nil,
 		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation"}})
 
 	_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
@@ -230,7 +233,7 @@ func TestAHeldRootCarryOutranksARecordReapedSince(t *testing.T) {
 	st := manager.rootEnsureStates[repoPath]
 	manager.mu.Unlock()
 	require.NotNil(t, st, "precondition: the candidate's ensure state")
-	manager.holdRootCarry(st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
+	holdCarryForTest(manager, st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
 		Agent: tmux.ProgramClaude, ID: heldID, CaptureKind: session.ConversationCaptureInjected,
 	}})
 
@@ -242,4 +245,80 @@ func TestAHeldRootCarryOutranksARecordReapedSince(t *testing.T) {
 	require.Equal(t, heldID, last.ResumeConversation.ID, "the held carry, not the record reaped since, is what the replacement resumes")
 	_, stillHeld := manager.heldRootCarry(st, repo, nil)
 	require.False(t, stillHeld, "the launch retires it")
+}
+
+// PR #7190 review F4 (P3): retiring carries at a deleted path compared the
+// delete's resolved path against the carry's workspace as written. A
+// registry-backed root's workspace is its recorded root as stored, which can
+// run through a symlink, so a delete of that vanished checkout missed the carry.
+// Both sides must be in the same resolved form.
+func TestRetiringCarriesAtADeletedPathResolvesTheCarrySideToo(t *testing.T) {
+	base := testguard.CanonicalTempDir(t)
+	physical := filepath.Join(base, "data")
+	require.NoError(t, os.MkdirAll(filepath.Join(physical, "project"), 0o755))
+	link := filepath.Join(base, "link")
+	require.NoError(t, os.Symlink(physical, link))
+	recorded := filepath.Join(link, "project") // the registry root as stored
+
+	m := &Manager{rootEnsureStates: map[string]*rootEnsureState{}}
+	st := &rootEnsureState{}
+	m.rootEnsureStates[recorded] = st
+	repo := &config.RepoContext{Root: recorded, ID: "registry-repo"}
+	holdCarryForTest(m, st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
+	}})
+
+	require.NoError(t, os.RemoveAll(filepath.Join(physical, "project")), "the checkout vanishes")
+	deleted := pathutil.ResolveForCompare(filepath.Clean(recorded)) // what the delete computes
+	require.NotEqual(t, recorded, deleted, "fixture: the delete's form resolves the symlink")
+	m.mu.Lock()
+	m.retireRootCarriesAtLocked(deleted)
+	m.mu.Unlock()
+
+	_, held := m.heldRootCarry(st, repo, nil)
+	require.False(t, held, "a carry recorded through a symlink must be retired by a delete of the path it names")
+}
+
+// PR #7190 review F5 (P3): a tick on which the deletion tombstone applies used
+// to clear the candidate's carry through rootEnsureSucceeded — a tombstone check
+// by proxy. A released tombstone whose proof lapses for a tick then cost an
+// occupant's heal its conversation. The deleted project's own carries are
+// retired by suppressRootAgent at the delete; a tombstoned tick leaves the rest
+// alone.
+func TestATombstonedTickLeavesTheCarryToTheDelete(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	installOptionsRecordingBackend(t)
+	repoPath := setupControlRepo(t)
+	manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+	require.NoError(t, err)
+	manager.ensureRootAgentsAndWait()
+	repo, err := config.RepoFromPath(repoPath)
+	require.NoError(t, err)
+	manager.mu.Lock()
+	st := manager.rootEnsureStates[repoPath]
+	manager.mu.Unlock()
+	require.NotNil(t, st, "precondition: the candidate's ensure state")
+	holdCarryForTest(manager, st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
+		Agent: tmux.ProgramClaude, ID: "occupants-conversation",
+	}})
+
+	// The tombstone applies again with no delete running — a released one whose
+	// proof lapsed for a tick — so nothing retired any carry.
+	manager.mu.Lock()
+	manager.deletedRootRepos[repo.ID] = "a-deleted-claimant"
+	manager.mu.Unlock()
+	manager.ensureRootAgentsAndWait()
+
+	got, held := manager.heldRootCarry(st, repo, nil)
+	require.True(t, held, "a tombstoned tick must leave the carry to suppressRootAgent")
+	require.Equal(t, "occupants-conversation", got.conversation.ID)
+}
+
+// holdCarryForTest holds carried on st the way a heal's reap does
+// (installRootCarryLocked), for tests that start from a carry already held.
+func holdCarryForTest(m *Manager, st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) {
+	compare := pathutil.ResolveForCompare(filepath.Clean(repo.WorkspacePath()))
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.installRootCarryLocked(st, repo, identity, compare, carried)
 }
