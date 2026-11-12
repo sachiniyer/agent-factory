@@ -565,3 +565,30 @@ func TestAccountHandoffInputsPersistedClaimUsesWorktreeRepoPath(t *testing.T) {
 		t.Fatalf("qualified spec resolved despite the persisted same-root claim")
 	}
 }
+
+// require_carry's full answer reaches the engine for every materialized
+// session (#7152): the input carries the session's own AccountSwapCarryPossible,
+// to be asked after m.mu is released. A session with no recorded conversation
+// cannot carry, so it answers false.
+func TestAccountHandoffInputsCarryTheLiveCarryAnswer(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+	require.NoError(t, config.SaveConfig(config.DefaultConfig()))
+	m := &Manager{
+		cfg:       &config.Config{},
+		instances: map[string]*session.Instance{},
+	}
+	m.instances[daemonInstanceKey("repoA", "worker")] = &session.Instance{
+		ID: "carry-id", Title: "worker", Program: tmux.ProgramCodex,
+	}
+	var found bool
+	for _, in := range m.accountHandoffInputs() {
+		if in.Title != "worker" || in.Persisted {
+			continue
+		}
+		found = true
+		require.NotNil(t, in.CarryConfirmed, "the engine cannot honour require_carry without the live carry's answer")
+		require.False(t, in.CarryPossible)
+		require.False(t, in.CarryConfirmed())
+	}
+	require.True(t, found)
+}
