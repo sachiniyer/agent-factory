@@ -611,8 +611,10 @@ func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uin
 	// Every caller is a launch boundary: whatever it records — even nothing
 	// beyond the command, when its pane query failed — describes the new
 	// runtime, so an identity kept from the old one's unanswerable reattach
-	// probe can never stand in for it (#7123).
+	// probe can never stand in for it (#7123). A standing operator repair
+	// records that its runtime was replaced (#7129).
 	i.captureEvidence = keptCaptureEvidence{}
+	i.markRepairRuntimeReplacedLocked(time.Now())
 	if i.runtimeProgram == program && i.runtimePID == pid && i.runtimeStartID == startID {
 		return
 	}
@@ -649,7 +651,11 @@ func (i *Instance) setRuntimeEvidenceLocked(program string, pid int, startID uin
 // answered mismatch is evidence of a replacement and keeps nothing, while an
 // unanswerable probe is no evidence either way, so its identity is kept as
 // captureEvidence for CheckConversationCaptureEvidence to re-verify later with
-// the same session-wide scan.
+// the same session-wide scan. A standing operator repair tells them apart
+// the same way: an answered mismatch records that the runtime the repair was
+// made against was replaced, exactly as an af launch does (#7132 review F-2),
+// because the next launch's resume decision runs before that launch records
+// itself.
 func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, claimRetired bool) {
 	i.mu.RLock()
 	oldProgram, pid, startID := i.runtimeProgram, i.runtimePID, i.runtimeStartID
@@ -681,8 +687,11 @@ func (i *Instance) settleReattachVerification(ts *tmux.TmuxSession) (verified, c
 	i.runtimeProgram = ""
 	i.runtimePID = 0
 	i.runtimeStartID = 0
-	if unanswered {
+	switch {
+	case unanswered:
 		i.captureEvidence = keptCaptureEvidence{pid: pid, startID: startID}
+	case pid > 0 && ts != nil:
+		i.markRepairRuntimeReplacedLocked(time.Now())
 	}
 	return false, true
 }

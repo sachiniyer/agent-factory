@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -53,7 +54,7 @@ func TestRemoteLaunchLeavesTheRepairStampBehind(t *testing.T) {
 	defer ts.Close()
 	repair := AgentConversationData{
 		Agent: tmux.ProgramCodex, ID: "019a0000-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureOperator,
-	}.WithRepairStamp("019a1111-aaaa-bbbb-cccc-ddddeeeeffff")
+	}.WithRepairStamp("019a1111-aaaa-bbbb-cccc-ddddeeeeffff").WithRepairRuntimeReplaced(time.Now())
 	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
 	inst.Tabs[0].Conversation = repair
 	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
@@ -68,6 +69,8 @@ func TestRemoteLaunchLeavesTheRepairStampBehind(t *testing.T) {
 	assert.Equal(t, ConversationCaptureOperator, conv["capture_kind"])
 	assert.NotContains(t, conv, "repair_stamped")
 	assert.NotContains(t, conv, "repair_held_id")
+	assert.NotContains(t, conv, "repair_held_observed")
+	assert.NotContains(t, conv, "repair_runtime_replaced_at")
 	assert.Equal(t, repair, inst.AgentConversation(), "the daemon's own record keeps its stamp")
 }
 
