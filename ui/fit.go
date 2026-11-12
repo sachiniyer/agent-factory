@@ -45,28 +45,63 @@ func fitLine(s string, width int) string {
 
 func fitBlockToSize(content string, width, height, pinnedFooter int) string {
 	lines := strings.Split(content, "\n")
-	for i := range lines {
-		lines[i] = fitLine(lines[i], width)
+	return renderFitPlan(lines, fitBlockPlan(len(lines), height, pinnedFooter), width)
+}
+
+// moreLine is the plan entry for the "↓ more" cue a fitted block draws in place
+// of its last body row when it overflows.
+const moreLine = -1
+
+// fitBlockPlan is fitBlockToSize's line plan for a block of n lines: for each
+// line the fitted block draws, the index of the source line it shows, or
+// moreLine for the overflow cue. The text and the row geometry a click zone
+// needs both come from this one plan, so a zone cannot land on a line the
+// frame did not draw there (#7175).
+func fitBlockPlan(n, height, pinnedFooter int) []int {
+	if height <= 0 || n <= height {
+		return linesThrough(0, n)
 	}
-	if height <= 0 || len(lines) <= height {
-		return strings.Join(lines, "\n")
-	}
-	if pinnedFooter < 0 {
-		pinnedFooter = 0
-	}
-	if pinnedFooter > height {
-		pinnedFooter = height
-	}
+	pinnedFooter = max(0, min(pinnedFooter, height))
 	bodyRows := height - pinnedFooter
-	fitted := make([]string, 0, height)
+	plan := linesThrough(0, bodyRows)
 	if bodyRows > 0 {
-		fitted = append(fitted, lines[:bodyRows]...)
-		if len(lines) > height {
-			fitted[bodyRows-1] = taskFormMoreStyle.Render(fitLine("  ↓ more", width))
-		}
+		plan[bodyRows-1] = moreLine
 	}
-	if pinnedFooter > 0 {
-		fitted = append(fitted, lines[len(lines)-pinnedFooter:]...)
+	return append(plan, linesThrough(n-pinnedFooter, n)...)
+}
+
+// linesThrough is the source line indices [from, to).
+func linesThrough(from, to int) []int {
+	plan := make([]int, 0, max(0, to-from))
+	for i := from; i < to; i++ {
+		plan = append(plan, i)
+	}
+	return plan
+}
+
+// renderFitPlan draws a plan over its source lines, each clipped to width.
+func renderFitPlan(lines []string, plan []int, width int) string {
+	fitted := make([]string, len(plan))
+	for i, src := range plan {
+		if src == moreLine {
+			fitted[i] = taskFormMoreStyle.Render(fitLine("  ↓ more", width))
+			continue
+		}
+		fitted[i] = fitLine(lines[src], width)
 	}
 	return strings.Join(fitted, "\n")
+}
+
+// planRows maps a fitted plan back to the item each drawn line shows, given
+// the item each SOURCE line belongs to (-1 for chrome): what a pane reports as
+// its clickable rows.
+func planRows(plan, sourceRows []int) []int {
+	rows := make([]int, len(plan))
+	for i, src := range plan {
+		rows[i] = -1
+		if src >= 0 && src < len(sourceRows) {
+			rows[i] = sourceRows[src]
+		}
+	}
+	return rows
 }

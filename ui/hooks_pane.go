@@ -194,6 +194,14 @@ func (h *HooksPane) handleEditMode(msg tea.KeyMsg) bool {
 }
 
 func (h *HooksPane) String() string {
+	out, _ := h.render()
+	return out
+}
+
+// render draws the pane and reports, for each line it draws, the index of the
+// command shown there or -1 — one pass, so a click zone and the row it names
+// cannot disagree (#7175).
+func (h *HooksPane) render() (string, []int) {
 	t := CurrentTheme()
 	tStyle := DialogTitleStyle()
 	selectedStyle := lipgloss.NewStyle().Bold(true).Background(t.SurfaceRaised).Foreground(t.Ink)
@@ -221,7 +229,9 @@ func (h *HooksPane) String() string {
 		b.WriteString("\n")
 	}
 
+	var sourceRows []int
 	for i, cmd := range h.commands {
+		sourceRows = tagLine(sourceRows, strings.Count(b.String(), "\n"), i)
 		isSelected := i == h.selectedIdx
 		if h.editing && isSelected {
 			b.WriteString(SelectionMarker("▸ ") + editStyle.Render(h.editBuffer) + InputCaret())
@@ -255,5 +265,7 @@ func (h *HooksPane) String() string {
 		b.WriteString(hintStyle.Render("enter edit hooks"))
 	}
 
-	return fitBlockToSize(b.String(), h.width, h.height, 1)
+	lines := strings.Split(b.String(), "\n")
+	plan := fitBlockPlan(len(lines), h.height, 1)
+	return renderFitPlan(lines, plan, h.width), planRows(plan, sourceRows)
 }

@@ -783,11 +783,20 @@ func taskDeliverySummary(tsk task.Task) string {
 }
 
 func (s *TaskPane) renderListMode() string {
+	out, _ := s.renderListModeRows()
+	return out
+}
+
+// renderListModeRows draws the task list and reports, for each line it draws,
+// the index of the task shown there or -1 — header and detail lines alike, from
+// the one pass and the one window, so a click zone always names the task the
+// frame drew on that line (#7175).
+func (s *TaskPane) renderListModeRows() (string, []int) {
 	if s.unavailable != "" {
-		return s.renderListRecovery("Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true)
+		return s.renderListRecovery("Cannot load tasks", "The last loaded tasks are retained. "+s.unavailable, "Check the task file.", true), nil
 	}
 	if len(s.tasks) == 0 {
-		return s.renderListRecovery("No tasks", "", "Press n to create one.", false)
+		return s.renderListRecovery("No tasks", "", "Press n to create one.", false), nil
 	}
 	t := CurrentTheme()
 	tStyle := DialogTitleStyle()
@@ -808,9 +817,11 @@ func (s *TaskPane) renderListMode() string {
 	}
 
 	selectedStart, selectedEnd := 2, 2
+	var sourceRows []int
 	for i, tsk := range s.tasks {
+		rowStart := strings.Count(b.String(), "\n")
 		if i == s.selectedIdx {
-			selectedStart = strings.Count(b.String(), "\n")
+			selectedStart = rowStart
 		}
 		status := taskEnabledGlyph(tsk.Enabled)
 		style := enabledStyle
@@ -878,6 +889,10 @@ func (s *TaskPane) renderListMode() string {
 			b.WriteString(detailStyle.Render(fitLine(detail, s.width)))
 			b.WriteString("\n")
 		}
+		// The task's own lines — header and details, not the blank separator.
+		for line := rowStart; line < strings.Count(b.String(), "\n"); line++ {
+			sourceRows = tagLine(sourceRows, line, i)
+		}
 		b.WriteString("\n")
 		if isSelected {
 			selectedEnd = strings.Count(b.String(), "\n")
@@ -912,7 +927,9 @@ func (s *TaskPane) renderListMode() string {
 
 	b.WriteString(ActionHint(fitLine(s.listModeHint(), s.width)))
 
-	return fitTaskList(b.String(), s.width, s.height, pinnedFooter, selectedStart, selectedEnd)
+	text := b.String()
+	plan := fitTaskListPlan(text, s.height, pinnedFooter, selectedStart, selectedEnd)
+	return renderFitPlan(strings.Split(text, "\n"), plan, s.width), planRows(plan, sourceRows)
 }
 
 // promptSnippet collapses a prompt to a single line truncated to maxWidth,

@@ -741,6 +741,15 @@ func (m *home) handleModalClick(id string) (tea.Model, tea.Cmd) {
 			m.projectPickerOverlay.SetSelectedIndex(idx)
 			return m.handleStateSwitchProject(tea.KeyMsg{Type: tea.KeyEnter})
 		}
+	// The pane-hosted overlays (#7175): the task manager, hooks editor and
+	// config editor answered the keyboard and swallowed the mouse — the #1819
+	// class. A press selects a row; a press on the selected row is Enter.
+	case stateTasks:
+		return m.clickOverlayRow(id, m.automations.TaskPane(), m.handleStateTasks)
+	case stateHooks:
+		return m.clickOverlayRow(id, m.hooksPane, m.handleStateHooks)
+	case stateConfigEditor:
+		return m.clickOverlayRow(id, m.configPane, m.handleStateConfigEditor)
 	case stateNew:
 		// The naming form's status-bar hints (enter submit / tab change
 		// program) stay clickable; handleKeyPress routes them to the form.
