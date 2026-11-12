@@ -635,7 +635,7 @@ func (i *Instance) SessionCodexHomeDir() string {
 // program_overrides edit cannot move (#6769 review) — falling back to a fresh
 // resolution only for rows that predate runtime evidence.
 func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
-	snap, err := i.RetakeSessionCodexCaptureBaseline()
+	snap, err := i.sessionCodexCaptureBaseline(log.WarningLog.Printf)
 	if err != nil {
 		log.WarningLog.Printf("session %q: %v", i.Title, err)
 	}
@@ -646,14 +646,23 @@ func (i *Instance) SessionCodexCaptureBaseline() ConversationCaptureSnapshot {
 // caller that takes the baseline again on a cadence — the capture loop after a
 // failed before-image — and so must not log the same failure on every call:
 // it returns why there is no baseline, and the caller's per-error dedup warns
-// once (#7131).
+// once (#7131). A project config the repository answered as invalid still
+// degrades to the global one, as the arm's resolve does, but the retake does
+// not report that degrade again on every rearm (#7140): reporting it is the
+// launch-class resolve's job, which the arm and every launch already do.
 func (i *Instance) RetakeSessionCodexCaptureBaseline() (ConversationCaptureSnapshot, error) {
+	return i.sessionCodexCaptureBaseline(nil)
+}
+
+// sessionCodexCaptureBaseline is the shared body; warn reports a degraded
+// project config, and nil drops the report.
+func (i *Instance) sessionCodexCaptureBaseline(warn func(string, ...any)) (ConversationCaptureSnapshot, error) {
 	program := i.RuntimeProgram()
 	if strings.TrimSpace(program) == "" {
 		// An unreadable project config is "cannot baseline", the empty
 		// snapshot every other unresolvable store answers — never a store
 		// bound to the global config's command (#7077).
-		resolution, err := resolveLaunchProgramForInstance(i)
+		resolution, err := resolveLaunchProgramForInstanceReporting(i, warn)
 		if err != nil {
 			return ConversationCaptureSnapshot{}, fmt.Errorf("no conversation capture baseline: %w", err)
 		}

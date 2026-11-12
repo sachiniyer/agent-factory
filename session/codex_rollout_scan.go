@@ -174,13 +174,21 @@ func CodexRolloutPathByID(codexHome, id string) string {
 // unclassifiable file stays a candidate — except for provable sub-agents,
 // which no correlation rule can excuse.
 func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string, int) {
+	matches, uncorrelated, _ := classifyCodexRolloutFiles(paths, workingDir)
+	return matches, uncorrelated
+}
+
+// classifyCodexRolloutFiles is codexRolloutFilesForWorkingDir that also
+// reports why af could not read an uncorrelated file's header, when it could
+// not: an unreadable header is a channel af could not look through, while a
+// readable one that does not parse yet is a header still being written
+// (#7140).
+func classifyCodexRolloutFiles(paths []string, workingDir string) (matches []string, uncorrelated int, unreadable error) {
 	if workingDir != "" && !filepath.IsAbs(workingDir) {
-		return nil, len(paths)
+		return nil, len(paths), nil
 	}
-	var matches []string
-	uncorrelated := 0
 	for _, path := range paths {
-		cwd, subagent, ok := codexRolloutSessionMeta(path)
+		cwd, subagent, ok, readErr := codexRolloutHeader(path)
 		switch {
 		case !ok:
 			if workingDir == "" {
@@ -189,6 +197,9 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 				matches = append(matches, path)
 			} else {
 				uncorrelated++
+				if unreadable == nil {
+					unreadable = readErr
+				}
 			}
 		case subagent:
 			// Provably a sub-agent thread: never this session's own
@@ -197,7 +208,7 @@ func codexRolloutFilesForWorkingDir(paths []string, workingDir string) ([]string
 			matches = append(matches, path)
 		}
 	}
-	return matches, uncorrelated
+	return matches, uncorrelated, unreadable
 }
 
 func codexRolloutWorkingDir(path string) (string, bool) {
@@ -210,9 +221,20 @@ func codexRolloutWorkingDir(path string) (string, bool) {
 // judge; subagent reports whether its source PROVES the file is a sub-agent
 // thread, which can never be the session's own top-level conversation (#6766).
 func codexRolloutSessionMeta(path string) (cwd string, subagent, ok bool) {
+	cwd, subagent, ok, _ = codexRolloutHeader(path)
+	return cwd, subagent, ok
+}
+
+// codexRolloutHeader is codexRolloutSessionMeta that also says why the header
+// could not be judged when af could not open or read it at all. A first record
+// over the read bound was read, just too large to judge, so it reports none.
+func codexRolloutHeader(path string) (cwd string, subagent, ok bool, unreadable error) {
 	line, err := readCodexRolloutFirstLine(path)
 	if err != nil {
-		return "", false, false
+		if errors.Is(err, errCodexSessionMetaOverBound) {
+			return "", false, false, nil
+		}
+		return "", false, false, err
 	}
 	var metadata struct {
 		Type    string `json:"type"`
@@ -223,9 +245,9 @@ func codexRolloutSessionMeta(path string) (cwd string, subagent, ok bool) {
 	}
 	if err := json.Unmarshal(line, &metadata); err != nil ||
 		metadata.Type != "session_meta" || !filepath.IsAbs(metadata.Payload.Cwd) {
-		return "", false, false
+		return "", false, false, nil
 	}
-	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true
+	return metadata.Payload.Cwd, codexRolloutIsSubagentSource(metadata.Payload.Source), true, nil
 }
 
 // codexRolloutIsSubagentSource reports whether a session_meta source proves the
@@ -335,6 +357,8 @@ func openCodexRollout(path string) (*os.File, error) {
 // a pathological first record (#5471 review, #5486 review).
 const codexSessionMetaReadCap = 8 << 20
 
+var errCodexSessionMetaOverBound = fmt.Errorf("first record exceeds %d-byte bound", codexSessionMetaReadCap)
+
 func readCodexRolloutFirstLine(path string) ([]byte, error) {
 	file, err := openCodexRollout(path)
 	if err != nil {
@@ -348,7 +372,7 @@ func readCodexRolloutFirstLine(path string) ([]byte, error) {
 		fragment, err := reader.ReadSlice('\n')
 		line = append(line, fragment...)
 		if len(line) > codexSessionMetaReadCap {
-			return nil, fmt.Errorf("read Codex rollout %s: first record exceeds %d-byte bound", path, codexSessionMetaReadCap)
+			return nil, fmt.Errorf("read Codex rollout %s: %w", path, errCodexSessionMetaOverBound)
 		}
 		switch {
 		case err == nil, errors.Is(err, io.EOF):

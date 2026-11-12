@@ -105,4 +105,5 @@ func TestKeepCaptureEvidenceForTest_LeavesTheRetireShape(t *testing.T) {
 	require.Equal(t, settled.captureEvidence, seeded.captureEvidence)
 	require.Equal(t, settled.runtimeEvidenceGeneration.Load()-settledGen, seeded.runtimeEvidenceGeneration.Load()-seededGen,
 		"the seam bumps the runtime-evidence generation exactly as the retire does")
+	require.Equal(t, settled.captureSettles, seeded.captureSettles, "and counts the settle, as the retire does (#7140)")
 }
