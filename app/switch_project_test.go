@@ -965,7 +965,7 @@ func TestBuildProjectListUnionsSourcesWithCounts(t *testing.T) {
 	}))
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
 
-	got, _ := h.buildProjectList()
+	got, _, _ := h.buildProjectListWithSnapshotStatus()
 	byRoot := map[string]overlay.Project{}
 	for _, p := range got {
 		byRoot[p.Root] = p
@@ -1004,7 +1004,7 @@ func TestBuildProjectListUnionsTheRegistry(t *testing.T) {
 	_, err := config.RegisterProject(repoRoot)
 	require.NoError(t, err)
 
-	got, _ := h.buildProjectList()
+	got, _, _ := h.buildProjectListWithSnapshotStatus()
 	var registered *overlay.Project
 	for i := range got {
 		if got[i].Root == repoRoot {
@@ -1132,7 +1132,7 @@ func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 	h.appConfig.RootAgents = map[string]config.RootAgentConfig{}
 
 	// A healthy (absent) registry is not degraded.
-	_, degraded := h.buildProjectList()
+	_, degraded, _ := h.buildProjectListWithSnapshotStatus()
 	assert.False(t, degraded, "an absent registry lists as zero projects, not as a failed read")
 
 	// A corrupt registry is: the strict read fails, and the union may be
@@ -1144,7 +1144,7 @@ func TestBuildProjectListReportsDegradedRegistry(t *testing.T) {
 	_, err = config.ListProjects()
 	require.Error(t, err, "fixture: the strict registry read must fail")
 
-	got, degraded := h.buildProjectList()
+	got, degraded, _ := h.buildProjectListWithSnapshotStatus()
 	assert.True(t, degraded, "a failed registry read must be reported to the switcher surfaces")
 	require.NotEmpty(t, got, "the union still renders from the other sources")
 }
@@ -1196,7 +1196,7 @@ func TestBuildProjectListRequiresProvenRegisteredCheckoutIdentity(t *testing.T) 
 	require.Equal(t, outerRepo.ID, generic.ID,
 		"test premise: the generic resolver adopts the ENCLOSING repository for the de-gitted registration")
 
-	got, degraded := h.buildProjectList()
+	got, degraded, _ := h.buildProjectListWithSnapshotStatus()
 	require.False(t, degraded)
 
 	ids := map[string]overlay.Project{}

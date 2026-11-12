@@ -29,8 +29,8 @@ func TestProjectListSnapshotFetchIsBoundedOnTheEventLoop(t *testing.T) {
 	type result struct{ degraded bool }
 	done := make(chan result, 1)
 	go func() {
-		_, _, snapshotDegraded := h.buildProjectListWithSnapshotStatus()
-		done <- result{snapshotDegraded}
+		_, _, snapshotErr := h.buildProjectListWithSnapshotStatus()
+		done <- result{snapshotErr != nil}
 	}()
 	select {
 	case r := <-done:

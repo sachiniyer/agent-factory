@@ -768,7 +768,7 @@ func armDeleteProjectDialogFor(t *testing.T) *home {
 
 // TestDeleteProjectPickerRefusesWhenSnapshotFetchFails pins the #1973/#1985
 // consent-copy hazard the report names: when the picker's cross-repo session
-// snapshot fetch fails, buildProjectList silently zeros every project's
+// snapshot fetch fails, buildProjectListWithSnapshotStatus silently zeros every project's
 // SessionCount/InPlaceCount. Before the fix, the destructive D path opened
 // the confirmation against those zeroed counts, so the consent copy rendered
 // "It has no live sessions — it just leaves the projects list" — a no-op
@@ -810,7 +810,7 @@ func TestDeleteProjectPickerRefusesWhenSnapshotFetchFails(t *testing.T) {
 	require.NotEmpty(t, notice, "the refuse must surface a user-visible notice, not a silent no-op")
 	assert.Contains(t, notice, "cannot delete project",
 		"the notice must name the project the user tried to delete")
-	assert.Contains(t, notice, "live-session counts are unavailable",
+	assert.Contains(t, notice, "could not check live sessions",
 		"the notice must explain WHY the delete was refused — the consent copy would have lied")
 	assert.Contains(t, notice, "Ctrl+P",
 		"the notice must tell the user how to retry once the daemon recovers")
