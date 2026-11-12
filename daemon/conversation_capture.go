@@ -350,6 +350,20 @@ func unrecordedCaptureError(title string, err error) error {
 		err, shellsuggest.PositionalCommand("af", []string{"sessions", "set-conversation"}, title))
 }
 
+// diffUnanswered says why this attempt's diff could not answer, or nil when it
+// could have.
+func diffUnanswered(baselineErr, retakeErr, diffErr error) error {
+	switch {
+	case baselineErr != nil && retakeErr != nil:
+		return fmt.Errorf("the Codex rollout store could not be scanned for a baseline (%v), and taking it again failed: %w", baselineErr, retakeErr)
+	case baselineErr != nil:
+		return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
+	case diffErr != nil:
+		return fmt.Errorf("af can record only a rollout the agent holds open until the Codex rollout store can be scanned: %w", diffErr)
+	}
+	return nil
+}
+
 // captureAgentConversation runs one capture attempt and commits any id it
 // finds; on a row that already recorded one it runs the follow check instead
 // (#7101). A non-nil return is the attempt's failure for the loop's
@@ -449,18 +463,7 @@ func (m *Manager) captureAgentConversationAttempt(repoID, key string, inst *sess
 			return unrecordedCaptureError(inst.Title, err)
 		}
 		if !conv.HasID() {
-			if baselineErr != nil {
-				// Say so once: until the agent holds a rollout open there is
-				// nothing to record, and the store is broken either way.
-				if retakeErr != nil {
-					return fmt.Errorf("the Codex rollout store could not be scanned for a baseline (%v), and taking it again failed: %w", baselineErr, retakeErr)
-				}
-				return fmt.Errorf("the Codex rollout store could not be scanned for a baseline, so af can record only a rollout the agent holds open: %w", baselineErr)
-			}
-			if diffErr != nil {
-				return fmt.Errorf("af can record only a rollout the agent holds open until the Codex rollout store can be scanned: %w", diffErr)
-			}
-			return nil
+			return diffUnanswered(baselineErr, retakeErr, diffErr)
 		}
 	}
 
