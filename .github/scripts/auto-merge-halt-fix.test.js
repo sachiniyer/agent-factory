@@ -10,8 +10,8 @@ const path = require('node:path');
 const { spawnSync } = require('node:child_process');
 const test = require('node:test');
 const {
-  YML, merger, parseSteps, GIT_ENV, git, lines, makeOrigin, FIX, fakeGithub,
-  CONTEXT, runJob, fakeCore, halted, outcome, output,
+  YML, merger, parseJobs, GIT_ENV, git, lines, makeOrigin, FIX, fakeGithub,
+  CONTEXT, runWorkflow, fakeCore, halted, outcome, output,
 } = require('./auto-merge-harness.js');
 
 // ---- The property --------------------------------------------------------------
@@ -37,7 +37,7 @@ test('a halted run lands a green fix-master PR once its merge onto master passes
 
   // The issue closes the existing way: the next run's re-check finds master green.
   assert.equal(github.issue.state, 'open');
-  const next = await runJob(origin, github);
+  const next = await runWorkflow(origin, github);
   assert.equal(outcome(next, 'recheck'), 'success');
   assert.equal(github.issue.state, 'closed');
   assert.ok(next.ran.includes('merge') && !next.ran.includes('fixcheck'), 'merging resumed normally');
@@ -72,7 +72,7 @@ test('the fix is checked in a scratch tree: the checkout the merge step loads it
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[11, FIX], [12, FIX]]);
   let checkout = null;
-  const job = await runJob(origin, github, {
+  const job = await runWorkflow(origin, github, {
     after: { fixcheck: (j) => { checkout = { head: git(j.workspace, 'rev-parse', 'HEAD'), status: git(j.workspace, 'status', '--porcelain', '-uall') }; } },
   });
   // Both candidates were merged and checked (#11 failed, #12 passed), yet the
@@ -85,7 +85,7 @@ test('a fix is not merged if master moved after it was checked', async () => {
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[12, FIX]]);
   // A hand merge lands between the check and the merge step.
-  const job = await runJob(origin, github, { after: { fixcheck: () => { origin.squash(origin.heads[13], 'hand merge'); } } });
+  const job = await runWorkflow(origin, github, { after: { fixcheck: () => { origin.squash(origin.heads[13], 'hand merge'); } } });
   assert.equal(outcome(job, 'fixcheck'), 'success');
   assert.deepEqual(github.merged, []);
   assert.ok(job.warnings.some((w) => /master moved/.test(w)), job.warnings.join('\n'));
@@ -105,7 +105,7 @@ test('a fix is not merged if master moved while the merge step re-read the PRs',
       return read(query, vars);
     };
   };
-  const job = await runJob(origin, github, { after: { fixcheck: moveMasterDuringNextPrRead } });
+  const job = await runWorkflow(origin, github, { after: { fixcheck: moveMasterDuringNextPrRead } });
   assert.equal(outcome(job, 'fixcheck'), 'success');
   assert.deepEqual(github.merged, []);
   assert.ok(job.warnings.some((w) => /master moved/.test(w)), job.warnings.join('\n'));
@@ -114,7 +114,7 @@ test('a fix is not merged if master moved while the merge step re-read the PRs',
 test('a fix is not merged if it was held after it was checked', async () => {
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[12, FIX]]);
-  const job = await runJob(origin, github, {
+  const job = await runWorkflow(origin, github, {
     after: { fixcheck: () => { github.prs[0].labels.nodes.push({ name: 'hold' }); } },
   });
   assert.equal(outcome(job, 'fixcheck'), 'success');
@@ -150,7 +150,7 @@ test('a fix is not merged if its head moved after it was checked', async () => {
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[12, FIX]]);
   // A push lands after the check: still labelled, still green, never checked.
-  const job = await runJob(origin, github, { after: { fixcheck: () => { github.prs[0].headRefOid = origin.heads[13]; } } });
+  const job = await runWorkflow(origin, github, { after: { fixcheck: () => { github.prs[0].headRefOid = origin.heads[13]; } } });
   assert.equal(outcome(job, 'fixcheck'), 'success');
   assert.deepEqual(github.merged, [], 'an unchecked head was merged');
   assert.ok(job.warnings.some((w) => /head moved/.test(w)), job.warnings.join('\n'));
@@ -161,7 +161,7 @@ test('a checked fix whose merge GitHub refuses does not starve the next one', as
   origin.addPr(15, { 'big.txt': lines(3) }, 'another fix');
   const github = fakeGithub(origin, [[12, FIX], [15, FIX]]);
   github.refuse.add(12);
-  const job = await runJob(origin, github);
+  const job = await runWorkflow(origin, github);
   assert.deepEqual(github.merged, [15]);
   assert.ok(job.warnings.some((w) => /#12: merge refused/.test(w)), job.warnings.join('\n'));
 });
@@ -171,7 +171,7 @@ test("a fix-master PR cannot pass the check by editing the lint script: master's
   // big.txt stays at 4 lines; the PR's own copy of the lint passes anything.
   origin.addPr(16, { 'scripts/lint-file-length.sh': '#!/usr/bin/env bash\nexit 0\n' }, 'a lint that passes everything');
   const github = fakeGithub(origin, [[16, FIX]]);
-  const job = await runJob(origin, github);
+  const job = await runWorkflow(origin, github);
   assert.deepEqual(github.merged, []);
   assert.equal(outcome(job, 'fixcheck'), 'failure', job.logs.fixcheck);
 });
@@ -183,7 +183,7 @@ test("master's lint is restored into the tree without writing through a symlink 
   fs.writeFileSync(outside, 'untouched\n');
   origin.addPr(17, { 'big.txt': lines(2), 'scripts/lint-file-length.sh': { symlink: outside } }, 'a fix whose lint is a symlink');
   const github = fakeGithub(origin, [[17, FIX]]);
-  const job = await runJob(origin, github);
+  const job = await runWorkflow(origin, github);
   assert.equal(fs.readFileSync(outside, 'utf8'), 'untouched\n');
   assert.deepEqual(github.merged, [17], job.logs.fixcheck);
 });
@@ -203,7 +203,7 @@ test("a fix-master PR's own lint script never runs before it merges, and no step
   origin.addPr(14, { 'big.txt': lines(2), 'scripts/lint-file-length.sh': PAYLOAD }, 'a real fix, plus a payload');
   const github = fakeGithub(origin, [[14, FIX]]);
   let beforeMerge = null;
-  const job = await runJob(origin, github, {
+  const job = await runWorkflow(origin, github, {
     after: {
       fixcheck: (j) => {
         const scratch = path.join(j.temps.fixcheck, 'fix-14');
@@ -231,7 +231,7 @@ test('unchanged: with no halt, a red master still lands only fix-master PRs, wit
 });
 
 test('the fix check runs the same composition commands as the re-check and the post-merge check', () => {
-  const steps = Object.fromEntries(parseSteps(YML).map((s) => [s.id, s]));
+  const steps = Object.fromEntries(parseJobs(YML).flatMap((job) => job.steps).map((s) => [s.id, s]));
   assert.ok(steps.fixcheck, 'auto-merge.yml has a fixcheck step');
   const commands = (run) => run.split('\n').map((l) => l.trim()).filter(Boolean);
   assert.deepEqual(commands(steps.recheck.run), ['go build ./...', 'go vet ./...', 'scripts/lint-file-length.sh']);
