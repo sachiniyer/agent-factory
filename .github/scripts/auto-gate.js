@@ -448,6 +448,9 @@ const NO_CHANGE_CLAIM_RE = /\bACCEPTED\b/;
 const MANUAL_MERGE_AUTHOR_REASON =
   "Auto Gate does not auto-merge PRs from this author; a maintainer must review and " +
   "merge manually.";
+const HAND_MERGE_BATCH_REMEDY =
+  "a maintainer merges the pull request that changes them by hand, outside the queue; " +
+  "the queue never lands it";
 // The unmet item a usage-limit degradation leaves when nobody has reviewed. It
 // names the exit rather than the problem, because the problem — Codex is out of
 // quota — is not something anyone can act on, and the exit is.
@@ -1112,13 +1115,14 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
   // real one (#3396).
   const subject = resolvedPullRequest({ github, context, pr });
   const files = await listPullRequestFiles({ github, context, number: pr.number, subject });
-  // The dispatch set this run will use comes from master's copy of this file, so
-  // a merge that CHANGES workflow definitions may be re-raising a stale set —
-  // most sharply when it adds a push-gated workflow, which cannot be in the list
-  // the running copy holds.
-  const workflowsChanged = files
-    .flatMap(pullRequestFilePaths)
-    .some((path) => path.startsWith(".github/workflows/"));
+  // Maintainer-merged, as auto-merge.js skips it (#7194): a PR that changes a
+  // workflow, or a script that jobs holding a write token load, would otherwise
+  // run its own code with that token from the next run on. It also means a merge
+  // made here never changes the dispatch set merge() re-raises (see there).
+  const handMerge = handMergePaths(files);
+  if (handMerge.length > 0) {
+    manualMergeReasons.push(handMergeReason(handMerge));
+  }
   const labels = new Set(pr.labels.map((label) => label.toLowerCase()));
 
   // The branch a head with no PR Validation run may have one dispatched on
@@ -1183,14 +1187,21 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
       // A batch head never merges itself, but its PASSING manual decision is
       // what the queue merges on — so the hold has to reach this list too, or a
       // held batch head would be certified for the queue (#4576).
-      manualMergeBlockers: [...holdBlockers, ...batch.blockers],
+      // The same goes for a batch that changes a workflow or a write-token
+      // job's script (#7194): its pass would let the queue land it.
+      manualMergeBlockers: [
+        ...holdBlockers,
+        ...(handMerge.length > 0
+          ? [{ reason: handMergeReason(handMerge), remedy: HAND_MERGE_BATCH_REMEDY }]
+          : []),
+        ...batch.blockers,
+      ],
       mergeQueueBatch: true,
       isOpen: pr.state === "OPEN" && !pr.merged,
       baseRefName: pr.baseRefName,
       headRefName: pr.headRefName,
       headRepository: pr.headRepository,
       headSha: pr.headRefOid,
-      workflowsChanged,
       requiredCheckObservations: requiredChecks.observations,
       reasons,
       transientReasons,
@@ -1436,7 +1447,6 @@ async function evaluatePullRequest({ github, context, core, prNumber, setOutputs
     headRefName: pr.headRefName,
     headRepository: pr.headRepository,
     headSha: pr.headRefOid,
-    workflowsChanged,
     requiredCheckObservations: requiredChecks.observations,
     reasons,
     transientReasons,
@@ -4693,19 +4703,11 @@ async function merge({
     }
   }
   // auto-gate.yml pins every checkout to the default branch, so the loop above
-  // ran from master's PRE-merge copy of MASTER_PUSH_WORKFLOWS. A merge that adds
-  // a push-gated workflow therefore cannot re-raise it for its own landing
-  // commit; every later merge picks it up. Nothing here can close that — deriving
-  // the set from the merged tree means re-parsing workflow triggers at merge
-  // time, where a misparse either skips a dispatch silently or reds a merge that
-  // has already landed. What it can do is stop the gap being invisible.
-  if (gate.workflowsChanged) {
-    core.warning(
-      `PR #${prNumber} changed workflow definitions, and this run re-raised the set known to ` +
-        "master's pre-merge copy of the gate. If it added or renamed a workflow gated on a " +
-        "master push, that one did not run for this commit; dispatch it by hand.",
-    );
-  }
+  // ran from master's PRE-merge copy of MASTER_PUSH_WORKFLOWS. That copy is
+  // never stale for a merge made here: a PR that changes a workflow or this file
+  // is maintainer-merged (#7194), and a maintainer's merge fires master's push
+  // workflows itself. (Before #7194 a merge here that added a push-gated
+  // workflow could not re-raise it, and this place warned.)
 
   try {
     await headRefPruner.deleteMergedHeadRef({ github, context, core, gate, prNumber });
@@ -7102,6 +7104,26 @@ function pullRequestFilePaths(file) {
     : [file.filename];
 }
 
+// The paths a PR changes only through a maintainer's hand merge (#7194), the
+// list auto-merge.js skips: the workflows, and the scripts their jobs load,
+// this file among them, several of them with a write token. Either side of a
+// rename counts. auto-merge-hand-merge.test.js derives from the workflow files
+// what this has to cover.
+const HAND_MERGE_PREFIXES = [".github/workflows/", ".github/scripts/"];
+
+function handMergePaths(files) {
+  const paths = new Set(files.flatMap(pullRequestFilePaths));
+  return [...paths].filter((path) => HAND_MERGE_PREFIXES.some((prefix) => path.startsWith(prefix)));
+}
+
+function handMergeReason(paths) {
+  const named = paths.slice(0, 3).join(", ") + (paths.length > 3 ? ` and ${paths.length - 3} more` : "");
+  return (
+    `PR changes ${named}, which jobs holding a write token load or define; a maintainer must ` +
+    "merge it by hand (#7194)."
+  );
+}
+
 // A required check PR Validation reports: Build or Lint, from GitHub Actions or
 // without a source app.
 function isPRValidationSpec(spec) {
@@ -9106,6 +9128,7 @@ module.exports = {
     updateBranchContentHead, evidenceHeadShasFor },
   beginAggregateDecision,
   evaluate,
+  handMergePaths,
   evaluateAggregateDecision,
   evaluateAggregateFresh,
   invalidateAggregateDecision,

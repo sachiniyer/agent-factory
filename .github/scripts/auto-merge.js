@@ -90,7 +90,7 @@ function threadsQuery(numbers) {
 }
 
 const WORKFLOW_SKIP_REASON =
-  "workflow files — needs AUTO_MERGE_TOKEN or a maintainer merge";
+  "workflow or .github/scripts files — needs AUTO_MERGE_TOKEN or a maintainer merge";
 
 // One aliased query, only for the PRs that survived phase 1 (and only when
 // merging with GITHUB_TOKEN, which cannot touch .github/workflows/).
@@ -110,10 +110,21 @@ function filesQuery(numbers) {
 }`;
 }
 
+// The paths a PR changes only through a hand merge (#7194): the workflows,
+// which GITHUB_TOKEN cannot merge anyway, and the scripts their jobs load. This
+// file runs in `land` with the write token, and the gate and the release
+// scripts run with write tokens too, so a PR that landed an edit to one would
+// run its code with that token from the next run on. auto-gate.js keeps the
+// same list, and auto-merge-hand-merge.test.js derives from the workflow files
+// what it has to cover. (GraphQL lists a renamed file under its new path only:
+// a rename out of .github/scripts/ removes a file the jobs load, so those jobs
+// fail; it cannot put code in its place.)
+const HAND_MERGE_PREFIXES = [".github/workflows/", ".github/scripts/"];
+
 // A truncated or missing file list fails closed (treated as touching workflows).
 function touchesWorkflows(files) {
   if (!files || (files.pageInfo && files.pageInfo.hasNextPage)) return true;
-  return (files.nodes || []).some((f) => f.path.startsWith(".github/workflows/"));
+  return (files.nodes || []).some((f) => HAND_MERGE_PREFIXES.some((prefix) => f.path.startsWith(prefix)));
 }
 
 // BATCH-THEN-VERIFY. Under continuous merging every master Build is cancelled by
@@ -622,7 +633,9 @@ async function selectPrs({ github, core, owner, repo, onlyFix }) {
     );
   }
   // AUTO_MERGE_TOKEN (a PAT with the workflows permission) can merge workflow
-  // PRs; GITHUB_TOKEN cannot, and GitHub refuses the merge. Detect them up front.
+  // PRs; GITHUB_TOKEN cannot, and GitHub refuses the merge. Detect them up front,
+  // with the scripts their jobs load. USING_PAT is set only in `land`: `gate`
+  // names no secret, so its halt pick always applies this rule.
   const workflowSkipped = [];
   if (!usingPat()) {
     const cands = selected.filter((e) => !e.reason).map((e) => e.pr);
@@ -640,7 +653,7 @@ async function selectPrs({ github, core, owner, repo, onlyFix }) {
   }
   if (workflowSkipped.length) {
     await core.summary
-      .addHeading("Skipped: workflow-touching PRs", 3)
+      .addHeading("Skipped: PRs that touch workflows or .github/scripts", 3)
       .addRaw(`${WORKFLOW_SKIP_REASON}\n\n`)
       .addList(workflowSkipped.map((n) => `#${n}`))
       .write();

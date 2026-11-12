@@ -49,7 +49,7 @@ function parseSteps(yaml) {
     if (!into) continue;
     if (value === '|') block = { into, key, indent: indent + '  ', lines: [] };
     else if (value === '') map = into[key] = into[key] || {};
-    else into[key] = value;
+    else into[key] = value.replace(/^'(.*)'$|^"(.*)"$/, '$1$2'); // a quoted scalar is its content
   }
   flush();
   return steps;

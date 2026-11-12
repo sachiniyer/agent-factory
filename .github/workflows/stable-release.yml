@@ -126,11 +126,16 @@ jobs:
       with:
         ref: ${{ github.sha }}
 
+    # No cache, restored or saved (#7194). Build runs the merged tree's tests
+    # with setup-go's cache on this runner image and Go version, so it saves a
+    # cache under the key this step would restore, and any job's code can write
+    # a missing key: code merged and then reverted would keep reaching release
+    # binaries through it. scripts/release_cache_test.go pins this.
     - name: Set up Go
       uses: actions/setup-go@v6
       with:
         go-version: '1.25'
-        cache: true
+        cache: false
 
     - name: Build
       env:

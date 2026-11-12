@@ -13373,29 +13373,22 @@ test("an auto-gate merge re-raises every gate its own push suppressed", async ()
   }
 });
 
-test("a merge that changes workflows warns that its own set may be stale", async () => {
+test("a merge that changes workflows is refused, so the set it re-raises is never stale", async () => {
   // Codex P2: auto-gate.yml pins every checkout to the default branch, so this
   // loop re-raises the set known to master's PRE-merge copy of the gate. A merge
-  // that ADDS a push-gated workflow cannot re-raise it for its own landing
-  // commit — the running copy's list predates it. Deriving the set from the
-  // merged tree would mean re-parsing triggers at merge time, where a misparse
-  // silently skips a dispatch or reds a merge that already landed; the gap is
-  // made visible instead.
-  const warnings = [];
-  const github = fakeGateGithub({ files: [".github/workflows/new-gate.yml"] });
-
-  await autoGate.merge({
-    github,
-    context: fakeContext(),
-    core: { ...fakeCore(), warning: (message) => warnings.push(message) },
-    prNumber: 1465,
-  });
-
-  assert.equal(github.mergedWith.sha, HEAD_SHA);
-  assert.ok(
-    warnings.some((warning) => /changed workflow definitions/.test(warning)),
-    `a workflow-changing merge must say its dispatch set may be stale; got ${JSON.stringify(warnings)}`,
-  );
+  // that ADDED a push-gated workflow could not re-raise it for its own landing
+  // commit, and the gate warned. Since #7194 a PR that changes a workflow, or
+  // this gate's own script, is maintainer-merged, so the gate never makes such a
+  // merge, and a maintainer's merge fires master's push workflows itself.
+  for (const file of [".github/workflows/new-gate.yml", ".github/scripts/auto-gate.js"]) {
+    const github = fakeGateGithub({ files: [file] });
+    await assert.rejects(
+      autoGate.merge({ github, context: fakeContext(), core: fakeCore(), prNumber: 1465 }),
+      /a maintainer must merge it by hand/,
+    );
+    assert.equal(github.mergedWith, null, file);
+    assert.deepEqual(github.dispatchedWorkflows, [], file);
+  }
 
   // A merge that touches no workflow definition says nothing.
   const quiet = [];

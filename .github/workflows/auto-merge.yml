@@ -84,12 +84,13 @@ jobs:
       # once its would-be merge result passes the same composition check (#7151).
       # Picked whenever master is broken, so fixcheck runs beside recheck; if
       # the re-check then passes, the halt is over and the pick goes unused.
+      # No USING_PAT here: a job receives every secret it names, even in a test
+      # of whether one is set, so this job names none (#7194). The pick
+      # therefore skips PRs touching workflows or .github/scripts on any token.
       - name: Pick fix-master PRs for the halted master
         id: fixes
         if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         uses: actions/github-script@v8
-        env:
-          USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
         with:
           script: |
             await require('./.github/scripts/auto-merge.js').pickHaltFixes({ github, core, context });
