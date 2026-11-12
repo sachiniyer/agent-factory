@@ -12,35 +12,48 @@ on:
     workflows: ['PR Validation', 'Build', 'Lint']
     types: [completed]
 
-permissions:
-  contents: write
-  pull-requests: write
-  actions: write
-  issues: write
-  checks: read
+# Nothing by default: each job asks for its own (#7165).
+permissions: {}
 
 # One merger at a time; a pending run replaces an older pending one.
 concurrency:
   group: auto-merge
   cancel-in-progress: false
 
+# No code a PR controls runs where the write token or secrets are (#7165). The
+# composition checks (recheck, fixcheck, compose) run merged or PR-controlled
+# code, so each is a job of its own: contents: read, no secrets, no persisted
+# credentials, no Go cache saved (release builds restore default-branch
+# caches). The other jobs run only auto-merge.js, from a fresh checkout of the
+# commit this workflow file came from, and read nothing from a check but its
+# verdict: pass or fail, the sha checked, and the fixes that passed.
+#
+#   gate ──┬── recheck ──┬── land ── compose ── report
+#          └── fixcheck ─┘
 jobs:
-  merge:
-    name: Merge ready PRs
+  gate:
+    name: Read the merge state
     # Kill switch: set the repository variable AUTO_MERGE_ENABLED to 'false'.
     if: vars.AUTO_MERGE_ENABLED != 'false'
     # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
     runs-on: ubuntu-24.04
-    timeout-minutes: 30
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pull-requests: read
+      issues: read
+      actions: read
+      checks: read
+    outputs:
+      skip: ${{ steps.debounce.outputs.skip }}
+      broken: ${{ steps.halt.outputs.broken }}
+      broken_number: ${{ steps.halt.outputs.broken_number }}
+      candidates: ${{ steps.fixes.outputs.candidates }}
     steps:
-      # No token is left in the repository's git config, so code under a
-      # scratch worktree below cannot read one (checkout includes its persisted
-      # credentials into every linked worktree). Every later git operation in
-      # this job is an anonymous fetch of this public repository.
-      - name: Check out master
+      - name: Check out the merger
         uses: actions/checkout@v6
         with:
-          ref: master
+          ref: ${{ github.workflow_sha }}
           persist-credentials: false
 
       - name: Debounce workflow_run triggers
@@ -61,41 +74,13 @@ jobs:
           script: |
             await require('./.github/scripts/auto-merge.js').checkHalt({ github, core, context });
 
-      - name: Set up Go
-        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
-        uses: actions/setup-go@v6
-        with:
-          go-version-file: go.mod
-
-      - name: Re-check master composition
-        id: recheck
-        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
-        continue-on-error: true
-        run: |
-          go build ./...
-          go vet ./...
-          scripts/lint-file-length.sh
-
-      - name: Settle the broken-master issue
-        id: settle
-        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
-        uses: actions/github-script@v8
-        env:
-          BROKEN_NUMBER: ${{ steps.halt.outputs.broken_number }}
-          RECHECK_OUTCOME: ${{ steps.recheck.outcome }}
-        with:
-          script: |
-            await require('./.github/scripts/auto-merge.js').settleBroken({
-              github, core, context,
-              passed: process.env.RECHECK_OUTCOME === 'success',
-              number: process.env.BROKEN_NUMBER,
-            });
-
       # While a composition halt holds, only a fix-master PR may land, and only
       # once its would-be merge result passes the same composition check (#7151).
+      # Picked whenever master is broken, so fixcheck runs beside recheck; if
+      # the re-check then passes, the halt is over and the pick goes unused.
       - name: Pick fix-master PRs for the halted master
         id: fixes
-        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted == 'true')
+        if: steps.debounce.outputs.skip != 'true' && (steps.halt.outputs.broken == 'true')
         uses: actions/github-script@v8
         env:
           USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
@@ -103,21 +88,76 @@ jobs:
           script: |
             await require('./.github/scripts/auto-merge.js').pickHaltFixes({ github, core, context });
 
-      # Each candidate is squash-merged onto master in its own scratch worktree,
-      # so this checkout, whose auto-merge.js the merge step loads, is never
-      # touched. Nothing the PR controls runs: go build and go vet do not
-      # execute the tree's code, and the lint is master's script, restored into
-      # the tree by git, which never writes through a symlink the PR planted.
-      # It must sit in the tree because it lints its own parent directory.
-      # Every candidate is checked, so a merge GitHub refuses falls through to
-      # the next. The checkout is depth 1, and a squash merge needs the merge
-      # base, hence --unshallow.
-      - name: Compose-check a fix on the halted master
+  recheck:
+    name: Re-check master composition
+    needs: gate
+    if: needs.gate.outputs.broken == 'true'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.recheck.outcome == 'success' }}
+      sha: ${{ steps.recheck_checkout.outputs.commit }}
+    steps:
+      - name: Check out master
+        id: recheck_checkout
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      - name: Re-check master composition
+        id: recheck
+        continue-on-error: true
+        run: |
+          go build ./...
+          go vet ./...
+          scripts/lint-file-length.sh
+
+  fixcheck:
+    name: Compose-check fixes for the halted master
+    needs: gate
+    if: needs.gate.outputs.candidates != ''
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    outputs:
+      fixes: ${{ steps.fixcheck.outputs.fixes }}
+      base: ${{ steps.fixcheck.outputs.base }}
+    steps:
+      - name: Check out master
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          persist-credentials: false
+
+      - name: Set up Go
+        uses: actions/setup-go@v6
+        with:
+          go-version-file: go.mod
+          cache: false
+
+      # Each candidate is squash-merged onto master in its own scratch worktree.
+      # Nothing the PR controls runs: go build and go vet do not execute the
+      # tree's code, and the lint is master's script, restored into the tree by
+      # git, which never writes through a symlink the PR planted. It must sit in
+      # the tree because it lints its own parent directory. Every candidate is
+      # checked, so a merge GitHub refuses falls through to the next. The
+      # checkout is depth 1, and a squash merge needs the merge base, hence
+      # --unshallow.
+      - name: Compose-check each fix-master candidate
         id: fixcheck
-        if: steps.debounce.outputs.skip != 'true' && (steps.fixes.outputs.candidates != '')
         continue-on-error: true
         env:
-          CANDIDATES: ${{ steps.fixes.outputs.candidates }}
+          CANDIDATES: ${{ needs.gate.outputs.candidates }}
         run: |
           git fetch --no-tags --quiet --unshallow origin master
           base=$(git rev-parse FETCH_HEAD)
@@ -142,17 +182,56 @@ jobs:
           test -n "$passed"
           printf 'fixes=%s\nbase=%s\n' "${passed# }" "$base" >> "$GITHUB_OUTPUT"
 
+  land:
+    name: Merge ready PRs
+    needs: [gate, recheck, fixcheck]
+    # Runs whether or not the checks ran; a check that did not report passed
+    # counts as failed.
+    if: ${{ !cancelled() && needs.gate.result == 'success' && needs.gate.outputs.skip != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: write
+      pull-requests: write
+      actions: write
+      issues: write
+      checks: read
+    outputs:
+      merged: ${{ steps.merge.outputs.merged }}
+      merged_prs: ${{ steps.merge.outputs.merged_prs }}
+    steps:
+      - name: Check out the merger
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
+      - name: Settle the broken-master issue
+        id: settle
+        if: needs.gate.outputs.broken == 'true'
+        uses: actions/github-script@v8
+        env:
+          BROKEN_NUMBER: ${{ needs.gate.outputs.broken_number }}
+          RECHECK_PASSED: ${{ needs.recheck.outputs.passed }}
+        with:
+          script: |
+            await require('./.github/scripts/auto-merge.js').settleBroken({
+              github, core, context,
+              passed: process.env.RECHECK_PASSED === 'true',
+              number: process.env.BROKEN_NUMBER,
+            });
+
       - name: Merge ready PRs
         id: merge
-        if: steps.debounce.outputs.skip != 'true' && (steps.settle.outputs.halted != 'true' || steps.fixcheck.outcome == 'success')
+        if: steps.settle.outputs.halted != 'true' || needs.fixcheck.outputs.fixes != ''
         uses: actions/github-script@v8
         env:
           USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
           AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
           HALTED: ${{ steps.settle.outputs.halted }}
-          FIX_CHECK: ${{ steps.fixcheck.outcome }}
-          FIX_PASSED: ${{ steps.fixcheck.outputs.fixes }}
-          FIX_BASE: ${{ steps.fixcheck.outputs.base }}
+          FIX_RESULT: ${{ needs.fixcheck.result }}
+          FIX_PASSED: ${{ needs.fixcheck.outputs.fixes }}
+          FIX_BASE: ${{ needs.fixcheck.outputs.base }}
         with:
           github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
           script: |
@@ -162,41 +241,69 @@ jobs:
             } else {
               await merger.mergeHaltFix({
                 github, core, context,
-                passed: process.env.FIX_CHECK === 'success',
+                passed: process.env.FIX_RESULT === 'success',
                 fixes: process.env.FIX_PASSED,
                 base: process.env.FIX_BASE,
               });
             }
 
-      - name: Move to the new master head
-        id: head
-        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
-        run: |
-          git fetch --quiet origin master
-          git checkout --quiet --detach origin/master
-          echo "sha=$(git rev-parse HEAD)" >> "$GITHUB_OUTPUT"
+  compose:
+    name: Post-merge composition check
+    needs: land
+    # Whatever merged is checked, even if land failed after merging it.
+    if: ${{ !cancelled() && needs.land.outputs.merged == 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    outputs:
+      passed: ${{ steps.compose.outcome == 'success' }}
+      sha: ${{ steps.compose_checkout.outputs.commit }}
+    steps:
+      - name: Check out the new master head
+        id: compose_checkout
+        uses: actions/checkout@v6
+        with:
+          ref: master
+          persist-credentials: false
 
-      - name: Set up Go (post-merge)
-        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.halt.outputs.broken != 'true')
+      - name: Set up Go
         uses: actions/setup-go@v6
         with:
           go-version-file: go.mod
+          cache: false
 
       - name: Post-merge composition check
         id: compose
-        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true')
         continue-on-error: true
         run: |
           go build ./...
           go vet ./...
           scripts/lint-file-length.sh
 
+  report:
+    name: Report broken master
+    needs: [land, compose]
+    # A check that did not report passed counts as failed.
+    if: ${{ !cancelled() && needs.land.outputs.merged == 'true' && needs.compose.outputs.passed != 'true' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      issues: write
+    steps:
+      - name: Check out the merger
+        uses: actions/checkout@v6
+        with:
+          ref: ${{ github.workflow_sha }}
+          persist-credentials: false
+
       - name: Report broken master
-        if: steps.debounce.outputs.skip != 'true' && (steps.merge.outputs.merged == 'true' && steps.compose.outcome != 'success')
+        id: report
         uses: actions/github-script@v8
         env:
-          MASTER_SHA: ${{ steps.head.outputs.sha }}
-          MERGED_PRS: ${{ steps.merge.outputs.merged_prs }}
+          MASTER_SHA: ${{ needs.compose.outputs.sha }}
+          MERGED_PRS: ${{ needs.land.outputs.merged_prs }}
         with:
           script: |
             await require('./.github/scripts/auto-merge.js').reportBroken({

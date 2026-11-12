@@ -110,13 +110,20 @@ test("a merged PR's lint script, run by the post-merge check, cannot get its cod
 });
 
 test('a check that never reaches its verdict counts as a failure, not a pass', async () => {
-  const origin = makeOrigin();
-  origin.squash(origin.heads[12], 'the fix, hand-merged'); // master passes again
-  const github = fakeGithub(origin, [[13]]);
-  // The re-check's runner faults before it can check anything.
   const runsRecheck = (job) => job.steps.some((step) => step.id === 'recheck');
-  const run = await runWorkflow(origin, github, { fail: (job, step) => runsRecheck(job) && uses(step, 'setup-go') });
-  assert.equal(github.issue.state, 'open', 'a missing verdict closed the broken-master issue');
-  assert.deepEqual(github.merged, []);
-  assert.notEqual(outcome(run, 'recheck'), 'success');
+  const faults = {
+    // A fault before the check runs: the job still reports, and says failed.
+    'a step fault': { fail: (job, step) => runsRecheck(job) && uses(step, 'setup-go') },
+    // A lost runner or a timeout: the job reports nothing at all.
+    'a lost runner': { crash: runsRecheck },
+  };
+  for (const [fault, opts] of Object.entries(faults)) {
+    const origin = makeOrigin();
+    origin.squash(origin.heads[12], 'the fix, hand-merged'); // master passes again
+    const github = fakeGithub(origin, [[13]]);
+    const run = await runWorkflow(origin, github, opts);
+    assert.equal(github.issue.state, 'open', `${fault}: a missing verdict closed the broken-master issue`);
+    assert.deepEqual(github.merged, [], fault);
+    assert.notEqual(outcome(run, 'recheck'), 'success', fault);
+  }
 });

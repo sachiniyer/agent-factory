@@ -267,8 +267,9 @@ const CONTEXT = { repo: { owner: 'o', repo: 'r' }, eventName: 'schedule', runId:
 // `after` maps a step id to a hook run once that step finishes, given the run:
 // the world moving between two steps. An id that names a job and no step runs
 // after that job. `fail(job, step)` makes a step fail without running, as a
-// runner or network fault would.
-async function runWorkflow(origin, github, { after = {}, fail = () => false } = {}) {
+// network fault would; `crash(job)` ends a job with no outputs at all, as a lost
+// runner or a timeout would.
+async function runWorkflow(origin, github, { after = {}, fail = () => false, crash = () => false } = {}) {
   const run = { state: {}, jobs: {}, ran: [], warnings: [], notices: [], logs: {}, temps: {}, workspaces: {}, workspace: null };
   const needs = new Proxy({}, { get: (_, id) => run.jobs[id] || { result: '', outputs: lenient({}) } });
   // A scheduled run reads the workflow file from master as it is when it starts.
@@ -279,6 +280,10 @@ async function runWorkflow(origin, github, { after = {}, fail = () => false } = 
     const needsMet = statusCheck || job.needs.every((need) => run.jobs[need].result === 'success');
     if (!needsMet || !condition(job.if, { needs, workflowSha })) {
       run.jobs[job.id] = { result: 'skipped', outputs: lenient({}) };
+      continue;
+    }
+    if (crash(job)) {
+      run.jobs[job.id] = { result: 'failure', outputs: lenient({}) };
       continue;
     }
     run.workspace = null;
@@ -314,7 +319,7 @@ async function runWorkflow(origin, github, { after = {}, fail = () => false } = 
           git(run.workspace, 'config', `includeIf.gitdir:${run.workspace}/.git.path`, creds);
           git(run.workspace, 'config', `includeIf.gitdir:${run.workspace}/.git/worktrees/*.path`, creds);
         }
-        result = { outcome: 'success', outputs: {} };
+        result = { outcome: 'success', outputs: { commit: git(run.workspace, 'rev-parse', 'HEAD') } };
       } else if (/^actions\/setup-go@/.test(step.uses || '')) {
         result = { outcome: 'success', outputs: {} };
       } else if (/^actions\/github-script@/.test(step.uses || '')) {

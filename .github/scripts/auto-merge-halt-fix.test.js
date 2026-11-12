@@ -68,7 +68,7 @@ test('a failing fix-master candidate does not block a passing one, and ordinary 
   assert.match(job.logs.fixcheck, /#11 does not pass the composition check/);
 });
 
-test('the fix is checked in a scratch tree: the checkout the merge step loads its script from is untouched', async () => {
+test('the fix is checked in a scratch tree: the checkout it runs in is untouched', async () => {
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[11, FIX], [12, FIX]]);
   let checkout = null;
