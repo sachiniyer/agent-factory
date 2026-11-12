@@ -466,6 +466,14 @@ func (t *TmuxSession) PaneRootProcessMatches(pid int, startID uint64) (bool, err
 	return paneRowsHoldRoot(strings.Fields(string(output)), pid, startID)
 }
 
+// PaneQueryFoundNoPane reports whether err is a pane query that tmux ANSWERED
+// with no pane at all — a session that no longer exists. Unlike every other
+// pane-query failure it is an answer, not an unanswerable probe, so a caller
+// settling "is the recorded process still here?" may treat it as "no" (#7123).
+func PaneQueryFoundNoPane(err error) bool {
+	return errors.Is(err, errPaneQueryFoundNoPane)
+}
+
 // paneRowsHoldRoot is PaneRootProcessMatches' verdict over a session's pane rows,
 // whether they came from its own list-panes or from a primed SessionSnapshot.
 func paneRowsHoldRoot(fields []string, pid int, startID uint64) (bool, error) {

@@ -256,8 +256,18 @@ func TestKeptCaptureEvidence_IsDurableAndReverifiedEachDaemonLife(t *testing.T) 
 	require.NoError(t, err)
 	var stored InstanceData
 	require.NoError(t, json.Unmarshal(raw, &stored))
-	stored.ID, stored.Title, stored.Program, stored.Liveness = "reattach", "reattach", tmux.ProgramCodex, LiveReady
-	reloaded, err := FromInstanceData(stored)
+	require.Equal(t, agent.PID, stored.CaptureRuntimePID, "the storage projection carries the kept identity")
+	// Archived, so the load is inert: a live row would run Start(false), whose
+	// respawn is a launch boundary that rightly clears the pair, and whose
+	// reattach leaves it (no claim for settleReattachVerification to settle).
+	reloaded, err := FromInstanceData(InstanceData{
+		ID: "reattach", Title: "reattach", Program: tmux.ProgramCodex, Liveness: LiveArchived,
+		Path: t.TempDir(),
+		Worktree: GitWorktreeData{
+			RepoPath: t.TempDir(), WorktreePath: t.TempDir(), SessionName: "reattach", BranchName: "af/reattach",
+		},
+		CaptureRuntimePID: stored.CaptureRuntimePID, CaptureRuntimeStartID: stored.CaptureRuntimeStartID,
+	})
 	require.NoError(t, err)
 	require.Equal(t, keptCaptureEvidence{pid: agent.PID, startID: agent.StartID}, reloaded.captureEvidence,
 		"the kept identity survives a restart, unverified: the next daemon life re-proves it")

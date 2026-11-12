@@ -27,7 +27,9 @@ import (
 //   - a record that changed since this check read it.
 //
 // The answer comes only from the runtime af launched — verified launch
-// evidence, never the session's active pane (#7120 review). One check costs
+// evidence, or an identity kept from an unanswerable reattach probe once the
+// session-wide pane scan re-verifies it (#7123), never the session's active
+// pane (#7120 review). One check costs
 // one stat per verified root plus that process's descriptor list in the steady
 // state; nothing in the conversation store is walked. The commit takes the
 // per-session op-lock the swap, handoff, and set-conversation paths hold.
@@ -42,6 +44,13 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 		return nil
 	}
 	inst.ClearConversationFollowFrozen()
+	// An identity an unanswerable reattach probe kept is re-verified here,
+	// by the session-wide pane scan, before the held query judges from it
+	// (#7123). A recorded row keeps its record either way, so its failure is
+	// the follow's own and names no restore consequence.
+	if err := inst.CheckConversationCaptureEvidence(); err != nil {
+		return fmt.Errorf("could not confirm recorded conversation %s is still the pane's: %w", recorded.ID, err)
+	}
 	current, err := session.HeldAgentConversation(token.Agent(), inst.BindConversationCaptureRuntime(snap))
 	if err != nil {
 		return fmt.Errorf("could not confirm recorded conversation %s is still the pane's: %w", recorded.ID, err)

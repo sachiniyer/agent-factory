@@ -51,6 +51,20 @@ type codexRuntimeAttribution struct {
 	// minted. nil on channels that can only judge candidates (test fixtures,
 	// older shapes).
 	answerHeld func(judge heldRolloutJudge) (AgentConversationData, error)
+	// evidence reports, without asking tmux, whether the bound runtime has a
+	// verified agent process to judge from right now. A diff that cannot have
+	// one ends its attempt at once instead of polling the store for an answer
+	// that cannot come (#7124 review F2). nil on channels that always judge.
+	evidence func() error
+}
+
+// runtimeEvidence is the bound channel's evidence answer; an unbound channel,
+// or one with no evidence hook, reports nothing missing.
+func (s *ConversationCaptureSnapshot) runtimeEvidence() error {
+	if s.runtime == nil || s.runtime.evidence == nil {
+		return nil
+	}
+	return s.runtime.evidence()
 }
 
 // heldRolloutJudge decides a conversation from a held path set and names the
@@ -215,10 +229,12 @@ func (s *codexHeldSet) contains(path string) bool {
 // judgement, so a snapshot armed before the launch recorded it still
 // attributes correctly once it has, and a runtime replaced under the same
 // instance attributes to the replacement. Without verified evidence the
-// channel attributes nothing and the held query reports why
-// (codexVerifiedRuntimeRoot). Snapshots for providers with no local rollout
-// store pass through untouched; so does one whose launch never bound a Codex
-// store.
+// channel attributes nothing, the diff ends its attempt at once, and the held
+// query reports why (codexVerifiedRuntimeRoot). Binding asks tmux nothing: an
+// identity kept for capture is re-verified by CheckConversationCaptureEvidence,
+// which every capture entry point calls first (#7123). Snapshots for providers
+// with no local rollout store pass through untouched; so does one whose launch
+// never bound a Codex store.
 func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapshot) ConversationCaptureSnapshot {
 	if !snap.CapturesCodex() {
 		return snap
@@ -226,6 +242,7 @@ func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapsh
 	snap.runtime = &codexRuntimeAttribution{
 		attribute:  i.attributeCodexRolloutPaths,
 		answerHeld: i.answerHeldCodexConversation,
+		evidence:   i.captureRuntimeEvidence,
 	}
 	return snap
 }
@@ -421,22 +438,33 @@ func codexGenerationKey(roots []proctree.Process) string {
 // codexVerifiedRuntimeRoot is the only root any attribution may judge from —
 // the held query, the follow, and the new-since-baseline diff alike: the
 // (pid, start-stamp) launch evidence setRuntimeLaunch pinned to this runtime,
-// still naming the same process. The session's ACTIVE pane is not evidence of
-// which process is the agent: it can be a user's split or a new window running
-// its own codex in the same worktree and store, whose thread the held query
-// would record and re-record every interval (#7120 review) and the diff would
-// adopt (#7123). Without verified evidence the answer is an error the capture
-// loop logs, never a guess.
+// or the identity an unanswerable reattach probe kept for capture once the
+// session-wide pane scan has re-verified it (#7123) — still naming the same
+// process. The session's ACTIVE pane is not evidence of which process is the
+// agent: it can be a user's split or a new window running its own codex in the
+// same worktree and store, whose thread the held query would record and
+// re-record every interval (#7120 review) and the diff would adopt (#7123).
+// Without verified evidence the answer is ErrNoConversationCaptureEvidence,
+// which the capture loop logs, never a guess. It asks tmux nothing.
 func (i *Instance) codexVerifiedRuntimeRoot() (proctree.Process, error) {
 	i.mu.RLock()
 	pid, startID := i.runtimePID, i.runtimeStartID
+	kept := i.captureEvidence
 	i.mu.RUnlock()
+	if pid <= 0 && kept.pid > 0 {
+		if !kept.verified {
+			return proctree.Process{}, fmt.Errorf("af has not yet re-verified that the agent process it launched for this session (pid %d) still roots one of its panes, so %w",
+				kept.pid, ErrNoConversationCaptureEvidence)
+		}
+		pid, startID = kept.pid, kept.startID
+	}
 	if pid <= 0 {
-		return proctree.Process{}, errors.New("af has no launch record of this session's agent process, so it cannot tell which open thread is the agent's own")
+		return proctree.Process{}, fmt.Errorf("af has no launch record of this session's agent process, so %w", ErrNoConversationCaptureEvidence)
 	}
 	root, err := proctree.Lookup(pid)
 	if err != nil || root.StartID != startID {
-		return proctree.Process{}, fmt.Errorf("the agent process af launched for this session (pid %d) is gone or replaced, so af cannot tell which open thread is the agent's own", pid)
+		return proctree.Process{}, fmt.Errorf("the agent process af launched for this session (pid %d) is gone or replaced, so %w",
+			pid, ErrNoConversationCaptureEvidence)
 	}
 	return root, nil
 }
