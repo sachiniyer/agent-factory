@@ -47,14 +47,21 @@ type SessionInput struct {
 	Working  bool // the poll's own verdict — LiveRunning, which folds in
 	// churn + the agent's in-turn indicator; never IsWorkingContent, whose
 	// unsupported agents (codex) always read idle (#6817 review)
-	Parked        bool // limit-parked liveness = wall liveness
-	Attached      bool
-	VSCodeTab     bool
-	PendingOp     bool // in-flight op or pending account swap
-	SwapCapable   bool
-	CarryPossible bool   // local worktree + carry-capable agent
-	HomeDir       string // the runtime-bound account home (codex), "" elsewhere
-	Program       string // the recorded launch command (RuntimeProgram); the
+	Parked      bool // limit-parked liveness = wall liveness
+	Attached    bool
+	VSCodeTab   bool
+	PendingOp   bool // in-flight op or pending account swap
+	SwapCapable bool
+	// CarryPossible is require_carry's in-memory precondition: a local
+	// worktree, a carry-capable agent, and a recorded conversation of its own.
+	CarryPossible bool
+	// CarryConfirmed is the full answer: whether the live carry would carry
+	// rather than start fresh (session.AccountSwapCarryPossible). It reads
+	// the provider's store, so the engine asks it only when it can change a
+	// verdict — see carryUnconfirmed — and nil reads as unconfirmed (#7152).
+	CarryConfirmed func() bool
+	HomeDir        string // the runtime-bound account home (codex), "" elsewhere
+	Program        string // the recorded launch command (RuntimeProgram); the
 	// drift compare asks whether its words could change the sandbox mode or
 	// profile — anything beyond af's own injected args answers "yes" (#6902)
 	LimitAccount   string    // parked-on account, from instance limit facts
@@ -361,6 +368,10 @@ func (e *Engine) Tick(sessions []SessionInput) (int, error) {
 			facts = e.factsFor(g, ns, occupancy, snap, now, readUsage)
 		}
 		decision := handoff.Decide(facts)
+		if carryUnconfirmed(g.in, facts, decision) {
+			facts.Session.CarryPossible = false
+			decision = handoff.Decide(facts)
+		}
 		events := pending.Filter(g.in.Key, decision.Events, now, Reannounce)
 		for _, ev := range events {
 			row := handoff.EventRow{
@@ -553,6 +564,19 @@ func resolveRecipient(spec string, inputs []SessionInput) (recipient SessionInpu
 // claim that appeared while the backlog sat would otherwise redirect it.
 func ResolveRecipient(spec string, inputs []SessionInput) (recipient SessionInput, found bool, live bool) {
 	return resolveRecipient(spec, inputs)
+}
+
+// carryUnconfirmed reports whether require_carry must refuse a verdict the
+// in-memory precondition let through, because the live carry would fall back
+// to a fresh start (#7152). The full answer reads the provider's store, so it
+// is asked only when it can change the verdict: the policy requires a carry,
+// the precondition holds, and the session has a real trigger — the only
+// verdicts whose blockers Decide evaluates.
+func carryUnconfirmed(in SessionInput, facts handoff.Facts, decision handoff.Decision) bool {
+	if !facts.Config.RequireCarry || !facts.Session.CarryPossible || !decision.Kind.Triggered() {
+		return false
+	}
+	return in.CarryConfirmed == nil || !in.CarryConfirmed()
 }
 
 // factsFor assembles one session's Facts from the snapshot fields — the only

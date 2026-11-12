@@ -384,11 +384,16 @@ func (m *Manager) accountHandoffInputs() []handoffengine.SessionInput {
 				VSCodeTab:   instanceHasVSCodeTab(inst),
 				PendingOp:   inst.GetInFlightOp() != session.OpNone || pendingSwap || manual,
 				SwapCapable: inst.SupportsAutomaticAccountSwap(),
-				// CarryPossible is admission's own feasibility predicate
+				// CarryPossible is admission's in-memory precondition
 				// (#6817 review): a carry-supporting provider BY LAUNCH
 				// COMMAND plus a recorded conversation that belongs to it —
 				// a session with no conversation id can never carry.
-				CarryPossible:  inst.AccountSwapCarryPossible() && !isRemoteWorkspace(inst),
+				// CarryConfirmed is the full answer, which reads the
+				// provider's store: a method value, so the engine calls it
+				// after m.mu is released, and only when require_carry can
+				// change a verdict (#7152).
+				CarryPossible:  inst.AccountSwapCarryRecorded() && !isRemoteWorkspace(inst),
+				CarryConfirmed: inst.AccountSwapCarryPossible,
 				LimitAccount:   limitAccountFor(inst),
 				WallObservedAt: wallObservedAtFor(inst),
 				Captured:       obs.captured,

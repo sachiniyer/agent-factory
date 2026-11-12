@@ -1005,10 +1005,10 @@ func TestConversationCarryRecordsTheCarriedPrefixForClaude(t *testing.T) {
 		"the copied transcript bytes are the source account's records")
 }
 
-// #6817 review: the shadow engine's require_carry fact must be admission's
-// own predicate — a session with no recorded conversation can never carry,
-// and the provider is the launch command's resolution, not the enum.
-func TestAccountSwapCarryPossible(t *testing.T) {
+// #6817 review: require_carry's in-memory precondition is admission's own —
+// a session with no recorded conversation can never carry, and the provider
+// is the launch command's resolution, not the enum.
+func TestAccountSwapCarryRecorded(t *testing.T) {
 	uuid := "12345678-1234-1234-1234-1234567890ab"
 	conv := func(agent, id string) AgentConversationData {
 		return AgentConversationData{Agent: agent, ID: id}
@@ -1047,8 +1047,8 @@ func TestAccountSwapCarryPossible(t *testing.T) {
 		}, false},
 	}
 	for _, tc := range cases {
-		if got := tc.inst.AccountSwapCarryPossible(); got != tc.want {
-			t.Fatalf("%s: AccountSwapCarryPossible() = %v, want %v", tc.name, got, tc.want)
+		if got := tc.inst.AccountSwapCarryRecorded(); got != tc.want {
+			t.Fatalf("%s: AccountSwapCarryRecorded() = %v, want %v", tc.name, got, tc.want)
 		}
 	}
 }

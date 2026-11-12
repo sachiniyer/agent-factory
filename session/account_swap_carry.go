@@ -71,18 +71,16 @@ func carrySupportedAgent(agent string) bool {
 	return agent == tmux.ProgramClaude || agent == tmux.ProgramCodex
 }
 
-// AccountSwapCarryPossible reports whether THIS session could carry its
-// conversation through an account swap — the same feasibility predicate
-// planAccountSwapCarry applies at admission: a carry-supporting provider
-// with a recorded conversation that belongs to it. The provider is what
-// the launch command resolves to (resolvedAgentLocked, the #6811
-// resolver), not the configured enum, so a program-override session is
-// judged by the runtime it actually runs. A local claude/codex session
-// with no recorded conversation — or one recorded under a different
-// provider — reads false, matching admission's "no recorded conversation
-// id" refusal, so the shadow engine's require_carry fact never logs moves
-// live would refuse (#6817 review).
-func (i *Instance) AccountSwapCarryPossible() bool {
+// AccountSwapCarryRecorded is the in-memory precondition of a carry: a
+// carry-supporting provider with a recorded conversation that belongs to it.
+// The provider is what the launch command resolves to (resolvedAgentLocked,
+// the #6811 resolver), not the configured enum, so a program-override
+// session is judged by the runtime it actually runs. A local claude/codex
+// session with no recorded conversation — or one recorded under a different
+// provider — reads false, matching admission's "no recorded conversation id"
+// refusal (#6817 review). It reads no file, so it is safe under a manager
+// lock; whether the carry would actually happen is AccountSwapCarryPossible.
+func (i *Instance) AccountSwapCarryRecorded() bool {
 	i.mu.RLock()
 	defer i.mu.RUnlock()
 	agent := i.resolvedAgentLocked()
@@ -140,12 +138,20 @@ type accountSwapCarryRequest struct {
 	workDir string
 	// fallback is a carry failure this attempt already hit.
 	fallback string
+	// sourceOnly plans without a target account: every check that needs only
+	// the outgoing side runs, and target is ignored. AccountSwapCarryPossible
+	// asks it before any target is chosen (#7152).
+	sourceOnly bool
 }
 
 // planAccountSwapCarry decides whether a swap carries its conversation. It
 // returns the carry to perform, or the reason a carry that applies cannot
 // happen; (nil, "") means no carry applies (a cross-agent handoff, or an agent
 // without verified carry support), which keeps today's fresh start unchanged.
+//
+// It is also require_carry's answer before a target exists
+// (AccountSwapCarryPossible, sourceOnly): a refusal that needs only the
+// outgoing side belongs outside the target block, so both callers see it.
 func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, string) {
 	if req.crossAgent || !carrySupportedAgent(req.agent) {
 		return nil, ""
@@ -173,14 +179,16 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	if err != nil {
 		return nil, "af could not locate its account registry"
 	}
-	target, err := agentaccount.Selected(home, req.agent, req.target)
-	if err != nil || target.Dir == "" {
-		// resolveAccountForProvision reports the real refusal for this.
-		return nil, "the new account's home could not be resolved"
-	}
-	carry.dstHome = target.Dir
-	if carry.dstRoot, err = accountCarryRoot(home, req.agent, req.target, target.Dir); err != nil {
-		return nil, "the new account's home is not where af registers accounts"
+	if !req.sourceOnly {
+		target, err := agentaccount.Selected(home, req.agent, req.target)
+		if err != nil || target.Dir == "" {
+			// resolveAccountForProvision reports the real refusal for this.
+			return nil, "the new account's home could not be resolved"
+		}
+		carry.dstHome = target.Dir
+		if carry.dstRoot, err = accountCarryRoot(home, req.agent, req.target, target.Dir); err != nil {
+			return nil, "the new account's home is not where af registers accounts"
+		}
 	}
 	srcRoot, sourceReason := carrySourceHome(home, req.agent, carry.sourceAccount, req.program, req.workDir)
 	if sourceReason != "" && !carry.committed {

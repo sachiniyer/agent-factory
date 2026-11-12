@@ -112,8 +112,9 @@ type SessionFacts struct {
 	// SwapCapable: SupportsAutomaticAccountSwap — the runtime can replace
 	// its credential boundary without changing backend kind.
 	SwapCapable bool
-	// CarryPossible: the conversation can be carried to a new account home
-	// (local worktree, carry-capable agent) — the require_carry input.
+	// CarryPossible: the conversation would be carried to a new account home
+	// rather than start fresh — the require_carry input. The engine fills it
+	// from the session's own conversation, before any target is chosen.
 	CarryPossible bool
 	// Reading is the newest usage reading on the session's OWN identity home
 	// — the account's store for a named session, the ambient home under
@@ -198,6 +199,13 @@ const (
 	// sighting is reported, nothing else follows.
 	KindReportOnly
 )
+
+// Triggered reports whether a decision of this kind had a real trigger, so
+// Decide went on to evaluate its blockers — require_carry among them.
+// KindNoop and KindReportOnly stop before the blockers.
+func (k Kind) Triggered() bool {
+	return k != KindNoop && k != KindReportOnly
+}
 
 // String is the log/params vocabulary for a decision kind.
 func (k Kind) String() string {
