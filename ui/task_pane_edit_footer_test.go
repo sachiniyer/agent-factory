@@ -96,9 +96,10 @@ func TestTaskPaneEditActionFooterKeepsEscLabelWhereItFits(t *testing.T) {
 		return lines[len(lines)-1]
 	}
 
-	// The full form is 42 cells; the middle tier is 35. Every width between
-	// them renders the abbreviated verbs and must keep esc's label.
-	for _, w := range []int{35, 38, 41} {
+	// The full form is 46 cells; the middle tier is 39 (both carry the
+	// toggle's [✓] state, #7135). Every width between them renders the
+	// abbreviated verbs and must keep esc's label.
+	for _, w := range []int{39, 42, 45} {
 		row := footerAt(w)
 		assert.Containsf(t, row, "esc list",
 			"width %d: esc's destination must be named wherever it fits: %q", w, row)
@@ -109,8 +110,10 @@ func TestTaskPaneEditActionFooterKeepsEscLabelWhereItFits(t *testing.T) {
 			"width %d: the verbs still abbreviate — only the destinations are protected: %q", w, row)
 	}
 
-	// Narrower than the middle tier: esc's label is the thing that goes.
-	narrow := footerAt(30)
+	// Narrower than the middle tier: esc's label is the thing that goes. 34
+	// is the overlay's content width at the 40-column hard minimum, the
+	// narrowest the app ever sizes the form, and the narrowest tier fits it.
+	narrow := footerAt(34)
 	assert.Contains(t, narrow, "esc", "esc itself is never dropped: %q", narrow)
 	assert.NotContains(t, narrow, "…", "the row must fit, not clip: %q", narrow)
 }

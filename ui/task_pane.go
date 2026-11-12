@@ -752,6 +752,16 @@ func watchTaskStatus(tsk task.Task) string {
 	return "watching"
 }
 
+// taskEnabledGlyph is a task's enabled state as the list row shows it. The
+// edit form's x toggle hint carries the same glyph (#7135), so the two read
+// alike.
+func taskEnabledGlyph(enabled bool) string {
+	if enabled {
+		return "[✓]"
+	}
+	return "[✗]"
+}
+
 // taskTriggerSummary is the one-line trigger column for a list row: the cron
 // expression, or the watch command with its supervision status.
 func taskTriggerSummary(tsk task.Task) string {
@@ -802,10 +812,9 @@ func (s *TaskPane) renderListMode() string {
 		if i == s.selectedIdx {
 			selectedStart = strings.Count(b.String(), "\n")
 		}
-		status := "[✓]"
+		status := taskEnabledGlyph(tsk.Enabled)
 		style := enabledStyle
 		if !tsk.Enabled {
-			status = "[✗]"
 			style = disabledStyle
 		}
 
