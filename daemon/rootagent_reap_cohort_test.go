@@ -237,7 +237,7 @@ func TestReapDeadRootRetainsTheRecordWhenTrustCannotSettleTheTeardown(t *testing
 	require.NoError(t, err)
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 
-	_, reaped, err := manager.reapDeadRoot(repo.ID, first)
+	_, reaped, err := manager.reapDeadRoot(repo.ID, first, nil)
 	require.Error(t, err, "an unsettled teardown must be reported, not swallowed")
 	require.ErrorContains(t, err, "its teardown did not complete safely")
 	require.False(t, reaped)
@@ -313,7 +313,7 @@ func TestReapDeadRootFencesArchivedNameReuseDuringItsTeardown(t *testing.T) {
 		manager.mu.Unlock()
 	}
 
-	_, _, err = manager.reapDeadRoot(repo.ID, first)
+	_, _, err = manager.reapDeadRoot(repo.ID, first, nil)
 	require.NoError(t, err)
 	require.True(t, createAttempted, "the colliding create never ran, so the window was never exercised")
 	// The SPECIFIC refusal, not merely "an error". `require.Error` alone would be

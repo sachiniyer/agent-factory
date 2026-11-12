@@ -92,6 +92,14 @@ type CreateSessionRequest struct {
 	// only in-process daemon code can.
 	allowReserved bool
 
+	// rootCommitGuard, when set, is the root-agent create's commit check
+	// (rootCommitRefusalLocked). reserveCreate runs it under m.mu right after
+	// its delete-fence check and before it reserves the title — the section
+	// DeleteProject's fence installation is serialized against — so a root
+	// create whose carry a delete retired while it was in flight never commits
+	// (#7182). Unexported for allowReserved's reason.
+	rootCommitGuard func() error
+
 	// resumeConversation carries a reaped record's provider conversation into its
 	// replacement (#2616). Set only by the root-agent ensure loop, which — unlike
 	// the general Lost-restore path — replaces the record rather than re-spawning

@@ -423,12 +423,17 @@ func (m *Manager) resolveDeleteProjectTarget(req DeleteProjectRequest) (deletePr
 	if err := m.refuseIfIdentityInTransition(repoID, rowFound); err != nil {
 		return deleteProjectTarget{repoID: repoID}, err
 	}
+	carryWorkspace := ""
+	if repoPath != "" {
+		carryWorkspace = pathutil.ResolveForCompare(filepath.Clean(repoPath))
+	}
 	return deleteProjectTarget{
 		repoID:                    repoID,
 		repoPath:                  repoPath,
 		claimantProjectID:         claimantProjectID,
 		unattributedRecordRoot:    unattributed.Root,
 		unattributedRecordProject: unattributed.ID,
+		carryWorkspace:            carryWorkspace,
 	}, nil
 }
 

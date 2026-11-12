@@ -18,7 +18,9 @@ import (
 // ensure should wait for a later tick instead of falling through to
 // CreateSession. Mirrors KillSession's teardown but deliberately does NOT
 // record rootKilledAt: this is the daemon healing itself, not a user decision.
-func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRootState, bool, error) {
+// holdLocked, when non-nil, receives the carried state under m.mu in the same
+// section that deletes the record — the heal holds its carry there.
+func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance, holdLocked func(reapedRootState)) (reapedRootState, bool, error) {
 	key := daemonInstanceKey(repoID, session.RootSessionTitle)
 	opLock := m.opLockFor(key)
 	if !opLock.TryLock() {
@@ -182,6 +184,12 @@ func (m *Manager) reapDeadRoot(repoID string, inst *session.Instance) (reapedRoo
 	if m.instances[key] == inst {
 		delete(m.instances, key)
 		m.forgetSessionRuntimeStateLocked(repoID, inst)
+	}
+	// The carry is held in this same section (installRootCarryLocked), so no
+	// delete can run between the record going and the carry being held, and
+	// find nothing to retire (#7182).
+	if holdLocked != nil {
+		holdLocked(carried)
 	}
 	m.mu.Unlock()
 	return carried, true, nil

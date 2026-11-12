@@ -1,6 +1,12 @@
 package daemon
 
-import "github.com/sachiniyer/agent-factory/config"
+import (
+	"errors"
+	"fmt"
+	"path/filepath"
+
+	"github.com/sachiniyer/agent-factory/config"
+)
 
 // A heal reaps the dead root's record — the only pointer to the conversation
 // (#2616) and tab roster (#2628) it carries — before its create runs, and that
@@ -38,59 +44,94 @@ func rootCarryBinding(repo *config.RepoContext, identity *resolvedProjectRoot) r
 	return binding
 }
 
-// holdRootCarry keeps carried on st for the next pass's create.
-//
-// The create runs on its own goroutine (#3721), so a delete that ran while it
-// was in flight retired this carry in suppressRootAgent (rootagent_carry.go's
-// retireRootCarriesLocked). Re-holding it here would re-arm the deleted
-// project's conversation and tabs for an unrelated clone later re-registered at
-// the same path, once the tombstone releases — exactly the leak the retirement
-// invariant exists to prevent (#7090 review, P3-2). Refuse to re-hold while a
-// delete for this repo is in flight (the projectDeletes fence) or has already
-// suppressed the repo (the deletion tombstone): the first covers a create that
-// fails after the fence went up but before suppressRootAgent ran, the second a
-// create that fails after suppression completed.
-//
-// Neither current-state check alone catches a create that resumes only AFTER
-// the delete finished and a later prove disproved its tombstone (a new clone at
-// the reused legacy path): the fence is gone and the tombstone no longer
-// applies, so both read clean and the carry would be restored. deleteSeq is the
-// sample of m.projectDeleteSeq this create took at launch; a delete that ran
-// while it was parked stamped the repo's fence-transition counter past it, so
-// refuse when that stamp has moved (#7090 review, P1).
-func (m *Manager) holdRootCarry(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState, deleteSeq uint64) {
-	held := rootCarryBinding(repo, identity)
-	held.state = carried
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if _, deleting := m.projectDeletes[repo.ID]; deleting {
-		return
-	}
-	if m.rootDeletionTombstoneApplies(m.rootAgentLayers.Load(), repo.ID) {
-		return
-	}
-	if m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
-		return
-	}
-	st.carry = &held
-}
-
 // heldRootCarry is the state a failed heal left on st for this repository,
 // workspace and checkout; a carry bound to any other is dropped. It stays held
 // until a launch retires it, so a pass that returns before its create keeps it
 // for the next one.
 func (m *Manager) heldRootCarry(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot) (reapedRootState, bool) {
+	ref, state := m.heldRootCarryRef(st, repo, identity)
+	return state, ref != nil
+}
+
+// heldRootCarryRef is heldRootCarry with the carry's identity, which is what a
+// create taking it compares at its commit (rootCommitRefusalLocked).
+func (m *Manager) heldRootCarryRef(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot) (*rootCarry, reapedRootState) {
 	want := rootCarryBinding(repo, identity)
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if st.carry == nil {
-		return reapedRootState{}, false
+		return nil, reapedRootState{}
 	}
 	if st.carry.repoID != want.repoID || st.carry.workspace != want.workspace || st.carry.checkout != want.checkout {
 		st.carry = nil
-		return reapedRootState{}, false
+		return nil, reapedRootState{}
 	}
-	return st.carry.state, true
+	return st.carry, st.carry.state
+}
+
+// A heal's carry is HELD on st from the moment its reap deletes the record
+// until a root commits, and the create that took it never puts one back. That
+// is what serializes it against DeleteProject (#7182, PR #7190): the only
+// things that end a carry — a delete's suppressRootAgent, a root launch, the
+// candidate no longer wanting a root — all run under m.mu, and so does the
+// create's commit, where reserveCreate checks the delete fence and reserves the
+// title (rootCommitRefusalLocked). Whichever comes first wins:
+//
+//   - A delete that suppresses before the commit has retired the carry, so the
+//     commit finds it gone and refuses — whether the delete is still running,
+//     finished long ago, or its tombstone has since been released by a
+//     different checkout proven at the path. Nothing re-holds it afterwards.
+//     (A delete still running is refused by reserveCreate's own fence check.)
+//   - A commit before the delete's fence reserves the root's title, and the
+//     delete's phase-1 gate refuses while that reservation stands, as it does
+//     for every create; retried, it archives the root through its normal path.
+//   - A delete that aborts after its fence never reaches suppressRootAgent, so
+//     the carry is exactly as it was and the next pass resumes it.
+
+// installRootCarryLocked holds the state a heal just reaped on st, in the same
+// m.mu section that deletes the dead record (reapDeadRoot), so no delete can
+// run between the reap and the hold and find nothing to retire. m.mu held.
+func (m *Manager) installRootCarryLocked(st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) *rootCarry {
+	held := rootCarryBinding(repo, identity)
+	held.state = carried
+	st.carry = &held
+	return st.carry
+}
+
+// errRootCommitWithdrawn says a root create reached its commit after the carry
+// it was resuming had been retired.
+var errRootCommitWithdrawn = errors.New("root create withdrawn at its commit")
+
+// rootCommitRefusalLocked is the root create's commit check, run by
+// reserveCreate under m.mu right after its delete-fence check, before it
+// reserves the title (CreateSessionRequest.rootCommitGuard). ref is the carry
+// the create is resuming, nil for one resuming nothing. m.mu held.
+//
+// It asks about the CARRY, not the deletion tombstone, on purpose. A tombstone
+// released by a different checkout proven at the path is released only while
+// that proof is current — the pass that made it and the next (#3611), about a
+// poll interval each — and the sweep admits the occupant's create inside that
+// window. Its commit lands later, on its own goroutine (#3721), so a tombstone
+// check here would withdraw the occupant's legitimate create whenever it took
+// longer than that, again on every re-proof. Every carry a delete could
+// matter to is retired by suppressRootAgent under m.mu, so its absence is the
+// delete's evidence, at no cost to anyone else.
+func (m *Manager) rootCommitRefusalLocked(st *rootEnsureState, ref *rootCarry) error {
+	if ref != nil && st.carry != ref {
+		return fmt.Errorf("%w: the conversation and tabs it carried were retired while it was in flight (a project delete or a newer root)", errRootCommitWithdrawn)
+	}
+	return nil
+}
+
+// updateRootCarry records what a failed create settled about its carry — a
+// substituted conversation, say — for the next pass, but only while st still
+// holds that carry. It never puts back one that was retired. m.mu not held.
+func (m *Manager) updateRootCarry(st *rootEnsureState, ref *rootCarry, carried reapedRootState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if ref != nil && st.carry == ref {
+		ref.state = carried
+	}
 }
 
 // retireRootCarries drops every candidate's carry for repoID once a root for
@@ -109,6 +150,30 @@ func (m *Manager) retireRootCarries(repoID string) {
 func (m *Manager) retireRootCarriesLocked(repoID string) {
 	for _, st := range m.rootEnsureStates {
 		if st.carry != nil && st.carry.repoID == repoID {
+			st.carry = nil
+		}
+	}
+}
+
+// retireRootCarriesAtLocked drops every carry whose workspace is the deleted
+// path, whatever identity it is bound to (PR #7190 review thread 4555053187).
+// A legacy root_agents root reached through a linked worktree runs under its
+// identity root's id, while a delete performed after that worktree vanished
+// can only name the path's provisional ids — so retirement by identity never
+// reaches its carry, and a replacement checkout of the same repository there
+// would resume the deleted project's conversation. The path is what the two
+// share. workspace is already resolved for comparison (pathutil.ResolveForCompare,
+// taken before any lock, since it touches the filesystem); "" retires nothing.
+//
+// The cost, stated: an unrelated root's held carry at that same, now-absent
+// path loses its continuity too. That is the conservative direction — a blank
+// root over another project's conversation. m.mu held.
+func (m *Manager) retireRootCarriesAtLocked(workspace string) {
+	if workspace == "" {
+		return
+	}
+	for _, st := range m.rootEnsureStates {
+		if st.carry != nil && filepath.Clean(st.carry.workspace) == workspace {
 			st.carry = nil
 		}
 	}

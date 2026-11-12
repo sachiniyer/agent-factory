@@ -144,7 +144,7 @@ func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing
 	key := daemonInstanceKey(repo.ID, session.RootSessionTitle)
 	opLock := manager.opLockFor(key)
 	opLock.Lock()
-	carried, reaped, err := manager.reapDeadRoot(repo.ID, inst)
+	carried, reaped, err := manager.reapDeadRoot(repo.ID, inst, nil)
 	opLock.Unlock()
 
 	require.NoError(t, err)
@@ -154,7 +154,7 @@ func TestReapDeadRootSnapshotsConversationOnlyAfterOwningTheOperation(t *testing
 	require.Empty(t, carried.tabs,
 		"a skipped reap must not snapshot state that another operation still owns")
 
-	carried, reaped, err = manager.reapDeadRoot(repo.ID, inst)
+	carried, reaped, err = manager.reapDeadRoot(repo.ID, inst, nil)
 	require.NoError(t, err)
 	require.True(t, reaped)
 	require.Equal(t, prior, carried.conversation,

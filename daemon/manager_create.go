@@ -728,6 +728,14 @@ func (m *Manager) reserveCreateWithWorktreeAdmission(req CreateSessionRequest, h
 	if deleting || m.projectDeleteMovedLocked(repo.ID, deleteSeq) {
 		return nil, "", nil, nil, projectDeleteRefusal(repo.ID, deleting)
 	}
+	// A root-agent create's own commit check, in this same section: the title
+	// reserved below is what DeleteProject's fence installation is serialized
+	// against (rootCommitRefusalLocked, #7182).
+	if req.rootCommitGuard != nil {
+		if err := req.rootCommitGuard(); err != nil {
+			return nil, "", nil, nil, err
+		}
+	}
 	if err := m.refreshLocked(); err != nil {
 		return nil, "", nil, nil, err
 	}

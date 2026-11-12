@@ -138,7 +138,7 @@ func TestAHeldRootCarryIsBoundToTheRepositoryItCameFrom(t *testing.T) {
 	b := &config.RepoContext{Root: "/repo-b", ID: "repo-b"}
 	carried := reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "conversation-a"}}
 
-	m.holdRootCarry(st, a, nil, carried, 0)
+	holdCarryForTest(m, st, a, nil, carried)
 	got, held := m.heldRootCarry(st, a, nil)
 	require.True(t, held, "precondition: the same target gets its carry")
 	require.Equal(t, carried.conversation.ID, got.conversation.ID)
@@ -167,8 +167,8 @@ func TestARootLaunchedForTheRepositoryRetiresEveryCandidatesHeldCarry(t *testing
 	manager.mu.Lock()
 	manager.rootEnsureStates["other spelling of the repository"] = other
 	manager.mu.Unlock()
-	manager.holdRootCarry(other, repo, nil,
-		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "older-conversation"}}, 0)
+	holdCarryForTest(manager, other, repo, nil,
+		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "older-conversation"}})
 
 	manager.ensureRootAgentsAndWait() // this candidate launches the root
 	require.NotNil(t, findRootInstance(t, manager, repoPath), "precondition: the root launched")
@@ -191,131 +191,14 @@ func TestDeletingAProjectRetiresItsHeldRootCarries(t *testing.T) {
 	manager.mu.Lock()
 	manager.rootEnsureStates[repoPath] = held // the legacy root_agents spelling
 	manager.mu.Unlock()
-	manager.holdRootCarry(held, repo, nil,
-		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation"}}, 0)
+	holdCarryForTest(manager, held, repo, nil,
+		reapedRootState{conversation: session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation"}})
 
 	_, err := manager.DeleteProject(DeleteProjectRequest{RepoID: repoID, RepoPath: repoPath})
 	require.NoError(t, err)
 
 	_, stillHeld := manager.heldRootCarry(held, repo, nil)
 	require.False(t, stillHeld, "a deleted project's carry must not outlive it for a clone at the same path to inherit")
-}
-
-// #7090 review, P3-2 (race the existing retirement test does not cover): the
-// root create runs on its own goroutine (#3721), so a create that launched
-// before the delete and reaches its failure path AFTER suppressRootAgent ran
-// must not re-hold the carry that suppression just retired. holdRootCarry is
-// the single point that re-arms a carry on the failure path, so it consults the
-// deletion tombstone and refuses while one applies — preventing the deleted
-// project's conversation and tabs from being resumed inside an unrelated clone
-// later re-registered at the same path once the tombstone releases.
-func TestHoldRootCarryRefusesToReHoldAfterSuppressRootAgent(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	repo := &config.RepoContext{Root: repoPath, ID: repoID}
-	held := &rootEnsureState{}
-	manager.mu.Lock()
-	manager.rootEnsureStates[repoPath] = held
-	manager.mu.Unlock()
-	carried := reapedRootState{conversation: session.AgentConversationData{
-		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
-	}}
-
-	// The create's failure path held its carry before the delete ran.
-	manager.holdRootCarry(held, repo, nil, carried, 0)
-	_, ok := manager.heldRootCarry(held, repo, nil)
-	require.True(t, ok, "precondition: the carry is held before suppression")
-
-	// The delete retires the carry and raises the suppression tombstone.
-	manager.suppressRootAgent(repoID, "")
-	_, ok = manager.heldRootCarry(held, repo, nil)
-	require.False(t, ok, "suppression retires the held carry")
-
-	// The racing create reaches its failure path now and tries to re-hold.
-	manager.holdRootCarry(held, repo, nil, carried, 0)
-	_, reHeld := manager.heldRootCarry(held, repo, nil)
-	require.False(t, reHeld,
-		"a create whose failure path runs after suppression must not re-arm the retired carry for an unrelated clone to inherit")
-}
-
-// The same re-hold must also be refused while the delete FENCE is up — the
-// window between DeleteProject installing projectDeletes and suppressRootAgent
-// running — since a create that fails there would re-arm a carry the about-to-run
-// retirement is meant to make final.
-func TestHoldRootCarryRefusesToReHoldWhileDeleteFenceIsUp(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	repo := &config.RepoContext{Root: repoPath, ID: repoID}
-	held := &rootEnsureState{}
-	manager.mu.Lock()
-	manager.rootEnsureStates[repoPath] = held
-	manager.projectDeletes = map[string]struct{}{repoID: {}}
-	manager.mu.Unlock()
-	carried := reapedRootState{conversation: session.AgentConversationData{
-		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
-	}}
-
-	manager.holdRootCarry(held, repo, nil, carried, 0)
-	_, reHeld := manager.heldRootCarry(held, repo, nil)
-	require.False(t, reHeld,
-		"a create whose failure path runs while the delete fence is up must not re-arm a carry for the deleting repo")
-}
-
-// Control for the two refusal tests above: with no delete in flight and no
-// tombstone, holdRootCarry still re-holds the carry so the next pass's create
-// can resume it — the #7088 behavior the carry exists for.
-func TestHoldRootCarryReholdsWhenNoDeleteIsInProgress(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	repo := &config.RepoContext{Root: repoPath, ID: repoID}
-	held := &rootEnsureState{}
-	manager.mu.Lock()
-	manager.rootEnsureStates[repoPath] = held
-	manager.mu.Unlock()
-	carried := reapedRootState{conversation: session.AgentConversationData{
-		Agent: tmux.ProgramClaude, ID: "carried-conversation",
-	}}
-
-	manager.holdRootCarry(held, repo, nil, carried, 0)
-	got, ok := manager.heldRootCarry(held, repo, nil)
-	require.True(t, ok, "the carry is held when no delete is in progress")
-	require.Equal(t, carried.conversation.ID, got.conversation.ID,
-		"the held carry is the one that was held")
-}
-
-// #7090 review, P1: the fence and tombstone checks alone miss a create that
-// resumes only AFTER the delete finished and a later prove disproved its
-// tombstone (a new clone at the reused legacy path): the fence is gone and the
-// tombstone no longer applies, so both read clean and the carry would be
-// restored. holdRootCarry closes that window by sampling the project-delete
-// fence-transition counter at create launch and refusing once that repo's
-// stamp has passed it — the same counter reserveCreate already uses (#2947).
-// Here the fence is NOT up and NO tombstone applies, so only the generation
-// guard refuses.
-func TestHoldRootCarryRefusesToReHoldAfterDeleteGenerationAdvanced(t *testing.T) {
-	manager, repoID, repoPath := newStatusTestManager(t)
-	repo := &config.RepoContext{Root: repoPath, ID: repoID}
-	held := &rootEnsureState{}
-	manager.mu.Lock()
-	manager.rootEnsureStates[repoPath] = held
-	// The create sampled the counter before the delete stamped it.
-	const sample uint64 = 7
-	manager.projectDeleteSeq = sample
-	manager.mu.Unlock()
-	carried := reapedRootState{conversation: session.AgentConversationData{
-		Agent: tmux.ProgramClaude, ID: "deleted-projects-conversation",
-	}}
-
-	// The delete ran to completion while the create was parked: it stamped the
-	// repo's fence-transition counter past the sample. No fence is left up and
-	// no tombstone applies, so neither of the other two guards fires.
-	manager.mu.Lock()
-	manager.stampProjectDeleteLocked(repoID)
-	stamped := manager.projectDeleteLastSeq[repoID]
-	manager.mu.Unlock()
-	require.Greater(t, stamped, sample, "precondition: the delete stamped the counter past the create's sample")
-
-	manager.holdRootCarry(held, repo, nil, carried, sample)
-	_, reHeld := manager.heldRootCarry(held, repo, nil)
-	require.False(t, reHeld,
-		"a create whose failure path runs after a delete stamped the fence counter past its launch sample must not re-arm the carry, even with the fence gone and no tombstone applying")
 }
 
 // #7090 review, P3-4: a held carry outranks a record reaped since. While it is
@@ -347,9 +230,9 @@ func TestAHeldRootCarryOutranksARecordReapedSince(t *testing.T) {
 	st := manager.rootEnsureStates[repoPath]
 	manager.mu.Unlock()
 	require.NotNil(t, st, "precondition: the candidate's ensure state")
-	manager.holdRootCarry(st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
+	holdCarryForTest(manager, st, repo, nil, reapedRootState{conversation: session.AgentConversationData{
 		Agent: tmux.ProgramClaude, ID: heldID, CaptureKind: session.ConversationCaptureInjected,
-	}}, 0)
+	}})
 
 	failed.SetStatusForTest(session.Lost)
 	manager.ensureRootAgentsAndWait()
@@ -359,4 +242,12 @@ func TestAHeldRootCarryOutranksARecordReapedSince(t *testing.T) {
 	require.Equal(t, heldID, last.ResumeConversation.ID, "the held carry, not the record reaped since, is what the replacement resumes")
 	_, stillHeld := manager.heldRootCarry(st, repo, nil)
 	require.False(t, stillHeld, "the launch retires it")
+}
+
+// holdCarryForTest holds carried on st the way a heal's reap does
+// (installRootCarryLocked), for tests that start from a carry already held.
+func holdCarryForTest(m *Manager, st *rootEnsureState, repo *config.RepoContext, identity *resolvedProjectRoot, carried reapedRootState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	m.installRootCarryLocked(st, repo, identity, carried)
 }

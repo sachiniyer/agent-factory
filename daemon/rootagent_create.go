@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"errors"
 	"fmt"
 	"sort"
 	"strings"
@@ -60,16 +61,6 @@ type rootCreateJob struct {
 	resolution config.RootAgentResolution
 	identity   *resolvedProjectRoot
 	inst       *session.Instance
-	// deleteSeq samples m.projectDeleteSeq at the moment this create was
-	// launched (under m.mu, atomic with the in-flight mark). holdRootCarry
-	// consults it on the failure path: a delete that ran while this stalled
-	// create was parked past its reap stamps the repo's fence-transition
-	// counter past this sample, so holdRootCarry refuses to re-hold the carry
-	// the delete retired — even once the fence is gone AND the tombstone a
-	// later prove disproved no longer applies. The fence and tombstone checks
-	// alone miss that window; the generation sample closes it (#7090 review
-	// P1, rootagent_carry.go).
-	deleteSeq uint64
 }
 
 // launchRootCreate starts one create for this repo, or does nothing because one
@@ -114,10 +105,6 @@ func (m *Manager) launchRootCreate(job rootCreateJob) {
 	if _, inFlight := m.rootCreatesInFlight[job.repo.ID]; inFlight {
 		return
 	}
-	// Sample the delete-fence transition counter alongside the in-flight mark
-	// so a delete that stamps while this create is parked is observable later on
-	// the failure path. See rootCreateJob.deleteSeq.
-	job.deleteSeq = m.projectDeleteSeq
 	m.rootCreatesInFlight[job.repo.ID] = job.repo.WorkspacePath()
 	m.rootCreateWG.Add(1)
 
@@ -243,8 +230,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// What an earlier heal carried, if its create failed after its reap
 	// (rootagent_carry.go). It is the last working root's, so it outranks a
 	// record reaped since: no replacement has launched, and any record reaped
-	// meanwhile is a failed one.
-	held, haveHeld := m.heldRootCarry(st, repo, identity)
+	// meanwhile is a failed one. carryRef is the carry this create resumes,
+	// held on st until its commit and compared there (rootCommitRefusalLocked).
+	carryRef, held := m.heldRootCarryRef(st, repo, identity)
+	haveHeld := carryRef != nil
 
 	if inst != nil {
 		// PROVE THE CHECKOUT BEFORE DESTROYING THE RECORD (#3366). Below
@@ -284,7 +273,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// tab, an editor — would vanish with the record that listed it.
 		m.warn().Printf("root agent for %s is gone (tmux vanished); attempting to reap and re-create it in place", workspace)
 		var err error
-		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst)
+		carried, reapedRoot, err = m.reapDeadRoot(repo.ID, inst, func(reaped reapedRootState) {
+			if !haveHeld { // a held carry outranks the record reaped since
+				carryRef = m.installRootCarryLocked(st, repo, identity, reaped)
+			}
+		})
 		if err != nil {
 			m.rootEnsureFailed(stateKey, st, fmt.Errorf("failed to remove dead root record: %w", err))
 			return
@@ -354,12 +347,16 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		replacesReapedRecord:  reapedRoot,
 		pendingRecreateNotice: carried.notice,
 		configSnapshot:        primed,
+		// The create commits only if the carry it resumes is still held —
+		// checked under the same m.mu section where reserveCreate checks the
+		// delete fence and reserves the title (#7182).
+		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, carryRef) },
 	}
 	if skipRecordedResume {
 		req.resumeConversation = session.AgentConversationData{}
 	}
 	data, err := m.createVerifiedRoot(repo.ID, identity, req)
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !errors.Is(err, errRootCommitWithdrawn) && req.resumeConversation.HasID() {
 		// The always-on guarantee outranks continuity. A conversation the provider
 		// can no longer resume (cleared history, a transcript store the agent no
 		// longer has) makes the resumed command exit at startup — and since the
@@ -385,15 +382,22 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 			}
 		}
 	}
-	if err != nil && !isRootCheckoutRefusal(err) && req.resumeConversation.HasID() {
+	if err != nil && !isRootCheckoutRefusal(err) && !errors.Is(err, errRootCommitWithdrawn) && req.resumeConversation.HasID() {
 		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
 		data, err = m.createVerifiedRoot(repo.ID, identity, req)
 	}
 	if err != nil {
-		if reapedRoot {
-			m.holdRootCarry(st, repo, identity, carried, job.deleteSeq) // the next pass's create carries it
+		// The carry is still held on st unless something retired it, so the
+		// next pass's create carries it. Never put back: a retired carry stays
+		// retired (#7182).
+		m.updateRootCarry(st, carryRef, carried)
+		if errors.Is(err, errRootCommitWithdrawn) {
+			// Not a failure to back off from: the next pass decides afresh
+			// whether this candidate wants a root, and with what.
+			m.info().Printf("root agent for %s: %v", workspace, err)
+			return
 		}
 		if isRootCheckoutRefusal(err) {
 			// Report the refusal as itself. createVerifiedRoot returns before
