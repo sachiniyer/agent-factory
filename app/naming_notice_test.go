@@ -12,16 +12,19 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// namingFormWithConflict opens the naming form holding a title an existing
-// session already has, and submits it: #4123's repro. The title is long enough
-// that the conflict notice clips at 80 columns.
+// namingFormWithConflict opens the naming form holding a title that collides
+// with an existing session's, and submits it: #4123's repro. The existing title
+// differs only in case, so the notice names both titles. An exact duplicate
+// reads as a short "already exists" since #7136, which no longer clips. The
+// title is long enough that the conflict notice clips at 80 columns.
 func namingFormWithConflict(t *testing.T) (*home, *session.Instance, string) {
 	t.Helper()
 	h := newTestHome(t)
 	resizeHome(h, 80, 24)
 	const title = "todo-core-with-a-longer-title"
+	const existingTitle = "Todo-Core-With-A-Longer-Title"
 
-	existing, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "claude"})
+	existing, err := session.NewInstance(session.InstanceOptions{Title: existingTitle, Path: t.TempDir(), Program: "claude"})
 	require.NoError(t, err)
 	h.store.AddInstance(existing)
 	naming, err := session.NewInstance(session.InstanceOptions{Title: title, Path: t.TempDir(), Program: "claude"})
@@ -32,9 +35,42 @@ func namingFormWithConflict(t *testing.T) (*home, *session.Instance, string) {
 
 	_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
 	require.Equal(t, stateNew, h.state, "precondition: the form refuses the title and stays open")
-	want := fmt.Sprintf("a session titled %q conflicts with existing session %q", title, title)
+	want := fmt.Sprintf("a session titled %q conflicts with existing session %q", title, existingTitle)
 	require.Contains(t, h.errBox.FullError(), want, "precondition: the conflict notice is up")
 	return h, naming, want
+}
+
+// TestNamingFormDuplicateTitleReadsAsTaken pins #7136. Submitting the exact
+// title of an existing session read "a session titled "alpha" conflicts with
+// existing session "alpha"": the name twice, as if two different sessions
+// collided. An exact duplicate is a name already taken, and it now says so in
+// the words the daemon and `af sessions create` use for the same refusal. A
+// variant that differs only in case or branch spelling still names both
+// titles, because there the two differ and the user needs to see which one.
+func TestNamingFormDuplicateTitleReadsAsTaken(t *testing.T) {
+	for _, tc := range []struct {
+		name, existing, typed, want string
+	}{
+		{"exact duplicate", "alpha", "alpha", `session with title "alpha" already exists`},
+		{"case variant", "Alpha", "alpha", `a session titled "alpha" conflicts with existing session "Alpha"`},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			h := newTestHome(t)
+			resizeHome(h, 120, 24)
+			existing, err := session.NewInstance(session.InstanceOptions{Title: tc.existing, Path: t.TempDir(), Program: "claude"})
+			require.NoError(t, err)
+			h.store.AddInstance(existing)
+			naming, err := session.NewInstance(session.InstanceOptions{Title: tc.typed, Path: t.TempDir(), Program: "claude"})
+			require.NoError(t, err)
+			h.state = stateNew
+			h.pendingProgram = "claude"
+			h.namingInstance = naming
+
+			_, _ = h.handleKeyPress(tea.KeyMsg{Type: tea.KeyEnter})
+			require.Equal(t, stateNew, h.state, "the form refuses the title and stays open")
+			assert.Equal(t, tc.want, h.errBox.FullError())
+		})
+	}
 }
 
 // TestNamingFormNoticeStaysWhileFormOpen: the reason the form refused its

@@ -295,7 +295,7 @@ func TestSanitizeErrorControls(t *testing.T) {
 func TestErrBoxDetailsHintOverride(t *testing.T) {
 	e := NewErrBox()
 	e.SetSize(40, 1)
-	e.SetNotice(errors.New("a session titled \"todo-core\" conflicts with existing session \"todo-core\""))
+	e.SetNotice(errors.New("session with title \"todo-core\" already exists"))
 
 	e.SetDetailsHint("ctrl+e details")
 	if got := e.String(); !strings.Contains(got, "ctrl+e details") {

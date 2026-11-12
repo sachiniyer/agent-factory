@@ -384,7 +384,7 @@ func (m *home) handleArchive() (tea.Model, tea.Cmd) {
 		return m, m.handleNotice(fmt.Errorf("cannot archive in-place session '%s': archive relocates the worktree, which it doesn't own", title))
 	}
 
-	message := fmt.Sprintf("Archive session '%s'?\n\nLocal: stop terminals and move the worktree to the archive.\nSandboxes: publish work, then remove the sandbox.\nRestore with %s.", title, restoreKeyHint())
+	message := fmt.Sprintf("Archive session %q?\n\nLocal: stop terminals and move the worktree to the archive.\nSandboxes: publish work, then remove the sandbox.\nRestore with %s.", title, restoreKeyHint())
 	return m, m.confirmAction(message, func() tea.Msg {
 		// Raise the optimistic OpArchiving op so the row visibly shows archiving
 		// while the RPC runs (#1195). It composes to Deleting for rendering; the

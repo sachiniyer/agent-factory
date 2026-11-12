@@ -93,12 +93,12 @@ func killConfirmMessage(title, warning string, reserved bool, impact *session.Wo
 	var message string
 	if reserved {
 		message = fmt.Sprintf(
-			"[!] '%s' is the daemon-managed root agent, not a scratch session.\n"+
-				"Killing it stops scheduled and watch-task delivery to '%s' until it\n"+
+			"[!] %q is the daemon-managed root agent, not a scratch session.\n"+
+				"Killing it stops scheduled and watch-task delivery to %q until it\n"+
 				"self-heals (~2 min) or you restart the daemon.\n\n"+
 				"Delete the root session and its af-owned resources?", title, title)
 	} else {
-		message = fmt.Sprintf("Delete session '%s'?\nPermanently delete the session.", title)
+		message = fmt.Sprintf("Delete session %q?\nPermanently delete the session.", title)
 	}
 	if impact != nil {
 		switch {

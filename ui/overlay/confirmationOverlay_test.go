@@ -249,7 +249,7 @@ func overlayProse(rendered string) string {
 // leads the scrollable body, so it is what the reader sees first (#1973, and
 // reachable in full since #5171).
 func TestConfirmationOverlay_GuardedMessageIsNeverClipped(t *testing.T) {
-	c := NewConfirmationOverlay("[!] Delete project 'acme'?\n1 in-place session torn down — not restorable.\n2 sessions archived — restorable.")
+	c := NewConfirmationOverlay("[!] Delete project \"acme\"?\n1 in-place session torn down — not restorable.\n2 sessions archived — restorable.")
 	c.SetDetail("Its worktree is yours — the branch and uncommitted changes stay exactly where they are, but the session and its agent are gone. Restore an archived session to bring the project back.")
 	c.SetWidth(50)
 	c.SetMaxSize(40, 10)
@@ -268,7 +268,7 @@ func TestConfirmationOverlay_GuardedMessageIsNeverClipped(t *testing.T) {
 // is indistinguishable from "there was nothing more to say", and "resize to
 // read" made the user do the work the dialog should do (#5171).
 func TestConfirmationOverlay_OverflowIsAnnouncedWithScrollKeys(t *testing.T) {
-	c := NewConfirmationOverlay("[!] Delete project 'acme'?\n1 in-place session torn down — not restorable.")
+	c := NewConfirmationOverlay("[!] Delete project \"acme\"?\n1 in-place session torn down — not restorable.")
 	c.SetDetail("Line one of elaboration that will not fit. Line two of elaboration. Line three of elaboration. Line four of elaboration that keeps going for a while.")
 	c.SetWidth(50)
 	c.SetMaxSize(40, 10)
@@ -288,7 +288,7 @@ func TestConfirmationOverlay_OverflowIsAnnouncedWithScrollKeys(t *testing.T) {
 // long project name wraps the title onto a second line, which pushes the body
 // past the four-line window.
 func TestConfirmationOverlay_CompactSizeScrollsNotRefuses(t *testing.T) {
-	c := NewConfirmationOverlay("[!] Delete project 'a-project-with-a-very-long-name-indeed'?\n3 in-place sessions torn down — not restorable.\n7 sessions archived — restorable.")
+	c := NewConfirmationOverlay("[!] Delete project \"a-project-with-a-very-long-name-indeed\"?\n3 in-place sessions torn down — not restorable.\n7 sessions archived — restorable.")
 	c.SetDetail("Elaboration that does not matter here.")
 	c.SetWidth(50)
 	c.SetMaxSize(40, 10)
@@ -322,7 +322,7 @@ func TestConfirmationOverlay_CompactSizeScrollsNotRefuses(t *testing.T) {
 // beside the prompt at all.
 func TestConfirmationOverlay_RefusalSurvivesDegenerateSizes(t *testing.T) {
 	for _, size := range [][2]int{{40, 5}, {30, 5}, {24, 5}, {24, 6}} {
-		c := NewConfirmationOverlay("[!] Delete project 'acme'?\n2 in-place sessions torn down — not restorable.\n5 sessions archived — restorable.")
+		c := NewConfirmationOverlay("[!] Delete project \"acme\"?\n2 in-place sessions torn down — not restorable.\n5 sessions archived — restorable.")
 		c.SetDetail("Elaboration.")
 		c.SetWidth(50)
 		c.SetMaxSize(size[0], size[1])
@@ -362,7 +362,7 @@ func TestConfirmationOverlay_UnguardedKeepsConfirming(t *testing.T) {
 // the enter alias — while cancel still works, and must confirm normally once the
 // pending note is cleared.
 func TestConfirmationOverlay_PendingWithholdsConfirm(t *testing.T) {
-	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c := NewConfirmationOverlay("Delete session \"alpha\"?")
 	c.SetWidth(60)
 	confirmed := 0
 	c.OnConfirm = func() { confirmed++ }
@@ -394,7 +394,7 @@ func TestConfirmationOverlay_PendingStillCancels(t *testing.T) {
 		{Type: tea.KeyEsc},
 		{Type: tea.KeyRunes, Runes: []rune("n")},
 	} {
-		c := NewConfirmationOverlay("Delete session 'alpha'?")
+		c := NewConfirmationOverlay("Delete session \"alpha\"?")
 		c.SetPending("Checking for unsaved work…")
 		cancelled := false
 		c.OnCancel = func() { cancelled = true }
@@ -409,7 +409,7 @@ func TestConfirmationOverlay_PendingStillCancels(t *testing.T) {
 // can prove it reached the screen without depending on the wrap.
 func overflowingConfirm(warnings int, termW, termH int) *ConfirmationOverlay {
 	lines := make([]string, 0, warnings+1)
-	lines = append(lines, "[!] Delete session 'risky'?")
+	lines = append(lines, "[!] Delete session \"risky\"?")
 	for i := 1; i <= warnings; i++ {
 		lines = append(lines, fmt.Sprintf("Warning %02d — consequences that must not be hidden.", i))
 	}
@@ -568,7 +568,7 @@ func TestConfirmationOverlay_EscalatedKeyWinsOverScroll(t *testing.T) {
 // exactly as it always has — every line, a blank gap, the prompt — with no
 // scroll affordance and no offset for keys to move.
 func TestConfirmationOverlay_FittingBodyHasNoNotice(t *testing.T) {
-	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c := NewConfirmationOverlay("Delete session \"alpha\"?")
 	c.SetWidth(50)
 	c.SetMaxSize(80, 24)
 
@@ -600,7 +600,7 @@ func TestConfirmationOverlay_GrowResizeCollapsesScroll(t *testing.T) {
 	c.SetMaxSize(200, 60)
 	rendered := renderedText(c.Render())
 	assert.Zero(t, c.scroll, "a window that now fits must not render mid-scroll")
-	assert.Contains(t, rendered, "[!] Delete session 'risky'?")
+	assert.Contains(t, rendered, "[!] Delete session \"risky\"?")
 	assert.Contains(t, rendered, "Warning 12")
 	assert.NotContains(t, rendered, "more lines", "a fitting body must not advertise a scroll")
 }

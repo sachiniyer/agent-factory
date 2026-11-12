@@ -116,7 +116,7 @@ func TestSelectionOverlayRegistersTruncatedRowZones(t *testing.T) {
 		"Retry send — submit the pending mission again",
 		"Mark delivered — retire the pending mission without resending (the pane already shows it landed)",
 	}
-	s := NewSelectionOverlay("Resolve delivery for 'alpha' — inspect the pane first", items)
+	s := NewSelectionOverlay("Resolve delivery for \"alpha\" — inspect the pane first", items)
 	s.SetWidth(50)
 	reg := zones.NewRegistry()
 	origin := layout.Point{X: 8, Y: 4}
@@ -251,7 +251,7 @@ func sessionTitle(i int) string {
 // hint carries no confirm words, so no yes zone may exist for a click to hit;
 // the cancel zone stays.
 func TestConfirmationOverlayPendingRegistersOnlyCancel(t *testing.T) {
-	c := NewConfirmationOverlay("Delete session 'alpha'?")
+	c := NewConfirmationOverlay("Delete session \"alpha\"?")
 	c.SetWidth(60)
 	c.SetPending("Checking for unsaved work…")
 	reg := zones.NewRegistry()

@@ -29,11 +29,11 @@ import (
 // scratch-session prompt.
 func TestKillConfirmMessage_RootIsDistinctAndNamesConsequence(t *testing.T) {
 	generic := killConfirmMessage("scratch-1", "", false, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true})
-	assert.Equal(t, "Delete session 'scratch-1'?\nPermanently delete the session.\nIts af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them.", generic,
+	assert.Equal(t, "Delete session \"scratch-1\"?\nPermanently delete the session.\nIts af-owned worktree and branch are removed. Uncommitted changes and unpushed commits in them are lost. Archive to keep them.", generic,
 		"ordinary deletion must name permanence and ownership")
 
 	root := killConfirmMessage(session.RootSessionTitle, "", true, &session.WorktreeCleanupImpact{RemoveWorktree: true, DeleteBranch: true})
-	assert.NotEqual(t, "Delete session 'root'?", root,
+	assert.NotEqual(t, `Delete session "root"?`, root,
 		"root must not show the generic scratch-session prompt")
 	assert.Contains(t, root, "daemon-managed root agent",
 		"root copy must identify the singleton")

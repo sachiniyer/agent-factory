@@ -400,7 +400,7 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 
 // TestHandoffConfirmMessage_OmitsAnUnknownOutgoingAgent covers the copy defect
 // found by driving the real TUI: with an unidentifiable agent the dialog
-// rendered "Hand 'alpha' from  to claude?" — a double space where the outgoing
+// rendered "Hand "alpha" from  to claude?" — a double space where the outgoing
 // agent should be.
 //
 // The identity fix (Instance.CurrentAgentName) makes the empty case rare, but
@@ -410,7 +410,7 @@ func TestHandleStateSelectHandoffAgent_CancelDoesNotSwap(t *testing.T) {
 // failed interpolation.
 func TestHandoffConfirmMessage_OmitsAnUnknownOutgoingAgent(t *testing.T) {
 	withFrom := handoffConfirmMessage("alpha", "codex", "claude")
-	if withFrom != "Hand 'alpha' from codex to claude?" {
+	if withFrom != `Hand "alpha" from codex to claude?` {
 		t.Fatalf("message = %q, want the outgoing agent named", withFrom)
 	}
 

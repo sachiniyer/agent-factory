@@ -43,7 +43,7 @@ func sessionWord(n int) string {
 // saying "restorable" is the bug.
 func deleteProjectConfirmMessage(name string, total, inPlace int, restoreKey string) (critical, detail string) {
 	archived := total - inPlace
-	title := fmt.Sprintf("[!] Delete project '%s'?", name)
+	title := fmt.Sprintf("[!] Delete project %q?", name)
 
 	killedLine := fmt.Sprintf("%d in-place %s torn down — not restorable.", inPlace, sessionWord(inPlace))
 	archivedLine := fmt.Sprintf("%d %s archived — restorable.", archived, sessionWord(archived))

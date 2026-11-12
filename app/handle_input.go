@@ -126,6 +126,14 @@ func (m *home) handleStateNew(msg tea.KeyMsg) (tea.Model, tea.Cmd) {
 			// only catching exact duplicates and deferring case/branch variants
 			// to a post-Start error (#936).
 			if git.TitlesCollide(other.Title, title, m.appConfig.BranchPrefix) {
+				// An exact duplicate is a name already taken, so say that, in
+				// the daemon's and `af sessions create`'s words for it. Naming
+				// the same title twice read as a collision between two
+				// different sessions (#7136). A case or branch variant names
+				// both titles, because there they differ.
+				if other.Title == title {
+					return m, m.handleNotice(fmt.Errorf("session with title %q already exists", title))
+				}
 				return m, m.handleNotice(fmt.Errorf("a session titled %q conflicts with existing session %q", title, other.Title))
 			}
 		}
