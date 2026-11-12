@@ -37,7 +37,10 @@ jobs:
   gate:
     name: Read the merge state
     # Kill switch: set the repository variable AUTO_MERGE_ENABLED to 'false'.
-    if: vars.AUTO_MERGE_ENABLED != 'false'
+    # Master only: a dispatch with --ref <branch> would check out that branch
+    # as github.workflow_sha and run its auto-merge.js with the write token.
+    # Every job waits on this one, and every real dispatch uses --ref master.
+    if: vars.AUTO_MERGE_ENABLED != 'false' && github.ref == 'refs/heads/master'
     # Pinned to 24.04 until #6281 (26.04 compatibility) lands.
     runs-on: ubuntu-24.04
     timeout-minutes: 15
@@ -133,6 +136,7 @@ jobs:
     permissions:
       contents: read
     outputs:
+      passed: ${{ steps.fixcheck.outcome == 'success' }}
       fixes: ${{ steps.fixcheck.outputs.fixes }}
       base: ${{ steps.fixcheck.outputs.base }}
     steps:
@@ -226,14 +230,14 @@ jobs:
 
       - name: Merge ready PRs
         id: merge
-        if: steps.settle.outputs.halted != 'true' || needs.fixcheck.outputs.fixes != ''
+        if: steps.settle.outputs.halted != 'true' || needs.fixcheck.outputs.passed == 'true'
         uses: actions/github-script@v8
         env:
           USING_PAT: ${{ secrets.AUTO_MERGE_TOKEN != '' }}
           AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
           HALTED: ${{ steps.settle.outputs.halted }}
-          FIX_RESULT: ${{ needs.fixcheck.result }}
-          FIX_PASSED: ${{ needs.fixcheck.outputs.fixes }}
+          FIX_CHECK_PASSED: ${{ needs.fixcheck.outputs.passed }}
+          FIX_LIST: ${{ needs.fixcheck.outputs.fixes }}
           FIX_BASE: ${{ needs.fixcheck.outputs.base }}
         with:
           github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
@@ -244,8 +248,8 @@ jobs:
             } else {
               await merger.mergeHaltFix({
                 github, core, context,
-                passed: process.env.FIX_RESULT === 'success',
-                fixes: process.env.FIX_PASSED,
+                passed: process.env.FIX_CHECK_PASSED === 'true',
+                fixes: process.env.FIX_LIST,
                 base: process.env.FIX_BASE,
               });
             }

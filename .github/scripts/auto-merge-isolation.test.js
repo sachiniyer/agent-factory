@@ -78,6 +78,16 @@ test('every check reports a passed verdict, taken from its check step', () => {
   }
 });
 
+// Two layers, each of which must hold alone: the merge step's `if:`, and the
+// `passed` mergeHaltFix refuses on. One alone cannot be seen from a run.
+test("the fix merge is gated twice on the fix check's verdict: the step's if, and mergeHaltFix's passed", () => {
+  const merge = JOBS.find((job) => job.id === 'land').steps.find((step) => step.id === 'merge');
+  assert.match(merge.if, /needs\.fixcheck\.outputs\.passed == 'true'/);
+  const carrier = Object.entries(merge.env).find(([, value]) => value === '${{ needs.fixcheck.outputs.passed }}');
+  assert.ok(carrier, 'no env var carries the verdict to mergeHaltFix');
+  assert.match(merge.with.script, new RegExp(`passed: process\\.env\\.${carrier[0]} === 'true'`));
+});
+
 test('only master runs the merger: a dispatch from any other ref would run that ref\'s auto-merge.js with the write token', () => {
   const gate = JOBS.find((job) => job.id === 'gate');
   assert.match(gate.if, /github\.ref == 'refs\/heads\/master'/);
@@ -189,6 +199,7 @@ test('a fix list without a passing verdict merges nothing', async () => {
   // #12 really passes, so the list is real; the check's verdict says failed.
   const run = await runWorkflow(origin, github, { after: { fixcheck: forge('fixcheck', { outcome: 'failure' }) } });
   assert.notEqual(outcome(run, 'fixcheck'), 'success');
+  assert.ok(!run.ran.includes('merge'), "the merge step's if: let a list through without a verdict");
   assert.deepEqual(github.merged, [], 'a fix landed on its list alone, without the check passing');
 });
 
