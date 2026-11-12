@@ -1,12 +1,15 @@
 package daemon
 
 import (
+	"encoding/json"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
+	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -149,4 +152,108 @@ func TestRepairToTheAlreadyRecordedIDBecomesAnOperatorRepair(t *testing.T) {
 		inst.SessionCodexCaptureScope(), inst.AgentRuntimeToken(), inst.AgentConversation()))
 	require.Equal(t, heldUserThreadID, inst.AgentConversation().ID,
 		"the repair stands while the runtime holds what it held when the repair was made")
+}
+
+// persistedAgentConversation is the record the row's last write put on disk —
+// what a restarted daemon reads back.
+func persistedAgentConversation(t *testing.T, repoID string) session.AgentConversationData {
+	t.Helper()
+	raw, err := config.LoadRepoInstances(repoID)
+	require.NoError(t, err)
+	var stored []session.InstanceData
+	require.NoError(t, json.Unmarshal(raw, &stored))
+	require.Len(t, stored, 1)
+	require.NotNil(t, stored[0].AgentConversation)
+	return *stored[0].AgentConversation
+}
+
+// TestOperatorRepairStampIsPersistedWithTheRecord is #7122's property 2 at
+// the daemon: what the runtime held when the operator's repair was made is
+// written to disk with the repair itself, so a restarted daemon still knows
+// which thread the pane was on and follows a move made while it was down. A
+// re-run renews the repair as of now and re-stamps it.
+func TestOperatorRepairStampIsPersistedWithTheRecord(t *testing.T) {
+	manager, inst, repoID, _, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
+	writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(fresh)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
+	stored := persistedAgentConversation(t, repoID)
+	require.Equal(t, heldUserThreadID, stored.ID)
+	require.Equal(t, session.ConversationCaptureOperator, stored.CaptureKind)
+	require.True(t, stored.RepairStamped, "the observation must reach disk with the repair")
+	require.Equal(t, heldFreshThreadID, stored.RepairHeldID)
+
+	next := writeHeldTestRollout(t, codexHome, heldNextThreadID, dir)
+	held.set(next)
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
+	renewed := persistedAgentConversation(t, repoID)
+	require.Equal(t, heldUserThreadID, renewed.ID)
+	require.Equal(t, heldNextThreadID, renewed.RepairHeldID, "a re-run re-stamps what the runtime holds now")
+	require.False(t, renewed.CapturedAt.Before(stored.CapturedAt))
+}
+
+// TestUnstampedOperatorRepairBaselineIsPersisted: a repair that reached disk
+// with no observation (the held query could not answer, or the record
+// predates the stamp) takes the follow's first answer as its baseline, and
+// that baseline is persisted like any record write, so a restart does not
+// take a later move as a fresh baseline (#7122).
+func TestUnstampedOperatorRepairBaselineIsPersisted(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
+	writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(fresh)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldUserThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureOperator,
+	})
+
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst,
+		inst.SessionCodexCaptureScope(), inst.AgentRuntimeToken(), inst.AgentConversation()))
+	stored := persistedAgentConversation(t, repoID)
+	require.Equal(t, heldUserThreadID, stored.ID, "the baseline moves nothing")
+	require.True(t, stored.RepairStamped)
+	require.Equal(t, heldFreshThreadID, stored.RepairHeldID)
+}
+
+// TestOperatorRepairIsDatedNoLaterThanItsObservation is the #7125 review's
+// R-2: the repair's stamp says what the runtime held when set-conversation
+// looked, before it took the op-lock and walked the store, so the repair's
+// date — the instant the staleness bound disregards threads up to — must be
+// no later than that look. Otherwise a thread the pane started in between is
+// one the bound treats as overridden while the follow treats it as a move.
+func TestOperatorRepairIsDatedNoLaterThanItsObservation(t *testing.T) {
+	manager, inst, repoID, _, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	fresh := writeHeldTestRollout(t, codexHome, heldFreshThreadID, dir)
+	writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held := &heldOnly{}
+	held.set(fresh)
+	var mu sync.Mutex
+	var firstLook time.Time
+	inst.SetCodexRuntimeHeldOverrideForTest(func() (map[string]struct{}, error) {
+		mu.Lock()
+		if firstLook.IsZero() {
+			firstLook = time.Now()
+		}
+		mu.Unlock()
+		return held.snapshot()
+	})
+
+	require.NoError(t, manager.setConversation(setConversationReq(inst, repoID, heldUserThreadID), nil))
+	stored := persistedAgentConversation(t, repoID)
+	require.True(t, stored.RepairStamped)
+	mu.Lock()
+	look := firstLook
+	mu.Unlock()
+	require.False(t, look.IsZero(), "fixture: the observation must have read the runtime's held files")
+	require.False(t, stored.CapturedAt.After(look),
+		"the repair is dated %s, after the observation it was stamped with (%s)", stored.CapturedAt, look)
 }

@@ -173,9 +173,12 @@ func (s *remoteAgentServer) Launch(firstTimeSetup bool) error {
 		req.Tabs = s.inst.restoreRosterForRestart(s.featureVerdict(tabRestoreFeature))
 	}
 	// Send the recorded conversation so a launch resumes exactly it (#5571 W7.2).
-	// The server resumes it only where its own store still holds it.
+	// The server resumes it only where its own store still holds it. An
+	// operator repair's stamp stays behind: it describes a runtime on this
+	// host, not the sandbox's, and an agent-server built before the field
+	// decodes this request strictly and would refuse it (#7122).
 	if s.inst != nil {
-		if conv := s.inst.AgentConversation(); conv.HasID() {
+		if conv := s.inst.AgentConversation().withoutRepairStamp(); conv.HasID() {
 			req.Conversation = &conv
 		}
 	}

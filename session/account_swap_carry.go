@@ -197,12 +197,11 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		}
 		return nil, reason
 	}
-	// An operator's standing repair is exempt for the reason the restore
-	// guard gives (prepareExactResumeConversation): its provenance was proven
-	// when it was set, and it stops being an operator record as soon as the
-	// runtime moves to another thread (#7120 review).
-	if !carry.committed && req.outgoing.CaptureKind != ConversationCaptureOperator {
-		if reason := carry.staleReason(req.program, req.workDir); reason != "" {
+	// An operator's standing repair is judged by the restore guard's rule
+	// (staleRecordedCodexDecline): its provenance is re-checked, and only the
+	// threads it overrode are disregarded (#7122).
+	if !carry.committed {
+		if reason := carry.staleReason(req.program, req.workDir, req.outgoing); reason != "" {
 			return nil, reason
 		}
 	}
@@ -327,7 +326,10 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 // naming a conversation the user abandoned; resuming that and saying
 // "continue" is worse than a stated fresh start. Newer is by modification
 // time, strictly: the live runtime appends to the conversation it is in.
-func (c *conversationCarry) staleReason(program, workDir string) string {
+// outgoing is the record being carried; only a Codex operator repair is
+// judged differently, and the kind buys a Claude record nothing — no repair
+// ever writes one.
+func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentConversationData) string {
 	switch c.agent {
 	case tmux.ProgramClaude:
 		transcripts, err := claudeProjectTranscripts(filepath.Join(c.srcHome, filepath.Dir(c.transcript)))
@@ -349,12 +351,12 @@ func (c *conversationCarry) staleReason(program, workDir string) string {
 			}
 		}
 	case tmux.ProgramCodex:
-		return c.staleCodexReason(program, workDir)
+		return c.staleCodexReason(program, workDir, outgoing)
 	}
 	return ""
 }
 
-func (c *conversationCarry) staleCodexReason(program, workDir string) string {
+func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing AgentConversationData) string {
 	// Only rollouts written after the recorded one can be a newer thread, so
 	// only those have their session metadata read: a shared home can hold
 	// thousands of rollouts for other worktrees.
@@ -366,7 +368,15 @@ func (c *conversationCarry) staleCodexReason(program, workDir string) string {
 	if launch, err := tmux.CommandEnvironmentFromCommand(program, workDir); err == nil && launch.WorkingDirKnown() {
 		launchDir = launch.WorkingDir
 	}
-	switch checkCodexRecordedStaleness(filepath.Join(c.srcHome, c.transcript), files, pathutil.ResolveForCompare(launchDir)) {
+	recordedPath := filepath.Join(c.srcHome, c.transcript)
+	var repair operatorRepairWindow
+	if outgoing.CaptureKind == ConversationCaptureOperator {
+		if decline := operatorRepairProvenance(recordedPath, launchDir); decline.reason != "" {
+			return decline.reason
+		}
+		repair = operatorRepairWindowOf(outgoing, time.Now())
+	}
+	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutRecordedGone:
 		return "its rollout is missing from the previous account's home"
 	case codexRolloutStale:

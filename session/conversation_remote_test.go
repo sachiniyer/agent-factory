@@ -42,6 +42,35 @@ func TestRemoteLaunchSendsAndRecordsTheConversation(t *testing.T) {
 	assert.Equal(t, reported, inst.AgentConversation(), "the conversation the server launched is the one recorded")
 }
 
+// An operator repair's stamp never rides the launch request: it describes a
+// runtime on the daemon's host, and an agent-server built before the field
+// decodes the request strictly (#7122). The repair itself still does.
+func TestRemoteLaunchLeavesTheRepairStampBehind(t *testing.T) {
+	srv := newTabWireServer(t).
+		route("/v1/health", map[string]any{"ok": true}).
+		route("/v1/agent/launch", map[string]any{"ok": true})
+	ts := httptest.NewServer(srv.mux)
+	defer ts.Close()
+	repair := AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: "019a0000-aaaa-bbbb-cccc-ddddeeeeffff", CaptureKind: ConversationCaptureOperator,
+	}.WithRepairStamp("019a1111-aaaa-bbbb-cccc-ddddeeeeffff")
+	inst := &Instance{Title: "sb", Tabs: []*Tab{newRemoteAgentTab()}}
+	inst.Tabs[0].Conversation = repair
+	s := &remoteAgentServer{rc: srv.client(t, ts.URL), inst: inst}
+	inst.remoteClient = s.rc
+
+	require.NoError(t, s.Launch(true))
+	srv.mu.Lock()
+	conv, ok := srv.bodies["/v1/agent/launch"]["conversation"].(map[string]any)
+	srv.mu.Unlock()
+	require.True(t, ok)
+	assert.Equal(t, repair.ID, conv["id"])
+	assert.Equal(t, ConversationCaptureOperator, conv["capture_kind"])
+	assert.NotContains(t, conv, "repair_stamped")
+	assert.NotContains(t, conv, "repair_held_id")
+	assert.Equal(t, repair, inst.AgentConversation(), "the daemon's own record keeps its stamp")
+}
+
 // A server that predates the field reports nothing; that never erases a record.
 func TestRemoteLaunchWithoutReportKeepsTheRecord(t *testing.T) {
 	srv := newTabWireServer(t).
