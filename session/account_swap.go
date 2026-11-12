@@ -790,35 +790,6 @@ func (b *LocalBackend) stopForAccountSwap(i *Instance, agentAlreadyAbsent bool) 
 	return nil
 }
 
-func (b *LocalBackend) respawnFresh(i *Instance) error {
-	plan, err := i.accountSwapLaunchForRespawn()
-	if err != nil {
-		return err
-	}
-	// The outgoing panes are already stopped: every environment refresh below —
-	// worktree hooks, the agent pane, each sibling tab — applies the list
-	// admission resolved instead of re-reading config, which could now fail only
-	// after refusing would have kept an agent running (#7077).
-	if plan.passthroughFrozen {
-		defer i.freezeEnvPassthrough(plan.passthrough)()
-	}
-	// Idempotent, and the only copy a restarted daemon performs. A carry that
-	// can no longer complete — at this copy or already at validation — leaves
-	// this launch and the pending record as a stated fresh start.
-	if plan, err = i.ensureAccountSwapConversationCarried(plan); err != nil {
-		return err
-	}
-	if plan.carry != nil {
-		i.markCarriedLaunchStarted(plan.account)
-	}
-	if err := b.respawnWithConversation(i, false, plan); err != nil {
-		stopErr := b.stopForAccountSwap(i, false)
-		return fmt.Errorf("account swap: replacement pane set for %q is incomplete: %w",
-			i.Title, errors.Join(err, stopErr))
-	}
-	return nil
-}
-
 func (i *Instance) markAccountSwapReplacementPanesStarted() error {
 	i.mu.Lock()
 	defer i.mu.Unlock()
