@@ -17,6 +17,10 @@ var boundedResolvePath = pathutil.ResolveForCompare
 // Test seam for a metadata syscall that stalls beneath the bounded worker.
 var boundedLstatPath = os.Lstat
 
+// Test seam for a symlink-following metadata syscall that stalls beneath the
+// bounded worker.
+var boundedStatPath = os.Stat
+
 // BoundedLstat runs os.Lstat through the shared identity-probe deadline (#3278
 // review). The destruction path's absence checks run while the caller holds
 // the session operation lock, so a stalled FUSE/NFS mount must surface as a
@@ -27,32 +31,53 @@ var boundedLstatPath = os.Lstat
 // blocked OS threads against the same stalled path until the stuck worker
 // finally returns and unpublishes itself.
 func BoundedLstat(path string) (os.FileInfo, error) {
+	return boundedPathInfo(boundedStatKey{path: path}, boundedLstatPath)
+}
+
+// BoundedStat is BoundedLstat for callers that must FOLLOW a final symlink, as
+// os.Stat does: a repository root may itself be a symlink (macOS /tmp is
+// /private/tmp), `.git` may be a symlink or a gitfile, and a bare layout's
+// HEAD/objects/refs are recognized by what they resolve to. It shares
+// BoundedLstat's deadline, flight table and timed-out latch, keyed apart by
+// whether the final component is followed — a Stat and an Lstat of one path
+// answer different questions, so neither may hand its result to the other.
+func BoundedStat(path string) (os.FileInfo, error) {
+	return boundedPathInfo(boundedStatKey{path: path, follow: true}, boundedStatPath)
+}
+
+// boundedStatKey names one flight: the path, and whether the probe follows a
+// final symlink.
+type boundedStatKey struct {
+	path   string
+	follow bool
+}
+
+func boundedPathInfo(key boundedStatKey, probe func(string) (os.FileInfo, error)) (os.FileInfo, error) {
 	boundedLstatFlights.Lock()
-	if active := boundedLstatFlights.byPath[path]; active != nil {
+	if active := boundedLstatFlights.byPath[key]; active != nil {
 		if active.timedOut {
 			boundedLstatFlights.Unlock()
 			return nil, fmt.Errorf(
 				"path check for %s is still running after an earlier deadline: %w",
-				path, context.DeadlineExceeded,
+				key.path, context.DeadlineExceeded,
 			)
 		}
 		boundedLstatFlights.Unlock()
-		return waitForBoundedLstat(path, active)
+		return waitForBoundedLstat(key, active)
 	}
 	flight := &boundedLstatFlight{done: make(chan struct{})}
-	boundedLstatFlights.byPath[path] = flight
+	boundedLstatFlights.byPath[key] = flight
 	boundedLstatFlights.Unlock()
-	lstat := boundedLstatPath
 	go func() {
-		flight.info, flight.err = lstat(path)
+		flight.info, flight.err = probe(key.path)
 		boundedLstatFlights.Lock()
-		if boundedLstatFlights.byPath[path] == flight {
-			delete(boundedLstatFlights.byPath, path)
+		if boundedLstatFlights.byPath[key] == flight {
+			delete(boundedLstatFlights.byPath, key)
 		}
 		close(flight.done)
 		boundedLstatFlights.Unlock()
 	}()
-	return waitForBoundedLstat(path, flight)
+	return waitForBoundedLstat(key, flight)
 }
 
 type boundedLstatFlight struct {
@@ -64,10 +89,10 @@ type boundedLstatFlight struct {
 
 var boundedLstatFlights = struct {
 	sync.Mutex
-	byPath map[string]*boundedLstatFlight
-}{byPath: map[string]*boundedLstatFlight{}}
+	byPath map[boundedStatKey]*boundedLstatFlight
+}{byPath: map[boundedStatKey]*boundedLstatFlight{}}
 
-func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, error) {
+func waitForBoundedLstat(key boundedStatKey, flight *boundedLstatFlight) (os.FileInfo, error) {
 	timer := time.NewTimer(relocationIdentityTimeout.Load())
 	defer timer.Stop()
 	select {
@@ -75,12 +100,12 @@ func waitForBoundedLstat(path string, flight *boundedLstatFlight) (os.FileInfo, 
 		return flight.info, flight.err
 	case <-timer.C:
 		boundedLstatFlights.Lock()
-		if boundedLstatFlights.byPath[path] == flight {
+		if boundedLstatFlights.byPath[key] == flight {
 			flight.timedOut = true
 			boundedLstatFlights.Unlock()
 			return nil, fmt.Errorf(
 				"timed out after %s while checking path %s: %w",
-				relocationIdentityTimeout.Load(), path, context.DeadlineExceeded,
+				relocationIdentityTimeout.Load(), key.path, context.DeadlineExceeded,
 			)
 		}
 		boundedLstatFlights.Unlock()

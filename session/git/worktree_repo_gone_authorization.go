@@ -869,8 +869,21 @@ func resolveRepoMetadataRoot(repoPath string) (string, error) {
 // bareMetadataDirectory recognizes the direct metadata layout produced by a
 // bare clone. The caller has already established that repoPath is the live Git
 // origin; this structural check keeps resolveRepoMetadataRoot from accepting an
-// arbitrary directory merely because it lacks a .git child.
+// arbitrary directory merely because it lacks a .git child. Its callers run it
+// inside a bounded worker, and any failed observation reads as "not bare",
+// which resolveRepoMetadataRoot then reports as an error, never as absence.
 func bareMetadataDirectory(repoPath string) bool {
+	bare, _ := bareMetadataLayout(repoPath, os.Stat)
+	return bare
+}
+
+// bareMetadataLayout is the structural bare-layout check over a caller-chosen
+// stat. It follows symlinks, as os.Stat does. The answer is determinate unless
+// err is non-nil: an observation that hit its deadline (context.DeadlineExceeded)
+// is returned as the error, because a stalled probe proves nothing about the
+// layout and a caller that reads "not bare" as absence must not get it. Every
+// other failed observation keeps bareMetadataDirectory's meaning: not bare.
+func bareMetadataLayout(repoPath string, stat func(string) (os.FileInfo, error)) (bool, error) {
 	for _, entry := range []struct {
 		name string
 		dir  bool
@@ -880,12 +893,16 @@ func bareMetadataDirectory(repoPath string) bool {
 		{name: "objects", dir: true},
 		{name: "refs", dir: true},
 	} {
-		info, err := os.Stat(filepath.Join(repoPath, entry.name))
+		path := filepath.Join(repoPath, entry.name)
+		info, err := stat(path)
+		if errors.Is(err, context.DeadlineExceeded) {
+			return false, fmt.Errorf("stat %s: %w", path, err)
+		}
 		if err != nil || info.IsDir() != entry.dir {
-			return false
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }
 
 func verifyArchivedWorktreePointer(worktreePath string) error {
