@@ -646,10 +646,16 @@ func claudeTrustNextContentRow(rows []claudeTrustRow, from int) int {
 // refused — leaves the caller owing another check before it may type into the
 // pane (#3302).
 func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
+	if dialog := claudeMCPServerDialogOf(content); dialog.verdict == claudeMCPServerComplete {
+		// Claude Code 2.1.322's MCP-server dialog. It does render rows af can
+		// read by label, so af confirms its preselection only after checking
+		// that the preselection IS the decline row (#7163).
+		return t.declineClaudeMCPServer(dialog)
+	}
 	if !claudeFolderTrustDialogPresent(content) {
-		// The MCP-server trust prompt, or the legacy folder-trust wording.
-		// Neither renders a row af can locate by label and neither is what
-		// regressed in 2.1.257, so both keep the historical Enter tap on
+		// The older MCP-server trust prompt, or the legacy folder-trust
+		// wording. Neither renders a row af can locate by label and neither is
+		// what regressed in 2.1.257, so both keep the historical Enter tap on
 		// whatever Claude Code preselected. Both are structurally guarded at
 		// the predicate — claudeMCPTrustFooterIsLast for the MCP branch,
 		// claudeLegacyTrustDialogOf for the legacy branch — so only a live

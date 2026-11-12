@@ -63,6 +63,12 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		if claudeMCPDialogPartiallyRendered(content) {
 			return true
 		}
+		// The 2.1.322 MCP-server dialog is painted top-down too. A frame that is
+		// a proper prefix of it — preamble, body, some of the options, no footer
+		// yet — holds the same way (#7163).
+		if claudeMCPServerDialogOf(content).verdict == claudeMCPServerPartial {
+			return true
+		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
 		// paints its question, then its body, then its options one row at a
 		// time. claudeLegacyTrustDialogOf reports a frame that is a proper
@@ -329,7 +335,7 @@ func sgrSetsReverse(params string, current bool) bool {
 // verbatim, so a visible rendering of this file's contents (a diff, a review
 // reply, pasted release notes) carries it too.
 //
-// The MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
+// The older MCP prompt ("New MCP server found. Do you trust this new MCP server? ❯
 // 1. Yes ... Enter to confirm") is anchored on its unique question "do you
 // trust this new mcp server" AND the modal's "Enter to confirm" footer being
 // the last non-blank content in the pane. The phrase alone cannot tell a live
@@ -356,6 +362,13 @@ func claudeTrustPromptPresent(content string) bool {
 	mcpDialog := strings.Contains(lower, "do you trust this new mcp server") &&
 		claudeMCPTrustFooterIsLast(content)
 
+	// Claude Code 2.1.322's MCP-server dialog ("New MCP server found in this
+	// project: <name>" … "Continue without using this MCP server"), which kept
+	// none of the older wording's anchors (#7163). Complete means the whole
+	// dialog with its footer last (claudeMCPServerDialogOf) — whichever row
+	// owns the cursor, because a dialog af will refuse is still in the way.
+	mcpServer := claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete
+
 	// Legacy folder-trust dialog — the question as a whole row, opening a
 	// trailing region that holds only rows the dialog paints, complete, with
 	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
@@ -364,5 +377,5 @@ func claudeTrustPromptPresent(content string) bool {
 	// agent."
 	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
 
-	return reworded || mcpDialog || legacy
+	return reworded || mcpDialog || mcpServer || legacy
 }
