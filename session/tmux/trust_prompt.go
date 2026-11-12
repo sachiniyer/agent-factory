@@ -68,6 +68,15 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// yet — holds the same way (#7163). So does the dialog in a shape af
 		// cannot read, such as a pane narrow enough that Claude Code wraps its
 		// rows: hold, say why once, and send nothing.
+		// The multi-server picker (#7166) holds the same way while painting,
+		// and when it is plainly on screen but af cannot read it.
+		switch claudeMCPServersPickerOf(content) {
+		case claudeMCPServersPartial:
+			return true
+		case claudeMCPServersUnreadable:
+			t.refuseClaudeMCPServers("its rows do not read as the picker af knows (a pane too narrow, or a server name too long, wraps them)")
+			return true
+		}
 		switch claudeMCPServerDialogOf(content).verdict {
 		case claudeMCPServerPartial:
 			return true
@@ -96,6 +105,10 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		// can only make af wait longer before typing into the NEXT dialog, never
 		// sooner. A pending movement key is a different matter and stays.
 		t.claudeTrust.firstSeen = time.Time{}
+		// The picker's settle clock too: its Esc needs the picker to have
+		// stayed on screen, not to have been seen at two moments hours apart
+		// (#7170 review, P3-1). mcpServersRejectSent stays: one Esc per pane.
+		t.claudeTrust.mcpServersFirstSeen = time.Time{}
 	case ProgramCodex:
 		if t.handleCodexSafetyBuffering(content) {
 			return true
@@ -394,6 +407,10 @@ func claudeTrustPromptPresent(content string) bool {
 	// owns the cursor, because a dialog af will refuse is still in the way.
 	mcpServer := claudeMCPServerDialogOf(content).verdict == claudeMCPServerComplete
 
+	// The multi-server picker Claude Code shows for two or more servers
+	// (#7166): its header opens the trailing region and its footer is last.
+	mcpServers := claudeMCPServersPickerOf(content) == claudeMCPServersComplete
+
 	// Legacy folder-trust dialog — the question as a whole row, opening a
 	// trailing region that holds only rows the dialog paints, complete, with
 	// the cursor on Yes (claudeLegacyTrustDialogOf). af's own source contains
@@ -402,5 +419,5 @@ func claudeTrustPromptPresent(content string) bool {
 	// agent."
 	legacy := claudeLegacyTrustDialogOf(content) == claudeLegacyTrustAnswerable
 
-	return reworded || mcpDialog || mcpServer || legacy
+	return reworded || mcpDialog || mcpServer || mcpServers || legacy
 }

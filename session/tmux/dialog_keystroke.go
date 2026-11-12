@@ -37,6 +37,9 @@ const (
 	// confirms only its decline row, verified by label, so the diagnostic can
 	// name exactly what af chose (#7163).
 	claudeMCPServerDialogName = "Claude MCP-server"
+	// claudeMCPServersDialogName is the multi-server MCP picker. af answers it
+	// with Esc, rejecting every server, and never with Space or Enter (#7166).
+	claudeMCPServersDialogName = "Claude MCP-server selection"
 	// Codex's directory-trust modal preselects its affirmative option and af
 	// accepts that preselection, so the option is named to keep the diagnostic
 	// honest about what af confirmed.
@@ -153,11 +156,12 @@ func (t *TmuxSession) sessionGoneError(op string, cause error) error {
 }
 
 // confirmed reports whether af actually sent the key that commits a choice.
-// Every dialog af answers is committed with Enter; the movement keys before it
-// select nothing on their own.
+// Most dialogs af answers are committed with Enter; the multi-server MCP picker
+// is committed with Escape, its "reject all" (#7166). The movement keys before
+// either select nothing on their own.
 func (k dialogKeystroke) confirmed() bool {
 	for _, key := range k.keys {
-		if key == "Enter" {
+		if key == "Enter" || key == "Escape" {
 			return true
 		}
 	}

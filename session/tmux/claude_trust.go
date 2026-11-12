@@ -114,6 +114,13 @@ type claudeTrustState struct {
 	// does not land in the window where Claude Code is painting the dialog and
 	// not yet reading input.
 	firstSeen time.Time
+	// mcpServersFirstSeen is the same settle clock for the multi-server MCP
+	// picker; a dialog-free frame clears it, as it clears firstSeen.
+	// mcpServersRejectSent records that af has sent that picker its one Esc;
+	// only a new pane process (Start) clears it, so af never sends this pane a
+	// second Esc (#7166).
+	mcpServersFirstSeen  time.Time
+	mcpServersRejectSent bool
 }
 
 func (s *claudeTrustState) beginPendingMove(from string) {
@@ -648,6 +655,11 @@ func claudeTrustNextContentRow(rows []claudeTrustRow, from int) int {
 // refused — leaves the caller owing another check before it may type into the
 // pane (#3302).
 func (t *TmuxSession) answerClaudeTrustPrompt(content string) bool {
+	if claudeMCPServersPickerOf(content) == claudeMCPServersComplete {
+		// The multi-server MCP picker. Its preselection enables every server,
+		// so af does not accept it: it rejects all with Esc (#7166).
+		return t.rejectClaudeMCPServers()
+	}
 	if dialog := claudeMCPServerDialogOf(content); dialog.verdict == claudeMCPServerComplete {
 		// Claude Code 2.1.322's MCP-server dialog. It does render rows af can
 		// read by label, so af confirms its preselection only after checking
