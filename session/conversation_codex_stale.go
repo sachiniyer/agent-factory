@@ -1,6 +1,7 @@
 package session
 
 import (
+	"iter"
 	"os"
 	"strings"
 	"time"
@@ -128,17 +129,35 @@ const (
 // other, including one af cannot date, stays a candidate exactly as it would
 // for any record. The zero window drops nothing.
 func checkCodexRecordedStaleness(recordedPath string, files map[string]struct{}, launchDir string, repair operatorRepairWindow) codexStalenessVerdict {
+	return judgeCodexRecordedStaleness(recordedPath, lstatRolloutModTimes(files), launchDir, repair)
+}
+
+// lstatRolloutModTimes yields each of files with its mtime now, skipping one
+// that cannot be stat'd.
+func lstatRolloutModTimes(files map[string]struct{}) iter.Seq2[string, time.Time] {
+	return func(yield func(string, time.Time) bool) {
+		for path := range files {
+			if info, err := os.Lstat(path); err == nil && !yield(path, info.ModTime()) {
+				return
+			}
+		}
+	}
+}
+
+// judgeCodexRecordedStaleness is checkCodexRecordedStaleness over rollouts
+// whose mtimes are already known — a snapshot of the store (#7156 review
+// P2-1). The recorded rollout itself is always stat'd now.
+func judgeCodexRecordedStaleness(recordedPath string, rollouts iter.Seq2[string, time.Time], launchDir string, repair operatorRepairWindow) codexStalenessVerdict {
 	recorded, err := os.Lstat(recordedPath)
 	if err != nil {
 		return codexRolloutRecordedGone
 	}
 	var newer []string
-	for path := range files {
+	for path, modTime := range rollouts {
 		if path == recordedPath {
 			continue
 		}
-		if info, serr := os.Lstat(path); serr == nil && info.ModTime().After(recorded.ModTime()) &&
-			!repair.disregards(path, info.ModTime()) {
+		if modTime.After(recorded.ModTime()) && !repair.disregards(path, modTime) {
 			newer = append(newer, path)
 		}
 	}

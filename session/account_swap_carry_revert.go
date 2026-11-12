@@ -32,7 +32,7 @@ const (
 	// codexRevertCarryTargetReason: the incoming account's Codex would resolve
 	// the thread to a revert rollout it already holds, not to the copy.
 	codexRevertCarryTargetReason   = "the new account already holds a thread/revert rollout of this conversation, which Codex would resume instead of the carried one"
-	codexRevertCarryUnlistedReason = "af could not enumerate the Codex rollout store"
+	codexRevertCarryUnlistedReason = carryStoreUnlistedReason
 )
 
 // codexRolloutIsRevert reports whether path names a thread/revert rollout,
@@ -73,7 +73,7 @@ func (c *conversationCarry) codexRevertReason() string {
 		return ""
 	}
 	floor := codexRevertFloor(c.transcript)
-	held, err := codexHoldsRevertRollout(c.srcHome, c.id, floor)
+	held, err := c.sourceHoldsRevert(floor)
 	switch {
 	case err != nil:
 		return codexRevertCarryUnlistedReason

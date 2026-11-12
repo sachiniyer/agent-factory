@@ -154,9 +154,9 @@ func codexCarryOtherFormsReason(srcHome, id string) string {
 	_, forms, err := codexRolloutForms(srcHome, id)
 	switch {
 	case err != nil:
-		return "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
+		return carryOtherFormsUnlistedReason
 	case len(forms) > 0:
-		return "its rollout is stored compressed or as a thread/revert rollout, which af does not carry yet"
+		return carryOtherFormsReason
 	}
 	return ""
 }
