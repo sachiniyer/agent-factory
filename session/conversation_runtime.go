@@ -16,11 +16,11 @@ import (
 )
 
 // codexRuntimeAttribution is the capture's positive-attribution channel: the
-// process generation this snapshot was armed against, re-resolved through the
-// pane on every judgement. A rollout file's mere existence after a baseline —
-// even as the lone new file whose session_meta agrees with the launch
-// directory — answers only WHICH DIRECTORY it names, never WHICH PROCESS
-// wrote it. A sibling Codex launched in the same worktree against the same
+// process generation this snapshot was armed against, re-resolved from the
+// launch evidence on every judgement. A rollout file's mere existence after
+// a baseline — even as the lone new file whose session_meta agrees with the
+// launch directory — answers only WHICH DIRECTORY it names, never WHICH
+// PROCESS wrote it. A sibling Codex launched in the same worktree against the same
 // account-scoped store mints exactly that shape of evidence, and adopting it
 // records a foreign thread as this session's conversation (#6847, the
 // deferred-capture twin of the carried-rollout refusal in #6834).
@@ -211,11 +211,14 @@ func (s *codexHeldSet) contains(path string) bool {
 // BindConversationCaptureRuntime attaches this instance's live runtime — the
 // pane-root process generation it launched — to snap's rollout discovery, so
 // capture adopts only a rollout that runtime itself holds open. The binding
-// is a resolver, not a frozen pid: it re-asks the pane on every judgement, so
-// a snapshot armed before the pane exists still attributes correctly once it
-// does, and a runtime replaced under the same instance attributes to the
-// replacement. Snapshots for providers with no local rollout store pass
-// through untouched; so does one whose launch never bound a Codex store.
+// is a resolver, not a frozen pid: it re-reads the launch evidence on every
+// judgement, so a snapshot armed before the launch recorded it still
+// attributes correctly once it has, and a runtime replaced under the same
+// instance attributes to the replacement. Without verified evidence the
+// channel attributes nothing and the held query reports why
+// (codexVerifiedRuntimeRoot). Snapshots for providers with no local rollout
+// store pass through untouched; so does one whose launch never bound a Codex
+// store.
 func (i *Instance) BindConversationCaptureRuntime(snap ConversationCaptureSnapshot) ConversationCaptureSnapshot {
 	if !snap.CapturesCodex() {
 		return snap
@@ -245,9 +248,9 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 	i.mu.RLock()
 	override := i.codexRuntimeHeldOverride
 	i.mu.RUnlock()
-	// The roots and generation this answer judges from. Production uses only
-	// the verified launch evidence, never codexRuntimeRoots' active-pane
-	// fallback (#7120 review); the test override keeps its own resolution.
+	// The roots and generation this answer judges from: only the verified
+	// launch evidence, never the session's active pane (#7120 review); the
+	// test override keeps its own resolution.
 	resolve := func() ([]proctree.Process, string, error) {
 		if override != nil {
 			gen, _, err := i.codexRuntimeJudgement()
@@ -325,10 +328,20 @@ func (i *Instance) answerHeldCodexConversation(judge heldRolloutJudge) (AgentCon
 // generation (a respawned pane reuses the session row) never leak into the
 // replacement's judgements, and a generation that changes mid-walk discards
 // the walk — its verdicts belong to no live process set.
+//
+// A runtime with no verified agent process — no launch record, or one naming
+// a process that is gone or replaced — attributes nothing, and it is not
+// inconclusive either. The session's active pane used to stand in, and it is
+// not evidence of which process is the agent: a user's split or a new window
+// running its own codex in the same worktree and store minted exactly the
+// rollout the diff then adopted as this session's (#7123). So the diff fails
+// closed the way an unbound snapshot does, without spending the settle window
+// on an answer that cannot come, and the held query — which the daemon loop
+// asks next — reports why.
 func (i *Instance) attributeCodexRolloutPaths(candidates []string) (attributed []string, inconclusive bool) {
 	gen, heldFor, err := i.codexRuntimeJudgement()
 	if err != nil {
-		return nil, true
+		return nil, false
 	}
 	// The verdict map must be captured under the SAME lock that selects its
 	// generation: a deferred loop displaced mid-attempt is allowed to overlap
@@ -365,12 +378,14 @@ func (i *Instance) verdictsForGen(gen string) map[string]codexRolloutVerdict {
 // codexRuntimeJudgement resolves this judgement's generation key and the
 // source of its held set. The test override supplies a stable generation and
 // its held answer outright — a fixture with a name-only pane has no process
-// generation to resolve — while production walks the pane's resolved roots.
+// generation to resolve — while production walks the verified agent
+// process's runtime (codexVerifiedRuntimeRoot), and nothing else.
 func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[string]struct{}, error), err error) {
 	i.mu.RLock()
 	override := i.codexRuntimeHeldOverride
 	i.mu.RUnlock()
-	roots, rerr := i.codexRuntimeRoots()
+	root, rerr := i.codexVerifiedRuntimeRoot()
+	roots := []proctree.Process{root}
 	if override == nil {
 		if rerr != nil {
 			return "", nil, rerr
@@ -380,9 +395,9 @@ func (i *Instance) codexRuntimeJudgement() (gen string, heldFor func() (map[stri
 		}, nil
 	}
 	// The override supplies the held answer; the generation still comes from
-	// the live roots when they resolve, so an override fixture's respawned
-	// runtime gets a fresh verdict cache exactly like production. Pane-less
-	// fixtures fall back to one synthetic generation.
+	// the launch evidence when it verifies, so an override fixture's respawned
+	// runtime gets a fresh verdict cache exactly like production. Fixtures
+	// with no evidence fall back to one synthetic generation.
 	gen = "test-override"
 	if rerr == nil {
 		gen = codexGenerationKey(roots)
@@ -403,14 +418,15 @@ func codexGenerationKey(roots []proctree.Process) string {
 	return strings.Join(parts, ",")
 }
 
-// codexVerifiedRuntimeRoot is the only root the held query may judge from:
-// the (pid, start-stamp) launch evidence setRuntimeLaunch pinned to this
-// runtime, still naming the same process. codexRuntimeRoots' fallback — the
-// session's ACTIVE pane — is not evidence of which process is the agent: it
-// can be a user's split or a new window running its own codex in the same
-// worktree and store, and the held query would then record that process's
-// thread and re-record it every interval (#7120 review). Without verified
-// evidence the answer is an error the capture loop logs, never a guess.
+// codexVerifiedRuntimeRoot is the only root any attribution may judge from —
+// the held query, the follow, and the new-since-baseline diff alike: the
+// (pid, start-stamp) launch evidence setRuntimeLaunch pinned to this runtime,
+// still naming the same process. The session's ACTIVE pane is not evidence of
+// which process is the agent: it can be a user's split or a new window running
+// its own codex in the same worktree and store, whose thread the held query
+// would record and re-record every interval (#7120 review) and the diff would
+// adopt (#7123). Without verified evidence the answer is an error the capture
+// loop logs, never a guess.
 func (i *Instance) codexVerifiedRuntimeRoot() (proctree.Process, error) {
 	i.mu.RLock()
 	pid, startID := i.runtimePID, i.runtimeStartID
@@ -423,34 +439,6 @@ func (i *Instance) codexVerifiedRuntimeRoot() (proctree.Process, error) {
 		return proctree.Process{}, fmt.Errorf("the agent process af launched for this session (pid %d) is gone or replaced, so af cannot tell which open thread is the agent's own", pid)
 	}
 	return root, nil
-}
-
-// codexRuntimeRoots resolves the pane-root process this instance's agent
-// runtime launched as. The recorded launch evidence — the (pid, kernel
-// start-stamp) pair setRuntimeLaunch pinned to the runtime claim — is the
-// authoritative answer when it still verifies, because it names the pane af
-// actually launched rather than whatever pane happens to be active now. When
-// it is absent or stale the live pane root is the fallback: it is the best
-// remaining evidence of which process generation holds the pane.
-func (i *Instance) codexRuntimeRoots() ([]proctree.Process, error) {
-	i.mu.RLock()
-	pid, startID := i.runtimePID, i.runtimeStartID
-	ts := i.tmuxLocked()
-	i.mu.RUnlock()
-
-	if pid > 0 {
-		if root, err := proctree.Lookup(pid); err == nil && root.StartID == startID {
-			return []proctree.Process{root}, nil
-		}
-	}
-	if ts == nil {
-		return nil, errors.New("session has no local pane to attribute its runtime")
-	}
-	root, err := ts.PaneRootProcess()
-	if err != nil {
-		return nil, fmt.Errorf("resolve the pane's root process: %w", err)
-	}
-	return []proctree.Process{root}, nil
 }
 
 // heldPathsForRoots returns every filesystem path held open by processes in

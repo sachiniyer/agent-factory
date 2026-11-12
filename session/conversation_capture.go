@@ -365,13 +365,16 @@ func (s *ConversationCaptureSnapshot) BaselineFree() bool {
 	return s != nil && s.scopeOnly
 }
 
-// CodexBaselineFailed reports whether the snapshot's before-image scan itself
-// failed: the map can no longer distinguish "new" from "pre-existing" inside
-// the capture window, so a capture armed on it would guess. A re-arm that
-// keeps a failed baseline would only re-ask the same broken question; the
-// baseline must be re-taken instead.
-func (s *ConversationCaptureSnapshot) CodexBaselineFailed() bool {
-	return s != nil && s.codexBeforeErr != nil
+// CodexBaselineErr reports why the snapshot's before-image scan failed, or nil
+// when it held or the snapshot took none. A failed before-image can no longer
+// distinguish "new" from "pre-existing" inside the capture window, so the
+// new-since-baseline diff can never answer from it and must not be asked —
+// only the held query, which needs no baseline, can (#7123).
+func (s *ConversationCaptureSnapshot) CodexBaselineErr() error {
+	if s == nil {
+		return nil
+	}
+	return s.codexBeforeErr
 }
 
 // CaptureAgentConversation waits until a supported provider exposes the
@@ -599,8 +602,10 @@ func captureCodexConversationOnce(snap ConversationCaptureSnapshot) (AgentConver
 			len(attributed))
 	default:
 		// Every candidate is provably another process's thread — a same-cwd
-		// sibling, not this session's. Unknown stays unrecorded; the caller
-		// keeps waiting for the rollout the runtime itself mints.
+		// sibling, not this session's — or the runtime has no verified agent
+		// process to judge from, and the active pane is no substitute (#7123).
+		// Unknown stays unrecorded; the caller keeps waiting for the rollout
+		// the runtime itself mints.
 		return AgentConversationData{}, true, nil
 	}
 }
