@@ -57,7 +57,7 @@ func TestAbandonHookProgressSnapshotTerminalizesMatchingJournal(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tree := t.TempDir()
 	p := publishHookProgressForTest(t, tree, "owner", "gen1")
-	done, captured, err := abandonHookProgressSnapshot(tree, "owner", p)
+	done, captured, err := abandonHookProgressSnapshot(tree, "owner", p, hookProgressPublicationCount(tree))
 	if err != nil {
 		t.Fatalf("abandonHookProgressSnapshot: %v", err)
 	}
@@ -83,36 +83,39 @@ func TestAbandonHookProgressSnapshotSkipsReplacementJournal(t *testing.T) {
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tree := t.TempDir()
 	first := publishHookProgressForTest(t, tree, "owner", "gen1")
+	armed := hookProgressPublicationCount(tree)
 	// Same-session rebuild: new Generation, new entries- directory, identical
 	// SessionID/Worktree/Prefix.
 	second := publishHookProgressForTest(t, tree, "owner", "gen2")
 	if second.Directory == first.Directory || second.Generation == first.Generation {
 		t.Fatalf("rebuild did not produce a distinct identity: dir=%s gen=%s", second.Directory, second.Generation)
 	}
-	done, captured, err := abandonHookProgressSnapshot(tree, "owner", first)
+	done, captured, err := abandonHookProgressSnapshot(tree, "owner", first, armed)
 	if err != nil {
 		t.Fatalf("abandonHookProgressSnapshot: %v", err)
 	}
 	if !done {
 		t.Fatal("replacement journal did not conclude the abandonment (skip must be conclusive)")
 	}
-	if captured == nil || captured.Directory != second.Directory || captured.Generation != second.Generation {
-		t.Fatalf("captured identity = %+v; want the replacement journal", captured)
+	if captured != nil {
+		t.Fatalf("captured = %+v; a replacement is never proved to be the armed journal", captured)
 	}
 	assertRebuiltJournalResumable(t, tree, "owner", second)
 }
 
 // TestAbandonHookProgressSnapshotCapturesIdentityWhenNoneProvided models the
 // p == nil installation: the shared restore read missed its budget before
-// decoding a journal, so the first locked attempt must capture the identity of
-// whatever owned journal it reads. A replacement published after that first
-// read is then left to its own runner on every later attempt.
+// decoding a journal. The first locked attempt proves the journal it reads is
+// the armed one by the unchanged publication count, and captures its identity.
+// A replacement published after that first read is then left to its own
+// runner on every later attempt.
 func TestAbandonHookProgressSnapshotCapturesIdentityWhenNoneProvided(t *testing.T) {
 	claimDaemonProcess(t)
 	installScopeShim(t)
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	tree := t.TempDir()
 	first := publishHookProgressForTest(t, tree, "owner", "gen1")
+	armed := hookProgressPublicationCount(tree)
 
 	originalMark := hookProgressMarkFinished
 	t.Cleanup(func() { hookProgressMarkFinished = originalMark })
@@ -125,7 +128,7 @@ func TestAbandonHookProgressSnapshotCapturesIdentityWhenNoneProvided(t *testing.
 
 	// First attempt with no snapshot: read the owned journal, capture its
 	// identity, fail to terminalize (transient storage).
-	done, captured, err := abandonHookProgressSnapshot(tree, "owner", nil)
+	done, captured, err := abandonHookProgressSnapshot(tree, "owner", nil, armed)
 	if done || err == nil {
 		t.Fatalf("first attempt = done %v, err %v; want inconclusive failure capturing identity", done, err)
 	}
@@ -141,7 +144,7 @@ func TestAbandonHookProgressSnapshotCapturesIdentityWhenNoneProvided(t *testing.
 	// replacement journal.
 	hookProgressMarkFinished = originalMark
 
-	done, _, err = abandonHookProgressSnapshot(tree, "owner", captured)
+	done, _, err = abandonHookProgressSnapshot(tree, "owner", captured, armed)
 	if err != nil {
 		t.Fatalf("second abandonment attempt: %v", err)
 	}

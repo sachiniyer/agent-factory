@@ -136,7 +136,14 @@ func TestRestoreInstallsAbandonmentThatSurvivesSameSessionRebuild(t *testing.T) 
 	if err != nil {
 		t.Fatal(err)
 	}
-	restoredInstanceByTitle(t, manager, "rebuild-e2e")
+	gw := restoredInstanceByTitle(t, manager, "rebuild-e2e").GitWorktreeForTest()
+	if gw == nil {
+		t.Fatal("the restored archived session has no worktree")
+	}
+	retryDone := gw.HookProgressRetirementDoneForTest()
+	if retryDone == nil {
+		t.Fatal("restore did not install the abandonment for the archived session")
+	}
 
 	// The abandonment retry is now scheduled. Wait for the synchronous first
 	// attempt to fail (it terminalizes the original journal and fails on the
@@ -162,20 +169,16 @@ func TestRestoreInstallsAbandonmentThatSurvivesSameSessionRebuild(t *testing.T) 
 	// replacement journal on the next retry attempt.
 	restoreMark()
 
-	// Wait for the abandonment retry goroutine to drain. The retry runs up to
-	// 8 attempts at 100ms→2s backoff (~9s total). Poll the rebuilt journal's
-	// finished marker; under the fix it must remain absent throughout and after.
-	deadline := time.Now().Add(20 * time.Second)
-	for time.Now().Before(deadline) {
-		if _, err := os.Stat(filepath.Join(rebuiltDir, "finished")); err == nil {
-			t.Fatalf("abandonment retry terminalized the rebuilt journal — the bug is present")
-		} else if !os.IsNotExist(err) {
-			t.Fatalf("unexpected stat error on rebuilt finished marker: %v", err)
-		}
-		time.Sleep(50 * time.Millisecond)
+	// Wait for the abandonment retry goroutine to finish. Its completion ends
+	// the wait; the deadline only bounds a retry that never finishes. The retry
+	// runs up to 8 attempts at 100ms→2s backoff (~9s plus lock waits).
+	select {
+	case <-retryDone:
+	case <-time.After(20 * time.Second):
+		t.Fatal("abandonment retry did not finish within 20s")
 	}
 
-	// Final assertion: the rebuilt journal must NOT be terminalized.
+	// The rebuilt journal must NOT be terminalized.
 	if _, err := os.Stat(filepath.Join(rebuiltDir, "finished")); err == nil {
 		t.Fatalf("rebuilt journal was terminalized by the abandonment retry")
 	} else if !os.IsNotExist(err) {

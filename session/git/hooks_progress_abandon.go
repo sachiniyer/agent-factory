@@ -9,9 +9,9 @@ import (
 
 // abandonHookProgress reads and terminalizes the owned journal for the
 // worktree/session. It returns the snapshot it read (nil when no resumable
-// journal exists) so a caller scheduling a bounded retry can thread the
-// snapshot's immutable identity and refuse to terminalize a replacement
-// journal published at the same path while the retry was pending.
+// journal exists or the read failed) so a caller scheduling a bounded retry
+// can thread the snapshot's immutable identity and refuse to terminalize a
+// replacement journal published at the same path while the retry was pending.
 func abandonHookProgress(worktreePath, sessionID string) (*hookProgress, error) {
 	p, _, err := readOwnedHookProgress(worktreePath, sessionID)
 	if noResumableHookProgress(err) {
@@ -28,27 +28,29 @@ func abandonHookProgress(worktreePath, sessionID string) (*hookProgress, error) 
 
 // abandonHookProgressSnapshot re-reads the owned journal for worktreePath/
 // sessionID under the .progress publication lock and terminalizes it only when
-// its immutable identity still matches snapshot. The lock and identity check
-// protect against a newer journal at the same path, including a same-session
+// it is provably the journal the abandonment was armed for. The lock and that
+// proof protect a newer journal at the same path, including a same-session
 // rebuild that reuses SessionID/Worktree/Prefix while publishing a new
 // Directory and Generation — the hazard retireHookProgressSnapshot already
-// defends against on the retirement path.
+// defends against on the retirement path. Publication holds the same lock.
 //
-// When snapshot is nil the caller had no durable snapshot — the shared restore
-// read missed its budget before decoding a journal. The first attempt then
-// captures the identity of the owned journal it reads under the lock and only
-// that identity is terminalized on this and later attempts; a replacement
-// published after that first read is left to its own runner.
+// The proof is the snapshot's immutable identity (Directory/SessionID/
+// Generation) when a read before arming decoded one. When none did — the
+// shared restore read missed its budget, or the synchronous read failed — the
+// proof is that this process published nothing at the path since arming:
+// armed must still equal hookProgressPublicationCount. A journal that fails
+// its proof belongs to a live run and is left to its own runner. Without
+// either proof a retry would finish whichever journal it first found.
 //
 // Returns (done, captured, err):
 //   - done is true when the abandonment reached a conclusive state — the
-//     journal is absent, conclusively invalid, replaced by a newer identity,
-//     or terminalized — and the caller must stop retrying.
-//   - captured is the journal decoded on this attempt (nil until a journal is
-//     read under the lock), so the caller can thread its identity into later
-//     attempts.
+//     journal is absent, conclusively invalid, not the armed journal, or
+//     terminalized — and the caller must stop retrying.
+//   - captured is the journal this attempt proved is the armed one, so a
+//     caller that started without a snapshot can check later attempts by its
+//     identity. Nil when no journal was proved.
 //   - err is the storage error that left the attempt inconclusive.
-func abandonHookProgressSnapshot(worktreePath, sessionID string, snapshot *hookProgress) (bool, *hookProgress, error) {
+func abandonHookProgressSnapshot(worktreePath, sessionID string, snapshot *hookProgress, armed uint64) (bool, *hookProgress, error) {
 	path, err := hookProgressPath(worktreePath)
 	if err != nil {
 		return false, nil, err
@@ -62,10 +64,14 @@ func abandonHookProgressSnapshot(worktreePath, sessionID string, snapshot *hookP
 		if readErr != nil {
 			return readErr
 		}
-		captured = current
-		if snapshot != nil && (current.Directory != snapshot.Directory || current.SessionID != snapshot.SessionID || current.Generation != snapshot.Generation) {
+		if snapshot != nil {
+			if current.Directory != snapshot.Directory || current.SessionID != snapshot.SessionID || current.Generation != snapshot.Generation {
+				return nil
+			}
+		} else if hookProgressPublicationCount(worktreePath) != armed {
 			return nil
 		}
+		captured = current
 		return current.markFinished()
 	})
 	if err != nil {
@@ -81,33 +87,29 @@ var hookProgressAbandonmentRetryWait = time.Sleep
 // retryHookProgressAbandonment retries terminalizing the owned journal for
 // worktreePath/sessionID after a synchronous abandonment failed. snapshot
 // carries the immutable identity of the journal the synchronous abandonment
-// read; when nil, the first locked attempt captures the identity of the owned
-// journal it reads and re-validates against it on every later attempt. A
+// read; armed is the publication count taken when the abandonment was armed,
+// before that read. When snapshot is nil, the first attempt that proves the
+// journal by armed captures its identity, and later attempts check that. A
 // replacement journal published at the same path by a same-session rebuild —
 // same SessionID/Worktree/Prefix, new Directory/Generation — is left to its
 // own runner instead of being terminalized.
-func retryHookProgressAbandonment(worktreePath, sessionID string, snapshot *hookProgress) {
+func retryHookProgressAbandonment(worktreePath, sessionID string, snapshot *hookProgress, armed uint64) {
 	delay := 100 * time.Millisecond
 	var lastError string
 	for attempt := 0; attempt < 8; attempt++ {
 		hookProgressAbandonmentRetryWait(delay)
-		done, captured, err := abandonHookProgressSnapshot(worktreePath, sessionID, snapshot)
+		done, captured, err := abandonHookProgressSnapshot(worktreePath, sessionID, snapshot, armed)
+		if captured != nil {
+			snapshot = captured
+		}
+		if err == nil && done {
+			return
+		}
 		if err != nil {
 			if message := err.Error(); message != lastError {
 				log.WarningLog.Printf("cannot retry hook progress abandonment for %s: %v; continuing bounded retry", worktreePath, err)
 				lastError = message
 			}
-			if captured != nil {
-				snapshot = captured
-			}
-			delay = min(2*delay, 2*time.Second)
-			continue
-		}
-		if done {
-			return
-		}
-		if captured != nil {
-			snapshot = captured
 		}
 		delay = min(2*delay, 2*time.Second)
 	}

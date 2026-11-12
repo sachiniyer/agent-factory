@@ -114,6 +114,7 @@ func readOwnedHookProgress(worktreePath, sessionID string) (*hookProgress, strin
 func (g *GitWorktree) AbandonHookProgress() {
 	g.hooksResumeDisabled = true
 	worktreePath, sessionID := g.worktreePath, g.hookScopeID()
+	armed := hookProgressPublicationCount(worktreePath)
 	p, err := abandonHookProgress(worktreePath, sessionID)
 	if err != nil {
 		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, err)
@@ -121,7 +122,7 @@ func (g *GitWorktree) AbandonHookProgress() {
 		g.hooksRetirementDone = done
 		go func() {
 			defer close(done)
-			retryHookProgressAbandonment(worktreePath, sessionID, p)
+			retryHookProgressAbandonment(worktreePath, sessionID, p, armed)
 		}()
 	}
 }
@@ -134,6 +135,10 @@ func (g *GitWorktree) installHookProgressAbandonment(worktreePath, sessionID str
 	if noResumableHookProgress(readErr) {
 		return
 	}
+	// Taken here, before restore publishes the worktree, so no rebuild of it can
+	// have published yet. It is what lets a retry with no snapshot tell the
+	// journal it was armed for from a rebuild's replacement.
+	armed := hookProgressPublicationCount(worktreePath)
 	done := make(chan struct{})
 	g.hooksRetirementDone = done
 	go func() {
@@ -146,8 +151,17 @@ func (g *GitWorktree) installHookProgressAbandonment(worktreePath, sessionID str
 			}
 		}
 		log.WarningLog.Printf("cannot abandon hook progress for %s: %v; scheduling bounded retry", worktreePath, readErr)
-		retryHookProgressAbandonment(worktreePath, sessionID, p)
+		retryHookProgressAbandonment(worktreePath, sessionID, p, armed)
 	}()
+}
+
+// HookProgressRetirementDoneForTest returns the join handle of the deferred
+// journal abandonment or reclamation, closed when it has finished; nil when
+// none was scheduled. Cross-package tests (the daemon-level abandonment/rebuild
+// E2E) wait on it instead of sleeping out the retry budget. Read it only after
+// the restore that installs it has returned.
+func (g *GitWorktree) HookProgressRetirementDoneForTest() <-chan struct{} {
+	return g.hooksRetirementDone
 }
 
 // retireHookProgress is called only AFTER cancellation, join and scope teardown
