@@ -1516,6 +1516,43 @@ test("a lookalike trunk-merge branch by a human author takes the ordinary path",
   assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
 });
 
+// #7194: the files a job holding a write token loads change only through a
+// maintainer's hand merge, as auto-merge.js treats them. Either side of a rename
+// counts: renaming the merger away removes it from where the jobs load it.
+for (const [name, file] of [
+  ["a workflow", ".github/workflows/build.yml"],
+  ["the merger", ".github/scripts/auto-merge.js"],
+  ["a script the merger requires", ".github/scripts/macos-verdict.js"],
+  ["the gate itself", ".github/scripts/auto-gate.js"],
+  ["a release script", ".github/scripts/release-bump.sh"],
+  ["the merger's path by renaming it away", { filename: "docs/old-merger.js", previous_filename: ".github/scripts/auto-merge.js", status: "renamed" }],
+]) {
+  test(`#7194: a PR that changes ${name} is maintainer-merged`, async () => {
+    const result = await evaluateGate({ files: ["session/storage.go", file] });
+
+    assert.equal(result.shouldMerge, false);
+    assert.equal(result.manualMergeRequired, true);
+    assert.match(result.manualMergeReasons.join("\n"), /a maintainer must merge it by hand/);
+  });
+}
+
+test("#7194: a PR that changes only docs beside the scripts still auto-merges", async () => {
+  const result = await evaluateGate({ files: [".github/auto-merge.md", "scripts/lint-file-length.sh"] });
+
+  assert.equal(result.manualMergeRequired, false);
+  assert.equal(result.shouldMerge, true, `blocked on: ${result.reasons.join("; ")}`);
+});
+
+test("#7194: a merge-queue batch that changes the merger is not certified for the queue", async () => {
+  const result = await evaluateBatch(mergeQueueBatchGithub({ files: [".github/scripts/auto-merge.js"] }));
+
+  assert.equal(result.shouldMerge, false);
+  assert.match(
+    result.manualMergeBlockers.map((blocker) => blocker.reason).join("\n"),
+    /a maintainer must merge it by hand/,
+  );
+});
+
 test("a native auto-merge cancellation failure leaves the manual-only aggregate red", async () => {
   const error = new Error("cannot disable native auto-merge");
   error.status = 500;

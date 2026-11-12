@@ -53,10 +53,11 @@ test('selection is ordered by PR number', () => {
   assert.deepEqual(selectMergeable([pr({ number: 9 }), pr({ number: 3 })]).map((e) => e.pr.number), [3, 9]);
 });
 
-test('touchesWorkflows detects .github/workflows paths and fails closed on truncation', () => {
+test('touchesWorkflows detects .github/workflows and .github/scripts paths and fails closed on truncation', () => {
   const f = (...paths) => ({ pageInfo: { hasNextPage: false }, nodes: paths.map((path) => ({ path })) });
-  assert.equal(touchesWorkflows(f('a.go', '.github/scripts/x.js')), false);
+  assert.equal(touchesWorkflows(f('a.go', 'scripts/x.sh', '.github/auto-merge.md')), false);
   assert.equal(touchesWorkflows(f('a.go', '.github/workflows/build.yml')), true);
+  assert.equal(touchesWorkflows(f('a.go', '.github/scripts/x.js')), true); // #7194
   assert.equal(touchesWorkflows({ pageInfo: { hasNextPage: true }, nodes: [] }), true);
   assert.equal(touchesWorkflows(null), true);
   assert.match(filesQuery([7]), /p7: pullRequest\(number: 7\)/);

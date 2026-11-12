@@ -85,12 +85,13 @@ function parseJobs(yaml) {
 // The expressions in this file (==, !=, &&, ||, !, parentheses, 'strings',
 // always(), cancelled()) are valid JavaScript. Anything unset reads as '', as
 // GitHub's null does. `ctx` carries the steps and needs contexts, the commit
-// the workflow file was read from, and the ref the run is on.
+// the workflow file was read from, the ref the run is on, and the repository's
+// secrets (none unless a test sets them).
 const lenient = (obj) => new Proxy(obj, { get: (t, k) => (k in t ? t[k] : '') });
 function evaluate(expr, ctx = {}) {
   const fn = new Function('steps', 'needs', 'secrets', 'vars', 'github', 'always', 'cancelled', `return (${expr});`);
   const github = lenient({ token: 'github-token', workflow_sha: ctx.workflowSha || '', ref: ctx.ref || '' });
-  return fn(ctx.steps || lenient({}), ctx.needs || lenient({}), lenient({}), lenient({}), github, () => true, () => false);
+  return fn(ctx.steps || lenient({}), ctx.needs || lenient({}), lenient({ ...ctx.secrets }), lenient({}), github, () => true, () => false);
 }
 const interpolate = (value, ctx) =>
   value.replace(/\$\{\{\s*([\s\S]*?)\s*\}\}/g, (_, expr) => String(evaluate(expr, ctx)));
@@ -206,6 +207,9 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
   // selection saw nothing wrong.
   const g = { prs, issue, merged: [], dispatched: [], comments: [], opened: [], refuse: new Set() };
   const open = () => prs.filter((p) => !g.merged.includes(p.number));
+  // The paths a PR changes, as GitHub lists them: its head against its merge
+  // base with master.
+  const changed = (n) => git(origin.bare, 'diff', '--name-only', `refs/heads/master...${origin.heads[n]}`).split('\n').filter(Boolean);
   const rateLimit = { cost: 1, remaining: 4999, resetAt: 'later' };
   g.graphql = async (query) => {
     if (query.includes('pullRequests(')) {
@@ -214,7 +218,7 @@ function fakeGithub(origin, openPrs, { buildRed = false, broken = true } = {}) {
     const repository = {};
     for (const [, n] of query.matchAll(/p(\d+): pullRequest/g)) {
       repository[`p${n}`] = query.includes('files(')
-        ? { files: { pageInfo: { hasNextPage: false }, nodes: [{ path: 'big.txt' }] } }
+        ? { files: { pageInfo: { hasNextPage: false }, nodes: changed(n).map((path) => ({ path })) } }
         : query.includes('reviewThreads')
           ? { reviewThreads: { pageInfo: { hasNextPage: false }, nodes: [] } }
           : { mergeable: 'MERGEABLE' };
@@ -269,9 +273,10 @@ const CONTEXT = { repo: { owner: 'o', repo: 'r' }, eventName: 'schedule', runId:
 // after that job. `fail(job, step)` makes a step fail without running, as a
 // network fault would; `crash(job)` ends a job with no outputs at all, as a lost
 // runner or a timeout would. `ref` is the ref the run is on: master for the
-// schedule and workflow_run, whatever `--ref` names for a dispatch.
-async function runWorkflow(origin, github, { after = {}, fail = () => false, crash = () => false, ref = 'refs/heads/master' } = {}) {
-  const run = { state: {}, jobs: {}, ran: [], warnings: [], notices: [], logs: {}, temps: {}, workspaces: {}, workspace: null };
+// schedule and workflow_run, whatever `--ref` names for a dispatch. `secrets`
+// are the repository's (a job's expressions see them whether or not it should).
+async function runWorkflow(origin, github, { after = {}, fail = () => false, crash = () => false, ref = 'refs/heads/master', secrets = {} } = {}) {
+  const run = { state: {}, jobs: {}, ran: [], warnings: [], notices: [], infos: [], logs: {}, temps: {}, workspaces: {}, workspace: null };
   const needs = new Proxy({}, { get: (_, id) => run.jobs[id] || { result: '', outputs: lenient({}) } });
   // A scheduled run reads the workflow file from master as it is when it starts.
   const workflowSha = origin.master();
@@ -279,7 +284,7 @@ async function runWorkflow(origin, github, { after = {}, fail = () => false, cra
     for (const need of job.needs) assert.ok(run.jobs[need], `job ${job.id} needs ${need}, which comes after it`);
     const statusCheck = /\b(always|cancelled|success|failure)\s*\(/.test(job.if);
     const needsMet = statusCheck || job.needs.every((need) => run.jobs[need].result === 'success');
-    if (!needsMet || !condition(job.if, { needs, workflowSha, ref })) {
+    if (!needsMet || !condition(job.if, { needs, workflowSha, ref, secrets })) {
       run.jobs[job.id] = { result: 'skipped', outputs: lenient({}) };
       continue;
     }
@@ -290,7 +295,7 @@ async function runWorkflow(origin, github, { after = {}, fail = () => false, cra
     run.workspace = null;
     const state = {};
     const steps = new Proxy({}, { get: (_, id) => state[id] || { outcome: '', outputs: lenient({}) } });
-    const ctx = { steps, needs, workflowSha, ref };
+    const ctx = { steps, needs, workflowSha, ref, secrets };
     let failed = false;
     for (const step of job.steps) {
       const id = step.id || step.name;
@@ -351,7 +356,7 @@ function fakeCore(job, outputs) {
     setOutput: (k, v) => { outputs[k] = String(v); },
     notice: (m) => job.notices.push(m),
     warning: (m) => job.warnings.push(m),
-    info: () => {},
+    info: (m) => { if (job.infos) job.infos.push(m); },
     summary: { addHeading() { return this; }, addRaw() { return this; }, addList() { return this; }, async write() {} },
   };
 }
