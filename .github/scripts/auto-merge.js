@@ -702,13 +702,16 @@ async function landSelected({ github, core, owner, repo, selected, batchSize }) 
 // skips mergeAll entirely, and its red-master exception with it, so before
 // #7151 only a hand merge could clear one. While it is open, one fix-master PR
 // per run may land, and only once its would-be merge result passes the same
-// composition check: a "fix" must never make master worse. The check is the
+// composition check, so a "fix" is never landed unchecked. The check is the
 // workflow's shell step between these two:
 //   pickHaltFixes  the selectable fix-master PRs, as `candidates`
 //   (fixcheck)     squash-merges each onto master in a scratch worktree and
-//                  runs the check; the first that passes -> number, head, base
-//   mergeHaltFix   lands that PR if nothing moved since it was checked
-// The next run's re-check then finds master passing and closes the issue.
+//                  runs the check with master's lint script; the ones that
+//                  pass -> `fixes` ("number:head ..."), and the `base` checked
+//   mergeHaltFix   lands the first of those that is still selectable at its
+//                  checked head, onto that base; a refused merge falls through
+// The next run's re-check then finds master passing and closes the issue, and
+// the post-merge check backs the pre-check (the merge API cannot pin master).
 const HALT_REASON = "master fails the composition check";
 
 async function pickHaltFixes({ github, core, context }) {
@@ -722,25 +725,37 @@ async function pickHaltFixes({ github, core, context }) {
   core.setOutput("candidates", fixes.map((pr) => `${pr.number}:${pr.headRefOid}`).join(" "));
 }
 
-async function mergeHaltFix({ github, core, context, passed, number, head, base }) {
+async function mergeHaltFix({ github, core, context, passed, fixes, base }) {
   const { owner, repo } = context.repo;
   const refuse = (why) => {
-    core.warning(`Composition halt: #${number || "?"} not merged (${why}); merging stays halted.`);
+    core.warning(`Composition halt: nothing merged (${why}); merging stays halted.`);
     core.setOutput("merged", "false");
     core.setOutput("merged_prs", "");
   };
-  if (!passed || !number) return refuse("no merge result passed the composition check");
+  const checked = (passed ? String(fixes || "") : "").split(/\s+/).filter(Boolean).map((fix) => {
+    const [number, head] = fix.split(":");
+    return { number: Number(number), head };
+  });
+  if (!checked.length) return refuse("no merge result passed the composition check");
   // Re-select: a hold, a new head or a lost label since the pick all count.
   const selected = await selectPrs({ github, core, owner, repo, onlyFix: HALT_REASON });
-  const entry = selected.find((e) => e.pr.number === Number(number));
-  if (!entry) return refuse("no longer an open master PR");
-  if (entry.reason) return refuse(entry.reason);
-  if (entry.pr.headRefOid !== head) return refuse(`head moved to ${entry.pr.headRefOid} after the check on ${head}`);
+  const ready = [];
+  for (const { number, head } of checked) {
+    const entry = selected.find((e) => e.pr.number === number);
+    const why = !entry ? "no longer an open master PR"
+      : entry.reason ? entry.reason
+      : entry.pr.headRefOid !== head ? `head moved to ${entry.pr.headRefOid} after the check on ${head}`
+      : null;
+    if (why) core.warning(`Composition halt: #${number} not merged (${why}).`);
+    else ready.push(entry);
+  }
+  if (!ready.length) return refuse("no checked fix is still mergeable");
   // Last read before the merge, which pins only the PR head: the base must still
   // be the master the check ran on (the re-select above can take ~36 s).
   const master = (await github.rest.repos.getBranch({ owner, repo, branch: BASE })).data.commit.sha;
   if (master !== base) return refuse(`master moved to ${master} after the check on ${base}`);
-  await landSelected({ github, core, owner, repo, selected: [entry], batchSize: 1 });
+  // One fix per run; a merge GitHub refuses falls through to the next checked fix.
+  await landSelected({ github, core, owner, repo, selected: ready, batchSize: 1 });
 }
 
 // Step 4: composition check failed after a batch — open/update ONE issue.

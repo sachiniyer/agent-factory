@@ -109,10 +109,14 @@ function makeOrigin() {
   fs.mkdirSync(bin);
   fs.writeFileSync(path.join(bin, 'go'), STUB_GO, { mode: 0o755 });
   git(root, 'init', '-q', '-b', 'master', work);
+  // A body of { symlink: target } commits a symlink.
   const commit = (files, message) => {
     for (const [file, body] of Object.entries(files)) {
-      fs.mkdirSync(path.dirname(path.join(work, file)), { recursive: true });
-      fs.writeFileSync(path.join(work, file), body, { mode: file.endsWith('.sh') ? 0o755 : 0o644 });
+      const at = path.join(work, file);
+      fs.mkdirSync(path.dirname(at), { recursive: true });
+      fs.rmSync(at, { force: true });
+      if (body.symlink) fs.symlinkSync(body.symlink, at);
+      else fs.writeFileSync(at, body, { mode: file.endsWith('.sh') ? 0o755 : 0o644 });
     }
     git(work, 'add', '-A');
     git(work, 'commit', '-q', '-m', message);
@@ -438,17 +442,23 @@ test('mergeHaltFix itself refuses an unchecked fix and any PR that is not fix-ma
   assert.equal(typeof merger.mergeHaltFix, 'function');
   const origin = makeOrigin();
   const github = fakeGithub(origin, [[12, FIX], [13]]);
+  // `fixes` is what the check step outputs: "number:head" per passing candidate.
   const call = async (passed, number) => {
     const outputs = {};
-    const core = fakeCore({ warnings: [], notices: [] }, outputs);
+    const job = { warnings: [], notices: [] };
     const args = { passed, fixes: `${number}:${origin.heads[number]}`, base: origin.broken };
-    await merger.mergeHaltFix({ github, core, context: CONTEXT, ...args });
-    return outputs.merged;
+    await merger.mergeHaltFix({ github, core: fakeCore(job, outputs), context: CONTEXT, ...args });
+    return { merged: outputs.merged, warnings: job.warnings.join('\n') };
   };
-  assert.equal(await call(false, 12), 'false', 'no passing check');
-  assert.equal(await call(true, 13), 'false', 'not fix-master');
+  // Each refusal must come from the guard it names, not from a malformed call.
+  const unchecked = await call(false, 12);
+  assert.equal(unchecked.merged, 'false');
+  assert.match(unchecked.warnings, /no merge result passed the composition check/);
+  const ordinary = await call(true, 13);
+  assert.equal(ordinary.merged, 'false');
+  assert.match(ordinary.warnings, /#13 not merged \(master fails the composition check\)/);
   assert.deepEqual(github.merged, []);
-  assert.equal(await call(true, 12), 'true');
+  assert.equal((await call(true, 12)).merged, 'true');
   assert.deepEqual(github.merged, [12]);
 });
 
@@ -480,6 +490,18 @@ test("a fix-master PR cannot pass the check by editing the lint script: master's
   const job = await runJob(origin, github);
   assert.deepEqual(github.merged, []);
   assert.equal(outcome(job, 'fixcheck'), 'failure', job.logs.fixcheck);
+});
+
+test("master's lint is restored into the tree without writing through a symlink the PR planted", async () => {
+  const origin = makeOrigin();
+  // Stands in for a file outside the tree, such as the merge step's auto-merge.js.
+  const outside = path.join(origin.root, 'outside.js');
+  fs.writeFileSync(outside, 'untouched\n');
+  origin.addPr(17, { 'big.txt': lines(2), 'scripts/lint-file-length.sh': { symlink: outside } }, 'a fix whose lint is a symlink');
+  const github = fakeGithub(origin, [[17, FIX]]);
+  const job = await runJob(origin, github);
+  assert.equal(fs.readFileSync(outside, 'utf8'), 'untouched\n');
+  assert.deepEqual(github.merged, [17], job.logs.fixcheck);
 });
 
 // The #7154 security review's proof of concept: a real fix whose own lint script

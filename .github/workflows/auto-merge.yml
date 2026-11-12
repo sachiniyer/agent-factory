@@ -33,10 +33,15 @@ jobs:
     runs-on: ubuntu-24.04
     timeout-minutes: 30
     steps:
+      # No token is left in the repository's git config, so code under a
+      # scratch worktree below cannot read one (checkout includes its persisted
+      # credentials into every linked worktree). Every later git operation in
+      # this job is an anonymous fetch of this public repository.
       - name: Check out master
         uses: actions/checkout@v6
         with:
           ref: master
+          persist-credentials: false
 
       - name: Debounce workflow_run triggers
         id: debounce
@@ -100,9 +105,13 @@ jobs:
 
       # Each candidate is squash-merged onto master in its own scratch worktree,
       # so this checkout, whose auto-merge.js the merge step loads, is never
-      # touched. The checkout is depth 1, and a squash merge needs the merge
-      # base, hence --unshallow. The first candidate that passes is the one the
-      # merge step may land.
+      # touched. Nothing the PR controls runs: go build and go vet do not
+      # execute the tree's code, and the lint is master's script, restored into
+      # the tree by git, which never writes through a symlink the PR planted.
+      # It must sit in the tree because it lints its own parent directory.
+      # Every candidate is checked, so a merge GitHub refuses falls through to
+      # the next. The checkout is depth 1, and a squash merge needs the merge
+      # base, hence --unshallow.
       - name: Compose-check a fix on the halted master
         id: fixcheck
         if: steps.debounce.outputs.skip != 'true' && (steps.fixes.outputs.candidates != '')
@@ -112,6 +121,7 @@ jobs:
         run: |
           git fetch --no-tags --quiet --unshallow origin master
           base=$(git rev-parse FETCH_HEAD)
+          passed=""
           for candidate in $CANDIDATES; do
             number=${candidate%%:*}
             head=${candidate#*:}
@@ -120,15 +130,17 @@ jobs:
               git worktree add --quiet --detach "$tree" "$base" &&
               (cd "$tree" &&
                 git -c user.name=auto-merge -c user.email=auto-merge@invalid merge --squash --quiet "$head" &&
+                git checkout "$base" -- scripts/lint-file-length.sh &&
                 go build ./... &&
                 go vet ./... &&
-                scripts/lint-file-length.sh); then
-              printf 'number=%s\nhead=%s\nbase=%s\n' "$number" "$head" "$base" >> "$GITHUB_OUTPUT"
-              exit 0
+                bash scripts/lint-file-length.sh); then
+              passed="$passed $candidate"
+            else
+              echo "::warning::#$number does not pass the composition check once merged onto master $base."
             fi
-            echo "::warning::#$number does not pass the composition check once merged onto master $base."
           done
-          exit 1
+          test -n "$passed"
+          printf 'fixes=%s\nbase=%s\n' "${passed# }" "$base" >> "$GITHUB_OUTPUT"
 
       - name: Merge ready PRs
         id: merge
@@ -139,8 +151,7 @@ jobs:
           AUTO_MERGE_BATCH_SIZE: ${{ vars.AUTO_MERGE_BATCH_SIZE }}
           HALTED: ${{ steps.settle.outputs.halted }}
           FIX_CHECK: ${{ steps.fixcheck.outcome }}
-          FIX_NUMBER: ${{ steps.fixcheck.outputs.number }}
-          FIX_HEAD: ${{ steps.fixcheck.outputs.head }}
+          FIX_PASSED: ${{ steps.fixcheck.outputs.fixes }}
           FIX_BASE: ${{ steps.fixcheck.outputs.base }}
         with:
           github-token: ${{ secrets.AUTO_MERGE_TOKEN || github.token }}
@@ -152,8 +163,7 @@ jobs:
               await merger.mergeHaltFix({
                 github, core, context,
                 passed: process.env.FIX_CHECK === 'success',
-                number: process.env.FIX_NUMBER,
-                head: process.env.FIX_HEAD,
+                fixes: process.env.FIX_PASSED,
                 base: process.env.FIX_BASE,
               });
             }
