@@ -341,6 +341,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
 			}
+			// The fresh pane committed after a refused resume: retire the id and
+			// park the pre-spawn baseline. This must precede the runtime
+			// generation advance below, which is what releases the park to the
+			// replacement's deferred arm (TakePendingConversationCaptureForRuntime);
+			// a park stamped after it waits for an advance that never comes.
+			if refusedID != "" {
+				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
+			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves
 			// them; a confirmed respawn must not attribute them to its replacement.
@@ -354,9 +362,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// this row ends interrupted rather than finished by the fresh agent's
 			// first idle tick.
 			i.markAgentRuntimeReplaced(true)
-			if refusedID != "" {
-				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
-			}
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate

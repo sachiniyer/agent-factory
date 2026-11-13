@@ -339,3 +339,44 @@ func TestLoadRespawnRetiresARefusedClaudeConversation(t *testing.T) {
 		})
 	}
 }
+
+// #7209 review: the load-time retirement parks its pre-spawn capture baseline
+// before the runtime generation advances, so the replacement's deferred arm
+// can take it. Parked after the advance, it would wait for one that never
+// comes, and a rollout Codex minted before the arm would go unrecorded.
+func TestLoadRespawnParksACaptureBaselineTheReplacementCanTake(t *testing.T) {
+	log.Initialize(false)
+	defer log.Close()
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	codexHome := t.TempDir()
+	t.Setenv("CODEX_HOME", codexHome)
+
+	const agentName = "af_load_codex_stale"
+	shellName := agentName + tmuxTabSeparator + shellTabName
+	var newSessions int
+	var spawns []string
+	exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+	pty := persistPtyFactory{t: t, cmdExec: exec}
+	prev := restoreTmuxSession
+	restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+		return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+	}
+	t.Cleanup(func() { restoreTmuxSession = prev })
+
+	data := deadInstanceData(t, Ready, agentName, shellName)
+	data.Program = tmux.ProgramCodex
+	data.Tabs[0].Conversation = &AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: carryTestID, CaptureKind: ConversationCaptureCodexRollout,
+	}
+	worktree := data.Worktree.WorktreePath
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, codexHome, codexRolloutRel(carryTestID), codexRollout(worktree)), past)
+	setModTime(t, writeCarryFile(t, codexHome, codexRolloutRel(newerConversationID), codexRollout(worktree)), past.Add(time.Minute))
+
+	restored, err := FromInstanceData(data)
+	require.NoError(t, err)
+	require.NotEqual(t, carryTestID, restored.AgentConversation().ID, "the stale id is retired")
+	park, current := restored.TakePendingConversationCaptureForRuntime(restored.AgentRuntimeToken())
+	require.True(t, current)
+	require.NotNil(t, park, "the replacement's arm must be able to take the pre-spawn baseline")
+}
