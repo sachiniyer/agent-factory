@@ -316,6 +316,25 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 		brief, captureErr = instance.CaptureHandoffBrief(&entry, req.Brief)
 		return captureErr
 	})
+	// Make the incoming record durable BEFORE the incoming runtime starts, as
+	// an account swap makes its new identity durable before its spawn (#7215).
+	// From the moment the incoming pane can write a transcript, the disk names
+	// the incoming agent, its conversation and the mission it is owed. Without
+	// this, a crash between the spawn and the post-swap checkpoint below left the
+	// disk naming the outgoing agent over a pane running the incoming one, and the
+	// incoming conversation in no record. A failed write refuses the start, so
+	// nothing runs that the record does not name. A sandbox swap starts its
+	// replacement inside the agent-server, with no boundary on the host to write
+	// at, so it keeps the post-swap checkpoint alone.
+	wroteBeforeStart := false
+	plan = plan.WithBeforeStart(func() error {
+		wroteBeforeStart = true
+		checkpoint := handoffMissionCheckpoint(instance.HandoffCheckpointBeforeStart(), req.Brief, brief.Render())
+		if err := m.persistHandoffCheckpointErr(repoID, instance, checkpoint); err != nil {
+			return fmt.Errorf("could not record the handoff to %s before starting it: %w", target, err)
+		}
+		return nil
+	})
 
 	checkpoint, swapErr := instance.SwapAgent(plan)
 	if swapErr != nil {
@@ -329,6 +348,15 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 				"the session's recorded agent may not match its running one", req.Title, swapErr, rbErr)
 		}
 		_ = instance.Transition(session.AbortHandoff())
+		if wroteBeforeStart {
+			// The incoming record reached disk (or a write of it was attempted)
+			// before the start that did not happen: put the outgoing record back
+			// there too, as the account swap's settle does on a failed commit.
+			if err := m.persistAndPublishInstanceErr(repoID, instance); err != nil {
+				m.err().Printf("handoff %q: swap failed (%v) AND the restored record could not be persisted (%v); "+
+					"a restart may bring the session back as %s", req.Title, swapErr, err, target)
+			}
+		}
 		return HandoffSessionResponse{}, fmt.Errorf("failed to hand %q off to %s: %w", req.Title, target, swapErr)
 	}
 	mission, headSHA := brief.Render(), brief.Work.HeadSHA
@@ -362,7 +390,6 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// to an obsolete mission.
 	if override := strings.TrimSpace(req.Brief); override != "" {
 		instance.SetPrompt(override)
-		checkpoint.Prompt = override
 	}
 	// The incoming runtime now exists, but its takeover context does not. Record
 	// that exact rendered mission in memory and in the post-swap checkpoint BEFORE
@@ -370,8 +397,7 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	// minute-long window, the restored row has an explicit delivery obligation
 	// instead of silently claiming an instruction-less agent is complete.
 	instance.SetPendingHandoffMission(mission)
-	checkpoint.PendingHandoffMission = mission
-	checkpoint.HandoffDeliveryStatus = session.PromptNotDelivered
+	checkpoint = handoffMissionCheckpoint(checkpoint, req.Brief, mission)
 	// The process swap is already irreversible, so checkpoint its durable facts
 	// before the readiness wait. Memory stays fenced, but a daemon crash in this
 	// window must restore the incoming Program rather than lie that the outgoing
@@ -405,6 +431,21 @@ func (m *Manager) HandoffSession(req HandoffSessionRequest) (HandoffSessionRespo
 	m.info().Printf("handoff: session %q swapped %s → %s at %s", instance.Title, outgoing, target, shortSHA(headSHA))
 
 	return response, nil
+}
+
+// handoffMissionCheckpoint projects a handoff's checkpoint as the durable
+// record of an incoming runtime that is owed mission: the predecessor's idle
+// facts dropped, an operator --brief as the durable goal, and the mission
+// pending and not yet delivered. The record written before the start (#7215)
+// and the one written after it carry the same obligation.
+func handoffMissionCheckpoint(checkpoint session.InstanceData, brief, mission string) session.InstanceData {
+	checkpoint = checkpoint.WithoutIdleEvidence()
+	if override := strings.TrimSpace(brief); override != "" {
+		checkpoint.Prompt = override
+	}
+	checkpoint.PendingHandoffMission = mission
+	checkpoint.HandoffDeliveryStatus = session.PromptNotDelivered
+	return checkpoint
 }
 
 func shortSHA(sha string) string {
