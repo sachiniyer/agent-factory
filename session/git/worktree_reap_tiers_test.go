@@ -152,15 +152,20 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 		},
 	}
 	var tier syscall.Signal
+	var underLock bool
 	tiers := newTierIdentity(
-		func(pid int) proctree.TmuxIdentity { return readAt[tier][pid] },
+		func(pid int) proctree.TmuxIdentity {
+			if !underLock {
+				t.Errorf("pid %d's identity was read outside the check-and-signal's critical section", pid)
+			}
+			return readAt[tier][pid]
+		},
 		func(p proctree.Process) bool { return p.PID != readsGone },
 	)
 	var signalled []string
-	signalIf := tiers.signalIf(func(p proctree.Process, sig syscall.Signal) (bool, error) {
+	signalIf := tiers.signalIf(checkAndSignal(&underLock, func(p proctree.Process, sig syscall.Signal) {
 		signalled = append(signalled, fmt.Sprintf("%d %s", p.PID, signalName(sig)))
-		return true, nil
-	})
+	}))
 	var info logtest.Buffer
 	aflog.CaptureOutput(t, aflog.InfoLog, "INFO: ", &info)
 
@@ -222,9 +227,26 @@ func TestTierIdentity_NeverSignalsAnUnknownReadThatALivenessReadCallsGone(t *tes
 	tiers := newTierIdentity(func(int) proctree.TmuxIdentity { return proctree.TmuxUnknown },
 		func(proctree.Process) bool { return false }) // Z, mid de_thread
 	signalled := false
-	signal := tiers.signalIf(func(proctree.Process, syscall.Signal) (bool, error) { signalled = true; return true, nil })
+	var underLock bool
+	signal := tiers.signalIf(checkAndSignal(&underLock, func(proctree.Process, syscall.Signal) { signalled = true }))
 	_, _ = signal(proctree.Process{PID: 4242}, syscall.SIGTERM)
 	require.False(t, signalled)
+}
+
+// checkAndSignal stands in for teardownreq.SignalUnlessTrackedOrSpared with no
+// requester tracked. It consults spare inside its "critical section", which
+// underLock marks, and records each signal it would send.
+func checkAndSignal(underLock *bool, record func(proctree.Process, syscall.Signal)) func(proctree.Process, syscall.Signal, func(proctree.Process) bool) (bool, error) {
+	return func(p proctree.Process, sig syscall.Signal, spare func(proctree.Process) bool) (bool, error) {
+		*underLock = true
+		spared := spare != nil && spare(p)
+		*underLock = false
+		if spared {
+			return false, nil
+		}
+		record(p, sig)
+		return true, nil
+	}
 }
 
 // The survivor warning re-reads the identity. A process left alone because it
@@ -253,6 +275,7 @@ func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *t
 	for _, tc := range []struct {
 		name         string
 		afterSIGTERM bool
+		readAt       syscall.Signal
 		now          proctree.TmuxIdentity
 		want         string
 		alsoWant     []string
@@ -265,6 +288,10 @@ func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *t
 			want:     fmt.Sprintf("pid %d (%s) is still working inside it and was not signalled", process.PID, process.Comm),
 			alsoWant: []string{"it reads as not tmux now", "retrying it will reap this process"},
 			notWant:  "could not be established"},
+		{name: "now not tmux, spared at the SIGKILL tier", afterSIGTERM: true, readAt: syscall.SIGKILL, now: proctree.NotTmux,
+			want: fmt.Sprintf("pid %d (%s) is still working inside it and was sent SIGTERM but not SIGKILL. "+
+				"When the reap read it just before its SIGKILL,", process.PID, process.Comm),
+			notWant: "could not be established"},
 		{name: "still unknown, never signalled", now: proctree.TmuxUnknown,
 			want: fmt.Sprintf("pid %d (%s) is still working inside it and was not signalled,", process.PID, process.Comm)},
 		{name: "still unknown, after SIGTERM", afterSIGTERM: true, now: proctree.TmuxUnknown,
@@ -274,7 +301,7 @@ func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *t
 			var warnings logtest.Buffer
 			aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
 
-			warnUnclassifiedSurvivors("/managed/worktree", []sparedProcess{{Process: process, afterSIGTERM: tc.afterSIGTERM}}, readsAs(tc.now))
+			warnUnclassifiedSurvivors("/managed/worktree", []sparedProcess{{Process: process, afterSIGTERM: tc.afterSIGTERM, readAt: tc.readAt}}, readsAs(tc.now))
 
 			if tc.want == "" {
 				assert.Empty(t, warnings.String(), "a survivor that now reads as tmux was rightly left alone")

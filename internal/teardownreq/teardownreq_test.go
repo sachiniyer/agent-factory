@@ -95,3 +95,47 @@ func TestSignalUnlessTrackedSignalsUntracked(t *testing.T) {
 		t.Fatalf("a nonexistent pid should yield ErrIdentityChanged, got %v", err)
 	}
 }
+
+// The spare predicate is the worktree reaper's last word before its kill
+// (#7244, #7245 review R2). It runs inside the registry's critical section, so
+// no lock wait separates the caller's read from the signal. A true answer
+// spares the process, a false one signals it, and a tracked requester is
+// spared without asking.
+func TestSignalUnlessTrackedOrSparedEvaluatesSpareInsideTheLock(t *testing.T) {
+	p := proc(99999998, 1)
+	heldDuringSpare := false
+	attempted, err := SignalUnlessTrackedOrSpared(p, syscall.SIGTERM, func(got proctree.Process) bool {
+		if got != p {
+			t.Errorf("spare was asked about %+v, want %+v", got, p)
+		}
+		if trackedMu.TryLock() {
+			trackedMu.Unlock()
+		} else {
+			heldDuringSpare = true
+		}
+		return true
+	})
+	if !heldDuringSpare {
+		t.Fatal("spare must run while the registry lock is held, with no wait between it and the signal")
+	}
+	if attempted || err != nil {
+		t.Fatalf("a spared process must not be signalled: attempted=%t err=%v", attempted, err)
+	}
+
+	attempted, err = SignalUnlessTrackedOrSpared(p, syscall.SIGTERM, func(proctree.Process) bool { return false })
+	if !attempted {
+		t.Fatal("a process spare declines must be signalled")
+	}
+	if !errors.Is(err, proctree.ErrIdentityChanged) {
+		t.Fatalf("a nonexistent pid should yield ErrIdentityChanged, got %v", err)
+	}
+
+	tracked := proc(4325, 6)
+	un := Track(tracked)
+	defer un()
+	asked := false
+	attempted, err = SignalUnlessTrackedOrSpared(tracked, syscall.SIGTERM, func(proctree.Process) bool { asked = true; return false })
+	if attempted || err != nil || asked {
+		t.Fatalf("a tracked requester is spared without consulting spare: attempted=%t err=%v asked=%t", attempted, err, asked)
+	}
+}

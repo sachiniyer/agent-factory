@@ -106,9 +106,27 @@ func Is(p proctree.Process) bool {
 // now-registered process into the signal set (Codex on #5186). Returns
 // (attempted, err): attempted false means p was exempt under the lock.
 func SignalUnlessTracked(p proctree.Process, sig syscall.Signal) (bool, error) {
+	return SignalUnlessTrackedOrSpared(p, sig, nil)
+}
+
+// SignalUnlessTrackedOrSpared is SignalUnlessTracked with one more check inside
+// the same critical section: spare, when it is not nil, is evaluated after the
+// registry check and immediately before the signal, and a true answer spares p
+// (attempted false). Nothing else runs between spare and the signal except
+// proctree.Signal's own identity check, so a caller whose reprieve depends on
+// what p is right now (the worktree reaper re-reading tmux identity, #7244)
+// has no lock wait between that read and the kill. spare is not consulted for
+// a tracked requester.
+//
+// spare runs while the registry lock is held, so it must be short and must not
+// call back into this package.
+func SignalUnlessTrackedOrSpared(p proctree.Process, sig syscall.Signal, spare func(proctree.Process) bool) (bool, error) {
 	trackedMu.Lock()
 	defer trackedMu.Unlock()
 	if tracked[requesterID{pid: p.PID, startID: p.StartID}] > 0 {
+		return false, nil
+	}
+	if spare != nil && spare(p) {
 		return false, nil
 	}
 	return true, proctree.Signal(p, sig)
