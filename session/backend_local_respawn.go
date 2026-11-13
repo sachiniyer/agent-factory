@@ -770,18 +770,20 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 // id is retired once the fresh spawn commits.
 type resumeRefusal struct {
 	tmux.ExactResumeRefusal
-	// retire is set for a refusal of the id itself — stale, missing, or
-	// unprovable — which the caller retires when the spawn commits (#6769
-	// review): leaving it recorded would suppress every later capture arm and
-	// make each restore start fresh again. An id the launch command merely
-	// cannot express (a recorded conversation of another agent) is reported
-	// but kept: it may be exactly what a later handoff back resumes. So is an
-	// operator's repair that af merely could not check — an unresolvable
-	// home, an unreadable store, a header it could not classify — which says
-	// nothing about the id (resumeDecline.retiresRecord, #7122).
+	// retire is set for a refusal that rests on evidence about the id itself
+	// (stale, or missing where af could look), which the caller retires once
+	// the fresh spawn commits (#6769 review). A refusal that says only that af
+	// could not look (an unresolvable home, an unreadable store, a header it
+	// could not classify) keeps the record for the next look, whoever wrote
+	// it (resumeDecline.retiresRecord, #7209 review R4); a recorded row's
+	// capture follows the runtime it launched (#7101), so a kept record does
+	// not fence capture. An id the launch command merely cannot express (a
+	// recorded conversation of another agent) is reported but kept too: it may
+	// be exactly what a later handoff back resumes.
 	retire bool
-	// replacement is the conversation the fresh spawn was launched on in the
-	// refused id's place, recorded when the spawn commits; zero when the
+	// replacement is the conversation the fresh spawn is launched on in the
+	// refused id's place, recorded before the spawn and restored away if the
+	// spawn does not commit (stageReplacementConversation); zero when the
 	// agent's launch names none (planReplacementConversation).
 	replacement AgentConversationData
 }

@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"strings"
 )
@@ -74,16 +75,21 @@ func judgeClaudeRecorded(configDir string, projects []string, id, bound string) 
 		if other.dir == recorded.dir || !strings.EqualFold(other.id, recorded.id) {
 			return claudeRecordedStale
 		}
-		verdict = claudeRecordedCopies
+		// A newer copy the judged one still holds every byte of brings no
+		// turn it lacks; only one that adds or diverges does.
+		if !claudeTranscriptExtends(*recorded, other) {
+			verdict = claudeRecordedCopies
+		}
 	}
 	return verdict
 }
 
 // claudeCarryStaleness is a Claude carry's staleness check: whether the copy
 // of conversation id the carry would take, transcript (relative to configDir,
-// under one of projects), is still the newest conversation in the worktree. A
-// newer copy of the same conversation under another spelling refuses too: the
-// carry would take the older copy, without the latest turns.
+// under one of projects), is still the newest conversation in the worktree.
+// The carry binds the copy that holds every other one (locateClaude), so a
+// newer copy under another spelling means Claude wrote it while af planned:
+// that refuses too, rather than carry a copy without the latest turns.
 func claudeCarryStaleness(configDir string, projects []string, transcript, id string) string {
 	switch judgeClaudeRecorded(configDir, projects, id, filepath.Dir(transcript)) {
 	case claudeRecordedUnlisted:
@@ -120,4 +126,32 @@ func (i *Instance) staleRecordedClaudeDecline(program string, conv AgentConversa
 		return declineResume(staleCarryReason)
 	}
 	return resumeDecline{}
+}
+
+// claudeTranscriptExtends reports whether the transcript longer begins with
+// every byte of shorter. One af cannot read extends nothing.
+func claudeTranscriptExtends(longer, shorter claudeTranscript) bool {
+	long, err := os.Open(filepath.Join(longer.dir, longer.name))
+	if err != nil {
+		return false
+	}
+	defer long.Close()
+	short, err := os.Open(filepath.Join(shorter.dir, shorter.name))
+	if err != nil {
+		return false
+	}
+	defer short.Close()
+	longInfo, err := long.Stat()
+	if err != nil {
+		return false
+	}
+	shortInfo, err := short.Stat()
+	if err != nil || longInfo.Size() < shortInfo.Size() {
+		return false
+	}
+	if os.SameFile(longInfo, shortInfo) {
+		return true
+	}
+	same, err := carryPrefixMatches(long, short, shortInfo.Size())
+	return err == nil && same
 }

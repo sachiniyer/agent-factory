@@ -37,10 +37,10 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 	if err != nil {
 		return ClaudeProjectConversationState{}, err
 	}
-	transcripts, err := claudeWorktreeTranscripts(configDir, claudeProjectCandidates(launchDir))
-	if err != nil {
-		return ClaudeProjectConversationState{}, err
-	}
+	// A recorded transcript found under a spelling af could list exists,
+	// whatever another spelling holds; an unlistable spelling withholds only
+	// the newest-conversation answer, which needs them all (#7207).
+	transcripts, listErr := claudeWorktreeTranscripts(configDir, claudeProjectCandidates(launchDir))
 	conversation := func(id string) AgentConversationData {
 		return AgentConversationData{
 			Agent:       tmux.ProgramClaude,
@@ -55,6 +55,9 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 				return ClaudeProjectConversationState{Resume: conversation(transcript.id), RecordedExists: true}, nil
 			}
 		}
+	}
+	if listErr != nil {
+		return ClaudeProjectConversationState{}, listErr
 	}
 	state := ClaudeProjectConversationState{}
 	if newest, ok := newestClaudeTranscript(transcripts); ok {
@@ -194,11 +197,14 @@ func claudeProjectCandidates(dir string) []string {
 
 // claudeWorktreeTranscripts lists the direct conversation files of every
 // project directory in projects, relative to configDir: the spellings
-// claudeProjectCandidates names for one worktree. A directory that cannot be
-// listed fails the whole listing, since what it holds would be invisible to
-// the caller; one that is missing holds nothing.
+// claudeProjectCandidates names for one worktree. A directory that is missing
+// holds nothing. One that cannot be listed is the error, returned with what
+// the others hold: whatever it holds is invisible, so an answer that needs
+// every conversation in the worktree fails on the error, while one that a
+// listed transcript settles can still use the rest (#7207).
 func claudeWorktreeTranscripts(configDir string, projects []string) ([]claudeTranscript, error) {
 	var all []claudeTranscript
+	var first error
 	listed := make(map[string]bool, len(projects))
 	for _, project := range projects {
 		dir := filepath.Join(configDir, project)
@@ -208,11 +214,14 @@ func claudeWorktreeTranscripts(configDir string, projects []string) ([]claudeTra
 		listed[dir] = true
 		transcripts, err := claudeProjectTranscripts(dir)
 		if err != nil {
-			return nil, err
+			if first == nil {
+				first = err
+			}
+			continue
 		}
 		all = append(all, transcripts...)
 	}
-	return all, nil
+	return all, first
 }
 
 // ErrNotClaude is returned for a session whose program is not Claude Code.

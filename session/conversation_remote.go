@@ -29,23 +29,14 @@ func persistedConversationOf(data InstanceData) AgentConversationData {
 	return AgentConversationData{}
 }
 
-// SetResumeConversation asks the NEXT launch of this instance to come up on conv
-// instead of a fresh conversation — the same request a root-agent heal makes
-// through InstanceOptions.ResumeConversation. Like that request it is honored
-// only when the resolved command can express it (planCreateConversation).
-func (i *Instance) SetResumeConversation(conv AgentConversationData) {
-	i.mu.Lock()
-	defer i.mu.Unlock()
-	i.carriedConversation, i.carriedIsRecord = conv, false
-}
-
-// SetResumeRecordedConversation is SetResumeConversation for an id that IS this
-// session's recorded conversation, delivered from elsewhere: the driving
-// daemon hands an in-sandbox agent-server the tab's record. The restore guard
-// judges it as it judges the tab's own record, so a /clear before an archive
-// still starts the restore fresh (#7209 review R2). A pin whose provenance was
-// checked where it was set (a swap's plan, the root heal) uses
-// SetResumeConversation and is not judged again.
+// SetResumeRecordedConversation asks the NEXT launch of this instance to come
+// up on conv, an id that IS this session's recorded conversation delivered from
+// elsewhere: the driving daemon hands an in-sandbox agent-server the tab's
+// record. Like every pin it is honored only when the resolved command can
+// express it (planCreateConversation), and the restore guard judges it as it
+// judges the tab's own record, so a /clear before an archive still starts the
+// restore fresh (#7209 review R2). The one pin judged where it was set, the
+// root heal's, arrives through InstanceOptions.ResumeConversation instead.
 func (i *Instance) SetResumeRecordedConversation(conv AgentConversationData) {
 	i.mu.Lock()
 	defer i.mu.Unlock()

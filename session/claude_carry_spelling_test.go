@@ -59,7 +59,10 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 		layout func(t *testing.T, source, recorded, resolved string)
 		// refusal is the fallback the swap states; "" means it carries.
 		refusal string
-		why     string
+		// from is the spelling whose copy a carry takes: "recorded" or
+		// "resolved"; "" leaves it unchecked.
+		from string
+		why  string
 	}{
 		{
 			name: "a newer conversation under the resolved spelling",
@@ -94,7 +97,8 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 				file(t, source, recorded, carryTestID, past.Add(time.Minute))
 				file(t, source, resolved, newerConversationID, past)
 			},
-			why: "an older conversation under the other spelling does not block the carry",
+			from: "recorded",
+			why:  "an older conversation under the other spelling does not block the carry",
 		},
 		{
 			name: "a newer copy of the recorded conversation under the other spelling",
@@ -102,8 +106,8 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 				file(t, source, recorded, carryTestID, past)
 				file(t, source, resolved, carryTestID, past.Add(time.Minute))
 			},
-			refusal: carryTranscriptCopiesReason,
-			why:     "carrying the older copy would resume the conversation without its latest turns",
+			from: "resolved",
+			why:  "the carry takes the copy Claude is appending to, not the first spelling that holds one (#7207)",
 		},
 		{
 			name: "an older copy of the recorded conversation under the other spelling",
@@ -111,7 +115,28 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 				file(t, source, recorded, carryTestID, past.Add(time.Minute))
 				file(t, source, resolved, carryTestID, past)
 			},
-			why: "the copy the carry takes is the newest one",
+			from: "recorded",
+			why:  "the copy the carry takes is the newest one",
+		},
+		{
+			name: "a conversation newer than the older copy but older than the newest copy",
+			layout: func(t *testing.T, source, recorded, resolved string) {
+				file(t, source, recorded, carryTestID, past)
+				file(t, source, recorded, newerConversationID, past.Add(time.Minute))
+				file(t, source, resolved, carryTestID, past.Add(2*time.Minute))
+			},
+			from: "resolved",
+			why:  "the conversation is judged by its newest copy, so the user did not move on (#7207)",
+		},
+		{
+			name: "a conversation newer than every copy",
+			layout: func(t *testing.T, source, recorded, resolved string) {
+				file(t, source, recorded, carryTestID, past)
+				file(t, source, resolved, carryTestID, past.Add(time.Minute))
+				file(t, source, recorded, newerConversationID, past.Add(2*time.Minute))
+			},
+			refusal: staleCarryReason,
+			why:     "a /clear after the newest copy is still a newer conversation",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -131,6 +156,10 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 			if tc.refusal == "" {
 				require.NotNil(t, inst.accountSwapLaunch.carry, tc.why)
 				require.Empty(t, inst.accountSwapLaunch.carryFallback, tc.why)
+				if project := map[string]string{"recorded": recorded, "resolved": resolved}[tc.from]; project != "" {
+					require.Equal(t, filepath.Join(project, carryTestID+".jsonl"), inst.accountSwapLaunch.carry.transcript, tc.why)
+					require.Equal(t, filepath.Join(project, carryTestID), inst.accountSwapLaunch.carry.aux, tc.why)
+				}
 				return
 			}
 			require.Nil(t, inst.accountSwapLaunch.carry, tc.why)

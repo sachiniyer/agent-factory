@@ -620,14 +620,16 @@ type Instance struct {
 	// derivation for a fresh local worktree (InstanceOptions.BranchName).
 	branchName string
 
-	// carriedConversation is a provider conversation a PREVIOUS record held that
-	// this create should come up on instead of starting a new one (#2616). It
-	// exists for exactly one caller: the daemon's root-agent heal, which reaps
-	// the vanished root's record — and with it agent_conversation — and creates a
-	// replacement in place, where every other Lost session is re-spawned on its
-	// own surviving record. Set by NewInstance or SetResumeConversation; not
-	// consumed by a launch (root-recreate classification reads it afterwards);
-	// retired when the account changes (retireConversationsLocked, #6189). A
+	// carriedConversation is a conversation this instance's next launch should
+	// come up on instead of a new one, set before the agent tab holds a record.
+	// Two callers set it: the daemon's root-agent heal (#2616), through
+	// NewInstance's InstanceOptions.ResumeConversation, which reaps the vanished
+	// root's record and creates a replacement in place where every other Lost
+	// session is re-spawned on its own surviving record; and an in-sandbox
+	// agent-server handed the tab's record (SetResumeRecordedConversation:
+	// adopted and FirstTimeSetup launches). Not consumed by a launch
+	// (root-recreate classification reads it afterwards); retired when the
+	// account changes (retireConversationsLocked, #6189). A
 	// REQUEST, not a fact: honored only when the resolved command can express it,
 	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
