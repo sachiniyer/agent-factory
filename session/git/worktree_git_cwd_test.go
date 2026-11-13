@@ -200,14 +200,23 @@ func TestRunGitCommand_ReapedInheritedWorktreeSpareUnrelatedGitChild(t *testing.
 		// Wait for the fake git to have started and recorded its pid, then wait for
 		// its cwd to be observable by proctree — the exact readiness gate the live
 		// reap tests use.
+		//
+		// Wait for the pid itself, not for the file: `echo $$ > file` creates the
+		// file before it writes to it, so a read between the two finds it empty.
+		// macOS read it in exactly that gap once (#7243's run 43470642407).
+		var fakePID int
 		requireEventually(t, 5*time.Second, func() bool {
-			_, err := os.Stat(pidFile)
-			return err == nil
+			raw, err := os.ReadFile(pidFile)
+			if err != nil {
+				return false
+			}
+			n, err := strconv.Atoi(strings.TrimSpace(string(raw)))
+			if err != nil {
+				return false
+			}
+			fakePID = n
+			return true
 		}, "the fake git child never recorded its pid")
-		raw, err := os.ReadFile(pidFile)
-		require.NoError(t, err)
-		fakePID, err := strconv.Atoi(strings.TrimSpace(string(raw)))
-		require.NoError(t, err)
 		proc, err := proctree.Lookup(fakePID)
 		require.NoError(t, err)
 		requireEventually(t, 5*time.Second, func() bool {
