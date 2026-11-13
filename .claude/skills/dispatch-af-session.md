@@ -24,10 +24,11 @@ green PR into a week-old PR.
    You own this PR end to end. Follow the gate-pr skill; under throughput
    mode the auto-merger squash-merges once Build + Lint are green on your
    current head (you do not merge by hand). Exception: while `AUTO_MERGE_TOKEN`
-   is unset, a PR that touches `.github/workflows/**` is skipped by design (the
-   merger's `GITHUB_TOKEN` cannot merge workflow files), so for that PR say so
-   in a PR comment and ask for a maintainer merge. Otherwise do not hand the PR
-   back to root.
+   is unset, a PR that touches `.github/workflows/**` or `.github/scripts/**`
+   is skipped by design (the merger's `GITHUB_TOKEN` cannot merge workflow
+   files, and it skips script edits so a PR cannot run its own code with the
+   write token), so for that PR say so in a PR comment and ask for a
+   maintainer merge. Otherwise do not hand the PR back to root.
 
    Local gates (cheap only, before opening the PR):
    - gofmt -l .
