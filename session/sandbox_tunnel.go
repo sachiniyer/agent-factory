@@ -294,7 +294,7 @@ func killTunnel(t *tunnelChild) {
 // when this process's own binary can serve as one and directly otherwise.
 //
 // The inner command text is identical on both paths —
-// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
+// `<sandbox_ssh> -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`
 // run by `sh -c` with $0=af-sandbox — because each flag is load-bearing rather
 // than hygiene:
 //
@@ -313,13 +313,34 @@ func killTunnel(t *tunnelChild) {
 //     and the transport supervisor re-dials. These land AFTER p.sshCmd, so the
 //     operator's own -o values keep precedence: OpenSSH takes the FIRST
 //     setting it reads.
+//   - -S none: the tunnel never shares a connection, so the forward is held by
+//     the very process supervision watches (#7121). Measured against OpenSSH
+//     9.6p1 under an operator's `ControlMaster auto`: with a master already
+//     running, the -N -L client hands the forward to the master and exits 0
+//     within half a second. The supervisor reads that as the transport going
+//     down and re-dials on its backoff ladder for as long as the session
+//     lives (5 generations in 12 s), each re-dial handing the master a
+//     forward it already holds, while the forward itself lives in the master:
+//     it outlives stopTunnel's group kill and keeps answering on the
+//     session's local port. With no master and ControlPersist set, the tunnel
+//     becomes the master and detaches out of its group, with the same result.
+//     With no master and no ControlPersist, the tunnel is the master, and the
+//     operator's other ssh sessions to that host multiplex over a process
+//     stopTunnel kills. -S is not an -o setting: ssh assigns it while parsing
+//     the command line, the last one winning, and ssh_config only fills a
+//     ControlPath still unset. So this outranks an -S or `-o ControlPath` in
+//     sandbox_ssh and any ssh_config, and `ssh -G` reports no controlpath at
+//     all. `-o ControlMaster=no` says the same in ControlMaster's terms but
+//     loses to an earlier operator value, which is why -S carries the
+//     guarantee. Provision and cleanup steps keep multiplexing: they run to
+//     completion, and reusing a master is what makes them fast.
 //
 // `reverse` is W3.4's slot for -R forwards (the in-sandbox callback): each
 // element is composed as `-R "$N"` after the -L spec, so it gets the same
 // ExitOnForwardFailure fatality, the same process-group teardown, and the same
 // supervision on every re-dial.
 func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*exec.Cmd, *tunnelLifeline, error) {
-	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`
+	script := p.sshCmd + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`
 	args := []string{forward}
 	for i := range reverse {
 		args = append(args, reverse[i])

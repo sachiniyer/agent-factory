@@ -747,6 +747,15 @@ the `ssh` backend stages it — platform-probed, cached under
 `~/.af-bin/`, sha256- and version-verified — and the same global-only
 `sandbox.binary` override applies.
 
+> **Connection sharing (`ControlMaster`).** Your `ControlMaster` and
+> `ControlPersist` settings apply to the setup and cleanup steps, which reuse a
+> master when one is running. The port-forward never shares a connection: af
+> runs it with `-o ControlMaster=no -S none`, which outranks any control path in
+> your command or `ssh_config`. A shared forward would live in your master,
+> where af could neither see it fail nor close it when the session ends. The
+> forward therefore logs in on its own each time af connects it, so it has to
+> be able to authenticate without a prompt even when no master is running.
+
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup
 > commands, the port-forward, and the cleanup. If it reaches a name with several
