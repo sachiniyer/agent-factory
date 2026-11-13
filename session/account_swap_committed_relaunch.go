@@ -69,3 +69,21 @@ func (i *Instance) recordNamesAccount(account string) bool {
 	i.mu.RUnlock()
 	return recorded != "" && recorded == strings.TrimSpace(account)
 }
+
+// pendingAccountSwapUnwrittenFor reports whether account's pending swap record
+// was rewritten in memory since it last reached disk.
+func (i *Instance) pendingAccountSwapUnwrittenFor(account string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingAccountSwapUnwritten && i.pendingAccountSwap != nil && i.pendingAccountSwap.To == account
+}
+
+// markPendingAccountSwapWritten records that account's pending swap record has
+// reached disk.
+func (i *Instance) markPendingAccountSwapWritten(account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.To == account {
+		i.pendingAccountSwapUnwritten = false
+	}
+}
