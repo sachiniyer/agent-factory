@@ -141,8 +141,8 @@ func TestAnInPlaceClaudeRowResumesItsOwnConversation(t *testing.T) {
 	}
 }
 
-// R1, Codex: the load-time retirement this PR added never retires an in-place
-// row's record. The refusal itself predates it and is #7210's.
+// R1, Codex: a row in the user's own checkout keeps its record on load, and
+// since #7210 the restore resumes its thread rather than refusing it.
 func TestAnInPlaceCodexRowKeepsItsRecordOnLoad(t *testing.T) {
 	log.Initialize(false)
 	defer log.Close()
@@ -154,7 +154,9 @@ func TestAnInPlaceCodexRowKeepsItsRecordOnLoad(t *testing.T) {
 
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
-	require.NotEmpty(t, agentSpawnOf(spawns, agentName))
+	spawn := agentSpawnOf(spawns, agentName)
+	require.NotEmpty(t, spawn)
+	require.Contains(t, spawn, "resume "+carryTestID, "the restore resumes the row's own thread (#7210)")
 	require.Equal(t, carryTestID, restored.AgentConversation().ID, "a row in the user's checkout retires nothing on load")
 }
 
@@ -305,4 +307,58 @@ func TestARefusedRecoverRecordsItsReplacementBeforeTheSpawn(t *testing.T) {
 		require.NotEmpty(t, persisted)
 		require.Equal(t, carryTestID, persisted[len(persisted)-1].ID, "and the restored record is persisted")
 	})
+}
+
+// #7210: the Codex restore guard shares the attribution rule. A row working in
+// the user's own checkout keeps and resumes its own thread beside a newer one
+// with the same cwd: the user's own codex, or a sibling in-place session,
+// wrote it. Whether the recorded thread is missing is still evidence about the
+// id itself, and refuses there too.
+func TestACodexRowInTheUsersCheckoutResumesItsOwnThread(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name string
+		row  func(t *testing.T, checkout string, conv AgentConversationData) *Instance
+	}{
+		{name: "the repository's own checkout", row: func(t *testing.T, checkout string, conv AgentConversationData) *Instance {
+			gw, err := sessiongit.NewGitWorktreeFromStorage(checkout, checkout, "t", "main", "", false, true)
+			require.NoError(t, err)
+			return &Instance{Title: "t", Program: tmux.ProgramCodex, Path: checkout, gitWorktree: gw, Tabs: []*Tab{{Conversation: conv}}}
+		}},
+		{name: "an adopted external worktree", row: func(t *testing.T, checkout string, conv AgentConversationData) *Instance {
+			gw, err := sessiongit.NewGitWorktreeFromStorage(t.TempDir(), checkout, "t", "main", "", true, false)
+			require.NoError(t, err)
+			return &Instance{Title: "t", Program: tmux.ProgramCodex, Path: checkout, gitWorktree: gw, Tabs: []*Tab{{Conversation: conv}}}
+		}},
+		{name: "the root agent", row: func(t *testing.T, checkout string, conv AgentConversationData) *Instance {
+			inst := staleResumeInstance(t, checkout, conv)
+			inst.Title = RootSessionTitle
+			return inst
+		}},
+		{name: "a --here session", row: func(t *testing.T, checkout string, conv AgentConversationData) *Instance {
+			inst := staleResumeInstance(t, checkout, conv)
+			inst.inPlace = true
+			return inst
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			checkout := t.TempDir()
+			conv := AgentConversationData{Agent: tmux.ProgramCodex, ID: carryTestID, CaptureKind: ConversationCaptureCodexRollout}
+			setModTime(t, writeCarryFile(t, codexHome, codexRolloutRel(carryTestID), codexRollout(checkout)), past)
+			setModTime(t, writeCarryFile(t, codexHome, codexRolloutRel(newerConversationID), codexRollout(checkout)), past.Add(time.Minute))
+
+			inst := tc.row(t, checkout, conv)
+			require.False(t, inst.newerConversationIsEvidence(checkout))
+			rewritten, ok, decline := prepareExactResumeConversation(inst, "codex")
+			require.True(t, ok, "the user's own codex in the checkout is not this row: %+v", decline)
+			require.Contains(t, rewritten, "resume "+carryTestID)
+
+			gone := tc.row(t, checkout, AgentConversationData{Agent: tmux.ProgramCodex, ID: "019f386f-7206-7fc2-803b-0000000a0000", CaptureKind: ConversationCaptureCodexRollout})
+			_, ok, decline = prepareExactResumeConversation(gone, "codex")
+			require.False(t, ok, "a recorded thread the store does not hold is still refused")
+			require.Equal(t, codexRolloutMissingReason, decline.reason)
+		})
+	}
 }
