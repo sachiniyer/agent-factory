@@ -214,6 +214,9 @@ test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, re
   await page.goto(`/#/session/${session.id}`);
   const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
   await expect(pane.locator(".cm-content")).toBeVisible();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
+  // The editor shows before its doc has loaded, and takes no keystrokes until then (#7256).
+  await expect(pane.locator(".cm-content"), "goals has loaded").not.toHaveAttribute("aria-readonly", "true");
 
   const marker = `typed just before switching ${Date.now()}`;
   await pane.locator(".cm-content").click();
@@ -225,6 +228,70 @@ test("docs tab: switching docs mid-edit keeps what was typed", async ({ page, re
   await pane.locator(".af-docs-tab", { hasText: "goals" }).click();
   await expect(pane.locator(".cm-content")).toContainText(marker);
   await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
+});
+
+// A click into the editor while its doc is still loading keeps the keyboard in the editor (#7256).
+// The keys must not reach the app's rail shortcuts: t opens a terminal tab, w closes one, 1-9 switch
+// tabs (1 leaves the proposal view), j/k switch sessions, and Enter attaches the agent terminal.
+// The loading editor takes no keystrokes, and once the doc arrives it takes the typing.
+test("docs tab: keys typed while a doc loads stay in its editor", async ({ page, request }) => {
+  const afBin = process.env.AF_BIN;
+  const mockRepo = process.env.AF_MOCK_REPO;
+  test.skip(!afBin || !mockRepo, "AF_BIN/AF_MOCK_REPO are set only by web-selftest-entry.sh");
+  const af = (...args: string[]): string =>
+    execFileSync(afBin as string, args, { stdio: ["ignore", "pipe", "pipe"], encoding: "utf8" });
+
+  const title = "docs-loading-keys-probe";
+  const slug = "docs-loading-keys-plan";
+  af("sessions", "create", "--repo", mockRepo as string, "--name", title, "--program", "claude");
+  const started = JSON.parse(af("proposal", "start", slug, "--repo", mockRepo as string, "--session", title,
+    "--docs", "goals,api")) as { path: string; tab_error?: string };
+  expect(started.tab_error ?? "", "start must create the Docs tab").toBe("");
+  const envelope = await (await request.post("/v1/Snapshot", { data: { repo_id: "" } })).json();
+  const session = envelope.data.instances.find((s: { title: string }) => s.title === title);
+  expect(session).toBeTruthy();
+
+  // The goals read is held, so the editor is on screen and the doc is still loading.
+  let release: () => void = () => {};
+  const held = new Promise<void>((resolve) => (release = resolve));
+  await page.route("**/v1/ReadProposalDoc", async (route) => {
+    if ((route.request().postDataJSON() as { doc?: string }).doc === "goals") await held;
+    await route.continue();
+  });
+  const tabCalls: string[] = [];
+  page.on("request", (r) => {
+    if (/\/v1\/(CreateTab|CloseTab)$/.test(new URL(r.url()).pathname)) tabCalls.push(r.url());
+  });
+
+  await page.goto(`/#/session/${session.id}`);
+  const pane = page.locator(`.af-docs[data-proposal="${slug}"]`);
+  const editor = pane.locator(".cm-content");
+  await expect(editor).toBeVisible();
+  await expect(pane.locator(".af-docs-tab")).toHaveText(["goals", "api"]);
+  await expect(editor, "the doc is still loading").toHaveAttribute("aria-readonly", "true");
+
+  const early = `typed just before the doc loaded 1${Date.now()}`;
+  await editor.click();
+  await page.keyboard.type(`\n\n${early}\n`);
+  await expect(editor, "the loading editor keeps the keyboard").toBeFocused();
+  await expect(page.locator(".af-pane"), "the proposal view stays split").toHaveCount(2);
+  await expect(pane.locator(".af-docs-tab"), "every doc stays listed").toHaveText(["goals", "api"]);
+  expect(new URL(page.url()).hash, "no key switched the session").toBe(`#/session/${session.id}`);
+
+  release();
+  await expect(editor, "the doc has loaded").not.toHaveAttribute("aria-readonly", "true");
+  await expect(editor, "the clicked editor still has the keyboard").toBeFocused();
+  await expect(editor, "a loading editor takes no keystrokes").not.toContainText(early);
+  const marker = `typed once the doc loaded ${Date.now()}`;
+  await page.keyboard.press("Control+End");
+  await page.keyboard.type(`\n\n${marker}\n`);
+  await pane.locator(".af-docs-tab", { hasText: "api" }).click();
+  await expect(pane.locator('.af-docs-tab[aria-selected="true"]')).toHaveText("api");
+  await pane.locator(".af-docs-tab", { hasText: "goals" }).click();
+  await expect(editor).toContainText(marker);
+  await expect.poll(() => readFileSync(join(started.path, "goals.md"), "utf8")).toContain(marker);
+  expect(readFileSync(join(started.path, "goals.md"), "utf8")).not.toContain(early);
+  expect(tabCalls, "no key opened or closed a session tab").toEqual([]);
 });
 
 // A Proposal tab that arrives while the user is typing in the Agent terminal adds the split, which
