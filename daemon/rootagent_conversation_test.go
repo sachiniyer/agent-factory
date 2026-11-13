@@ -459,7 +459,9 @@ func (b plannedCreateBackend) Start(instance *session.Instance, firstTimeSetup b
 	// materializes the agent tab, and only then is the planned conversation
 	// committed to it. A commit with no agent tab yet records nothing.
 	instance.SetTmuxSession(tmux.NewTmuxSession(instance.Title, tmux.ProgramClaude))
-	instance.CommitCreateConversationForTest(tmux.ProgramClaude)
+	if err := instance.CommitCreateConversationForTest(tmux.ProgramClaude); err != nil {
+		return err
+	}
 	return b.readyFakeBackend.Start(instance, firstTimeSetup)
 }
 
@@ -490,6 +492,10 @@ func TestEnsureRootAgentsReportsAHealThatStartsOnItsRecordAsFreshContext(t *test
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			// Every store the judge counts is this test's own: CLAUDE_CONFIG_DIR,
+			// and $HOME/.claude, which the daemon package's shared home would
+			// otherwise make whatever an earlier test left there.
+			t.Setenv("HOME", t.TempDir())
 			claudeConfigDir := t.TempDir()
 			t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
 			restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
@@ -517,6 +523,8 @@ func TestEnsureRootAgentsReportsAHealThatStartsOnItsRecordAsFreshContext(t *test
 			root := findRootInstance(t, manager, repoPath)
 			require.NotNil(t, root)
 			require.NotSame(t, first, root, "the heal replaced the record")
+			require.NotEmpty(t, root.GetWorktreePath(),
+				"the plan judged the carried id from the checkout, as a real create does, not blind")
 			require.Equal(t, priorRootConversationID, root.AgentConversation().ID, "the root keeps its record either way")
 			require.Equal(t, tc.want, root.RootRecreateContext())
 			if tc.wantWarning != "" {

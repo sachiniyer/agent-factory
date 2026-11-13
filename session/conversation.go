@@ -380,11 +380,26 @@ func prepareLaunchConversation(i *Instance, program, freshID string) string {
 	return rewritten
 }
 
-// CommitCreateConversationForTest makes and commits the conversation plan a
-// local create makes for program, for a backend double that spawns nothing: a
-// daemon heal test then classifies the launch the real planner chose.
-func (i *Instance) CommitCreateConversationForTest(program string) string {
-	return prepareLaunchConversation(i, program, i.ID)
+// CommitCreateConversationForTest stands in, for a backend double that spawns
+// nothing, for the two steps of a local create that decide its conversation:
+// Provision attaching the create's worktree handle (newWorktreeHandle), then
+// the launch plan's commit for program. Without the first the plan has no
+// launch directory and judges a carried id blind, which a real create never
+// does (prepareCreateLaunch refuses an empty one). A daemon heal test then
+// classifies the launch the real planner chose.
+func (i *Instance) CommitCreateConversationForTest(program string) error {
+	if i.GetWorktreePath() == "" {
+		gitWorktree, branchName, err := i.newWorktreeHandle()
+		if err != nil {
+			return err
+		}
+		i.mu.Lock()
+		i.setGitWorktreeLocked(gitWorktree)
+		i.Branch = branchName
+		i.mu.Unlock()
+	}
+	prepareLaunchConversation(i, program, i.ID)
+	return nil
 }
 
 // setLaunchStartedOnCarried records, with the conversation a launch commits,
