@@ -31,3 +31,13 @@ func SetProbeTimeoutForTest(d time.Duration) func() {
 	probeTimeout = d
 	return func() { probeTimeout = old }
 }
+
+// SetReadDirForTest overrides the directory read ReadDir and ReadDirInfo run
+// inside their bounded flights, so a test can stand in for a conversation
+// store on a wedged mount (#7212). Callers must restore the original via the
+// returned function.
+func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) func() {
+	old := readDirPath
+	readDirPath = f
+	return func() { readDirPath = old }
+}

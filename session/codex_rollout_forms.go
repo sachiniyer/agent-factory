@@ -65,7 +65,7 @@ func codexRolloutFormsSince(codexHome, id string, floor time.Time) (plain, other
 		return nil, nil, nil
 	}
 	root := filepath.Join(codexHome, "sessions")
-	err = filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err = walkConversationStore(root, false, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil
