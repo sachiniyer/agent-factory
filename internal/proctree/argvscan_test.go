@@ -457,7 +457,10 @@ func TestRefusalIsReportedOnlyForAProcessPresentAndUnreadableThroughout(t *testi
 		{"exit between the two re-reads", []error{refused}, []identityAnswer{present, departed}, "skip"},
 		{"the re-read finds the process gone", []error{refused, syscall.ESRCH}, []identityAnswer{present}, "skip"},
 		{"the re-read finds it exited", []error{refused, ErrProcessExited}, []identityAnswer{present}, "skip"},
-		{"the re-read finds no argv", []error{refused, ErrNoArgv}, []identityAnswer{present}, "skip"},
+		// #7239: no argv on a process that is still present is not an exit. A
+		// live process mid-execve reads this way, and it may be the launcher.
+		{"the re-read finds no argv, and the process is still present", []error{refused, ErrNoArgv}, []identityAnswer{present}, "refusal"},
+		{"the re-read finds no argv, then the process departs", []error{refused, ErrNoArgv}, []identityAnswer{present, departed}, "skip"},
 		{"the re-read succeeds: the first failure was transient", []error{refused, nil}, []identityAnswer{present}, "recovered"},
 		{"the second re-read succeeds", []error{refused, refused, nil}, []identityAnswer{present}, "recovered"},
 	}
@@ -499,5 +502,51 @@ func TestARefusalIsReadMoreThanOnce(t *testing.T) {
 	}
 	if *reads < 2 {
 		t.Fatalf("argv was read %d time(s) before the refusal was reported; want at least 2", *reads)
+	}
+}
+
+// #7239. ProcessesMatchingArgv is the hook-launcher ABSENCE oracle: when it
+// finds no launcher, a successor daemon may rebuild or relocate the tree
+// (#3667). A live process caught mid-execve has no argv yet. Linux installs the
+// new address space before it lays out the new argv, so /proc/<pid>/cmdline
+// reads empty for that window, and that window opens at the launcher's execve,
+// which is exactly the moment this oracle exists for. Skipping it as "nothing
+// to classify" reads "could not classify" as absence.
+//
+// Here the launcher is caught on its first read and readable on the next. It
+// must be FOUND, not skipped.
+func TestALauncherCaughtMidExecveIsFound(t *testing.T) {
+	argv, reads := scriptedArgv(t, 44, fmt.Errorf("%w: pid 44", ErrNoArgv), nil)
+	stubScan(t, fixedSnapshot(44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid()})
+
+	got, err := ProcessesMatchingArgv(func(argv []string) bool { return argv[0] == "recovered" })
+	if err != nil {
+		t.Fatalf("a launcher caught mid-execve failed the scan instead of being re-read: %v", err)
+	}
+	if len(got) != 1 || got[0].Process.PID != 44 {
+		t.Fatalf("matches = %v after %d read(s); a live process caught mid-execve was skipped as absent, "+
+			"so the oracle would report no launcher while one is starting (#7239)", got, *reads)
+	}
+}
+
+// And one that never shows an argv while it stays present is UNKNOWN. The scan
+// reports it rather than returning a list without it, so the caller holds off.
+// It must never let a rebuild proceed on a check that could not classify a
+// live process of ours.
+func TestALiveProcessWithNoArgvIsUnknownNotAbsent(t *testing.T) {
+	argv, _ := scriptedArgv(t, 44, fmt.Errorf("%w: pid 44", ErrNoArgv))
+	stubScan(t, fixedSnapshot(44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid()})
+
+	got, err := ProcessesMatchingArgv(func([]string) bool { return true })
+	var unreadable *ArgvUnreadableError
+	if !errors.As(err, &unreadable) || unreadable.PID != 44 {
+		t.Fatalf("got %v, %v; want an ArgvUnreadableError for the live pid 44: "+
+			"a process of ours with no readable argv may be a launcher mid-execve, "+
+			"and reading it as absent lets a successor rebuild the tree under it (#7239)", got, err)
+	}
+	if !errors.Is(err, ErrNoArgv) {
+		t.Fatalf("err = %v; the report must keep the reason, ErrNoArgv", err)
 	}
 }
