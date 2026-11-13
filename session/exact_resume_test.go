@@ -10,12 +10,15 @@ import (
 	"github.com/sachiniyer/agent-factory/session/git"
 )
 
-// adoptInstanceAt is a fresh in-sandbox instance whose worktree is workDir.
+// adoptInstanceAt is a fresh in-sandbox instance whose worktree is workDir: a
+// linked worktree beside the sandbox's repository, as AdoptExistingWorktree
+// binds it.
 func adoptInstanceAt(t *testing.T, workDir string) *Instance {
 	t.Helper()
-	gw, err := git.NewGitWorktreeFromStorage(workDir, workDir, "t", "main", "", false, true)
+	repo := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(repo, workDir, "t", "main", "", false, true)
 	require.NoError(t, err)
-	return &Instance{Title: "t", Program: "codex", gitWorktree: gw}
+	return &Instance{Title: "t", Program: "codex", Path: repo, gitWorktree: gw}
 }
 
 const (
@@ -23,14 +26,16 @@ const (
 	adoptedLatestID = "039f386f-7206-7fc2-803b-f7045e07a244"
 )
 
-// #5949: a workspace holding two conversations, the archived session's older than
-// the latest. The adopted launch's command names the archived one, so the
-// provider's own "latest" is never consulted.
+// #5949: a home holding two conversations, the archived session's older than
+// the latest, which is another worktree's. The adopted launch's command names
+// the archived one, so the provider's own "latest" is never consulted. (A
+// newer thread in this worktree is a /new, judged by
+// TestAdoptedLaunchJudgesTheTabsCodexRecord.)
 func TestAdoptedLaunchResumesTheRecordedConversationNotTheLatest(t *testing.T) {
 	codexHome := t.TempDir()
 	workDir := t.TempDir()
 	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+adoptedOlderID+".jsonl", workDir)
-	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-37-"+adoptedLatestID+".jsonl", workDir)
+	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-37-"+adoptedLatestID+".jsonl", t.TempDir())
 
 	t.Setenv("CODEX_HOME", codexHome)
 	inst := adoptInstanceAt(t, workDir)
@@ -106,4 +111,49 @@ func TestRecoveryResumeNamesTheSessionsOwnConversation(t *testing.T) {
 func TestAdoptedLaunchFailureStillPropagates(t *testing.T) {
 	inst := &Instance{Title: "t"}
 	require.Error(t, inst.launchAdoptedWith(&AgentConversationData{Agent: "codex", ID: adoptedOlderID}, func() error { return errors.New("boom") }))
+}
+
+// #7219: a sandbox restore hands the agent-server the tab's record as a pin,
+// and the Codex guard judges it like the tab's own record. After a /new in
+// the sandbox (a newer top-level thread in this worktree), the relaunch does
+// not resume the thread the user left, and the refused pin is spent. With no
+// newer thread it resumes exactly.
+func TestAdoptedLaunchJudgesTheTabsCodexRecord(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		newer bool
+	}{{"after a /new", true}, {"with no newer thread", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			codexHome := t.TempDir()
+			t.Setenv("CODEX_HOME", codexHome)
+			workDir := t.TempDir()
+			recorded := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+adoptedOlderID+".jsonl", workDir)
+			markRolloutOlder(t, recorded)
+			if tc.newer {
+				writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-37-"+adoptedLatestID+".jsonl", workDir)
+			}
+			inst := adoptInstanceAt(t, workDir)
+			inst.Tabs = []*Tab{{}}
+			conv := AgentConversationData{Agent: "codex", ID: adoptedOlderID}
+
+			var launched string
+			var decline resumeDecline
+			require.NoError(t, inst.launchAdoptedWith(&conv, func() error {
+				var ok bool
+				launched, ok, decline = prepareExactResumeConversation(inst, inst.Program)
+				if !ok {
+					inst.RetireConversationForFreshRuntime(inst.exactResumeRefusal(decline).ID, ConversationCaptureSnapshot{})
+				}
+				return nil
+			}))
+			if !tc.newer {
+				assert.Contains(t, launched, "resume "+adoptedOlderID)
+				return
+			}
+			assert.NotContains(t, launched, adoptedOlderID, "the thread the user left is not resumed")
+			assert.NotContains(t, launched, "--last")
+			assert.Equal(t, staleCarryReason, decline.reason)
+			assert.False(t, inst.resumableConversation().HasID(), "the refused pin is spent")
+		})
+	}
 }

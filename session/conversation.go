@@ -263,6 +263,12 @@ func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap Conv
 		i.Tabs[0].Conversation = AgentConversationData{}
 		i.touchLocked()
 	}
+	// A refused pin that is the tab's record is spent the same way: a later
+	// launch must not come up on the thread it refused (#7219).
+	if i.carriedIsRecord && i.carriedConversation.ID == refusedID && refusedID != "" {
+		i.carriedConversation, i.carriedIsRecord = AgentConversationData{}, false
+		i.touchLocked()
+	}
 	if snap.CapturesCodex() {
 		s := snap
 		i.pendingConversationCapture = &PendingConversationCapture{
@@ -530,9 +536,12 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 	if !ok {
 		return program, false, resumeDecline{}
 	}
+	// Both agents judge the tab's record, wherever it is delivered from: an
+	// in-sandbox agent-server has no follow for a recorded Codex row, so a
+	// /new there leaves the record naming the thread the user left (#7219).
 	var decline resumeDecline
 	switch {
-	case conv.Agent == tmux.ProgramCodex && source == conversationFromTab:
+	case conv.Agent == tmux.ProgramCodex && source != conversationFromPin:
 		decline = i.staleRecordedCodexDecline(program, conv)
 	case conv.Agent == tmux.ProgramClaude && source != conversationFromPin:
 		// The tab's record, wherever it is delivered from (#7209 review R2).
