@@ -227,6 +227,11 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		}
 		return nil, reason
 	}
+	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
+		if reason := carry.claudeTargetReason(); reason != "" {
+			return nil, reason
+		}
+	}
 	// An operator's standing repair is judged by the restore guard's rule
 	// (staleRecordedCodexDecline): its provenance is re-checked, and only the
 	// threads it overrode are disregarded (#7122).
@@ -283,37 +288,6 @@ func (c *conversationCarry) locate(program, workDir string) string {
 		return c.locateCodex()
 	}
 	return fmt.Sprintf(carryUnsupportedFormat, c.agent)
-}
-
-func (c *conversationCarry) locateClaude(program, workDir string) string {
-	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
-	if err != nil || !launch.WorkingDirKnown() {
-		return carryNoClaudeDirReason
-	}
-	var refused string
-	c.claudeProjects = claudeProjectCandidates(launch.WorkingDir)
-	for _, project := range c.claudeProjects {
-		transcript := filepath.Join(project, c.id+".jsonl")
-		roots := []carryRoot{c.srcRoot}
-		if c.committed {
-			roots = append(roots, c.dstRoot)
-		}
-		for _, root := range roots {
-			present, err := probeCarryArtifact(root, transcript)
-			if present {
-				c.transcript = transcript
-				c.aux = filepath.Join(project, c.id)
-				return ""
-			}
-			if path := carrySymlinkPath(err); path != "" && refused == "" {
-				refused = symlinkCarryReason(path)
-			}
-		}
-	}
-	if refused != "" {
-		return refused
-	}
-	return carryTranscriptMissingReason
 }
 
 func (c *conversationCarry) locateCodex() string {

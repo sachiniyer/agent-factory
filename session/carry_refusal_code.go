@@ -28,7 +28,8 @@ const (
 	carryStoreUnlistedReason           = "af could not enumerate the Codex rollout store"
 	carrySourceStoreUnlistedReason     = "af could not enumerate the previous account's rollout store"
 	carryTranscriptsUnlistedReason     = "af could not list the conversations in this worktree to confirm the recorded one is current"
-	carryTranscriptCopiesReason        = "Claude holds a newer copy of this conversation under another spelling of the worktree's path than the one af would carry"
+	carryTranscriptCopiesReason        = "Claude wrote a newer copy of this conversation under another spelling of the worktree's path while af planned the carry"
+	carryTargetUncheckedReason         = "af could not check the new account's home for another copy of this conversation"
 	carryUncorrelatedReason            = "af could not confirm the recorded conversation is still the newest one in this worktree"
 	carryRolloutMisplacedReason        = "af could not place the Codex rollout inside its home"
 	carryOtherFormsUnlistedReason      = "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
@@ -45,6 +46,10 @@ const (
 	carryUnsupportedFormat        = "%s conversations cannot be carried"
 	carryDuplicatedFormat         = "%d Codex rollouts record this conversation"
 	carrySymlinkFormat            = "%s is a symbolic link, which af does not follow when carrying a conversation"
+	carryTranscriptCopiesFormat   = "Claude holds two copies of this conversation last written at the same moment, %s and %s, " +
+		"and af cannot tell which one it resumes; move aside the one you are not using and try again"
+	carryTargetOtherCopyFormat = "the new account already holds this conversation at %s, under another spelling of the worktree's path " +
+		"than the copy af would write, and its replacement could resume that one instead; move it aside and try again"
 )
 
 // carryOperatorRepairMark is in every refusal of an operator-recorded
@@ -68,6 +73,7 @@ var carryRefusalCodeOf = map[string]string{
 	carrySourceStoreUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptsUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptCopiesReason:        handoff.CarryDuplicated,
+	carryTargetUncheckedReason:         handoff.CarryUnverified,
 	carryUncorrelatedReason:            handoff.CarryUnverified,
 	carryRolloutMisplacedReason:        handoff.CarryUnverified,
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,
@@ -90,6 +96,8 @@ var carryRefusalFormats = []struct {
 	{carryFormatRE(carryUnsupportedFormat), handoff.CarryUnsupported},
 	{carryFormatRE(carryDuplicatedFormat), handoff.CarryDuplicated},
 	{carryFormatRE(carrySymlinkFormat), handoff.CarrySymlinked},
+	{carryFormatRE(carryTranscriptCopiesFormat), handoff.CarryDuplicated},
+	{carryFormatRE(carryTargetOtherCopyFormat), handoff.CarryDuplicated},
 }
 
 var carryFormatVerbRE = regexp.MustCompile(`%[sqd]`)

@@ -625,7 +625,7 @@ type Instance struct {
 	// exists for exactly one caller: the daemon's root-agent heal, which reaps
 	// the vanished root's record — and with it agent_conversation — and creates a
 	// replacement in place, where every other Lost session is re-spawned on its
-	// own surviving record. Set by NewInstance or SetResumeConversation; not
+	// own surviving record. Set by NewInstance or SetResumeRecordedConversation; not
 	// consumed by a launch (root-recreate classification reads it afterwards);
 	// retired when the account changes (retireConversationsLocked, #6189). A
 	// REQUEST, not a fact: honored only when the resolved command can express it,
