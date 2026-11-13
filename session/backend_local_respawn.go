@@ -744,8 +744,10 @@ func (i *Instance) exactResumeRefusal(decline resumeDecline) resumeRefusal {
 		return resumeRefusal{}
 	}
 	refusal := resumeRefusal{
-		ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: decline.reason},
-		retire:             decline.retiresRecord(conv),
+		ExactResumeRefusal: tmux.ExactResumeRefusal{
+			Session: i.Title, ID: conv.ID, Reason: decline.reason, Judged: decline.reason != "",
+		},
+		retire: decline.retiresRecord(conv),
 	}
 	if decline.reason == "" {
 		refusal.Reason = fmt.Sprintf("its launch command cannot resume a recorded %s conversation", conv.Agent)

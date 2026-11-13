@@ -802,8 +802,14 @@ func (i *Instance) respawnConversationPlan() (HandoffConversation, AgentConversa
 		return HandoffConversation{CarryFailure: err.Error()}, AgentConversationData{}
 	}
 	program := resolution.command
-	if _, ok, _ := prepareExactResumeConversation(i, program); ok {
+	_, ok, decline := prepareExactResumeConversation(i, program)
+	if ok {
 		return HandoffConversation{Carried: true}, i.resumableConversation()
+	}
+	if decline.reason != "" {
+		// A refused id starts the respawn fresh: it bars the agent's own
+		// worktree-scoped latest too (tmux.ExactResumeRefusal.Judged).
+		return HandoffConversation{CarryFailure: decline.reason}, AgentConversationData{}
 	}
 	if tmux.ProgramResumesConversation(program) {
 		return HandoffConversation{Carried: true}, AgentConversationData{}

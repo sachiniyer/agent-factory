@@ -3,12 +3,14 @@ package session
 import (
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/internal/testguard"
+	"github.com/sachiniyer/agent-factory/log"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -202,4 +204,73 @@ func TestExactResumeLeavesACarriedClaudeConversationAlone(t *testing.T) {
 	rewritten, ok, _ := prepareExactResumeConversation(inst, "claude")
 	require.True(t, ok)
 	require.Equal(t, "claude --resume "+carryTestID, rewritten)
+}
+
+// #7209 review: the refusal holds through the re-spawn itself. The command a
+// recovery launches carries neither the refused id nor Claude's
+// worktree-scoped --continue, which after a /clear would pick whichever
+// conversation Claude wrote last, and the retry answer reports the refusal
+// instead of predicting a carry.
+func TestRecoverStartsAStaleClaudeSessionFresh(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		stale bool
+	}{{"stale", true}, {"current", false}} {
+		t.Run(tc.name, func(t *testing.T) {
+			log.Initialize(false)
+			defer log.Close()
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+			const agentName = "af_recover_claude_stale"
+			shellName := agentName + tmuxTabSeparator + shellTabName
+			var newSessions int
+			var spawns []string
+			exec := recordingExec(map[string]bool{}, &newSessions, &spawns)
+			pty := persistPtyFactory{t: t, cmdExec: exec}
+			prev := restoreTmuxSession
+			restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+				return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+			}
+			t.Cleanup(func() { restoreTmuxSession = prev })
+
+			data := deadInstanceData(t, Lost, agentName, shellName)
+			data.Tabs[0].Conversation = &AgentConversationData{
+				Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected,
+			}
+			project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
+			past := time.Now().Add(-time.Hour)
+			other := past.Add(-time.Minute)
+			if tc.stale {
+				other = past.Add(time.Minute)
+			}
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), other)
+
+			restored, err := FromInstanceData(data)
+			require.NoError(t, err)
+			require.Equal(t, Lost, restored.GetStatus())
+			outcome := restored.ResumeConversationOutcome()
+			require.NoError(t, restored.Recover())
+
+			var agentSpawn string
+			for _, spawn := range spawns {
+				if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellName) {
+					agentSpawn = spawn
+					break
+				}
+			}
+			require.NotEmpty(t, agentSpawn, "Recover must re-spawn the agent")
+			if !tc.stale {
+				require.True(t, outcome.Carried, "%+v", outcome)
+				require.Contains(t, agentSpawn, "--resume "+carryTestID)
+				return
+			}
+			require.False(t, outcome.Carried, "a refused id is not carried")
+			require.Equal(t, staleCarryReason, outcome.CarryFailure)
+			require.NotContains(t, agentSpawn, "--resume", "the refused id must not be resumed")
+			require.NotContains(t, agentSpawn, "--continue", "a refused restore starts fresh, not on Claude's latest")
+		})
+	}
 }
