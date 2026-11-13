@@ -530,10 +530,10 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
 			// and whoever created it — is the root agent, and its recorded
-			// conversation is left as it is. Claude 2.1 never continues a
-			// conversation under a new id, so no transcript in the checkout
-			// can stand in for it; the newest one there may be the user's own
-			// (#7222).
+			// conversation is left as it is. A resume continues a
+			// conversation under its own id (Claude Code 1.0.119 on), so no
+			// transcript in the checkout stands in for it; the newest one
+			// there may be the user's own (#7222).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
 			m.rootEnsureSucceeded(st)
 			return

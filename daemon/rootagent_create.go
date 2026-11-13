@@ -321,9 +321,10 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// (judgeRecordedClaude): resumed while a store holds it, started on while
 	// none does. It is never swapped for the newest conversation in the
 	// checkout. That is the user's checkout, where their own claude files
-	// beside the root's, and Claude 2.1 never moves a conversation to a new
-	// id, so nothing there is the root's continuation (#7222; #3306's
-	// rotation was an older Claude's).
+	// beside the root's, and a resume continues a conversation under its own
+	// id (Claude Code 1.0.119 on; af launches nothing older than 2.0.25, the
+	// first with --plugin-dir), so nothing there is a continuation of the
+	// root's record that af can tell from the user's own (#7222).
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: workspace,
