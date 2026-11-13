@@ -11,9 +11,11 @@ import (
 )
 
 const (
-	ConversationCaptureInjected         = "injected"
-	ConversationCaptureCodexRollout     = "codex_rollout"
-	ConversationCaptureClaudeTranscript = "claude_transcript"
+	ConversationCaptureInjected     = "injected"
+	ConversationCaptureCodexRollout = "codex_rollout"
+	// A record the removed root substitution wrote may still say
+	// "claude_transcript" (#7222). No code reads a capture kind but the
+	// carried and operator ones, so it needs no constant.
 	// ConversationCaptureCarried marks a conversation a same-agent account
 	// swap copied into the incoming account's home and resumed (#4367).
 	ConversationCaptureCarried = "carried"
@@ -370,11 +372,27 @@ func (i *Instance) PendingConversationCaptureParkedForTest() bool {
 }
 
 func prepareLaunchConversation(i *Instance, program, freshID string) string {
-	rewritten, conversation := planCreateConversation(i, program, freshID)
+	rewritten, conversation, startedOnCarried := planCreateConversation(i, program, freshID)
 	if conversation.HasID() {
 		i.SetAgentConversation(conversation)
 	}
+	i.setLaunchStartedOnCarried(startedOnCarried)
 	return rewritten
+}
+
+// CommitCreateConversationForTest makes and commits the conversation plan a
+// local create makes for program, for a backend double that spawns nothing: a
+// daemon heal test then classifies the launch the real planner chose.
+func (i *Instance) CommitCreateConversationForTest(program string) string {
+	return prepareLaunchConversation(i, program, i.ID)
+}
+
+// setLaunchStartedOnCarried records, with the conversation a launch commits,
+// whether that launch started on the carried id rather than resuming it.
+func (i *Instance) setLaunchStartedOnCarried(started bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.launchStartedOnCarried = started
 }
 
 // planCreateConversation decides which conversation a launch comes up on.
@@ -400,7 +418,7 @@ func prepareLaunchConversation(i *Instance, program, freshID string) string {
 // minted one, because the instance id may already name the conversation that
 // first launch started, and Claude refuses to start a new conversation on an
 // id a transcript already holds (#7211).
-func planCreateConversation(i *Instance, program, freshID string) (string, AgentConversationData) {
+func planCreateConversation(i *Instance, program, freshID string) (launch string, conversation AgentConversationData, startedOnCarried bool) {
 	i.mu.RLock()
 	carried := i.carriedConversation
 	i.mu.RUnlock()
@@ -415,22 +433,26 @@ func planCreateConversation(i *Instance, program, freshID string) (string, Agent
 			if carried.Agent == tmux.ProgramClaude {
 				switch decline := i.recordedClaudeDecline(program, carried); {
 				case decline.startsOnRecorded:
+					// A new conversation on the carried id, not a resume: the
+					// recreate classification must not read it as one.
 					if started, injected := tmux.ClaudeProgramWithSessionID(program, carried.ID); injected {
-						return started, carried
+						return started, carried, true
 					}
 				case decline.reason != "":
 					log.WarningLog.Printf("session %q: not resuming its recorded claude conversation %s on first launch: %s; starting a fresh conversation",
 						i.Title, carried.ID, decline.reason)
-					return planLaunchConversation(freshID, program)
+					launch, conversation := planLaunchConversation(freshID, program)
+					return launch, conversation, false
 				}
 			}
-			return rewritten, carried
+			return rewritten, carried, false
 		}
 		// A command that pins its own resume flag also lands here, and must not be
 		// given a freshly injected --session-id on top of it — the injection helper
 		// declines for the same reason, so the fall-through below is a no-op there.
 	}
-	return planLaunchConversation(freshID, program)
+	launch, conversation = planLaunchConversation(freshID, program)
+	return launch, conversation, false
 }
 
 // planLaunchConversation is the side-effect-free half of

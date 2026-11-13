@@ -525,6 +525,8 @@ func TestPrepareCreateLaunchComesUpOnTheCarriedConversation(t *testing.T) {
 			require.Equal(t, priorID, plan.conversation.ID,
 				"the create must come up on the carried conversation, not a freshly minted one")
 			require.Contains(t, plan.program, tc.want)
+			require.Equal(t, !tc.filed, plan.startedOnCarried,
+				"the plan says when its launch starts on the carried id rather than resuming it (#7226 review R1)")
 		})
 	}
 }

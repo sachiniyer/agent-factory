@@ -438,6 +438,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			if prepared.conversation.HasID() {
 				i.SetAgentConversation(prepared.conversation)
 			}
+			i.setLaunchStartedOnCarried(prepared.startedOnCarried)
 		} else {
 			// The pre-rewrite command is resolved once and kept with the proof it
 			// produces. A prepared create carries both from its earlier freeze.

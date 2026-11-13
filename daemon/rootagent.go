@@ -610,12 +610,14 @@ func countNonAgentTabs(tabs []session.TabData) int {
 // its own resume flag), and the record is the thing that will be resumed from
 // next time.
 //
-// The judgment itself is session.ClassifyRootRecreateContext — the SAME call
-// that decides the note on the row (#2629), not a second copy of the rule. The
-// log adds one distinction the note does not need (nothing recorded to carry vs
-// recorded and not resumed); it cannot add a different verdict.
-func reportRootConversationCarry(repoRoot string, carried session.AgentConversationData, created *session.AgentConversationData, launchedAgent string) {
-	switch session.ClassifyRootRecreateContext(carried, created, launchedAgent) {
+// The judgment itself is outcome: the replacement's own
+// session.ClassifyRootRecreateContext answer, returned by the SAME call that
+// decides the note on the row (#2629, NoteRecreateContext), not a second copy
+// of the rule. The log adds distinctions the note does not need (nothing
+// recorded to carry, a new conversation on the carried id, recorded and not
+// resumed); it cannot add a different verdict.
+func reportRootConversationCarry(repoRoot string, outcome session.RootRecreateContext, carried session.AgentConversationData, created *session.AgentConversationData, launchedAgent string) {
+	switch outcome {
 	case session.RootRecreateContextNone:
 		log.InfoLog.Printf("re-created root agent for %s resumed its prior %s conversation %s", repoRoot, carried.Agent, carried.ID)
 	case session.RootRecreateContextUnknown:
@@ -631,6 +633,12 @@ func reportRootConversationCarry(repoRoot string, carried session.AgentConversat
 			// agents is what makes a repointed root_agents program diagnosable.
 			log.WarningLog.Printf("re-created root agent for %s now runs %s, so its prior %s conversation %s cannot be resumed; it starts with a fresh context",
 				repoRoot, launchedAgent, carried.Agent, carried.ID)
+		case created.Agent == carried.Agent && created.ID == carried.ID:
+			// The launch started on the carried id: no store held its
+			// transcript any more (Claude's retention, or a hand), so the id
+			// came back and its history did not (#7226 review R1).
+			log.WarningLog.Printf("re-created root agent for %s could not resume its prior %s conversation %s, because no transcript store holds it any more; it started a new conversation on that id and starts with a fresh context",
+				repoRoot, carried.Agent, carried.ID)
 		default:
 			log.WarningLog.Printf("re-created root agent for %s did not come up on its prior %s conversation %s; it starts with a fresh context",
 				repoRoot, carried.Agent, carried.ID)

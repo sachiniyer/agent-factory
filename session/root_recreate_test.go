@@ -26,12 +26,13 @@ func TestClassifyRootRecreateContext(t *testing.T) {
 	prior := AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID}
 
 	tests := []struct {
-		name     string
-		carried  AgentConversationData
-		created  *AgentConversationData
-		launched string
-		want     RootRecreateContext
-		note     string
+		name      string
+		carried   AgentConversationData
+		created   *AgentConversationData
+		launched  string
+		startedOn bool
+		want      RootRecreateContext
+		note      string
 	}{
 		{
 			name:     "resumed the exact conversation",
@@ -40,6 +41,18 @@ func TestClassifyRootRecreateContext(t *testing.T) {
 			launched: tmux.ProgramClaude,
 			want:     RootRecreateContextNone,
 			note:     "",
+		},
+		{
+			// #7226 review R1: no store held the carried transcript, so the
+			// launch started a new conversation on its id. The id matches; the
+			// history is gone.
+			name:      "a new conversation on the carried id",
+			carried:   prior,
+			created:   &AgentConversationData{Agent: tmux.ProgramClaude, ID: priorConversationID},
+			launched:  tmux.ProgramClaude,
+			startedOn: true,
+			want:      RootRecreateContextFresh,
+			note:      "fresh context",
 		},
 		{
 			name:     "nothing was recorded to carry",
@@ -102,7 +115,7 @@ func TestClassifyRootRecreateContext(t *testing.T) {
 
 	for _, tc := range tests {
 		t.Run(tc.name, func(t *testing.T) {
-			got := ClassifyRootRecreateContext(tc.carried, tc.created, tc.launched)
+			got := ClassifyRootRecreateContext(tc.carried, tc.created, tc.launched, tc.startedOn)
 			assert.Equal(t, tc.want, got)
 			assert.Equal(t, tc.note, got.Note())
 		})
@@ -209,7 +222,7 @@ func TestPendingNoticeSurvivesASecondHeal(t *testing.T) {
 		Tabs:                  []*Tab{{Name: agentTabName, Conversation: current}},
 	}
 	require.Equal(t, RootRecreateContextNone,
-		ClassifyRootRecreateContext(current, &current, tmux.ProgramClaude),
+		ClassifyRootRecreateContext(current, &current, tmux.ProgramClaude, false),
 		"fixture guard: this heal must classify clean on its own, or the test proves nothing")
 
 	inst.NoteRecreateContext()

@@ -39,9 +39,11 @@ const (
 	// that came back on exactly the conversation it had. Nothing to report.
 	RootRecreateContextNone RootRecreateContext = ""
 	// RootRecreateContextFresh means the root is demonstrably NOT on its prior
-	// conversation: it had none to carry, or the launch committed a different
-	// one. Its context is gone, and the user's next prompt lands on an agent
-	// with no memory of what it was doing.
+	// conversation: it had none to carry, the launch committed a different one,
+	// or the launch started a new conversation on the carried id because no
+	// store held its transcript any more (#7226 review R1). Its context is gone,
+	// and the user's next prompt lands on an agent with no memory of what it
+	// was doing.
 	RootRecreateContextFresh RootRecreateContext = "fresh"
 	// RootRecreateContextUnknown means the replacement recorded no conversation
 	// at all, so af cannot say whether the agent continued or started over. The
@@ -52,7 +54,8 @@ const (
 
 // ClassifyRootRecreateContext decides what a root heal's conversation carry did,
 // from the conversation the reaped record held, the one the replacement actually
-// came up with, and the agent the replacement actually launched.
+// came up with, the agent the replacement actually launched, and whether that
+// launch started on the carried id rather than resuming it.
 //
 // It reads the conversation the new record CARRIES rather than what the create
 // was asked to do: a create can be handed a conversation and still come up on a
@@ -78,14 +81,24 @@ const (
 //     fresh-id injection therefore decline. There the agent may well have
 //     continued something; af genuinely cannot say.
 //
-// This is the single authority for that judgment — the daemon's log line and
-// the note on the row both come from here — so the log and the rail can never
-// disagree about whether a root resumed.
-func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentConversationData, launchedAgent string) RootRecreateContext {
+// startedOnCarried separates the two launches that record the carried id. A
+// resume (`--resume R`) continues R's history. A start on R (`--session-id R`,
+// when no store holds R's transcript: Claude's retention deleted it, or Claude
+// never filed it) begins a conversation with none, so the id matching is no
+// evidence of continuity.
+//
+// This is the single authority for that judgment — the note on the row comes
+// from here, and the daemon's log line reports the same call's answer
+// (NoteRecreateContext) — so the log and the rail can never disagree about
+// whether a root resumed.
+func ClassifyRootRecreateContext(carried AgentConversationData, created *AgentConversationData, launchedAgent string, startedOnCarried bool) RootRecreateContext {
 	switch {
 	case !carried.HasID():
 		// Nothing was recorded to carry, so nothing was resumed. The root really is
 		// on a fresh context; that the loss predates the outage does not soften it.
+		return RootRecreateContextFresh
+	case startedOnCarried:
+		// The id came back; the history did not.
 		return RootRecreateContextFresh
 	case created != nil && created.Agent == carried.Agent && created.ID == carried.ID:
 		return RootRecreateContextNone
@@ -199,8 +212,10 @@ func (i *Instance) ReconcileRootRecreateContext(ctx RootRecreateContext) bool {
 	return true
 }
 
-// NoteRecreateContext classifies the launch this instance just completed and
-// records the resulting one-shot marker.
+// NoteRecreateContext classifies the launch this instance just completed,
+// records the resulting one-shot marker, and returns that launch's own
+// classification — before the floor at an earlier heal's pending notice — for
+// the daemon's log line to report.
 //
 // The CALLER decides that this create is a heal — only the daemon knows it just
 // reaped a record, and it is the one fact the carried conversation cannot
@@ -214,10 +229,10 @@ func (i *Instance) ReconcileRootRecreateContext(ctx RootRecreateContext) bool {
 // recovery resumes from. Calling it before the create's own persist is what
 // keeps the marker in the SAME projection the create writes and publishes,
 // rather than a second write racing the first client to render the row.
-func (i *Instance) NoteRecreateContext() {
+func (i *Instance) NoteRecreateContext() RootRecreateContext {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.noteRecreateContextLocked()
+	return i.noteRecreateContextLocked()
 }
 
 // RefreshRecreateContext re-runs the classification against evidence that
@@ -248,7 +263,8 @@ func (i *Instance) RefreshRecreateContext() bool {
 	return i.rootRecreateContext != before
 }
 
-// noteRecreateContextLocked is the shared body. Caller holds i.mu for writing.
+// noteRecreateContextLocked is the shared body, returning the launch's own
+// classification. Caller holds i.mu for writing.
 //
 // The result is FLOORED at any notice inherited from an earlier heal. A root can
 // lose its history and then have tmux die again before anyone opens the pane;
@@ -257,7 +273,16 @@ func (i *Instance) RefreshRecreateContext() bool {
 // erase an unacknowledged warning about the first — putting the loss back out of
 // sight, which is the whole bug. A pending notice is cleared by acknowledgement
 // and by nothing else; a later heal can only make it worse.
-func (i *Instance) noteRecreateContextLocked() {
+func (i *Instance) noteRecreateContextLocked() RootRecreateContext {
+	var created *AgentConversationData
+	if len(i.Tabs) > 0 {
+		created = conversationDataPtr(i.Tabs[0].Conversation)
+	}
+	// currentAgentNameLocked reads the LAUNCHED command off the bound tmux
+	// session, so a root whose program was repointed to another agent is
+	// identified as that agent — which is what separates the provable
+	// agent-change fallback from a command that picked its own conversation.
+	classified := ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked(), i.launchStartedOnCarried)
 	// A carried notice this binary cannot READ is kept verbatim. severity() has to
 	// score an unrecognized value as 0 — it must never outrank a note this binary
 	// would actually show — but that score would then let a locally-classified
@@ -267,27 +292,20 @@ func (i *Instance) noteRecreateContextLocked() {
 	//
 	// The cost is real and deliberate: while running the older binary the rail
 	// shows no note for that root, because it has no words for the value it is
-	// holding. The heal outcome still reaches the application log, and the note
-	// returns the moment the newer daemon is back.
+	// holding. The heal outcome still reaches the application log, from the
+	// classification returned here, and the note returns the moment the newer
+	// daemon is back.
 	if i.carriedRecreateNotice != RootRecreateContextNone && i.carriedRecreateNotice.Note() == "" {
 		if i.rootRecreateContext != i.carriedRecreateNotice {
 			i.rootRecreateContext = i.carriedRecreateNotice
 			i.touchLocked()
 		}
-		return
+		return classified
 	}
-	var created *AgentConversationData
-	if len(i.Tabs) > 0 {
-		created = conversationDataPtr(i.Tabs[0].Conversation)
-	}
-	// currentAgentNameLocked reads the LAUNCHED command off the bound tmux
-	// session, so a root whose program was repointed to another agent is
-	// identified as that agent — which is what separates the provable
-	// agent-change fallback from a command that picked its own conversation.
-	classified := ClassifyRootRecreateContext(i.carriedConversation, created, i.currentAgentNameLocked())
 	next := moreSevereRecreateContext(i.carriedRecreateNotice, classified)
 	if i.rootRecreateContext != next {
 		i.rootRecreateContext = next
 		i.touchLocked()
 	}
+	return classified
 }

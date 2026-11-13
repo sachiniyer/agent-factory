@@ -123,8 +123,10 @@ func TestFirstLaunchJudgesARecordPinByTheRecordedClaudeRule(t *testing.T) {
 			inst.Tabs = []*Tab{{}}
 			inst.SetResumeRecordedConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected})
 
-			got, conv := planCreateConversation(inst, "claude", freshID)
+			got, conv, startedOn := planCreateConversation(inst, "claude", freshID)
 			require.Equal(t, tc.want, got)
+			require.Equal(t, strings.Contains(tc.want, "--session-id "+carryTestID), startedOn,
+				"only a launch on the carried id itself starts on it")
 			require.Equal(t, strings.Fields(tc.want)[2], conv.ID, "the launch records the conversation it starts on")
 		})
 	}
@@ -160,16 +162,60 @@ func TestRootHealsPinIsJudgedAsTheRootsRecord(t *testing.T) {
 			tc.layout(func(id string, at time.Time) {
 				setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, checkout)), at)
 			})
-			gw, err := sessiongit.NewGitWorktreeFromStorage(checkout, checkout, RootSessionTitle, "main", "", false, true)
-			require.NoError(t, err)
-			root := &Instance{Title: RootSessionTitle, Program: tmux.ProgramClaude, Path: checkout, gitWorktree: gw, inPlace: true,
-				Tabs: []*Tab{{}}}
-			// As NewInstance sets it from InstanceOptions.ResumeConversation.
-			root.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
+			root := rootHealInstance(t, checkout)
 
-			got, conv := planCreateConversation(root, "claude", freshID)
+			got, conv, startedOn := planCreateConversation(root, "claude", freshID)
 			require.Equal(t, tc.want, got)
+			require.Equal(t, strings.Contains(tc.want, "--session-id"), startedOn,
+				"a start on R is reported as one, a resume of R is not")
 			require.Equal(t, carryTestID, conv.ID, "the root's record stays its conversation")
+		})
+	}
+}
+
+// rootHealInstance is the replacement a root heal creates: the root's title,
+// in place at the checkout, no agent-tab record yet, and the vanished root's
+// record R carried as NewInstance sets it from InstanceOptions.ResumeConversation.
+func rootHealInstance(t *testing.T, checkout string) *Instance {
+	t.Helper()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(checkout, checkout, RootSessionTitle, "main", "", false, true)
+	require.NoError(t, err)
+	root := &Instance{Title: RootSessionTitle, Program: tmux.ProgramClaude, Path: checkout, gitWorktree: gw, inPlace: true,
+		Tabs: []*Tab{{}}}
+	root.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
+	return root
+}
+
+// #7226 review R1: a heal whose launch starts Claude on R, because no store
+// holds R's transcript (Claude's retention deleted it, or Claude never filed
+// it), comes back with R's id and none of its history, and its row says
+// "fresh context" as every other heal that lost the context does. Only a heal
+// that resumes R has nothing to report.
+func TestARootHealThatStartsOnItsRecordIsAFreshContext(t *testing.T) {
+	const freshID = "0e0e0e0e-1111-4222-8333-444444444444"
+	for _, tc := range []struct {
+		name  string
+		filed bool
+		want  RootRecreateContext
+	}{
+		{"R no store holds is started on: fresh context", false, RootRecreateContextFresh},
+		{"R a store holds is resumed: nothing to report", true, RootRecreateContextNone},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+			t.Setenv("HOME", t.TempDir())
+			checkout, project, _ := claudeRestoreWorktree(t)
+			if tc.filed {
+				writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), claudeRecordLine(t, checkout))
+			}
+			root := rootHealInstance(t, checkout)
+
+			prepareLaunchConversation(root, "claude", freshID)
+			root.NoteRecreateContext()
+
+			require.Equal(t, carryTestID, root.AgentConversation().ID, "the root keeps its record either way")
+			require.Equal(t, tc.want, root.RootRecreateContext())
 		})
 	}
 }

@@ -447,6 +447,85 @@ func TestEnsureRootAgentsFallsBackFreshNotToTheUsersConversation(t *testing.T) {
 	require.NotNil(t, findRootInstance(t, manager, repoPath))
 }
 
+// plannedCreateBackend is a ready fake whose start makes and commits the
+// conversation plan a real local create makes, so a heal's note and log line
+// classify the launch af would actually make, not a stand-in for it.
+type plannedCreateBackend struct {
+	readyFakeBackend
+}
+
+func (b plannedCreateBackend) Start(instance *session.Instance, firstTimeSetup bool) error {
+	instance.CommitCreateConversationForTest(tmux.ProgramClaude)
+	return b.readyFakeBackend.Start(instance, firstTimeSetup)
+}
+
+// TestEnsureRootAgentsReportsAHealThatStartsOnItsRecordAsFreshContext is #7226
+// review R1, end to end: a heal whose launch starts Claude on R, because no
+// store holds R's transcript any more, comes back with none of R's history, so
+// the row's note and the log both say "fresh context". A heal that resumes R
+// says it resumed.
+func TestEnsureRootAgentsReportsAHealThatStartsOnItsRecordAsFreshContext(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		filed       bool
+		want        session.RootRecreateContext
+		wantInfo    string
+		wantWarning string
+	}{
+		{
+			name:        "R no store holds",
+			want:        session.RootRecreateContextFresh,
+			wantWarning: "could not resume its prior claude conversation " + priorRootConversationID + ", because no transcript store holds it any more; it started a new conversation on that id and starts with a fresh context",
+		},
+		{
+			name:     "R a store holds",
+			filed:    true,
+			want:     session.RootRecreateContextNone,
+			wantInfo: "resumed its prior claude conversation " + priorRootConversationID,
+		},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
+			claudeConfigDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+			restore := session.SetBackendFactoryForTest(func(session.InstanceOptions, string) (session.Backend, error) {
+				fake := session.NewFakeBackend()
+				fake.CompleteStart()
+				return plannedCreateBackend{readyFakeBackend{fake}}, nil
+			})
+			t.Cleanup(restore)
+			repoPath := setupControlRepo(t)
+			if tc.filed {
+				writeRootClaudeTranscript(t, claudeConfigDir, repoPath, priorRootConversationID)
+			}
+
+			manager, err := NewManager(rootTestConfig(repoPath, config.RootAgentConfig{}))
+			require.NoError(t, err)
+			manager.ensureRootAgentsAndWait()
+			first := findRootInstance(t, manager, repoPath)
+			require.NotNil(t, first)
+			seedRootConversation(t, first)
+			info, warning := captureInfo(t), captureWarnings(t)
+
+			first.SetStatusForTest(session.Lost)
+			manager.ensureRootAgentsAndWait()
+
+			root := findRootInstance(t, manager, repoPath)
+			require.NotNil(t, root)
+			require.NotSame(t, first, root, "the heal replaced the record")
+			require.Equal(t, priorRootConversationID, root.AgentConversation().ID, "the root keeps its record either way")
+			require.Equal(t, tc.want, root.RootRecreateContext())
+			if tc.wantWarning != "" {
+				require.Contains(t, warning.String(), tc.wantWarning)
+				require.NotContains(t, info.String(), "resumed its prior")
+			} else {
+				require.Contains(t, info.String(), tc.wantInfo)
+				require.NotContains(t, warning.String(), "fresh context")
+			}
+		})
+	}
+}
+
 // TestReportRootConversationCarryDistinguishesTheThreeOutcomes: whichever way
 // the carry goes, the log must SAY which. A fresh agent is a legitimate outcome
 // when the prior conversation cannot be recovered — but if it reads the same as
@@ -464,6 +543,7 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 		carried     session.AgentConversationData
 		created     *session.AgentConversationData
 		launched    string
+		startedOn   bool
 		wantInfo    string
 		wantWarning string
 	}{
@@ -499,6 +579,16 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 			wantWarning: "now runs codex, so its prior claude conversation " + priorRootConversationID + " cannot be resumed",
 		},
 		{
+			// No store held the carried transcript, so the launch started a new
+			// conversation on its id (#7226 review R1): the same id, no history.
+			name:        "a new conversation on the carried id",
+			carried:     prior,
+			created:     &session.AgentConversationData{Agent: tmux.ProgramClaude, ID: priorRootConversationID},
+			launched:    tmux.ProgramClaude,
+			startedOn:   true,
+			wantWarning: "could not resume its prior claude conversation " + priorRootConversationID + ", because no transcript store holds it any more; it started a new conversation on that id and starts with a fresh context",
+		},
+		{
 			name:        "recorded but not resumed",
 			carried:     prior,
 			created:     &session.AgentConversationData{Agent: tmux.ProgramClaude, ID: "5299e00d-1111-4222-8333-f7045e07a242"},
@@ -511,7 +601,8 @@ func TestReportRootConversationCarryDistinguishesTheThreeOutcomes(t *testing.T) 
 		t.Run(tc.name, func(t *testing.T) {
 			info, warning := captureInfo(t), captureWarnings(t)
 
-			reportRootConversationCarry("/repo", tc.carried, tc.created, tc.launched)
+			outcome := session.ClassifyRootRecreateContext(tc.carried, tc.created, tc.launched, tc.startedOn)
+			reportRootConversationCarry("/repo", outcome, tc.carried, tc.created, tc.launched)
 
 			if tc.wantInfo != "" {
 				require.Contains(t, info.String(), tc.wantInfo)

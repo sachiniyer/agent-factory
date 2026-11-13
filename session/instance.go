@@ -641,6 +641,12 @@ type Instance struct {
 	// REQUEST, not a fact: honored only when the resolved command can express it,
 	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
+	// launchStartedOnCarried records that the launch which committed Tabs[0]'s
+	// conversation started the agent ON carriedConversation's id, because no
+	// store held a transcript for it, rather than resuming it: the id survived
+	// and its history did not. Not persisted; the root heal's recreate
+	// classification reads it right after that launch (#7226 review R1).
+	launchStartedOnCarried bool
 
 	// reportedConversation is the last conversation a remote agent-server reported
 	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to

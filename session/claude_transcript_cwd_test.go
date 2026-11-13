@@ -88,9 +88,9 @@ func TestClaudeTranscriptDirReadsWhatClaudesResumeReads(t *testing.T) {
 
 // #7208: Claude's project names collide (a.b and a-b both become a-b), so the
 // project directory a worktree's spelling names can hold another directory's
-// conversations. Those are neither a restore's substitute nor evidence that
-// the user moved on; a conversation that names no directory af can read is not
-// a substitute, and as a newer conversation it leaves "current" unconfirmed.
+// conversations. Those are no evidence that the user moved on; a newer
+// conversation that names no directory af can read leaves "current"
+// unconfirmed.
 func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 	const otherID = "7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
 	past := time.Now().Add(-time.Hour)

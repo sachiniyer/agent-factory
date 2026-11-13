@@ -100,6 +100,13 @@ type CreateSessionRequest struct {
 	// (#7182). Unexported for allowReserved's reason.
 	rootCommitGuard func() error
 
+	// recreateOutcome, when set on a heal's create, receives what its launch
+	// did to the carried conversation: the classification the replacement's
+	// note was made from (Instance.NoteRecreateContext), so the daemon's log
+	// line reports the same answer the row shows (#7226 review R1). Unexported
+	// for allowReserved's reason.
+	recreateOutcome *session.RootRecreateContext
+
 	// resumeConversation carries a reaped record's provider conversation into its
 	// replacement (#2616). Set only by the root-agent ensure loop, which — unlike
 	// the general Lost-restore path — replaces the record rather than re-spawning

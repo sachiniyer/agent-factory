@@ -97,7 +97,7 @@ func TestNoLaunchOnAnIDGetsALatestConversationSelector(t *testing.T) {
 			inst.SetResumeRecordedConversation(AgentConversationData{
 				Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected,
 			})
-			program, _ := planCreateConversation(inst, "claude", "0e0e0e0e-1111-4222-8333-444444444444")
+			program, _, _ := planCreateConversation(inst, "claude", "0e0e0e0e-1111-4222-8333-444444444444")
 			var newSessions int
 			var spawns []string
 			exec := recordingExec(map[string]bool{}, &newSessions, &spawns)

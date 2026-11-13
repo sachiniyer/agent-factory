@@ -322,9 +322,11 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	// none does. It is never swapped for the newest conversation in the
 	// checkout. That is the user's checkout, where their own claude files
 	// beside the root's, and a resume continues a conversation under its own
-	// id (Claude Code 1.0.119 on; af launches nothing older than 2.0.25, the
-	// first with --plugin-dir), so nothing there is a continuation of the
-	// root's record that af can tell from the user's own (#7222).
+	// id (Claude Code 1.0.119 on; every session launch, the root's included,
+	// passes --plugin-dir, which Claude Code first accepts in 2.0.25), so
+	// nothing there is a continuation of the root's record that af can tell
+	// from the user's own (#7222).
+	var recreateOutcome session.RootRecreateContext
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: workspace,
@@ -363,6 +365,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// resumes is still held — checked under the same m.mu section where
 		// reserveCreate checks the delete fence and reserves the title (#7182).
 		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, job.ticket, carryRef) },
+		// The fallback create below reuses this request, so the outcome is
+		// whichever create committed.
+		recreateOutcome: &recreateOutcome,
 	}
 	data, err := m.createVerifiedRoot(repo.ID, identity, req)
 	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
@@ -404,7 +409,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 	m.info().Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
 	if reapedRoot {
-		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
+		reportRootConversationCarry(workspace, recreateOutcome, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
 	m.retireRootCarries(repo.ID)
