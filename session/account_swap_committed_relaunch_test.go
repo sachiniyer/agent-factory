@@ -28,18 +28,40 @@ import (
 // own conversation, unless the account swap's staleness rule says the user has
 // since moved on from it.
 
+// swapLayout is where a committed swap's session works: the repository, the
+// worktree Claude runs in, and the flags that decide whether af owns that
+// worktree exclusively (newerConversationIsEvidence).
+type swapLayout struct {
+	repo, worktree    string
+	external, inPlace bool
+}
+
+// checkoutLayout is a worktree at the repository's own path: the user's
+// checkout, whatever the record's flags say.
+func checkoutLayout(t *testing.T) swapLayout {
+	t.Helper()
+	repo := initTempGitRepo(t)
+	return swapLayout{repo: repo, worktree: repo}
+}
+
+// exclusiveLayout is a worktree af created for this session alone.
+func exclusiveLayout(t *testing.T) swapLayout {
+	t.Helper()
+	return swapLayout{repo: initTempGitRepo(t), worktree: t.TempDir()}
+}
+
 // committedFreshClaudeSwap admits and commits a fresh Claude swap to "work",
 // then drops the in-memory launch plan the way a restart does. It returns the
 // session, the target account's Claude store, the worktree Claude runs in,
 // and the committed conversation id.
 func committedFreshClaudeSwap(t *testing.T) (*Instance, string, string, string) {
 	t.Helper()
-	return committedFreshClaudeSwapIn(t, initTempGitRepo)
+	return committedFreshClaudeSwapIn(t, checkoutLayout)
 }
 
-// committedFreshClaudeSwapIn is committedFreshClaudeSwap in the repository
-// repo creates.
-func committedFreshClaudeSwapIn(t *testing.T, repo func(*testing.T) string) (*Instance, string, string, string) {
+// committedFreshClaudeSwapIn is committedFreshClaudeSwap in the layout build
+// creates.
+func committedFreshClaudeSwapIn(t *testing.T, build func(*testing.T) swapLayout) (*Instance, string, string, string) {
 	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	t.Setenv("HOME", t.TempDir())
@@ -49,9 +71,11 @@ func committedFreshClaudeSwapIn(t *testing.T, repo func(*testing.T) string) (*In
 	require.NoError(t, config.SaveConfig(cfg))
 	target := registerAccount(t, tmux.ProgramClaude, "work")
 
+	layout := build(t)
 	inst := accountSwapTestInstanceWithProgram(tmux.ProgramClaude)
-	inst.Path = repo(t)
-	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	inst.Path = layout.repo
+	inst.inPlace = layout.inPlace
+	gw, err := sessiongit.NewGitWorktreeFromStorage(layout.repo, layout.worktree, inst.Title, "main", "", layout.external, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 
@@ -115,12 +139,14 @@ func TestCommittedSwapRelaunchStartsOnItsIDWhileNoTranscriptHoldsIt(t *testing.T
 	require.Equal(t, committed, inst.ToInstanceData().PendingAccountSwap.ConversationID)
 }
 
-// A newer conversation in the worktree means the user moved on from the
-// committed one (a /clear in the replacement): resuming it would continue a
-// thread the user left, and starting on its id never boots. The re-launch
-// starts fresh on an id of its own, and the record names that id.
+// In a worktree af created for this session alone, a newer conversation is
+// evidence the user moved on from the committed one (a /clear in the
+// replacement): resuming it would continue a thread the user left, and starting
+// on its id never boots. The re-launch starts fresh on an id of its own, the
+// record names that id, and the replacement is told why.
 func TestCommittedSwapRelaunchStartsFreshWhenItsConversationIsStale(t *testing.T) {
-	inst, target, worktree, committed := committedFreshClaudeSwap(t)
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	require.True(t, inst.newerConversationIsEvidence(worktree), "precondition: af owns this worktree exclusively")
 	const newer = "7c1d2e3f-4a5b-4c6d-8e7f-901234567890"
 	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
 	fileClaudeTranscript(t, target, worktree, newer, time.Now().Add(-time.Minute))
@@ -132,8 +158,54 @@ func TestCommittedSwapRelaunchStartsFreshWhenItsConversationIsStale(t *testing.T
 	require.NotEqual(t, committed, match[1], "a new conversation must not re-use an id a transcript already holds")
 	require.NotEqual(t, newer, match[1])
 	require.Equal(t, match[1], plan.conversation.ID)
-	require.Equal(t, match[1], inst.ToInstanceData().PendingAccountSwap.ConversationID,
+	pending := inst.ToInstanceData().PendingAccountSwap
+	require.Equal(t, match[1], pending.ConversationID,
 		"the committed record must name the conversation the re-launch starts")
+	require.Equal(t, staleCommittedConversationReason, pending.CarryFallback, "the record says why it starts fresh")
+	require.Equal(t, staleCommittedConversationReason, inst.PendingAccountSwapConversation().CarryFailure,
+		"the swap's answer and notice report why the replacement starts fresh")
+}
+
+// Anywhere af does not own exclusively, a newer conversation beside the
+// committed one says nothing about this session: a sibling on the same account
+// (the root, a --here row, an adopted worktree, claude in a scoped shell tab)
+// files there too. The re-launch resumes the session's own conversation, as a
+// restore would (#7216 review R1).
+func TestCommittedSwapRelaunchResumesBesideANewerConversationItDoesNotOwn(t *testing.T) {
+	for _, tc := range []struct {
+		name   string
+		layout func(*testing.T) swapLayout
+	}{
+		{"checkout", checkoutLayout},
+		{"in place", func(t *testing.T) swapLayout {
+			l := checkoutLayout(t)
+			l.inPlace = true
+			return l
+		}},
+		{"adopted external worktree", func(t *testing.T) swapLayout {
+			l := exclusiveLayout(t)
+			l.external = true
+			return l
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			inst, target, worktree, committed := committedFreshClaudeSwapIn(t, tc.layout)
+			require.False(t, inst.newerConversationIsEvidence(worktree), "precondition: af does not own this worktree exclusively")
+			fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+			fileClaudeTranscript(t, target, worktree, "7c1d2e3f-4a5b-4c6d-8e7f-901234567890", time.Now().Add(-time.Minute))
+			fallback := inst.ToInstanceData().PendingAccountSwap.CarryFallback
+
+			plan := relaunchPlan(t, inst)
+			require.NotRegexp(t, sessionIDArg, plan.program, plan.program)
+			match := resumeArg.FindStringSubmatch(plan.program)
+			require.NotNil(t, match, "a sibling's newer conversation must not abandon this session's own: %s", plan.program)
+			require.Equal(t, committed, match[1])
+			require.Equal(t, committed, plan.conversation.ID)
+			pending := inst.ToInstanceData().PendingAccountSwap
+			require.Equal(t, committed, pending.ConversationID)
+			require.Equal(t, fallback, pending.CarryFallback, "a resumed conversation leaves the record's account of it alone")
+		})
+	}
 }
 
 // Claude may file the conversation under the kernel's spelling of a worktree
@@ -141,7 +213,7 @@ func TestCommittedSwapRelaunchStartsFreshWhenItsConversationIsStale(t *testing.T
 // spelling would call the conversation unfiled and start on its id again.
 func TestCommittedSwapRelaunchFindsItsConversationUnderEitherSpelling(t *testing.T) {
 	var real string
-	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, func(t *testing.T) string {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, func(t *testing.T) swapLayout {
 		real = filepath.Join(testguard.CanonicalTempDir(t), "real", "repo")
 		require.NoError(t, os.MkdirAll(real, 0o755))
 		cmd := exec.Command("git", "init")
@@ -150,7 +222,8 @@ func TestCommittedSwapRelaunchFindsItsConversationUnderEitherSpelling(t *testing
 		require.NoError(t, err, string(out))
 		link := filepath.Join(testguard.CanonicalTempDir(t), "link")
 		require.NoError(t, os.Symlink(filepath.Dir(real), link))
-		return filepath.Join(link, "repo")
+		repo := filepath.Join(link, "repo")
+		return swapLayout{repo: repo, worktree: repo}
 	})
 	require.NotEqual(t, real, worktree, "precondition: the worktree is recorded through the symlink")
 	fileClaudeTranscript(t, target, real, committed, time.Now().Add(-time.Minute))
