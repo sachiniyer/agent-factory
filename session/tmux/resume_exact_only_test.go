@@ -31,6 +31,31 @@ func TestResumeRewriteFollowsTheExactOnlyFlag(t *testing.T) {
 	assert.Equal(t, "codex resume --last", ts.resumeRewrite()("codex"))
 }
 
+// #7209 review: a re-spawn whose recorded conversation af judged and refused
+// starts fresh, whatever the agent. A worktree-scoped "latest" (claude
+// --continue) would re-answer the question the refusal answered: after a
+// /clear it picks whichever conversation Claude wrote last. A refusal that only
+// says the command cannot name the id keeps the agent's own resume.
+func TestResumeRewriteStartsFreshAfterAJudgedRefusal(t *testing.T) {
+	judged := ExactResumeRefusal{Session: "s", ID: "id", Reason: "stale", Judged: true}
+	for _, program := range []string{"claude", "codex", "claude --dangerously-skip-permissions"} {
+		ts := &TmuxSession{program: program, sanitizedName: "t"}
+		ts.SetExactResumeOnly(true)
+		ts.SetExactResumeRefusal(judged)
+		assert.Equal(t, program, ts.resumeRewrite()(program), program)
+	}
+
+	ts := &TmuxSession{program: "claude", sanitizedName: "t"}
+	ts.SetExactResumeOnly(true)
+	ts.SetExactResumeRefusal(ExactResumeRefusal{Session: "s", ID: "id", Reason: "its launch command cannot resume a recorded codex conversation"})
+	assert.Equal(t, "claude --continue", ts.resumeRewrite()("claude"),
+		"an id the command cannot name says nothing about the worktree's own conversation")
+
+	ts.SetExactResumeRefusal(judged)
+	ts.SetExactResumeOnly(false)
+	assert.Equal(t, "claude --continue", ts.resumeRewrite()("claude"), "a session that is not exact-only keeps today's rewrite")
+}
+
 // #6768: the retry-limit response answers "did the conversation carry" from
 // the program a respawn launches, and only a provable resume counts — a
 // worktree scope for codex, an explicit continue form for amp, the

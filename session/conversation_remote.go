@@ -36,7 +36,20 @@ func persistedConversationOf(data InstanceData) AgentConversationData {
 func (i *Instance) SetResumeConversation(conv AgentConversationData) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.carriedConversation = conv
+	i.carriedConversation, i.carriedIsRecord = conv, false
+}
+
+// SetResumeRecordedConversation is SetResumeConversation for an id that IS this
+// session's recorded conversation, delivered from elsewhere: the driving
+// daemon hands an in-sandbox agent-server the tab's record. The restore guard
+// judges it as it judges the tab's own record, so a /clear before an archive
+// still starts the restore fresh (#7209 review R2). A pin whose provenance was
+// checked where it was set (a swap's plan, the root heal) uses
+// SetResumeConversation and is not judged again.
+func (i *Instance) SetResumeRecordedConversation(conv AgentConversationData) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	i.carriedConversation, i.carriedIsRecord = conv, true
 }
 
 // ConversationResumableHere reports whether conv names a conversation the agent

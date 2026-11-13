@@ -50,13 +50,13 @@ func declineResumeUnverified(reason string) resumeDecline {
 }
 
 // retiresRecord reports whether the declined record is retired once the fresh
-// spawn commits: any refusal of a capture's record, and a refusal of an
-// operator's repair that rests on evidence about the id.
-func (d resumeDecline) retiresRecord(conv AgentConversationData) bool {
-	if d.reason == "" {
-		return false
-	}
-	return conv.CaptureKind != ConversationCaptureOperator || !d.unverified
+// spawn commits: a refusal that rests on evidence about the id. A refusal that
+// only says af could not look (unverified) keeps the record for the next look,
+// whoever wrote it (#7209 review R4): retiring on it would drop a conversation
+// that may be current, while the equally blind "the store cannot be named"
+// case resumes it.
+func (d resumeDecline) retiresRecord(AgentConversationData) bool {
+	return d.reason != "" && !d.unverified
 }
 
 // codexRolloutStampPrecision is the resolution of Codex's session_meta stamps:
