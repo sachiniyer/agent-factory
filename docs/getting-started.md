@@ -10,7 +10,9 @@ minutes.
 - **tmux** and **git** on your `PATH`.
 - At least one AI coding agent installed — e.g.
   [Claude Code](https://docs.anthropic.com/en/docs/claude-code), Codex, Aider,
-  Gemini, Amp, opencode, or Devin.
+  Gemini, Amp, opencode, or Devin. Claude Code must be 2.0.25 or newer: `af`
+  launches it with `--plugin-dir` to load its skill, and older releases exit on
+  that flag.
 - Linux or macOS. On Windows, run it inside WSL2.
 
 No Go toolchain is required to install `af` — releases ship prebuilt binaries.
