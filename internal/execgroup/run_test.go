@@ -185,9 +185,11 @@ func (w *refusingWriter) Write(p []byte) (int, error) {
 	return len(p), nil
 }
 
-// A writer that refuses bytes stops the copy, and the child then sees EPIPE
-// rather than a pipe that never drains, as with os/exec. The refusal is the
-// error when nothing else failed.
+// A writer that refuses bytes stops delivery to it, and the rest is read and
+// discarded, so the child never blocks on a pipe nobody drains. os/exec closes
+// the read end instead; Run keeps it open, because a reap may still be
+// searching for that pipe (#7243). The refusal is the error when nothing else
+// failed.
 func TestRunReportsAWriterThatRefuses(t *testing.T) {
 	cmd := exec.CommandContext(context.Background(), "sh", "-c",
 		`trap '' PIPE; i=0; while [ $i -lt 20000 ]; do echo line$i 2>/dev/null; i=$((i+1)); done; exit 0`)

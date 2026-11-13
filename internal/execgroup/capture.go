@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -58,6 +59,12 @@ import (
 //     open at WaitDelay, it is exec.ErrWaitDelay: the output is complete. A
 //     failed copy, a caller's writer refusing bytes included, is reported only
 //     when nothing else failed.
+//   - One difference: a writer that refuses bytes gets no more, and the rest
+//     is read and discarded, so the child never blocks on a full pipe. os/exec
+//     closes the read end instead, but Run keeps its own end of every pipe open
+//     while a reap may still be searching for that pipe (see settle). So a
+//     child whose writer refused gets no EPIPE: it runs until it finishes or
+//     its deadline ends it, as RunLimited's cancel on overflow does.
 //   - WaitDelay is counted from the leader's exit. Under KillOnCancel a
 //     deadline kills the leader at once, so that is also, to within the kill,
 //     os/exec's "WaitDelay after the context is done". A zero WaitDelay waits
@@ -172,10 +179,11 @@ func run(cmd *exec.Cmd) error {
 	}
 
 	err := cmd.Wait()
+	overran := settle(cmd, pipes)
+	// After settle, where base's Reap ran: once Output had returned.
 	if canceled() && leadsOwnGroup(cmd) {
 		sweepAfterCancel(cmd.Process.Pid)
 	}
-	overran := settle(cmd, pipes)
 	if err == nil {
 		for _, p := range pipes {
 			if p.err != nil {
@@ -237,13 +245,29 @@ func settle(cmd *exec.Cmd, pipes []*ownedPipe) bool {
 		return false
 	}
 	if leadsOwnGroup(cmd) {
-		ends := make([]proctree.PipeEnd, 0, len(open))
+		// No pipe is searched for once af has closed its own end of it (#7243). On
+		// darwin a pipe's identity is the hash of a kernel address, and af's open
+		// end is what keeps that address from being freed and reused, so a holder
+		// proof read after the close could name a process holding none of the
+		// command's pipes (see proctree.PipeEnd). An end already closed is left
+		// out of the reap. One the copy would close during the reap (stdin, whose
+		// close is its EOF) stays open until the reap returns. The reap signals
+		// nothing after its deadline, so a scan still running past it acts on
+		// nothing it read after the release below.
+		var ends []proctree.PipeEnd
+		var held []*ownedPipe
 		for _, p := range open {
-			ends = append(ends, p.end)
+			if p.holdForReap() {
+				ends = append(ends, p.end)
+				held = append(held, p)
+			}
 		}
-		// Before abandon: each pipe's own end must still be open here while its
-		// holders are looked for (see proctree.PipeEnd).
-		reapPipeHolders(cmd.Process.Pid, ends)
+		if len(ends) > 0 {
+			reapPipeHolders(cmd.Process.Pid, ends)
+		}
+		for _, p := range held {
+			p.releaseAfterReap()
+		}
 	}
 	for _, p := range open {
 		p.abandon()
@@ -265,6 +289,9 @@ func leadsOwnGroup(cmd *exec.Cmd) bool {
 // kept here, theirs the end the child inherits, closed here once it has
 // started. end identifies the pair, so that a process still holding theirs
 // can be found while ours is open.
+//
+// ours is closed only through closeOurs, under mu, so that closing it and
+// searching for the pipe exclude each other (see settle).
 type ownedPipe struct {
 	ours, theirs *os.File
 	end          proctree.PipeEnd
@@ -272,6 +299,11 @@ type ownedPipe struct {
 	done         chan struct{} // closed when copy has returned
 	err          error         // copy's result, valid once done is closed
 	abandoned    atomic.Bool   // set before ours is closed under the copy
+
+	mu       sync.Mutex
+	closed   bool // ours has been closed
+	reaping  bool // a holder reap is searching for this pipe
+	deferred bool // the copy asked to close ours while reaping was set
 }
 
 func newOutputPipe(dst io.Writer) (*ownedPipe, error) {
@@ -282,10 +314,15 @@ func newOutputPipe(dst io.Writer) (*ownedPipe, error) {
 	p := &ownedPipe{ours: r, theirs: w, done: make(chan struct{})}
 	p.copy = func() error {
 		_, err := io.Copy(dst, r)
-		// As os/exec does: a writer that refused bytes stops the copy, and closing
-		// the read end then gives the child EPIPE instead of a pipe that never
-		// drains. A pipe whose copy has returned is no longer searched for holders.
-		_ = r.Close()
+		if err != nil {
+			// A writer that refused bytes stops the copy. Keep reading into
+			// io.Discard so the child never blocks on a pipe nobody drains, as
+			// os/exec's close of the read end would also spare it, but without
+			// closing our end: a reap may still be searching for this pipe, and
+			// our end is what makes its answer mean this pipe (#7243). After
+			// abandon has closed it, this returns at once.
+			_, _ = io.Copy(io.Discard, r)
+		}
 		return err
 	}
 	return p, p.identify()
@@ -304,7 +341,11 @@ func newInputPipe(src io.Reader) (*ownedPipe, error) {
 		if errors.Is(err, syscall.EPIPE) {
 			err = nil
 		}
-		if cerr := w.Close(); err == nil {
+		// Closing our end is the child's EOF, so it cannot wait for settle. But
+		// a reap may be searching for this pipe right now, as when it has just
+		// killed the holder that was keeping the copy from finishing, and then
+		// closeOurs leaves the close to releaseAfterReap (#7243).
+		if cerr := p.closeOurs(); err == nil {
 			err = cerr
 		}
 		return err
@@ -349,12 +390,56 @@ func (p *ownedPipe) finished() bool {
 // the copy, which is blocked on it.
 func (p *ownedPipe) abandon() {
 	p.abandoned.Store(true)
-	_ = p.ours.Close()
+	_ = p.closeOurs()
 }
 
 func (p *ownedPipe) closeBoth() {
-	_ = p.ours.Close()
+	_ = p.closeOurs()
 	_ = p.theirs.Close()
+}
+
+// closeOurs closes our end, unless a reap is searching for this pipe, in which
+// case the close waits for releaseAfterReap. Every close of ours goes through
+// here, under mu.
+func (p *ownedPipe) closeOurs() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	if p.reaping {
+		p.deferred = true
+		return nil
+	}
+	p.closed = true
+	return p.ours.Close()
+}
+
+// holdForReap marks the pipe as being searched for, so that our end stays open
+// until releaseAfterReap. It reports false, and marks nothing, for a pipe whose
+// end is already closed: that pipe must not be searched for at all.
+func (p *ownedPipe) holdForReap() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.reaping = true
+	return true
+}
+
+// releaseAfterReap ends the search, and performs a close the copy asked for
+// during it.
+func (p *ownedPipe) releaseAfterReap() {
+	p.mu.Lock()
+	p.reaping = false
+	closeNow := p.deferred && !p.closed
+	p.deferred = false
+	if closeNow {
+		p.closed = true
+		_ = p.ours.Close()
+	}
+	p.mu.Unlock()
 }
 
 // headTail keeps the first and last n bytes written to it, as os/exec's

@@ -51,6 +51,12 @@ type PipeEnd struct {
 	held, kept uint64
 }
 
+// Kept is the identity of the end this process keeps: on Linux the pipe's
+// inode number, as /proc/<pid>/fd shows it, and on darwin the end's address
+// hash. For diagnostics and tests; deciding anything still goes through
+// HoldsPipeEnd.
+func (e PipeEnd) Kept() uint64 { return e.kept }
+
 // PipeEndOf returns the PipeEnd for a pipe whose end held was handed to a
 // child and whose other end kept is still open here. Both must be the two
 // ends of one pipe from os.Pipe; the caller must keep kept open for as long

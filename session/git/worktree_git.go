@@ -127,13 +127,16 @@ func (g *GitWorktree) runGitLocalCommand(path string, args ...string) (string, e
 	ctx, cancel := context.WithTimeout(context.Background(), localGitTimeout)
 	defer cancel()
 	output, err := g.runGitCommandContext(ctx, path, args...)
-	// Only treat a tripped deadline as a timeout when the command actually
-	// failed — runGitCommandContext maps a bare exec.ErrWaitDelay to nil, and
-	// without the err != nil guard that race would surface as a false timeout on
-	// a command that in fact succeeded (#914, same guard as runGitNetworkCommand).
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return output, fmt.Errorf("git %s timed out after %s (no progress; a stalled filesystem or an unkillable process holding the worktree): %w",
-			strings.Join(args, " "), localGitTimeout, ctx.Err())
+	// A timeout is the deadline ending git while it ran: errEndedByContext,
+	// which the runner sets only when os/exec called Cancel. Not ctx.Err(),
+	// which is also true when git failed on its own just before the deadline and
+	// WaitDelay or the straggler reap ran past it, and which would hide git's
+	// own failure behind a timeout (#7243). A command that succeeded is never a
+	// timeout either (#914). Both errors stay in the chain: callers test for
+	// context.DeadlineExceeded, and git's stderr rides on its own error.
+	if errors.Is(err, errEndedByContext) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return output, fmt.Errorf("git %s timed out after %s (no progress; a stalled filesystem or an unkillable process holding the worktree): %w: %w",
+			strings.Join(args, " "), localGitTimeout, ctx.Err(), err)
 	}
 	return output, err
 }
@@ -147,15 +150,14 @@ func (g *GitWorktree) runGitNetworkCommand(path string, args ...string) (string,
 	ctx, cancel := context.WithTimeout(context.Background(), networkGitTimeout)
 	defer cancel()
 	output, err := g.runGitCommandContext(ctx, path, args...)
-	// Only treat a tripped deadline as a timeout when the command actually
-	// failed. runGitCommandContext converts an exec.ErrWaitDelay (git itself
-	// exited successfully, only a transport child held the capture pipe open
-	// past the deadline) into err == nil; without the err != nil guard that
-	// race would surface as a false timeout even though the fetch succeeded
-	// (#914).
-	if err != nil && errors.Is(ctx.Err(), context.DeadlineExceeded) {
-		return output, fmt.Errorf("git %s timed out after %s (remote unreachable or stalled): %w",
-			strings.Join(args, " "), networkGitTimeout, ctx.Err())
+	// A timeout is the deadline ending git while it ran (see runGitLocalCommand).
+	// A fetch that failed on its own, say on authentication, just before the
+	// deadline, with a transport child holding stderr past gitWaitDelay, is
+	// that failure and keeps git's stderr, not "remote unreachable or stalled"
+	// (#7243). A fetch that succeeded is never a timeout (#914).
+	if errors.Is(err, errEndedByContext) && errors.Is(ctx.Err(), context.DeadlineExceeded) {
+		return output, fmt.Errorf("git %s timed out after %s (remote unreachable or stalled): %w: %w",
+			strings.Join(args, " "), networkGitTimeout, ctx.Err(), err)
 	}
 	return output, err
 }
@@ -237,6 +239,7 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// network connection (mirrors config.go's claude probe and the hook
 	// runner, #610/#769/#856).
 	execgroup.Lead(cmd)
+	canceled := execgroup.WatchCancel(cmd)
 	// Bound the post-exit wait: a transport child can inherit the capture pipes
 	// and, without a bound, Output() would block on pipe EOF until that child
 	// exits even after the deadline killed git (#856).
@@ -262,6 +265,9 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 		err = nil
 	}
 	if err != nil {
+		if canceled() {
+			err = endedByContext{err}
+		}
 		if detail := commandFailureDetail(err); detail != "" {
 			return string(output), fmt.Errorf("git command failed: %s (%w)", detail, err)
 		}
@@ -270,6 +276,19 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 
 	return string(output), nil
 }
+
+// errEndedByContext marks a git failure its context caused: os/exec called
+// Cancel, so the context ended git while it still ran (execgroup.WatchCancel).
+// It is what "timed out" means, where ctx.Err() alone is also true for a git
+// that failed on its own while cleanup ran past the deadline.
+var errEndedByContext = errors.New("git was ended by its context")
+
+// endedByContext carries errEndedByContext beside git's own error without
+// changing its text, so commandFailureDetail still finds the *exec.ExitError.
+type endedByContext struct{ err error }
+
+func (e endedByContext) Error() string   { return e.err.Error() }
+func (e endedByContext) Unwrap() []error { return []error{e.err, errEndedByContext} }
 
 func (g *GitWorktree) gitCommandEnvironment() []string {
 	return append(sessionenv.Filter(os.Environ(), "", g.HookEnvironment()),

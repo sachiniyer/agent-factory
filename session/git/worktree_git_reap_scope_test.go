@@ -1,8 +1,10 @@
 package git
 
 import (
+	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -11,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -158,4 +161,56 @@ func TestGitFetchReapsOnlyTheMemberHoldingThePipe(t *testing.T) {
 		"the transport child holding git's capture pipe past gitWaitDelay must be reaped (#769)")
 	requireMemberSurvives(t, detached.pid,
 		"the member holding none of git's pipes was killed along with the straggler; a group reap does that")
+}
+
+// A fetch that fails on its own is that failure, not a timeout, even when the
+// deadline passes while cleanup runs (#7243). Here the transport refuses
+// authentication at once, git exits 128, and a transport child keeps git's
+// stderr past gitWaitDelay, so the deadline passes during WaitDelay and the
+// straggler reap. Keyed on ctx.Err(), that read "timed out (remote unreachable
+// or stalled)" and dropped git's error, stderr and all.
+func TestGitFetchThatFailsOnItsOwnIsNotATimeout(t *testing.T) {
+	dir := t.TempDir()
+	record := filepath.Join(dir, "planted")
+	ssh := filepath.Join(dir, "fake-ssh")
+	require.NoError(t, os.WriteFile(ssh, []byte("#!/bin/sh\n"+
+		"[ \"$1\" = -G ] && exit 1\n"+
+		"sleep 60 </dev/null >/dev/null & echo \"$! $(ps -o pgid= -p $! | tr -d ' ') $(ps -o pgid= -p $$ | tr -d ' ')\" >> '"+record+"'\n"+
+		"echo 'git@fake-host.invalid: Permission denied (publickey).' >&2\n"+
+		"exit 255\n"), 0o755))
+
+	sandboxHome(t)
+	repoRoot := createGitRepo(t)
+	t.Setenv("GIT_SSH_COMMAND", ssh)
+	runGit(t, repoRoot, "remote", "add", "origin", "ssh://fake-host.invalid/repo.git")
+	shortenNetworkTimeout(t, 500*time.Millisecond)
+	require.Less(t, networkGitTimeout, gitWaitDelay, "the deadline must fall inside gitWaitDelay for this test to mean anything")
+
+	_, err := (&GitWorktree{}).runGitNetworkCommand(repoRoot, "fetch", "origin")
+	readPlanted(t, record)
+	require.Error(t, err)
+	assert.NotContains(t, err.Error(), "timed out", "git failed on its own before its deadline")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded), "nor may it read as a deadline: %v", err)
+	var exitErr *exec.ExitError
+	require.True(t, errors.As(err, &exitErr), "git's own failure is the error: %v", err)
+	assert.Equal(t, 128, exitErr.ExitCode())
+	assert.Contains(t, err.Error(), "Permission denied", "git's stderr rides on its error")
+}
+
+// The other side: a fetch the deadline really ended still reads as a timeout,
+// still satisfies errors.Is(err, context.DeadlineExceeded) for its callers,
+// and now keeps git's own error in the chain too.
+func TestGitFetchEndedByItsDeadlineIsATimeout(t *testing.T) {
+	sandboxHome(t)
+	repoRoot := createGitRepo(t)
+	runGit(t, repoRoot, "commit", "--allow-empty", "-m", "initial")
+	stallOriginViaFakeSSH(t, repoRoot)
+	shortenNetworkTimeout(t, 500*time.Millisecond)
+
+	_, err := (&GitWorktree{}).runGitNetworkCommand(repoRoot, "fetch", "origin")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "timed out")
+	assert.True(t, errors.Is(err, context.DeadlineExceeded), "callers test for the deadline: %v", err)
+	var exitErr *exec.ExitError
+	assert.True(t, errors.As(err, &exitErr), "git's own error stays in the chain: %v", err)
 }
