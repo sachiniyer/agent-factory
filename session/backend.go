@@ -359,6 +359,9 @@ type AgentSwapPlan struct {
 	conversation        AgentConversationData
 	conversationCapture ConversationCaptureSnapshot
 	afterStop           func() error
+	// beforeStart runs after afterStop, immediately before the incoming runtime
+	// starts (WithBeforeStart).
+	beforeStart func() error
 	// passthrough is the session-environment list preflight resolved, applied
 	// after the outgoing agent stops instead of re-reading config (#7077).
 	// passthroughFrozen distinguishes a frozen empty list from a plan built

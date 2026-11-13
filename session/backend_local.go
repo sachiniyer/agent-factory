@@ -624,6 +624,11 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 	if err := refreshSessionEnvironment(i, ts); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}
+	// The last step before the replacement can write anything: a handoff makes
+	// its incoming record durable here (#7215). A refusal leaves nothing running.
+	if err := plan.RunBeforeStart(); err != nil {
+		return fmt.Errorf("swap agent: %w", err)
+	}
 	if err := ts.Start(workDir); err != nil {
 		if cleanupErr := ts.CloseAttachOnly(); cleanupErr != nil {
 			err = fmt.Errorf("%w (cleanup error: %w)", err, cleanupErr)

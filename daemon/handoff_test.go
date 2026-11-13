@@ -69,6 +69,11 @@ func (b *handoffBackend) SwapAgent(i *session.Instance, plan session.AgentSwapPl
 	if err := plan.CaptureAfterStop(); err != nil {
 		return err
 	}
+	// LocalBackend's next step: the incoming record is made durable immediately
+	// before the incoming runtime starts (#7215).
+	if err := plan.RunBeforeStart(); err != nil {
+		return err
+	}
 	// Mirror the local backend's SetProgram: readiness and conversation capture
 	// must identify the incoming agent from the pane command, not stale tmux state.
 	i.SetTmuxSession(tmux.NewTmuxSession(i.Title, i.AgentProgram()))
