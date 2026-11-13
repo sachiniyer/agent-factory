@@ -500,7 +500,8 @@ func planReplacementConversation(program string) (string, AgentConversationData)
 }
 
 func prepareResumeConversation(i *Instance, program string) string {
-	if rewritten, ok, _ := prepareExactResumeConversation(i, program); ok {
+	// A start-on-id decline is the launch to make, as the launch paths take it.
+	if rewritten, ok, decline := prepareExactResumeConversation(i, program); ok || decline.startsOnRecorded {
 		return rewritten
 	}
 	return program

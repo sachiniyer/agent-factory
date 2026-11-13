@@ -157,3 +157,23 @@ func (i *Instance) RefuseGuessedRespawn(conv AgentConversationData) error {
 	return fmt.Errorf("the agent's tmux session is gone and would be respawned, but resuming conversation %s exactly "+
 		"is not something a lazy respawn does (it resumes the latest conversation instead); not guessing", conv.ID)
 }
+
+// PinRecordedConversationForLaunch pins the host's recorded conversation for
+// the next launch of a sandboxed instance, the adopted relaunch and the
+// headless first launch alike, and reports whether it did. A Claude id is
+// always pinned as the tab's record, so the launch judges it by the one rule
+// for a recorded Claude id (judgeRecordedClaude): resumed where a store holds
+// it, started on where none does (a fresh workspace's store holds none of the
+// old history), and never left to a latest-conversation selector (#7217 review
+// R3). Any other agent's id is pinned only where this host's store can resume
+// it, since its resume of an id the store lacks exits at launch.
+func (i *Instance) PinRecordedConversationForLaunch(program, workingDir string, conv AgentConversationData) bool {
+	if !conv.HasID() {
+		return false
+	}
+	if strings.TrimSpace(conv.Agent) != tmux.ProgramClaude && !i.conversationResumableHere(program, workingDir, conv) {
+		return false
+	}
+	i.SetResumeRecordedConversation(conv)
+	return true
+}
