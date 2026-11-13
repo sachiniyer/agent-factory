@@ -139,22 +139,22 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 		flipsBack      = 30 // reads as tmux at SIGTERM, not tmux again at SIGKILL
 		becomesUnknown = 40 // unreadable at SIGKILL, such as mid-exec
 		unknownFirst   = 50 // unreadable at SIGTERM, readable again at SIGKILL
-		gone           = 60 // exited, so its reads say nothing about it
+		readsGone      = 60 // reads as exited, as a multi-threaded process mid-exec does on Linux
 	)
 	readAt := map[syscall.Signal]map[int]proctree.TmuxIdentity{
 		syscall.SIGTERM: {
 			ordinary: proctree.NotTmux, becomesTmux: proctree.NotTmux, flipsBack: proctree.Tmux,
-			becomesUnknown: proctree.NotTmux, unknownFirst: proctree.TmuxUnknown, gone: proctree.TmuxUnknown,
+			becomesUnknown: proctree.NotTmux, unknownFirst: proctree.TmuxUnknown, readsGone: proctree.TmuxUnknown,
 		},
 		syscall.SIGKILL: {
 			ordinary: proctree.NotTmux, becomesTmux: proctree.Tmux, flipsBack: proctree.NotTmux,
-			becomesUnknown: proctree.TmuxUnknown, unknownFirst: proctree.NotTmux, gone: proctree.TmuxUnknown,
+			becomesUnknown: proctree.TmuxUnknown, unknownFirst: proctree.NotTmux, readsGone: proctree.TmuxUnknown,
 		},
 	}
 	var tier syscall.Signal
 	tiers := newTierIdentity(
 		func(pid int) proctree.TmuxIdentity { return readAt[tier][pid] },
-		func(p proctree.Process) bool { return p.PID != gone },
+		func(p proctree.Process) bool { return p.PID != readsGone },
 	)
 	var signalled []string
 	signalIf := tiers.signalIf(func(p proctree.Process, sig syscall.Signal) (bool, error) {
@@ -165,7 +165,7 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 	aflog.CaptureOutput(t, aflog.InfoLog, "INFO: ", &info)
 
 	var procs []proctree.Process
-	for _, pid := range []int{ordinary, becomesTmux, flipsBack, becomesUnknown, unknownFirst, gone} {
+	for _, pid := range []int{ordinary, becomesTmux, flipsBack, becomesUnknown, unknownFirst, readsGone} {
 		procs = append(procs, proctree.Process{PID: pid, Comm: "writer"})
 	}
 	for _, tier = range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
@@ -178,15 +178,14 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 	}
 
 	assert.Equal(t, []string{
-		"10 SIGTERM", "20 SIGTERM", "40 SIGTERM", "60 SIGTERM",
-		"10 SIGKILL", "60 SIGKILL",
-	}, signalled, "only a positive not-tmux read lets a signal through, and a process left alone once "+
-		"is never signalled again; a process that is gone is handed on, since its signal is identity-verified")
-	for _, pid := range []int{becomesTmux, flipsBack, becomesUnknown, unknownFirst} {
+		"10 SIGTERM", "20 SIGTERM", "40 SIGTERM",
+		"10 SIGKILL",
+	}, signalled, "only a positive not-tmux read lets a signal through, whatever a liveness read says, "+
+		"and a process left alone once is never signalled again")
+	for _, pid := range []int{becomesTmux, flipsBack, becomesUnknown, unknownFirst, readsGone} {
 		assert.True(t, tiers.leftAlone(proctree.Process{PID: pid}), "pid %d must stay left alone", pid)
 	}
 	assert.False(t, tiers.leftAlone(proctree.Process{PID: ordinary}))
-	assert.False(t, tiers.leftAlone(proctree.Process{PID: gone}))
 	attempted, err := signalIf(proctree.Process{PID: flipsBack}, syscall.SIGKILL)
 	assert.NoError(t, err)
 	assert.False(t, attempted, "the check-and-signal must hold the decision too, not only the exemption")
@@ -195,9 +194,10 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 	for _, s := range tiers.unclassified {
 		unclassified = append(unclassified, fmt.Sprintf("%d afterSIGTERM=%t", s.PID, s.afterSIGTERM))
 	}
-	assert.Equal(t, []string{"50 afterSIGTERM=false", "40 afterSIGTERM=true"}, unclassified,
+	assert.Equal(t, []string{"50 afterSIGTERM=false", "60 afterSIGTERM=false", "40 afterSIGTERM=true"}, unclassified,
 		"each process left alone for an unknown identity is handed to the survivor warning, "+
-			"with whether it had already been sent SIGTERM; one that read as tmux is not")
+			"with whether it had already been sent SIGTERM; one that read as tmux is not. One that read as "+
+			"exited goes too: the warning's own wait drops it if it really has exited")
 
 	logged := info.String()
 	for _, want := range []string{
@@ -205,16 +205,34 @@ func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmu
 		"pid 30 (writer) was selected as not tmux, but just before its SIGTERM it reads as tmux",
 		"pid 40 (writer) was selected as not tmux, but just before its SIGKILL it reads as unknown",
 		"pid 50 (writer) was selected as not tmux, but just before its SIGTERM it reads as unknown",
+		"pid 60 (writer) reads as unknown just before its SIGTERM, and as exited",
 	} {
 		assert.Equal(t, 1, strings.Count(logged, want), "logged once: %q\nlog:\n%s", want, logged)
 	}
-	assert.NotContains(t, logged, "pid 60 ", "a process that is gone was not left alone, so nothing is said about it")
+}
+
+// The #7245 review's R1, as its reviewer sketched it. On Linux, a multi-threaded
+// process that execs from a thread other than its leader reads as a zombie for
+// about 100 µs while de_thread hands the pid over, and then carries on under the
+// same pid and start time. Measured through the real hook: in 82 of 300 runs an
+// unknown read was handed on because liveness said "gone", and the signal's own
+// liveness check then found the process alive. So a liveness read must never
+// overrule an identity read that is not positively not tmux.
+func TestTierIdentity_NeverSignalsAnUnknownReadThatALivenessReadCallsGone(t *testing.T) {
+	tiers := newTierIdentity(func(int) proctree.TmuxIdentity { return proctree.TmuxUnknown },
+		func(proctree.Process) bool { return false }) // Z, mid de_thread
+	signalled := false
+	signal := tiers.signalIf(func(proctree.Process, syscall.Signal) (bool, error) { signalled = true; return true, nil })
+	_, _ = signal(proctree.Process{PID: 4242}, syscall.SIGTERM)
+	require.False(t, signalled)
 }
 
 // The survivor warning re-reads the identity. A process left alone because it
 // read as unknown, mid-exec into tmux, is tmux by the time the reap is done,
 // and leaving it alone was right. One that is still unclassifiable is reported,
-// and the report says whether it had been sent SIGTERM.
+// and the report says whether it had been sent SIGTERM. One that now reads as not
+// tmux was mid-transition when it was read, and the report says that and what
+// will reap it, never that its identity could not be established.
 func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *testing.T) {
 	survivor := exec.Command(sleeper.Path(t), "300")
 	require.NoError(t, survivor.Start())
@@ -237,8 +255,16 @@ func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *t
 		afterSIGTERM bool
 		now          proctree.TmuxIdentity
 		want         string
+		alsoWant     []string
+		notWant      string
 	}{
 		{name: "now tmux", afterSIGTERM: true, now: proctree.Tmux},
+		// #7245 review R3: it was mid-transition when it was read, and it is an
+		// ordinary process now, so the warning says so and what will reap it.
+		{name: "now not tmux", now: proctree.NotTmux,
+			want:     fmt.Sprintf("pid %d (%s) is still working inside it and was not signalled", process.PID, process.Comm),
+			alsoWant: []string{"it reads as not tmux now", "retrying it will reap this process"},
+			notWant:  "could not be established"},
 		{name: "still unknown, never signalled", now: proctree.TmuxUnknown,
 			want: fmt.Sprintf("pid %d (%s) is still working inside it and was not signalled,", process.PID, process.Comm)},
 		{name: "still unknown, after SIGTERM", afterSIGTERM: true, now: proctree.TmuxUnknown,
@@ -255,6 +281,12 @@ func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *t
 				return
 			}
 			assert.Contains(t, warnings.String(), tc.want)
+			for _, want := range tc.alsoWant {
+				assert.Contains(t, warnings.String(), want)
+			}
+			if tc.notWant != "" {
+				assert.NotContains(t, warnings.String(), tc.notWant)
+			}
 		})
 	}
 	require.True(t, proctree.AliveSame(process), "the warning must never signal anything")
