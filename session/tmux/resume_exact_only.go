@@ -45,6 +45,13 @@ type ExactResumeRefusal struct {
 	Session string
 	ID      string
 	Reason  string
+	// Judged marks a refusal of the id itself: af looked at the recorded
+	// conversation and found it stale, missing or unprovable. The agent's own
+	// "latest" resume would only guess at the question that refusal answered,
+	// so a judged refusal starts the re-spawn fresh whatever the agent
+	// (#7209 review). A refusal that says only that the launch command cannot
+	// name the id leaves the agent's worktree-scoped resume in place.
+	Judged bool
 }
 
 // SetExactResumeRefusal records the conversation the caller refused to put in
@@ -65,7 +72,7 @@ func ExactResumeFreshStartMessage(sanitizedName string, refusal ExactResumeRefus
 	if strings.TrimSpace(refusal.ID) == "" {
 		return fmt.Sprintf("tmux session %q: no recorded conversation id to resume; starting a fresh conversation rather than the latest one on a shared account home", sanitizedName)
 	}
-	return fmt.Sprintf("session %q (tmux %q): refused to resume its recorded conversation %s: %s; starting a fresh conversation rather than the latest one on a shared account home",
+	return fmt.Sprintf("session %q (tmux %q): refused to resume its recorded conversation %s: %s; starting a fresh conversation rather than the agent's latest one",
 		refusal.Session, sanitizedName, refusal.ID, refusal.Reason)
 }
 
@@ -117,6 +124,12 @@ func (t *TmuxSession) resumeRewrite() func(string) string {
 	t.programMu.RUnlock()
 	if !exact {
 		return resumeProgram
+	}
+	if refusal.Judged {
+		if resumeProgram(program) != program {
+			log.WarningLog.Print(ExactResumeFreshStartMessage(t.sanitizedName, refusal))
+		}
+		return func(program string) string { return program }
 	}
 	if accountWideLatestResume(program) && resumeProgram(program) != program {
 		log.WarningLog.Print(ExactResumeFreshStartMessage(t.sanitizedName, refusal))

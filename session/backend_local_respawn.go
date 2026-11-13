@@ -287,13 +287,13 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					Err:          fmt.Errorf("%w (rebuild from existing branch failed: %w)", err, rebuildErr),
 				}
 			}
-			exactProgram, ok, _ := prepareExactResumeConversation(i, resolvedProgram)
+			exactProgram, ok, decline := prepareExactResumeConversation(i, resolvedProgram)
 			if !ok {
 				return &WorktreeUnavailableError{
 					Title:        i.Title,
 					WorktreePath: workDir,
-					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; fresh rebuild requires a recorded conversation id for the resolved agent)",
-						err, rebuildErr),
+					Err: fmt.Errorf("%w (rebuild from existing branch failed: %w; %s)",
+						err, rebuildErr, freshRebuildRefusal(decline)),
 				}
 			}
 			if freshErr := gw.RebuildFreshFromRecordedBase(); freshErr != nil {
@@ -385,6 +385,36 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if refusedID != "" {
 		preSpawnCapture = i.sessionCodexCaptureBaselineFor(resolvedProgram)
 	}
+	// A Claude replacement is the record before its pane can write (#7209
+	// review R6), and durable through the respawn's persist callback (the one
+	// the daemon installs for the relocation settle above): a daemon exit after
+	// the spawn would otherwise reload the refused id beside a pane running the
+	// replacement. Anything short of a committed re-spawn puts the record back.
+	committed := false
+	if refusedID != "" && refusal.replacement.HasID() {
+		if undo, staged := i.stageReplacementConversation(refusedID, refusal.replacement); staged {
+			notify := i.relocationSettleNotifyFn()
+			if notify != nil {
+				if perr := notify(i); perr != nil {
+					undo()
+					return markRecoverRebuilt(rebuilt, fmt.Errorf(
+						"recover: session %q: the replacement for its refused conversation %s could not be recorded durably: %w",
+						i.Title, refusedID, perr))
+				}
+			}
+			defer func() {
+				if committed {
+					return
+				}
+				undo()
+				if notify != nil {
+					if perr := notify(i); perr != nil {
+						log.WarningLog.Printf("session %q: could not persist its restored conversation record after a re-spawn that did not commit: %v", i.Title, perr)
+					}
+				}
+			}()
+		}
+	}
 	if resume {
 		restoreResult, err = ts.RestoreWithResult(workDir)
 	} else {
@@ -421,7 +451,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// and park the pre-spawn baseline so the next deferred arm can record
 		// this runtime's rollout instead of fencing on the stale record
 		// (#6769 review).
-		if refusedID != "" {
+		if refusedID != "" && !refusal.replacement.HasID() {
 			i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
 		}
 		// af just recreated the missing worktree AND started a fresh agent pane
@@ -466,6 +496,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	// accessor keeps this a no-op for sessions nobody ever streamed (empty broker
 	// map) and skips a remote runtime's agent-server (not a localAgentServer).
 	resetAgentBrokerCaptures(i, !reattachedVerified)
+	committed = restoreResult == tmux.RestoreRespawned
 	return nil
 }
 
@@ -677,10 +708,23 @@ func missingWorktreeRebuildRefusal(i *Instance, gw *git.GitWorktree, resume bool
 	if !resume {
 		return fmt.Errorf("branch %s is gone, and a fresh rebuild is only allowed when resuming the recorded conversation", branch)
 	}
-	if _, ok, _ := prepareExactResumeConversation(i, program); !ok {
+	if _, ok, decline := prepareExactResumeConversation(i, program); !ok {
+		if decline.reason != "" {
+			return fmt.Errorf("branch %s is gone, and a fresh rebuild resumes only the recorded conversation, which af refused: %s", branch, decline.reason)
+		}
 		return fmt.Errorf("branch %s is gone and no recorded conversation id can resume into a fresh rebuild", branch)
 	}
 	return nil
+}
+
+// freshRebuildRefusal says why a fresh rebuild, which must resume the
+// recorded conversation, cannot: the guard's refusal of the recorded id when
+// there is one, rather than claiming no id was recorded (#7209 review R5).
+func freshRebuildRefusal(decline resumeDecline) string {
+	if decline.reason != "" {
+		return "a fresh rebuild resumes only the recorded conversation, which af refused: " + decline.reason
+	}
+	return "fresh rebuild requires a recorded conversation id for the resolved agent"
 }
 
 // respawnLaunchProgram is the respawn's launch command and proof: a prepared
@@ -704,6 +748,9 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 			program = rewritten
 		} else {
 			refusal = i.exactResumeRefusal(decline)
+			if refusal.retire {
+				program, refusal.replacement = planReplacementConversation(program)
+			}
 		}
 	} else {
 		// A re-spawn is never the instance's first launch, so a fresh start must
@@ -733,6 +780,10 @@ type resumeRefusal struct {
 	// home, an unreadable store, a header it could not classify — which says
 	// nothing about the id (resumeDecline.retiresRecord, #7122).
 	retire bool
+	// replacement is the conversation the fresh spawn was launched on in the
+	// refused id's place, recorded when the spawn commits; zero when the
+	// agent's launch names none (planReplacementConversation).
+	replacement AgentConversationData
 }
 
 // exactResumeRefusal turns prepareExactResumeConversation's decline into the
@@ -746,8 +797,10 @@ func (i *Instance) exactResumeRefusal(decline resumeDecline) resumeRefusal {
 		return resumeRefusal{}
 	}
 	refusal := resumeRefusal{
-		ExactResumeRefusal: tmux.ExactResumeRefusal{Session: i.Title, ID: conv.ID, Reason: decline.reason},
-		retire:             decline.retiresRecord(conv),
+		ExactResumeRefusal: tmux.ExactResumeRefusal{
+			Session: i.Title, ID: conv.ID, Reason: decline.reason, Judged: decline.reason != "",
+		},
+		retire: decline.retiresRecord(conv),
 	}
 	if decline.reason == "" {
 		refusal.Reason = fmt.Sprintf("its launch command cannot resume a recorded %s conversation", conv.Agent)
