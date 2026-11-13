@@ -82,3 +82,36 @@ func TestCarryJudgesANewerConversationOnlyWhereAfOwnsTheDirectory(t *testing.T) 
 		}
 	}
 }
+
+// Codex review of #7228: a copy of the recorded conversation that gained turns
+// the bound copy lacks is a fact about the id itself, so it refuses the carry
+// whatever a newer conversation says. A carry that disregards newer
+// conversations (an in-place row) must still not take a copy missing the
+// latest turns. The bound copy and its newer sibling are what a write between
+// locateClaude and the staleness check leaves.
+func TestJudgeClaudeRecordedPutsACopyFailureBeforeANewerConversation(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, newerUnder := range []string{"the bound spelling", "the other spelling"} {
+		t.Run("a newer conversation under "+newerUnder, func(t *testing.T) {
+			configDir := t.TempDir()
+			workDir, bound, other := claudeRestoreWorktree(t)
+			record := claudeRecordLine(t, workDir)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(bound, carryTestID+".jsonl"), record), past)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(other, carryTestID+".jsonl"), record+record), past.Add(time.Minute))
+			newerDir := bound
+			if newerUnder == "the other spelling" {
+				newerDir = other
+			}
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(newerDir, newerConversationID+".jsonl"), record), past.Add(2*time.Minute))
+			projects := claudeProjectCandidates(workDir)
+
+			require.Equal(t, claudeRecordedCopies, judgeClaudeRecorded(configDir, projects, workDir, carryTestID, bound))
+			transcript := filepath.Join(bound, carryTestID+".jsonl")
+			for _, newerCounts := range []bool{true, false} {
+				require.Equal(t, carryTranscriptCopiesReason,
+					claudeCarryStaleness(configDir, projects, workDir, transcript, carryTestID, newerCounts),
+					"newer conversations counted: %v", newerCounts)
+			}
+		})
+	}
+}
