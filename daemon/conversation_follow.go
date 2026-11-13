@@ -36,7 +36,9 @@ import (
 // pane (#7120 review). One check costs
 // one stat per verified root plus that process's descriptor list in the steady
 // state; nothing in the conversation store is walked. The commit takes the
-// per-session op-lock the swap, handoff, and set-conversation paths hold.
+// per-session op-lock the swap, handoff, and set-conversation paths hold, and
+// then the repository start lock, held across the commit, its write, and the
+// rollback a failed write takes (#7252, #7254 review).
 func (m *Manager) followAgentConversation(repoID, key string, inst *session.Instance, snap session.ConversationCaptureSnapshot, token session.AgentRuntimeToken, recorded session.AgentConversationData) error {
 	if recorded.Agent != token.Agent() {
 		return nil
@@ -72,27 +74,22 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	if tracked != inst || inst.UserKilled() || inst.IsArchived() {
 		return nil
 	}
-	outcome := inst.FollowAgentConversationForRuntime(token, recorded, current)
-	if outcome == session.ConversationFollowUnchanged {
-		return nil
-	}
+	// The move is committed, persisted, and on failure rolled back inside one
+	// start-lock critical section (#7254 review). Every whole-row writer
+	// snapshots the row under this lock, so none can see the moved id unless
+	// this write saved it: one that did, after an unlocked commit or before an
+	// unlocked rollback, would persist the move and the rollback would then
+	// leave memory behind a disk that has it. opLock -> start lock -> the
+	// instance's own mutex is the order set_conversation.go takes too.
 	repoStartLock := m.startLockForRepo(repoID)
 	repoStartLock.Lock()
-	persistErr := persistInstanceData(repoID, inst.ToInstanceData())
-	repoStartLock.Unlock()
-	switch {
-	case outcome == session.ConversationFollowBaselined:
-		m.info().Printf("session %q: the operator-recorded conversation %s stands; its Codex pane now holds %s, and only a move off that is followed (#7122)%s",
-			inst.Title, recorded.ID, heldThreadForLog(current), baselineRestoreCaveat(current))
-	case strings.EqualFold(recorded.ID, current.ID):
-		m.info().Printf("session %q: its Codex pane is now on the conversation %s an operator recorded; following it like any capture from here (#7120)",
-			inst.Title, current.ID)
-	default:
-		m.info().Printf("session %q: its Codex pane moved from conversation %s to %s; recorded the thread its runtime now holds open (#7101)",
-			inst.Title, recorded.ID, current.ID)
+	outcome := inst.FollowAgentConversationForRuntime(token, recorded, current)
+	if outcome == session.ConversationFollowUnchanged {
+		repoStartLock.Unlock()
+		return nil
 	}
+	persistErr := persistInstanceData(repoID, inst.ToInstanceData())
 	if persistErr != nil {
-		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, persistErr)
 		// Roll the in-memory record back to what disk still holds, mirroring
 		// the operator-repair path in set_conversation.go: the follow move
 		// can never be re-proposed (its own re-read judges Unchanged) and the
@@ -104,7 +101,36 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 		// presumes.
 		inst.SetAgentConversation(recorded)
 	}
+	repoStartLock.Unlock()
+	if persistErr != nil {
+		m.warn().Printf("session %q: %s, but the record could not be saved: %v; it stays on conversation %s, and the next follow check retries (#7252)",
+			inst.Title, followSeenForLog(outcome, recorded, current), persistErr, recorded.ID)
+		return nil
+	}
+	switch {
+	case outcome == session.ConversationFollowBaselined:
+		m.info().Printf("session %q: the operator-recorded conversation %s stands; its Codex pane now holds %s, and only a move off that is followed (#7122)%s",
+			inst.Title, recorded.ID, heldThreadForLog(current), baselineRestoreCaveat(current))
+	case strings.EqualFold(recorded.ID, current.ID):
+		m.info().Printf("session %q: its Codex pane is now on the conversation %s an operator recorded; following it like any capture from here (#7120)",
+			inst.Title, current.ID)
+	default:
+		m.info().Printf("session %q: its Codex pane moved from conversation %s to %s; recorded the thread its runtime now holds open (#7101)",
+			inst.Title, recorded.ID, current.ID)
+	}
 	return nil
+}
+
+// followSeenForLog is what the follow saw, for the line it logs when it could
+// not save what it saw: the record it would have written was rolled back.
+func followSeenForLog(outcome session.ConversationFollowOutcome, recorded, held session.AgentConversationData) string {
+	switch {
+	case outcome == session.ConversationFollowBaselined:
+		return fmt.Sprintf("its Codex pane holds %s under the operator-recorded conversation %s, a baseline af keeps with the record (#7122)", heldThreadForLog(held), recorded.ID)
+	case strings.EqualFold(recorded.ID, held.ID):
+		return fmt.Sprintf("its Codex pane is now on the conversation %s an operator recorded (#7120)", held.ID)
+	}
+	return fmt.Sprintf("its Codex pane moved from conversation %s to %s", recorded.ID, held.ID)
 }
 
 // baselineRestoreCaveat is what the follow's baseline does not buy at a

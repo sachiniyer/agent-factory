@@ -105,6 +105,17 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	if err != nil {
 		return err
 	}
+
+	// opLock→repoStartLock is the ordering SetAttention and the kill/archive
+	// paths use: the write persists the whole row, so it must not checkpoint a
+	// sibling operation's provisional state. The lock is taken before the
+	// commit, not just around the write (#7254 review): every whole-row writer
+	// snapshots under it, so one holding it while the repair landed in memory
+	// would persist the repair, and a failed write's rollback below would then
+	// leave memory behind a disk that has it.
+	repoStartLock := m.startLockForRepo(repoID)
+	repoStartLock.Lock()
+	defer repoStartLock.Unlock()
 	prev := instance.AgentConversation()
 	// Re-running a repair is a fresh repair, never a no-op: it re-dates the
 	// record and re-stamps what the runtime holds now. The staleness guards
@@ -116,13 +127,6 @@ func (m *Manager) setConversation(req SetConversationRequest, guard func(*sessio
 	if !instance.SetAgentConversation(observed.stamp(instance, conv)) {
 		return nil
 	}
-
-	// opLock→repoStartLock is the ordering SetAttention and the kill/archive
-	// paths use: the write persists the whole row, so it must not checkpoint a
-	// sibling operation's provisional state.
-	repoStartLock := m.startLockForRepo(repoID)
-	repoStartLock.Lock()
-	defer repoStartLock.Unlock()
 	data := instance.ToInstanceData()
 	if err := persistInstanceData(repoID, data); err != nil {
 		instance.SetAgentConversation(prev)
