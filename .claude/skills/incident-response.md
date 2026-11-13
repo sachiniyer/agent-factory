@@ -17,10 +17,14 @@ lost sessions as recoverable until proven otherwise.
    `codex resume <id>` or `claude --continue`, when that id is still provably
    current. A Codex or Amp session whose id was never captured starts fresh
    instead — af no longer resumes the account-wide "latest", which could name
-   a sibling's conversation. A Codex session whose recorded id is stale,
-   missing, or cannot be confirmed as the newest in its worktree also starts
-   fresh, rather than continuing the wrong thread; Amp still resumes its
-   recorded id via `threads continue <id>` without this guard.
+   a sibling's conversation. A Claude or Codex session whose recorded id is
+   no longer the newest one in a worktree af created for it also starts
+   fresh, rather than continuing the wrong thread; in your own checkout
+   (`--here`, or the root agent) your own agent files conversations there
+   too, so a newer one says nothing and the recorded conversation resumes
+   regardless. A Codex session whose recorded id is missing or cannot be
+   confirmed also starts fresh. Amp still resumes its recorded id via
+   `threads continue <id>` without this guard.
 
 2. **Recover vanished worktrees** — if the worktree is gone but the branch is
    alive, re-add the worktree and then let lost-restore resume the session:
