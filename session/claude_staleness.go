@@ -104,39 +104,65 @@ func claudeCarryStaleness(configDir string, projects []string, transcript, id st
 const unfiledRecordedClaudeReason = "its store holds no transcript for it " +
 	"(Claude files a conversation only on its first entry, and deletes old ones), so Claude starts on that id instead of resuming it"
 
-// recordedClaudeDecline is the one rule for launching a recorded Claude
-// conversation (#7215): restore, Recover, the adopted sandbox relaunch and a
-// first launch's record pin (planCreateConversation) all judge the id by it,
+// recordedClaudeVerdict is judgeRecordedClaude's answer about launching a
+// recorded Claude id.
+type recordedClaudeVerdict int
+
+const (
+	// recordedClaudeBlind: the store cannot be named or a spelling cannot be
+	// listed, which says nothing about the id. Each caller keeps what it did
+	// before it could look.
+	recordedClaudeBlind recordedClaudeVerdict = iota
+	// recordedClaudeResume: the id is filed, and no newer conversation is
+	// evidence that this session moved on from it.
+	recordedClaudeResume
+	// recordedClaudeStartOn: the store listed cleanly and holds no transcript
+	// for the id. Claude never filed it (it files lazily) or its retention
+	// deleted it, and --resume of it exits at launch: start Claude on it.
+	recordedClaudeStartOn
+	// recordedClaudeAbandoned: a newer conversation is evidence this session
+	// moved on (a /clear), and resuming would continue a thread the user left.
+	recordedClaudeAbandoned
+)
+
+// judgeRecordedClaude is the one rule for launching a recorded Claude id
+// (#7215): restore, Recover, the adopted sandbox relaunch, a first launch's
+// record pin and a committed account swap's re-launch all judge the id by it,
 // from one listing of the store the launch writes (claudeStoreFor,
-// judgeClaudeRecorded).
-//
-//   - The store listed cleanly and holds no transcript for the id: Claude never
-//     filed it, since it files a conversation lazily, or its retention deleted
-//     it. --resume of such an id exits at launch, so the launch starts Claude ON
-//     the id instead (startsOnRecorded). The record stays truthful, and the
-//     first prompt files it.
-//   - A newer conversation exists, and that is evidence this session moved on:
-//     a worktree af created for it alone, where Claude actually runs
-//     (newerConversationIsEvidence). Refuse, as #7206's restore guard does: a
-//     /clear leaves the recorded id naming the conversation the user abandoned,
-//     and resuming that is worse than a stated fresh start.
-//   - Otherwise resume. A row in the user's own checkout or launched outside its
-//     worktree says nothing about whether this session moved on, and a store af
-//     cannot name or cannot list says nothing about the id at all: blind stays
-//     blind, and the launch resumes the recorded id as it always has (#7209
-//     review R1, R4).
-func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
-	configDir, launchDir, err := i.claudeStoreFor(program, i.GetWorktreePath())
+// judgeClaudeRecorded) and through one ownership gate. A newer conversation is
+// evidence only in a worktree af created for this session alone, where Claude
+// actually runs (newerConversationIsEvidence). In the user's own checkout, an
+// in-place row or an adopted worktree, a sibling files there too, so it says
+// nothing about this session (#7209 review R1, #7216 review R1).
+func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClaudeVerdict {
+	configDir, launchDir, err := i.claudeStoreFor(program, workDir)
 	if err != nil || strings.TrimSpace(configDir) == "" || strings.TrimSpace(launchDir) == "" {
-		return resumeDecline{}
+		return recordedClaudeBlind
 	}
-	switch judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), conv.ID, "") {
+	switch judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), id, "") {
 	case claudeRecordedMissing:
-		return resumeDecline{reason: unfiledRecordedClaudeReason, startsOnRecorded: true}
+		return recordedClaudeStartOn
 	case claudeRecordedStale:
 		if i.newerConversationIsEvidence(launchDir) {
-			return declineResume(staleCarryReason)
+			return recordedClaudeAbandoned
 		}
+		return recordedClaudeResume
+	case claudeRecordedCurrent, claudeRecordedCopies:
+		return recordedClaudeResume
+	}
+	return recordedClaudeBlind
+}
+
+// recordedClaudeDecline is judgeRecordedClaude for a restore: an id to start on
+// is a startsOnRecorded decline that keeps the record, an abandoned one is
+// refused as #7206's restore guard refuses it, and a blind look resumes the
+// recorded id as a restore always has.
+func (i *Instance) recordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
+	switch i.judgeRecordedClaude(program, i.GetWorktreePath(), conv.ID) {
+	case recordedClaudeStartOn:
+		return resumeDecline{reason: unfiledRecordedClaudeReason, startsOnRecorded: true}
+	case recordedClaudeAbandoned:
+		return declineResume(staleCarryReason)
 	}
 	return resumeDecline{}
 }
