@@ -65,7 +65,7 @@ func codexRolloutFilesSince(codexHome string, floor time.Time) (map[string]struc
 		return out, nil
 	}
 	root := filepath.Join(codexHome, "sessions")
-	err := filepath.WalkDir(root, func(path string, d os.DirEntry, err error) error {
+	err := walkConversationStore(root, false, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			// An entry vanishing mid-walk is normal; a store that cannot be
 			// traversed is NOT an empty store. Swallowing the failure would let

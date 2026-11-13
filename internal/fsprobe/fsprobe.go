@@ -219,9 +219,10 @@ func FullUnprivileged(dir string) (bool, error) {
 // bounded environmental class rather than charging the structural budget
 // (#5295 review).
 func Stat(dir string) (os.FileInfo, error) {
+	stat := statPath // in the caller: a stuck flight never reads the seam
 	res, err := runBounded(dir, statFlights, "stat probe",
 		"the filesystem did not answer the stat",
-		func() (any, error) { return statPath(dir) })
+		func() (any, error) { return stat(dir) })
 	info, _ := res.(os.FileInfo)
 	return info, err
 }
