@@ -98,11 +98,17 @@ func TestTmuxIdentityOf_CoversClientsAndRetitledArgv(t *testing.T) {
 		"an unreadable process is unknown, never \"not tmux\" (#7238)")
 }
 
-// The kernel task name is the second source, and it can only add protection.
-// A real tmux whose argv[0] was rewritten (`exec -a`), or whose command line
-// cannot be read, is still tmux by the name the kernel gave it. This fixture
-// is a sleeper copied to a file called `tmux`, so its task name is `tmux` on
-// Linux and on darwin, run with an argv[0] that names something else.
+// The kernel task name is the second source, and it can only add protection:
+// when it names tmux, the process is tmux whatever its command line says. This
+// fixture is a sleeper copied to a file called `tmux` and run with an argv[0]
+// that names something else, so its task name is `tmux` on Linux and on darwin.
+//
+// What it models is limited, and the limit is measured (#7242 review). On
+// darwin it is a real tmux under a rewritten argv[0], because p_comm is the
+// exec'd file name. On Linux it is NOT a renamed real tmux: tmux titles itself
+// from argv[0], so `exec -a foo tmux` reads `foo: server` and is NotTmux by
+// both sources. On Linux the task name answers for a tmux whose command line
+// cannot be read, and the decision table pins that row.
 func TestTmuxIdentityOf_TaskNameNamesTmuxWhenArgvDoesNot(t *testing.T) {
 	renamed := exec.Command(sleeper.Named(t, filepath.Join(t.TempDir(), "tmux")), "300")
 	renamed.Args[0] = "renamed"
@@ -134,8 +140,8 @@ func TestTmuxIdentity_Decision(t *testing.T) {
 		{"argv names tmux", []string{"/usr/bin/tmux", "new-session"}, nil, "sleep", nil, Tmux},
 		{"argv retitled", []string{"tmux: client (/tmp/tmux-1000/default)"}, nil, "sleep", nil, Tmux},
 		{"argv is a tmux lookalike", []string{"tmuxinator", "start"}, nil, "tmuxinator", nil, NotTmux},
-		{"linux server task name, argv rewritten", []string{"renamed"}, nil, "tmux: server", nil, Tmux},
-		{"darwin task name, argv rewritten", []string{"renamed"}, nil, "tmux", nil, Tmux},
+		{"task name is the linux server title, argv names something else", []string{"renamed"}, nil, "tmux: server", nil, Tmux},
+		{"darwin: argv[0] rewritten, task name is the file name", []string{"renamed"}, nil, "tmux", nil, Tmux},
 		{"unknown tmux title is still tmux", plain, nil, "tmux: frobnicate", nil, Tmux},
 
 		// #7238: an unreadable or empty command line is never NotTmux.

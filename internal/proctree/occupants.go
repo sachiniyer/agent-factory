@@ -183,10 +183,26 @@ func DescribeOccupants(occupants []Occupant) string {
 			out += ", "
 		}
 		if o.TmuxUnknown {
-			out += fmt.Sprintf("pid %d (cwd %s, command line unreadable)", o.Process.PID, o.WorkingDir)
+			out += fmt.Sprintf("pid %d (cwd %s, unclassified: its command line or task name could not be read)",
+				o.Process.PID, o.WorkingDir)
 		} else {
 			out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
 		}
 	}
 	return out
+}
+
+// UnclassifiedOccupantAdvice is the next step for a refusal that cites an
+// occupant the gate could not classify, or "" when none is cited (#7242 review
+// R8). Such a process is usually starting or exiting, and a large one can take
+// a second or more to exit (see ErrNoArgv), so the common fix is a retry. The
+// operator still needs a way to look at one that persists.
+func UnclassifiedOccupantAdvice(occupants []Occupant) string {
+	for _, o := range occupants {
+		if o.TmuxUnknown {
+			return fmt.Sprintf("An unclassified process is usually starting or exiting, so retry; "+
+				"if one persists, inspect it with `ps -o pid,stat,lstart,args -p %d`.", o.Process.PID)
+		}
+	}
+	return ""
 }

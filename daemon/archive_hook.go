@@ -102,8 +102,9 @@ func runOnArchiveHook(hookCtx onArchiveHookContext) error {
 		scopePrefix = systemdunit.HookScopeUnitPrefix(hookCtx.sessionID)
 		if err := systemdunit.StopHookScopes(scopePrefix); err != nil {
 			return fmt.Errorf(
-				"%w: refusing to run the on-archive hook for %s because a previous run's hook scopes (%s-*) could not be stopped: %w",
-				session.ErrHookTeardownUnconfirmed, hookCtx.sessionID, scopePrefix, err)
+				"%w: refusing to run the on-archive hook for %s because %s: %w",
+				session.ErrHookTeardownUnconfirmed, hookCtx.sessionID,
+				systemdunit.DescribeHookSweepRefusal(err, fmt.Sprintf("a previous run's hook scopes (%s-*)", scopePrefix)), err)
 		}
 	}
 

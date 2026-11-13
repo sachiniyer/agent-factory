@@ -20,10 +20,10 @@ type TmuxIdentity int
 
 const (
 	// TmuxUnknown: neither source named tmux, and at least one of them could not
-	// be read. The command line may be unreadable or empty, as it is for a
-	// process mid-execve or mid-exit (see ErrNoArgv), or refused, as darwin
-	// refuses some same-uid processes. Or the process-table entry may be
-	// unreadable.
+	// be read. The command line may be empty (see ErrNoArgv, the one definition
+	// of an unknown argv, for what that can be and for why this predicate reads
+	// once rather than settling), or refused, as darwin refuses some same-uid
+	// processes. Or the process-table entry may be unreadable.
 	TmuxUnknown TmuxIdentity = iota
 	// Tmux: the command line or the kernel task name names tmux, as a server or
 	// as a client.
@@ -77,9 +77,14 @@ func (id TmuxIdentity) String() string {
 //     at its socket path's slash.
 //   - The kernel task name. Linux tmux retitles it to `tmux: server` or
 //     `tmux: client`; on darwin it stays the exec'd file name, `tmux`. It
-//     comes from the process-table entry, so it still answers when the command
-//     line does not, and it names tmux even when argv[0] was rewritten
-//     (`exec -a`).
+//     comes from the process-table entry, so on both OSes it still answers when
+//     the command line cannot be read. It does NOT rescue a renamed tmux on
+//     Linux. There tmux builds its title from getprogname(), which is argv[0],
+//     so `exec -a foo tmux` is `foo: server`, and a copy or symlink named
+//     otherwise is titled after that name (measured on tmux 3.4, #7242
+//     review). Only darwin, where the task name is the exec'd file name, keeps
+//     `tmux` under a rewritten argv[0]. af always execs `tmux`, so this matters
+//     only for a tmux someone else started under another name.
 func TmuxIdentityOf(pid int) TmuxIdentity {
 	argv, argvErr := readArgv(pid)
 	p, procErr := readProc(pid)

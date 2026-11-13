@@ -3,6 +3,7 @@
 package git
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -11,6 +12,8 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
+	aflog "github.com/sachiniyer/agent-factory/log"
+	"github.com/sachiniyer/agent-factory/log/logtest"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,9 +66,20 @@ func TestReapWorktreeWriters_LeavesAProcessWithAnUnreadableArgvAlone(t *testing.
 	require.Nil(t, proctree.Argv(fixture.Pid),
 		"fixture: an empty argv must read as no command line at all")
 
+	// It is reported, not silently spared (#7242 review R6). The wait it gets
+	// first is shortened here; it lives for the whole test.
+	previousTermWait := worktreeReapTermWait
+	worktreeReapTermWait = 200 * time.Millisecond
+	t.Cleanup(func() { worktreeReapTermWait = previousTermWait })
+	var warnings logtest.Buffer
+	aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
+
 	reapWorktreeWriters(worktree)
 
 	require.True(t, proctree.AliveSame(process),
 		"a process whose command line cannot be read might be the shared tmux server: "+
 			"the reaper must leave it alone, never read the unreadable answer as \"not tmux\"")
+	require.Contains(t, warnings.String(), fmt.Sprintf("pid %d (sleeper) is still working inside it and was not signalled", fixture.Pid),
+		"a writer spared only for its unknown identity must surface at WARNING once the reap is done: "+
+			"an archive would otherwise leave it writing into the moved tree with nothing said")
 }

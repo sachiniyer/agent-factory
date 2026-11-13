@@ -11,17 +11,47 @@ import (
 )
 
 // ErrNoArgv reports that a process has no argument vector to classify RIGHT
-// NOW. That covers a kernel thread, one the kernel has already torn down far
-// enough to clear it, and a live process in the middle of execve (#7238).
-// Linux installs the new address space, and closes the caller's CLOEXEC status
-// pipe, before it lays out the new argv, so /proc/<pid>/cmdline reads empty
-// while /proc/<pid>/cwd already answers. Measured straight after Go's
-// cmd.Start returned: empty 1196 times in 2000.
+// NOW. This is the one definition of an "unknown argv" in this package
+// (#7238, #7239); every caller below points here.
+//
+// # What an empty read can be
+//
+//   - A kernel thread, which never has an argv. That is POSITIVE, but only by
+//     the kernel's own flag (Process.KernelThread), never by the empty read.
+//   - A live process mid-execve. Linux installs the new address space, and
+//     closes the caller's CLOEXEC status pipe, before it lays out the new argv.
+//     Measured straight after Go's cmd.Start returned: empty 1196 times in 2000.
+//     The window is brief.
+//   - A process mid-exit. exit_mm clears task->mm before the address space is
+//     torn down, so a single-threaded process reads present, state R, same
+//     start stamp and argv-less for the whole teardown: 114 ms at 1 GiB and
+//     212 ms at 2 GiB, measured on the devbox. A multi-threaded process usually
+//     does not show this on /proc/<tgid>. Its leader reads Z at once, and
+//     another thread does the teardown. But whichever thread drops the last mm
+//     reference does it, and sometimes that is the leader: 2 of 30 trials, for
+//     67 ms at 1 GiB and 204 ms at 2 GiB (#7242 review).
+//   - A process that blanked its own argv, or was exec'd with none. This one
+//     persists.
 //
 // It is not a refusal: there is nothing to match, as opposed to something we
-// were not allowed to look at. But it is NOT proof that the process has no
-// identity. A caller that may only skip what it can positively classify, such
-// as a leave-alone predicate (TmuxIdentityOf), must treat it as unknown.
+// were not allowed to look at. But apart from the kernel-thread flag, it is
+// not proof that the process has no identity. It is UNKNOWN.
+//
+// # What each caller does with unknown, and why they differ
+//
+//   - TmuxIdentityOf (the reaper and the occupancy gate) reads once and
+//     answers TmuxUnknown. Unknown is already each caller's safe answer: the
+//     reaper spares the process, and the gate counts it in a retryable refusal.
+//     Settling would only trade latency on a teardown path for fewer of those.
+//     It does not consult the kernel-thread flag, because a kernel thread's
+//     cwd is never inside a worktree, so its answer never reaches a decision.
+//   - ProcessesMatchingArgv (the hook-launcher oracle) settles it like a
+//     refusal, re-reading while the same instance stays present, because there
+//     unknown blocks a lifecycle flow. That settle is short (about 20 ms) and
+//     covers an exec, not an exit.
+//   - Its callers in internal/systemdunit then decide. StopHookScopes waits out
+//     an unknown within its 15 s settle budget, which covers an exit, and
+//     RunningHookPrefixes, a fail-open reader, degrades to its units-only answer.
 var ErrNoArgv = errors.New("proctree: process has no argv")
 
 // scanSnapshot, scanArgv and scanUID are the reads ProcessesMatchingArgv makes,
@@ -96,11 +126,27 @@ func isGone(err error) bool {
 // A process table that cannot be read is an ERROR, never an empty slice: the
 // callers of this are deciding whether a tree is safe to modify, and "I could
 // not look" must not arrive as "nothing is there" (#2874). The same rule governs
-// each individual argv read, with one exception that is a fact rather than a
-// guess: a process that has EXITED between the snapshot and its argv read, or
-// that never had an argv at all (ErrNoArgv), is skipped, because "it is gone"
-// and "it has nothing to classify" are both answers. Anything else — a refusal,
-// a malformed read — fails the whole scan.
+// each individual argv read, with two exceptions that are facts rather than
+// guesses: a process that has EXITED between the snapshot and its argv read,
+// and a KERNEL THREAD (the kernel's own PF_KTHREAD flag), which never has an
+// argv. Both are skipped, because "it is gone" and "it can never match" are both
+// answers. Anything else — a refusal, a malformed read — fails the whole scan.
+//
+// # An empty argv is not an answer on its own
+//
+// ErrNoArgv from any OTHER process is not "nothing to classify" (#7239). A live
+// process in the middle of execve reads exactly that way: Linux installs the new
+// address space before it lays out the new argv, so /proc/<pid>/cmdline is
+// empty for that window. That window opens at a launcher's own execve, the
+// moment this oracle exists for, so skipping it would report "no launcher"
+// about one that is starting. It is handled like a refusal instead: subject to
+// the ownership scope below, re-read while the same process stays present, and
+// used once an argv appears, skipped once the process is gone, and reported as
+// an *ArgvUnreadableError if it is present and argv-less throughout. That settle
+// covers an exec. It does not outlast an EXIT, which reads the same way for the
+// whole address-space teardown (see ErrNoArgv), so a caller that must not
+// refuse over an ordinary exit waits the unknown out itself, as StopHookScopes
+// does.
 //
 // # Whose refusal counts
 //
@@ -150,6 +196,15 @@ func isGone(err error) bool {
 // ours: a same-uid target that darwin's code-signing restrictions cover, or one
 // whose ownership could not be read. Those come back as *ArgvUnreadableError,
 // and a caller must handle it rather than read a truncated list as complete.
+//
+// # An unknown never discards a match
+//
+// On *ArgvUnreadableError the returned slice is STILL every process this scan
+// positively matched (#7242 review R2-1). An unknown about one process says the
+// list may be incomplete. It says nothing about the matches found beside it, so
+// it never erases them. A caller that has to act on "nothing matched" holds on
+// the error. A caller that degrades on it uses the matches it has. The error
+// names the lowest unclassifiable pid, so the report is stable across scans.
 func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error) {
 	if match == nil {
 		return nil, errors.New("proctree: ProcessesMatchingArgv needs a match function")
@@ -159,18 +214,26 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		return nil, fmt.Errorf("cannot read the process table: %w", err)
 	}
 	var matched []ProcessArgv
+	var unknown *ArgvUnreadableError
 	for pid, process := range snap {
 		argv, err := scanArgv(pid)
 		switch {
 		case err == nil:
-		case errors.Is(err, ErrNoArgv), isGone(err):
-			// Gone, or nothing to classify. Skipping can only omit a process
-			// that no longer exists; it can never invent one.
+		case isGone(err):
+			// Gone. Skipping can only omit a process that no longer exists; it
+			// can never invent one.
+			continue
+		case errors.Is(err, ErrNoArgv) && process.KernelThread:
+			// A kernel thread, by the kernel's own flag, which never has an argv
+			// and so can never match. The flag is the evidence, not the empty
+			// read: a live process mid-execve reads empty too (#7239), and it
+			// falls through to be settled below.
 			continue
 		default:
-			// Not ours, so its refusal is not evidence about us. Ownership is
-			// read from /proc/<pid> itself, which hidepid=1 still discloses —
-			// it restricts the directory's CONTENTS, not who owns it.
+			// Not ours, so its refusal (or its empty argv) is not evidence about
+			// us. Ownership is read from /proc/<pid> itself, which hidepid=1
+			// still discloses — it restricts the directory's CONTENTS, not who
+			// owns it.
 			uid, known := scanUID(pid)
 			if known && uid != os.Getuid() {
 				continue
@@ -185,7 +248,12 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			case refusalGone:
 				continue
 			default:
-				return nil, &ArgvUnreadableError{PID: pid, Err: refusal, OwnedByUs: known}
+				// Keep scanning: the next process may be the match a caller is
+				// looking for, and this unknown must not hide it.
+				if unknown == nil || pid < unknown.PID {
+					unknown = &ArgvUnreadableError{PID: pid, Err: refusal, OwnedByUs: known}
+				}
+				continue
 			}
 		}
 		if match(argv) {
@@ -193,6 +261,9 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		}
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].Process.PID < matched[j].Process.PID })
+	if unknown != nil {
+		return matched, unknown
+	}
 	return matched, nil
 }
 
@@ -224,12 +295,17 @@ const (
 )
 
 // settleRefusal decides what a refused argv read means. first is the refusal
-// the scan already has. Every read is bracketed by a presence check
-// (scanIdentity, which treats a zombie, a reaped process and a recycled pid as
-// departed), so a refusal stands only when the same process instance was
-// present before the first re-read, between all reads and after the last one.
-// An identity that cannot be revalidated counts as present: unknown never
-// licenses a skip.
+// the scan already has, or ErrNoArgv from a process that is not a kernel
+// thread. Every read is bracketed by a presence check (scanIdentity, which
+// treats a zombie, a reaped process and a recycled pid as departed), so a
+// refusal stands only when the same process instance was present before the
+// first re-read, between all reads and after the last one. An identity that
+// cannot be revalidated counts as present: unknown never licenses a skip.
+//
+// A re-read that finds no argv is NOT a departure (#7239). An exiting process
+// does read that way once its address space is gone, but so does one still
+// mid-execve, and only the presence check can tell them apart. So an empty
+// re-read keeps settling, and the process is skipped only once it is gone.
 func settleRefusal(process Process, first error) ([]string, refusalOutcome, error) {
 	gone := func() bool {
 		same, err := scanIdentity(process)
@@ -245,7 +321,7 @@ func settleRefusal(process Process, first error) ([]string, refusalOutcome, erro
 		switch {
 		case err == nil:
 			return argv, refusalRecovered, nil
-		case errors.Is(err, ErrNoArgv), isGone(err):
+		case isGone(err):
 			return nil, refusalGone, nil
 		}
 		last = err

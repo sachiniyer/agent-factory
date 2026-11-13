@@ -168,6 +168,16 @@ func readProcStat(pid int) (Process, int, error) {
 	if err != nil {
 		return Process{}, 0, err
 	}
+	return parseStat(pid, data)
+}
+
+// pfKthread is PF_KTHREAD from include/linux/sched.h, the task flag the kernel
+// sets on every kernel thread. Its value has not changed since it was added.
+const pfKthread = 0x00200000
+
+// parseStat is readProcStat's parse of one /proc/<pid>/stat line, separate so
+// a test can pin it on lines no live process on the runner would produce.
+func parseStat(pid int, data []byte) (Process, int, error) {
 	open := bytes.IndexByte(data, '(')
 	close_ := bytes.LastIndexByte(data, ')')
 	if open < 0 || close_ < open || close_+2 > len(data) {
@@ -180,6 +190,7 @@ func readProcStat(pid int) (Process, int, error) {
 		idxPPID  = 4 - 3
 		idxPGRP  = 5 - 3
 		idxSID   = 6 - 3
+		idxFlags = 9 - 3
 		idxStart = 22 - 3
 	)
 	if len(fields) <= idxStart {
@@ -203,16 +214,21 @@ func readProcStat(pid int) (Process, int, error) {
 	if err != nil {
 		return Process{}, 0, fmt.Errorf("bad sid for pid %d: %w", pid, err)
 	}
+	flags, err := strconv.ParseUint(fields[idxFlags], 10, 64)
+	if err != nil {
+		return Process{}, 0, fmt.Errorf("bad flags for pid %d: %w", pid, err)
+	}
 	start, err := strconv.ParseUint(fields[idxStart], 10, 64)
 	if err != nil {
 		return Process{}, 0, fmt.Errorf("bad starttime for pid %d: %w", pid, err)
 	}
 	return Process{
-		PID:     pid,
-		PPID:    ppid,
-		SID:     sid,
-		StartID: start,
-		Comm:    comm,
+		PID:          pid,
+		PPID:         ppid,
+		SID:          sid,
+		StartID:      start,
+		Comm:         comm,
+		KernelThread: flags&pfKthread != 0,
 	}, pgrp, nil
 }
 
@@ -286,12 +302,11 @@ func readArgv(pid int) ([]string, error) {
 	}
 	argv := splitNUL(data)
 	if len(argv) == 0 {
-		// Kernel threads, reaped-but-unwaited zombies, and a live process
-		// mid-execve (the new argv is not laid out yet, #7238) have an empty
-		// cmdline. Nothing to classify yet; say so rather than returning a
-		// zero-length argv that reads as a successful parse. ErrNoArgv keeps it
-		// apart from an argv we were refused (see ProcessesMatchingArgv), and
-		// apart from a classification (see TmuxIdentityOf).
+		// Kernel threads, zombies, and live processes mid-execve or mid-exit
+		// have an empty cmdline (see ErrNoArgv for each, and for how long).
+		// Nothing to classify yet; say so rather than returning a zero-length
+		// argv that reads as a successful parse. ErrNoArgv is never a
+		// classification. ErrNoArgv's doc says what each caller does with it.
 		return nil, fmt.Errorf("%w: pid %d", ErrNoArgv, pid)
 	}
 	return argv, nil

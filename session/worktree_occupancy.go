@@ -52,7 +52,11 @@ func CheckWorktreeOccupants(worktreePath string) error {
 	if len(occupants) == 0 {
 		return nil
 	}
-	return fmt.Errorf("%d process(es) are still working inside %s — %s; they carry no agent-factory "+
+	refusal := fmt.Errorf("%d process(es) are still working inside %s — %s; they carry no agent-factory "+
 		"marker, so ownership cannot be proven and they are reported rather than killed",
 		len(occupants), worktreePath, proctree.DescribeOccupants(occupants))
+	if advice := proctree.UnclassifiedOccupantAdvice(occupants); advice != "" {
+		return fmt.Errorf("%w. %s", refusal, advice)
+	}
+	return refusal
 }

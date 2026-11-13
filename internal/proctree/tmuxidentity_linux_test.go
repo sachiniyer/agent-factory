@@ -3,6 +3,7 @@
 package proctree
 
 import (
+	"fmt"
 	"os"
 	"testing"
 	"time"
@@ -67,5 +68,9 @@ func TestOccupantsOfDir_CountsAnUnclassifiableProcessAndSaysSo(t *testing.T) {
 	}
 	require.NotNil(t, found, "an occupant whose tmux identity is unknown must still be counted")
 	require.True(t, found.TmuxUnknown)
-	require.Contains(t, DescribeOccupants([]Occupant{*found}), "command line unreadable")
+	require.Contains(t, DescribeOccupants([]Occupant{*found}), "unclassified: its command line or task name could not be read")
+	// And the refusal says what to do next (#7242 review R8).
+	advice := UnclassifiedOccupantAdvice(occupants)
+	require.Contains(t, advice, "retry")
+	require.Contains(t, advice, fmt.Sprintf("ps -o pid,stat,lstart,args -p %d", pid))
 }

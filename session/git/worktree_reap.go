@@ -90,7 +90,9 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf)
+	procs, unclassified := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf)
+	// Runs after the kill below, or now if there is nothing to kill.
+	defer warnUnclassifiedSurvivors(worktreePath, unclassified)
 	if len(procs) == 0 {
 		return
 	}
@@ -130,6 +132,33 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 	})
 }
 
+// warnUnclassifiedSurvivors reports, at WARNING, each process the reap left
+// alone only because its tmux identity could not be established, if it is still
+// alive once the reap is done (#7238, #7242 review R6). Leaving it alone is
+// right, but it is not loud on its own. A removal fails only if the process
+// out-creates the unlink. On relocate (archive) the rename succeeds and the
+// process keeps writing into the moved tree. So this is where an operator hears
+// about it.
+//
+// It first gives those processes the same wait a SIGTERMed writer gets. An
+// unknown identity is usually a process starting or exiting (see
+// proctree.ErrNoArgv), and an ordinary exit is not worth a warning. Nothing is
+// signalled here.
+func warnUnclassifiedSurvivors(worktreePath string, unclassified []proctree.Process) {
+	if len(unclassified) == 0 {
+		return
+	}
+	for _, p := range proctree.WaitForExits(unclassified, worktreeReapTermWait) {
+		// worktreePath is a runtime value that may contain `%`, so it is an
+		// argument, never part of the format (#1211).
+		log.WarningLog.Printf("worktree %s: pid %d (%s) is still working inside it and was not signalled, "+
+			"because whether it is the shared tmux server could not be established (#7238). It and its "+
+			"subtree may keep writing: a removal can fail with \"directory not empty\", and an archive leaves "+
+			"it writing into the moved tree. Inspect it with `ps -o pid,stat,lstart,args -p %d`",
+			worktreePath, p.PID, p.Comm, p.PID)
+	}
+}
+
 // worktreeWriterProcesses selects the identity-verified snapshot entries the
 // worktree reaper may signal. The process fact functions are explicit so tests
 // can cover dangerous ancestry shapes without scanning or signalling real
@@ -145,19 +174,23 @@ func worktreeWriterProcesses(
 		cwd, ok := workingDir(pid)
 		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}
-	return worktreeWriterProcessesMatching(snap, selfPID, matches, tmuxIdentity)
+	procs, _ := worktreeWriterProcessesMatching(snap, selfPID, matches, tmuxIdentity)
+	return procs
 }
 
 // worktreeWriterProcessesMatching applies the shared-infrastructure exclusions
 // to both pathname-based cleanup and the repo-gone cleanup's descriptor-identity
 // matcher. The latter must not lose the protections merely because it cannot
 // safely re-resolve the pathname it is about to delete.
+//
+// It returns the kill set, and separately each process left out ONLY because its
+// tmux identity was unknown, for warnUnclassifiedSurvivors.
 func worktreeWriterProcessesMatching(
 	snap map[int]proctree.Process,
 	selfPID int,
 	matches func(int) bool,
 	tmuxIdentity func(int) proctree.TmuxIdentity,
-) []proctree.Process {
+) (procs, unclassified []proctree.Process) {
 	// The daemon can inherit a cwd inside a worktree when an af invocation
 	// auto-starts it there, and the shared tmux server inherits its cwd from the
 	// client that first started it. Neither may be a selected root or be reached
@@ -174,8 +207,11 @@ func worktreeWriterProcessesMatching(
 	// positive NotTmux makes a process eligible. An unreadable command line
 	// (a process mid-execve or mid-exit, or one darwin refuses) could belong to
 	// the shared server, and signalling the server ends every session on it. That
-	// costs at most one missed writer, and the removal then fails loudly, on the
-	// existing "directory not empty" path.
+	// costs at most one missed writer, and it is not loud on its own: a removal
+	// fails only if the writer out-creates the unlink, and a relocate (archive)
+	// succeeds with the writer still writing into the moved tree. So each such
+	// process is returned as unclassified, and one still alive after the reap is
+	// reported at WARNING (warnUnclassifiedSurvivors).
 	// A tracked teardown requester (#5182) — the process that asked for this
 	// teardown, identified by kernel peer credentials and still blocked on its
 	// reply — is alive inside the worktree for the best possible reason:
@@ -213,13 +249,14 @@ func worktreeWriterProcessesMatching(
 			// Once per pid per pass, like the requester notice: a pid can be
 			// evaluated as a root and again inside another root's subtree.
 			unknownLogged[pid] = true
-			log.InfoLog.Printf("pid %d (%s) could not be classified as tmux or not: its command line is unreadable; "+
-				"leaving it and its subtree out of the worktree writer reap (#7238)", pid, snap[pid].Comm)
+			unclassified = append(unclassified, snap[pid])
+			log.InfoLog.Printf("pid %d (%s) could not be classified as tmux or not: its command line or task "+
+				"name could not be read; leaving it and its subtree out of the worktree writer reap (#7238)",
+				pid, snap[pid].Comm)
 		}
 		return identity != proctree.NotTmux
 	}
 	seen := make(map[int]bool)
-	var procs []proctree.Process
 	add := func(p proctree.Process) {
 		if !seen[p.PID] {
 			seen[p.PID] = true
@@ -266,5 +303,5 @@ func worktreeWriterProcessesMatching(
 			add(p)
 		}
 	}
-	return procs
+	return procs, unclassified
 }
