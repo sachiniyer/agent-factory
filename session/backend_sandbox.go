@@ -472,22 +472,34 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 
 	cmd := p.buildRunCommand(ctx, script, stdin)
 
+	// execgroup's Output, not os/exec's plus a group Reap. When the step exits
+	// with a member of its group still holding one of its pipes past
+	// WaitDelay, such as a wedged transport helper, that member would otherwise
+	// keep running after the step reported its result, so it is SIGKILLed
+	// (#7108). Only members proven to hold one of the step's pipes are.
+	//
+	// Do not go back to a group reap. Under ControlMaster/ControlPersist,
+	// OpenSSH detaches the master into its own session but leaves its
+	// ProxyCommand, or ProxyJump's `ssh -W`, in this group as the master's
+	// transport. Since OpenSSH 8.0 that proxy's stderr is /dev/null, so it holds
+	// none of the step's pipes. Killing it kills the master: every later step
+	// re-authenticates, a concurrent step multiplexed over it fails with exit 255
+	// (ssh's own failure code, see reap), and forwards attached to it die
+	// (#7115). A group kill reaches the proxy whenever any other member is a
+	// straggler, so the reap names its targets per process instead (#7121). A
+	// step still running at its deadline is different: KillOnCancel tears down
+	// the whole group, members like that included.
 	var out []byte
 	var err error
 	if combined {
-		out, err = cmd.CombinedOutput()
+		out, err = execgroup.CombinedOutput(cmd)
 	} else {
-		out, err = cmd.Output()
+		out, err = execgroup.Output(cmd)
 	}
-	// Read the deadline as the command returned, before anything below can spend
-	// time. On darwin the reap re-signals the group for up to resignalBound
-	// (2 s), and the timeout label must describe the command, not how long its
-	// cleanup took: read afterwards, a deadline that passed during the sweep
-	// would relabel a genuine *exec.ExitError as a timeout.
 	deadlineErr := ctx.Err()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The child exited cleanly (a non-zero exit surfaces as an *exec.ExitError,
-		// not ErrWaitDelay) and only a descendant held the capture pipe open past
+		// not ErrWaitDelay) and only a descendant held a pipe open past
 		// WaitDelay. The output is already complete, so this is not a failure —
 		// consistent with backend_docker.go and doctor/remote.go, which normalize
 		// a bare ErrWaitDelay to nil before any deadline check. (Previously this
@@ -495,28 +507,16 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 		// orphaned pipe-holder made the unconditional ctx.Err() check rewrite a
 		// completed command as context.DeadlineExceeded, misrouting reap's
 		// sentinel-present case into ErrWorkspaceStateUnknown instead of latching.)
-		//
-		// ErrWaitDelay is also the proof that a group member outlived the leader
-		// while holding the capture pipe, such as a wedged transport helper. That
-		// member would otherwise keep running after a step that reported success,
-		// so SIGKILL the group the leader bound (#7108).
-		//
-		// This is the only exit that reaps. Do not widen it to every successful
-		// exit. Under ControlMaster/ControlPersist, OpenSSH detaches the master
-		// into its own session but leaves its ProxyCommand, or ProxyJump's
-		// `ssh -W`, in this group as the master's transport. Since OpenSSH 8.0
-		// that proxy's stderr is /dev/null, so it holds none of our pipes and the
-		// step returns err == nil with the proxy still a member. Reaping there
-		// kills the master: every later step re-authenticates, a concurrent step
-		// multiplexed over it fails with exit 255 (ssh's own failure code, see
-		// reap), and forwards attached to it die (#7115). A member that
-		// holds none of our pipes is not evidence of a leak, so it is left alone.
-		// A step still running at its deadline is different: KillOnCancel tears
-		// down the whole group, members like that included.
-		execgroup.Reap(cmd)
 		err = nil
 	}
-	if err != nil && deadlineErr != nil {
+	// The timeout label describes the command, not its cleanup. WaitDelay and
+	// the straggler reap both run after the child has exited, and a deadline
+	// that passes while they do must not relabel the child's own exit status as
+	// a timeout. A child the deadline killed died of a signal, so it never
+	// reads as having exited on its own.
+	var exitErr *exec.ExitError
+	exitedOnItsOwn := errors.As(err, &exitErr) && exitErr.Exited()
+	if err != nil && deadlineErr != nil && !exitedOnItsOwn {
 		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, deadlineErr)
 	}
 	return out, err
