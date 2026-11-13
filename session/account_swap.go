@@ -388,7 +388,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		if pending != nil && pending.To == name && pending.ConversationID != "" {
 			// A re-launch of a committed replacement: its id may already name a
 			// transcript in the target account's store (#7214).
-			launchProgram, conversation, reminted = committedConversationLaunch(
+			launchProgram, conversation, reminted = i.committedConversationLaunch(
 				resolvedProgram, workDir, name, pending.ConversationID)
 		} else {
 			launchProgram, conversation = planLaunchConversation(newSessionID(), resolvedProgram)
@@ -547,18 +547,28 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
 	}
-	var replaced string
+	var replaced, missionFrom string
+	refreshMission := false
 	if live := i.pendingAccountSwap; reminted && live != nil && live.To == name && live.CarriedConversationID == "" &&
 		live.ConversationID != conversation.ID {
 		// The record names the conversation the re-launch starts, never the
-		// stale id it no longer resumes (#7214).
+		// stale id it no longer resumes, and says why the replacement starts
+		// fresh: the API answer and the notice report CarryFallback (#7214,
+		// #7216 review R4).
 		replaced, live.ConversationID = live.ConversationID, conversation.ID
+		live.CarryFallback = staleCommittedConversationReason
+		refreshMission, missionFrom = live.Manual, live.From
 		i.touchLocked()
 	}
 	i.mu.Unlock()
 	if replaced != "" {
-		log.WarningLog.Printf("account swap for %q re-launches its replacement on a fresh conversation %s: committed conversation %s is %s",
-			i.Title, conversation.ID, replaced, staleCarryReason)
+		log.WarningLog.Printf("account swap for %q re-launches its replacement on a fresh conversation %s instead of committed conversation %s, because %s",
+			i.Title, conversation.ID, replaced, staleCommittedConversationReason)
+		if refreshMission {
+			// A manual mission was rendered for the conversation the replacement
+			// no longer runs (demotePendingAccountSwapCarry's case).
+			i.refreshPendingManualAccountSwapMission(missionFrom, name)
+		}
 	}
 	// The pane and the API response say why; af's log must too (#7152). A
 	// re-plan after a failed copy is the copy's own refusal, logged there.
