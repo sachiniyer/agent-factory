@@ -128,7 +128,7 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 			workDir, recorded, resolved := claudeRestoreWorktree(t)
 			tc.layout(t, func(project, id string, at time.Time) {
 				t.Helper()
-				setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), "{}\n"), at)
+				setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, workDir)), at)
 			}, recorded, resolved)
 			inst := claudeRestoreInstance(t, workDir, carryTestID)
 
@@ -181,7 +181,7 @@ func TestExactResumeJudgesAnAccountSessionByTheAccountsStore(t *testing.T) {
 	// The ambient store alone would say the recorded conversation is current.
 	setModTime(t, writeCarryFile(t, filepath.Join(ambient, ".claude"), filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
 	setModTime(t, writeCarryFile(t, account, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, account, filepath.Join(recorded, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	setModTime(t, writeCarryFile(t, account, filepath.Join(recorded, newerConversationID+".jsonl"), claudeRecordLine(t, workDir)), past.Add(time.Minute))
 
 	inst := claudeRestoreInstance(t, workDir, carryTestID)
 	inst.Account = "work"
@@ -251,7 +251,7 @@ func TestRecoverStartsAStaleClaudeSessionFresh(t *testing.T) {
 				other = past.Add(time.Minute)
 			}
 			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), other)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, data.Worktree.WorktreePath)), other)
 
 			restored, err := FromInstanceData(data)
 			require.NoError(t, err)
@@ -321,7 +321,7 @@ func TestLoadRespawnRetiresARefusedClaudeConversation(t *testing.T) {
 			project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
 			past := time.Now().Add(-time.Hour)
 			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, data.Worktree.WorktreePath)), past.Add(time.Minute))
 
 			restored, err := FromInstanceData(data)
 			require.NoError(t, err)

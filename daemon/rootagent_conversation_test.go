@@ -1,6 +1,7 @@
 package daemon
 
 import (
+	"encoding/json"
 	"errors"
 	"os"
 	"path/filepath"
@@ -80,7 +81,11 @@ func writeRootClaudeTranscript(t *testing.T, configDir, repoPath, id string) str
 	projectDir := filepath.Join(configDir, "projects", projectName)
 	require.NoError(t, os.MkdirAll(projectDir, 0o700))
 	path := filepath.Join(projectDir, id+".jsonl")
-	require.NoError(t, os.WriteFile(path, []byte("{}\n"), 0o600))
+	// A transcript records the directory its conversation was launched in, and
+	// af counts it as this repo's by that cwd, not by its project name (#7208).
+	record, err := json.Marshal(map[string]any{"type": "user", "cwd": repoPath})
+	require.NoError(t, err)
+	require.NoError(t, os.WriteFile(path, append(record, '\n'), 0o600))
 	return path
 }
 

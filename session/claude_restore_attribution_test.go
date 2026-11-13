@@ -54,8 +54,8 @@ func TestAClaudeLaunchMovedOutOfItsWorktreeResumesItsRecord(t *testing.T) {
 	workDir, shared := t.TempDir(), t.TempDir()
 	project := claudeProjectCandidates(shared)[0]
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), claudeRecordLine(t, shared)), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, shared)), past.Add(time.Minute))
 
 	program := "env -C " + shared + " claude"
 	rewritten, ok, decline := prepareExactResumeConversation(claudeRestoreInstance(t, workDir, carryTestID), program)
@@ -79,8 +79,10 @@ func inPlaceRowData(t *testing.T, status Status, agent, agentName, id string) (I
 		configDir := t.TempDir()
 		t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 		project := claudeProjectCandidates(checkout)[0]
-		setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), "{}\n"), past)
-		setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+		setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, checkout)), past)
+		// The user's own claude in the checkout records the same cwd: #7208's
+		// cwd match cannot tell it apart, which is why ownership decides.
+		setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, checkout)), past.Add(time.Minute))
 	case tmux.ProgramCodex:
 		codexHome := t.TempDir()
 		t.Setenv("CODEX_HOME", codexHome)
@@ -176,8 +178,9 @@ func TestAdoptedRelaunchJudgesTheTabsRecord(t *testing.T) {
 	data := deadInstanceData(t, Lost, agentName, agentName+tmuxTabSeparator+shellTabName)
 	project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	own := claudeRecordLine(t, data.Worktree.WorktreePath)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), own), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), own), past.Add(time.Minute))
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })
@@ -213,8 +216,8 @@ func TestARefusedRebuildNamesTheRefusal(t *testing.T) {
 	}
 	project := claudeProjectCandidates(workDir)[0]
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), claudeRecordLine(t, workDir)), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, workDir)), past.Add(time.Minute))
 
 	err = missingWorktreeRebuildRefusal(inst, gw, true, "claude")
 	require.ErrorContains(t, err, "which af refused: "+staleCarryReason)
@@ -238,8 +241,9 @@ func staleClaudeRecoverRow(t *testing.T, exec cmd_test.MockCmdExec, agentName st
 	data.Tabs[0].Conversation = &AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
 	project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	own := claudeRecordLine(t, data.Worktree.WorktreePath)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), own), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), own), past.Add(time.Minute))
 	restored, err := FromInstanceData(data)
 	require.NoError(t, err)
 	restored.SetRebuildTeardownNotify(func(*Instance) error { return nil })

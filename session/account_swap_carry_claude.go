@@ -35,6 +35,7 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 		return carryNoClaudeDirReason
 	}
 	c.claudeProjects = claudeProjectCandidates(launch.WorkingDir)
+	c.claudeLaunchDir = launch.WorkingDir
 	var refused string
 	var src, dst []claudeCopy
 	note := func(root carryRoot, project string, into *[]claudeCopy) {

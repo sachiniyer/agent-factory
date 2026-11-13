@@ -26,12 +26,21 @@ import (
 // spellings: as recorded first, then as resolved.
 func symlinkedClaudeCarryInstance(t *testing.T) (*Instance, string, string) {
 	t.Helper()
+	inst, recorded, resolved, _ := symlinkedClaudeCarryInstanceNamed(t, "repo")
+	return inst, recorded, resolved
+}
+
+// symlinkedClaudeCarryInstanceNamed is symlinkedClaudeCarryInstance for a
+// worktree whose last path element is leaf. It also returns the real
+// directory the symlinked parent points at.
+func symlinkedClaudeCarryInstanceNamed(t *testing.T, leaf string) (*Instance, string, string, string) {
+	t.Helper()
 	inst, _ := carrySwapInstance(t, tmux.ProgramClaude)
 	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
-	require.NoError(t, os.MkdirAll(filepath.Join(real, "repo"), 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(real, leaf), 0o755))
 	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
 	require.NoError(t, os.Symlink(real, link))
-	inst.Path = filepath.Join(link, "repo")
+	inst.Path = filepath.Join(link, leaf)
 	cmd := exec.Command("git", "init")
 	cmd.Dir = inst.Path
 	out, err := cmd.CombinedOutput()
@@ -42,17 +51,19 @@ func symlinkedClaudeCarryInstance(t *testing.T) (*Instance, string, string) {
 
 	projects := claudeProjectCandidates(inst.GetWorktreePath())
 	require.Len(t, projects, 2, "the worktree must have two project-directory spellings")
-	require.Equal(t, filepath.Join("projects", claudeProjectName(filepath.Join(link, "repo"))), projects[0])
-	require.Equal(t, filepath.Join("projects", claudeProjectName(filepath.Join(real, "repo"))), projects[1])
-	return inst, projects[0], projects[1]
+	require.Equal(t, filepath.Join("projects", claudeProjectName(filepath.Join(link, leaf))), projects[0])
+	require.Equal(t, filepath.Join("projects", claudeProjectName(filepath.Join(real, leaf))), projects[1])
+	return inst, projects[0], projects[1], real
 }
 
 func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
+	// cwd is the worktree each subtest's conversations were launched in.
+	var cwd string
 	// file writes a transcript for id under project at modTime.
 	file := func(t *testing.T, source, project, id string, at time.Time) {
 		t.Helper()
-		setModTime(t, writeCarryFile(t, source, filepath.Join(project, id+".jsonl"), "{}\n"), at)
+		setModTime(t, writeCarryFile(t, source, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, cwd)), at)
 	}
 	for _, tc := range []struct {
 		name   string
@@ -142,6 +153,7 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			home := carryAmbientProviderHomes(t)
 			inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+			cwd = inst.GetWorktreePath()
 			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 			tc.layout(t, filepath.Join(home, ".claude"), recorded, resolved)
 
@@ -186,7 +198,7 @@ func TestInspectClaudeProjectConversationsReadsEveryProjectSpelling(t *testing.T
 	past := time.Now().Add(-time.Hour)
 	write := func(project, id string, at time.Time) string {
 		t.Helper()
-		path := writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), "{}\n")
+		path := writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, link))
 		setModTime(t, path, at)
 		return path
 	}

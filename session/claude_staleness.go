@@ -24,21 +24,26 @@ const (
 	// claudeRecordedUnlisted: a spelling's project directory could not be
 	// listed, so what it holds is unknown.
 	claudeRecordedUnlisted
+	// claudeRecordedUncorrelated: a newer conversation names no directory af
+	// can read, so whether it is this worktree's is unknown (#7208).
+	claudeRecordedUncorrelated
 )
 
 // judgeClaudeRecorded is the one staleness rule for a recorded Claude
 // conversation, shared by the account swap's carry and the restore guard: is
 // conversation id still the newest one in the worktree? The worktree's
 // conversations are every one filed in configDir under any project directory
-// in projects, the spellings claudeProjectCandidates names for it (#7177).
-// Newer is by modification time, strictly: the live runtime appends to the
-// conversation it is in.
+// in projects, the spellings claudeProjectCandidates names for it (#7177),
+// whose recorded cwd is launchDir (#7208): a project directory can hold
+// another directory's conversations under a colliding name, and a newer one
+// of those says nothing about this worktree. Newer is by modification time,
+// strictly: the live runtime appends to the conversation it is in.
 //
 // bound, relative to configDir, is the project directory whose copy of the
 // conversation the caller would use, as a carry copies one file. "" judges
 // the newest copy under any spelling, which is the one a resume by id
 // continues.
-func judgeClaudeRecorded(configDir string, projects []string, id, bound string) claudeRecordedVerdict {
+func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bound string) claudeRecordedVerdict {
 	transcripts, err := claudeWorktreeTranscripts(configDir, projects)
 	if err != nil {
 		return claudeRecordedUnlisted
@@ -66,20 +71,31 @@ func judgeClaudeRecorded(configDir string, projects []string, id, bound string) 
 		return claudeRecordedMissing
 	}
 	verdict := claudeRecordedCurrent
+	uncorrelated := false
 	for _, other := range transcripts {
 		if !other.modTime.After(recorded.modTime) {
 			continue
 		}
+		if other.dir != recorded.dir && strings.EqualFold(other.id, recorded.id) {
+			// A newer copy the judged one still holds every byte of brings no
+			// turn it lacks; only one that adds or diverges does.
+			if !claudeTranscriptExtends(*recorded, other) {
+				verdict = claudeRecordedCopies
+			}
+			continue
+		}
 		// Newer is never the recorded file itself, so a newer file in its own
-		// directory is another conversation.
-		if other.dir == recorded.dir || !strings.EqualFold(other.id, recorded.id) {
+		// directory, or under another id, is another conversation: this
+		// worktree's only if its transcript records this launch directory.
+		switch claudeTranscriptOwnership(other, launchDir) {
+		case claudeOwnedHere:
 			return claudeRecordedStale
+		case claudeOwnershipUnknown:
+			uncorrelated = true
 		}
-		// A newer copy the judged one still holds every byte of brings no
-		// turn it lacks; only one that adds or diverges does.
-		if !claudeTranscriptExtends(*recorded, other) {
-			verdict = claudeRecordedCopies
-		}
+	}
+	if uncorrelated {
+		return claudeRecordedUncorrelated
 	}
 	return verdict
 }
@@ -90,10 +106,12 @@ func judgeClaudeRecorded(configDir string, projects []string, id, bound string) 
 // The carry binds the copy that holds every other one (locateClaude), so a
 // newer copy under another spelling means Claude wrote it while af planned:
 // that refuses too, rather than carry a copy without the latest turns.
-func claudeCarryStaleness(configDir string, projects []string, transcript, id string) string {
-	switch judgeClaudeRecorded(configDir, projects, id, filepath.Dir(transcript)) {
+func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string) string {
+	switch judgeClaudeRecorded(configDir, projects, launchDir, id, filepath.Dir(transcript)) {
 	case claudeRecordedUnlisted:
 		return carryTranscriptsUnlistedReason
+	case claudeRecordedUncorrelated:
+		return carryUncorrelatedReason
 	case claudeRecordedMissing:
 		return carryTranscriptMissingReason
 	case claudeRecordedStale:
@@ -111,18 +129,20 @@ func claudeCarryStaleness(configDir string, projects []string, transcript, id st
 // conversation the user abandoned, and resuming that is worse than a stated
 // fresh start.
 //
-// It refuses on evidence only: a newer conversation in a directory af owns
-// exclusively, where Claude actually runs (newerConversationIsEvidence). A row
-// in the user's own checkout or launched outside its worktree,
-// a store af cannot name, a spelling it cannot list, and a recorded transcript
-// it does not find all say nothing about whether this session moved on, so the
-// restore resumes the recorded id as it always has (#7209 review R1, R4).
+// It refuses on evidence only: a newer conversation, launched here by the cwd
+// its transcript records, in a directory af owns exclusively and where Claude
+// actually runs (newerConversationIsEvidence). A row in the user's own
+// checkout or launched outside its worktree, a store af cannot name, a
+// spelling it cannot list, a newer conversation that names no directory, and
+// a recorded transcript af does not find all say nothing about whether this
+// session moved on, so the restore resumes the recorded id as it always has
+// (#7209 review R1, R4).
 func (i *Instance) staleRecordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
 	configDir, launchDir, err := i.claudeStoreFor(program, i.GetWorktreePath())
 	if err != nil || strings.TrimSpace(configDir) == "" || !i.newerConversationIsEvidence(launchDir) {
 		return resumeDecline{}
 	}
-	if judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), conv.ID, "") == claudeRecordedStale {
+	if judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), launchDir, conv.ID, "") == claudeRecordedStale {
 		return declineResume(staleCarryReason)
 	}
 	return resumeDecline{}

@@ -48,12 +48,15 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 	if !ok {
 		return launch, conversation, false
 	}
-	verdict := judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), id, "")
+	verdict := judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), launchDir, id, "")
 	if verdict == claudeRecordedStale && i.newerConversationIsEvidence(launchDir) {
 		launch, conversation = planLaunchConversation(newSessionID(), program)
 		return launch, conversation, conversation.HasID()
 	}
-	if verdict == claudeRecordedCurrent || verdict == claudeRecordedStale {
+	// id is filed in every one of these: a newer conversation that names no
+	// directory af can read (#7208) is no evidence the session moved on, and a
+	// second --session-id on a filed id never boots, so it resumes too.
+	if verdict == claudeRecordedCurrent || verdict == claudeRecordedStale || verdict == claudeRecordedUncorrelated {
 		if resumed, ok := tmux.ResumeProgramWithConversationID(program, tmux.ProgramClaude, id); ok {
 			return resumed, AgentConversationData{
 				Agent:       tmux.ProgramClaude,
