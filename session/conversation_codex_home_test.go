@@ -18,12 +18,15 @@ import (
 // the recorded id still names the pane's conversation.
 func staleResumeInstance(t *testing.T, workDir string, conv AgentConversationData) *Instance {
 	t.Helper()
-	gw, err := git.NewGitWorktreeFromStorage(workDir, workDir, "t", "main", "", false, true)
+	// A worktree af created for the session, apart from the repository's own
+	// checkout: only there is a newer thread evidence (#7210).
+	repo := t.TempDir()
+	gw, err := git.NewGitWorktreeFromStorage(repo, workDir, "t", "main", "", false, true)
 	require.NoError(t, err)
 	return &Instance{
 		Title:       "t",
 		Program:     tmux.ProgramCodex,
-		Path:        workDir,
+		Path:        repo,
 		gitWorktree: gw,
 		Tabs:        []*Tab{{Conversation: conv}},
 	}

@@ -93,6 +93,19 @@ func (i *Instance) judgeRecordedCodexRollout(home, program, workDir string, conv
 		}
 		repair = operatorRepairWindowOf(conv, time.Now())
 	}
+	// A newer thread counts against the record only where af owns the
+	// directory the agent runs in exclusively (newerConversationIsEvidence,
+	// #7210): in the user's own checkout their own codex, or a sibling
+	// in-place session, writes threads with the same cwd. Whether the
+	// recorded thread is missing, duplicated or someone else's is evidence
+	// about the id itself, judged above and here, where the rollout af chose
+	// may have gone since the walk: that still takes the second look.
+	if !i.newerConversationIsEvidence(launchDir) {
+		if _, err := os.Lstat(recordedPath); err != nil {
+			return resumeDecline{}, true
+		}
+		return resumeDecline{}, false
+	}
 	switch checkCodexRecordedStaleness(recordedPath, files, pathutil.ResolveForCompare(launchDir), repair) {
 	case codexRolloutStale:
 		return declineResume(staleCarryReason), false
