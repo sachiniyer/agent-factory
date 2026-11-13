@@ -64,6 +64,27 @@ func (t *TmuxSession) SetExactResumeRefusal(refusal ExactResumeRefusal) {
 	t.exactResumeRefusal = refusal
 }
 
+// SetBeforeRespawn installs a step Restore runs only when it re-spawns: after
+// tmux confirmed the session gone, and immediately before the replacement
+// starts. A restore that reattaches a live pane never runs it, so a caller can
+// make what only a re-spawn needs durable there without writing it for a pane
+// that keeps running (#7209 review R2-1). An error refuses the re-spawn. The
+// step runs at most once; nil clears it.
+func (t *TmuxSession) SetBeforeRespawn(step func() error) {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	t.beforeRespawn = step
+}
+
+// takeBeforeRespawn returns the SetBeforeRespawn step and clears it.
+func (t *TmuxSession) takeBeforeRespawn() func() error {
+	t.programMu.Lock()
+	defer t.programMu.Unlock()
+	step := t.beforeRespawn
+	t.beforeRespawn = nil
+	return step
+}
+
 // ExactResumeFreshStartMessage is the warning a re-spawn logs when it starts a
 // fresh conversation instead of the account-wide latest. A refused id gets its
 // own wording: "no recorded conversation id" would be false, and it is the

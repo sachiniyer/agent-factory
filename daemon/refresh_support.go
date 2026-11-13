@@ -389,7 +389,23 @@ func releasesLostSandboxGhost(item session.InstanceData) bool {
 // see TestManagerCreateSessionAtomicWithRefresh, which uses it to detect
 // whether refresh ever raced CreateSession and tried to construct a
 // duplicate Instance from disk.
-var fromInstanceDataForRefresh = session.FromInstanceData
+var fromInstanceDataForRefresh = session.FromInstanceDataWithContext
+
+// loadRestoreContext is the context a daemon load materializes a row of repoID
+// through: rc when the refresh primed one, else a fresh load context, either
+// way carrying the write that makes a staged conversation replacement durable
+// before its re-spawn (#7209 review R2-1). The write is the loader's own,
+// persistInstanceData, which is safe under m.mu and keys the row by title and
+// stable id, so it lands on the record being loaded.
+func loadRestoreContext(repoID string, rc *session.RestoreContext) *session.RestoreContext {
+	if rc == nil {
+		rc = session.NewLoadRestoreContext()
+	}
+	rc.SetPersistBeforeRespawn(func(i *session.Instance) error {
+		return persistInstanceData(repoID, i.ToInstanceData())
+	})
+	return rc
+}
 
 // persistLegacyInstanceID is the durable half of daemon-load ID backfill. A
 // seam keeps the unknown-outcome branch testable: if this write cannot be

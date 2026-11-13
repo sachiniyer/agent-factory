@@ -39,7 +39,7 @@ func unknownOnLoadForAll(t *testing.T) *int {
 	t.Helper()
 	loads := 0
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		loads++
 		return nil, unknownProjectConfig(d.Path)
 	}

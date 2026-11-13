@@ -131,6 +131,12 @@ func (i *Instance) SetRelocationSettleNotify(notify func(*Instance) error) {
 	i.relocationSettleNotify = notify
 }
 
+// RelocationSettleNotifyForTest is the installed respawn persist callback, so a
+// daemon test can prove a route installs one around its re-spawn.
+func (i *Instance) RelocationSettleNotifyForTest() func(*Instance) error {
+	return i.relocationSettleNotifyFn()
+}
+
 // relocationSettleNotifyFn reads the installed callback under the lock for
 // the respawn edge; a nil return means fire nothing.
 func (i *Instance) relocationSettleNotifyFn() func(*Instance) error {

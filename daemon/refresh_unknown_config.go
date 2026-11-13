@@ -190,9 +190,9 @@ func materializeRefreshRow(tick uint64, repoID, key string, item session.Instanc
 	var instance *session.Instance
 	var err error
 	if primed != nil {
-		instance, err = fromInstanceDataWithContextForRefresh(item, primed)
+		instance, err = fromInstanceDataWithContextForRefresh(item, loadRestoreContext(repoID, primed))
 	} else {
-		instance, err = fromInstanceDataForRefresh(item)
+		instance, err = fromInstanceDataForRefresh(item, loadRestoreContext(repoID, nil))
 	}
 	noteRefreshRowOutcome(tick, repoID, key, item, err)
 	return instance, err

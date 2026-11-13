@@ -17,7 +17,7 @@ import (
 func stubFromInstanceForRefresh(t *testing.T) {
 	t.Helper()
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
