@@ -198,17 +198,27 @@ func (m *home) setPaneAutoHideStatus(p *store.OpenPane, paneCount int) {
 	msg := fmt.Sprintf("%s — too narrow; resize%s", subject, paneRecoveryStatusHint())
 	m.pendingPaneAutoHideStatus = msg
 	m.paneAutoHideNoticeID = m.setTransientNotice(errors.New(msg))
+	m.paneAutoHidePane = p
 }
 
-// clearStaleAutoHideStatus drops the "N hidden: terminal too narrow" guidance
-// the moment a relayout fits every open pane again — otherwise a resize wide
-// enough to reveal the auto-hidden panes still leaves the narrow-width status
-// on the bar, contradicting the now-visible panes (#1557). Keyed on the notice
-// id so a newer, unrelated status that superseded ours is never wiped; the
-// guidance's own transient timer still handles the case where it is the current
-// notice but the panes never came back.
+// clearStaleAutoHideStatus drops the "X hidden — too narrow" guidance the
+// moment the pane it names is no longer hidden. relayout calls it right after
+// it settles the visible set, so the notice is judged against the same panes
+// the frame paints, in the same update.
+//
+// Fitting every open pane again (a resize, #1557) is one way the named pane
+// comes back. It is not the only one: closing the visible pane promotes a
+// hidden one in its place. Archiving a session closes its panes, so after an
+// archive the workspace showed `alpha · › Terminal` while the bar still said
+// "alpha · › Terminal hidden", because another of alpha's panes was still
+// hidden and the old rule waited for every pane to fit (#7229). The notice
+// names one pane, so that pane is what it is checked against.
+//
+// Keyed on the notice id so a newer, unrelated status that superseded ours is
+// never wiped; the guidance's own transient timer still handles the case where
+// it is the current notice but the pane never came back.
 func (m *home) clearStaleAutoHideStatus() {
-	if m.paneAutoHideNoticeID == 0 || m.store.NumOpenPanes() > len(m.visiblePanes) {
+	if m.paneAutoHideNoticeID == 0 || m.paneStillAutoHidden(m.paneAutoHidePane) {
 		return
 	}
 	if m.transientNoticeID == m.paneAutoHideNoticeID {
@@ -216,6 +226,27 @@ func (m *home) clearStaleAutoHideStatus() {
 	}
 	m.paneAutoHideNoticeID = 0
 	m.pendingPaneAutoHideStatus = ""
+	m.paneAutoHidePane = nil
+}
+
+// paneStillAutoHidden reports whether p is open but not among the visible
+// panes, which is the one state the auto-hide notice may describe. A notice
+// with no recorded pane falls back to "some open pane is not shown".
+func (m *home) paneStillAutoHidden(p *store.OpenPane) bool {
+	if p == nil {
+		return m.store.NumOpenPanes() > len(m.visiblePanes)
+	}
+	for _, v := range m.visiblePanes {
+		if v == p {
+			return false
+		}
+	}
+	for _, o := range m.store.OpenPanes() {
+		if o == p {
+			return true
+		}
+	}
+	return false
 }
 
 // paneStatusLabel names a pane for a user-facing message the way the pane's own

@@ -18,7 +18,11 @@ import (
 //     asserted instance's row — restoring the tab sub-selection when the
 //     cursor was on one of its tab rows (lastCursor*); a dangling or nil
 //     assertion leaves the clamped cursor as-is, matching the old "selected
-//     title gone → sidebar clamp behavior" rule.
+//     title gone → sidebar clamp behavior" rule;
+//   - except when the cursor's own session is still present but its row moved
+//     out from under the index: archived into the Archived folder, or its tab
+//     rows folded by an in-flight op. The cursor follows it (followCursorRow,
+//     #7229).
 //
 // Afterwards the cursor's row (if it rests on an instance or tab row) is
 // pushed back into the store so the display binding, the active tab, and the
@@ -27,6 +31,7 @@ func (s *Sidebar) syncFromStore() {
 	if s.structureSig() == s.seenSig && s.proj.SelectionSeq() == s.seenSelSeq {
 		return
 	}
+	prev := s.builtCursorRow()
 	s.rebuildVisibleItems()
 	// treeCollapsed is the user's fold of the BOUND live row's tab subtree.
 	// Archiving re-homes that row into the flat Archived folder, where the
@@ -46,6 +51,7 @@ func (s *Sidebar) syncFromStore() {
 			s.rebuildVisibleItems()
 		}
 	}
+	s.followCursorRow(prev)
 	if s.proj.SelectionSeq() != s.seenSelSeq {
 		if inst := s.proj.GetSelectedInstance(); inst != nil {
 			s.moveCursorToInstance(inst)
@@ -314,6 +320,7 @@ func (s *Sidebar) rebuildVisibleItems() {
 		}
 	}
 	s.visibleItems = items
+	s.rowInstances = append(s.rowInstances[:0], instances...)
 	// Clamp selectedIdx
 	if s.selectedIdx >= len(s.visibleItems) {
 		s.selectedIdx = len(s.visibleItems) - 1

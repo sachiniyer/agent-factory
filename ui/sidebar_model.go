@@ -135,6 +135,11 @@ type Sidebar struct {
 	sections     []SidebarSection
 	visibleItems []SidebarItem
 	selectedIdx  int
+	// rowInstances is the instance list visibleItems was built from, copied at
+	// that rebuild: every item's ItemIndex indexes it. The projection's own list
+	// can change before the next rebuild, so this is what names the row the
+	// cursor was on when syncFromStore decides where it goes next (#7229).
+	rowInstances []*session.Instance
 
 	// seenSig is the structure signature (structureSig) visibleItems was last
 	// derived from. The store is written directly by event-loop handlers
