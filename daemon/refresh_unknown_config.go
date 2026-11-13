@@ -92,7 +92,8 @@ var (
 	// deferredPrimedMaxPasses bounds how many refresh passes may go by between
 	// a probe priming a row and the row loading from it: an older snapshot is
 	// re-probed, so a row whose repo was unlisted for a while never loads from a
-	// config read long ago (#7083 review). Passes, not seconds: the refresh runs
+	// config read long ago (#7083 review). Every refresh is a pass, a refresh
+	// whose load aborted included (#7113). Passes, not seconds: the refresh runs
 	// at daemon_poll_interval, which accepts any positive duration, and a
 	// wall-clock bound shorter than it would stale every snapshot before its
 	// next pass and re-probe the row forever (#7087 review).
