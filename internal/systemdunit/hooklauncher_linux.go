@@ -36,9 +36,12 @@ const hookLauncherProgram = "systemd-run"
 // that prefix. A launcher for a DIFFERENT prefix is another session's business
 // and is never adopted.
 //
-// A process table that cannot be read is an error, never an empty list. Callers
-// on a path that is about to touch the tree must fail closed on it, exactly as
-// they already do for an unreachable user manager.
+// A process table that cannot be read is an error, never an empty list. So is a
+// live process of ours whose command line cannot be classified, even after the
+// scan re-reads it (#7239). A launcher caught mid-execve has no argv yet, so an
+// argv-less process might be the very launcher this looks for. Callers on a
+// path that is about to touch the tree must fail closed on it, exactly as they
+// already do for an unreachable user manager.
 func RunningHookLaunchers(prefixes ...string) ([]HookLauncher, error) {
 	present := nonEmpty(prefixes)
 	if len(present) == 0 {

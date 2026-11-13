@@ -92,11 +92,23 @@ func isGone(err error) bool {
 // A process table that cannot be read is an ERROR, never an empty slice: the
 // callers of this are deciding whether a tree is safe to modify, and "I could
 // not look" must not arrive as "nothing is there" (#2874). The same rule governs
-// each individual argv read, with one exception that is a fact rather than a
-// guess: a process that has EXITED between the snapshot and its argv read, or
-// that never had an argv at all (ErrNoArgv), is skipped, because "it is gone"
-// and "it has nothing to classify" are both answers. Anything else — a refusal,
-// a malformed read — fails the whole scan.
+// each individual argv read, with two exceptions that are facts rather than
+// guesses: a process that has EXITED between the snapshot and its argv read,
+// and a KERNEL THREAD (the kernel's own PF_KTHREAD flag), which never has an
+// argv. Both are skipped, because "it is gone" and "it can never match" are both
+// answers. Anything else — a refusal, a malformed read — fails the whole scan.
+//
+// # An empty argv is not an answer on its own
+//
+// ErrNoArgv from any OTHER process is not "nothing to classify" (#7239). A live
+// process in the middle of execve reads exactly that way: Linux installs the new
+// address space before it lays out the new argv, so /proc/<pid>/cmdline is
+// empty for that window. That window opens at a launcher's own execve, the
+// moment this oracle exists for, so skipping it would report "no launcher"
+// about one that is starting. It is handled like a refusal instead: subject to
+// the ownership scope below, re-read while the same process stays present, and
+// used once an argv appears, skipped once the process is gone, and reported as
+// an *ArgvUnreadableError if it is present and argv-less throughout.
 //
 // # Whose refusal counts
 //
@@ -159,14 +171,21 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		argv, err := scanArgv(pid)
 		switch {
 		case err == nil:
-		case errors.Is(err, ErrNoArgv), isGone(err):
-			// Gone, or nothing to classify. Skipping can only omit a process
-			// that no longer exists; it can never invent one.
+		case isGone(err):
+			// Gone. Skipping can only omit a process that no longer exists; it
+			// can never invent one.
+			continue
+		case errors.Is(err, ErrNoArgv) && process.KernelThread:
+			// A kernel thread, by the kernel's own flag, which never has an argv
+			// and so can never match. The flag is the evidence, not the empty
+			// read: a live process mid-execve reads empty too (#7239), and it
+			// falls through to be settled below.
 			continue
 		default:
-			// Not ours, so its refusal is not evidence about us. Ownership is
-			// read from /proc/<pid> itself, which hidepid=1 still discloses —
-			// it restricts the directory's CONTENTS, not who owns it.
+			// Not ours, so its refusal (or its empty argv) is not evidence about
+			// us. Ownership is read from /proc/<pid> itself, which hidepid=1
+			// still discloses — it restricts the directory's CONTENTS, not who
+			// owns it.
 			uid, known := scanUID(pid)
 			if known && uid != os.Getuid() {
 				continue
@@ -220,12 +239,17 @@ const (
 )
 
 // settleRefusal decides what a refused argv read means. first is the refusal
-// the scan already has. Every read is bracketed by a presence check
-// (scanIdentity, which treats a zombie, a reaped process and a recycled pid as
-// departed), so a refusal stands only when the same process instance was
-// present before the first re-read, between all reads and after the last one.
-// An identity that cannot be revalidated counts as present: unknown never
-// licenses a skip.
+// the scan already has, or ErrNoArgv from a process that is not a kernel
+// thread. Every read is bracketed by a presence check (scanIdentity, which
+// treats a zombie, a reaped process and a recycled pid as departed), so a
+// refusal stands only when the same process instance was present before the
+// first re-read, between all reads and after the last one. An identity that
+// cannot be revalidated counts as present: unknown never licenses a skip.
+//
+// A re-read that finds no argv is NOT a departure (#7239). An exiting process
+// does read that way once its address space is gone, but so does one still
+// mid-execve, and only the presence check can tell them apart. So an empty
+// re-read keeps settling, and the process is skipped only once it is gone.
 func settleRefusal(process Process, first error) ([]string, refusalOutcome, error) {
 	gone := func() bool {
 		same, err := scanIdentity(process)
@@ -241,7 +265,7 @@ func settleRefusal(process Process, first error) ([]string, refusalOutcome, erro
 		switch {
 		case err == nil:
 			return argv, refusalRecovered, nil
-		case errors.Is(err, ErrNoArgv), isGone(err):
+		case isGone(err):
 			return nil, refusalGone, nil
 		}
 		last = err

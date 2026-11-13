@@ -88,6 +88,12 @@ type Process struct {
 	// Comm is the kernel task name (truncated by the kernel: 15 chars on
 	// Linux, 16 on darwin).
 	Comm string
+	// KernelThread is the kernel's own flag for a kernel thread (Linux
+	// PF_KTHREAD, /proc/<pid>/stat field 9). A kernel thread never has an argv,
+	// so this is the POSITIVE evidence that lets an argv scan skip one rather
+	// than infer it from an empty read, which a live process mid-execve also
+	// gives (#7239). Always false where the backend has no such flag.
+	KernelThread bool
 }
 
 // sidUnknown is the SID of a process whose kernel session id could not be

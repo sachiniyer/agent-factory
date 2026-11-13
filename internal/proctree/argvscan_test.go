@@ -175,13 +175,18 @@ func TestProcessesMatchingArgvReportsAnUnreadableProcessTable(t *testing.T) {
 func TestProcessesMatchingArgvSeparatesGoneFromRefused(t *testing.T) {
 	const target = 42
 	skippable := map[int]error{
-		7:  fmt.Errorf("%w: pid 7", ErrNoArgv),
+		7:  fmt.Errorf("%w: pid 7", ErrNoArgv), // a kernel thread: see kernelThreadSnapshot
 		8:  ErrProcessExited,
 		9:  &fs.PathError{Op: "open", Path: "/proc/9/cmdline", Err: syscall.ENOENT},
 		10: syscall.ESRCH,
 	}
 	for pid, readErr := range skippable {
-		stubScan(t, fixedSnapshot(target, pid), func(p int) ([]string, error) {
+		// Pid 7's skip must stand on the kernel's own flag, not on its owner.
+		// Ownership is pinned to us, so the host's real pid 7, a root-owned
+		// kernel thread on an ordinary box, cannot make this pass as "foreign"
+		// (#7239).
+		stubScanUID(t, map[int]int{target: os.Getuid(), pid: os.Getuid()})
+		stubScan(t, kernelThreadSnapshot(fixedSnapshot(target, pid), 7), func(p int) ([]string, error) {
 			if p == target {
 				return []string{"systemd-run", "--unit=af-hook-s1-g-0.scope"}, nil
 			}
@@ -548,5 +553,64 @@ func TestALiveProcessWithNoArgvIsUnknownNotAbsent(t *testing.T) {
 	}
 	if !errors.Is(err, ErrNoArgv) {
 		t.Fatalf("err = %v; the report must keep the reason, ErrNoArgv", err)
+	}
+}
+
+// kernelThreadSnapshot marks pids as kernel threads in an otherwise fixed
+// snapshot, which is the flag the scan reads to skip an argv-less process on
+// evidence rather than on the empty read.
+func kernelThreadSnapshot(base func() (map[int]Process, error), kernel ...int) func() (map[int]Process, error) {
+	return func() (map[int]Process, error) {
+		snap, err := base()
+		if err != nil {
+			return nil, err
+		}
+		for _, pid := range kernel {
+			if p, ok := snap[pid]; ok {
+				p.KernelThread = true
+				snap[pid] = p
+			}
+		}
+		return snap, nil
+	}
+}
+
+// A kernel thread has no argv for its whole life, so the scan skips it on the
+// kernel's PF_KTHREAD flag, even when it runs as us (af under root, where every
+// kernel thread is "ours"). It is skipped at once, with no settling reads.
+// Settling cannot resolve an argv that will never exist, and refusing on one
+// would refuse every rebuild on such a host, permanently. The control is the
+// same read from a process WITHOUT the flag, which must not be skipped.
+func TestAKernelThreadIsSkippedOnItsFlagNotItsEmptyArgv(t *testing.T) {
+	argv, reads := scriptedArgv(t, 44, fmt.Errorf("%w: pid 44", ErrNoArgv))
+	stubScan(t, kernelThreadSnapshot(fixedSnapshot(44), 44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid()})
+	got, err := ProcessesMatchingArgv(func([]string) bool { return true })
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %v, %v; want the kernel thread skipped", got, err)
+	}
+	if *reads != 1 {
+		t.Fatalf("a kernel thread's argv was read %d times; its flag already answers, so once is enough", *reads)
+	}
+
+	argv, _ = scriptedArgv(t, 44, fmt.Errorf("%w: pid 44", ErrNoArgv))
+	stubScan(t, fixedSnapshot(44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid()})
+	if _, err := ProcessesMatchingArgv(func([]string) bool { return true }); err == nil {
+		t.Fatal("control: the same empty argv from a process that is not a kernel thread must not be skipped")
+	}
+}
+
+// The ownership scope covers an empty argv exactly as it covers a refusal. A
+// process owned by another uid cannot be a launcher this daemon spawned, so it
+// being mid-execve says nothing about us. Refusing on it would make every
+// rebuild on a shared box wait on strangers' execs.
+func TestAnArgvlessProcessOfAnotherUidDoesNotFailTheScan(t *testing.T) {
+	argv, _ := scriptedArgv(t, 44, fmt.Errorf("%w: pid 44", ErrNoArgv))
+	stubScan(t, fixedSnapshot(44), argv)
+	stubScanUID(t, map[int]int{44: os.Getuid() + 1})
+	got, err := ProcessesMatchingArgv(func([]string) bool { return true })
+	if err != nil || len(got) != 0 {
+		t.Fatalf("got %v, %v; want a foreign argv-less process skipped as not ours", got, err)
 	}
 }

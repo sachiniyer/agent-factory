@@ -161,6 +161,16 @@ func readProc(pid int) (Process, error) {
 	if err != nil {
 		return Process{}, err
 	}
+	return parseStat(pid, data)
+}
+
+// pfKthread is PF_KTHREAD from include/linux/sched.h, the task flag the kernel
+// sets on every kernel thread. Its value has not changed since it was added.
+const pfKthread = 0x00200000
+
+// parseStat is readProc's parse of one /proc/<pid>/stat line, separate so a
+// test can pin it on lines no live process on the runner would produce.
+func parseStat(pid int, data []byte) (Process, error) {
 	open := bytes.IndexByte(data, '(')
 	close_ := bytes.LastIndexByte(data, ')')
 	if open < 0 || close_ < open || close_+2 > len(data) {
@@ -172,6 +182,7 @@ func readProc(pid int) (Process, error) {
 	const (
 		idxPPID  = 4 - 3
 		idxSID   = 6 - 3
+		idxFlags = 9 - 3
 		idxStart = 22 - 3
 	)
 	if len(fields) <= idxStart {
@@ -191,16 +202,21 @@ func readProc(pid int) (Process, error) {
 	if err != nil {
 		return Process{}, fmt.Errorf("bad sid for pid %d: %w", pid, err)
 	}
+	flags, err := strconv.ParseUint(fields[idxFlags], 10, 64)
+	if err != nil {
+		return Process{}, fmt.Errorf("bad flags for pid %d: %w", pid, err)
+	}
 	start, err := strconv.ParseUint(fields[idxStart], 10, 64)
 	if err != nil {
 		return Process{}, fmt.Errorf("bad starttime for pid %d: %w", pid, err)
 	}
 	return Process{
-		PID:     pid,
-		PPID:    ppid,
-		SID:     sid,
-		StartID: start,
-		Comm:    comm,
+		PID:          pid,
+		PPID:         ppid,
+		SID:          sid,
+		StartID:      start,
+		Comm:         comm,
+		KernelThread: flags&pfKthread != 0,
 	}, nil
 }
 
