@@ -19,55 +19,27 @@ import (
 
 var claudeConversationFileRE = regexp.MustCompile(`(?i)^([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})\.jsonl$`)
 
-// ClaudeProjectConversationState is the on-disk evidence used to validate a
-// recorded Claude conversation before a root-agent restore. Resume is the
-// recorded conversation while its transcript exists, otherwise the newest
-// project transcript; it is empty when the project has no transcript.
-type ClaudeProjectConversationState struct {
-	Resume         AgentConversationData
-	RecordedExists bool
-}
-
-// InspectClaudeProjectConversations checks the exact transcript store selected
-// by program and returns the newest direct transcript launched in workingDir,
-// by the cwd the transcript records (#7208). Claude
+// claudeConversationFiledHere reports whether the transcript store program
+// writes to files conv under one of workingDir's project directories. Claude
 // encodes every non-alphanumeric character in an absolute project path as '-',
 // and may file the conversation under either spelling of that path
-// (claudeProjectCandidates), so both are read (#7177).
-func InspectClaudeProjectConversations(program, workingDir string, recorded AgentConversationData) (ClaudeProjectConversationState, error) {
+// (claudeProjectCandidates), so both are read (#7177); a transcript found under
+// a spelling af could list is filed, whatever another spelling holds (#7207).
+func claudeConversationFiledHere(program, workingDir string, conv AgentConversationData) bool {
+	if conv.Agent != tmux.ProgramClaude {
+		return false
+	}
 	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workingDir)
 	if err != nil {
-		return ClaudeProjectConversationState{}, err
+		return false
 	}
-	// A recorded transcript found under a spelling af could list exists,
-	// whatever another spelling holds; an unlistable spelling withholds only
-	// the newest-conversation answer, which needs them all (#7207).
-	transcripts, listErr := claudeWorktreeTranscripts(configDir, claudeProjectCandidates(launchDir))
-	conversation := func(id string) AgentConversationData {
-		return AgentConversationData{
-			Agent:       tmux.ProgramClaude,
-			ID:          id,
-			CapturedAt:  time.Now(),
-			CaptureKind: ConversationCaptureClaudeTranscript,
+	transcripts, _ := claudeWorktreeTranscripts(configDir, claudeProjectCandidates(launchDir))
+	for _, transcript := range transcripts {
+		if strings.EqualFold(transcript.id, strings.TrimSpace(conv.ID)) {
+			return true
 		}
 	}
-	if recorded.Agent == tmux.ProgramClaude {
-		for _, transcript := range transcripts {
-			if strings.EqualFold(transcript.id, strings.TrimSpace(recorded.ID)) {
-				return ClaudeProjectConversationState{Resume: conversation(transcript.id), RecordedExists: true}, nil
-			}
-		}
-	}
-	if listErr != nil {
-		return ClaudeProjectConversationState{}, listErr
-	}
-	state := ClaudeProjectConversationState{}
-	// A substitute must be this worktree's own conversation by the cwd it
-	// records, not merely one filed under a colliding project name (#7208).
-	if newest, ok := newestClaudeTranscriptIn(transcripts, launchDir); ok {
-		state.Resume = conversation(newest.id)
-	}
-	return state, nil
+	return false
 }
 
 // claudeTranscript is one direct conversation file in a Claude project

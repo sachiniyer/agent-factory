@@ -18,8 +18,8 @@ import (
 // (the root agent, an `af sessions create --here` session, an adopted external
 // worktree) works in the user's own checkout, where the user's own agent, an
 // editor extension and any sibling in-place session file conversations too. A
-// newer one there says nothing about this row, which is the rule
-// daemon/rootagent_claude.go already states for the root. The launch directory
+// newer one there says nothing about this row, and nothing there stands in
+// for the root's own record either (#7222). The launch directory
 // must be that worktree or a directory inside it: an agent launched elsewhere
 // files beside whatever else runs there, and one whose directory af cannot
 // prove is attributed nothing. Without that evidence a guard resumes the

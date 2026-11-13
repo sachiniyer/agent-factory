@@ -47,7 +47,11 @@ paragraph because it's why `af` doesn't corrupt itself:
   reported and retried, not replaced. The always-on [root agent](configuration.md#root-agents-always-ensured)
   is re-created rather than re-spawned — its record is replaced, but its recorded
   conversation and its tabs are carried across, so it comes back on the same
-  context with the same tab strip. When that conversation cannot be resumed the
+  context with the same tab strip. Nothing else ever stands in for that
+  conversation — not the newest one in the checkout, which may be your own, and
+  not one started inside the root after a `/clear`, which af does not follow.
+  When that conversation cannot be resumed (for Claude, when no transcript store
+  holds it any more, the root starts a new conversation on the same id) the
   root still comes back, on a fresh context — an always-on root that exists
   outranks one that keeps its history — and every rail marks the replacement's
   row with a one-shot note (`fresh context`, or `context unknown` when af cannot

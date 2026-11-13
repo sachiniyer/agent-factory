@@ -180,9 +180,9 @@ func TestClaudeCarryStalenessReadsEveryProjectSpelling(t *testing.T) {
 	}
 }
 
-// The root agent's restore and a headless workspace's resume check read the
-// same store, and must find a conversation under either spelling too.
-func TestInspectClaudeProjectConversationsReadsEveryProjectSpelling(t *testing.T) {
+// A headless workspace's resume check reads the same store, and must find a
+// conversation under either spelling too.
+func TestClaudeFiledHereReadsEveryProjectSpelling(t *testing.T) {
 	configDir := t.TempDir()
 	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
 	require.NoError(t, os.MkdirAll(real, 0o700))
@@ -190,37 +190,15 @@ func TestInspectClaudeProjectConversationsReadsEveryProjectSpelling(t *testing.T
 	require.NoError(t, os.Symlink(real, link))
 	projects := claudeProjectCandidates(link)
 	require.Len(t, projects, 2)
-	recordedProject, resolvedProject := projects[0], projects[1]
+	program := "CLAUDE_CONFIG_DIR=" + configDir + " claude"
 
-	const recordedID = "64ea06ed-ed87-4b12-bc2d-2a2102a81ba5"
-	const otherID = "5299e00d-1111-4222-8333-f7045e07a242"
-	const newestID = "64ea06ed-ed87-4b12-bc2d-2a2102a81ba6"
-	past := time.Now().Add(-time.Hour)
-	write := func(project, id string, at time.Time) string {
-		t.Helper()
-		path := writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, link))
-		setModTime(t, path, at)
-		return path
+	for _, project := range projects {
+		const recordedID = "64ea06ed-ed87-4b12-bc2d-2a2102a81ba5"
+		recorded := AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID}
+		path := writeCarryFile(t, configDir, filepath.Join(project, recordedID+".jsonl"), claudeRecordLine(t, link))
+		require.True(t, ConversationResumableHere(program, link, recorded),
+			"a recorded conversation filed under %s exists", project)
+		require.NoError(t, os.Remove(path))
+		require.False(t, ConversationResumableHere(program, link, recorded))
 	}
-	inspect := func() ClaudeProjectConversationState {
-		t.Helper()
-		state, err := InspectClaudeProjectConversations("CLAUDE_CONFIG_DIR="+configDir+" claude", link,
-			AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID})
-		require.NoError(t, err)
-		return state
-	}
-
-	recorded := write(resolvedProject, recordedID, past)
-	write(recordedProject, otherID, past.Add(-time.Minute))
-	state := inspect()
-	require.True(t, state.RecordedExists,
-		"a recorded conversation filed under the resolved spelling still exists; replacing it resumes another one")
-	require.Equal(t, recordedID, state.Resume.ID)
-
-	require.NoError(t, os.Remove(recorded))
-	write(resolvedProject, newestID, past)
-	state = inspect()
-	require.False(t, state.RecordedExists)
-	require.Equal(t, newestID, state.Resume.ID,
-		"the newest conversation in the worktree is filed under the resolved spelling")
 }

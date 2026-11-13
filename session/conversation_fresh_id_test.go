@@ -86,9 +86,7 @@ func (f freshIDFixture) requireUnheldSessionID(t *testing.T, program string, con
 	for _, id := range used {
 		require.NotEqual(t, id, match[1], "a new conversation must not re-use an id a transcript already holds")
 	}
-	state, err := InspectClaudeProjectConversations(program, f.work, conv)
-	require.NoError(t, err)
-	require.False(t, state.RecordedExists, "no transcript may already hold the id a new conversation launches on")
+	require.False(t, claudeConversationFiledHere(program, f.work, conv), "no transcript may already hold the id a new conversation launches on")
 }
 
 // claude → codex → claude: the second Claude launch is a handoff, and the

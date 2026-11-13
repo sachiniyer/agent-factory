@@ -427,7 +427,10 @@ func (m *Manager) CreateSession(ctx context.Context, req CreateSessionRequest) (
 	// own persist and EventSessionCreated rather than in a second write behind
 	// them. Never for an ordinary create: starting fresh is what those ARE.
 	if req.replacesReapedRecord {
-		instance.NoteRecreateContext()
+		outcome := instance.NoteRecreateContext()
+		if req.recreateOutcome != nil {
+			*req.recreateOutcome = outcome
+		}
 	}
 	data := instance.ToInstanceData()
 	conversationToken := instance.AgentRuntimeToken()

@@ -56,27 +56,7 @@ var (
 	// Checked-in and personal project configuration can change outside
 	// ApplyConfig. Re-resolve the command off the poll goroutine on this cadence.
 	rootProgramDriftConfigInspectionInterval = 30 * time.Second
-	// A transcript creation or removal can lag one poll without affecting the
-	// live root. Bound the directory scan instead of statting every historical
-	// transcript on the daemon's default one-second ensure cadence.
-	rootClaudeTranscriptInspectionInterval = 30 * time.Second
 )
-
-// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
-// WAIT for one transcript inspection (#3782 item 3).
-//
-// Deliberately NOT rootRepoProbeBudget, even though the value matches and
-// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
-// a context can kill; this one bounds a wait on os.ReadDir and a stat per
-// entry, which no context can cancel — so it is a bound on the caller, and
-// the read outlives it. Two mechanisms, two names, and a reader who
-// conflates them will reach for a context that cannot help.
-//
-// 2s for the same reason the sibling is 2s: the inspection is advisory
-// while the root is live, so being late costs a resumable conversation id
-// staying stale for one more 30s interval, and #3503 is the standing
-// lesson about stingy budgets on a box whose load baseline is 60-95.
-const rootClaudeTranscriptInspectBudget = 2 * time.Second
 
 // rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
 // doubling per consecutive failure, capped at max. Used by the per-candidate
@@ -161,18 +141,6 @@ type rootEnsureState struct {
 	// dedupe bits. Runtime evidence is committed separately under the instance
 	// lifecycle lock.
 	programDriftBeforeLatchForTest func()
-	// Claude transcript verification is advisory while the root is live. Keep
-	// its filesystem work and any persistent inspection warning off the hot
-	// one-second ensure path.
-	nextClaudeTranscriptInspection time.Time
-	claudeTranscriptWarning        string
-	// claudeTranscriptInspecting marks one inspection as still running for
-	// this root (#3782 item 3). It is what keeps a bound from turning a sick
-	// transcript store into an accumulating pile of blocked goroutines: the
-	// deadline releases the POLL goroutine, it cannot release the filesystem
-	// read, so without single-flighting, every throttle interval would start
-	// another one that also blocks. Guarded by m.mu.
-	claudeTranscriptInspecting bool
 }
 
 // resolvedRootAgentFor is the single resolution choke point for one repo: every
@@ -561,11 +529,12 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
-			// and whoever created it — is the root agent. The one mutation is
-			// refreshing a recorded Claude conversation from durable transcript
-			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			// and whoever created it — is the root agent, and its recorded
+			// conversation is left as it is. A resume continues a
+			// conversation under its own id (Claude Code 1.0.119 on), so no
+			// transcript in the checkout stands in for it; the newest one
+			// there may be the user's own (#7222).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
-			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}
@@ -641,12 +610,14 @@ func countNonAgentTabs(tabs []session.TabData) int {
 // its own resume flag), and the record is the thing that will be resumed from
 // next time.
 //
-// The judgment itself is session.ClassifyRootRecreateContext — the SAME call
-// that decides the note on the row (#2629), not a second copy of the rule. The
-// log adds one distinction the note does not need (nothing recorded to carry vs
-// recorded and not resumed); it cannot add a different verdict.
-func reportRootConversationCarry(repoRoot string, carried session.AgentConversationData, created *session.AgentConversationData, launchedAgent string) {
-	switch session.ClassifyRootRecreateContext(carried, created, launchedAgent) {
+// The judgment itself is outcome: the replacement's own
+// session.ClassifyRootRecreateContext answer, returned by the SAME call that
+// decides the note on the row (#2629, NoteRecreateContext), not a second copy
+// of the rule. The log adds distinctions the note does not need (nothing
+// recorded to carry, a new conversation on the carried id, recorded and not
+// resumed); it cannot add a different verdict.
+func reportRootConversationCarry(repoRoot string, outcome session.RootRecreateContext, carried session.AgentConversationData, created *session.AgentConversationData, launchedAgent string) {
+	switch outcome {
 	case session.RootRecreateContextNone:
 		log.InfoLog.Printf("re-created root agent for %s resumed its prior %s conversation %s", repoRoot, carried.Agent, carried.ID)
 	case session.RootRecreateContextUnknown:
@@ -662,6 +633,12 @@ func reportRootConversationCarry(repoRoot string, carried session.AgentConversat
 			// agents is what makes a repointed root_agents program diagnosable.
 			log.WarningLog.Printf("re-created root agent for %s now runs %s, so its prior %s conversation %s cannot be resumed; it starts with a fresh context",
 				repoRoot, launchedAgent, carried.Agent, carried.ID)
+		case created.Agent == carried.Agent && created.ID == carried.ID:
+			// The launch started on the carried id: no store held its
+			// transcript any more (Claude's retention, or a hand), so the id
+			// came back and its history did not (#7226 review R1).
+			log.WarningLog.Printf("re-created root agent for %s could not resume its prior %s conversation %s, because no transcript store holds it any more; it started a new conversation on that id and starts with a fresh context",
+				repoRoot, carried.Agent, carried.ID)
 		default:
 			log.WarningLog.Printf("re-created root agent for %s did not come up on its prior %s conversation %s; it starts with a fresh context",
 				repoRoot, carried.Agent, carried.ID)

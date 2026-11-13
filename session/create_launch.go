@@ -22,9 +22,12 @@ type CreateLaunchPlan struct {
 	// executable/arguments af authored (#3083, #3108). Re-resolving at launch
 	// could read a different override and make the proof describe a command other
 	// than the one installed.
-	accountProof        sessionenv.AccountLaunchProof
-	workDir             string
-	conversation        AgentConversationData
+	accountProof sessionenv.AccountLaunchProof
+	workDir      string
+	conversation AgentConversationData
+	// startedOnCarried: the launch starts on the carried conversation's id
+	// rather than resuming it (planCreateConversation).
+	startedOnCarried    bool
 	conversationCapture ConversationCaptureSnapshot
 }
 

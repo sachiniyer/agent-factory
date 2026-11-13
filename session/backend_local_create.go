@@ -23,7 +23,7 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 		return CreateLaunchPlan{}, fmt.Errorf("cannot create session %q: %w", i.Title, err)
 	}
 	resolved := resolution.command
-	program, conversation := planCreateConversation(i, resolved, i.ID)
+	program, conversation, startedOnCarried := planCreateConversation(i, resolved, i.ID)
 	program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 	proof := accountLaunchProof(resolved, program, resolution.trustBase, nil, "")
 	if account := strings.TrimSpace(i.Account); account != "" {
@@ -42,11 +42,12 @@ func (b *LocalBackend) prepareCreateLaunch(i *Instance) (CreateLaunchPlan, error
 		}
 	}
 	plan := CreateLaunchPlan{
-		program:      program,
-		baseProgram:  resolved,
-		accountProof: proof,
-		workDir:      workDir,
-		conversation: conversation,
+		program:          program,
+		baseProgram:      resolved,
+		accountProof:     proof,
+		workDir:          workDir,
+		conversation:     conversation,
+		startedOnCarried: startedOnCarried,
 	}
 
 	// Key capture off the executable the pane will actually run, never the

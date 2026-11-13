@@ -35,12 +35,11 @@ func persistedConversationOf(data InstanceData) AgentConversationData {
 // record. Like every pin it is honored only when the resolved command can
 // express it (planCreateConversation), and the restore guard judges it as it
 // judges the tab's own record, so a /clear before an archive still starts the
-// restore fresh (#7209 review R2). The one pin judged where it was set, the
-// root heal's, arrives through InstanceOptions.ResumeConversation instead.
+// restore fresh (#7209 review R2).
 func (i *Instance) SetResumeRecordedConversation(conv AgentConversationData) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
-	i.carriedConversation, i.carriedIsRecord = conv, true
+	i.carriedConversation = conv
 }
 
 // ConversationResumableHere reports whether conv names a conversation the agent
@@ -55,8 +54,7 @@ func ConversationResumableHere(program, workingDir string, conv AgentConversatio
 	}
 	switch strings.TrimSpace(conv.Agent) {
 	case tmux.ProgramClaude:
-		state, err := InspectClaudeProjectConversations(program, workingDir, conv)
-		return err == nil && state.RecordedExists
+		return claudeConversationFiledHere(program, workingDir, conv)
 	case tmux.ProgramCodex:
 		home, err := tmux.CodexHomeFromCommand(program, workingDir)
 		return err == nil && CodexRolloutPathByID(home, conv.ID) != ""

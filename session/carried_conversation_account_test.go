@@ -47,16 +47,18 @@ func TestRespawnAfterAnAccountSwapDoesNotResumeTheOldAccountsConversation(t *tes
 // fresh in-sandbox instance with no tab yet, from the pinned carry (#6173).
 func TestRespawnWithoutASwapStillResumesExactly(t *testing.T) {
 	conv := AgentConversationData{Agent: "codex", ID: carriedOldAccountID}
-
-	pinned := &Instance{Title: "t", carriedConversation: conv}
-	assert.Contains(t, prepareResumeConversation(pinned, "codex"), "resume "+carriedOldAccountID)
-
 	workDir := t.TempDir()
 	gw, err := git.NewGitWorktreeFromStorage(workDir, workDir, "t", "main", "", false, true)
 	require.NoError(t, err)
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+carriedOldAccountID+".jsonl")
+
+	// The pin is the session's record, judged as the tab's is (#7222), so it
+	// resumes while the store holds it.
+	pinned := &Instance{Title: "t", carriedConversation: conv, gitWorktree: gw}
+	assert.Contains(t, prepareResumeConversation(pinned, "codex"), "resume "+carriedOldAccountID)
+
 	tabbed := &Instance{Title: "t", Tabs: []*Tab{{Conversation: conv}}, carriedConversation: conv, gitWorktree: gw}
 	assert.Contains(t, prepareResumeConversation(tabbed, "codex"), "resume "+carriedOldAccountID)
 	assert.Equal(t, conv, tabbed.carriedConversation, "a launch does not consume the carry: root-recreate classification reads it afterwards")

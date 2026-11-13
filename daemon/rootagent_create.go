@@ -7,7 +7,6 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/session"
-	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // THE ROOT CREATE, OFF THE POLL GOROUTINE (#3721).
@@ -317,27 +316,17 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		carried, reapedRoot = held, true
 	}
 
-	skipRecordedResume := false
-	if carried.conversation.Agent == tmux.ProgramClaude && carried.conversation.HasID() {
-		transcriptProgram, resolveErr := rootAgentTranscriptProgramFrom(projectConfig, projectErr, program)
-		state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-		if inspectErr == nil {
-			state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, carried.conversation)
-		}
-		switch {
-		case inspectErr != nil:
-			m.warn().Printf("root agent for %s could not verify its recorded claude conversation %s against the project transcript store: %v; attempting the recorded conversation",
-				workspace, carried.conversation.ID, inspectErr)
-		case !state.RecordedExists && state.Resume.HasID():
-			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript; substituting newest on-disk project conversation %s",
-				workspace, carried.conversation.ID, state.Resume.ID)
-			carried.conversation = state.Resume
-		case !state.RecordedExists:
-			m.warn().Printf("root agent for %s recorded claude conversation %s has no transcript and the project has no replacement transcript; starting fresh",
-				workspace, carried.conversation.ID)
-			skipRecordedResume = true
-		}
-	}
+	// The carried conversation is the root's own record, and the create
+	// judges it by the rule every recorded Claude id launches under
+	// (judgeRecordedClaude): resumed while a store holds it, started on while
+	// none does. It is never swapped for the newest conversation in the
+	// checkout. That is the user's checkout, where their own claude files
+	// beside the root's, and a resume continues a conversation under its own
+	// id (Claude Code 1.0.119 on; every session launch, the root's included,
+	// passes --plugin-dir, which Claude Code first accepts in 2.0.25), so
+	// nothing there is a continuation of the root's record that af can tell
+	// from the user's own (#7222).
+	var recreateOutcome session.RootRecreateContext
 	req := CreateSessionRequest{
 		Title:    session.RootSessionTitle,
 		RepoPath: workspace,
@@ -376,9 +365,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// resumes is still held — checked under the same m.mu section where
 		// reserveCreate checks the delete fence and reserves the title (#7182).
 		rootCommitGuard: func() error { return m.rootCommitRefusalLocked(st, job.ticket, carryRef) },
-	}
-	if skipRecordedResume {
-		req.resumeConversation = session.AgentConversationData{}
+		// The fallback create below reuses this request, so the outcome is
+		// whichever create committed.
+		recreateOutcome: &recreateOutcome,
 	}
 	data, err := m.createVerifiedRoot(repo.ID, identity, req)
 	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
@@ -388,26 +377,8 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 		// reaped record is already gone, retrying it here rather than next tick is
 		// what keeps an unresumable id from costing the root a backoff interval of
 		// downtime. Losing the history is the bug this carry fixes; losing the ROOT
-		// would be worse than the bug.
-		if req.resumeConversation.Agent == tmux.ProgramClaude {
-			transcriptProgram, resolveErr := rootAgentTranscriptProgramFrom(projectConfig, projectErr, program)
-			state, inspectErr := session.ClaudeProjectConversationState{}, resolveErr
-			if inspectErr == nil {
-				state, inspectErr = session.InspectClaudeProjectConversations(transcriptProgram, workspace, req.resumeConversation)
-			}
-			if inspectErr != nil {
-				m.warn().Printf("root agent for %s could not re-check failed claude conversation %s against the project transcript store: %v",
-					workspace, req.resumeConversation.ID, inspectErr)
-			} else if !state.RecordedExists && state.Resume.HasID() && !strings.EqualFold(state.Resume.ID, req.resumeConversation.ID) {
-				m.warn().Printf("root agent for %s could not be re-created on claude conversation %s because its transcript disappeared (%v); substituting newest on-disk project conversation %s",
-					workspace, req.resumeConversation.ID, err, state.Resume.ID)
-				req.resumeConversation = state.Resume
-				carried.conversation = state.Resume
-				data, err = m.createVerifiedRoot(repo.ID, identity, req)
-			}
-		}
-	}
-	if err != nil && !isRootCheckoutRefusal(err) && !rootCreateWithdrawn(err) && req.resumeConversation.HasID() {
+		// would be worse than the bug. The retry is a fresh agent, never another
+		// conversation found in the checkout (#7222).
 		m.warn().Printf("root agent for %s could not be re-created on its prior %s conversation %s (%v); retrying with a fresh agent",
 			workspace, req.resumeConversation.Agent, req.resumeConversation.ID, err)
 		req.resumeConversation = session.AgentConversationData{}
@@ -415,9 +386,9 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 	if err != nil {
 		// The carry is still held on st unless something retired it, so the
-		// next pass's create carries it. Never put back: a retired carry stays
-		// retired (#7182).
-		m.updateRootCarry(st, carryRef, carried)
+		// next pass's create carries it, unchanged: nothing the create tried
+		// replaces the root's record (#7222). Never put back: a retired carry
+		// stays retired (#7182).
 		if rootCreateWithdrawn(err) {
 			// Not a failure to back off from: the next pass decides afresh
 			// whether this candidate wants a root, and with what.
@@ -438,7 +409,7 @@ func (m *Manager) runRootCreate(job rootCreateJob) {
 	}
 	m.info().Printf("ensured root agent for %s (in-place, program %q)", workspace, program)
 	if reapedRoot {
-		reportRootConversationCarry(workspace, carried.conversation, data.AgentConversation, data.CurrentAgent)
+		reportRootConversationCarry(workspace, recreateOutcome, carried.conversation, data.AgentConversation, data.CurrentAgent)
 		reportRootTabCarry(workspace, carried.tabs, data.Tabs)
 	}
 	m.retireRootCarries(repo.ID)
