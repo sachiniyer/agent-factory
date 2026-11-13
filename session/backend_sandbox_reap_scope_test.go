@@ -370,13 +370,16 @@ func TestRunLimitedReapsOnlyTheMemberHoldingThePipe(t *testing.T) {
 }
 
 // TestSandboxRunDoesNotCallALeaderThatDiedOnItsOwnATimeout: "timed out" means
-// the deadline ended the step while it ran (#7241, R5). This leader kills
-// itself at once with SIGKILL, a member holds the pipe, and the deadline passes
-// during WaitDelay. Reading "died of a signal" as "the deadline killed it"
-// labelled that a timeout; the Cancel never ran.
+// the deadline ended the step while it ran (#7241, R5). Here the leader itself,
+// the `sh -c` runCommand starts, kills itself with SIGKILL at once, a member it
+// backgrounded holds the pipe, and the deadline passes during WaitDelay.
+// Reading "died of a signal" as "the deadline killed it" labelled that a
+// timeout, though the Cancel never ran. The kill is in sshCmd, not in a stub
+// ssh, so that $$ is the leader and its death is a signal rather than an exit
+// status a forking shell reports for its child.
 func TestSandboxRunDoesNotCallALeaderThatDiedOnItsOwnATimeout(t *testing.T) {
-	stub := stubSSHPlanting(t, plantPipeHolder, "kill -KILL $$")
-	p := &sandboxProvisioner{sshCmd: stub.ssh}
+	record := filepath.Join(t.TempDir(), "holder")
+	p := &sandboxProvisioner{sshCmd: "sleep 30 </dev/null & echo $! > " + shellQuote(record) + "; kill -KILL $$; true"}
 
 	timeout := 500 * time.Millisecond
 	require.Less(t, timeout, sandboxTunnelWaitDelay, "the deadline must fall inside WaitDelay for this test to mean anything")
@@ -384,11 +387,17 @@ func TestSandboxRunDoesNotCallALeaderThatDiedOnItsOwnATimeout(t *testing.T) {
 	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
 		_, err = p.Run(timeout, "true", nil, true)
 	}), "runCommand must return once WaitDelay has passed")
-	stub.planted(t)
+	data, rerr := os.ReadFile(record)
+	require.NoError(t, rerr, "the leader must have recorded the member it backgrounded")
+	holder, aerr := strconv.Atoi(strings.TrimSpace(string(data)))
+	require.NoError(t, aerr)
+	if proc, lerr := proctree.Lookup(holder); lerr == nil {
+		t.Cleanup(func() { _ = proctree.Signal(proc, syscall.SIGKILL) })
+	}
 
-	require.Error(t, err, "a leader that died of SIGKILL failed")
+	var exitErr *exec.ExitError
+	require.True(t, errors.As(err, &exitErr), "the leader's own death is the error: %v", err)
+	require.False(t, exitErr.Exited(), "the leader must have died of the signal, or this test proves nothing: %v", err)
 	assert.False(t, errors.Is(err, context.DeadlineExceeded),
 		"a leader that killed itself before its deadline must not be reported as timed out: %v", err)
-	var exitErr *exec.ExitError
-	assert.True(t, errors.As(err, &exitErr), "the leader's own death is the error: %v", err)
 }
