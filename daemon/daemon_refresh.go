@@ -33,12 +33,18 @@ import (
 // unloadable-row (retracted below) is not in it, so neither an omission, a
 // zero-rows file, nor a partial loss is a repair (#4783, #4812, #4876).
 func refreshDaemonInstances(existing map[string]*session.Instance) (map[string]*session.Instance, map[string]int, []SkippedRepo, map[string]bool, error) {
+	// Opened before the load, so a refresh whose load aborts still counts as a
+	// pass. An instances.json that cannot be read fails the whole load, and the
+	// poll keeps retrying it every daemon_poll_interval; a snapshot primed before
+	// that stretch must age through it, or the first pass after the file reads
+	// again loads its row from config read before the stretch, however long it
+	// lasted (#7113).
+	configTick := beginDeferredConfigTick()
 	load, err := loadAllRepoInstancesForRefresh()
 	if err != nil {
 		return existing, nil, nil, nil, err
 	}
 	allInstances, unreadable, missing, sigs := load.Instances, load.Skipped, load.Missing, load.Signatures
-	configTick := beginDeferredConfigTick()
 
 	next := make(map[string]*session.Instance)
 	ghostTaskRuns := make(map[string]int)
