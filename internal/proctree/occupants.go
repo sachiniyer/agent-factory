@@ -20,6 +20,10 @@ type Occupant struct {
 	// WorkingDir is the resolved cwd that matched, kept so a report can say WHY
 	// this process was attributed rather than asking the operator to trust it.
 	WorkingDir string
+	// TmuxUnknown marks an occupant whose command line could not be read, so
+	// whether it is tmux, which this gate never counts, is unknown (#7238). It is
+	// counted anyway, and the report says so rather than implying "not tmux".
+	TmuxUnknown bool
 }
 
 // WorktreeOccupants reports every process whose working directory is inside
@@ -93,7 +97,8 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 		if !pathutil.IsAtOrInside(filepath.Clean(cwd), root) {
 			continue
 		}
-		if IsTmuxProcess(pid) {
+		identity := TmuxIdentityOf(pid)
+		if identity == Tmux {
 			// The tmux SERVER is shared infrastructure, not a session's descendant:
 			// one server backs every session on the box and outlives all of them, and
 			// it inherits its cwd from whichever client first started it. If that was
@@ -116,6 +121,16 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 			// and their descendants, which is exactly what this looks for.
 			continue
 		}
+		// TmuxUnknown is COUNTED (#7238). The worktree reaper leaves an
+		// unclassifiable process alone, because its destructive act is the signal.
+		// This gate never signals: its destructive act is letting a deletion
+		// proceed, and its working directory has already been positively observed
+		// inside the workspace. An exemption that cannot be established cannot
+		// excuse that. The refusal is retryable. On Linux a same-uid process's
+		// command line reads empty mostly while it is mid-execve or mid-exit, and
+		// otherwise only when the process has blanked it. A real tmux process whose
+		// command line is unreadable is still excluded above, through its task
+		// name, so this cannot reintroduce the server wedge.
 		if seen[pid] {
 			// An ancestor already matched and TreeOf walked this whole subtree. A
 			// deep worker tree that all inherited one cwd would otherwise call
@@ -142,7 +157,11 @@ func OccupantsOfDir(dir string) ([]Occupant, error) {
 					dir = own
 				}
 			}
-			occupants = append(occupants, Occupant{Process: descendant, WorkingDir: dir})
+			occupants = append(occupants, Occupant{
+				Process:     descendant,
+				WorkingDir:  dir,
+				TmuxUnknown: descendant.PID == pid && identity == TmuxUnknown,
+			})
 		}
 	}
 	sort.Slice(occupants, func(i, j int) bool { return occupants[i].Process.PID < occupants[j].Process.PID })
@@ -163,7 +182,11 @@ func DescribeOccupants(occupants []Occupant) string {
 		if i > 0 {
 			out += ", "
 		}
-		out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
+		if o.TmuxUnknown {
+			out += fmt.Sprintf("pid %d (cwd %s, command line unreadable)", o.Process.PID, o.WorkingDir)
+		} else {
+			out += fmt.Sprintf("pid %d (cwd %s)", o.Process.PID, o.WorkingDir)
+		}
 	}
 	return out
 }

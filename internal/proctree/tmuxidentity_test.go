@@ -1,6 +1,8 @@
 package proctree
 
 import (
+	"errors"
+	"fmt"
 	"os/exec"
 	"path/filepath"
 	"syscall"
@@ -73,8 +75,8 @@ func TestIsTmuxServer_RefusesATmuxClient(t *testing.T) {
 
 // The leave-alone predicate still covers the client: the occupancy gate and the
 // worktree reaper exclude every tmux process, and #4678 must not change that.
-func TestIsTmuxProcess_CoversClientsAndRetitledArgv(t *testing.T) {
-	require.True(t, IsTmuxProcess(tmuxNamedProcess(t, t.TempDir(), nil)))
+func TestTmuxIdentityOf_CoversClientsAndRetitledArgv(t *testing.T) {
+	require.Equal(t, Tmux, TmuxIdentityOf(tmuxNamedProcess(t, t.TempDir(), nil)))
 
 	retitled := exec.Command(sleeper.Path(t), "300")
 	retitled.Args[0] = "tmux: server (/tmp/tmux-1000/default)"
@@ -85,19 +87,88 @@ func TestIsTmuxProcess_CoversClientsAndRetitledArgv(t *testing.T) {
 	})
 	require.Eventually(t, func() bool { return len(Argv(retitled.Process.Pid)) > 0 },
 		5*time.Second, 10*time.Millisecond)
-	require.True(t, IsTmuxProcess(retitled.Process.Pid),
+	require.Equal(t, Tmux, TmuxIdentityOf(retitled.Process.Pid),
 		"a setproctitle(3)-style title is tmux; matched on the whole argv[0], since Base would cut at the socket path")
 	require.False(t, IsTmuxServer(retitled.Process.Pid),
 		"the signalling predicate never trusts a title written into argv")
 
-	plain := exec.Command("sleep", "300")
-	require.NoError(t, plain.Start())
+	plain := startedWithReadableArgv(t, exec.Command("sleep", "300"))
+	require.Equal(t, NotTmux, TmuxIdentityOf(plain))
+	require.Equal(t, TmuxUnknown, TmuxIdentityOf(-1),
+		"an unreadable process is unknown, never \"not tmux\" (#7238)")
+}
+
+// The kernel task name is the second source, and it can only add protection.
+// A real tmux whose argv[0] was rewritten (`exec -a`), or whose command line
+// cannot be read, is still tmux by the name the kernel gave it. This fixture
+// is a sleeper copied to a file called `tmux`, so its task name is `tmux` on
+// Linux and on darwin, run with an argv[0] that names something else.
+func TestTmuxIdentityOf_TaskNameNamesTmuxWhenArgvDoesNot(t *testing.T) {
+	renamed := exec.Command(sleeper.Named(t, filepath.Join(t.TempDir(), "tmux")), "300")
+	renamed.Args[0] = "renamed"
+	pid := startedWithReadableArgv(t, renamed)
+	require.Eventually(t, func() bool { p, err := Lookup(pid); return err == nil && p.Comm == "tmux" },
+		5*time.Second, 10*time.Millisecond, "fixture: the kernel task name never became `tmux`")
+	require.Equal(t, []string{"renamed", "300"}, Argv(pid), "fixture: argv must not name tmux")
+
+	require.Equal(t, Tmux, TmuxIdentityOf(pid),
+		"a process the kernel calls tmux is left alone whatever its argv[0] says")
+}
+
+// Every combination of the two reads, pinned without a live process in each
+// state. Only a row where BOTH reads answered and neither named tmux may
+// come out NotTmux. That is the property #7238 restores.
+func TestTmuxIdentity_Decision(t *testing.T) {
+	refused := errors.New("permission denied")
+	noArgv := fmt.Errorf("%w: pid 7", ErrNoArgv)
+	plain := []string{"sleep", "300"}
+	for _, tc := range []struct {
+		name    string
+		argv    []string
+		argvErr error
+		comm    string
+		commErr error
+		want    TmuxIdentity
+	}{
+		{"both read, neither tmux", plain, nil, "sleep", nil, NotTmux},
+		{"argv names tmux", []string{"/usr/bin/tmux", "new-session"}, nil, "sleep", nil, Tmux},
+		{"argv retitled", []string{"tmux: client (/tmp/tmux-1000/default)"}, nil, "sleep", nil, Tmux},
+		{"argv is a tmux lookalike", []string{"tmuxinator", "start"}, nil, "tmuxinator", nil, NotTmux},
+		{"linux server task name, argv rewritten", []string{"renamed"}, nil, "tmux: server", nil, Tmux},
+		{"darwin task name, argv rewritten", []string{"renamed"}, nil, "tmux", nil, Tmux},
+		{"unknown tmux title is still tmux", plain, nil, "tmux: frobnicate", nil, Tmux},
+
+		// #7238: an unreadable or empty command line is never NotTmux.
+		{"mid-execve: argv empty, task name not tmux", nil, noArgv, "sleep", nil, TmuxUnknown},
+		{"argv refused, task name not tmux", nil, refused, "sleep", nil, TmuxUnknown},
+		{"argv empty, task name is the server's", nil, noArgv, "tmux: server", nil, Tmux},
+		{"argv read, process-table entry unreadable", plain, nil, "", refused, TmuxUnknown},
+		{"argv read and tmux, entry unreadable", []string{"tmux"}, nil, "", refused, Tmux},
+		{"nothing readable", nil, refused, "", ErrProcessExited, TmuxUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			require.Equal(t, tc.want, tmuxIdentity(tc.argv, tc.argvErr, tc.comm, tc.commErr))
+		})
+	}
+
+	var zero TmuxIdentity
+	require.Equal(t, TmuxUnknown, zero, "the zero value must be unknown, so an unset identity never passes for NotTmux")
+}
+
+// startedWithReadableArgv starts cmd and returns its pid once its command line
+// is readable. Asserting NotTmux any earlier would race the exec: straight after
+// Start, /proc/<pid>/cmdline is often still empty (#7238), and the honest answer
+// there is TmuxUnknown.
+func startedWithReadableArgv(t *testing.T, cmd *exec.Cmd) int {
+	t.Helper()
+	require.NoError(t, cmd.Start())
 	t.Cleanup(func() {
-		_ = plain.Process.Kill()
-		_, _ = plain.Process.Wait()
+		_ = cmd.Process.Kill()
+		_, _ = cmd.Process.Wait()
 	})
-	require.False(t, IsTmuxProcess(plain.Process.Pid))
-	require.False(t, IsTmuxProcess(-1), "unreadable reports false")
+	require.Eventually(t, func() bool { return len(Argv(cmd.Process.Pid)) > 0 },
+		5*time.Second, 10*time.Millisecond, "fixture: the command line never became readable")
+	return cmd.Process.Pid
 }
 
 // A tmux client parked in a worktree is still not an occupant. af's own clients

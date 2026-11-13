@@ -12,8 +12,39 @@ func isTmuxArgv(argv []string) bool {
 	return len(argv) > 0 && filepath.Base(argv[0]) == "tmux"
 }
 
-// IsTmuxProcess reports whether pid is running tmux at all, as a server or as a
-// client, from its own command line. An unreadable command line reports false.
+// TmuxIdentity is what TmuxIdentityOf could establish about whether a process
+// is tmux. There are three answers because "could not tell" is a third fact,
+// not the negative (#7238). The zero value is TmuxUnknown, so an identity that
+// was never filled in can never pass for NotTmux.
+type TmuxIdentity int
+
+const (
+	// TmuxUnknown: neither source named tmux, and at least one of them could not
+	// be read. The command line may be unreadable or empty, as it is for a
+	// process mid-execve or mid-exit (see ErrNoArgv), or refused, as darwin
+	// refuses some same-uid processes. Or the process-table entry may be
+	// unreadable.
+	TmuxUnknown TmuxIdentity = iota
+	// Tmux: the command line or the kernel task name names tmux, as a server or
+	// as a client.
+	Tmux
+	// NotTmux: both sources were read, and both name something else.
+	NotTmux
+)
+
+func (id TmuxIdentity) String() string {
+	switch id {
+	case Tmux:
+		return "tmux"
+	case NotTmux:
+		return "not tmux"
+	default:
+		return "unknown"
+	}
+}
+
+// TmuxIdentityOf reports whether pid is running tmux at all, as a server or as
+// a client.
 //
 // This is the predicate for callers that must LEAVE tmux alone: the worktree
 // occupancy gate and the worktree-writer reaper. Neither may signal or count any
@@ -22,17 +53,66 @@ func isTmuxArgv(argv []string) bool {
 // sit inside a worktree. Never use it to choose a process to signal — see
 // IsTmuxServer.
 //
-// It also accepts a retitled argv[0], `tmux: server (<socket>)` or
-// `tmux: client (<socket>)`: the form setproctitle(3) writes into the argument
-// area on the BSDs. tmux does not do this on Linux (it retitles the kernel task
-// name via prctl; measured: every live server's argv[0] is plain `tmux`) or on
-// darwin (it cannot retitle at all). So on those platforms the clause only ever
-// matches a fixture shaped that way, such as the reaper's regression test.
-// Keeping it costs nothing on the leave-alone side. It is matched on the whole
-// argv[0]: filepath.Base would cut a real title at its socket path's slash.
-func IsTmuxProcess(pid int) bool {
-	argv := Argv(pid)
+// Only NotTmux licenses treating a process as an ordinary one. TmuxUnknown
+// must be handled as its own answer, in each caller's safe direction: the
+// reaper never signals it, and the occupancy gate still counts it. Before
+// #7238 an unreadable command line reported "not tmux", which put a process
+// whose argv was unreadable into the reaper's kill set. On CI that was a fixture
+// caught mid-execve. On a user's box it could be the shared tmux server, and
+// with it every af session.
+//
+// Two sources are read, and either one naming tmux is enough. Both can only add
+// protection: a process is NotTmux only when both were read and neither names
+// tmux.
+//
+//   - The command line. argv[0]'s basename is matched exactly, so tmuxinator,
+//     tmuxp and tmux-mem-cpu-load are not tmux. A retitled argv[0],
+//     `tmux: server (<socket>)` or `tmux: client (<socket>)`, also counts: the
+//     form setproctitle(3) writes into the argument area on the BSDs. tmux does
+//     not do this on Linux (it retitles the kernel task name via prctl;
+//     measured: every live server's argv[0] is plain `tmux`) or on darwin (it
+//     cannot retitle at all). So on those platforms the clause only ever
+//     matches a fixture shaped that way, such as the reaper's regression test.
+//     It is matched on the whole argv[0]: filepath.Base would cut a real title
+//     at its socket path's slash.
+//   - The kernel task name. Linux tmux retitles it to `tmux: server` or
+//     `tmux: client`; on darwin it stays the exec'd file name, `tmux`. It
+//     comes from the process-table entry, so it still answers when the command
+//     line does not, and it names tmux even when argv[0] was rewritten
+//     (`exec -a`).
+func TmuxIdentityOf(pid int) TmuxIdentity {
+	argv, argvErr := readArgv(pid)
+	p, procErr := readProc(pid)
+	return tmuxIdentity(argv, argvErr, p.Comm, procErr)
+}
+
+// tmuxIdentity is TmuxIdentityOf's decision over what the two reads returned.
+// It is separate so that every combination can be pinned without a live
+// process in each state.
+func tmuxIdentity(argv []string, argvErr error, comm string, commErr error) TmuxIdentity {
+	if argvErr == nil && isTmuxCommandLine(argv) {
+		return Tmux
+	}
+	if commErr == nil && isTmuxTaskName(comm) {
+		return Tmux
+	}
+	if argvErr != nil || commErr != nil {
+		return TmuxUnknown
+	}
+	return NotTmux
+}
+
+// isTmuxCommandLine reports whether argv is tmux's, plain or retitled.
+func isTmuxCommandLine(argv []string) bool {
 	return isTmuxArgv(argv) || (len(argv) > 0 && strings.HasPrefix(argv[0], "tmux: "))
+}
+
+// isTmuxTaskName reports whether a kernel task name is tmux's: `tmux` where it
+// cannot retitle, or one of the titles proc_start gives it where it can. Any
+// `tmux: ` title counts, so a title this code does not know is still left
+// alone. Leave-alone is the safe direction for an unrecognised title.
+func isTmuxTaskName(comm string) bool {
+	return comm == "tmux" || strings.HasPrefix(comm, "tmux: ")
 }
 
 // IsTmuxServer reports whether pid is a tmux SERVER, identified positively.

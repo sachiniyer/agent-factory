@@ -50,7 +50,7 @@ func TestReapWorktreeWriters_DoesNotKillTmuxServer(t *testing.T) {
 }
 
 // A tmux CLIENT parked in the worktree is protected too (#4678). The reaper uses
-// proctree.IsTmuxProcess, not IsTmuxServer: af's own short-lived clients inherit
+// proctree.TmuxIdentityOf, not IsTmuxServer: af's own short-lived clients inherit
 // the self-matching daemon's cwd, and a client writes nothing into a worktree, so
 // killing one would only break the daemon's in-flight tmux command for some
 // other session. A client's argv[0] is plain `tmux` — the shape IsTmuxServer now
@@ -142,16 +142,66 @@ func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T
 	}
 
 	t.Run("scanner", func(t *testing.T) {
-		got := worktreeWriterProcesses(root, snap, infrastructure, workingDir, func(int) bool { return false })
+		got := worktreeWriterProcesses(root, snap, infrastructure, workingDir, allNotTmux)
 		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
 			"a matching ancestor must not carry the scanner and its unrelated subtree into the kill set")
 	})
 
 	t.Run("tmux server", func(t *testing.T) {
-		got := worktreeWriterProcesses(root, snap, 99, workingDir, func(pid int) bool { return pid == infrastructure })
+		got := worktreeWriterProcesses(root, snap, 99, workingDir, identities(map[int]proctree.TmuxIdentity{infrastructure: proctree.Tmux}))
 		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
 			"a matching ancestor must not carry the shared tmux server and its unrelated subtree into the kill set")
 	})
+
+	// #7238: a process whose tmux identity cannot be read is protected exactly
+	// like a tmux server, wherever the walk meets it.
+	t.Run("unknown identity", func(t *testing.T) {
+		got := worktreeWriterProcesses(root, snap, 99, workingDir, identities(map[int]proctree.TmuxIdentity{infrastructure: proctree.TmuxUnknown}))
+		assert.ElementsMatch(t, []int{ancestorPID, matchingChild}, processPIDs(got),
+			"a process whose command line is unreadable might be the shared tmux server: "+
+				"neither it nor its unrelated subtree may be carried into the kill set")
+	})
+}
+
+// The #7238 failure, as a selection. A process with a matching cwd and an
+// unreadable command line is never a selected root, so the fixture that failed
+// on CI could not be reached at all. Only a positive NotTmux makes a process
+// eligible, so the zero value of TmuxIdentity, which is what an identity
+// nobody filled in reads as, must exclude it too.
+func TestWorktreeWriterProcesses_NeverSelectsAnUnclassifiableRoot(t *testing.T) {
+	const (
+		unreadable = 10
+		ordinary   = 20
+	)
+	root := "/managed/worktree"
+	snap := map[int]proctree.Process{
+		unreadable: {PID: unreadable, PPID: 1},
+		ordinary:   {PID: ordinary, PPID: 1},
+	}
+	workingDir := func(int) (string, bool) { return root, true }
+
+	got := worktreeWriterProcesses(root, snap, 99, workingDir, identities(map[int]proctree.TmuxIdentity{unreadable: proctree.TmuxUnknown}))
+	assert.ElementsMatch(t, []int{ordinary}, processPIDs(got),
+		"a matching process whose command line is unreadable must not be selected; the control must be")
+
+	var zero proctree.TmuxIdentity
+	got = worktreeWriterProcesses(root, snap, 99, workingDir, func(int) proctree.TmuxIdentity { return zero })
+	assert.Empty(t, processPIDs(got),
+		"TmuxIdentity's zero value must mean unknown, never not-tmux")
+}
+
+// allNotTmux classifies every process as positively not tmux: the injected
+// identity for tests whose subject is something else.
+func allNotTmux(int) proctree.TmuxIdentity { return proctree.NotTmux }
+
+// identities answers from known, and NotTmux for every other pid.
+func identities(known map[int]proctree.TmuxIdentity) func(int) proctree.TmuxIdentity {
+	return func(pid int) proctree.TmuxIdentity {
+		if id, ok := known[pid]; ok {
+			return id
+		}
+		return proctree.NotTmux
+	}
 }
 
 // A process cwd'd inside the worktree that is the teardown's own requester
@@ -176,7 +226,7 @@ func TestWorktreeWriterProcesses_RetainsTeardownRequester(t *testing.T) {
 	}
 	workingDirs := map[int]string{10: root, 20: root, 30: root, 40: outside}
 	workingDir := func(pid int) (string, bool) { d, ok := workingDirs[pid]; return d, ok }
-	noTmux := func(int) bool { return false }
+	noTmux := allNotTmux
 
 	untrack := teardownreq.Track(snap[20])
 	defer untrack()
@@ -219,7 +269,7 @@ func TestWorktreeWriterProcesses_RequesterRootKeepsChildrenEligible(t *testing.T
 	untrack := teardownreq.Track(snap[50])
 	defer untrack()
 
-	got := worktreeWriterProcesses(root, snap, 99, workingDir, func(int) bool { return false })
+	got := worktreeWriterProcesses(root, snap, 99, workingDir, allNotTmux)
 	assert.ElementsMatch(t, []int{50, 60}, processPIDs(got),
 		"the matching requester is retained for the per-signal recheck, and its chdir'd-out writer child is still selected")
 }
