@@ -152,8 +152,13 @@ func TestServePTYStreamKeepaliveDropsASilentPeerOnceASlowInputEnds(t *testing.T)
 	// The input, then a few pings the peer leaves unanswered.
 	time.Sleep(binding.hold + 4*keepalive)
 
-	// Reading now drains the hello and then meets the server's close: the
-	// keepalive dropped the peer, and the stream closed normally.
+	// Reading now drains the hello and then meets the end of the stream: the
+	// keepalive dropped the peer. It may end as a close frame or as a torn-down
+	// transport. The drop cancels the server's read, and coder/websocket closes
+	// the transport when a read's context is cancelled, sometimes before the
+	// close handshake completes. That teardown is the existing dead-peer path
+	// (TestServePTYStreamKeepaliveDropsDeadSubscriber), so either is a drop.
+	// Only this read's own deadline means the peer was never dropped.
 	ctx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
 	defer cancel()
 	for {
@@ -163,9 +168,6 @@ func TestServePTYStreamKeepaliveDropsASilentPeerOnceASlowInputEnds(t *testing.T)
 		}
 		if ctx.Err() != nil {
 			t.Fatalf("the keepalive never dropped a peer that answers no ping: %v", err)
-		}
-		if got := websocket.CloseStatus(err); got != websocket.StatusNormalClosure {
-			t.Fatalf("read after the drop = %v (close status %v), want a normal closure", err, got)
 		}
 		return
 	}
