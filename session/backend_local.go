@@ -248,6 +248,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if gw != nil && !worktreeMissing {
 			workDir = gw.GetWorktreePath()
 		}
+		// refusedID is a recorded conversation this load refused to resume,
+		// which a confirmed re-spawn retires, exactly as Recover does: left
+		// recorded, it fences every later capture arm, and each restore refuses
+		// it again and starts fresh again (#7209 review).
+		var refusedID string
+		var replacement AgentConversationData
 		// A row flagged worktree-missing (#5102) has no directory to re-spawn
 		// into, so workDir stays empty: Restore may only REATTACH a session that
 		// is still alive, never re-spawn one. Re-spawning would either fail —
@@ -280,15 +286,23 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			runtimeProgram = resolution.command
 			resumeProgram, resumed, refusal := prepareExactResumeConversation(i, resolution.command)
-			program := injectSystemPromptWithEnv(resumeProgram, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
-			setLaunchProgram(tmuxSession, program,
-				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			// Logged only if this restore actually re-spawns: a reattach to a
 			// live pane resumes nothing, so a refusal there is not news (#7101).
 			var refused tmux.ExactResumeRefusal
 			if !resumed {
-				refused = i.exactResumeRefusal(refusal).ExactResumeRefusal
+				r := i.exactResumeRefusal(refusal)
+				refused = r.ExactResumeRefusal
+				// A row in the user's own checkout retires nothing on load, for
+				// either agent: a newer conversation there is not this row's
+				// (newerConversationIsEvidence, #7209 review R1).
+				if r.retire && i.newerConversationIsEvidence(LaunchCaptureWorkingDir(resolution.command, i.GetWorktreePath())) {
+					refusedID = r.ID
+					resumeProgram, replacement = planReplacementConversation(resumeProgram)
+				}
 			}
+			program := injectSystemPromptWithEnv(resumeProgram, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
+			setLaunchProgram(tmuxSession, program,
+				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			tmuxSession.SetExactResumeRefusal(refused)
 			// A re-spawn here resumes the session's own recorded conversation or
 			// starts fresh (#4797), never the latest one on a shared account home.
@@ -301,12 +315,29 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// row's one remedy was a tmux hiccup away from being stranded. Every
 		// failure of the inert reattach is therefore the plain one below: warn
 		// and keep the row listed.
+		// A refused resume launches fresh if this restore re-spawns, and Codex
+		// can mint the replacement's rollout before the next deferred arm's
+		// snapshot: baseline the store before the spawn (#6769 review).
+		var preSpawnCapture ConversationCaptureSnapshot
+		if refusedID != "" {
+			preSpawnCapture = i.sessionCodexCaptureBaselineFor(runtimeProgram)
+		}
+		// A Claude replacement is the record before its pane can write, as on
+		// Recover (#7209 review R6); the loader persists it with the load. A
+		// load that does not re-spawn puts the refused id back.
+		undoReplacement, replaced := func() {}, false
+		if refusedID != "" && replacement.HasID() {
+			undoReplacement, replaced = i.stageReplacementConversation(refusedID, replacement)
+		}
 		var restoreResult tmux.RestoreResult
 		var err error
 		if worktreeMissing {
 			restoreResult, err = tmux.RestoreReattached, tmuxSession.ReattachInert()
 		} else {
 			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
+		}
+		if replaced && (err != nil || restoreResult != tmux.RestoreRespawned) {
+			undoReplacement()
 		}
 		if err != nil && worktreeMissing {
 			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
@@ -324,6 +355,14 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if restoreResult == tmux.RestoreRespawned {
 			if strings.TrimSpace(runtimeProgram) != "" {
 				i.setRuntimeLaunch(runtimeProgram, tmuxSession, tmuxSession.SpawnedAt())
+			}
+			// The fresh pane committed after a refused resume: retire the id and
+			// park the pre-spawn baseline. This must precede the runtime
+			// generation advance below, which is what releases the park to the
+			// replacement's deferred arm (TakePendingConversationCaptureForRuntime);
+			// a park stamped after it waits for an advance that never comes.
+			if refusedID != "" && !replaced {
+				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves

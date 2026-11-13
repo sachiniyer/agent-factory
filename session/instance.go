@@ -631,6 +631,11 @@ type Instance struct {
 	// REQUEST, not a fact: honored only when the resolved command can express it,
 	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
+	// carriedIsRecord marks carriedConversation as this session's own recorded
+	// conversation delivered from elsewhere (SetResumeRecordedConversation): the
+	// driving daemon hands an in-sandbox agent-server the tab's record. The
+	// restore guard judges such a pin like the tab's record (#7209 review R2).
+	carriedIsRecord bool
 
 	// reportedConversation is the last conversation a remote agent-server reported
 	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to

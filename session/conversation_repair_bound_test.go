@@ -288,7 +288,8 @@ func TestCouldNotVerifyRefusalKeepsAnOperatorRepair(t *testing.T) {
 	})
 	_, ok, reason = prepareExactResumeConversation(captured, captured.Program)
 	require.False(t, ok)
-	require.True(t, captured.exactResumeRefusal(reason).retire, "a capture's refused record is still retired")
+	require.False(t, captured.exactResumeRefusal(reason).retire,
+		"a capture's record is kept too: could-not-look is no evidence about any id (#7209 review R4)")
 }
 
 // A rollout is dated by when it entered the store — its session_meta line's

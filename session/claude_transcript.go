@@ -215,43 +215,6 @@ func claudeWorktreeTranscripts(configDir string, projects []string) ([]claudeTra
 	return all, nil
 }
 
-// claudeCarryStaleness is a Claude carry's staleness check: whether the copy
-// of conversation id the carry would take, transcript (relative to configDir,
-// under one of projects), is still the newest conversation in the worktree.
-// It reads every spelling in projects, not only the one the transcript was
-// found under, so a /clear filed under the other spelling still refuses
-// (#7177). A newer copy of the same conversation under another spelling
-// refuses too: the carry would take the older copy, without the latest turns.
-func claudeCarryStaleness(configDir string, projects []string, transcript, id string) string {
-	transcripts, err := claudeWorktreeTranscripts(configDir, projects)
-	if err != nil {
-		return carryTranscriptsUnlistedReason
-	}
-	boundDir := filepath.Join(configDir, filepath.Dir(transcript))
-	var recorded *claudeTranscript
-	for idx := range transcripts {
-		if transcripts[idx].dir == boundDir && strings.EqualFold(transcripts[idx].id, id) {
-			recorded = &transcripts[idx]
-		}
-	}
-	if recorded == nil {
-		return carryTranscriptMissingReason
-	}
-	reason := ""
-	for _, other := range transcripts {
-		if !other.modTime.After(recorded.modTime) {
-			continue
-		}
-		// Newer is never the recorded file itself, so a newer file in its own
-		// directory is another conversation.
-		if other.dir == recorded.dir || !strings.EqualFold(other.id, recorded.id) {
-			return staleCarryReason
-		}
-		reason = carryTranscriptCopiesReason
-	}
-	return reason
-}
-
 // ErrNotClaude is returned for a session whose program is not Claude Code.
 var ErrNotClaude = errors.New("the session does not run claude")
 
@@ -272,21 +235,7 @@ func (i *Instance) ClaudeRunTranscriptDirs() (string, []string, error) {
 	if workDir == "" {
 		return "", nil, errors.New("the session has no worktree")
 	}
-	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workDir)
-	if account := strings.TrimSpace(i.Account); account != "" {
-		home, herr := config.GetConfigDir()
-		if herr != nil {
-			return "", nil, herr
-		}
-		selected, serr := agentaccount.Selected(home, tmux.ProgramClaude, account)
-		if serr != nil {
-			return "", nil, serr
-		}
-		configDir = selected.Dir
-		if err != nil {
-			launchDir, err = workDir, nil
-		}
-	}
+	configDir, launchDir, err := i.claudeStoreFor(program, workDir)
 	if err != nil {
 		return "", nil, err
 	}
@@ -295,4 +244,32 @@ func (i *Instance) ClaudeRunTranscriptDirs() (string, []string, error) {
 		dirs = append(dirs, filepath.Join(configDir, project))
 	}
 	return configDir, dirs, nil
+}
+
+// claudeStoreFor resolves the Claude config dir a runtime launched with
+// program in workDir writes its transcripts to, and the directory it launches
+// in. A session pinned to an account writes to the account's registry dir,
+// whose CLAUDE_CONFIG_DIR rides in through the session environment rather
+// than the command text; any other session writes where the command model
+// resolves the ambient dir.
+func (i *Instance) claudeStoreFor(program, workDir string) (string, string, error) {
+	configDir, launchDir, err := claudeTranscriptLaunchContext(program, workDir)
+	if account := strings.TrimSpace(i.Account); account != "" {
+		home, herr := config.GetConfigDir()
+		if herr != nil {
+			return "", "", herr
+		}
+		selected, serr := agentaccount.Selected(home, tmux.ProgramClaude, account)
+		if serr != nil {
+			return "", "", serr
+		}
+		configDir = selected.Dir
+		if err != nil {
+			launchDir, err = workDir, nil
+		}
+	}
+	if err != nil {
+		return "", "", err
+	}
+	return configDir, launchDir, nil
 }
