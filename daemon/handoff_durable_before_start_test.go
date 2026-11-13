@@ -66,7 +66,8 @@ func TestHandoffSession_IncomingRecordIsDurableWhenTheIncomingPaneStarts(t *test
 	var onDisk session.InstanceData
 	backend.atSpawn = func(*session.Instance) { onDisk = persistedInstance(t, repoID) }
 	inst := registerHandoffSubject(t, manager, repoID, repoPath, "durable-handoff", backend)
-	require.Equal(t, tmux.ProgramClaude, persistedInstance(t, repoID).Program, "precondition: the disk names the outgoing agent")
+	require.NotEqual(t, tmux.ProgramCodex, persistedInstance(t, repoID).Program,
+		"precondition: the disk does not already name the incoming agent")
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repoID, To: tmux.ProgramCodex})
 	require.NoError(t, err)
@@ -120,9 +121,9 @@ func TestHandoffSession_RefusesTheStartWhenTheIncomingRecordCannotBeWritten(t *t
 	}
 
 	_, err := manager.HandoffSession(HandoffSessionRequest{Title: inst.Title, RepoID: repoID, To: tmux.ProgramCodex})
+	require.Zero(t, backend.spawns(), "nothing may start that the record does not name")
 	require.Error(t, err, "a handoff whose incoming record cannot be written must not start the incoming agent")
 	require.False(t, isMutationCommitted(err))
-	require.Zero(t, backend.spawns(), "nothing may start that the record does not name")
 
 	mu.Lock()
 	defer mu.Unlock()
