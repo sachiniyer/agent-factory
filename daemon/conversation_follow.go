@@ -93,6 +93,16 @@ func (m *Manager) followAgentConversation(repoID, key string, inst *session.Inst
 	}
 	if persistErr != nil {
 		m.warn().Printf("failed to persist conversation id for %q: %v", inst.Title, persistErr)
+		// Roll the in-memory record back to what disk still holds, mirroring
+		// the operator-repair path in set_conversation.go: the follow move
+		// can never be re-proposed (its own re-read judges Unchanged) and the
+		// poll's pending-write gate is never armed for this write, so leaving
+		// the move committed in memory would diverge memory and disk until an
+		// unrelated row write happened to land. Restoring recorded makes the
+		// next follow check re-detect the runtime/thread mismatch and retry
+		// the persist — the retry contract the warn-only best-effort pattern
+		// presumes.
+		inst.SetAgentConversation(recorded)
 	}
 	return nil
 }
