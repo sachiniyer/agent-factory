@@ -3,10 +3,13 @@ package daemon
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -165,5 +168,83 @@ func TestServePTYStreamKeepaliveDropsASilentPeerOnceASlowInputEnds(t *testing.T)
 			t.Fatalf("read after the drop = %v (close status %v), want a normal closure", err, got)
 		}
 		return
+	}
+}
+
+func TestClassifyPingBlamesThePeerOnlyWhenTheReaderWasReading(t *testing.T) {
+	missedPong := fmt.Errorf("failed to ping: failed to wait for pong: %w", context.DeadlineExceeded)
+	writeLock := fmt.Errorf("failed to ping: failed to write control frame opPing: failed to acquire lock: %w", context.DeadlineExceeded)
+	closed := fmt.Errorf("failed to ping: %w", net.ErrClosed)
+	for _, tt := range []struct {
+		name       string
+		err        error
+		readerAway bool
+		want       keepaliveDecision
+	}{
+		{"a missed pong while reading drops", missedPong, false, keepaliveDrop},
+		{"a missed pong while the reader was away retries", missedPong, true, keepaliveRetry},
+		{"a closed connection drops while reading", closed, false, keepaliveDrop},
+		{"a closed connection drops while the reader was away", closed, true, keepaliveDrop},
+		{"a pong continues while the reader was away", nil, true, keepaliveContinue},
+		{"a write-lock timeout retries while the reader was away", writeLock, true, keepaliveRetry},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := classifyPing(tt.err, tt.readerAway); got != tt.want {
+				t.Errorf("classifyPing(%v, away=%v) = %v, want %v", tt.err, tt.readerAway, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestPTYReaderAvailabilityReportsAnyAbsenceSinceTheMark(t *testing.T) {
+	var reader ptyReaderAvailability
+	mark := reader.mark()
+	if reader.awaySince(mark) {
+		t.Fatal("a reader that stayed on Conn.Read was reported away")
+	}
+	reader.away()
+	reader.back()
+	if !reader.awaySince(mark) {
+		t.Fatal("a reader that left and came back since the mark was reported present")
+	}
+	reader.away()
+	mark = reader.mark()
+	if !reader.awaySince(mark) {
+		t.Fatal("a reader away at the mark was reported present")
+	}
+	reader.back()
+	if !reader.awaySince(mark) {
+		t.Fatal("a reader away at the mark and back since was reported present")
+	}
+	var none *ptyReaderAvailability
+	if none.awaySince(none.mark()) {
+		t.Fatal("a nil reader never leaves Conn.Read")
+	}
+}
+
+// While the reader is away every missed pong is retried. The first one missed
+// after it is back drops the peer.
+func TestKeepaliveLoopRetriesMissedPongsWhileTheReaderIsAwayThenDrops(t *testing.T) {
+	const keepalive = 20 * time.Millisecond
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	reader := &ptyReaderAvailability{}
+	reader.away()
+	var pings atomic.Int32
+	ping := func(context.Context) error {
+		if pings.Add(1) == 3 {
+			reader.back() // the input this reader was applying returns during this ping's wait
+		}
+		return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
+	}
+	done := make(chan struct{})
+	go func() { keepaliveLoop(ctx, keepalive, ping, reader); close(done) }()
+	select {
+	case <-done:
+	case <-time.After(2 * time.Second):
+		t.Fatal("keepaliveLoop never dropped a peer that missed a pong while the reader was reading")
+	}
+	if got := pings.Load(); got != 4 {
+		t.Fatalf("pings = %d, want 4: three retried while the reader was away, then one drop", got)
 	}
 }
