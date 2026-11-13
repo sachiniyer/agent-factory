@@ -33,7 +33,7 @@ func TestInspectClaudeProjectConversationsKeepsExistingRecordedTranscript(t *tes
 	recordedPath := filepath.Join(projectDir, recordedID+".jsonl")
 	latestPath := filepath.Join(projectDir, latestID+".jsonl")
 	require.NoError(t, os.WriteFile(recordedPath, []byte("{}\n"), 0o600))
-	require.NoError(t, os.WriteFile(latestPath, []byte("{}\n"), 0o600))
+	require.NoError(t, os.WriteFile(latestPath, []byte(claudeRecordLine(t, workDir)), 0o600))
 	oldTime := time.Now().Add(-time.Minute)
 	require.NoError(t, os.Chtimes(recordedPath, oldTime, oldTime))
 	require.NoError(t, os.Chtimes(latestPath, oldTime.Add(time.Second), oldTime.Add(time.Second)))

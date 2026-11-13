@@ -27,6 +27,13 @@ const (
 	// claudeRecordedUnlisted: a spelling's project directory could not be
 	// listed, so what it holds is unknown.
 	claudeRecordedUnlisted
+	// claudeRecordedUncorrelated: a newer conversation names no directory af
+	// can read, so whether it is this worktree's is unknown (#7208).
+	claudeRecordedUncorrelated
+	// claudeRecordedFiledUnlisted: a spelling could not be listed, but one af
+	// could list files the recorded conversation, so it exists; whether it is
+	// still the newest is unknown (#7221 review R5).
+	claudeRecordedFiledUnlisted
 	// claudeRecordedVerdicts counts the verdicts above. A new verdict goes
 	// before it, and TestEveryClaudeRecordedVerdictMapsToALaunch requires
 	// recordedClaudeLaunchFor to map it.
@@ -37,17 +44,26 @@ const (
 // conversation, shared by the account swap's carry and the restore guard: is
 // conversation id still the newest one in the worktree? The worktree's
 // conversations are every one filed in configDir under any project directory
-// in projects, the spellings claudeProjectCandidates names for it (#7177).
-// Newer is by modification time, strictly: the live runtime appends to the
-// conversation it is in.
+// in projects, the spellings claudeProjectCandidates names for it (#7177),
+// whose recorded cwd is launchDir (#7208): a project directory can hold
+// another directory's conversations under a colliding name, and a newer one
+// of those says nothing about this worktree. Newer is by modification time,
+// strictly: the live runtime appends to the conversation it is in.
 //
 // bound, relative to configDir, is the project directory whose copy of the
 // conversation the caller would use, as a carry copies one file. "" judges
 // the newest copy under any spelling, which is the one a resume by id
 // continues.
-func judgeClaudeRecorded(configDir string, projects []string, id, bound string) claudeRecordedVerdict {
+func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bound string) claudeRecordedVerdict {
 	transcripts, err := claudeWorktreeTranscripts(configDir, projects)
 	if err != nil {
+		// What an unlistable spelling holds is unknown, but the recorded
+		// conversation may be filed under one af could list.
+		for _, transcript := range transcripts {
+			if strings.EqualFold(transcript.id, id) {
+				return claudeRecordedFiledUnlisted
+			}
+		}
 		return claudeRecordedUnlisted
 	}
 	boundDir := ""
@@ -73,20 +89,31 @@ func judgeClaudeRecorded(configDir string, projects []string, id, bound string) 
 		return claudeRecordedMissing
 	}
 	verdict := claudeRecordedCurrent
+	uncorrelated := false
 	for _, other := range transcripts {
 		if !other.modTime.After(recorded.modTime) {
 			continue
 		}
+		if other.dir != recorded.dir && strings.EqualFold(other.id, recorded.id) {
+			// A newer copy the judged one still holds every byte of brings no
+			// turn it lacks; only one that adds or diverges does.
+			if !claudeTranscriptExtends(*recorded, other) {
+				verdict = claudeRecordedCopies
+			}
+			continue
+		}
 		// Newer is never the recorded file itself, so a newer file in its own
-		// directory is another conversation.
-		if other.dir == recorded.dir || !strings.EqualFold(other.id, recorded.id) {
+		// directory, or under another id, is another conversation: this
+		// worktree's only if its transcript records this launch directory.
+		switch claudeTranscriptOwnership(other, launchDir) {
+		case claudeOwnedHere:
 			return claudeRecordedStale
+		case claudeOwnershipUnknown:
+			uncorrelated = true
 		}
-		// A newer copy the judged one still holds every byte of brings no
-		// turn it lacks; only one that adds or diverges does.
-		if !claudeTranscriptExtends(*recorded, other) {
-			verdict = claudeRecordedCopies
-		}
+	}
+	if uncorrelated {
+		return claudeRecordedUncorrelated
 	}
 	return verdict
 }
@@ -97,10 +124,12 @@ func judgeClaudeRecorded(configDir string, projects []string, id, bound string) 
 // The carry binds the copy that holds every other one (locateClaude), so a
 // newer copy under another spelling means Claude wrote it while af planned:
 // that refuses too, rather than carry a copy without the latest turns.
-func claudeCarryStaleness(configDir string, projects []string, transcript, id string) string {
-	switch judgeClaudeRecorded(configDir, projects, id, filepath.Dir(transcript)) {
-	case claudeRecordedUnlisted:
+func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string) string {
+	switch judgeClaudeRecorded(configDir, projects, launchDir, id, filepath.Dir(transcript)) {
+	case claudeRecordedUnlisted, claudeRecordedFiledUnlisted:
 		return carryTranscriptsUnlistedReason
+	case claudeRecordedUncorrelated:
+		return carryUncorrelatedReason
 	case claudeRecordedMissing:
 		return carryTranscriptMissingReason
 	case claudeRecordedStale:
@@ -153,7 +182,7 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 		return recordedClaudeBlind
 	}
 	projects := claudeProjectCandidates(launchDir)
-	verdict := judgeClaudeRecorded(configDir, projects, id, "")
+	verdict := judgeClaudeRecorded(configDir, projects, launchDir, id, "")
 	if verdict == claudeRecordedMissing {
 		account, _ := i.AccountSelection()
 		verdict = claudeRecordedAnywhere(configDir, strings.TrimSpace(account) != "", id)
@@ -179,6 +208,12 @@ func recordedClaudeLaunchFor(verdict claudeRecordedVerdict, evidence func() bool
 	case claudeRecordedMissing:
 		return recordedClaudeStartOn, true
 	case claudeRecordedCurrent, claudeRecordedCopies:
+		return recordedClaudeResume, true
+	case claudeRecordedUncorrelated, claudeRecordedFiledUnlisted:
+		// The id is filed, and nothing shows the session moved on from it: a
+		// newer conversation names no directory af can read (#7208), or a
+		// spelling could not be listed beside one that files it (#7221
+		// review R5).
 		return recordedClaudeResume, true
 	case claudeRecordedStale:
 		if evidence() {

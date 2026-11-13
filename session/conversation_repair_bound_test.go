@@ -162,8 +162,8 @@ func TestCarryBoundsAnOperatorRepairToThreadsThatExistedAtTheRepair(t *testing.T
 			Agent: tmux.ProgramClaude, ID: carryTestID, CapturedAt: repairedAt, CaptureKind: ConversationCaptureOperator,
 		}))
 		source := filepath.Join(home, ".claude")
-		recorded := writeCarryFile(t, source, claudeTranscriptRel(inst.GetWorktreePath(), carryTestID), "{}\n")
-		newer := writeCarryFile(t, source, claudeTranscriptRel(inst.GetWorktreePath(), newerConversationID), "{}\n")
+		recorded := writeCarryFile(t, source, claudeTranscriptRel(inst.GetWorktreePath(), carryTestID), claudeRecordLine(t, inst.GetWorktreePath()))
+		newer := writeCarryFile(t, source, claudeTranscriptRel(inst.GetWorktreePath(), newerConversationID), claudeRecordLine(t, inst.GetWorktreePath()))
 		setModTime(t, recorded, now.Add(-time.Hour))
 		setModTime(t, newer, now.Add(-time.Minute))
 

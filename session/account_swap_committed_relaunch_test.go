@@ -93,10 +93,12 @@ func committedFreshClaudeSwapIn(t *testing.T, build func(*testing.T) swapLayout)
 }
 
 // fileClaudeTranscript files conversation id under worktree's project
-// directory in the Claude store configDir, last written at modTime.
+// directory in the Claude store configDir, last written at modTime. Its
+// record names worktree as the directory it was launched in, as Claude's
+// does: ownership is judged by that cwd (#7208).
 func fileClaudeTranscript(t *testing.T, configDir, worktree, id string, modTime time.Time) {
 	t.Helper()
-	setModTime(t, writeCarryFile(t, configDir, claudeTranscriptRel(worktree, id), "{}\n"), modTime)
+	setModTime(t, writeCarryFile(t, configDir, claudeTranscriptRel(worktree, id), claudeRecordLine(t, worktree)), modTime)
 }
 
 var resumeArg = regexp.MustCompile(`--resume[ =](\S+)`)
@@ -233,4 +235,23 @@ func TestCommittedSwapRelaunchFindsItsConversationUnderEitherSpelling(t *testing
 	match := resumeArg.FindStringSubmatch(plan.program)
 	require.NotNil(t, match, plan.program)
 	require.Equal(t, committed, match[1])
+}
+
+// #7208: a newer conversation that names no directory af can read is no
+// evidence the session moved on, even in a worktree af owns. The committed
+// conversation is filed, so starting on its id again would never boot; the
+// re-launch resumes it.
+func TestCommittedSwapRelaunchResumesBesideAnUnattributableConversation(t *testing.T) {
+	inst, target, worktree, committed := committedFreshClaudeSwapIn(t, exclusiveLayout)
+	require.True(t, inst.newerConversationIsEvidence(worktree), "precondition: af owns this worktree exclusively")
+	const unnamed = "7c1d2e3f-4a5b-4c6d-8e7f-901234567890"
+	fileClaudeTranscript(t, target, worktree, committed, time.Now().Add(-time.Hour))
+	setModTime(t, writeCarryFile(t, target, claudeTranscriptRel(worktree, unnamed), `{"type":"summary","summary":"s"}`+"\n"),
+		time.Now().Add(-time.Minute))
+
+	plan := relaunchPlan(t, inst)
+	match := resumeArg.FindStringSubmatch(plan.program)
+	require.NotNil(t, match, "a filed conversation is resumed: %s", plan.program)
+	require.Equal(t, committed, match[1])
+	require.NotRegexp(t, sessionIDArg, plan.program, "--session-id on a filed id never boots")
 }

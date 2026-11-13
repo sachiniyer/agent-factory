@@ -292,8 +292,8 @@ func TestClaudeCarryJudgesTheSourceBeforeTheTarget(t *testing.T) {
 	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 	source := filepath.Join(home, ".claude")
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, inst.GetWorktreePath())), past)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, newerConversationID+".jsonl"), claudeRecordLine(t, inst.GetWorktreePath())), past.Add(time.Minute))
 	writeCarryFile(t, target, filepath.Join(resolved, carryTestID+".jsonl"), "{\"other\":1}\n")
 
 	require.Equal(t, handoff.CarryStale, inst.AccountSwapCarryRefusal())

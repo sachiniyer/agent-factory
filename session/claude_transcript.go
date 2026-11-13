@@ -29,7 +29,8 @@ type ClaudeProjectConversationState struct {
 }
 
 // InspectClaudeProjectConversations checks the exact transcript store selected
-// by program and returns the newest direct transcript for workingDir. Claude
+// by program and returns the newest direct transcript launched in workingDir,
+// by the cwd the transcript records (#7208). Claude
 // encodes every non-alphanumeric character in an absolute project path as '-',
 // and may file the conversation under either spelling of that path
 // (claudeProjectCandidates), so both are read (#7177).
@@ -61,7 +62,9 @@ func InspectClaudeProjectConversations(program, workingDir string, recorded Agen
 		return ClaudeProjectConversationState{}, listErr
 	}
 	state := ClaudeProjectConversationState{}
-	if newest, ok := newestClaudeTranscript(transcripts); ok {
+	// A substitute must be this worktree's own conversation by the cwd it
+	// records, not merely one filed under a colliding project name (#7208).
+	if newest, ok := newestClaudeTranscriptIn(transcripts, launchDir); ok {
 		state.Resume = conversation(newest.id)
 	}
 	return state, nil
@@ -107,21 +110,6 @@ func claudeProjectTranscripts(projectDir string) ([]claudeTranscript, error) {
 		transcripts = append(transcripts, claudeTranscript{id: match[1], name: entry.Name(), dir: projectDir, modTime: info.ModTime()})
 	}
 	return transcripts, nil
-}
-
-// newestClaudeTranscript picks the most recently written transcript, breaking
-// an exact tie by the greater file name.
-func newestClaudeTranscript(transcripts []claudeTranscript) (claudeTranscript, bool) {
-	var newest claudeTranscript
-	found := false
-	for _, transcript := range transcripts {
-		if found && (transcript.modTime.Before(newest.modTime) ||
-			(transcript.modTime.Equal(newest.modTime) && transcript.name < newest.name)) {
-			continue
-		}
-		newest, found = transcript, true
-	}
-	return newest, found
 }
 
 func claudeTranscriptLaunchContext(command, workingDir string) (string, string, error) {

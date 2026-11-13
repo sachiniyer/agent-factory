@@ -55,8 +55,9 @@ func staleClaudeLoadAs(t *testing.T, alive bool, status Status) (InstanceData, *
 	}
 	project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
 	past := time.Now().Add(-time.Hour)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	own := claudeRecordLine(t, data.Worktree.WorktreePath)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), own), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), own), past.Add(time.Minute))
 	return data, spawns, agentName
 }
 

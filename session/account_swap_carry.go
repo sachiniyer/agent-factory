@@ -46,6 +46,10 @@ type conversationCarry struct {
 	// dir, that locateClaude searched for the transcript: the staleness check
 	// reads the same set (#7177).
 	claudeProjects []string
+	// claudeLaunchDir is the directory locateClaude resolved the conversation
+	// was launched in; the staleness check counts only conversations whose
+	// transcripts record it (#7208).
+	claudeLaunchDir string
 	// committed marks a carry re-planned from a pending record: the identity
 	// checkpoint only records a carry whose pre-commit copy landed.
 	committed bool
@@ -351,7 +355,7 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentConversationData) string {
 	switch c.agent {
 	case tmux.ProgramClaude:
-		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.transcript, c.id)
+		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.claudeLaunchDir, c.transcript, c.id)
 	case tmux.ProgramCodex:
 		return c.staleCodexReason(program, workDir, outgoing)
 	}

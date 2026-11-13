@@ -48,7 +48,7 @@ func recordedClaudeRespawn(t *testing.T, status Status, id string) (InstanceData
 	// The store lists cleanly: the worktree's project directory holds another,
 	// older conversation, and none for the recorded id.
 	project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
-	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), time.Now().Add(-time.Hour))
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), claudeRecordLine(t, data.Worktree.WorktreePath)), time.Now().Add(-time.Hour))
 	return data, spawns, agentName
 }
 
@@ -121,7 +121,7 @@ func TestFirstLaunchJudgesARecordPinByTheRecordedClaudeRule(t *testing.T) {
 			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 			workDir, recorded, _ := claudeRestoreWorktree(t)
 			tc.layout(func(id string, at time.Time) {
-				setModTime(t, writeCarryFile(t, configDir, filepath.Join(recorded, id+".jsonl"), "{}\n"), at)
+				setModTime(t, writeCarryFile(t, configDir, filepath.Join(recorded, id+".jsonl"), claudeRecordLine(t, workDir)), at)
 			})
 			inst := claudeRestoreInstance(t, workDir, carryTestID)
 			inst.Tabs = []*Tab{{}}
