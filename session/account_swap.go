@@ -381,12 +381,18 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 			carry, carryFallback = nil, carryUnresumableReason
 		}
 	}
+	// reminted reports that a committed replacement's recorded conversation id
+	// was replaced by a fresh one, which the record takes below.
+	var reminted bool
 	if carry == nil {
-		conversationID := newSessionID()
 		if pending != nil && pending.To == name && pending.ConversationID != "" {
-			conversationID = pending.ConversationID
+			// A re-launch of a committed replacement: its id may already name a
+			// transcript in the target account's store (#7214).
+			launchProgram, conversation, reminted = committedConversationLaunch(
+				resolvedProgram, workDir, name, pending.ConversationID)
+		} else {
+			launchProgram, conversation = planLaunchConversation(newSessionID(), resolvedProgram)
 		}
-		launchProgram, conversation = planLaunchConversation(conversationID, resolvedProgram)
 	}
 	// A swap selects the account in the namespace of the command it will
 	// actually launch, not the enum the session was created under: a session
@@ -541,7 +547,19 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
 	}
+	var replaced string
+	if live := i.pendingAccountSwap; reminted && live != nil && live.To == name && live.CarriedConversationID == "" &&
+		live.ConversationID != conversation.ID {
+		// The record names the conversation the re-launch starts, never the
+		// stale id it no longer resumes (#7214).
+		replaced, live.ConversationID = live.ConversationID, conversation.ID
+		i.touchLocked()
+	}
 	i.mu.Unlock()
+	if replaced != "" {
+		log.WarningLog.Printf("account swap for %q re-launches its replacement on a fresh conversation %s: committed conversation %s is %s",
+			i.Title, conversation.ID, replaced, staleCarryReason)
+	}
 	// The pane and the API response say why; af's log must too (#7152). A
 	// re-plan after a failed copy is the copy's own refusal, logged there.
 	if carry == nil && carryFallback != "" && carryFailure == "" {
