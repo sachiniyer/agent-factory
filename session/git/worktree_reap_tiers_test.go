@@ -17,6 +17,7 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 	aflog "github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/log/logtest"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -126,6 +127,137 @@ func TestReapWorktreeWriters_LeavesAProcessThatBecameTmuxOutOfTheLaterTier(t *te
 	require.Contains(t, info.String(),
 		fmt.Sprintf("pid %d (%s) was selected as not tmux, but just before its SIGKILL it reads as tmux", process.PID, process.Comm),
 		"the reap must say why it left a selected process alone")
+}
+
+// The tier hook in isolation, over every way an identity can move between the
+// SIGTERM and SIGKILL tiers. It is driven the way KillEscalatingExcept drives
+// it: the exemption first, then the check-and-signal.
+func TestTierIdentity_LeavesAProcessAloneFromTheFirstTierItIsNotPositivelyNotTmux(t *testing.T) {
+	const (
+		ordinary       = 10 // not tmux at both tiers
+		becomesTmux    = 20 // execs tmux between the tiers
+		flipsBack      = 30 // reads as tmux at SIGTERM, not tmux again at SIGKILL
+		becomesUnknown = 40 // unreadable at SIGKILL, such as mid-exec
+		unknownFirst   = 50 // unreadable at SIGTERM, readable again at SIGKILL
+		gone           = 60 // exited, so its reads say nothing about it
+	)
+	readAt := map[syscall.Signal]map[int]proctree.TmuxIdentity{
+		syscall.SIGTERM: {
+			ordinary: proctree.NotTmux, becomesTmux: proctree.NotTmux, flipsBack: proctree.Tmux,
+			becomesUnknown: proctree.NotTmux, unknownFirst: proctree.TmuxUnknown, gone: proctree.TmuxUnknown,
+		},
+		syscall.SIGKILL: {
+			ordinary: proctree.NotTmux, becomesTmux: proctree.Tmux, flipsBack: proctree.NotTmux,
+			becomesUnknown: proctree.TmuxUnknown, unknownFirst: proctree.NotTmux, gone: proctree.TmuxUnknown,
+		},
+	}
+	var tier syscall.Signal
+	tiers := newTierIdentity(
+		func(pid int) proctree.TmuxIdentity { return readAt[tier][pid] },
+		func(p proctree.Process) bool { return p.PID != gone },
+	)
+	var signalled []string
+	signalIf := tiers.signalIf(func(p proctree.Process, sig syscall.Signal) (bool, error) {
+		signalled = append(signalled, fmt.Sprintf("%d %s", p.PID, signalName(sig)))
+		return true, nil
+	})
+	var info logtest.Buffer
+	aflog.CaptureOutput(t, aflog.InfoLog, "INFO: ", &info)
+
+	var procs []proctree.Process
+	for _, pid := range []int{ordinary, becomesTmux, flipsBack, becomesUnknown, unknownFirst, gone} {
+		procs = append(procs, proctree.Process{PID: pid, Comm: "writer"})
+	}
+	for _, tier = range []syscall.Signal{syscall.SIGTERM, syscall.SIGKILL} {
+		for _, p := range procs {
+			if tiers.leftAlone(p) {
+				continue
+			}
+			_, _ = signalIf(p, tier)
+		}
+	}
+
+	assert.Equal(t, []string{
+		"10 SIGTERM", "20 SIGTERM", "40 SIGTERM", "60 SIGTERM",
+		"10 SIGKILL", "60 SIGKILL",
+	}, signalled, "only a positive not-tmux read lets a signal through, and a process left alone once "+
+		"is never signalled again; a process that is gone is handed on, since its signal is identity-verified")
+	for _, pid := range []int{becomesTmux, flipsBack, becomesUnknown, unknownFirst} {
+		assert.True(t, tiers.leftAlone(proctree.Process{PID: pid}), "pid %d must stay left alone", pid)
+	}
+	assert.False(t, tiers.leftAlone(proctree.Process{PID: ordinary}))
+	assert.False(t, tiers.leftAlone(proctree.Process{PID: gone}))
+	attempted, err := signalIf(proctree.Process{PID: flipsBack}, syscall.SIGKILL)
+	assert.NoError(t, err)
+	assert.False(t, attempted, "the check-and-signal must hold the decision too, not only the exemption")
+
+	var unclassified []string
+	for _, s := range tiers.unclassified {
+		unclassified = append(unclassified, fmt.Sprintf("%d afterSIGTERM=%t", s.PID, s.afterSIGTERM))
+	}
+	assert.Equal(t, []string{"50 afterSIGTERM=false", "40 afterSIGTERM=true"}, unclassified,
+		"each process left alone for an unknown identity is handed to the survivor warning, "+
+			"with whether it had already been sent SIGTERM; one that read as tmux is not")
+
+	logged := info.String()
+	for _, want := range []string{
+		"pid 20 (writer) was selected as not tmux, but just before its SIGKILL it reads as tmux",
+		"pid 30 (writer) was selected as not tmux, but just before its SIGTERM it reads as tmux",
+		"pid 40 (writer) was selected as not tmux, but just before its SIGKILL it reads as unknown",
+		"pid 50 (writer) was selected as not tmux, but just before its SIGTERM it reads as unknown",
+	} {
+		assert.Equal(t, 1, strings.Count(logged, want), "logged once: %q\nlog:\n%s", want, logged)
+	}
+	assert.NotContains(t, logged, "pid 60 ", "a process that is gone was not left alone, so nothing is said about it")
+}
+
+// The survivor warning re-reads the identity. A process left alone because it
+// read as unknown, mid-exec into tmux, is tmux by the time the reap is done,
+// and leaving it alone was right. One that is still unclassifiable is reported,
+// and the report says whether it had been sent SIGTERM.
+func TestWarnUnclassifiedSurvivors_RereadsTheIdentityAndNamesTheTierReached(t *testing.T) {
+	survivor := exec.Command(sleeper.Path(t), "300")
+	require.NoError(t, survivor.Start())
+	t.Cleanup(func() {
+		// The fixture this test started and recorded, and nothing else.
+		_ = survivor.Process.Kill()
+		_ = survivor.Wait()
+	})
+	process, err := proctree.Lookup(survivor.Process.Pid)
+	require.NoError(t, err)
+	previousTermWait := worktreeReapTermWait
+	worktreeReapTermWait = 50 * time.Millisecond
+	t.Cleanup(func() { worktreeReapTermWait = previousTermWait })
+	readsAs := func(id proctree.TmuxIdentity) func(int) proctree.TmuxIdentity {
+		return func(int) proctree.TmuxIdentity { return id }
+	}
+
+	for _, tc := range []struct {
+		name         string
+		afterSIGTERM bool
+		now          proctree.TmuxIdentity
+		want         string
+	}{
+		{name: "now tmux", afterSIGTERM: true, now: proctree.Tmux},
+		{name: "still unknown, never signalled", now: proctree.TmuxUnknown,
+			want: fmt.Sprintf("pid %d (%s) is still working inside it and was not signalled,", process.PID, process.Comm)},
+		{name: "still unknown, after SIGTERM", afterSIGTERM: true, now: proctree.TmuxUnknown,
+			want: fmt.Sprintf("pid %d (%s) is still working inside it and was sent SIGTERM but not SIGKILL,", process.PID, process.Comm)},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			var warnings logtest.Buffer
+			aflog.CaptureOutput(t, aflog.WarningLog, "WARNING: ", &warnings)
+
+			warnUnclassifiedSurvivors("/managed/worktree", []sparedProcess{{Process: process, afterSIGTERM: tc.afterSIGTERM}}, readsAs(tc.now))
+
+			if tc.want == "" {
+				assert.Empty(t, warnings.String(), "a survivor that now reads as tmux was rightly left alone")
+				return
+			}
+			assert.Contains(t, warnings.String(), tc.want)
+		})
+	}
+	require.True(t, proctree.AliveSame(process), "the warning must never signal anything")
 }
 
 // requireFixtureLine waits for the fixture to print a line starting with want,
