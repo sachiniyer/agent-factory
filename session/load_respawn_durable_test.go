@@ -24,6 +24,12 @@ import (
 // worktree, loaded through a tmux double; alive keeps its panes running.
 func staleClaudeLoad(t *testing.T, alive bool) (InstanceData, *[]string, string) {
 	t.Helper()
+	return staleClaudeLoadAs(t, alive, Ready)
+}
+
+// staleClaudeLoadAs is staleClaudeLoad for a row persisted at status.
+func staleClaudeLoadAs(t *testing.T, alive bool, status Status) (InstanceData, *[]string, string) {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -43,7 +49,7 @@ func staleClaudeLoad(t *testing.T, alive bool) (InstanceData, *[]string, string)
 	}
 	t.Cleanup(func() { restoreTmuxSession = prev })
 
-	data := deadInstanceData(t, Ready, agentName, shellName)
+	data := deadInstanceData(t, status, agentName, shellName)
 	data.Tabs[0].Conversation = &AgentConversationData{
 		Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected,
 	}
