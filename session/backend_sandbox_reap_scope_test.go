@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -193,4 +194,149 @@ func TestSandboxRunStillKillsADetachedGroupMemberOnTimeout(t *testing.T) {
 		"a deadline kill surfaces as context.DeadlineExceeded: %v", err)
 	assert.True(t, waitProcessGone(pid, 3*time.Second),
 		"the deadline must kill every member of the step's group, including one that holds none of its pipes")
+}
+
+// plantingStub is an `ssh` stub that plants processes in the step's group and
+// records each as "<pid> <pgid> <stub's pgid>" in a file.
+type plantingStub struct {
+	ssh    string
+	record string
+}
+
+// The two plants. detached has every stdio stream on /dev/null, the shape of
+// a ControlPersist master's ProxyCommand. holding keeps the step's stdout and
+// stderr, the shape of a wedged transport helper (#7108).
+const (
+	plantDetachedMember = "sleep 30 </dev/null >/dev/null 2>&1 & record $!"
+	plantPipeHolder     = "sleep 30 </dev/null & record $!"
+)
+
+func stubSSHPlanting(t *testing.T, plant, then string) plantingStub {
+	t.Helper()
+	dir := t.TempDir()
+	record := filepath.Join(dir, "planted")
+	body := "#!/usr/bin/env bash\n" +
+		`record() { printf '%s %s %s\n' "$1" "$(ps -o pgid= -p "$1" | tr -d ' ')" "$(ps -o pgid= -p $$ | tr -d ' ')" >> ` +
+		shellQuote(record) + "; }\n" +
+		plant + "\n" +
+		"printf 'AF-SANDBOX-ANSWER\\n'\n" +
+		then + "\n"
+	sshPath := filepath.Join(dir, "ssh")
+	require.NoError(t, os.WriteFile(sshPath, []byte(body), 0o755))
+	return plantingStub{ssh: sshPath, record: record}
+}
+
+// planted reads every recorded process with the same proof member makes: each
+// was in the step's group, which is not the test's. A cleanup kills each
+// instance by identity.
+func (s plantingStub) planted(t *testing.T) []int {
+	t.Helper()
+	data, err := os.ReadFile(s.record)
+	require.NoError(t, err, "the stub must have recorded what it planted")
+	var pids []int
+	for _, line := range strings.Split(strings.TrimSpace(string(data)), "\n") {
+		fields := strings.Fields(line)
+		require.Len(t, fields, 3, "record line %q", line)
+		var n [3]int
+		for i, f := range fields {
+			v, err := strconv.Atoi(f)
+			require.NoError(t, err)
+			require.Positive(t, v)
+			n[i] = v
+		}
+		if proc, err := proctree.Lookup(n[0]); err == nil {
+			t.Cleanup(func() { _ = proctree.Signal(proc, syscall.SIGKILL) })
+		}
+		require.Equal(t, n[2], n[1], "the planted process must be in the step's process group, or nothing here tests the reap")
+		require.NotEqual(t, syscall.Getpgrp(), n[2], "the step must lead its own process group (execgroup.Lead), not share the test's")
+		pids = append(pids, n[0])
+	}
+	return pids
+}
+
+// requireStillRunning fails unless pid is the same live process for the whole
+// settle window.
+func requireStillRunning(t *testing.T, pid int, why string) {
+	t.Helper()
+	proc, err := proctree.Lookup(pid)
+	require.NoError(t, err, "pid %d was not running when runCommand returned: %s", pid, why)
+	settle := time.Now().Add(sandboxDetachedMemberSettle)
+	for time.Now().Before(settle) {
+		require.True(t, proctree.AliveSame(proc), "pid %d died after runCommand returned: %s", pid, why)
+		time.Sleep(20 * time.Millisecond)
+	}
+}
+
+// TestSandboxRunReapsOnlyTheMemberHoldingThePipe is the case a group reap gets
+// wrong (#7121). The step exits 0 with one member holding its capture pipe
+// past WaitDelay, which is proof of a straggler, and another member holding
+// none of its pipes, which is a ControlPersist master's transport. A group kill
+// on that proof reaches both. Only the straggler may die.
+func TestSandboxRunReapsOnlyTheMemberHoldingThePipe(t *testing.T) {
+	stub := stubSSHPlanting(t, plantDetachedMember+"\n"+plantPipeHolder, "exit 0")
+	p := &sandboxProvisioner{sshCmd: stub.ssh}
+
+	var (
+		out []byte
+		err error
+	)
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		out, err = p.Run(10*time.Second, "true", nil, true)
+	}), "runCommand must return once WaitDelay has passed")
+	pids := stub.planted(t)
+	require.Len(t, pids, 2)
+	detached, holder := pids[0], pids[1]
+
+	require.NoError(t, err, "a step that exits 0 succeeds, whatever held its pipe")
+	assert.Contains(t, string(out), "AF-SANDBOX-ANSWER")
+	assert.True(t, waitProcessGone(holder, 3*time.Second),
+		"the member holding the capture pipe past WaitDelay must be reaped (#7108)")
+	requireStillRunning(t, detached,
+		"the member holding none of the step's pipes was killed alongside the straggler; a group reap does that, and it kills a ControlPersist master's transport")
+}
+
+// TestSandboxRunReapsAHolderAfterANonZeroExit: the held pipe is the same
+// evidence whatever the exit status. os/exec reports a non-zero exit as an
+// *exec.ExitError and drops ErrWaitDelay, so the ErrWaitDelay-gated reap never
+// ran on this path and the helper leaked.
+func TestSandboxRunReapsAHolderAfterANonZeroExit(t *testing.T) {
+	stub := stubSSHPlanting(t, plantPipeHolder, "exit 3")
+	p := &sandboxProvisioner{sshCmd: stub.ssh}
+
+	var err error
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		_, err = p.Run(10*time.Second, "true", nil, true)
+	}), "runCommand must return once WaitDelay has passed")
+	pids := stub.planted(t)
+	require.Len(t, pids, 1)
+
+	var exitErr *exec.ExitError
+	require.True(t, errors.As(err, &exitErr), "the step's own failure is reported: %v", err)
+	assert.Equal(t, 3, exitErr.ExitCode())
+	assert.True(t, waitProcessGone(pids[0], 3*time.Second),
+		"a member holding the capture pipe past WaitDelay must be reaped after a non-zero exit too")
+}
+
+// TestSandboxRunKeepsTheExitStatusWhenTheDeadlinePassesDuringCleanup: the
+// timeout label describes the command, not its cleanup. The step fails on its
+// own at once, a member holds the pipe, and the deadline passes during
+// WaitDelay and the reap. That is a step that failed, not one that timed out
+// (#7115 read the deadline before its reap for the same reason).
+func TestSandboxRunKeepsTheExitStatusWhenTheDeadlinePassesDuringCleanup(t *testing.T) {
+	stub := stubSSHPlanting(t, plantPipeHolder, "exit 3")
+	p := &sandboxProvisioner{sshCmd: stub.ssh}
+
+	timeout := 500 * time.Millisecond
+	require.Less(t, timeout, sandboxTunnelWaitDelay, "the deadline must fall inside WaitDelay for this test to mean anything")
+	var err error
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		_, err = p.Run(timeout, "true", nil, true)
+	}), "runCommand must return once WaitDelay has passed")
+	stub.planted(t)
+
+	assert.False(t, errors.Is(err, context.DeadlineExceeded),
+		"a step that exited 3 on its own before its deadline must not be reported as timed out: %v", err)
+	var exitErr *exec.ExitError
+	require.True(t, errors.As(err, &exitErr), "the step's own exit status is the error: %v", err)
+	assert.Equal(t, 3, exitErr.ExitCode())
 }
