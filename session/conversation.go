@@ -395,8 +395,27 @@ func prepareLaunchConversation(i *Instance, program, freshID string) string {
 // first launch started, and Claude refuses to start a new conversation on an
 // id a transcript already holds (#7211).
 func planCreateConversation(i *Instance, program, freshID string) (string, AgentConversationData) {
-	if carried := i.carriedConversation; carried.HasID() {
+	i.mu.RLock()
+	carried, isRecord := i.carriedConversation, i.carriedIsRecord
+	i.mu.RUnlock()
+	if carried.HasID() {
 		if rewritten, ok := tmux.ResumeProgramWithConversationID(program, carried.Agent, carried.ID); ok {
+			// A pin that is the tab's own record is judged on a first launch
+			// too, by the rule every other launch of a recorded Claude id uses
+			// (recordedClaudeDecline, #7209 review R2-2). A pin whose provenance
+			// was checked where it was set (the root heal) is not judged again.
+			if isRecord && carried.Agent == tmux.ProgramClaude {
+				switch decline := i.recordedClaudeDecline(program, carried); {
+				case decline.startsOnRecorded:
+					if started, injected := tmux.ClaudeProgramWithSessionID(program, carried.ID); injected {
+						return started, carried
+					}
+				case decline.reason != "":
+					log.WarningLog.Printf("session %q: not resuming its recorded claude conversation %s on first launch: %s; starting a fresh conversation",
+						i.Title, carried.ID, decline.reason)
+					return planLaunchConversation(freshID, program)
+				}
+			}
 			return rewritten, carried
 		}
 		// A command that pins its own resume flag also lands here, and must not be
@@ -494,7 +513,10 @@ func prepareResumeConversation(i *Instance, program string) string {
 // no longer names the conversation the pane is in, so a restore must start
 // fresh rather than continue a thread the user left (#6769). A recorded
 // Claude id is refused when a newer conversation exists under any spelling
-// of the worktree's path (#7206, staleRecordedClaudeDecline). A refused
+// of an af-owned worktree's path (#7206), and one its store holds no
+// transcript for is started on rather than resumed (#7215): both are
+// recordedClaudeDecline. A start-on-id decline returns the program to launch
+// with its decline; every other refused
 // resume comes back with its typed reason; every other non-resume case
 // (nothing recorded, the command cannot express a resume) is the zero decline
 // because there is nothing to warn about.
@@ -513,7 +535,15 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 		decline = i.staleRecordedCodexDecline(program, conv)
 	case conv.Agent == tmux.ProgramClaude && source != conversationFromPin:
 		// The tab's record, wherever it is delivered from (#7209 review R2).
-		decline = i.staleRecordedClaudeDecline(program, conv)
+		decline = i.recordedClaudeDecline(program, conv)
+	}
+	if decline.startsOnRecorded {
+		// Not a resume, but the launch to make: Claude comes up on the
+		// recorded id, which no transcript holds (#7215).
+		if started, injected := tmux.ClaudeProgramWithSessionID(program, conv.ID); injected {
+			return started, false, decline
+		}
+		return rewritten, true, resumeDecline{}
 	}
 	if decline.reason != "" {
 		return program, false, decline

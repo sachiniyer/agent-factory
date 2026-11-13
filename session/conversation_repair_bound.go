@@ -41,6 +41,10 @@ import (
 type resumeDecline struct {
 	reason     string
 	unverified bool
+	// startsOnRecorded is a decline that launches Claude ON the recorded id
+	// instead of resuming it: the store listed cleanly and holds no transcript
+	// for it (recordedClaudeDecline). The id stays the record.
+	startsOnRecorded bool
 }
 
 func declineResume(reason string) resumeDecline { return resumeDecline{reason: reason} }
@@ -56,7 +60,7 @@ func declineResumeUnverified(reason string) resumeDecline {
 // that may be current, while the equally blind "the store cannot be named"
 // case resumes it.
 func (d resumeDecline) retiresRecord(AgentConversationData) bool {
-	return d.reason != "" && !d.unverified
+	return d.reason != "" && !d.unverified && !d.startsOnRecorded
 }
 
 // codexRolloutStampPrecision is the resolution of Codex's session_meta stamps:

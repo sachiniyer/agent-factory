@@ -744,9 +744,14 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	var refusal resumeRefusal
 	if resume {
 		rewritten, ok, decline := prepareExactResumeConversation(i, program)
-		if ok {
+		switch {
+		case ok:
 			program = rewritten
-		} else {
+		case decline.startsOnRecorded:
+			// The recorded id holds no transcript: start Claude on it (#7215).
+			program = rewritten
+			log.InfoLog.Printf("session %q: recorded claude conversation %s: %s", i.Title, i.resumableConversation().ID, decline.reason)
+		default:
 			refusal = i.exactResumeRefusal(decline)
 			if refusal.retire {
 				program, refusal.replacement = planReplacementConversation(program)
