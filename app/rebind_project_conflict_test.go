@@ -74,7 +74,7 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	assert.False(t, displayed.RebindPending(), "a definitive refusal re-arms the form")
 	assert.Contains(t, displayed.Render(), "Rebound elsewhere", "the refusal says the project moved")
 	assert.Empty(t, h.errBox.FullError(), "a conflict is not reported as an unknown outcome or a failure")
-	root, ok := registeredProjectRoot(id)
+	root, _, _, ok := registeredProjectRoot(id)
 	require.True(t, ok)
 	assert.Equal(t, moved.Root, root, "the refused rebind wrote nothing")
 
@@ -100,7 +100,7 @@ func TestRebindConflictIsARefusalThatReArmsAgainstTheCurrentRoot(t *testing.T) {
 	require.Len(t, *expected, 2)
 	assert.Equal(t, [2]string{moved.Root, moved.CheckoutID}, (*expected)[1],
 		"the retry expects the (root, checkout) pair the refresh found")
-	root, ok = registeredProjectRoot(id)
+	root, _, _, ok = registeredProjectRoot(id)
 	require.True(t, ok)
 	assert.Equal(t, mine, root, "the retry, made against the current root, lands")
 }
@@ -198,7 +198,7 @@ func TestRebindConflictRefreshRunsOffTheEventLoop(t *testing.T) {
 // last-known counts, while still refreshing the record that re-arms.
 func TestRebindConflictWithAFailedSnapshotKeepsSessionRows(t *testing.T) {
 	h, id := activeRebindHome(t)
-	root, ok := registeredProjectRoot(id)
+	root, _, _, ok := registeredProjectRoot(id)
 	require.True(t, ok)
 	var recordedCheckout string
 	projects, err := config.ListProjects()
@@ -316,7 +316,7 @@ func TestRebindConflictRefreshTimeoutReArmsTheForm(t *testing.T) {
 // registry rows while live session truth replaces the session half.
 func TestRebindConflictWithADegradedRegistryKeepsRegistryRows(t *testing.T) {
 	h, id := activeRebindHome(t)
-	root, ok := registeredProjectRoot(id)
+	root, _, _, ok := registeredProjectRoot(id)
 	require.True(t, ok)
 	var recordedCheckout string
 	projects, err := config.ListProjects()
