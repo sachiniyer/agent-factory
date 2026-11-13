@@ -358,16 +358,20 @@ func (s *Sidebar) renderHeader(kind SidebarSectionKind, selected bool) string {
 	case SectionInstances:
 		// "Sessions" is the one user-facing noun (#1993) — the empty state, help,
 		// search, and actions all say session. Count live ones only; archived
-		// sessions live under their own folder. An empty title marks the create
-		// flow's still-unnamed naming draft (#6711): its row is the input it
-		// renders, not yet a session, so it stays out of the count until titled.
-		named := 0
+		// sessions live under their own folder. The create flow's naming draft
+		// (#6711) is the input its row renders, not yet a session, so it stays
+		// out of the count until submit ends the naming. Ask the projection
+		// which row that is rather than read an empty title as "the draft": the
+		// title is empty only until the user types, and counting from the first
+		// keystroke announced a session the user could still cancel (#7230).
+		draft := s.proj.Naming()
+		created := 0
 		for _, idx := range live {
-			if instances[idx].Title != "" {
-				named++
+			if instances[idx] != draft {
+				created++
 			}
 		}
-		label = fmt.Sprintf("Sessions (%d)", named)
+		label = fmt.Sprintf("Sessions (%d)", created)
 	case SectionArchived:
 		label = archivedHeaderLabel(s.proj.GetInstances(), archived, s.contentWidth()-runewidth.StringWidth(arrow))
 	}

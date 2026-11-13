@@ -144,12 +144,15 @@ func TestSidebar_RestoringRowRehomedToInstances(t *testing.T) {
 		"the Archived folder is absent while the only archived-liveness row is restoring")
 }
 
-// TestSidebar_UntitledDraftNotCounted (#6711): the create flow's naming draft —
-// an untitled instance with its create op in flight — renders as the naming
-// input row but is not yet a session, so the section header must not count it.
-// Giving the draft a title (typing, or Enter adopting the suggestion) makes it
-// a session, and then it joins the count with its own row.
-func TestSidebar_UntitledDraftNotCounted(t *testing.T) {
+// TestSidebar_NamingDraftNotCounted (#6711, #7230): the create flow's naming
+// draft renders as the naming input row but is not yet a session, so the
+// section header must not count it. That holds whatever the field holds: the
+// ghost suggestion (an empty title) and typed text are both a draft the user
+// can still cancel. Before #7230 the header read an empty title as "the draft",
+// so the first typed character counted it. It joins the count only when submit
+// ends the naming, the way the app's enter path clears the projection's
+// naming row after committing the title.
+func TestSidebar_NamingDraftNotCounted(t *testing.T) {
 	s := NewSidebar(store.NewProjection())
 	addTestInstance(s, archTestInstance(t, "alpha", session.Ready))
 	addTestInstance(s, archTestInstance(t, "beta", session.Ready))
@@ -162,13 +165,22 @@ func TestSidebar_UntitledDraftNotCounted(t *testing.T) {
 	draft.SetBackend(session.NewFakeBackend())
 	draft.SetInFlightOpForTest(session.OpCreating)
 	addTestInstance(s, draft)
+	s.proj.SetNaming(draft)
 
 	assert.Contains(t, s.View(), "Sessions (2)",
-		"the untitled naming draft is an input row, not a session — the header counts only titled rows")
+		"the draft holding only the ghost suggestion is an input row, not a session")
+
+	require.NoError(t, draft.SetTitle("n"))
+	assert.Contains(t, s.View(), "Sessions (2)",
+		"typing a name does not make the draft a session: it is still cancellable (#7230)")
 
 	require.NoError(t, draft.SetTitle("named-now"))
+	assert.Contains(t, s.View(), "Sessions (2)",
+		"a fully typed name is still a draft until enter submits it (#7230)")
+
+	s.proj.SetNaming(nil)
 	assert.Contains(t, s.View(), "Sessions (3)",
-		"once titled the draft is a session and joins the count")
+		"once submit ends the naming the session joins the count")
 }
 
 // TestSidebar_NoArchivedFolderWhenEmpty (#1028): with nothing archived, the
