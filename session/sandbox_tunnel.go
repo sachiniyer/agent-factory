@@ -364,6 +364,7 @@ func (p *sandboxProvisioner) spawnTunnel(forward string, reverse ...string) (*ex
 	// ignores its kill must not hold af's pipes open forever. This is the child
 	// TRAP 1 says it belongs on.
 	cmd.WaitDelay = sandboxTunnelWaitDelay
+	cmd.Stderr = &tunnelStderrTail{}
 	stampSandboxTunnel(cmd)
 	if err := cmd.Start(); err != nil {
 		return nil, nil, err
@@ -397,6 +398,9 @@ func spawnTunnelViaLifeline(exe, script string, args ...string) (cmd *exec.Cmd, 
 	// The lifeline must lead the group it kills; it refuses to run otherwise.
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.WaitDelay = sandboxTunnelWaitDelay
+	// The lifeline hands its own stderr to the shell, so this collects the
+	// tunnel's ssh too, and the lifeline's own complaints.
+	cmd.Stderr = &tunnelStderrTail{}
 	stampSandboxTunnel(cmd)
 	// watchlifeline.LifelineFD and AckFD in the child. The write end of the
 	// lifeline pipe stays here and only here: os.Pipe sets O_CLOEXEC on both
@@ -736,7 +740,7 @@ func (p *sandboxProvisioner) superviseTunnel() {
 					p.tunnel = nil
 				}
 				p.reapMu.Unlock()
-				m.noteEvent(err)
+				m.noteEvent(withTunnelStderr(err, next))
 				continue
 			}
 			m.armHealthyTimer(next)

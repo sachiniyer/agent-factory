@@ -64,14 +64,32 @@ func (p *sandboxProvisioner) openTunnel(remoteAddr string) (string, error) {
 	// a StopAllSandboxTunnels stop can never interleave between a born child
 	// and its publication — and a child born after that stop already ran is
 	// killed by its own spawner rather than left registered to nothing.
-	if _, err := p.provisionTunnelChild(); err != nil {
+	child, err := p.provisionTunnelChild()
+	if err != nil {
 		return "", fmt.Errorf("backend=%s: starting the ssh tunnel failed: %w", p.label(), err)
 	}
 
 	if err := waitForSandboxTunnelFn(p.label(), localAddr, sandboxTunnelReadyTimeout, sandboxTunnelReadyPoll); err != nil {
-		return "", err
+		return "", withTunnelStderr(err, child)
 	}
 	return localAddr, nil
+}
+
+// tunnelOwnLoginNote is what the readiness error adds for a backend whose ssh
+// reads the operator's ssh_config (#7121). There the operator may reuse a
+// ControlMaster for everything, including logins that need a prompt, and the
+// tunnel is the one connection that never rides it (spawnTunnel's -S none).
+// Their sandbox.ssh then works by hand while the tunnel cannot log in, so the
+// error has to say what af changed and what that requires. backend=ssh runs
+// ssh with -F none, where no master can apply, so it gets no such note.
+func tunnelOwnLoginNote(label string) string {
+	if label == string(BackendSSH) {
+		return ""
+	}
+	return ". The tunnel is a connection of its own: af runs its ssh with -o ControlMaster=no -S none, " +
+		"so it never rides a ControlMaster and has to log in without a prompt (no MFA push or code, " +
+		"no key passphrase outside an agent), even where your other ssh sessions to that host reuse a master. " +
+		"Adding -S none -o BatchMode=yes to the command you test by hand shows what the tunnel sees"
 }
 
 // sandboxTransportConfigKey names the setting that holds the ssh invocation for
@@ -106,8 +124,8 @@ func waitForSandboxTunnelWithin(label, localAddr string, timeout, poll time.Dura
 		}
 		if time.Now().After(deadline) {
 			return fmt.Errorf("backend=%s: the ssh tunnel to %s never started listening within %s — "+
-				"check that the transport af runs for %s works by hand and that the remote permits port forwarding",
-				label, localAddr, timeout, sandboxTransportConfigKey(label))
+				"check that the transport af runs for %s works by hand and that the remote permits port forwarding%s",
+				label, localAddr, timeout, sandboxTransportConfigKey(label), tunnelOwnLoginNote(label))
 		}
 		time.Sleep(poll)
 	}

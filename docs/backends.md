@@ -752,9 +752,19 @@ the `ssh` backend stages it — platform-probed, cached under
 > master when one is running. The port-forward never shares a connection: af
 > runs it with `-o ControlMaster=no -S none`, which outranks any control path in
 > your command or `ssh_config`. A shared forward would live in your master,
-> where af could neither see it fail nor close it when the session ends. The
-> forward therefore logs in on its own each time af connects it, so it has to
-> be able to authenticate without a prompt even when no master is running.
+> where af could neither see it fail nor close it when the session ends. So the
+> forward logs in on its own each time af connects it, and it has to
+> authenticate without a prompt (no MFA push or code, no key passphrase outside
+> an agent) even when your other ssh sessions to that host reuse a master. If it
+> cannot, provisioning fails with "the ssh tunnel … never started listening",
+> followed by the last line the tunnel's ssh wrote.
+>
+> **Flags af appends to the port-forward.** A `sandbox.ssh` that wraps `ssh` has
+> to pass these through to it: `-o` (`ExitOnForwardFailure`,
+> `ServerAliveInterval`, `ServerAliveCountMax`, `ControlMaster`), `-S`, `-N`,
+> `-L`, and `-R` when the session has a callback. A wrapper that rejects one of
+> them fails every port-forward the same way. The setup and cleanup steps add
+> only the remote command.
 
 > **Known limitation: af cannot pin a `sandbox.ssh` target to one machine.**
 > af runs a separate invocation of your command for each step — the setup
