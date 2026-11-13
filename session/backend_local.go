@@ -416,7 +416,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			base := resolution.command
 			runtimeProgram = base
-			program = prepareLaunchConversation(i, base)
+			program = prepareLaunchConversation(i, base, i.ID)
 			program = injectSystemPromptWithEnv(program, resolveSkillTarget(i, program), i.guidanceCaps(), env)
 			proof = accountLaunchProof(base, program, resolution.trustBase, nil, "")
 		}

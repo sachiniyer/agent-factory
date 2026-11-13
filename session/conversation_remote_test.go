@@ -160,7 +160,7 @@ func TestConversationResumableHere(t *testing.T) {
 func TestSetResumeConversationPlansAResume(t *testing.T) {
 	inst := &Instance{ID: "id-1"}
 	inst.SetResumeConversation(claudeConv)
-	rewritten, conv := planCreateConversation(inst, "claude")
+	rewritten, conv := planCreateConversation(inst, "claude", inst.ID)
 	assert.Contains(t, rewritten, "--resume "+claudeConv.ID)
 	assert.Equal(t, claudeConv, conv)
 }

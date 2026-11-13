@@ -706,7 +706,9 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 			refusal = i.exactResumeRefusal(decline)
 		}
 	} else {
-		program = prepareLaunchConversation(i, program)
+		// A re-spawn is never the instance's first launch, so a fresh start must
+		// not come up on the instance id (planCreateConversation, #7211).
+		program = prepareLaunchConversation(i, program, newSessionID())
 	}
 	env, err := launchEnvFor(i, i.GetWorktreePath())
 	if err != nil {
