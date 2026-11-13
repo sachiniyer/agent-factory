@@ -363,15 +363,15 @@ func (i *Instance) PendingConversationCaptureParkedForTest() bool {
 	return i.pendingConversationCapture != nil
 }
 
-func prepareLaunchConversation(i *Instance, program string) string {
-	rewritten, conversation := planCreateConversation(i, program)
+func prepareLaunchConversation(i *Instance, program, freshID string) string {
+	rewritten, conversation := planCreateConversation(i, program, freshID)
 	if conversation.HasID() {
 		i.SetAgentConversation(conversation)
 	}
 	return rewritten
 }
 
-// planCreateConversation decides which conversation a FIRST launch comes up on.
+// planCreateConversation decides which conversation a launch comes up on.
 // A create carrying a previous record's conversation (#2616 — the root agent's
 // reap-and-recreate, the one heal that replaces the record instead of
 // re-spawning into it) resumes that conversation, exactly as
@@ -387,7 +387,14 @@ func prepareLaunchConversation(i *Instance, program string) string {
 // a provider that has never heard of it. Falling back to a fresh agent there is
 // the correct outcome; ensureRootAgent reports which of the two happened rather
 // than letting them read alike.
-func planCreateConversation(i *Instance, program string) (string, AgentConversationData) {
+//
+// freshID is the id a conversation that is not carried starts on, and each
+// caller states it. Only an instance's FIRST launch may pass the instance id:
+// no transcript can be filed under it yet. Every later launch passes a newly
+// minted one, because the instance id may already name the conversation that
+// first launch started, and Claude refuses to start a new conversation on an
+// id a transcript already holds (#7211).
+func planCreateConversation(i *Instance, program, freshID string) (string, AgentConversationData) {
 	if carried := i.carriedConversation; carried.HasID() {
 		if rewritten, ok := tmux.ResumeProgramWithConversationID(program, carried.Agent, carried.ID); ok {
 			return rewritten, carried
@@ -396,18 +403,21 @@ func planCreateConversation(i *Instance, program string) (string, AgentConversat
 		// given a freshly injected --session-id on top of it — the injection helper
 		// declines for the same reason, so the fall-through below is a no-op there.
 	}
-	return planLaunchConversation(i.ID, program)
+	return planLaunchConversation(freshID, program)
 }
 
 // planLaunchConversation is the side-effect-free half of
-// prepareLaunchConversation. Handoff preflight uses it to freeze the exact
-// first-launch command before the outgoing pane is stopped; the conversation is
-// committed to the instance only when that prepared plan is executed.
-func planLaunchConversation(instanceID, program string) (string, AgentConversationData) {
+// prepareLaunchConversation: a Claude launch starting a new conversation on
+// conversationID, or on a newly minted id when it is empty. Handoff preflight
+// uses it to freeze the exact first-launch command before the outgoing pane is
+// stopped; the conversation is committed to the instance only when that
+// prepared plan is executed. conversationID must be one no transcript holds
+// (planCreateConversation's freshID).
+func planLaunchConversation(conversationID, program string) (string, AgentConversationData) {
 	if tmux.DetectAgentFromCommand(program) != tmux.ProgramClaude {
 		return program, AgentConversationData{}
 	}
-	id := instanceID
+	id := conversationID
 	if strings.TrimSpace(id) == "" {
 		id = newSessionID()
 	}

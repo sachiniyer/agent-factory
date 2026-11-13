@@ -81,7 +81,7 @@ func TestPrepareLaunchConversationSeedsClaudeSessionID(t *testing.T) {
 	inst := &Instance{ID: id, Title: "worker"}
 	inst.SetTmuxSession(tmux.NewTmuxSession("worker", tmux.ProgramClaude))
 
-	got := prepareLaunchConversation(inst, "claude --model sonnet")
+	got := prepareLaunchConversation(inst, "claude --model sonnet", inst.ID)
 
 	require.Equal(t, "claude --model sonnet --session-id "+id, got)
 	conv := inst.AgentConversation()
@@ -112,7 +112,7 @@ func TestPrepareLaunchConversationResumesCarriedConversation(t *testing.T) {
 	}
 	inst.SetTmuxSession(tmux.NewTmuxSession("root", tmux.ProgramClaude))
 
-	got := prepareLaunchConversation(inst, "claude --dangerously-skip-permissions")
+	got := prepareLaunchConversation(inst, "claude --dangerously-skip-permissions", inst.ID)
 
 	require.Equal(t, "claude --dangerously-skip-permissions --resume "+priorID, got)
 	require.Equal(t, priorID, inst.AgentConversation().ID,
@@ -140,7 +140,7 @@ func TestPrepareLaunchConversationIgnoresCarriedConversationForAnotherAgent(t *t
 	}
 	inst.SetTmuxSession(tmux.NewTmuxSession("root", tmux.ProgramClaude))
 
-	got := prepareLaunchConversation(inst, "claude --dangerously-skip-permissions")
+	got := prepareLaunchConversation(inst, "claude --dangerously-skip-permissions", inst.ID)
 
 	require.Equal(t, "claude --dangerously-skip-permissions --session-id "+instanceID, got)
 	require.Equal(t, instanceID, inst.AgentConversation().ID)
@@ -162,7 +162,7 @@ func TestPrepareLaunchConversationLeavesAUserPinnedResumeAlone(t *testing.T) {
 	}
 	inst.SetTmuxSession(tmux.NewTmuxSession("root", tmux.ProgramClaude))
 
-	got := prepareLaunchConversation(inst, "claude --resume pinned-by-the-user")
+	got := prepareLaunchConversation(inst, "claude --resume pinned-by-the-user", inst.ID)
 
 	require.Equal(t, "claude --resume pinned-by-the-user", got)
 	require.False(t, inst.AgentConversation().HasID())

@@ -36,7 +36,12 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s: %w", target, err)
 	}
 	program := injectSystemPromptWithEnv(resolved, resolveSkillTargetForAccount(resolved, "", "", workDir), i.guidanceCaps(), env)
-	program, conversation := planLaunchConversation(i.ID, program)
+	// A swap is never the instance's first launch. The instance id may already
+	// name a transcript: a claude → codex → claude handoff's first Claude
+	// conversation was started on it, and Claude refuses to start a new
+	// conversation on an id already in use (#7211). Mint one, as the account
+	// swap's fresh start does; SwapAgent records it before the spawn.
+	program, conversation := planLaunchConversation(newSessionID(), program)
 	if workDir == "" {
 		return AgentSwapPlan{}, fmt.Errorf("handoff target %s has no worktree path for launch preflight", target)
 	}
