@@ -322,37 +322,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if refusedID != "" {
 			preSpawnCapture = i.sessionCodexCaptureBaselineFor(runtimeProgram)
 		}
-		// A Claude replacement is the record before its pane can write, as on
-		// Recover (#7209 review R6), and durable before it too, through the
-		// loader's persist hook (#7209 review R2-1). Both happen on the re-spawn
-		// branch only: a reattached live pane keeps its record, and a write made
-		// before tmux knew which branch it takes would name the replacement for
-		// a pane that never ran it. A re-spawn that does not commit puts the
-		// refused id back, on disk too.
-		undoReplacement, replaced, persisted := func() {}, false, false
-		persist := i.restoreCtx.Load().persistBeforeRespawnFn()
+		// A Claude replacement is the record before its pane can write, and
+		// durable before it too, on the re-spawn branch only (loadReplacement).
+		var loadRepl *loadReplacement
 		if refusedID != "" && replacement.HasID() && !worktreeMissing {
-			tmuxSession.SetBeforeRespawn(func() error {
-				undo, staged := i.stageReplacementConversation(refusedID, replacement)
-				if !staged {
-					return nil
-				}
-				undoReplacement, replaced = undo, true
-				if persist == nil {
-					// A load with no hook says so: the replacement is in memory
-					// only until the load's own persist.
-					log.InfoLog.Printf("session %q: the replacement for its refused conversation %s is recorded in memory only until the load persists it, because this load has no persist hook",
-						i.Title, refusedID)
-					return nil
-				}
-				if perr := persist(i); perr != nil {
-					undo()
-					undoReplacement, replaced = func() {}, false
-					return fmt.Errorf("%w: session %q, refused conversation %s: %w", ErrReplacementNotDurable, i.Title, refusedID, perr)
-				}
-				persisted = true
-				return nil
-			})
+			loadRepl = i.armLoadReplacement(tmuxSession, refusedID, replacement)
 			defer tmuxSession.SetBeforeRespawn(nil)
 		}
 		var restoreResult tmux.RestoreResult
@@ -362,14 +336,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
 		}
-		if replaced && (err != nil || restoreResult != tmux.RestoreRespawned) {
-			undoReplacement()
-			if persisted {
-				if perr := persist(i); perr != nil {
-					log.WarningLog.Printf("session %q: could not persist its restored conversation record after a re-spawn that did not commit: %v", i.Title, perr)
-				}
-			}
-		}
+		replaced := loadRepl.settle(err == nil && restoreResult == tmux.RestoreRespawned)
 		if err != nil && worktreeMissing {
 			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
 			return nil
