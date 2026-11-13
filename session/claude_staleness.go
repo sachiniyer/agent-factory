@@ -88,8 +88,7 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 	if recorded == nil {
 		return claudeRecordedMissing
 	}
-	verdict := claudeRecordedCurrent
-	uncorrelated := false
+	copies, stale, uncorrelated := false, false, false
 	for _, other := range transcripts {
 		if !other.modTime.After(recorded.modTime) {
 			continue
@@ -98,8 +97,13 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 			// A newer copy the judged one still holds every byte of brings no
 			// turn it lacks; only one that adds or diverges does.
 			if !claudeTranscriptExtends(*recorded, other) {
-				verdict = claudeRecordedCopies
+				copies = true
 			}
+			continue
+		}
+		if stale {
+			// Settled for another conversation; only a copy, above, can still
+			// change the answer, so no further transcript is read for it.
 			continue
 		}
 		// Newer is never the recorded file itself, so a newer file in its own
@@ -107,15 +111,24 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 		// worktree's only if its transcript records this launch directory.
 		switch claudeTranscriptOwnership(other, launchDir) {
 		case claudeOwnedHere:
-			return claudeRecordedStale
+			stale = true
 		case claudeOwnershipUnknown:
 			uncorrelated = true
 		}
 	}
-	if uncorrelated {
+	// A copy the judged one lacks turns of is a fact about the id itself, so it
+	// outranks what a newer conversation says: a caller that disregards newer
+	// conversations (an in-place carry, #7227) must still refuse it (Codex
+	// review of #7228).
+	switch {
+	case copies:
+		return claudeRecordedCopies
+	case stale:
+		return claudeRecordedStale
+	case uncorrelated:
 		return claudeRecordedUncorrelated
 	}
-	return verdict
+	return claudeRecordedCurrent
 }
 
 // claudeCarryStaleness is a Claude carry's staleness check: whether the copy
@@ -124,16 +137,24 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 // The carry binds the copy that holds every other one (locateClaude), so a
 // newer copy under another spelling means Claude wrote it while af planned:
 // that refuses too, rather than carry a copy without the latest turns.
-func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string) string {
+// newerCounts says whether a newer conversation in launchDir is evidence that
+// the session moved on (conversationCarry.newerCounts, #7227): where it is
+// not, a newer or unattributable conversation refuses nothing, and only the
+// verdicts about the id itself (missing, copies, unlisted) do.
+func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string, newerCounts bool) string {
 	switch judgeClaudeRecorded(configDir, projects, launchDir, id, filepath.Dir(transcript)) {
 	case claudeRecordedUnlisted, claudeRecordedFiledUnlisted:
 		return carryTranscriptsUnlistedReason
 	case claudeRecordedUncorrelated:
-		return carryUncorrelatedReason
+		if newerCounts {
+			return carryUncorrelatedReason
+		}
 	case claudeRecordedMissing:
 		return carryTranscriptMissingReason
 	case claudeRecordedStale:
-		return staleCarryReason
+		if newerCounts {
+			return staleCarryReason
+		}
 	case claudeRecordedCopies:
 		return carryTranscriptCopiesReason
 	}

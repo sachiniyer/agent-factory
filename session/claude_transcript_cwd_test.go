@@ -193,9 +193,12 @@ func TestJudgeClaudeRecordedLooksForTheIDBesideAnUnlistableSpelling(t *testing.T
 
 	require.Equal(t, claudeRecordedFiledUnlisted, judgeClaudeRecorded(configDir, projects, link, carryTestID, ""))
 	require.Equal(t, claudeRecordedUnlisted, judgeClaudeRecorded(configDir, projects, link, newerConversationID, ""))
-	require.Equal(t, carryTranscriptsUnlistedReason,
-		claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID),
-		"the swap still cannot confirm the carried copy is current")
+	for _, newerCounts := range []bool{true, false} {
+		// About the id itself, so it refuses wherever the session runs (#7227).
+		require.Equal(t, carryTranscriptsUnlistedReason,
+			claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID, newerCounts),
+			"the swap still cannot confirm the carried copy is current")
+	}
 }
 
 // #7221 review R4: the head read runs inside fsprobe's bound, like the store

@@ -62,6 +62,8 @@ func (i *Instance) accountSwapCarryRefusalReason() string {
 		workDir:    i.GetWorktreePath(),
 		sourceOnly: true,
 		stores:     carryAheadStores,
+		// The live swap's own judgement of a newer conversation (#7227).
+		newerIsEvidence: i.newerConversationIsEvidence,
 	})
 	return carryAheadRefusal(carry, reason, program)
 }

@@ -12,6 +12,7 @@ import (
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/handoff"
 	"github.com/sachiniyer/agent-factory/internal/sessionenv"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/log"
 	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -44,7 +45,10 @@ func carrySwapInstance(t *testing.T, agent string) (*Instance, string) {
 	target := registerAccount(t, agent, "work")
 	inst := accountSwapTestInstance(agent)
 	inst.Path = initTempGitRepo(t)
-	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	// A worktree af created for this session, apart from the repository's own
+	// checkout: only there is a newer conversation evidence against the carry
+	// (newerConversationIsEvidence, #7227).
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, testguard.CanonicalTempDir(t), inst.Title, "main", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 	return inst, target

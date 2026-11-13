@@ -40,12 +40,14 @@ func symlinkedClaudeCarryInstanceNamed(t *testing.T, leaf string) (*Instance, st
 	require.NoError(t, os.MkdirAll(filepath.Join(real, leaf), 0o755))
 	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
 	require.NoError(t, os.Symlink(real, link))
-	inst.Path = filepath.Join(link, leaf)
+	worktree := filepath.Join(link, leaf)
 	cmd := exec.Command("git", "init")
-	cmd.Dir = inst.Path
+	cmd.Dir = worktree
 	out, err := cmd.CombinedOutput()
 	require.NoError(t, err, string(out))
-	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, inst.Path, inst.Title, "main", "", false, true)
+	// A worktree af created for the session, apart from the repository's own
+	// checkout, so a newer conversation in it is evidence (#7227).
+	gw, err := sessiongit.NewGitWorktreeFromStorage(inst.Path, worktree, inst.Title, "main", "", false, true)
 	require.NoError(t, err)
 	inst.SetGitWorktreeForTest(gw)
 
