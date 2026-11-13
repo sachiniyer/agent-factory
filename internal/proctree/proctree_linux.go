@@ -286,11 +286,12 @@ func readArgv(pid int) ([]string, error) {
 	}
 	argv := splitNUL(data)
 	if len(argv) == 0 {
-		// Kernel threads and reaped-but-unwaited zombies have an empty
-		// cmdline. Nothing to classify; say so rather than returning a
-		// zero-length argv that reads as a successful parse. ErrNoArgv marks it
-		// as that POSITIVE finding, so a scan can skip it without confusing it
-		// with an argv it was refused (see ProcessesMatchingArgv).
+		// Kernel threads, reaped-but-unwaited zombies, and a live process
+		// mid-execve (the new argv is not laid out yet, #7238) have an empty
+		// cmdline. Nothing to classify yet; say so rather than returning a
+		// zero-length argv that reads as a successful parse. ErrNoArgv keeps it
+		// apart from an argv we were refused (see ProcessesMatchingArgv), and
+		// apart from a classification (see TmuxIdentityOf).
 		return nil, fmt.Errorf("%w: pid %d", ErrNoArgv, pid)
 	}
 	return argv, nil

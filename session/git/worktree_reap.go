@@ -66,6 +66,11 @@ var (
 // disclose, WorkingDir reports the honest unknown and that process is simply not
 // matched — the safe degradation, since it can only fail to signal the right
 // process, never signal the wrong one.
+//
+// The leave-alone identity degrades the same way (#7238). A process whose
+// command line cannot be read (one mid-execve or mid-exit, or one darwin
+// refuses) might be the shared tmux server, so it is excluded like tmux, never
+// read as "not tmux". The reaper signals only what it has fully classified.
 func reapWorktreeWriters(worktreePath string) {
 	// The path exists (callers reap only after an os.Stat succeeds), so resolving
 	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
@@ -85,7 +90,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		// WARNING for doctor to reconcile, never a silently-swept process table.
 		return
 	}
-	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.IsTmuxProcess)
+	procs := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf)
 	if len(procs) == 0 {
 		return
 	}
@@ -134,13 +139,13 @@ func worktreeWriterProcesses(
 	snap map[int]proctree.Process,
 	selfPID int,
 	workingDir func(int) (string, bool),
-	isTmuxProcess func(int) bool,
+	tmuxIdentity func(int) proctree.TmuxIdentity,
 ) []proctree.Process {
 	matches := func(pid int) bool {
 		cwd, ok := workingDir(pid)
 		return ok && pathutil.IsAtOrInside(filepath.Clean(cwd), root)
 	}
-	return worktreeWriterProcessesMatching(snap, selfPID, matches, isTmuxProcess)
+	return worktreeWriterProcessesMatching(snap, selfPID, matches, tmuxIdentity)
 }
 
 // worktreeWriterProcessesMatching applies the shared-infrastructure exclusions
@@ -151,7 +156,7 @@ func worktreeWriterProcessesMatching(
 	snap map[int]proctree.Process,
 	selfPID int,
 	matches func(int) bool,
-	isTmuxProcess func(int) bool,
+	tmuxIdentity func(int) proctree.TmuxIdentity,
 ) []proctree.Process {
 	// The daemon can inherit a cwd inside a worktree when an af invocation
 	// auto-starts it there, and the shared tmux server inherits its cwd from the
@@ -159,11 +164,18 @@ func worktreeWriterProcessesMatching(
 	// through another matching ancestor. Prune each protected subtree during that
 	// walk; descendants remain eligible when their own cwd independently matches.
 	//
-	// Every tmux process is protected, clients included — proctree.IsTmuxProcess,
+	// Every tmux process is protected, clients included — proctree.TmuxIdentityOf,
 	// not IsTmuxServer (#4678). A client writes nothing into the worktree, and
 	// af's own short-lived clients inherit the self-matching daemon's cwd, so
 	// selecting them would kill the daemon's in-flight tmux commands for
 	// unrelated sessions.
+	//
+	// So is every process whose tmux identity is UNKNOWN (#7238). Only a
+	// positive NotTmux makes a process eligible. An unreadable command line
+	// (a process mid-execve or mid-exit, or one darwin refuses) could belong to
+	// the shared server, and signalling the server ends every session on it. That
+	// costs at most one missed writer, and the removal then fails loudly, on the
+	// existing "directory not empty" path.
 	// A tracked teardown requester (#5182) — the process that asked for this
 	// teardown, identified by kernel peer credentials and still blocked on its
 	// reply — is alive inside the worktree for the best possible reason:
@@ -191,8 +203,20 @@ func worktreeWriterProcessesMatching(
 		}
 		return true
 	}
+	unknownLogged := make(map[int]bool)
 	protectedInfrastructure := func(pid int) bool {
-		return pid == selfPID || isTmuxProcess(pid)
+		if pid == selfPID {
+			return true
+		}
+		identity := tmuxIdentity(pid)
+		if identity == proctree.TmuxUnknown && !unknownLogged[pid] {
+			// Once per pid per pass, like the requester notice: a pid can be
+			// evaluated as a root and again inside another root's subtree.
+			unknownLogged[pid] = true
+			log.InfoLog.Printf("pid %d (%s) could not be classified as tmux or not: its command line is unreadable; "+
+				"leaving it and its subtree out of the worktree writer reap (#7238)", pid, snap[pid].Comm)
+		}
+		return identity != proctree.NotTmux
 	}
 	seen := make(map[int]bool)
 	var procs []proctree.Process
@@ -210,7 +234,8 @@ func worktreeWriterProcessesMatching(
 			// A tmux server is shared infrastructure whose cwd comes from the client
 			// that first started it. It is not owned by this worktree, and selecting
 			// its tree could terminate every tmux session on the server. The same
-			// subtree rule protects a self-matching daemon and its unrelated sessions.
+			// subtree rule protects a self-matching daemon and its unrelated sessions,
+			// and a process that cannot be told apart from a tmux server.
 			continue
 		}
 		if seen[pid] {
