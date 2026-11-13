@@ -19,6 +19,27 @@ func (p AgentSwapPlan) CaptureAfterStop() error {
 	return nil
 }
 
+// WithBeforeStart attaches a step the backend runs once the outgoing runtime is
+// confirmed stopped and its post-stop capture is done, immediately before the
+// incoming runtime starts: the last point at which a refusal still leaves
+// nothing running. A handoff makes its incoming record durable there (#7215),
+// as an account swap makes its new identity durable before its spawn. A step
+// error refuses the start. A backend that cannot bracket the start, because
+// the replacement starts inside a sandbox's own agent-server, never runs it.
+func (p AgentSwapPlan) WithBeforeStart(step func() error) AgentSwapPlan {
+	p.beforeStart = step
+	return p
+}
+
+// RunBeforeStart runs the WithBeforeStart step, if any. A backend calls it after
+// CaptureAfterStop and immediately before starting the incoming runtime.
+func (p AgentSwapPlan) RunBeforeStart() error {
+	if p.beforeStart != nil {
+		return p.beforeStart()
+	}
+	return nil
+}
+
 // CaptureHandoffBrief uses the same branch summary as account handoffs, after
 // teardown. The provisional record retains the outgoing identity even though
 // Program already names the target. Update the rollback token too, so a later

@@ -557,6 +557,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// #7216 review R4).
 		replaced, live.ConversationID = live.ConversationID, conversation.ID
 		live.CarryFallback = staleCommittedConversationReason
+		i.pendingAccountSwapUnwritten = true
 		refreshMission, missionFrom = live.Manual, live.From
 		i.touchLocked()
 	}
@@ -718,6 +719,7 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 		pending.CarryFallback = plan.carryFallback
 	}
 	i.pendingAccountSwap = pending
+	i.pendingAccountSwapUnwritten = false
 	i.touchLocked()
 	return previous, nil
 }
@@ -747,6 +749,7 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name, accountAgent st
 	}
 	if i.pendingAccountSwap != nil {
 		i.pendingAccountSwap = nil
+		i.pendingAccountSwapUnwritten = false
 		i.touchLocked()
 	}
 	i.accountSwapLaunch = nil
@@ -764,6 +767,7 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 	}
 	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
+	i.pendingAccountSwapUnwritten = false
 	// The notice was just delivered, so the agent's new work ends the run on
 	// its own idle edge — see ClearPendingHandoffMission for why a held edge
 	// must not outlive a resend.

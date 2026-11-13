@@ -127,7 +127,12 @@ func (b *FakeBackend) PrepareAgentSwap(_ *Instance, target string) (AgentSwapPla
 	return plan, nil
 }
 func (b *FakeBackend) SwapAgent(_ *Instance, plan AgentSwapPlan) error {
-	return plan.CaptureAfterStop()
+	// LocalBackend's order: the post-stop capture, then the step that runs
+	// immediately before the incoming runtime starts.
+	if err := plan.CaptureAfterStop(); err != nil {
+		return err
+	}
+	return plan.RunBeforeStart()
 }
 func (b *FakeBackend) Type() string { return "local" }
 

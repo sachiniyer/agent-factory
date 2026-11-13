@@ -698,6 +698,10 @@ func (i *Instance) demotePendingAccountSwapCarry(account, reason string) error {
 	if plan.conversation.HasID() {
 		pending.ConversationID = plan.conversation.ID
 	}
+	// The record no longer names the committed carry: the respawn makes the
+	// rewrite durable before its spawn, as it does a re-minted id (#7216
+	// review R2), whatever a later re-plan concludes (#7217 review R1).
+	i.pendingAccountSwapUnwritten = true
 	manual, from := pending.Manual, pending.From
 	i.touchLocked()
 	i.mu.Unlock()

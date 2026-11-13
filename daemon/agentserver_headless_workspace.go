@@ -209,9 +209,9 @@ func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agent
 	if hs.inst != nil && req.FirstTimeSetup && req.Conversation != nil && req.Conversation.HasID() {
 		// A resume flag for a transcript this host does not hold makes the agent
 		// exit on launch, so a fresh workspace starts a new conversation instead.
-		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
-			hs.inst.SetResumeRecordedConversation(*req.Conversation)
-		} else {
+		// A Claude id is pinned either way and judged at launch by the
+		// recorded-Claude rule, which starts on an id this store lacks (#7217).
+		if !hs.inst.PinRecordedConversationForLaunch(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
 			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
 				req.Conversation.ID, req.Conversation.Agent)
 		}

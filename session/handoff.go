@@ -431,6 +431,22 @@ func (i *Instance) handoffStorageCheckpoint() InstanceData {
 	return data
 }
 
+// HandoffCheckpointBeforeStart is the durable record of a handoff whose
+// outgoing runtime is confirmed stopped and whose incoming runtime is about to
+// start (#7215): the post-swap projection (handoffStorageCheckpoint), naming the
+// incoming Program and conversation, with the outgoing runtime's idle facts and
+// launch claim dropped. That claim describes a process that is gone, and the
+// incoming one has not launched, so the record claims no runtime: a reattach
+// after a crash past the start then has nothing of the outgoing agent's to
+// distrust and comes back as Program, and a restore re-resolves it from there.
+func (i *Instance) HandoffCheckpointBeforeStart() InstanceData {
+	data := i.handoffStorageCheckpoint().WithoutIdleEvidence()
+	data.RuntimeProgram = ""
+	data.RuntimePID, data.RuntimeStartID = 0, 0
+	data.CaptureRuntimePID, data.CaptureRuntimeStartID = 0, 0
+	return data
+}
+
 // recordHandoffSwapLocked takes crossAgent from its caller rather than
 // re-deriving it: the decision belongs to the admission that froze the launch
 // plan. An account-only request's target is the current agent's IDENTITY, not

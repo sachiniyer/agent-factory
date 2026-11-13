@@ -322,12 +322,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if refusedID != "" {
 			preSpawnCapture = i.sessionCodexCaptureBaselineFor(runtimeProgram)
 		}
-		// A Claude replacement is the record before its pane can write, as on
-		// Recover (#7209 review R6); the loader persists it with the load. A
-		// load that does not re-spawn puts the refused id back.
-		undoReplacement, replaced := func() {}, false
-		if refusedID != "" && replacement.HasID() {
-			undoReplacement, replaced = i.stageReplacementConversation(refusedID, replacement)
+		// A Claude replacement is the record before its pane can write, and
+		// durable before it too, on the re-spawn branch only (loadReplacement).
+		var loadRepl *loadReplacement
+		if refusedID != "" && replacement.HasID() && !worktreeMissing {
+			loadRepl = i.armLoadReplacement(tmuxSession, refusedID, replacement)
+			defer tmuxSession.SetBeforeRespawn(nil)
 		}
 		var restoreResult tmux.RestoreResult
 		var err error
@@ -336,9 +336,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		} else {
 			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
 		}
-		if replaced && (err != nil || restoreResult != tmux.RestoreRespawned) {
-			undoReplacement()
-		}
+		replaced := loadRepl.settle(err == nil && restoreResult == tmux.RestoreRespawned)
 		if err != nil && worktreeMissing {
 			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
 			return nil
@@ -661,6 +659,11 @@ func (b *LocalBackend) SwapAgent(i *Instance, plan AgentSwapPlan) error {
 		defer i.freezeEnvPassthrough(plan.passthrough)()
 	}
 	if err := refreshSessionEnvironment(i, ts); err != nil {
+		return fmt.Errorf("swap agent: %w", err)
+	}
+	// The last step before the replacement can write anything: a handoff makes
+	// its incoming record durable here (#7215). A refusal leaves nothing running.
+	if err := plan.RunBeforeStart(); err != nil {
 		return fmt.Errorf("swap agent: %w", err)
 	}
 	if err := ts.Start(workDir); err != nil {

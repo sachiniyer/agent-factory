@@ -38,6 +38,10 @@ type RestoreContext struct {
 	// daemon's deferred-row probe, the lost-restore loop — owns the patience,
 	// and a load runs under locks that must not pay a launch's retry budget.
 	attempts int
+	// persistBeforeRespawn makes a load's staged conversation replacement
+	// durable before its re-spawn (SetPersistBeforeRespawn); nil when the
+	// loader brought none.
+	persistBeforeRespawn func(*Instance) error
 
 	mu    sync.Mutex
 	repos map[string]*repoMemo
@@ -76,6 +80,36 @@ func newLoadRestoreContext() *RestoreContext {
 	rc := NewRestoreContext()
 	rc.attempts = 1
 	return rc
+}
+
+// NewLoadRestoreContext is the context a single load runs in when its caller
+// has no primed one: what FromInstanceData uses for a nil context. A caller
+// that must hand the load something else, a persist hook, starts from it.
+func NewLoadRestoreContext() *RestoreContext {
+	return newLoadRestoreContext()
+}
+
+// SetPersistBeforeRespawn gives the loads reading through c the write that
+// makes a staged conversation replacement durable before its re-spawn: a load
+// that refuses a recorded conversation and re-spawns a fresh one records the
+// replacement first, so a daemon that stops before the load's own persist
+// cannot bring the row back on the refused id beside a pane running the
+// replacement (#7209 review R2-1). The write runs only on the re-spawn branch;
+// a load that reattaches a live pane never makes it.
+func (c *RestoreContext) SetPersistBeforeRespawn(persist func(*Instance) error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.persistBeforeRespawn = persist
+}
+
+// persistBeforeRespawnFn is SetPersistBeforeRespawn's write, or nil.
+func (c *RestoreContext) persistBeforeRespawnFn() func(*Instance) error {
+	if c == nil {
+		return nil
+	}
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.persistBeforeRespawn
 }
 
 // loadContext is the context a load reads through: its caller's, else its own.

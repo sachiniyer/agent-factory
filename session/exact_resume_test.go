@@ -62,6 +62,28 @@ func TestAdoptedLaunchWithAnAbsentConversationResumesNothing(t *testing.T) {
 	assert.Equal(t, inst.Program, launched)
 }
 
+// #7217 review R3: the Claude twin. A recorded Claude id this host's store does
+// not hold (a fresh workspace's store holds none of the old history, and Claude
+// files lazily) is not dropped before the launch: it is judged by the
+// recorded-Claude rule, which starts Claude on it, keeps it recorded, and never
+// leaves the launch to a latest-conversation selector.
+func TestAdoptedLaunchStartsClaudeOnARecordedIDItsStoreLacks(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	t.Setenv("CLAUDE_CONFIG_DIR", t.TempDir())
+	inst := adoptInstanceAt(t, t.TempDir())
+	inst.Program = "claude"
+	conv := AgentConversationData{Agent: "claude", ID: adoptedOlderID}
+
+	var launched string
+	require.NoError(t, inst.launchAdoptedWith(&conv, func() error {
+		launched = prepareResumeConversation(inst, inst.Program)
+		return nil
+	}))
+	assert.Equal(t, "claude --session-id "+adoptedOlderID, launched,
+		"the adopted launch starts Claude on the id the host recorded")
+	assert.Equal(t, adoptedOlderID, inst.resumableConversation().ID, "the id stays the record")
+}
+
 // #4797: a recovery names the session's own recorded conversation, and with no id
 // the program is untouched here — the tmux layer then declines the account-wide
 // "latest" rewrite for a session marked exact-only.
