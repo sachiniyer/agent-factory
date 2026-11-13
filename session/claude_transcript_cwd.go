@@ -31,18 +31,21 @@ const (
 )
 
 // claudeTranscriptDir returns the directory the transcript at path records its
-// conversation in, the way Claude's own /resume reads it: the directory of the
-// last relocation record (Claude appends {"type":"relocated","relocatedCwd":…}
-// when /cd, an SDK set_cwd or a worktree switch moves the conversation), else
-// the cwd of its first record that names one. ok is false when no record af can
-// read names an absolute directory, or the file cannot be read.
+// conversation in now: the last record in its tail that names one, else the
+// cwd of its first record that does. When /cd, an SDK set_cwd or a worktree
+// switch moves a conversation, Claude appends {"type":"relocated",
+// "relocatedCwd":…} and every record after it names the new directory as its
+// cwd, so the tail says where the conversation lives however far back the
+// move was; the head names where it began (#7221 review R1, Codex review). ok
+// is false when no record af can read names an absolute directory, or the file
+// cannot be read.
 func claudeTranscriptDir(path string) (string, bool) {
 	file, err := os.Open(path)
 	if err != nil {
 		return "", false
 	}
 	defer file.Close()
-	if dir, ok := claudeTranscriptRelocatedDir(file); ok {
+	if dir, ok := claudeTranscriptTailDir(file); ok {
 		return dir, true
 	}
 	if _, err := file.Seek(0, io.SeekStart); err != nil {
@@ -72,9 +75,10 @@ func claudeTranscriptHeadCwd(file io.Reader) (string, bool) {
 	}
 }
 
-// claudeTranscriptRelocatedDir is the directory of the last relocation record
-// within the tail budget.
-func claudeTranscriptRelocatedDir(file *os.File) (string, bool) {
+// claudeTranscriptTailDir is the directory named by the last whole record
+// within the tail budget that names one: a relocation's relocatedCwd, or a
+// message's cwd.
+func claudeTranscriptTailDir(file *os.File) (string, bool) {
 	info, err := file.Stat()
 	if err != nil {
 		return "", false
@@ -95,9 +99,16 @@ func claudeTranscriptRelocatedDir(file *os.File) (string, bool) {
 		var record struct {
 			Type         string `json:"type"`
 			RelocatedCwd string `json:"relocatedCwd"`
+			Cwd          string `json:"cwd"`
 		}
-		if json.Unmarshal(line, &record) == nil && record.Type == "relocated" && filepath.IsAbs(record.RelocatedCwd) {
+		if json.Unmarshal(line, &record) != nil {
+			continue
+		}
+		switch {
+		case record.Type == "relocated" && filepath.IsAbs(record.RelocatedCwd):
 			dir, found = record.RelocatedCwd, true
+		case filepath.IsAbs(record.Cwd):
+			dir, found = record.Cwd, true
 		}
 	}
 	return dir, found

@@ -41,9 +41,25 @@ func TestClaudeTranscriptDirReadsWhatClaudesResumeReads(t *testing.T) {
 		return claudeTranscriptDir(path)
 	}
 
-	got, ok := read(write("ordered.jsonl", summary+claudeRecordLine(t, "/work/a")+claudeRecordLine(t, "/work/b")))
+	got, ok := read(write("ordered.jsonl", summary+claudeRecordLine(t, "/work/a")+claudeRecordLine(t, "/work/a/web")))
 	require.True(t, ok)
-	require.Equal(t, "/work/a", got, "without a relocation, the first record that names a cwd")
+	require.Equal(t, "/work/a/web", got, "the last record names where the conversation is now")
+
+	// Codex review of #7221: a relocation far behind the tail window is still
+	// told by the records after it, which name the new directory.
+	far := claudeRecordLine(t, "/work/a-b") + `{"type":"relocated","relocatedCwd":"/work/a.b"}` + "\n" +
+		strings.Repeat(claudeRecordLine(t, "/work/a.b"), 2000)
+	require.Greater(t, len(far), claudeTranscriptTailBudget)
+	got, ok = read(write("relocated-long-ago.jsonl", far))
+	require.True(t, ok)
+	require.Equal(t, "/work/a.b", got)
+
+	// With nothing whole in the tail (one record longer than the window), the
+	// head names where the conversation began.
+	got, ok = read(write("tail-is-one-record.jsonl", claudeRecordLine(t, "/work/a")+
+		`{"type":"assistant","message":{"content":"`+strings.Repeat("y", 2*claudeTranscriptTailBudget)+`"}}`+"\n"))
+	require.True(t, ok)
+	require.Equal(t, "/work/a", got)
 
 	relocated := claudeRecordLine(t, "/work/a") + `{"type":"relocated","relocatedCwd":"/work/c"}` + "\n" + claudeRecordLine(t, "/work/c")
 	got, ok = read(write("relocated.jsonl", relocated))
@@ -91,6 +107,9 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 		// moves: a /clear after `cd web` is still this worktree's (#7221 R1).
 		{name: "a /clear after the agent cd'd into a subdirectory", cwd: "subdirectory", verdict: claudeRecordedStale},
 		{name: "a conversation relocated into this worktree", cwd: "relocated in", verdict: claudeRecordedStale},
+		// Codex review: begun in the colliding directory, relocated here, and
+		// written on past the tail window since.
+		{name: "a colliding directory's conversation relocated here long ago", cwd: "relocated in long ago", verdict: claudeRecordedStale},
 		// One oversize record (a pasted screenshot) does not make the
 		// conversation unknown: the next one names the directory (R2).
 		{name: "a /clear whose first record is a pasted image", cwd: "oversize first", verdict: claudeRecordedStale},
@@ -111,10 +130,12 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 			setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, worktree)), past)
 			relocation := func(to string) string { return `{"type":"relocated","relocatedCwd":"` + to + `"}` + "\n" }
 			content := map[string]string{
-				"own":            claudeRecordLine(t, worktree),
-				"own resolved":   claudeRecordLine(t, filepath.Join(real, "a.b")),
-				"subdirectory":   claudeRecordLine(t, filepath.Join(worktree, "web")),
-				"relocated in":   claudeRecordLine(t, t.TempDir()) + relocation(worktree),
+				"own":          claudeRecordLine(t, worktree),
+				"own resolved": claudeRecordLine(t, filepath.Join(real, "a.b")),
+				"subdirectory": claudeRecordLine(t, filepath.Join(worktree, "web")),
+				"relocated in": claudeRecordLine(t, t.TempDir()) + relocation(worktree),
+				"relocated in long ago": claudeRecordLine(t, foreign) + relocation(worktree) +
+					strings.Repeat(claudeRecordLine(t, worktree), 2000),
 				"oversize first": `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
 				"before a move":  claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
 				"foreign":        claudeRecordLine(t, foreign),
