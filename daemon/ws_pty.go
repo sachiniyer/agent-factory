@@ -345,6 +345,16 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	defer cancel()
 	defer func() { _ = sub.Close() }()
 
+	// writeMu serializes EVERY server→client write on this socket. coder/websocket
+	// permits only one concurrent writer, so the input-ack frame readPTYClient emits
+	// from the reader goroutine would race writePTYStream's PTY_OUT/repaint/resize
+	// frames from the writer goroutine (#6848 review: serialize acknowledgements
+	// with the outbound stream writer — the same pattern apiclient/attach.go and
+	// session/agentserver_remote_channel.go use). The keepalive pinger predates
+	// this PR and stays on its own (pre-existing) concurrency; it is the one writer
+	// not routed here.
+	writeMu := &sync.Mutex{}
+
 	inputDelivery := &ptyInputDelivery{}
 	reader := &ptyReaderAvailability{}
 	readerDone := make(chan error, 1)
@@ -352,13 +362,13 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		err := readPTYClient(ctx, binding, conn, inputDelivery, reader)
+		err := readPTYClient(ctx, binding, conn, inputDelivery, reader, writeMu)
 		readerDone <- err
 		cancel()
 	}()
 	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, keepalive, reader) }()
 
-	writePTYStream(ctx, sub, conn)
+	writePTYStream(ctx, sub, conn, writeMu)
 
 	closeStatus := websocket.StatusNormalClosure
 	closeReason := ""
@@ -392,7 +402,9 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 			applied = pie.Applied
 		}
 		nctx, ncancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+		writeMu.Lock()
 		_ = agentproto.WriteControl(nctx, conn, agentproto.NewInputNackMessage(applied))
+		writeMu.Unlock()
 		ncancel()
 		closeStatus = websocket.StatusInternalError
 		closeReason = "PTY input delivery failed"
@@ -405,7 +417,7 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 // writePTYStream is the single writer goroutine: it multiplexes the subscriber's
 // output bytes and resize echoes onto the one connection. Keeping it single means
 // no concurrent data writes race on the socket.
-func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *websocket.Conn) {
+func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *websocket.Conn, writeMu *sync.Mutex) {
 	// Emit the start-seq hello as the VERY FIRST frame, before any PTY_OUT/repaint,
 	// so a browser client — which cannot read the X-Af-Stream-Seq handshake header
 	// off a WS upgrade (#1592 Phase 5 PR1, §4.3) — learns its absolute cursor in-band
@@ -418,7 +430,9 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 	// coder/websocket closes the transport when a context passed to an active
 	// write is cancelled; that would race the explicit close frame below.
 	hctx, hcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+	writeMu.Lock()
 	err := agentproto.WriteFrame(hctx, conn, agentproto.HelloFrame(uint64(sub.Seq())))
+	writeMu.Unlock()
 	hcancel()
 	if err != nil {
 		return // wedged/dead client before the first byte: drop it (session untouched)
@@ -455,12 +469,15 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 					exit = agentproto.NewTabClosedMessage()
 				}
 				ectx, ecancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+				writeMu.Lock()
 				_ = agentproto.WriteControl(ectx, conn, exit)
+				writeMu.Unlock()
 				ecancel()
 			}
 			return
 		}
 		wctx, wcancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+		writeMu.Lock()
 		switch ev.Kind {
 		case session.PTYData:
 			err = agentproto.WriteFrame(wctx, conn, agentproto.PTYOutFrame(ev.Data))
@@ -499,6 +516,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 		case session.PTYResize:
 			err = agentproto.WriteControl(wctx, conn, agentproto.NewResizeMessage(ev.Rows, ev.Cols))
 		}
+		writeMu.Unlock()
 		wcancel()
 		if err != nil {
 			return // wedged/dead client: drop it (the session is untouched)
@@ -525,7 +543,7 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // re-sends the unapplied tail rather than the whole backlog. Together they
 // preserve the queue's "a drained byte must never be silently discarded"
 // invariant across a post-write daemon-side failure (#6848).
-func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability) error {
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability, writeMu *sync.Mutex) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
@@ -557,7 +575,9 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 				// ack leaves the client to re-send the frame on reconnect — a
 				// bounded duplicate, not silent loss.
 				actx, acancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+				writeMu.Lock()
 				_ = agentproto.WriteControl(actx, conn, agentproto.NewInputAckMessage())
+				writeMu.Unlock()
 				acancel()
 			case agentproto.OpResize:
 				reader.away()

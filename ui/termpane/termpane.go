@@ -624,6 +624,32 @@ func (t *TermPane) flushLoop() {
 				t.inputMu.Unlock()
 				break
 			}
+			// The write reached the daemon, but the connection may have torn
+			// down WHILE the write was in flight: the run loop can read the old
+			// stream, then clear t.stream and reset sentLen/frameLens, after
+			// which this (stale) flusher registered a frame and wrote it before
+			// stream.Close() ran. Because that stream's readStream has already
+			// exited, the frame can never be acked, and the next connection
+			// would inherit the incremented sentLen and consider the queue
+			// fully sent — leaving the input permanently stuck. Re-check that
+			// THIS stream is still current; if it has been retired, undo the
+			// registration so the frame re-sends on the next stream (#6848
+			// review: retire the old sender before resetting its accounting).
+			t.connMu.Lock()
+			stale := t.stream != stream
+			t.connMu.Unlock()
+			if stale {
+				t.inputMu.Lock()
+				if len(t.frameLens) > 0 {
+					t.frameLens = t.frameLens[:len(t.frameLens)-1]
+					t.sentLen -= len(data)
+					if t.sentLen < 0 {
+						t.sentLen = 0
+					}
+				}
+				t.inputMu.Unlock()
+				break
+			}
 		}
 	}
 }
