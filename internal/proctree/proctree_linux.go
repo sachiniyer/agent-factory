@@ -157,9 +157,16 @@ func procUptime() (time.Duration, error) {
 // StartedAt is deliberately left zero here: it needs boot time, which is a
 // per-snapshot fact rather than a per-process one. snapshot() fills it in.
 func readProc(pid int) (Process, error) {
+	p, _, err := readProcStat(pid)
+	return p, err
+}
+
+// readProcStat is readProc plus the process group id, stat field 5, taken
+// from the same read so the two describe one instance. groupMembers uses it.
+func readProcStat(pid int) (Process, int, error) {
 	data, err := os.ReadFile(fmt.Sprintf("/proc/%d/stat", pid))
 	if err != nil {
-		return Process{}, err
+		return Process{}, 0, err
 	}
 	return parseStat(pid, data)
 }
@@ -168,47 +175,52 @@ func readProc(pid int) (Process, error) {
 // sets on every kernel thread. Its value has not changed since it was added.
 const pfKthread = 0x00200000
 
-// parseStat is readProc's parse of one /proc/<pid>/stat line, separate so a
-// test can pin it on lines no live process on the runner would produce.
-func parseStat(pid int, data []byte) (Process, error) {
+// parseStat is readProcStat's parse of one /proc/<pid>/stat line, separate so
+// a test can pin it on lines no live process on the runner would produce.
+func parseStat(pid int, data []byte) (Process, int, error) {
 	open := bytes.IndexByte(data, '(')
 	close_ := bytes.LastIndexByte(data, ')')
 	if open < 0 || close_ < open || close_+2 > len(data) {
-		return Process{}, fmt.Errorf("malformed stat for pid %d", pid)
+		return Process{}, 0, fmt.Errorf("malformed stat for pid %d", pid)
 	}
 	comm := string(data[open+1 : close_])
 	fields := strings.Fields(string(data[close_+2:]))
 	// fields[0] is stat field 3 (state); stat field N lives at fields[N-3].
 	const (
 		idxPPID  = 4 - 3
+		idxPGRP  = 5 - 3
 		idxSID   = 6 - 3
 		idxFlags = 9 - 3
 		idxStart = 22 - 3
 	)
 	if len(fields) <= idxStart {
-		return Process{}, fmt.Errorf("truncated stat for pid %d", pid)
+		return Process{}, 0, fmt.Errorf("truncated stat for pid %d", pid)
 	}
 	// Z is the zombie state; X/x is EXIT_DEAD, the sliver between the two halves
 	// of teardown. Neither will ever run again or answer a signal.
 	switch fields[0] {
 	case "Z", "X", "x":
-		return Process{}, ErrProcessExited
+		return Process{}, 0, ErrProcessExited
 	}
 	ppid, err := strconv.Atoi(fields[idxPPID])
 	if err != nil {
-		return Process{}, fmt.Errorf("bad ppid for pid %d: %w", pid, err)
+		return Process{}, 0, fmt.Errorf("bad ppid for pid %d: %w", pid, err)
+	}
+	pgrp, err := strconv.Atoi(fields[idxPGRP])
+	if err != nil {
+		return Process{}, 0, fmt.Errorf("bad pgrp for pid %d: %w", pid, err)
 	}
 	sid, err := strconv.Atoi(fields[idxSID])
 	if err != nil {
-		return Process{}, fmt.Errorf("bad sid for pid %d: %w", pid, err)
+		return Process{}, 0, fmt.Errorf("bad sid for pid %d: %w", pid, err)
 	}
 	flags, err := strconv.ParseUint(fields[idxFlags], 10, 64)
 	if err != nil {
-		return Process{}, fmt.Errorf("bad flags for pid %d: %w", pid, err)
+		return Process{}, 0, fmt.Errorf("bad flags for pid %d: %w", pid, err)
 	}
 	start, err := strconv.ParseUint(fields[idxStart], 10, 64)
 	if err != nil {
-		return Process{}, fmt.Errorf("bad starttime for pid %d: %w", pid, err)
+		return Process{}, 0, fmt.Errorf("bad starttime for pid %d: %w", pid, err)
 	}
 	return Process{
 		PID:          pid,
@@ -217,7 +229,7 @@ func parseStat(pid int, data []byte) (Process, error) {
 		StartID:      start,
 		Comm:         comm,
 		KernelThread: flags&pfKthread != 0,
-	}, nil
+	}, pgrp, nil
 }
 
 // readCPUTime returns pid's cumulative user+system CPU from /proc/<pid>/stat

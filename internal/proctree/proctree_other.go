@@ -65,3 +65,15 @@ func openWorkingDir(int) (*os.File, string, bool) {
 func openFilePaths(int) (map[string]struct{}, error) {
 	return nil, ErrUnsupportedPlatform
 }
+
+func holdsPipeEnd(int, []PipeEnd) (bool, error) {
+	return false, ErrUnsupportedPlatform
+}
+
+func checkPipePair(uint64, uint64) error {
+	return ErrUnsupportedPlatform
+}
+
+func groupMembers(int) ([]Process, error) {
+	return nil, ErrUnsupportedPlatform
+}

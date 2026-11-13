@@ -91,15 +91,15 @@ func TestParseStatReadsTheKernelThreadFlag(t *testing.T) {
 	line := func(comm, flags string) []byte {
 		return []byte("7 (" + comm + ") S 2 0 0 0 -1 " + flags + " 0 0 0 0 0 0 0 0 20 0 1 0 15 0 0")
 	}
-	kernel, err := parseStat(7, line("kworker/0:1", "69238880"))
+	kernel, _, err := parseStat(7, line("kworker/0:1", "69238880"))
 	if err != nil || !kernel.KernelThread {
 		t.Fatalf("flags 0x%x carry PF_KTHREAD: got %+v, %v", 69238880, kernel, err)
 	}
-	user, err := parseStat(7, line("a) (b c", "4194560"))
-	if err != nil || user.KernelThread || user.StartID != 15 || user.Comm != "a) (b c" {
+	user, pgrp, err := parseStat(7, line("a) (b c", "4194560"))
+	if err != nil || user.KernelThread || user.StartID != 15 || user.Comm != "a) (b c" || pgrp != 0 {
 		t.Fatalf("an ordinary task: got %+v, %v", user, err)
 	}
-	if _, err := parseStat(7, line("x", "nope")); err == nil {
+	if _, _, err := parseStat(7, line("x", "nope")); err == nil {
 		t.Fatal("a malformed flags field must fail the parse, not read as \"not a kernel thread\"")
 	}
 

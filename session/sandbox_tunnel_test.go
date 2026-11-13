@@ -91,7 +91,7 @@ func TestSandboxTunnelLifelineKillsGroupWhenDaemonPipeCloses(t *testing.T) {
 	require.NotNil(t, child.ll, "the tunnel must run under the lifeline when the binary speaks it")
 
 	// The inner tunnel command reaches the lifeline verbatim: sh -c '<sshCmd>
-	// -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"'
+	// -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"'
 	// af-sandbox <forward> — argv[6:] after '<exe> __watch-lifeline v1 <ms> --'.
 	// ExitOnForwardFailure is the failed-bind pin of
 	// TestSandboxTunnelRefusesToOutliveAFailedForward; the ServerAlive pair is
@@ -101,7 +101,7 @@ func TestSandboxTunnelLifelineKillsGroupWhenDaemonPipeCloses(t *testing.T) {
 	assert.Equal(t, watchlifeline.Protocol, child.cmd.Args[2])
 	assert.Equal(t, "sh", child.cmd.Args[5])
 	assert.Equal(t, "-c", child.cmd.Args[6])
-	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`, child.cmd.Args[7])
+	assert.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`, child.cmd.Args[7])
 	assert.Equal(t, "af-sandbox", child.cmd.Args[8])
 	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[9])
 
@@ -132,7 +132,7 @@ func TestSandboxTunnelFallsBackOncePerDaemon(t *testing.T) {
 	require.Nil(t, child.ll, "a non-acking lifeline must fall back to the direct spawn")
 	require.Equal(t, "sh", child.cmd.Args[0], "the fallback is the direct sh -c spawn: %v", child.cmd.Args)
 	require.Equal(t, "-c", child.cmd.Args[1])
-	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1"`, child.cmd.Args[2])
+	require.Equal(t, tunnelTestSleep+` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1"`, child.cmd.Args[2])
 	assert.True(t, sandboxTunnelLifelineUnavailable.Load(), "the failed probe must latch the fallback")
 
 	// A second provision goes straight to the direct spawn and does NOT warn
@@ -607,7 +607,7 @@ func TestTunnelSpawnsReverseForwardSlot(t *testing.T) {
 		p.reapMu.Unlock()
 	})
 
-	want := tunnelTestSleep + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -N -L "$1" -R "$2" -R "$3"`
+	want := tunnelTestSleep + ` -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=3 -o ControlMaster=no -S none -N -L "$1" -R "$2" -R "$3"`
 	assert.Equal(t, want, child.cmd.Args[2], "the spawn script composes each -R as a positional arg: %v", child.cmd.Args)
 	assert.Equal(t, "127.0.0.1:40000:127.0.0.1:40001", child.cmd.Args[4])
 	assert.Equal(t, "127.0.0.1:9000:127.0.0.1:7070", child.cmd.Args[5])

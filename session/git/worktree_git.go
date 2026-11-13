@@ -242,16 +242,22 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// exits even after the deadline killed git (#856).
 	cmd.WaitDelay = gitWaitDelay
 
-	output, err := cmd.Output()
-	// Reap any transport child that outlived git on every exit path —
-	// normal completion or timeout — so a fetch never leaks a
-	// connection-holding process (#769 pattern).
-	execgroup.Reap(cmd)
+	// execgroup.Output, not cmd.Output plus a group Reap. It still kills a
+	// transport child that held the capture pipe past gitWaitDelay after git
+	// exited, on every exit path, so a fetch never leaks a connection-holding
+	// process (#769 pattern). What it no longer kills is a member of git's group
+	// that holds none of git's pipes. Under ControlMaster/ControlPersist that is
+	// the master's ProxyCommand (or ProxyJump's `ssh -W`), which OpenSSH leaves
+	// in this group as the master's transport while the master itself detaches:
+	// a group reap after a successful fetch killed it, and the master with it,
+	// so every later fetch re-authenticated (#7121). A deadline is unchanged:
+	// KillOnCancel still kills the whole group.
+	output, err := execgroup.Output(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited (successfully — a non-zero exit would surface as an
 		// ExitError, not ErrWaitDelay); only a transport child held the capture
-		// pipe open past gitWaitDelay and was just killed above. The command's
-		// output is already complete, so this is not a failure (#676 precedent).
+		// pipe open past gitWaitDelay and was just killed. The command's output
+		// is already complete, so this is not a failure (#676 precedent).
 		err = nil
 	}
 	if err != nil {
