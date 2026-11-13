@@ -10,14 +10,18 @@ import (
 	"time"
 )
 
-// ErrNoArgv reports that a process has no argument vector to classify — a
-// kernel thread, or one the kernel has already torn down far enough to clear
-// it.
+// ErrNoArgv reports that a process has no argument vector to classify RIGHT
+// NOW. That covers a kernel thread, one the kernel has already torn down far
+// enough to clear it, and a live process in the middle of execve (#7238).
+// Linux installs the new address space, and closes the caller's CLOEXEC status
+// pipe, before it lays out the new argv, so /proc/<pid>/cmdline reads empty
+// while /proc/<pid>/cwd already answers. Measured straight after Go's
+// cmd.Start returned: empty 1196 times in 2000.
 //
-// Like ErrProcessExited it is a POSITIVE finding rather than a read failure:
-// there is nothing to match, as opposed to something we were not allowed to
-// look at. A scan may skip it without inventing a fact; it must not skip a
-// refusal the same way.
+// It is not a refusal: there is nothing to match, as opposed to something we
+// were not allowed to look at. But it is NOT proof that the process has no
+// identity. A caller that may only skip what it can positively classify, such
+// as a leave-alone predicate (TmuxIdentityOf), must treat it as unknown.
 var ErrNoArgv = errors.New("proctree: process has no argv")
 
 // scanSnapshot, scanArgv and scanUID are the reads ProcessesMatchingArgv makes,
