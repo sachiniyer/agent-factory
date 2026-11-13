@@ -282,7 +282,8 @@ version when one is a prefix of the other, and refuses when neither is.
 If the copy cannot be made, the replacement starts fresh, and the brief says
 that af tried to carry the conversation and why it could not. The same fallback
 applies when the recorded id is no longer the newest conversation in the
-worktree (after `/clear` or `/new`), and when a replacement already launched on
+worktree (after a Claude `/clear`, or a Codex `/new` that af's follow loop did
+not record), and when a replacement already launched on
 the carried id had to be launched again. The copy stays in the new account's
 home, where the provider replays it under that account. A cross-agent
 handoff never copies anything, and gemini, which records no conversation id,
