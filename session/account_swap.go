@@ -24,10 +24,6 @@ type accountSwapStopper interface {
 type accountSwapLaunchPlan struct {
 	account string
 	base    string
-	// reminted marks a committed replacement re-planned on a fresh
-	// conversation in place of the committed one (committedConversationLaunch).
-	// The respawn makes that record durable before the spawn (#7216 review R2).
-	reminted bool
 	// runtimeBase is the clean base command this plan launches, frozen at
 	// preflight, for RuntimeProgram: the base without af's injected flags
 	// (base can be the pane's frozen program, which carries them), and never
@@ -550,7 +546,6 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
-		reminted: reminted,
 	}
 	var replaced, missionFrom string
 	refreshMission := false
@@ -562,6 +557,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		// #7216 review R4).
 		replaced, live.ConversationID = live.ConversationID, conversation.ID
 		live.CarryFallback = staleCommittedConversationReason
+		i.pendingAccountSwapUnwritten = true
 		refreshMission, missionFrom = live.Manual, live.From
 		i.touchLocked()
 	}
@@ -723,6 +719,7 @@ func (i *Instance) selectAccountLocked(from, name, accountAgent string, automati
 		pending.CarryFallback = plan.carryFallback
 	}
 	i.pendingAccountSwap = pending
+	i.pendingAccountSwapUnwritten = false
 	i.touchLocked()
 	return previous, nil
 }
@@ -752,6 +749,7 @@ func (i *Instance) RestoreAccountSelectionUnderResumeFence(name, accountAgent st
 	}
 	if i.pendingAccountSwap != nil {
 		i.pendingAccountSwap = nil
+		i.pendingAccountSwapUnwritten = false
 		i.touchLocked()
 	}
 	i.accountSwapLaunch = nil
@@ -769,6 +767,7 @@ func (i *Instance) ClearPendingAccountSwap(from, to string) bool {
 	}
 	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
+	i.pendingAccountSwapUnwritten = false
 	// The notice was just delivered, so the agent's new work ends the run on
 	// its own idle edge — see ClearPendingHandoffMission for why a held edge
 	// must not outlive a resend.
@@ -989,4 +988,22 @@ func setTabAccountEnvironment(tab *Tab, agent, account string) error {
 		tab.tmux.SetAccountEnvironmentForAgent(agent, account)
 	}
 	return nil
+}
+
+// pendingAccountSwapUnwrittenFor reports whether account's pending swap record
+// was rewritten in memory since it last reached disk.
+func (i *Instance) pendingAccountSwapUnwrittenFor(account string) bool {
+	i.mu.RLock()
+	defer i.mu.RUnlock()
+	return i.pendingAccountSwapUnwritten && i.pendingAccountSwap != nil && i.pendingAccountSwap.To == account
+}
+
+// markPendingAccountSwapWritten records that account's pending swap record has
+// reached disk.
+func (i *Instance) markPendingAccountSwapWritten(account string) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if i.pendingAccountSwap != nil && i.pendingAccountSwap.To == account {
+		i.pendingAccountSwapUnwritten = false
+	}
 }

@@ -426,17 +426,21 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 			}()
 		}
 	}
-	// A committed swap's replacement re-planned on a fresh conversation names it
-	// in its record and its pending swap already: make that durable before the
-	// pane can write under it, through the same hook (#7216 review R2). The
-	// daemon's limit-resume path, the only one that re-plans a committed swap,
-	// installs it.
-	if prepared != nil && prepared.reminted {
+	// A committed swap's pending record rewritten in memory since it last
+	// reached disk (a re-minted or demoted conversation, by any re-plan) is
+	// written before the pane can write under its conversation, through the
+	// same hook (#7216 review R2, #7217 review R1). A write that fails starts
+	// nothing and keeps the mark, so the retry writes it again. The daemon's
+	// limit-resume path, the only one that re-plans a committed swap, installs
+	// the hook.
+	if prepared != nil && i.pendingAccountSwapUnwrittenFor(prepared.account) {
 		if notify := i.relocationSettleNotifyFn(); notify == nil {
-			log.InfoLog.Printf("session %q: its re-planned account swap conversation is recorded in memory only: this re-spawn has no persist hook", i.Title)
+			log.InfoLog.Printf("session %q: its re-planned account swap record is in memory only: this re-spawn has no persist hook", i.Title)
 		} else if perr := notify(i); perr != nil {
 			return markRecoverRebuilt(rebuilt, fmt.Errorf(
 				"account swap: session %q: its re-planned conversation could not be recorded durably before the spawn: %w", i.Title, perr))
+		} else {
+			i.markPendingAccountSwapWritten(prepared.account)
 		}
 	}
 	if resume {

@@ -474,6 +474,7 @@ func (i *Instance) SettlePendingAccountSwapNoticeDelivery(from, to string, attem
 	// !pending.Manual, and automatic swaps append no ledger entry.
 	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
+	i.pendingAccountSwapUnwritten = false
 	i.accountSwapLaunch = nil
 	i.taskRunIdleEdgeHeld = false
 	i.taskRunTurnGateHeld = false
@@ -662,6 +663,7 @@ func (i *Instance) ConfirmPendingAccountSwapDelivery(from, to string) error {
 	// would keep new tabs refused until the daemon restarted.
 	i.stampHandoffConversationLocked()
 	i.pendingAccountSwap = nil
+	i.pendingAccountSwapUnwritten = false
 	i.accountSwapLaunch = nil
 	// The confirmed mission is work the incoming agent already has (#5023):
 	// publish working — the same liveness a delivered prompt produces — and
@@ -705,6 +707,7 @@ func (i *Instance) ReconcileAccountHandoffSnapshot(account, accountAgent string,
 	i.accountAgent = accountAgent
 	i.accountAutoSelected = auto
 	i.pendingAccountSwap = cloneAccountSwapData(pending)
+	i.pendingAccountSwapUnwritten = false
 	i.touchLocked()
 	return true
 }

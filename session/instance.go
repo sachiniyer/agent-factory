@@ -586,6 +586,12 @@ type Instance struct {
 	accountAutoSelected bool
 	// pendingAccountSwap survives until the replacement notice and task land.
 	pendingAccountSwap *AccountSwapData
+	// pendingAccountSwapUnwritten marks pendingAccountSwap as rewritten in memory
+	// since it last reached disk: a re-planned replacement's conversation (a
+	// re-mint, a carry demotion). It survives every re-plan for the swap and is
+	// cleared only by the write before the replacement's spawn, or by a
+	// pending record its caller writes (#7217 review R1).
+	pendingAccountSwapUnwritten bool
 	// accountSwapLaunch is the admitted command, rebuilt before a post-restart retry.
 	accountSwapLaunch *accountSwapLaunchPlan
 	// Height is the height of the instance.
