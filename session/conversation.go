@@ -218,7 +218,7 @@ func (i *Instance) setAgentConversationLocked(conv AgentConversationData) bool {
 // other account's home (#6189). The caller holds i.mu and clears the agent tab's
 // own conversation itself.
 func (i *Instance) retireConversationsLocked() {
-	i.carriedConversation = AgentConversationData{}
+	i.carriedConversation, i.carriedIsRecord = AgentConversationData{}, false
 	i.reportedConversation = AgentConversationData{}
 	// A relaunch verdict describes a respawn under the outgoing account's
 	// provider store; it must not survive the crossing either (#6868).
@@ -257,25 +257,11 @@ type PendingConversationCapture struct {
 // so the replacement's own rollout — which may already exist — is not
 // excluded from its own discovery.
 func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap ConversationCaptureSnapshot) {
-	i.replaceRefusedConversation(refusedID, AgentConversationData{}, snap)
-}
-
-// replaceRefusedConversation is RetireConversationForFreshRuntime for a fresh
-// runtime launched on a conversation of its own, replacement, which takes the
-// refused id's place (planReplacementConversation). Nothing discovers a Claude
-// conversation after launch, so a fresh Claude runtime that recorded nothing
-// could never be resumed or carried again (#7209 review). A recorded
-// replacement needs no capture baseline.
-func (i *Instance) replaceRefusedConversation(refusedID string, replacement AgentConversationData, snap ConversationCaptureSnapshot) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if len(i.Tabs) > 0 && i.Tabs[0].Conversation.ID == refusedID && refusedID != "" {
 		i.Tabs[0].Conversation = AgentConversationData{}
 		i.touchLocked()
-		if replacement.HasID() {
-			i.setAgentConversationLocked(replacement)
-			return
-		}
 	}
 	if snap.CapturesCodex() {
 		s := snap
@@ -438,6 +424,44 @@ func planLaunchConversation(instanceID, program string) (string, AgentConversati
 	return rewritten, conversation
 }
 
+// stageReplacementConversation records replacement in the refused id's place
+// before the spawn that runs it, so there is no moment at which the pane can
+// write to the replacement while the record still names the refused id
+// (#7209 review R6). The refused id may be the agent tab's record or a pin
+// that is the tab's record (SetResumeRecordedConversation). staged is false,
+// and nothing changed, when neither names it any more.
+//
+// undo puts the record back exactly as it was: a spawn that does not commit
+// (a failure, or a restore that reattached instead) must not leave a recorded
+// replacement that holds no transcript. It changes nothing if the record moved
+// on meanwhile.
+func (i *Instance) stageReplacementConversation(refusedID string, replacement AgentConversationData) (undo func(), staged bool) {
+	i.mu.Lock()
+	defer i.mu.Unlock()
+	if refusedID == "" || !replacement.HasID() || len(i.Tabs) == 0 {
+		return func() {}, false
+	}
+	prevTab, prevCarried, prevIsRecord := i.Tabs[0].Conversation, i.carriedConversation, i.carriedIsRecord
+	if prevTab.ID != refusedID && prevCarried.ID != refusedID {
+		return func() {}, false
+	}
+	if prevCarried.ID == refusedID {
+		i.carriedConversation, i.carriedIsRecord = AgentConversationData{}, false
+	}
+	i.Tabs[0].Conversation = AgentConversationData{}
+	i.setAgentConversationLocked(replacement)
+	return func() {
+		i.mu.Lock()
+		defer i.mu.Unlock()
+		if len(i.Tabs) == 0 || i.Tabs[0].Conversation != replacement {
+			return
+		}
+		i.Tabs[0].Conversation = prevTab
+		i.carriedConversation, i.carriedIsRecord = prevCarried, prevIsRecord
+		i.touchLocked()
+	}, true
+}
+
 // planReplacementConversation is the conversation a re-spawn launches on
 // after refusing the recorded one: a newly minted Claude session id, never the
 // instance id a first launch uses, since that may name the very conversation
@@ -465,7 +489,7 @@ func prepareResumeConversation(i *Instance, program string) string {
 // (nothing recorded, the command cannot express a resume) is the zero decline
 // because there is nothing to warn about.
 func prepareExactResumeConversation(i *Instance, program string) (string, bool, resumeDecline) {
-	conv, carried := i.resumableConversationAndSource()
+	conv, source := i.resumableConversationAndSource()
 	if !conv.HasID() {
 		return program, false, resumeDecline{}
 	}
@@ -473,17 +497,16 @@ func prepareExactResumeConversation(i *Instance, program string) (string, bool, 
 	if !ok {
 		return program, false, resumeDecline{}
 	}
-	if !carried {
-		var decline resumeDecline
-		switch conv.Agent {
-		case tmux.ProgramCodex:
-			decline = i.staleRecordedCodexDecline(program, conv)
-		case tmux.ProgramClaude:
-			decline = i.staleRecordedClaudeDecline(program, conv)
-		}
-		if decline.reason != "" {
-			return program, false, decline
-		}
+	var decline resumeDecline
+	switch {
+	case conv.Agent == tmux.ProgramCodex && source == conversationFromTab:
+		decline = i.staleRecordedCodexDecline(program, conv)
+	case conv.Agent == tmux.ProgramClaude && source != conversationFromPin:
+		// The tab's record, wherever it is delivered from (#7209 review R2).
+		decline = i.staleRecordedClaudeDecline(program, conv)
+	}
+	if decline.reason != "" {
+		return program, false, decline
 	}
 	return rewritten, true, resumeDecline{}
 }
@@ -497,18 +520,35 @@ func (i *Instance) resumableConversation() AgentConversationData {
 	return conv
 }
 
-// resumableConversationAndSource distinguishes the tab-recorded id — af's own
-// evidence about what the pane ran — from a carried id, which is a pin the
-// adopt/swap paths set before the tab exists. Only the former is the restore
-// staleness guard's business: a carried id's provenance was checked where it
-// was set.
-func (i *Instance) resumableConversationAndSource() (AgentConversationData, bool) {
+// conversationSource is where resumableConversation's answer came from, which
+// decides whether the restore guard judges it.
+type conversationSource int
+
+const (
+	// conversationFromTab: the agent tab's own record, af's evidence about
+	// what the pane ran.
+	conversationFromTab conversationSource = iota
+	// conversationFromRecordPin: the tab's record delivered as a pin before
+	// the tab exists (SetResumeRecordedConversation).
+	conversationFromRecordPin
+	// conversationFromPin: a pin whose provenance was checked where it was set
+	// (a swap's plan, the root heal), not judged again.
+	conversationFromPin
+)
+
+// resumableConversationAndSource distinguishes the tab-recorded id from a
+// carried pin the adopt/swap/heal paths set before the tab exists, and a pin
+// that is the tab's record from one whose provenance was checked elsewhere.
+func (i *Instance) resumableConversationAndSource() (AgentConversationData, conversationSource) {
 	if conv := i.AgentConversation(); conv.HasID() {
-		return conv, false
+		return conv, conversationFromTab
 	}
 	i.mu.RLock()
 	defer i.mu.RUnlock()
-	return i.carriedConversation, true
+	if i.carriedIsRecord {
+		return i.carriedConversation, conversationFromRecordPin
+	}
+	return i.carriedConversation, conversationFromPin
 }
 
 // codexHomeForLaunch resolves the rollout store this session writes to the way

@@ -210,7 +210,7 @@ func (hs *headlessServer) launchWorkspace(req agentLifecycleRequest, resp *agent
 		// A resume flag for a transcript this host does not hold makes the agent
 		// exit on launch, so a fresh workspace starts a new conversation instead.
 		if session.ConversationResumableHere(hs.program, hs.inst.GetWorktreePath(), *req.Conversation) {
-			hs.inst.SetResumeConversation(*req.Conversation)
+			hs.inst.SetResumeRecordedConversation(*req.Conversation)
 		} else {
 			log.InfoLog.Printf("agent-server: conversation %s is not in this host's %s store; starting a new conversation",
 				req.Conversation.ID, req.Conversation.Agent)

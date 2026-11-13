@@ -292,7 +292,10 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			if !resumed {
 				r := i.exactResumeRefusal(refusal)
 				refused = r.ExactResumeRefusal
-				if r.retire {
+				// A row in the user's own checkout retires nothing on load, for
+				// either agent: a newer conversation there is not this row's
+				// (newerConversationIsEvidence, #7209 review R1).
+				if r.retire && i.newerConversationIsEvidence() {
 					refusedID = r.ID
 					resumeProgram, replacement = planReplacementConversation(resumeProgram)
 				}
@@ -319,12 +322,22 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if refusedID != "" {
 			preSpawnCapture = i.sessionCodexCaptureBaselineFor(runtimeProgram)
 		}
+		// A Claude replacement is the record before its pane can write, as on
+		// Recover (#7209 review R6); the loader persists it with the load. A
+		// load that does not re-spawn puts the refused id back.
+		undoReplacement, replaced := func() {}, false
+		if refusedID != "" && replacement.HasID() {
+			undoReplacement, replaced = i.stageReplacementConversation(refusedID, replacement)
+		}
 		var restoreResult tmux.RestoreResult
 		var err error
 		if worktreeMissing {
 			restoreResult, err = tmux.RestoreReattached, tmuxSession.ReattachInert()
 		} else {
 			restoreResult, err = tmuxSession.RestoreWithResult(workDir)
+		}
+		if replaced && (err != nil || restoreResult != tmux.RestoreRespawned) {
+			undoReplacement()
 		}
 		if err != nil && worktreeMissing {
 			log.WarningLog.Printf("session %q: tracked worktree is gone and its tmux session could not be reattached (%v); keeping the row listed so it can be archived (its branch is kept)", i.Title, err)
@@ -348,8 +361,8 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// generation advance below, which is what releases the park to the
 			// replacement's deferred arm (TakePendingConversationCaptureForRuntime);
 			// a park stamped after it waits for an advance that never comes.
-			if refusedID != "" {
-				i.replaceRefusedConversation(refusedID, replacement, preSpawnCapture)
+			if refusedID != "" && !replaced {
+				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves

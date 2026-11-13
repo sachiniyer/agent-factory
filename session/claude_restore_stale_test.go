@@ -33,16 +33,18 @@ func claudeRestoreWorktree(t *testing.T) (string, string, string) {
 	return workDir, projects[0], projects[1]
 }
 
-// claudeRestoreInstance is a Claude session in workDir whose agent tab
-// recorded conversation id.
+// claudeRestoreInstance is a Claude session whose agent tab recorded
+// conversation id, in workDir: a worktree af created for it, apart from the
+// repository's own checkout.
 func claudeRestoreInstance(t *testing.T, workDir, id string) *Instance {
 	t.Helper()
-	gw, err := sessiongit.NewGitWorktreeFromStorage(workDir, workDir, "t", "main", "", false, true)
+	repo := t.TempDir()
+	gw, err := sessiongit.NewGitWorktreeFromStorage(repo, workDir, "t", "main", "", false, true)
 	require.NoError(t, err)
 	return &Instance{
 		Title:       "t",
 		Program:     tmux.ProgramClaude,
-		Path:        workDir,
+		Path:        repo,
 		gitWorktree: gw,
 		Tabs: []*Tab{{Conversation: AgentConversationData{
 			Agent: tmux.ProgramClaude, ID: id, CapturedAt: time.Now(), CaptureKind: ConversationCaptureInjected,
@@ -147,9 +149,10 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 	}
 }
 
-// A spelling af found but could not list may hold the newer conversation, so
-// the restore cannot confirm the recorded one is current.
-func TestExactResumeRefusesAClaudeConversationItCannotConfirm(t *testing.T) {
+// A spelling af found but could not list is no evidence about the recorded
+// conversation: the restore resumes it, as it does when the store cannot be
+// named at all, and nothing is retired (#7209 review R4).
+func TestExactResumeResumesAClaudeConversationItCannotCheck(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode-000 directory")
 	}
@@ -162,10 +165,9 @@ func TestExactResumeRefusesAClaudeConversationItCannotConfirm(t *testing.T) {
 	require.NoError(t, os.Chmod(unlistable, 0))
 	t.Cleanup(func() { _ = os.Chmod(unlistable, 0o755) })
 
-	_, ok, decline := prepareExactResumeConversation(claudeRestoreInstance(t, workDir, carryTestID), "claude")
-	require.False(t, ok)
-	require.Equal(t, carryTranscriptsUnlistedReason, decline.reason)
-	require.True(t, decline.unverified, "af could not look, which is no evidence about the id")
+	rewritten, ok, decline := prepareExactResumeConversation(claudeRestoreInstance(t, workDir, carryTestID), "claude")
+	require.True(t, ok, "%+v", decline)
+	require.Equal(t, "claude --resume "+carryTestID, rewritten)
 }
 
 // An account-scoped session writes to the account's registry dir, not the
@@ -188,9 +190,10 @@ func TestExactResumeJudgesAnAccountSessionByTheAccountsStore(t *testing.T) {
 	require.Equal(t, staleCarryReason, decline.reason)
 }
 
-// Only the tab's own record is judged: a carried id is a pin whose provenance
-// was checked where it was set.
-func TestExactResumeLeavesACarriedClaudeConversationAlone(t *testing.T) {
+// A pin whose provenance was checked where it was set (a swap's plan, the root
+// heal: SetResumeConversation) is not judged again. A pin that is the tab's
+// record delivered from elsewhere is (TestAdoptedRelaunchJudgesTheTabsRecord).
+func TestExactResumeLeavesAPinJudgedElsewhereAlone(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
 	workDir, recorded, _ := claudeRestoreWorktree(t)
@@ -200,7 +203,7 @@ func TestExactResumeLeavesACarriedClaudeConversationAlone(t *testing.T) {
 
 	inst := claudeRestoreInstance(t, workDir, carryTestID)
 	inst.Tabs = []*Tab{{}}
-	inst.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
+	inst.SetResumeConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected})
 	rewritten, ok, _ := prepareExactResumeConversation(inst, "claude")
 	require.True(t, ok)
 	require.Equal(t, "claude --resume "+carryTestID, rewritten)

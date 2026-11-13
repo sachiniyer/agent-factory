@@ -98,27 +98,28 @@ func claudeCarryStaleness(configDir string, projects []string, transcript, id st
 	return ""
 }
 
-// staleRecordedClaudeDecline is the restore guard for a tab-recorded Claude
+// staleRecordedClaudeDecline is the restore guard for a recorded Claude
 // conversation (#7206): a restore resumes it only while it is still the newest
 // conversation in the worktree, by the account swap's own rule
 // (judgeClaudeRecorded). A /clear leaves the recorded id naming the
 // conversation the user abandoned, and resuming that is worse than a stated
 // fresh start.
 //
-// It refuses on evidence: a newer conversation, or a spelling whose directory
-// af found but could not list. A store af cannot name, or a recorded
-// transcript it does not find there, says nothing about whether the user moved
-// on, so the restore resumes the recorded id as it always has.
+// It refuses on evidence only: a newer conversation in a directory af owns
+// exclusively (newerConversationIsEvidence). A row in the user's own checkout,
+// a store af cannot name, a spelling it cannot list, and a recorded transcript
+// it does not find all say nothing about whether this session moved on, so the
+// restore resumes the recorded id as it always has (#7209 review R1, R4).
 func (i *Instance) staleRecordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
+	if !i.newerConversationIsEvidence() {
+		return resumeDecline{}
+	}
 	configDir, launchDir, err := i.claudeStoreFor(program, i.GetWorktreePath())
 	if err != nil || strings.TrimSpace(configDir) == "" {
 		return resumeDecline{}
 	}
-	switch judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), conv.ID, "") {
-	case claudeRecordedStale:
+	if judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), conv.ID, "") == claudeRecordedStale {
 		return declineResume(staleCarryReason)
-	case claudeRecordedUnlisted:
-		return declineResumeUnverified(carryTranscriptsUnlistedReason)
 	}
 	return resumeDecline{}
 }

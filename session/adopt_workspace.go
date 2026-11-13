@@ -468,7 +468,7 @@ func (i *Instance) LaunchAdopted(conv *AgentConversationData) error {
 func (i *Instance) launchAdoptedWith(conv *AgentConversationData, respawn func() error) error {
 	if conv != nil && conv.HasID() {
 		if i.conversationResumableHere(i.Program, i.GetWorktreePath(), *conv) {
-			i.SetResumeConversation(*conv)
+			i.SetResumeRecordedConversation(*conv)
 		} else {
 			log.InfoLog.Printf("adopted launch: conversation %s is not in this host's %s store; starting a fresh conversation rather than resuming the latest one", conv.ID, conv.Agent)
 		}
