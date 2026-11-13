@@ -11,17 +11,45 @@ import (
 )
 
 // ErrNoArgv reports that a process has no argument vector to classify RIGHT
-// NOW. That covers a kernel thread, one the kernel has already torn down far
-// enough to clear it, and a live process in the middle of execve (#7238).
-// Linux installs the new address space, and closes the caller's CLOEXEC status
-// pipe, before it lays out the new argv, so /proc/<pid>/cmdline reads empty
-// while /proc/<pid>/cwd already answers. Measured straight after Go's
-// cmd.Start returned: empty 1196 times in 2000.
+// NOW. This is the one definition of an "unknown argv" in this package
+// (#7238, #7239); every caller below points here.
+//
+// # What an empty read can be
+//
+//   - A kernel thread, which never has an argv. That is POSITIVE, but only by
+//     the kernel's own flag (Process.KernelThread), never by the empty read.
+//   - A live process mid-execve. Linux installs the new address space, and
+//     closes the caller's CLOEXEC status pipe, before it lays out the new argv.
+//     Measured straight after Go's cmd.Start returned: empty 1196 times in 2000.
+//     The window is brief.
+//   - A process mid-exit. exit_mm clears task->mm before the address space is
+//     torn down, so a single-threaded process reads present, state R, same
+//     start stamp and argv-less for the whole teardown: 114 ms at 1 GiB and
+//     212 ms at 2 GiB, measured on the devbox. A multi-threaded process does
+//     not show this on /proc/<tgid>, because its leader reads Z at once while
+//     another thread does the teardown.
+//   - A process that blanked its own argv, or was exec'd with none. This one
+//     persists.
 //
 // It is not a refusal: there is nothing to match, as opposed to something we
-// were not allowed to look at. But it is NOT proof that the process has no
-// identity. A caller that may only skip what it can positively classify, such
-// as a leave-alone predicate (TmuxIdentityOf), must treat it as unknown.
+// were not allowed to look at. But apart from the kernel-thread flag, it is
+// not proof that the process has no identity. It is UNKNOWN.
+//
+// # What each caller does with unknown, and why they differ
+//
+//   - TmuxIdentityOf (the reaper and the occupancy gate) reads once and
+//     answers TmuxUnknown. Unknown is already each caller's safe answer: the
+//     reaper spares the process, and the gate counts it in a retryable refusal.
+//     Settling would only trade latency on a teardown path for fewer of those.
+//     It does not consult the kernel-thread flag, because a kernel thread's
+//     cwd is never inside a worktree, so its answer never reaches a decision.
+//   - ProcessesMatchingArgv (the hook-launcher oracle) settles it like a
+//     refusal, re-reading while the same instance stays present, because there
+//     unknown blocks a lifecycle flow. That settle is short (about 20 ms) and
+//     covers an exec, not an exit.
+//   - Its callers in internal/systemdunit then decide. StopHookScopes waits out
+//     an unknown within its 15 s settle budget, which covers an exit, and
+//     RunningHookPrefixes, a fail-open reader, degrades to its units-only answer.
 var ErrNoArgv = errors.New("proctree: process has no argv")
 
 // scanSnapshot, scanArgv and scanUID are the reads ProcessesMatchingArgv makes,
@@ -112,7 +140,11 @@ func isGone(err error) bool {
 // about one that is starting. It is handled like a refusal instead: subject to
 // the ownership scope below, re-read while the same process stays present, and
 // used once an argv appears, skipped once the process is gone, and reported as
-// an *ArgvUnreadableError if it is present and argv-less throughout.
+// an *ArgvUnreadableError if it is present and argv-less throughout. That settle
+// covers an exec. It does not outlast an EXIT, which reads the same way for the
+// whole address-space teardown (see ErrNoArgv), so a caller that must not
+// refuse over an ordinary exit waits the unknown out itself, as StopHookScopes
+// does.
 //
 // # Whose refusal counts
 //

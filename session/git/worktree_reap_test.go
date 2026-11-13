@@ -188,6 +188,16 @@ func TestWorktreeWriterProcesses_NeverSelectsAnUnclassifiableRoot(t *testing.T) 
 	got = worktreeWriterProcesses(root, snap, 99, workingDir, func(int) proctree.TmuxIdentity { return zero })
 	assert.Empty(t, processPIDs(got),
 		"TmuxIdentity's zero value must mean unknown, never not-tmux")
+
+	// #7242 review R6: the process spared ONLY for its unknown identity is
+	// handed back, so the reap can report it if it is still alive afterwards.
+	// The control is not, because it was not spared at all.
+	matches := func(int) bool { return true }
+	procs, unclassified := worktreeWriterProcessesMatching(snap, 99, matches,
+		identities(map[int]proctree.TmuxIdentity{unreadable: proctree.TmuxUnknown}))
+	assert.ElementsMatch(t, []int{ordinary}, processPIDs(procs))
+	assert.ElementsMatch(t, []int{unreadable}, processPIDs(unclassified),
+		"the process left out only for an unknown identity must be reported as such")
 }
 
 // allNotTmux classifies every process as positively not tmux: the injected

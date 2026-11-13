@@ -38,11 +38,20 @@ const hookLauncherProgram = "systemd-run"
 // and is never adopted.
 //
 // A process table that cannot be read is an error, never an empty list. So is a
-// live process of ours whose command line cannot be classified, even after the
-// scan re-reads it (#7239). A launcher caught mid-execve has no argv yet, so an
-// argv-less process might be the very launcher this looks for. Callers on a
-// path that is about to touch the tree must fail closed on it, exactly as they
-// already do for an unreachable user manager.
+// live process of ours whose command line still cannot be classified after the
+// scan's short settle (#7239; proctree.ErrNoArgv defines it). A launcher caught
+// mid-execve has no argv yet, so that process might be the very launcher this
+// looks for. It comes back as a *proctree.ArgvUnreadableError, and the two
+// callers treat it differently:
+//   - StopHookScopes waits it out like a launcher it found, within its settle
+//     budget, and refuses only if it outlives that. Usually it is a process
+//     mid-exit, which reads argv-less for its whole teardown.
+//   - RunningHookPrefixes, a fail-open reader, falls back to its units-only
+//     answer.
+//
+// Any other error here is a /proc that cannot be read, and a caller about to
+// touch the tree fails closed on it, exactly as it does for an unreachable user
+// manager.
 func RunningHookLaunchers(prefixes ...string) ([]HookLauncher, error) {
 	present := nonEmpty(prefixes)
 	if len(present) == 0 {

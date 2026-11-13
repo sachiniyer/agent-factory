@@ -187,3 +187,14 @@ func TestTmuxPredicates_RefuseNonTmuxProcesses(t *testing.T) {
 	require.False(t, IsTmuxServer(-1))
 	require.Equal(t, TmuxUnknown, TmuxIdentityOf(-1))
 }
+
+// A refusal that cites no unclassified occupant gives no advice about one, and
+// one that does names the first such pid (#7242 review R8).
+func TestUnclassifiedOccupantAdvice_OnlyWhenOneIsCited(t *testing.T) {
+	plain := Occupant{Process: Process{PID: 10}, WorkingDir: "/w"}
+	unknown := Occupant{Process: Process{PID: 20}, WorkingDir: "/w", TmuxUnknown: true}
+	require.Empty(t, UnclassifiedOccupantAdvice([]Occupant{plain}))
+	advice := UnclassifiedOccupantAdvice([]Occupant{plain, unknown})
+	require.Contains(t, advice, "retry")
+	require.Contains(t, advice, "ps -o pid,stat,lstart,args -p 20")
+}
