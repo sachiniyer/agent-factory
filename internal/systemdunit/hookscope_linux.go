@@ -125,19 +125,28 @@ func RunningHookScopes(prefixes ...string) ([]string, error) {
 // walk for all of them beats one pair per session on the path that gates
 // readiness (#3682).
 //
-// An oracle that cannot be read is an error, never an empty answer — but unlike
-// the sweep, this one's callers fail OPEN, because reporting a hook that is not
-// running is worse here than reporting none: the safety ordering belongs to
-// StopHookScopes, which still refuses on the same error.
+// An oracle that cannot be read is an error, never an empty answer. That
+// includes one process the launcher oracle cannot classify
+// (*proctree.ArgvUnreadableError, #7239): it might be a launcher mid-execve,
+// so "none" is not an answer this read can give over it.
 //
-// Failing open is exactly why a single process the launcher oracle cannot
-// classify (*proctree.ArgvUnreadableError, #7239) is NOT returned as an error
-// here. It degrades this read to the units-only answer instead. On an error the
-// callers report "none", which would erase a scope the manager still lists: an
-// adopted hook's watcher would call a running hook finished on one poll that
-// landed while some process of ours was exiting, and stop watching for good.
-// The units-only answer is what this read gave before the oracle could report
-// an unknown at all. A process table that cannot be read is still an error.
+// # Which callers fail closed and which fail open
+//
+// This is the FAIL-CLOSED read. Its callers act only on err == nil with an
+// empty answer, and hold on an error, as they do for an unreachable manager:
+//   - hooks_progress_adopt.go resumes the remaining hooks;
+//   - hooks_progress_resume.go steps over a claimed entry;
+//   - hooks_progress_failure.go records a disappeared claimant as failed;
+//   - hooks_progress_retention_plan.go reclaims journals.
+//
+// Each of those, on a false "none", would let a command recorded as failed run
+// alongside the hooks resumed after it, which is the ordering #2770 and #3667
+// exist for (#7242 review R2-1). The trade-off is stated, not hidden: while a
+// process of ours stays argv-less, which a large exit does for under a second
+// and a blanked argv does for good, they wait.
+//
+// The two FAIL-OPEN readers, the restored session's hook probe and its adopted
+// watcher (hooks_adopt.go), use RunningHookPrefixesFailOpen instead.
 func RunningHookPrefixes(prefixes ...string) ([]string, error) {
 	present := nonEmpty(prefixes)
 	if len(present) == 0 {
@@ -145,16 +154,49 @@ func RunningHookPrefixes(prefixes ...string) ([]string, error) {
 	}
 	launchers, err := RunningHookLaunchers(present...)
 	if err != nil {
-		var unclassified *proctree.ArgvUnreadableError
-		if !errors.As(err, &unclassified) {
-			return nil, err
-		}
-		launchers = nil
+		return nil, err
 	}
 	units, err := RunningHookScopes(present...)
 	if err != nil {
 		return nil, err
 	}
+	return liveHookPrefixes(present, units, launchers), nil
+}
+
+// RunningHookPrefixesFailOpen is RunningHookPrefixes for the readers that fail
+// OPEN: the restored session's hook probe and its adopted watcher
+// (hooks_adopt.go). On an error they report no hooks in flight, because
+// guessing "running" would hold the readiness budget and a task's teardown
+// against a session nothing can resolve. The safety ordering is not theirs: it
+// belongs to StopHookScopes and the fail-closed callers above.
+//
+// Failing open is why one process the launcher oracle cannot classify is NOT an
+// error here. An error would erase everything this read DID establish. An
+// adopted watcher would call a hook finished on one poll that landed while some
+// process of ours was exiting, and stop watching for good. So that unknown
+// degrades this read to the units the manager lists plus the launchers the scan
+// found (#7242 review R2-1). A process table or manager that cannot be read is
+// still an error.
+func RunningHookPrefixesFailOpen(prefixes ...string) ([]string, error) {
+	present := nonEmpty(prefixes)
+	if len(present) == 0 {
+		return nil, nil
+	}
+	launchers, err := RunningHookLaunchers(present...)
+	var unclassified *proctree.ArgvUnreadableError
+	if err != nil && !errors.As(err, &unclassified) {
+		return nil, err
+	}
+	units, err := RunningHookScopes(present...)
+	if err != nil {
+		return nil, err
+	}
+	return liveHookPrefixes(present, units, launchers), nil
+}
+
+// liveHookPrefixes attributes the units and launchers found back to each prefix
+// that owns one.
+func liveHookPrefixes(present, units []string, launchers []HookLauncher) []string {
 	names := make([]string, 0, len(units)+len(launchers))
 	names = append(names, units...)
 	for _, launcher := range launchers {
@@ -166,7 +208,7 @@ func RunningHookPrefixes(prefixes ...string) ([]string, error) {
 			live = append(live, prefix)
 		}
 	}
-	return live, nil
+	return live
 }
 
 // hasAnyHookPrefix reports whether any of names belongs to this one prefix. The
@@ -275,7 +317,9 @@ func StopHookScopes(prefixes ...string) error {
 		// the manager admits the scope exists.
 		waited := time.Since(start) - stopping
 		if waited >= hookLauncherSettleTimeout {
-			if unclassified != nil {
+			// A launcher it FOUND is the stronger, session-specific reason, so it
+			// names the refusal even when an unknown was also standing.
+			if len(launchers) == 0 && unclassified != nil {
 				return &HookLauncherUnclassifiedError{Unclassified: unclassified, Waited: waited}
 			}
 			return &HookLauncherUnregisteredError{Launchers: launchers, Waited: waited}
@@ -302,6 +346,11 @@ type HookLauncherUnregisteredError struct {
 // how long the sweep spent WAITING for it (#7239). Such a process might be a
 // launcher mid-execve. Usually it is a process mid-exit or one starting up, and
 // that resolves well inside the budget, so the error means one that did not.
+//
+// The oracle scans every process of this user on the box, not just this
+// session's, so the process may have nothing to do with the session being torn
+// down. The message says so, and it does not claim any scope failed to stop
+// (#7242 review R2-3).
 type HookLauncherUnclassifiedError struct {
 	Unclassified *proctree.ArgvUnreadableError
 	Waited       time.Duration
@@ -309,9 +358,25 @@ type HookLauncherUnclassifiedError struct {
 
 func (e *HookLauncherUnclassifiedError) Error() string {
 	return fmt.Sprintf(
-		"pid %d stayed unclassifiable for %s of waiting, so it could still be a hook launcher about to start "+
-			"in this worktree; retry, and if it persists inspect it with `ps -o pid,stat,lstart,args -p %d`: %v",
+		"pid %d, a process of this user that may be unrelated to this session, stayed unclassifiable for %s "+
+			"of the hook sweep's wait: its command line could not be read, so it could not be ruled out as a "+
+			"hook launcher. Retry; if it persists, inspect it with `ps -o pid,stat,lstart,args -p %d`: %v",
 		e.Unclassified.PID, e.Waited.Round(time.Millisecond), e.Unclassified.PID, e.Unclassified)
+}
+
+// DescribeHookSweepRefusal says, for a caller's refusal message, what made a
+// StopHookScopes sweep refuse. what names the scopes the caller was clearing,
+// such as "a previous run's hook scopes (af-hook-x-*)". That is either "<what>
+// could not be stopped", or, when the refusal was an unclassifiable process
+// (#7242 review R2-3), that such a process of this user, possibly unrelated to
+// this session, could not be ruled out as one of their launchers.
+func DescribeHookSweepRefusal(err error, what string) string {
+	var unclassified *HookLauncherUnclassifiedError
+	if errors.As(err, &unclassified) {
+		return fmt.Sprintf("a process of this user (pid %d), possibly unrelated to this session, "+
+			"could not be ruled out as a launcher for %s", unclassified.Unclassified.PID, what)
+	}
+	return what + " could not be stopped"
 }
 
 func (e *HookLauncherUnclassifiedError) Unwrap() error { return e.Unclassified }

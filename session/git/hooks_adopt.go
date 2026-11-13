@@ -88,7 +88,9 @@ func AdoptRunningHooks(worktrees []*GitWorktree) {
 	if len(all) == 0 {
 		return
 	}
-	live, err := systemdunit.RunningHookPrefixes(all...)
+	// The fail-open read: an unclassifiable process degrades it to the units
+	// and launchers found, never to an error (#7242 review R2-1).
+	live, err := systemdunit.RunningHookPrefixesFailOpen(all...)
 	if err != nil {
 		// Fail OPEN, which is the opposite of the sweep on the rebuild path, and
 		// deliberately so. This read decides only what a session SAYS: guessing
@@ -175,7 +177,7 @@ func watchAdoptedHookRun(ctx context.Context, done chan struct{}, worktreePath s
 			return
 		case <-ticker.C:
 		}
-		live, err := systemdunit.RunningHookPrefixes(prefixes...)
+		live, err := systemdunit.RunningHookPrefixesFailOpen(prefixes...)
 		if err != nil {
 			// Fail open, as the initial probe does: the run may well still be
 			// going, but a channel that never closes because a poll broke would

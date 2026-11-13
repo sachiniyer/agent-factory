@@ -41,13 +41,15 @@ const hookLauncherProgram = "systemd-run"
 // live process of ours whose command line still cannot be classified after the
 // scan's short settle (#7239; proctree.ErrNoArgv defines it). A launcher caught
 // mid-execve has no argv yet, so that process might be the very launcher this
-// looks for. It comes back as a *proctree.ArgvUnreadableError, and the two
-// callers treat it differently:
+// looks for. It comes back as a *proctree.ArgvUnreadableError, TOGETHER with
+// every launcher the scan did find, because an unknown about one process never
+// erases a finding about another (#7242 review R2-1). The callers:
 //   - StopHookScopes waits it out like a launcher it found, within its settle
 //     budget, and refuses only if it outlives that. Usually it is a process
 //     mid-exit, which reads argv-less for its whole teardown.
-//   - RunningHookPrefixes, a fail-open reader, falls back to its units-only
-//     answer.
+//   - RunningHookPrefixes fails closed on it, so its callers hold.
+//   - RunningHookPrefixesFailOpen answers from the units and the launchers
+//     found.
 //
 // Any other error here is a /proc that cannot be read, and a caller about to
 // touch the tree fails closed on it, exactly as it does for an unreachable user
@@ -61,22 +63,26 @@ func RunningHookLaunchers(prefixes ...string) ([]HookLauncher, error) {
 		unit, ok := hookLauncherUnit(argv)
 		return ok && hasHookPrefix(unit, present)
 	})
-	if err != nil {
-		// Two different unknowns, worded for the operator who reads them. One
-		// process we could not classify is not a /proc failure (#7239).
-		var unclassified *proctree.ArgvUnreadableError
-		if errors.As(err, &unclassified) {
-			return nil, fmt.Errorf("cannot rule out a hook launcher under %s: %w",
-				strings.Join(present, ", "), err)
-		}
+	var unclassified *proctree.ArgvUnreadableError
+	if err != nil && !errors.As(err, &unclassified) {
 		return nil, fmt.Errorf(
 			"cannot read the process table to look for hook launchers under %s: %w",
 			strings.Join(present, ", "), err)
 	}
+	// An unknown about one process never erases a launcher found beside it
+	// (#7242 review R2-1). The launchers come back WITH the unknown, and each
+	// caller decides: a fail-closed one holds on the error, a fail-open one uses
+	// what was found.
 	launchers := make([]HookLauncher, 0, len(matched))
 	for _, process := range matched {
 		unit, _ := hookLauncherUnit(process.Argv)
 		launchers = append(launchers, HookLauncher{PID: process.Process.PID, Unit: unit})
+	}
+	if unclassified != nil {
+		// Worded for the operator: one process we could not classify is not a
+		// /proc failure (#7239).
+		return launchers, fmt.Errorf("cannot rule out a hook launcher under %s: %w",
+			strings.Join(present, ", "), err)
 	}
 	return launchers, nil
 }

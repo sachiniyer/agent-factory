@@ -25,9 +25,11 @@ import (
 //   - A process mid-exit. exit_mm clears task->mm before the address space is
 //     torn down, so a single-threaded process reads present, state R, same
 //     start stamp and argv-less for the whole teardown: 114 ms at 1 GiB and
-//     212 ms at 2 GiB, measured on the devbox. A multi-threaded process does
-//     not show this on /proc/<tgid>, because its leader reads Z at once while
-//     another thread does the teardown.
+//     212 ms at 2 GiB, measured on the devbox. A multi-threaded process usually
+//     does not show this on /proc/<tgid>. Its leader reads Z at once, and
+//     another thread does the teardown. But whichever thread drops the last mm
+//     reference does it, and sometimes that is the leader: 2 of 30 trials, for
+//     67 ms at 1 GiB and 204 ms at 2 GiB (#7242 review).
 //   - A process that blanked its own argv, or was exec'd with none. This one
 //     persists.
 //
@@ -194,6 +196,15 @@ func isGone(err error) bool {
 // ours: a same-uid target that darwin's code-signing restrictions cover, or one
 // whose ownership could not be read. Those come back as *ArgvUnreadableError,
 // and a caller must handle it rather than read a truncated list as complete.
+//
+// # An unknown never discards a match
+//
+// On *ArgvUnreadableError the returned slice is STILL every process this scan
+// positively matched (#7242 review R2-1). An unknown about one process says the
+// list may be incomplete. It says nothing about the matches found beside it, so
+// it never erases them. A caller that has to act on "nothing matched" holds on
+// the error. A caller that degrades on it uses the matches it has. The error
+// names the lowest unclassifiable pid, so the report is stable across scans.
 func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error) {
 	if match == nil {
 		return nil, errors.New("proctree: ProcessesMatchingArgv needs a match function")
@@ -203,6 +214,7 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		return nil, fmt.Errorf("cannot read the process table: %w", err)
 	}
 	var matched []ProcessArgv
+	var unknown *ArgvUnreadableError
 	for pid, process := range snap {
 		argv, err := scanArgv(pid)
 		switch {
@@ -236,7 +248,12 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 			case refusalGone:
 				continue
 			default:
-				return nil, &ArgvUnreadableError{PID: pid, Err: refusal, OwnedByUs: known}
+				// Keep scanning: the next process may be the match a caller is
+				// looking for, and this unknown must not hide it.
+				if unknown == nil || pid < unknown.PID {
+					unknown = &ArgvUnreadableError{PID: pid, Err: refusal, OwnedByUs: known}
+				}
+				continue
 			}
 		}
 		if match(argv) {
@@ -244,6 +261,9 @@ func ProcessesMatchingArgv(match func(argv []string) bool) ([]ProcessArgv, error
 		}
 	}
 	sort.Slice(matched, func(i, j int) bool { return matched[i].Process.PID < matched[j].Process.PID })
+	if unknown != nil {
+		return matched, unknown
+	}
 	return matched, nil
 }
 

@@ -259,8 +259,9 @@ func (g *GitWorktree) stopSurvivingHookScopes() error {
 	}
 	if err := systemdunit.StopHookScopes(prefixes...); err != nil {
 		return fmt.Errorf(
-			"post-worktree hook scopes (%s) for %s could not be stopped; refusing to modify the worktree while a hook may still be using it: %w",
-			strings.Join(prefixes, ", "), g.worktreePath, err)
+			"%s; refusing to modify the worktree while a hook may still be using it: %w",
+			systemdunit.DescribeHookSweepRefusal(err,
+				fmt.Sprintf("post-worktree hook scopes (%s) for %s", strings.Join(prefixes, ", "), g.worktreePath)), err)
 	}
 	return nil
 }

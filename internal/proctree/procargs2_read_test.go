@@ -61,7 +61,12 @@ func TestProcArgs2ScanSkipsExitedAndRefusesUnreadable(t *testing.T) {
 				require.ErrorAs(t, err, &refused)
 				require.Equal(t, targetPID, refused.PID)
 				require.ErrorIs(t, err, tc.err)
-				require.Empty(t, matched, "a refused read must never return a partial scan")
+				// The match found beside the refusal comes back WITH it, never
+				// as a complete answer: the error is what says the list may be
+				// incomplete, and the match is positive evidence that the
+				// refusal must not erase (#7242 review R2-1).
+				require.Len(t, matched, 1, "the live match must be returned beside the refusal, not discarded by it")
+				require.Equal(t, livePID, matched[0].Process.PID)
 			}
 		})
 	}

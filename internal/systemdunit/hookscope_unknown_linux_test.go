@@ -5,9 +5,11 @@ package systemdunit
 import (
 	"bufio"
 	"errors"
+	"fmt"
 	"os"
 	"os/exec"
 	"strconv"
+	"strings"
 	"syscall"
 	"testing"
 	"time"
@@ -116,11 +118,13 @@ func TestStopHookScopesRefusesAnUnclassifiableProcessThatOutlivesTheBudget(t *te
 // command line. Measured on the devbox: 114 ms at 1 GiB, 212 ms at 2 GiB.
 //
 // The fixture must be SINGLE-threaded, which is why it is python3 and not a Go
-// helper. In a multi-threaded process the thread-group leader exits at once and
-// /proc/<tgid> reads Z within about 100 us, while another thread does the
-// teardown. That never shows the window (measured on a 2 GiB Go child). A
-// single-threaded process tears down on its leader, so the window is visible,
-// and shells, interpreters and compilers are single-threaded.
+// helper. In a multi-threaded process the thread-group leader usually exits at
+// once and /proc/<tgid> reads Z within about 100 us, while another thread does
+// the teardown (a 2 GiB Go child never showed the window here). Only when the
+// leader happens to drop the last mm reference does it show (2 of 30 trials in
+// the #7242 review), which is too rare to test on. A single-threaded process
+// always tears down on its leader, and shells, interpreters and compilers are
+// single-threaded.
 func TestStopHookScopesDoesNotRefuseOverAnOrdinaryExit(t *testing.T) {
 	python, err := exec.LookPath("python3")
 	if err != nil {
@@ -190,22 +194,26 @@ func TestStopHookScopesDoesNotRefuseOverAnOrdinaryExit(t *testing.T) {
 	}
 }
 
-// R2. RunningHookPrefixes is a fail-OPEN reader: on an error its callers report
-// no hooks in flight. So an unknown from the launcher oracle must degrade to the
-// units-only answer, master's answer, and never erase a scope the manager
-// still lists. Otherwise one exiting process on one poll ends an adopted hook's
-// watch for good while its scope is still registered.
-func TestRunningHookPrefixesKeepsUnitEvidenceWhenALauncherIsUnclassifiable(t *testing.T) {
+// R2. The FAIL-OPEN read (the restored session's probe and its adopted
+// watcher) must not erase a scope the manager still lists because one process
+// could not be classified. On an error its callers report no hooks in flight,
+// so it answers from what it did establish. The fail-closed read holds instead
+// of answering at all.
+func TestRunningHookPrefixesFailOpenKeepsUnitEvidenceBesideAnUnknown(t *testing.T) {
 	installSystemctlShim(t, "printf '%s\\n' 'af-hook-s1-g0-0.scope loaded active running Hook'\nexit 0\n")
 	startArgvlessProcess(t)
 
-	live, err := RunningHookPrefixes("af-hook-s1", "af-hook-s2")
+	live, err := RunningHookPrefixesFailOpen("af-hook-s1", "af-hook-s2")
 	if err != nil {
-		t.Fatalf("RunningHookPrefixes failed (%v) on an unclassifiable process; its callers fail open, "+
-			"so this reports a still-registered hook as finished (#7239 review R2)", err)
+		t.Fatalf("the fail-open read failed (%v) on an unclassifiable process; its callers would report "+
+			"a still-registered hook as finished (#7239 review R2)", err)
 	}
 	if len(live) != 1 || live[0] != "af-hook-s1" {
 		t.Fatalf("live prefixes = %v, want the registered af-hook-s1", live)
+	}
+
+	if _, err := RunningHookPrefixes("af-hook-s1", "af-hook-s2"); err == nil {
+		t.Fatal("the fail-closed read answered over an unclassifiable process; its callers must hold on it")
 	}
 }
 
@@ -242,5 +250,58 @@ func TestAnUnknownBesideAFoundLauncherNeverReadsAsAbsent(t *testing.T) {
 	if err == nil && len(live) == 0 {
 		t.Fatal("RunningHookPrefixes answered \"no hook in flight\" while a launcher of that prefix was alive; " +
 			"its fail-closed callers would resume the hooks and record the claimant as failed (#7242 review R2-1)")
+	}
+
+	// The fail-open read degrades to units AND found launchers, never units
+	// alone: the launcher it found keeps its prefix live.
+	live, err = RunningHookPrefixesFailOpen(prefix)
+	if err != nil || len(live) != 1 || live[0] != prefix {
+		t.Fatalf("RunningHookPrefixesFailOpen = %v, %v; want [%s]: a found launcher must survive an unknown "+
+			"about another process", live, err, prefix)
+	}
+}
+
+// When the budget runs out with a launcher FOUND and an unknown also standing,
+// the refusal names the launcher. It is the session-specific finding, and the
+// unknown may be any process of this user on the box.
+func TestStopHookScopesNamesAFoundLauncherOverAnUnknown(t *testing.T) {
+	installSystemctlShim(t, "exit 0\n")
+	shortenLauncherSettle(t, 300*time.Millisecond, 20*time.Millisecond)
+	prefix := HookScopeUnitPrefix("s7242")
+	launcher := startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g0", 0),
+		testguard.BoundedSpin(time.Second, 5*time.Minute))
+	startArgvlessProcess(t)
+
+	err := StopHookScopes(prefix)
+	var unregistered *HookLauncherUnregisteredError
+	if !errors.As(err, &unregistered) || len(unregistered.Launchers) != 1 || unregistered.Launchers[0].PID != launcher {
+		t.Fatalf("err = %v; want the found launcher pid %d named", err, launcher)
+	}
+}
+
+// #7242 review R2-3. A refusal caused by an unclassifiable process says so,
+// says it may be unrelated to this session, and keeps the pid. It does not
+// claim the scopes could not be stopped. Any other refusal keeps that wording.
+func TestDescribeHookSweepRefusalNamesWhatHeldTheSweep(t *testing.T) {
+	unclassified := &HookLauncherUnclassifiedError{
+		Unclassified: &proctree.ArgvUnreadableError{PID: 4242, Err: proctree.ErrNoArgv, OwnedByUs: true},
+		Waited:       15 * time.Second,
+	}
+	got := DescribeHookSweepRefusal(fmt.Errorf("wrapped: %w", unclassified), "hook scopes (af-hook-s1-*)")
+	for _, want := range []string{"pid 4242", "possibly unrelated to this session", "hook scopes (af-hook-s1-*)"} {
+		if !strings.Contains(got, want) {
+			t.Fatalf("%q does not say %q", got, want)
+		}
+	}
+	if strings.Contains(got, "could not be stopped") || strings.Contains(unclassified.Error(), "in this worktree") {
+		t.Fatalf("the refusal blames the scopes or this worktree for a box-wide unknown: %q / %q", got, unclassified.Error())
+	}
+	if !strings.Contains(unclassified.Error(), "may be unrelated to this session") {
+		t.Fatalf("the error itself must say the process may be unrelated: %q", unclassified.Error())
+	}
+
+	other := DescribeHookSweepRefusal(errors.New("bus gone"), "hook scopes (af-hook-s1-*)")
+	if other != "hook scopes (af-hook-s1-*) could not be stopped" {
+		t.Fatalf("other refusals keep their wording, got %q", other)
 	}
 }

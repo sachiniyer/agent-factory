@@ -40,3 +40,9 @@ func StopScopeUnits(...string) error { return nil }
 func RunningHookLaunchers(...string) ([]HookLauncher, error) { return nil, nil }
 
 func RunningHookPrefixes(...string) ([]string, error) { return nil, nil }
+
+func RunningHookPrefixesFailOpen(...string) ([]string, error) { return nil, nil }
+
+// DescribeHookSweepRefusal has nothing but the scopes to blame here: the sweep
+// it describes is Linux-only.
+func DescribeHookSweepRefusal(_ error, what string) string { return what + " could not be stopped" }
