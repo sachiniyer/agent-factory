@@ -274,3 +274,68 @@ func TestRecoverStartsAStaleClaudeSessionFresh(t *testing.T) {
 		})
 	}
 }
+
+// #7209 review: a load-time re-spawn (the tmux server died across a reboot)
+// refuses a stale Claude id as Recover does, and retires it once the fresh
+// spawn commits; left recorded, it would fence every later capture arm and be
+// refused again on every restore. A pane that is still alive is reattached and
+// keeps its record, since nothing was re-spawned.
+func TestLoadRespawnRetiresARefusedClaudeConversation(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		alive bool
+	}{{"respawned", false}, {"reattached", true}} {
+		t.Run(tc.name, func(t *testing.T) {
+			log.Initialize(false)
+			defer log.Close()
+			t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+
+			const agentName = "af_load_claude_stale"
+			shellName := agentName + tmuxTabSeparator + shellTabName
+			alive := map[string]bool{}
+			if tc.alive {
+				alive = map[string]bool{agentName: true, shellName: true}
+			}
+			var newSessions int
+			var spawns []string
+			exec := recordingExec(alive, &newSessions, &spawns)
+			pty := persistPtyFactory{t: t, cmdExec: exec}
+			prev := restoreTmuxSession
+			restoreTmuxSession = func(name, program string) *tmux.TmuxSession {
+				return tmux.NewTmuxSessionFromSanitizedNameWithDeps(name, program, pty, exec)
+			}
+			t.Cleanup(func() { restoreTmuxSession = prev })
+
+			data := deadInstanceData(t, Ready, agentName, shellName)
+			data.Tabs[0].Conversation = &AgentConversationData{
+				Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected,
+			}
+			project := claudeProjectCandidates(data.Worktree.WorktreePath)[0]
+			past := time.Now().Add(-time.Hour)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
+			setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+
+			restored, err := FromInstanceData(data)
+			require.NoError(t, err)
+			var agentSpawn string
+			for _, spawn := range spawns {
+				if strings.Contains(spawn, agentName) && !strings.Contains(spawn, shellName) {
+					agentSpawn = spawn
+					break
+				}
+			}
+			if tc.alive {
+				require.Empty(t, agentSpawn, "a live pane is reattached, not re-spawned")
+				require.Equal(t, carryTestID, restored.AgentConversation().ID)
+				return
+			}
+			require.NotEmpty(t, agentSpawn, "the load must re-spawn the missing agent session")
+			require.NotContains(t, agentSpawn, "--resume")
+			require.NotContains(t, agentSpawn, "--continue")
+			require.NotEqual(t, carryTestID, restored.AgentConversation().ID,
+				"the refused id is retired once the fresh spawn commits")
+		})
+	}
+}

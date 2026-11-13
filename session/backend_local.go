@@ -248,6 +248,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		if gw != nil && !worktreeMissing {
 			workDir = gw.GetWorktreePath()
 		}
+		// refusedID is a recorded conversation this load refused to resume,
+		// which a confirmed re-spawn retires, exactly as Recover does: left
+		// recorded, it fences every later capture arm, and each restore refuses
+		// it again and starts fresh again (#7209 review).
+		var refusedID string
 		// A row flagged worktree-missing (#5102) has no directory to re-spawn
 		// into, so workDir stays empty: Restore may only REATTACH a session that
 		// is still alive, never re-spawn one. Re-spawning would either fail —
@@ -287,7 +292,11 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// live pane resumes nothing, so a refusal there is not news (#7101).
 			var refused tmux.ExactResumeRefusal
 			if !resumed {
-				refused = i.exactResumeRefusal(refusal).ExactResumeRefusal
+				r := i.exactResumeRefusal(refusal)
+				refused = r.ExactResumeRefusal
+				if r.retire {
+					refusedID = r.ID
+				}
 			}
 			tmuxSession.SetExactResumeRefusal(refused)
 			// A re-spawn here resumes the session's own recorded conversation or
@@ -301,6 +310,13 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// row's one remedy was a tmux hiccup away from being stranded. Every
 		// failure of the inert reattach is therefore the plain one below: warn
 		// and keep the row listed.
+		// A refused resume launches fresh if this restore re-spawns, and Codex
+		// can mint the replacement's rollout before the next deferred arm's
+		// snapshot: baseline the store before the spawn (#6769 review).
+		var preSpawnCapture ConversationCaptureSnapshot
+		if refusedID != "" {
+			preSpawnCapture = i.sessionCodexCaptureBaselineFor(runtimeProgram)
+		}
 		var restoreResult tmux.RestoreResult
 		var err error
 		if worktreeMissing {
@@ -338,6 +354,9 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// this row ends interrupted rather than finished by the fresh agent's
 			// first idle tick.
 			i.markAgentRuntimeReplaced(true)
+			if refusedID != "" {
+				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
+			}
 		} else {
 			// A tmux name surviving across daemon downtime does not prove that it
 			// still names the process AF launched: an operator can remove and recreate
