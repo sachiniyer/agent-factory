@@ -81,7 +81,9 @@ func TestResumeConversationOutcomeSandboxAnswersUnprovenBeforeARespawn(t *testin
 	// Control: a local session resumes its recorded conversation. The sandbox
 	// refusal below is what changes the answer, not the recorded id.
 	localInst := exactResumeSession(t, tmux.ProgramClaude)
-	localInst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	const localID = "11111111-1111-4111-8111-111111111111"
+	localInst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: localID, CapturedAt: time.Now()}}}
+	fileRecordedClaudeTranscript(t, localInst, localID)
 	require.Equal(t, HandoffConversation{Carried: true}, localInst.ResumeConversationOutcome(),
 		"the control: a local session resumes its recorded conversation")
 

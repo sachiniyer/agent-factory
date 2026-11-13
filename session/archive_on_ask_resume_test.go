@@ -24,6 +24,16 @@ func exactResumeSession(t *testing.T, program string) *Instance {
 	return inst
 }
 
+// fileRecordedClaudeTranscript files conversation id in inst's Claude store, the
+// way Claude does on the conversation's first entry: a recorded id with no
+// transcript is started on rather than resumed (recordedClaudeDecline, #7215).
+func fileRecordedClaudeTranscript(t *testing.T, inst *Instance, id string) {
+	t.Helper()
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	writeCarryFile(t, configDir, claudeTranscriptRel(inst.GetWorktreePath(), id), "{}\n")
+}
+
 // ExactResume, which gates the archive after an agent asks, answers exactly as
 // ResumeProgramWithConversationID does for each supported program: af archives
 // only a session it can resume by its own conversation id. Today that is
@@ -41,6 +51,9 @@ func TestExactResumeFollowsResumeProgramWithConversationID(t *testing.T) {
 				codexHome := t.TempDir()
 				t.Setenv("CODEX_HOME", codexHome)
 				writeCodexRolloutFile(t, codexHome, "rollout-2026-07-06T10-17-35-"+convID+".jsonl")
+			}
+			if program == tmux.ProgramClaude {
+				fileRecordedClaudeTranscript(t, inst, convID)
 			}
 			_, want := tmux.ResumeProgramWithConversationID(program, program, convID)
 			got, why := inst.ExactResume()
@@ -85,7 +98,9 @@ func (b remoteWorkspaceBackend) Capabilities() Capabilities {
 // provisions starts a new conversation (Codex P1 on #6475).
 func TestExactResumeRefusesASandboxSession(t *testing.T) {
 	inst := exactResumeSession(t, tmux.ProgramClaude)
-	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: "conv-1", CapturedAt: time.Now()}}}
+	const convID = "11111111-1111-4111-8111-111111111111"
+	inst.Tabs = []*Tab{{Conversation: AgentConversationData{Agent: tmux.ProgramClaude, ID: convID, CapturedAt: time.Now()}}}
+	fileRecordedClaudeTranscript(t, inst, convID)
 	ok, _ := inst.ExactResume()
 	require.True(t, ok, "the control: a local claude session with a recorded id resumes exactly")
 	inst.SetBackend(remoteWorkspaceBackend{NewFakeBackend()})
