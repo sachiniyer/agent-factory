@@ -13,6 +13,7 @@ import (
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/proctree"
+	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/internal/testguard/sleeper"
 )
 
@@ -205,5 +206,41 @@ func TestRunningHookPrefixesKeepsUnitEvidenceWhenALauncherIsUnclassifiable(t *te
 	}
 	if len(live) != 1 || live[0] != "af-hook-s1" {
 		t.Fatalf("live prefixes = %v, want the registered af-hook-s1", live)
+	}
+}
+
+// #7242 review R2-1, end to end on the real process table. A live launcher held
+// before registration is the #3667 window. Beside it sits an unrelated process
+// of ours that cannot be classified. The oracle must report the launcher it
+// found AND the unknown. Then RunningHookPrefixes, whose four fail-closed
+// callers act only on err == nil && len(live) == 0, must never answer "none":
+// that answer resumes hooks and records the claimant as failed while its
+// launcher is about to run.
+func TestAnUnknownBesideAFoundLauncherNeverReadsAsAbsent(t *testing.T) {
+	installSystemctlShim(t, "exit 0\n") // the manager lists nothing: the #3667 window
+	prefix := HookScopeUnitPrefix("s7242")
+	launcher := startStubHookLauncher(t, "systemd-run", HookScopeUnit(prefix, "g0", 0),
+		testguard.BoundedSpin(time.Second, 5*time.Minute))
+	startArgvlessProcess(t)
+
+	launchers, err := RunningHookLaunchers(prefix)
+	var unreadable *proctree.ArgvUnreadableError
+	if !errors.As(err, &unreadable) {
+		t.Fatalf("err = %v; the argv-less process must be reported as unknown", err)
+	}
+	found := false
+	for _, l := range launchers {
+		found = found || l.PID == launcher
+	}
+	if !found {
+		// Errorf, not Fatalf: the assertion below is the caller-facing half, and
+		// it must be seen on its own.
+		t.Errorf("launchers = %v; the live launcher pid %d was discarded by an unknown about another process", launchers, launcher)
+	}
+
+	live, err := RunningHookPrefixes(prefix)
+	if err == nil && len(live) == 0 {
+		t.Fatal("RunningHookPrefixes answered \"no hook in flight\" while a launcher of that prefix was alive; " +
+			"its fail-closed callers would resume the hooks and record the claimant as failed (#7242 review R2-1)")
 	}
 }

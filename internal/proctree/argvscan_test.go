@@ -614,3 +614,30 @@ func TestAnArgvlessProcessOfAnotherUidDoesNotFailTheScan(t *testing.T) {
 		t.Fatalf("got %v, %v; want a foreign argv-less process skipped as not ours", got, err)
 	}
 }
+
+// #7242 review R2-1. An unknown about one process must never discard a match
+// found beside it. The scan used to return at the first unclassifiable
+// process, so a launcher it had already matched vanished from the answer. The
+// readers that then treated "unknown" as "no launcher" read a live launcher
+// as absent. So the scan returns BOTH: every positive match, and the unknown
+// that makes the list possibly incomplete.
+func TestAnUnknownNeverDiscardsAMatchFoundBesideIt(t *testing.T) {
+	const launcher, unknown = 44, 45
+	stubScan(t, fixedSnapshot(launcher, unknown), func(pid int) ([]string, error) {
+		if pid == launcher {
+			return []string{"systemd-run", "--unit=af-hook-s1-g-0.scope"}, nil
+		}
+		return nil, fmt.Errorf("%w: pid %d", ErrNoArgv, pid)
+	})
+	stubScanUID(t, map[int]int{launcher: os.Getuid(), unknown: os.Getuid()})
+
+	got, err := ProcessesMatchingArgv(func(argv []string) bool { return argv[0] == "systemd-run" })
+	var unreadable *ArgvUnreadableError
+	if !errors.As(err, &unreadable) || unreadable.PID != unknown {
+		t.Fatalf("err = %v; want the unknown about pid %d reported", err, unknown)
+	}
+	if len(got) != 1 || got[0].Process.PID != launcher {
+		t.Fatalf("matches = %v; the launcher pid %d was found and must be reported beside the unknown, "+
+			"not discarded by it (#7242 review R2-1)", got, launcher)
+	}
+}
