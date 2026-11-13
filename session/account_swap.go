@@ -24,6 +24,10 @@ type accountSwapStopper interface {
 type accountSwapLaunchPlan struct {
 	account string
 	base    string
+	// reminted marks a committed replacement re-planned on a fresh
+	// conversation in place of the committed one (committedConversationLaunch).
+	// The respawn makes that record durable before the spawn (#7216 review R2).
+	reminted bool
 	// runtimeBase is the clean base command this plan launches, frozen at
 	// preflight, for RuntimeProgram: the base without af's injected flags
 	// (base can be the pane's frozen program, which carries them), and never
@@ -546,6 +550,7 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		proof: proof, conversation: conversation, conversationCapture: conversationCapture,
 		agent: agent, crossAgent: crossAgent, manual: manual,
 		carry: carry, carryFallback: carryFallback, passthrough: env.passthrough, passthroughFrozen: true,
+		reminted: reminted,
 	}
 	var replaced, missionFrom string
 	refreshMission := false
