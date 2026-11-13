@@ -26,6 +26,14 @@ import (
 // rollout.
 func codexLoopTestInstance(t *testing.T) (*Manager, *session.Instance, string, string, string) {
 	t.Helper()
+	return codexLoopTestInstanceWithOptions(t, managerOptions{})
+}
+
+// codexLoopTestInstanceWithOptions is codexLoopTestInstance on a Manager built
+// with opts, for a test that needs that Manager's own log sinks (they are set
+// at construction and never mutated).
+func codexLoopTestInstanceWithOptions(t *testing.T, opts managerOptions) (*Manager, *session.Instance, string, string, string) {
+	t.Helper()
 	t.Setenv("AGENT_FACTORY_HOME", testguard.SocketTempDir(t))
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
@@ -33,7 +41,7 @@ func codexLoopTestInstance(t *testing.T) (*Manager, *session.Instance, string, s
 	repo, err := config.RepoFromPath(repoPath)
 	require.NoError(t, err)
 
-	manager, err := NewManager(config.DefaultConfig())
+	manager, err := newManagerWithOptions(config.DefaultConfig(), opts)
 	require.NoError(t, err)
 	// Join the capture workers before the timing-global cleanup runs: a loop
 	// still winding down reads conversationCaptureRearmInterval when it builds

@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"fmt"
+	stdlog "log"
 	"sync"
 	"testing"
 	"time"
@@ -244,4 +245,148 @@ func TestFollowPersistsTheMovedThreadAndDoesNotRollBackWhenTheWriteSucceeds(t *t
 		"a successful follow lands the moved thread on disk")
 	require.False(t, inst.ConversationUnpersisted(),
 		"a successful follow still arms no pending-write flag — the poll never owned this write")
+}
+
+// parkedLogSink is a Manager log sink that, once armed closes, holds each
+// write until released closes (bounded, so a broken test fails rather than
+// hangs). The follow writes its log line only after it has released the start
+// lock, so parking that line hands the lock to a writer queued behind it before
+// the follow can do anything further: the interleaving the #7254 review named,
+// made deterministic instead of left to the scheduler.
+type parkedLogSink struct {
+	logs     logCapture
+	armed    <-chan struct{}
+	released <-chan struct{}
+}
+
+func (s *parkedLogSink) Write(p []byte) (int, error) {
+	select {
+	case <-s.armed:
+		select {
+		case <-s.released:
+		case <-time.After(10 * time.Second):
+		}
+	default:
+	}
+	return s.logs.Write(p)
+}
+
+// TestFollowPersistFailureRollsBackBeforeAQueuedWriterCanPersistTheMove is the
+// #7254 review's interleaving. The follow persists under the repository start
+// lock, and every whole-row writer (persistInstanceErr, the polls) snapshots
+// the row under that same lock. A rollback made after the unlock leaves a
+// window in which a writer queued on the lock snapshots the moved, unsaved id
+// and persists it successfully; the rollback then puts memory back on A over a
+// disk that says B — the divergence the rollback exists to prevent, in the
+// other direction. Here a whole-row writer is queued on the start lock while
+// the follow's persist fails, and it must snapshot what disk holds.
+func TestFollowPersistFailureRollsBackBeforeAQueuedWriterCanPersistTheMove(t *testing.T) {
+	armed := make(chan struct{})
+	queuedSnapshotted := make(chan struct{})
+	logger := stdlog.New(&parkedLogSink{armed: armed, released: queuedSnapshotted}, "", 0)
+	manager, inst, repoID, key, codexHome := codexLoopTestInstanceWithOptions(t, managerOptions{warnLog: logger, infoLog: logger})
+	dir := inst.GetWorktreePath()
+
+	// Thread A is recorded and durable; the runtime then moves to B.
+	first := writeHeldTestRollout(t, codexHome, heldMissionThreadID, dir)
+	held := &heldOnly{}
+	held.set(first)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldMissionThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	})
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	second := writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held.set(second)
+	snap := inst.SessionCodexCaptureScope()
+	token := inst.AgentRuntimeToken()
+
+	var mu sync.Mutex
+	calls := 0
+	var followWrote, queuedWrote session.AgentConversationData
+	queuedErr := make(chan error, 1)
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		mu.Lock()
+		calls++
+		n := calls
+		mu.Unlock()
+		switch n {
+		case 1:
+			// The follow's write, made while it holds the start lock: queue
+			// a whole-row writer on that lock, then fail the write.
+			mu.Lock()
+			followWrote = conversationBeingPersisted(data)
+			mu.Unlock()
+			close(armed)
+			go func() { queuedErr <- manager.persistInstanceErr(repoID, inst) }()
+			return fmt.Errorf("simulated transient fsync failure")
+		case 2:
+			// The queued writer's snapshot, taken once it holds the lock.
+			mu.Lock()
+			queuedWrote = conversationBeingPersisted(data)
+			mu.Unlock()
+			close(queuedSnapshotted)
+		}
+		return nil
+	}
+
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, snap, token, inst.AgentConversation()))
+	select {
+	case err := <-queuedErr:
+		require.NoError(t, err, "the queued whole-row writer's own write succeeds")
+	case <-time.After(30 * time.Second):
+		t.Fatal("the writer queued on the start lock never ran")
+	}
+
+	mu.Lock()
+	defer mu.Unlock()
+	require.Equal(t, heldUserThreadID, followWrote.ID, "fixture: the faulted write is the follow's move to B")
+	require.Equal(t, heldMissionThreadID, queuedWrote.ID,
+		"a writer queued on the start lock behind the follow's failed persist must not snapshot the moved, unsaved id")
+	require.Equal(t, heldMissionThreadID, inst.AgentConversation().ID, "memory rolls back to A")
+	require.Equal(t, inst.AgentConversation().ID, persistedConversationID(t, repoID),
+		"memory and disk agree once both writers are done")
+}
+
+// TestFollowPersistFailureLogsTheMoveAsSeenNotRecorded pins what the daemon
+// says when the follow's write fails: the move was seen, it was not saved, and
+// the next follow check retries it. It must not claim, as the success line
+// does, that the thread was recorded.
+func TestFollowPersistFailureLogsTheMoveAsSeenNotRecorded(t *testing.T) {
+	logs := &logCapture{}
+	logger := stdlog.New(logs, "", 0)
+	manager, inst, repoID, key, codexHome := codexLoopTestInstanceWithOptions(t, managerOptions{warnLog: logger, infoLog: logger})
+	dir := inst.GetWorktreePath()
+
+	first := writeHeldTestRollout(t, codexHome, heldMissionThreadID, dir)
+	held := &heldOnly{}
+	held.set(first)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldMissionThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	})
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	second := writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held.set(second)
+
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if conversationBeingPersisted(data).ID == heldUserThreadID {
+			return fmt.Errorf("simulated transient fsync failure")
+		}
+		return nil
+	}
+
+	require.NoError(t, manager.followAgentConversation(repoID, key, inst, inst.SessionCodexCaptureScope(), inst.AgentRuntimeToken(), inst.AgentConversation()))
+	logged := logs.String()
+	require.NotContains(t, logged, "recorded the thread", "a failed write must not be logged as recorded")
+	require.Contains(t, logged, "moved from conversation "+heldMissionThreadID+" to "+heldUserThreadID, "the log names the move that was seen")
+	require.Contains(t, logged, "could not be saved", "the log says the move was not saved")
+	require.Contains(t, logged, "simulated transient fsync failure", "the log carries the write's error")
+	require.Contains(t, logged, "next follow check", "the log says when it is retried")
 }
