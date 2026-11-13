@@ -63,6 +63,19 @@ type conversationCarry struct {
 	// source checks read it instead of walking the store. The live swap never
 	// sets it, and the plan clears it before it returns.
 	srcStore *codexStoreSnapshot
+	// newerIsEvidence is the session's newerConversationIsEvidence: whether a
+	// newer conversation in a launch directory shows the session moved on from
+	// the carried one. Nil counts every newer conversation.
+	newerIsEvidence func(launchDir string) bool
+}
+
+// newerCounts reports whether a newer conversation in launchDir is evidence
+// against the carry. Only where af owns the directory the agent runs in
+// exclusively, the rule the restore path applies (#7227): in the user's own
+// checkout their own claude or codex files conversations too, so a newer one
+// there says nothing about this session.
+func (c *conversationCarry) newerCounts(launchDir string) bool {
+	return c.newerIsEvidence == nil || c.newerIsEvidence(launchDir)
 }
 
 // HandoffConversation reports what the agent serving a session after a
@@ -165,6 +178,10 @@ type accountSwapCarryRequest struct {
 	// snapshot of the source store instead of walking it (#7156 review
 	// P2-1). Only the check-ahead sets it; the live swap walks the store.
 	stores *codexStoreCache
+	// newerIsEvidence is the session's newerConversationIsEvidence. Both the
+	// live swap and the check-ahead pass it, so they judge a newer
+	// conversation alike (#7227).
+	newerIsEvidence func(launchDir string) bool
 }
 
 // planAccountSwapCarry decides whether a swap carries its conversation. It
@@ -182,7 +199,8 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	if req.fallback != "" {
 		return nil, req.fallback
 	}
-	carry := &conversationCarry{agent: req.agent, id: strings.TrimSpace(req.outgoing.ID), sourceAccount: req.current}
+	carry := &conversationCarry{agent: req.agent, id: strings.TrimSpace(req.outgoing.ID), sourceAccount: req.current,
+		newerIsEvidence: req.newerIsEvidence}
 	if pending := req.pending; pending != nil && pending.To == req.target {
 		// A committed transaction already chose its conversation. Never start a
 		// new carry after the checkpoint: the live slot no longer describes the
@@ -355,7 +373,7 @@ const staleCarryReason = "the conversation af recorded is no longer the newest o
 func (c *conversationCarry) staleReason(program, workDir string, outgoing AgentConversationData) string {
 	switch c.agent {
 	case tmux.ProgramClaude:
-		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.claudeLaunchDir, c.transcript, c.id)
+		return claudeCarryStaleness(c.srcHome, c.claudeProjects, c.claudeLaunchDir, c.transcript, c.id, c.newerCounts(c.claudeLaunchDir))
 	case tmux.ProgramCodex:
 		return c.staleCodexReason(program, workDir, outgoing)
 	}
@@ -395,9 +413,15 @@ func (c *conversationCarry) staleCodexReason(program, workDir string, outgoing A
 	case codexRolloutRecordedGone:
 		return carryRolloutMissingReason
 	case codexRolloutStale:
-		return staleCarryReason
+		if c.newerCounts(launchDir) {
+			return staleCarryReason
+		}
 	case codexRolloutUncorrelated:
-		return carryUncorrelatedReason
+		// A newer rollout af cannot classify is a look that failed only where
+		// a newer thread would count.
+		if c.newerCounts(launchDir) {
+			return carryUncorrelatedReason
+		}
 	}
 	return ""
 }
