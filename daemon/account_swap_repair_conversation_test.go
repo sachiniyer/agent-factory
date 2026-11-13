@@ -55,6 +55,13 @@ func TestResumeFromLimit_LivePaneRepairKeepsItsConversationBesideASibling(t *tes
 	}
 
 	outcome, err := m.resumeFromLimitOutcome(ResumeFromLimitRequest{Title: inst.Title, RepoID: repo})
+	// Judged before the outcome: a repair that re-planned away from P leaves
+	// the pending swap naming the fresh id, and fails to finish because the
+	// live agent still records P.
+	if after := inst.ToInstanceData().PendingAccountSwap; after != nil {
+		require.Equal(t, committed, after.ConversationID,
+			"a sibling's newer conversation must not make the repair re-plan away from this session's own conversation")
+	}
 	require.NoError(t, err)
 	require.Equal(t, resumePerformed, outcome)
 
