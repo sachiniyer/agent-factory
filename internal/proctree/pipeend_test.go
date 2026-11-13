@@ -4,6 +4,7 @@ import (
 	"encoding/binary"
 	"os"
 	"os/exec"
+	"runtime"
 	"syscall"
 	"testing"
 	"time"
@@ -34,50 +35,74 @@ func TestPipeInodeFromLink(t *testing.T) {
 
 // The offsets are what decide a kill, so they are pinned against a buffer
 // built by hand from the C layout rather than against the decoder itself.
-func TestPipeHandleFromPipeFdInfo(t *testing.T) {
+func TestPipeHandlesFromPipeFdInfo(t *testing.T) {
 	buf := make([]byte, pipeFdInfoSize)
 	// proc_fileinfo (24 bytes), then pipe_info: vinfo_stat (136), pipe_handle,
-	// pipe_peerhandle. Fill the neighbours with distinct values so an
-	// off-by-eight decode reads the wrong one and fails.
+	// pipe_peerhandle, pipe_status. Fill the neighbours with distinct values so
+	// an off-by-eight decode reads the wrong one and fails.
 	binary.LittleEndian.PutUint64(buf[24+136-8:], 0x1111111111111111) // last qspare of vinfo_stat
 	binary.LittleEndian.PutUint64(buf[24+136:], 0xfeedfacecafebeef)   // pipe_handle
 	binary.LittleEndian.PutUint64(buf[24+144:], 0x2222222222222222)   // pipe_peerhandle
-	h, ok := pipeHandleFromPipeFdInfo(buf)
-	if !ok || h != 0xfeedfacecafebeef {
-		t.Fatalf("pipeHandleFromPipeFdInfo = %#x, %v; want 0xfeedfacecafebeef", h, ok)
+	binary.LittleEndian.PutUint64(buf[24+152:], 0x3333333333333333)   // pipe_status, rfu_1
+	h, peer, ok := pipeHandlesFromPipeFdInfo(buf)
+	if !ok || h != 0xfeedfacecafebeef || peer != 0x2222222222222222 {
+		t.Fatalf("pipeHandlesFromPipeFdInfo = %#x, %#x, %v; want 0xfeedfacecafebeef, 0x2222222222222222", h, peer, ok)
 	}
-	if _, ok := pipeHandleFromPipeFdInfo(buf[:pipeFdInfoSize-1]); ok {
+	if _, _, ok := pipeHandlesFromPipeFdInfo(buf[:pipeFdInfoSize-1]); ok {
 		t.Error("a short buffer must not decode")
 	}
-	if _, ok := pipeHandleFromPipeFdInfo(make([]byte, pipeFdInfoSize)); ok {
+	if _, _, ok := pipeHandlesFromPipeFdInfo(make([]byte, pipeFdInfoSize)); ok {
 		t.Error("a zero handle must not decode: no live struct pipe hashes to zero")
+	}
+	binary.LittleEndian.PutUint64(buf[24+144:], 0)
+	if _, peer, ok := pipeHandlesFromPipeFdInfo(buf); !ok || peer != 0 {
+		t.Errorf("a closed peer is a real answer, zero: got %#x, %v", peer, ok)
 	}
 }
 
-func TestPipeEndIDRefusesANonPipe(t *testing.T) {
+func TestPipeEndOfRefusesWhatIsNotOnePipe(t *testing.T) {
 	f, err := os.CreateTemp(t.TempDir(), "notapipe")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer f.Close()
-	if _, err := PipeEndID(f); err == nil {
+	r, w, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	defer w.Close()
+	if _, err := PipeEndOf(f, r); err == nil {
 		t.Error("a regular file must not have a pipe-end identity")
+	}
+	r2, w2, err := os.Pipe()
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r2.Close()
+	defer w2.Close()
+	if _, err := PipeEndOf(w, r2); err == nil && runtime.GOOS == "linux" {
+		t.Error("ends of two different pipes must not pair")
+	}
+	if _, err := PipeEndOf(w, r); err != nil {
+		t.Errorf("the two ends of one pipe must pair: %v", err)
 	}
 }
 
 // startHolder starts `sleep 60` with stdout on the write end of a fresh pipe
 // when hold is true, and on /dev/null otherwise, in a process group of its
-// own. It returns the child and the identity of that write end.
-func startHolder(t *testing.T, hold bool) (*exec.Cmd, uint64) {
+// own. It returns the child and the pipe's identity, with the read end kept
+// open by the test until cleanup.
+func startHolder(t *testing.T, hold bool) (*exec.Cmd, PipeEnd) {
 	t.Helper()
 	r, w, err := os.Pipe()
 	if err != nil {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { _ = r.Close(); _ = w.Close() })
-	id, err := PipeEndID(w)
+	end, err := PipeEndOf(w, r)
 	if err != nil {
-		t.Fatalf("PipeEndID: %v", err)
+		t.Fatalf("PipeEndOf: %v", err)
 	}
 	cmd := exec.Command("sleep", "60")
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
@@ -102,24 +127,38 @@ func startHolder(t *testing.T, hold bool) (*exec.Cmd, uint64) {
 		}
 		time.Sleep(10 * time.Millisecond)
 	}
-	return cmd, id
+	return cmd, end
 }
 
 func TestHoldsPipeEndSeesAChildHoldingIt(t *testing.T) {
-	cmd, id := startHolder(t, true)
-	held, err := HoldsPipeEnd(cmd.Process.Pid, id)
+	cmd, end := startHolder(t, true)
+	held, err := HoldsPipeEnd(cmd.Process.Pid, end)
 	if err != nil || !held {
 		t.Fatalf("HoldsPipeEnd(child holding the write end) = %v, %v; want true", held, err)
 	}
-	held, err = HoldsPipeEnd(cmd.Process.Pid, id+1)
+	other := end
+	other.held++
+	other.kept++
+	held, err = HoldsPipeEnd(cmd.Process.Pid, other)
 	if err != nil || held {
-		t.Errorf("HoldsPipeEnd(a different identity) = %v, %v; want false", held, err)
+		t.Errorf("HoldsPipeEnd(a different pipe) = %v, %v; want false", held, err)
+	}
+	if runtime.GOOS == "darwin" {
+		// The held end's handle alone is not proof on darwin: an end freed and
+		// reallocated at the same address hashes the same. Its peer must be the
+		// end this process keeps open.
+		wrongPeer := end
+		wrongPeer.kept++
+		held, err = HoldsPipeEnd(cmd.Process.Pid, wrongPeer)
+		if err != nil || held {
+			t.Errorf("HoldsPipeEnd(right handle, wrong peer) = %v, %v; want false", held, err)
+		}
 	}
 }
 
 func TestHoldsPipeEndSeesAChildNotHoldingIt(t *testing.T) {
-	cmd, id := startHolder(t, false)
-	held, err := HoldsPipeEnd(cmd.Process.Pid, id)
+	cmd, end := startHolder(t, false)
+	held, err := HoldsPipeEnd(cmd.Process.Pid, end)
 	if err != nil || held {
 		t.Fatalf("HoldsPipeEnd(child with stdout on /dev/null) = %v, %v; want false", held, err)
 	}
@@ -130,7 +169,7 @@ func TestHoldsPipeEndOnAGoneProcess(t *testing.T) {
 	if err := cmd.Run(); err != nil {
 		t.Fatal(err)
 	}
-	held, err := HoldsPipeEnd(cmd.Process.Pid, 1)
+	held, err := HoldsPipeEnd(cmd.Process.Pid, PipeEnd{held: 1, kept: 2})
 	if held || err == nil {
 		t.Errorf("HoldsPipeEnd(reaped pid) = %v, %v; want false and an error", held, err)
 	}

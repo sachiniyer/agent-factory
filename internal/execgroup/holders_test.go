@@ -2,6 +2,8 @@ package execgroup
 
 import (
 	"errors"
+	"os"
+	"os/exec"
 	"sync"
 	"syscall"
 	"testing"
@@ -20,7 +22,7 @@ type scripted struct {
 	sent    []int
 }
 
-func (s *scripted) scan(pgid int, ids []uint64) ([]proctree.Process, error) {
+func (s *scripted) scan(pgid int, ends []proctree.PipeEnd) ([]proctree.Process, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	i := s.scans
@@ -34,14 +36,14 @@ func (s *scripted) scan(pgid int, ids []uint64) ([]proctree.Process, error) {
 	return s.answers[i], nil
 }
 
-func (s *scripted) signal(p proctree.Process, sig syscall.Signal) error {
+func (s *scripted) signal(p proctree.Process, sig syscall.Signal, _ time.Time) bool {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if sig != syscall.SIGKILL {
 		panic("reapPipeHolders sends only SIGKILL")
 	}
 	s.sent = append(s.sent, p.PID)
-	return nil
+	return true
 }
 
 func proc(pid int) proctree.Process { return proctree.Process{PID: pid, StartID: uint64(pid)} }
@@ -49,7 +51,7 @@ func proc(pid int) proctree.Process { return proctree.Process{PID: pid, StartID:
 // Two quiet scans in a row end the reap, and a quiet group is never signalled.
 func TestReapPipeHoldersStopsAfterTwoQuietScans(t *testing.T) {
 	s := &scripted{answers: [][]proctree.Process{nil}, errAt: -1}
-	reapPipeHoldersWith(100, []uint64{1}, s.scan, s.signal, time.Now().Add(time.Minute))
+	reapPipeHoldersWith(100, nil, s.scan, s.signal, time.Now().Add(time.Minute))
 	if s.scans != 2 {
 		t.Errorf("scans = %d, want 2: one quiet scan and its confirmation", s.scans)
 	}
@@ -68,7 +70,7 @@ func TestReapPipeHoldersRescansAfterEachKill(t *testing.T) {
 		nil,
 		nil,
 	}, errAt: -1}
-	reapPipeHoldersWith(100, []uint64{1}, s.scan, s.signal, time.Now().Add(time.Minute))
+	reapPipeHoldersWith(100, nil, s.scan, s.signal, time.Now().Add(time.Minute))
 	if len(s.sent) != 2 || s.sent[0] != 7 || s.sent[1] != 8 {
 		t.Errorf("signalled %v, want [7 8]: each holder found, in the order found", s.sent)
 	}
@@ -80,7 +82,7 @@ func TestReapPipeHoldersRescansAfterEachKill(t *testing.T) {
 // A scan that fails proves nothing, so nothing is signalled on it.
 func TestReapPipeHoldersSendsNothingOnAFailedScan(t *testing.T) {
 	s := &scripted{answers: [][]proctree.Process{{proc(7)}}, errAt: 0}
-	reapPipeHoldersWith(100, []uint64{1}, s.scan, s.signal, time.Now().Add(time.Minute))
+	reapPipeHoldersWith(100, nil, s.scan, s.signal, time.Now().Add(time.Minute))
 	if len(s.sent) != 0 {
 		t.Errorf("signalled %v after a failed scan", s.sent)
 	}
@@ -92,19 +94,19 @@ func TestReapPipeHoldersHonoursItsDeadline(t *testing.T) {
 	release := make(chan struct{})
 	var mu sync.Mutex
 	var sent []int
-	scan := func(int, []uint64) ([]proctree.Process, error) {
+	scan := func(int, []proctree.PipeEnd) ([]proctree.Process, error) {
 		<-release
 		return []proctree.Process{proc(7)}, nil
 	}
-	signal := func(p proctree.Process, _ syscall.Signal) error {
+	signal := func(p proctree.Process, _ syscall.Signal, _ time.Time) bool {
 		mu.Lock()
 		defer mu.Unlock()
 		sent = append(sent, p.PID)
-		return nil
+		return true
 	}
 	deadline := time.Now().Add(100 * time.Millisecond)
 	start := time.Now()
-	reapPipeHoldersWith(100, []uint64{1}, scan, signal, deadline)
+	reapPipeHoldersWith(100, nil, scan, signal, deadline)
 	if took := time.Since(start); took > 2*time.Second {
 		t.Errorf("returned after %v; a blocked scan must not hold the reap past its deadline", took)
 	}
@@ -114,5 +116,37 @@ func TestReapPipeHoldersHonoursItsDeadline(t *testing.T) {
 	defer mu.Unlock()
 	if len(sent) != 0 {
 		t.Errorf("signalled %v on an answer that arrived after the deadline", sent)
+	}
+}
+
+// The production signaller's own rules: it never signals pid 1 or itself, and
+// sends nothing when the identity check answers after the deadline.
+func TestSignalIfSameRefusesWhatItCannotProve(t *testing.T) {
+	if signalIfSame(proc(1), syscall.Signal(0), time.Now().Add(time.Minute)) {
+		t.Error("signalIfSame signalled pid 1")
+	}
+	self := proctree.Process{PID: os.Getpid()}
+	if signalIfSame(self, syscall.Signal(0), time.Now().Add(time.Minute)) {
+		t.Error("signalIfSame signalled this process")
+	}
+	cmd := exec.Command("sleep", "60")
+	if err := cmd.Start(); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = cmd.Process.Kill(); _ = cmd.Wait() })
+	live, err := proctree.Lookup(cmd.Process.Pid)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if signalIfSame(live, syscall.Signal(0), time.Now()) {
+		t.Error("signalIfSame sent a signal with its deadline already passed")
+	}
+	stale := live
+	stale.StartID++
+	if signalIfSame(stale, syscall.Signal(0), time.Now().Add(time.Minute)) {
+		t.Error("signalIfSame signalled a pid whose start time no longer matches")
+	}
+	if !signalIfSame(live, syscall.Signal(0), time.Now().Add(time.Minute)) {
+		t.Error("signalIfSame refused the same live instance before its deadline")
 	}
 }

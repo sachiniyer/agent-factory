@@ -187,11 +187,13 @@ func settle(cmd *exec.Cmd, pipes []*ownedPipe) bool {
 		return false
 	}
 	if leadsOwnGroup(cmd) {
-		ids := make([]uint64, 0, len(open))
+		ends := make([]proctree.PipeEnd, 0, len(open))
 		for _, p := range open {
-			ids = append(ids, p.id)
+			ends = append(ends, p.end)
 		}
-		reapPipeHolders(cmd.Process.Pid, ids)
+		// Before abandon: each pipe's own end must still be open here while its
+		// holders are looked for (see proctree.PipeEnd).
+		reapPipeHolders(cmd.Process.Pid, ends)
 	}
 	for _, p := range open {
 		p.abandon()
@@ -211,10 +213,11 @@ func leadsOwnGroup(cmd *exec.Cmd) bool {
 
 // ownedPipe is one pipe between this process and the child: ours is the end
 // kept here, theirs the end the child inherits, closed here once it has
-// started. id is PipeEndID of theirs, the end a straggler would hold.
+// started. end identifies the pair, so that a process still holding theirs
+// can be found while ours is open.
 type ownedPipe struct {
 	ours, theirs *os.File
-	id           uint64
+	end          proctree.PipeEnd
 	copy         func() error
 	done         chan struct{} // closed when copy has returned
 	err          error         // copy's result, valid once done is closed
@@ -255,16 +258,16 @@ func newInputPipe(src io.Reader) (*ownedPipe, error) {
 	return p, p.identify()
 }
 
-// identify records the identity of the child's end. A pipe whose holders
-// cannot be named would leave a straggler on it unreapable, so failing here
-// fails the command before it starts rather than degrading silently.
+// identify records the identity of the pipe. A pipe whose holders cannot be
+// named would leave a straggler on it unreapable, so failing here fails the
+// command before it starts rather than degrading silently.
 func (p *ownedPipe) identify() error {
-	id, err := proctree.PipeEndID(p.theirs)
+	end, err := proctree.PipeEndOf(p.theirs, p.ours)
 	if err != nil {
 		p.closeBoth()
 		return err
 	}
-	p.id = id
+	p.end = end
 	return nil
 }
 

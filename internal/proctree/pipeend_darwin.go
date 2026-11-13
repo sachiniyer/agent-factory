@@ -21,15 +21,22 @@ var errProcFdPipeInfoFailed = errors.New("proc_pidfdinfo(PROC_PIDFDPIPEINFO) ret
 
 // holdsPipeEnd lists pid's descriptors with proc_pidinfo(PROC_PIDLISTFDS),
 // the same list openFilePaths walks, and asks proc_pidfdinfo for each pipe
-// descriptor's pipe_handle. That handle is the hash of the end's own struct
-// pipe, which is what PipeEndID read through fstat (bsd/kern/sys_pipe.c), so
-// equality means the very same end.
+// descriptor's pipe_handle and pipe_peerhandle. Each is the hash of a struct
+// pipe, the same hash PipeEndOf read through fstat (bsd/kern/sys_pipe.c). A
+// descriptor matches only when its handle is the held end's AND its peer is
+// the kept end's. The kept end is open in the caller, so its address, and
+// with it its hash, cannot have been reused; the held end might have been.
+//
+// The list and the per-fd queries are separate reads of a table that keeps
+// changing, so each answer is judged on its own: a descriptor that closed in
+// between is skipped, and one whose number now names a different file is
+// judged by what it names now, which matches only if it is one of these pipes.
 //
 // An fd that closed between the listing and the query (EBADF, ENOENT) is
 // skipped. A process that is gone (ESRCH) is ErrProcessExited. Any other
 // failure, including an answer of the wrong size, is an error: a partly read
 // descriptor set must never look like one that holds nothing.
-func holdsPipeEnd(pid int, want map[uint64]bool) (bool, error) {
+func holdsPipeEnd(pid int, ends []PipeEnd) (bool, error) {
 	fds, err := listProcFds(pid)
 	if err != nil {
 		return false, err
@@ -55,15 +62,26 @@ func holdsPipeEnd(pid int, want map[uint64]bool) (bool, error) {
 		if int(n) != len(buf) {
 			return false, errProcFdPipeInfoFailed
 		}
-		handle, ok := pipeHandleFromPipeFdInfo(buf[:])
+		handle, peer, ok := pipeHandlesFromPipeFdInfo(buf[:])
 		if !ok {
 			return false, errProcFdPipeInfoFailed
 		}
-		if want[handle] {
-			return true, nil
+		for _, end := range ends {
+			if handle == end.held && peer == end.kept {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
+}
+
+// checkPipePair has nothing to compare on darwin, where each end has its own
+// identity.
+func checkPipePair(held, kept uint64) error {
+	if held == kept {
+		return fmt.Errorf("proctree: both pipe ends report identity %#x; darwin gives each end its own", held)
+	}
+	return nil
 }
 
 // groupMembers reads kern.proc.pgrp: one sysctl for the members of one group,
