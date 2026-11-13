@@ -44,20 +44,62 @@ const (
 // transcript on a wedged mount must read as unknown, not stall them.
 func claudeTranscriptDir(path string) (string, bool) {
 	got, err := fsprobe.ReadFileWith(path, func(file *os.File) (any, error) {
-		if dir, ok := claudeTranscriptTailDir(file); ok {
-			return dir, nil
-		}
-		if _, err := file.Seek(0, io.SeekStart); err != nil {
-			return "", err
-		}
-		dir, _ := claudeTranscriptHeadCwd(file)
-		return dir, nil
+		return readClaudeTranscriptDir(file)
 	})
 	dir, _ := got.(string)
 	if err != nil || dir == "" {
 		return "", false
 	}
 	return dir, true
+}
+
+// readClaudeTranscriptDir is claudeTranscriptDir over an open transcript: ""
+// when no record af can read names a directory.
+func readClaudeTranscriptDir(file *os.File) (string, error) {
+	if dir, ok := claudeTranscriptTailDir(file); ok {
+		return dir, nil
+	}
+	if _, err := file.Seek(0, io.SeekStart); err != nil {
+		return "", err
+	}
+	dir, _ := claudeTranscriptHeadCwd(file)
+	return dir, nil
+}
+
+// claudeRecordedDir is what ownership needs of the directory a transcript
+// records: where it resolves to, and the project names its spellings file
+// under.
+type claudeRecordedDir struct {
+	resolved string
+	names    map[string]bool
+}
+
+// claudeRecordedDirFacts resolves dir for claudeTranscriptOwnership. It
+// follows symlinks on whatever filesystem dir names, which may be a mount the
+// agent cd'd onto that no longer answers, so it runs inside the transcript
+// read's bounded flight. A test seam.
+var claudeRecordedDirFacts = func(dir string) claudeRecordedDir {
+	names := map[string]bool{}
+	for _, project := range claudeProjectCandidates(dir) {
+		names[filepath.Base(project)] = true
+	}
+	return claudeRecordedDir{resolved: pathutil.ResolveForCompare(dir), names: names}
+}
+
+// claudeTranscriptRecordedDir reads the directory the transcript at path
+// records and resolves it, both inside fsprobe's per-path bound (Codex review
+// of #7221): a read or a lookup that does not answer leaves ok false.
+func claudeTranscriptRecordedDir(path string) (claudeRecordedDir, bool) {
+	facts := claudeRecordedDirFacts // in the caller, as fsprobe's seams
+	got, err := fsprobe.ReadFileWith(path, func(file *os.File) (any, error) {
+		dir, err := readClaudeTranscriptDir(file)
+		if err != nil || dir == "" {
+			return nil, err
+		}
+		return facts(dir), nil
+	})
+	recorded, ok := got.(claudeRecordedDir)
+	return recorded, err == nil && ok
 }
 
 // claudeTranscriptHeadCwd is the cwd of the first record within the head
@@ -166,19 +208,15 @@ const (
 // was relocated from, the worktree's path before a move. Both sides are
 // compared resolved, the way the Codex checks compare a rollout's cwd.
 func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) claudeOwnership {
-	dir, ok := claudeTranscriptDir(filepath.Join(transcript.dir, transcript.name))
+	recorded, ok := claudeTranscriptRecordedDir(filepath.Join(transcript.dir, transcript.name))
 	if !ok {
 		return claudeOwnershipUnknown
 	}
-	if pathutil.ResolveForCompare(dir) == pathutil.ResolveForCompare(launchDir) {
+	if recorded.resolved == pathutil.ResolveForCompare(launchDir) {
 		return claudeOwnedHere
 	}
-	names := map[string]bool{}
 	for _, project := range claudeProjectCandidates(launchDir) {
-		names[filepath.Base(project)] = true
-	}
-	for _, project := range claudeProjectCandidates(dir) {
-		if names[filepath.Base(project)] {
+		if recorded.names[filepath.Base(project)] {
 			return claudeOwnedElsewhere
 		}
 	}

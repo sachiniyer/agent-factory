@@ -269,3 +269,35 @@ func TestClaudeTranscriptDirIsBoundedOnAWedgedMount(t *testing.T) {
 	require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(
 		claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}, "/work/a"))
 }
+
+// Codex review of #7221: resolving the directory a transcript records follows
+// symlinks on whatever filesystem it names, which may be a mount the agent
+// cd'd onto that no longer answers. That lookup runs inside the read's bound:
+// it reads as unknown, never stalls the judge.
+func TestClaudeTranscriptOwnershipBoundsTheRecordedDirectorysLookup(t *testing.T) {
+	path := filepath.Join(t.TempDir(), carryTestID+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(claudeRecordLine(t, "/mnt/gone/work")), 0o600))
+	release := make(chan struct{})
+	prev := claudeRecordedDirFacts
+	claudeRecordedDirFacts = func(string) claudeRecordedDir {
+		<-release
+		return claudeRecordedDir{}
+	}
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		claudeRecordedDirFacts = prev
+		restoreTimeout()
+	})
+
+	answered := make(chan claudeOwnership, 1)
+	go func() {
+		answered <- claudeTranscriptOwnership(claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}, "/work")
+	}()
+	select {
+	case got := <-answered:
+		require.Equal(t, claudeOwnershipUnknown, got)
+	case <-time.After(5 * time.Second):
+		t.Fatal("a lookup on a wedged mount must not stall ownership")
+	}
+}
