@@ -168,6 +168,38 @@ func TestWorktreeWriterProcesses_PrunesSharedInfrastructureSubtrees(t *testing.T
 // on CI could not be reached at all. Only a positive NotTmux makes a process
 // eligible, so the zero value of TmuxIdentity, which is what an identity
 // nobody filled in reads as, must exclude it too.
+// A pass settles each process's identity once (#7245 review R3). A pid read as
+// unknown when it is evaluated as a root, and as not tmux when another root's
+// walk reaches it, used to end up both left out as unclassified and in the kill
+// set. The survivor warning could then call a process the reap had signalled
+// unsignalled. The first answer now holds for the whole pass, in the safe
+// direction, just as a tier's answer holds for every later tier.
+func TestWorktreeWriterProcesses_SettlesEachIdentityOncePerPass(t *testing.T) {
+	const (
+		parent = 10
+		flaky  = 20 // unknown at its first read, not tmux after
+	)
+	snap := map[int]proctree.Process{
+		parent: {PID: parent, PPID: 1},
+		flaky:  {PID: flaky, PPID: parent},
+	}
+	reads := make(map[int]int)
+	identity := func(pid int) proctree.TmuxIdentity {
+		reads[pid]++
+		if pid == flaky && reads[pid] == 1 {
+			return proctree.TmuxUnknown
+		}
+		return proctree.NotTmux
+	}
+
+	procs, unclassified := worktreeWriterProcessesMatching(snap, 99, func(int) bool { return true }, identity)
+
+	assert.ElementsMatch(t, []int{parent}, processPIDs(procs),
+		"a pid read as unknown must not be admitted by a later read in the same pass")
+	assert.ElementsMatch(t, []int{flaky}, processPIDs(unclassified),
+		"it is reported as unclassified exactly once, and never also put in the kill set")
+}
+
 func TestWorktreeWriterProcesses_NeverSelectsAnUnclassifiableRoot(t *testing.T) {
 	const (
 		unreadable = 10

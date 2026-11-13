@@ -8,6 +8,7 @@ package git
 import (
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -70,7 +71,9 @@ var (
 // The leave-alone identity degrades the same way (#7238). A process whose
 // command line cannot be read (one mid-execve or mid-exit, or one darwin
 // refuses) might be the shared tmux server, so it is excluded like tmux, never
-// read as "not tmux". The reaper signals only what it has fully classified.
+// read as "not tmux". The reaper signals only what it has fully classified,
+// and that holds when it signals, not only when it selects: the identity is
+// read again just before every signal tier (#7244, tierIdentity).
 func reapWorktreeWriters(worktreePath string) {
 	// The path exists (callers reap only after an os.Stat succeeds), so resolving
 	// symlinks here matches /proc/<pid>/cwd, which the kernel already resolves.
@@ -91,8 +94,13 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		return
 	}
 	procs, unclassified := worktreeWriterProcessesMatching(snap, os.Getpid(), matches, proctree.TmuxIdentityOf)
-	// Runs after the kill below, or now if there is nothing to kill.
-	defer warnUnclassifiedSurvivors(worktreePath, unclassified)
+	// The identity read above is re-established before every signal (#7244).
+	tiers := newTierIdentity(proctree.TmuxIdentityOf, proctree.AliveSame)
+	// Runs after the kill below, or now if there is nothing to kill. It reads
+	// tiers only when it runs, so it also covers what a signal tier left alone.
+	defer func() {
+		warnUnclassifiedSurvivors(worktreePath, append(sparedAtSelection(unclassified), tiers.unclassified...), proctree.TmuxIdentityOf)
+	}()
 	if len(procs) == 0 {
 		return
 	}
@@ -109,6 +117,9 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 		}
 	}
 	proctree.KillEscalatingExcept(procs, func(p proctree.Process) bool {
+		if tiers.leftAlone(p) {
+			return true
+		}
 		if !teardownreq.Is(p) {
 			return false
 		}
@@ -118,7 +129,7 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 				"excluding it from the worktree writer reap (#5182)", p.PID, p.Comm)
 		}
 		return true
-	}, teardownreq.SignalUnlessTracked, worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
+	}, tiers.signalIf(teardownreq.SignalUnlessTrackedOrSpared), worktreeReapGrace, worktreeReapTermWait, func(_ proctree.ReapOutcome, format string, args ...any) {
 		// Every tier stays a WARNING here, and the outcome is deliberately unused
 		// (#2765). This reaper does not run on the requested-teardown side of that
 		// split: it fires only when a process is STILL WRITING into a worktree
@@ -142,20 +153,219 @@ func reapWorktreeWritersMatching(worktreePath string, matches func(int) bool) {
 //
 // It first gives those processes the same wait a SIGTERMed writer gets. An
 // unknown identity is usually a process starting or exiting (see
-// proctree.ErrNoArgv), and an ordinary exit is not worth a warning. Nothing is
-// signalled here.
-func warnUnclassifiedSurvivors(worktreePath string, unclassified []proctree.Process) {
-	if len(unclassified) == 0 {
+// proctree.ErrNoArgv), and an ordinary exit is not worth a warning. Then it reads
+// each survivor's identity again, and says what that read found (#7245 review
+// R3):
+//
+//   - tmux: it was caught mid-exec into tmux, and leaving it alone was right, so
+//     nothing is reported.
+//   - not tmux: it was mid-transition when the reap read it, and it is an
+//     ordinary process now. The warning says so, and that a retried removal, or
+//     deleting an archived session, reaps it.
+//   - still unknown: the warning says its identity could not be established.
+//
+// Nothing is signalled here.
+func warnUnclassifiedSurvivors(worktreePath string, spared []sparedProcess, identity func(int) proctree.TmuxIdentity) {
+	if len(spared) == 0 {
 		return
 	}
-	for _, p := range proctree.WaitForExits(unclassified, worktreeReapTermWait) {
+	procs := make([]proctree.Process, 0, len(spared))
+	byPID := make(map[int]sparedProcess, len(spared))
+	for _, s := range spared {
+		procs = append(procs, s.Process)
+		byPID[s.PID] = s
+	}
+	for _, p := range proctree.WaitForExits(procs, worktreeReapTermWait) {
+		s := byPID[p.PID]
 		// worktreePath is a runtime value that may contain `%`, so it is an
-		// argument, never part of the format (#1211).
-		log.WarningLog.Printf("worktree %s: pid %d (%s) is still working inside it and was not signalled, "+
-			"because whether it is the shared tmux server could not be established (#7238). It and its "+
-			"subtree may keep writing: a removal can fail with \"directory not empty\", and an archive leaves "+
-			"it writing into the moved tree. Inspect it with `ps -o pid,stat,lstart,args -p %d`",
-			worktreePath, p.PID, p.Comm, p.PID)
+		// argument, never part of either format (#1211).
+		switch identity(p.PID) {
+		case proctree.Tmux:
+			continue
+		case proctree.NotTmux:
+			log.WarningLog.Printf("worktree %s: pid %d (%s) is still working inside it and %s. When the reap read it "+
+				"%s, whether it is tmux could not be read, which happens while a process starts, execs or exits, "+
+				"and it reads as not tmux now. If the removal failed with \"directory not empty\", retrying it will "+
+				"reap this process; after an archive, deleting the archived session does. Inspect it with "+
+				"`ps -o pid,stat,lstart,args -p %d`",
+				worktreePath, p.PID, p.Comm, s.signalled(), s.readWhen(), p.PID)
+		default:
+			log.WarningLog.Printf("worktree %s: pid %d (%s) is still working inside it and %s, "+
+				"because whether it is the shared tmux server could not be established (#7238). It and its "+
+				"subtree may keep writing: a removal can fail with \"directory not empty\", and an archive leaves "+
+				"it writing into the moved tree. Inspect it with `ps -o pid,stat,lstart,args -p %d`",
+				worktreePath, p.PID, p.Comm, s.signalled(), p.PID)
+		}
+	}
+}
+
+// sparedProcess is a process the reap left alone because its tmux identity was
+// unknown, for warnUnclassifiedSurvivors.
+type sparedProcess struct {
+	proctree.Process
+	// afterSIGTERM: the reap had already sent it SIGTERM, and it was left out
+	// of the SIGKILL tier only.
+	afterSIGTERM bool
+	// readAt is the signal whose identity read spared it, or zero when
+	// selection did.
+	readAt syscall.Signal
+}
+
+// signalled says what the reap had sent the process.
+func (s sparedProcess) signalled() string {
+	if s.afterSIGTERM {
+		return "was sent SIGTERM but not SIGKILL"
+	}
+	return "was not signalled"
+}
+
+// readWhen names the read that spared the process.
+func (s sparedProcess) readWhen() string {
+	if s.readAt == 0 {
+		return "at selection"
+	}
+	return "just before its " + signalName(s.readAt)
+}
+
+// sparedAtSelection wraps the processes selection left out for an unknown
+// identity. Selection settles each pid's identity once per pass, so none of
+// them is also in the kill set, and none was signalled.
+func sparedAtSelection(procs []proctree.Process) []sparedProcess {
+	spared := make([]sparedProcess, 0, len(procs))
+	for _, p := range procs {
+		spared = append(spared, sparedProcess{Process: p})
+	}
+	return spared
+}
+
+// tierIdentity re-establishes the leave-alone identity immediately before each
+// signal the reap sends (#7244).
+//
+// Selection reads proctree.TmuxIdentityOf once, and the signal tiers come
+// later: SIGTERM after the grace, then SIGKILL after worktreeReapTermWait.
+// Neither the kill set nor AliveSame notices an exec in between, because exec
+// keeps the pid and the start time. That is #4678's shape: a daemon child
+// selected in its pre-exec window, still carrying af's argv, execs tmux and
+// becomes a client, or the server's fork parent, and the next tier signals it.
+//
+// So "signal only what has been fully classified" holds when the reap signals,
+// not just when it selects. Before each signal the identity is read again, and
+// only a positive NotTmux lets the signal through. A process that reads as
+// tmux, or as unknown, is left out of that tier and every later one. The
+// decision sticks: a process caught mid-exec, which reads as unknown, is still
+// not signalled if a later read finds something else. As at selection, that
+// costs at most one missed writer, and an unknown one that survives the reap is
+// reported (warnUnclassifiedSurvivors).
+//
+// No liveness read overrules that (#7245 review R1). On Linux, a multi-threaded
+// process that execs from a thread other than its leader reads as a zombie for
+// about 100 µs while de_thread hands the pid over, and then carries on under the
+// same pid and start time. So "gone" is not proof, and a process that read as
+// tmux or unknown is never handed to the signal because a liveness read said it
+// had exited. Liveness only picks the log line. One that really has exited
+// costs that INFO line, and the survivor warning's own wait drops it.
+//
+// The read is the spare predicate of teardownreq.SignalUnlessTrackedOrSpared,
+// so it runs inside the requester lock, after the registry check, with only
+// proctree.Signal's identity check between it and kill(2) (#7245 review R2).
+// What remains is that one stat read: an exec that starts after the identity
+// read can still be signalled, and nothing in Linux or darwin refuses a signal
+// across an exec. The lock is held over the read. On darwin that read can wait
+// out its target's own exec, the same blocking class as the stat read
+// proctree.Signal already makes under that lock.
+//
+// The read sits in the check-and-signal rather than in the exemption, because
+// KillEscalatingExcept consults the exemption for its wait sets and its final
+// leftovers too. A process exiting after its SIGKILL can read as unknown there
+// (see proctree.ErrNoArgv), and it would be reported as spared when it was
+// killed. The exemption only consults the decision the check-and-signal
+// recorded.
+//
+// The subtree needs no fresh walk. The kill set is a snapshot, so a process
+// forked after selection is never in it, and that includes the panes a tmux
+// forks after its exec. Each selected descendant is re-read before its own
+// signal. A child that existed before its parent became tmux belongs to the
+// parent's old image, so it was admitted by the same descent rule as before and
+// is still a writer.
+type tierIdentity struct {
+	identity func(int) proctree.TmuxIdentity
+	alive    func(proctree.Process) bool
+	// left holds each pid a tier left alone; it is never signalled again.
+	left map[int]bool
+	// termed holds each pid that was sent SIGTERM.
+	termed map[int]bool
+	// unclassified is each process left alone because it read as unknown.
+	unclassified []sparedProcess
+}
+
+func newTierIdentity(identity func(int) proctree.TmuxIdentity, alive func(proctree.Process) bool) *tierIdentity {
+	return &tierIdentity{identity: identity, alive: alive, left: make(map[int]bool), termed: make(map[int]bool)}
+}
+
+// leftAlone reports whether a signal tier has already left p alone. It reads
+// nothing about the process.
+func (t *tierIdentity) leftAlone(p proctree.Process) bool {
+	return t.left[p.PID]
+}
+
+// signalIf adapts next, a check-and-signal that takes a spare predicate
+// (teardownreq.SignalUnlessTrackedOrSpared), to the signalIf KillEscalatingExcept
+// takes. next evaluates the identity read as that predicate, immediately before
+// the signal. signalIf reports attempted false for a process left alone, which
+// KillEscalatingExcept treats like any other reprieve.
+func (t *tierIdentity) signalIf(next func(proctree.Process, syscall.Signal, func(proctree.Process) bool) (bool, error)) func(proctree.Process, syscall.Signal) (bool, error) {
+	return func(p proctree.Process, sig syscall.Signal) (bool, error) {
+		if t.left[p.PID] {
+			return false, nil
+		}
+		identity := proctree.NotTmux
+		attempted, err := next(p, sig, func(p proctree.Process) bool {
+			identity = t.identity(p.PID)
+			return identity != proctree.NotTmux
+		})
+		if identity != proctree.NotTmux {
+			// Recorded and logged here, once next has released its lock.
+			t.leave(p, sig, identity)
+			return false, nil
+		}
+		if attempted && err == nil && sig == syscall.SIGTERM {
+			t.termed[p.PID] = true
+		}
+		return attempted, err
+	}
+}
+
+// leave records that the read before sig left p alone, for this tier and every
+// later one.
+func (t *tierIdentity) leave(p proctree.Process, sig syscall.Signal, identity proctree.TmuxIdentity) {
+	t.left[p.PID] = true
+	if identity == proctree.TmuxUnknown {
+		t.unclassified = append(t.unclassified, sparedProcess{Process: p, afterSIGTERM: t.termed[p.PID], readAt: sig})
+	}
+	// The liveness read comes after the identity read, so a live answer means
+	// the identity read was of p itself: its pid cannot have been reused while it
+	// is alive. A "gone" answer proves nothing (see tierIdentity), so it changes
+	// only what is said.
+	if t.alive(p) {
+		log.InfoLog.Printf("pid %d (%s) was selected as not tmux, but just before its %s it reads as %s; "+
+			"leaving it out of this signal tier and every later one of the worktree writer reap (#7244)",
+			p.PID, p.Comm, signalName(sig), identity)
+		return
+	}
+	log.InfoLog.Printf("pid %d (%s) reads as %s just before its %s, and as exited. A process mid-exec can read "+
+		"that way too, so it is not signalled at this tier or any later one of the worktree writer reap (#7244)",
+		p.PID, p.Comm, identity, signalName(sig))
+}
+
+// signalName names the two signals the reap sends as an operator writes them.
+func signalName(sig syscall.Signal) string {
+	switch sig {
+	case syscall.SIGTERM:
+		return "SIGTERM"
+	case syscall.SIGKILL:
+		return "SIGKILL"
+	default:
+		return sig.String()
 	}
 }
 
@@ -212,6 +422,12 @@ func worktreeWriterProcessesMatching(
 	// succeeds with the writer still writing into the moved tree. So each such
 	// process is returned as unclassified, and one still alive after the reap is
 	// reported at WARNING (warnUnclassifiedSurvivors).
+	//
+	// The first identity read of a pid settles it for the whole pass (#7245
+	// review R3). A pid read as unknown as a root and as not tmux inside another
+	// root's walk used to be both unclassified and admitted, so the survivor
+	// warning could call a signalled process unsignalled. Keeping the first
+	// answer is the safe direction, and it is the rule the signal tiers follow.
 	// A tracked teardown requester (#5182) — the process that asked for this
 	// teardown, identified by kernel peer credentials and still blocked on its
 	// reply — is alive inside the worktree for the best possible reason:
@@ -239,20 +455,23 @@ func worktreeWriterProcessesMatching(
 		}
 		return true
 	}
-	unknownLogged := make(map[int]bool)
+	settled := make(map[int]proctree.TmuxIdentity)
 	protectedInfrastructure := func(pid int) bool {
 		if pid == selfPID {
 			return true
 		}
-		identity := tmuxIdentity(pid)
-		if identity == proctree.TmuxUnknown && !unknownLogged[pid] {
-			// Once per pid per pass, like the requester notice: a pid can be
-			// evaluated as a root and again inside another root's subtree.
-			unknownLogged[pid] = true
-			unclassified = append(unclassified, snap[pid])
-			log.InfoLog.Printf("pid %d (%s) could not be classified as tmux or not: its command line or task "+
-				"name could not be read; leaving it and its subtree out of the worktree writer reap (#7238)",
-				pid, snap[pid].Comm)
+		identity, ok := settled[pid]
+		if !ok {
+			// Read once per pid per pass: a pid can be evaluated as a root and
+			// again inside another root's subtree.
+			identity = tmuxIdentity(pid)
+			settled[pid] = identity
+			if identity == proctree.TmuxUnknown {
+				unclassified = append(unclassified, snap[pid])
+				log.InfoLog.Printf("pid %d (%s) could not be classified as tmux or not: its command line or task "+
+					"name could not be read; leaving it and its subtree out of the worktree writer reap (#7238)",
+					pid, snap[pid].Comm)
+			}
 		}
 		return identity != proctree.NotTmux
 	}
