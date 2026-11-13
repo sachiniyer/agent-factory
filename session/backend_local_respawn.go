@@ -394,6 +394,17 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if refusedID != "" && refusal.replacement.HasID() {
 		if undo, staged := i.stageReplacementConversation(refusedID, refusal.replacement); staged {
 			notify := i.relocationSettleNotifyFn()
+			if notify == nil {
+				// Every daemon path that can re-spawn a staged replacement installs
+				// this hook: the Lost restore RPC, the lost-restore loop, the
+				// retry-limit respawn and the archived restore (#7209 review R2-1).
+				// The one launcher without it is the in-sandbox agent-server, which
+				// has no durable store of its own and hands the staged replacement
+				// to the host in its launch response and snapshots. Say so, so a
+				// new caller that forgot the hook is visible.
+				log.InfoLog.Printf("session %q: the replacement for its refused conversation %s is recorded in memory only: this re-spawn has no persist hook",
+					i.Title, refusedID)
+			}
 			if notify != nil {
 				if perr := notify(i); perr != nil {
 					undo()
