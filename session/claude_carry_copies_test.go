@@ -4,6 +4,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
@@ -161,4 +162,141 @@ func TestInspectClaudeFindsTheRecordedConversationBesideAnUnlistableSpelling(t *
 	_, err = InspectClaudeProjectConversations(program, link, recorded)
 	require.Error(t, err, "the newest conversation may be under the spelling af cannot read")
 	require.False(t, ConversationResumableHere(program, link, recorded))
+}
+
+// #7220 review R1: the carry takes a copy only if it holds every byte of the
+// other: copies that diverge are two lines of the conversation (the pane's,
+// and a terminal's resuming it under the other spelling), and recency does not
+// say which one the user means to keep.
+func TestClaudeCarryRefusesCopiesThatDiverge(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name               string
+		recorded, resolved string
+		newer              string // the spelling written last
+		from               string // "" refuses
+	}{
+		{name: "the newer copy diverges", recorded: "{\"base\":1}\n{\"pane\":1}\n", resolved: "{\"base\":1}\n{\"term\":1}\n", newer: "resolved"},
+		{name: "the older copy diverges", recorded: "{\"base\":1}\n{\"pane\":1}\n", resolved: "{\"base\":1}\n{\"term\":1}\n", newer: "recorded"},
+		{name: "the newer copy extends the older", recorded: "{\"base\":1}\n", resolved: "{\"base\":1}\n{\"more\":1}\n", newer: "resolved", from: "resolved"},
+		{name: "the older copy extends the newer", recorded: "{\"base\":1}\n", resolved: "{\"base\":1}\n{\"more\":1}\n", newer: "recorded", from: "resolved"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := carryAmbientProviderHomes(t)
+			inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+			source := filepath.Join(home, ".claude")
+			recordedPath := writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), tc.recorded)
+			resolvedPath := writeCarryFile(t, source, filepath.Join(resolved, carryTestID+".jsonl"), tc.resolved)
+			older, newer := recordedPath, resolvedPath
+			if tc.newer == "recorded" {
+				older, newer = resolvedPath, recordedPath
+			}
+			setModTime(t, older, past)
+			setModTime(t, newer, past.Add(time.Minute))
+
+			require.NoError(t, inst.ValidateAccountSwap("work"))
+			if tc.from == "" {
+				require.Nil(t, inst.accountSwapLaunch.carry, "carrying either line drops the other's turns")
+				reason := inst.accountSwapLaunch.carryFallback
+				require.Contains(t, reason, recordedPath)
+				require.Contains(t, reason, resolvedPath)
+				require.Equal(t, handoff.CarryDuplicated, carryRefusalCode(reason))
+				require.Equal(t, handoff.CarryDuplicated, inst.AccountSwapCarryRefusal())
+				return
+			}
+			require.NotNil(t, inst.accountSwapLaunch.carry, "%s", inst.accountSwapLaunch.carryFallback)
+			require.Equal(t, filepath.Join(resolved, carryTestID+".jsonl"), inst.accountSwapLaunch.carry.transcript)
+		})
+	}
+}
+
+// #7220 review R2: a carry refusal is spliced into the replacement agent's
+// brief ("af tried to carry …, but <reason>, so …"). It states what af found;
+// it never tells the agent to act on files, and the remedy is the user's.
+func TestClaudeCarryRefusalsAreStatementsInTheBrief(t *testing.T) {
+	reasons := []string{
+		fmt.Sprintf(carryUnrecordedFormat, "claude"),
+		fmt.Sprintf(carryForeignIDFormat, "claude"),
+		fmt.Sprintf(carrySourceUnregisteredFormat, "old", "claude"),
+		fmt.Sprintf(carryUnsupportedFormat, "gemini"),
+		fmt.Sprintf(carryDuplicatedFormat, 2),
+		symlinkCarryReason("/h/.claude/projects"),
+		fmt.Sprintf(carryTranscriptCopiesFormat, "/h/.claude/projects/-a/X.jsonl", "/h/.claude/projects/-b/X.jsonl"),
+		fmt.Sprintf(carryTargetOtherCopyFormat, "/h/accounts/claude/work/projects/-b/X.jsonl"),
+	}
+	for reason := range carryRefusalCodeOf {
+		reasons = append(reasons, reason)
+	}
+	for _, reason := range reasons {
+		brief := MissionBrief{From: tmux.ProgramClaude, To: tmux.ProgramClaude,
+			Conversation: HandoffConversation{CarryFailure: reason}}.Render()
+		require.Contains(t, brief, "af tried to carry the previous conversation over to the new account, but "+reason+", so it is not available to you", reason)
+		lower := strings.ToLower(reason)
+		for _, imperative := range []string{"move ", "try again", "remove ", "delete "} {
+			require.NotContains(t, lower, imperative, "the brief's reason states what af found: %q", reason)
+		}
+	}
+
+	require.NotEmpty(t, carryRefusalRemedy(fmt.Sprintf(carryTranscriptCopiesFormat, "/a", "/b")))
+	require.NotEmpty(t, carryRefusalRemedy(fmt.Sprintf(carryTargetOtherCopyFormat, "/a")))
+	require.Empty(t, carryRefusalRemedy(staleCarryReason))
+}
+
+// #7220 review R3: on the swap back, the account the conversation left still
+// holds the older copy under the spelling Claude moved off. The carried copy
+// extends it, so it cannot be resumed instead, and the swap carries; a copy
+// there the carried one does not extend, or one written after it, still
+// refuses.
+func TestClaudeCarryReturnsPastAnOlderCopyItExtends(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	for _, tc := range []struct {
+		name    string
+		target  string
+		at      time.Time
+		refuses bool
+	}{
+		{name: "an older copy the carried one extends", target: "{\"base\":1}\n", at: past},
+		{name: "an older copy that diverges", target: "{\"base\":1}\n{\"other\":1}\n", at: past, refuses: true},
+		{name: "a copy written after the carried one", target: "{\"base\":1}\n", at: past.Add(2 * time.Minute), refuses: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			home := carryAmbientProviderHomes(t)
+			inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+			target := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "accounts", tmux.ProgramClaude, "work")
+			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+			setModTime(t, writeCarryFile(t, filepath.Join(home, ".claude"), filepath.Join(resolved, carryTestID+".jsonl"),
+				"{\"base\":1}\n{\"live\":1}\n"), past.Add(time.Minute))
+			left := writeCarryFile(t, target, filepath.Join(recorded, carryTestID+".jsonl"), tc.target)
+			setModTime(t, left, tc.at)
+
+			require.NoError(t, inst.ValidateAccountSwap("work"))
+			if tc.refuses {
+				require.Nil(t, inst.accountSwapLaunch.carry)
+				require.Equal(t, fmt.Sprintf(carryTargetOtherCopyFormat, left), inst.accountSwapLaunch.carryFallback)
+				return
+			}
+			require.NotNil(t, inst.accountSwapLaunch.carry, "%s", inst.accountSwapLaunch.carryFallback)
+			require.NoError(t, inst.CarryAccountSwapConversation())
+			require.FileExists(t, left, "af deletes nothing from an account's home")
+		})
+	}
+}
+
+// #7220 review R4: a stale conversation refuses as stale on the live swap, as
+// the source-only check-ahead says, whatever the target holds.
+func TestClaudeCarryJudgesTheSourceBeforeTheTarget(t *testing.T) {
+	home := carryAmbientProviderHomes(t)
+	inst, recorded, resolved := symlinkedClaudeCarryInstance(t)
+	target := filepath.Join(os.Getenv("AGENT_FACTORY_HOME"), "accounts", tmux.ProgramClaude, "work")
+	recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
+	source := filepath.Join(home, ".claude")
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), "{}\n"), past)
+	setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+	writeCarryFile(t, target, filepath.Join(resolved, carryTestID+".jsonl"), "{\"other\":1}\n")
+
+	require.Equal(t, handoff.CarryStale, inst.AccountSwapCarryRefusal())
+	require.NoError(t, inst.ValidateAccountSwap("work"))
+	require.Equal(t, staleCarryReason, inst.accountSwapLaunch.carryFallback)
 }

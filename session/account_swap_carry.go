@@ -227,16 +227,19 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 		}
 		return nil, reason
 	}
-	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
-		if reason := carry.claudeTargetReason(); reason != "" {
-			return nil, reason
-		}
-	}
 	// An operator's standing repair is judged by the restore guard's rule
 	// (staleRecordedCodexDecline): its provenance is re-checked, and only the
 	// threads it overrode are disregarded (#7122).
 	if !carry.committed {
 		if reason := carry.staleReason(req.program, req.workDir, req.outgoing); reason != "" {
+			return nil, reason
+		}
+	}
+	// Checks on the target come after every check on the source, so the live
+	// swap and the source-only check-ahead give the same answer for the same
+	// source state (#7220 review R4).
+	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
+		if reason := carry.claudeTargetReason(); reason != "" {
 			return nil, reason
 		}
 	}

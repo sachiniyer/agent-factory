@@ -560,14 +560,16 @@ tried to carry the conversation and why it could not, when:
 
 - the file is missing, or reached through a symbolic link;
 - the new account already holds a different version of it, including a
-  copy filed under the other spelling of a symlinked worktree's path (the
-  message names the file to move aside);
+  copy under the other spelling of a symlinked worktree's path that is newer
+  than the carried one or that the carried one does not extend (af's log names
+  the file; move it aside before the next swap);
 - the conversation af recorded is no longer the newest one in this worktree,
   because a new one was started with `/clear` or `/new`. For a worktree reached
   through a symlink, Claude can file conversations under the path as given or
   as resolved, so af checks both. When both hold a copy of the conversation,
-  af carries the newer one, and refuses only when two differing copies were
-  last written at the same moment;
+  af carries the one that holds every turn of the other, and refuses when the
+  two copies diverge (af's log names both files; move aside the one whose
+  turns you don't want to keep before the next swap);
 - a replacement already launched on the carried conversation stopped before it
   was confirmed working.
 

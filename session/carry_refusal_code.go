@@ -46,11 +46,35 @@ const (
 	carryUnsupportedFormat        = "%s conversations cannot be carried"
 	carryDuplicatedFormat         = "%d Codex rollouts record this conversation"
 	carrySymlinkFormat            = "%s is a symbolic link, which af does not follow when carrying a conversation"
-	carryTranscriptCopiesFormat   = "Claude holds two copies of this conversation last written at the same moment, %s and %s, " +
-		"and af cannot tell which one it resumes; move aside the one you are not using and try again"
-	carryTargetOtherCopyFormat = "the new account already holds this conversation at %s, under another spelling of the worktree's path " +
-		"than the copy af would write, and its replacement could resume that one instead; move it aside and try again"
+	carryTranscriptCopiesFormat   = "Claude holds two copies of this conversation that diverge, %s and %s, " +
+		"so af cannot tell which line of it Claude would resume"
+	carryTargetOtherCopyFormat = "the new account already holds another copy of this conversation at %s, " +
+		"under another spelling of the worktree's path, which its Claude could resume instead of the carried one"
 )
+
+// A refusal is a statement of what af found. It reaches the replacement
+// agent's brief (MissionBrief: "af tried to carry …, but <reason>, so …"),
+// where an instruction would be addressed to the agent the files concern,
+// after the swap already started it fresh. What a user can do about one goes
+// to the surfaces addressed to the user instead (carryRefusalRemedy, #7220
+// review R2).
+var (
+	carryTranscriptCopiesRE = carryFormatRE(carryTranscriptCopiesFormat)
+	carryTargetOtherCopyRE  = carryFormatRE(carryTargetOtherCopyFormat)
+)
+
+// carryRefusalRemedy is what the user can do about reason before the next
+// swap, for the refusals a user clears by hand; "" for every other one. It is
+// for af's log and the docs, never for the brief.
+func carryRefusalRemedy(reason string) string {
+	switch {
+	case carryTranscriptCopiesRE.MatchString(reason):
+		return "to carry it on the next swap, move aside the copy whose turns you do not want to keep before that swap"
+	case carryTargetOtherCopyRE.MatchString(reason):
+		return "to carry it on the next swap, move that copy aside before that swap"
+	}
+	return ""
+}
 
 // carryOperatorRepairMark is in every refusal of an operator-recorded
 // conversation whose provenance af could not confirm (operatorRepairProvenance).
@@ -96,8 +120,8 @@ var carryRefusalFormats = []struct {
 	{carryFormatRE(carryUnsupportedFormat), handoff.CarryUnsupported},
 	{carryFormatRE(carryDuplicatedFormat), handoff.CarryDuplicated},
 	{carryFormatRE(carrySymlinkFormat), handoff.CarrySymlinked},
-	{carryFormatRE(carryTranscriptCopiesFormat), handoff.CarryDuplicated},
-	{carryFormatRE(carryTargetOtherCopyFormat), handoff.CarryDuplicated},
+	{carryTranscriptCopiesRE, handoff.CarryDuplicated},
+	{carryTargetOtherCopyRE, handoff.CarryDuplicated},
 }
 
 var carryFormatVerbRE = regexp.MustCompile(`%[sqd]`)

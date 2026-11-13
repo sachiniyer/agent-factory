@@ -545,8 +545,12 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 	// The pane and the API response say why; af's log must too (#7152). A
 	// re-plan after a failed copy is the copy's own refusal, logged there.
 	if carry == nil && carryFallback != "" && carryFailure == "" {
-		log.WarningLog.Printf("account swap for %q cannot carry conversation %q into account %q, so the replacement starts a fresh conversation: %s",
-			i.Title, outgoing.ID, name, carryFallback)
+		remedy := ""
+		if r := carryRefusalRemedy(carryFallback); r != "" {
+			remedy = "; " + r
+		}
+		log.WarningLog.Printf("account swap for %q cannot carry conversation %q into account %q, so the replacement starts a fresh conversation: %s%s",
+			i.Title, outgoing.ID, name, carryFallback, remedy)
 	}
 	return nil
 }

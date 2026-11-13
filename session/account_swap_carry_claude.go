@@ -1,8 +1,12 @@
 package session
 
 import (
+	"errors"
 	"fmt"
+	"io/fs"
+	"os"
 	"path/filepath"
+	"sort"
 	"time"
 
 	"github.com/sachiniyer/agent-factory/session/tmux"
@@ -78,53 +82,57 @@ func statClaudeCopy(root carryRoot, project, id string) (*claudeCopy, error) {
 }
 
 // liveClaudeCopy picks, from copies of conversation id in root, the project
-// directory of the one Claude is appending to: the newest. Copies last written
-// at the same moment are told apart by content, since the live one extends the
-// others; copies that differ otherwise are a refusal naming both, because af
-// cannot tell which one Claude resumes.
+// directory of the copy that holds every byte of every other copy: the one
+// Claude went on appending to after a spelling change left an older copy
+// behind. Copies that diverge, where neither holds the other, are two lines of
+// the conversation written by two Claude processes (the pane, and a terminal
+// resuming it under the other spelling); carrying either one drops the other's
+// turns, however recently each was written, so that refuses, naming both
+// (#7220 review R1). Among copies that each hold all the others, identical
+// ones, the newest is taken.
 func liveClaudeCopy(root carryRoot, id string, copies []claudeCopy) (string, string) {
-	newest := copies[0]
-	for _, other := range copies[1:] {
-		if other.modTime.After(newest.modTime) {
-			newest = other
+	ordered := append([]claudeCopy(nil), copies...)
+	sort.SliceStable(ordered, func(a, b int) bool {
+		if ordered[a].size != ordered[b].size {
+			return ordered[a].size > ordered[b].size
 		}
-	}
-	live := newest
-	var tied []claudeCopy
-	for _, other := range copies {
-		if other.modTime.Equal(newest.modTime) {
-			tied = append(tied, other)
-			if other.size > live.size {
-				live = other
+		return ordered[a].modTime.After(ordered[b].modTime)
+	})
+	rel := func(project string) string { return filepath.Join(project, id+".jsonl") }
+	for _, candidate := range ordered {
+		holdsAll := true
+		for _, other := range ordered {
+			if other.project != candidate.project && !claudeCopyExtends(root, rel(candidate.project), root, rel(other.project)) {
+				holdsAll = false
+				break
 			}
 		}
-	}
-	for _, other := range tied {
-		if other.project == live.project {
-			continue
-		}
-		if !claudeCopyExtends(root, id, live.project, other.project) {
-			path := func(project string) string { return filepath.Join(root.dir(), project, id+".jsonl") }
-			return "", fmt.Sprintf(carryTranscriptCopiesFormat, path(live.project), path(other.project))
+		if holdsAll {
+			return candidate.project, ""
 		}
 	}
-	return live.project, ""
+	path := func(project string) string { return filepath.Join(root.dir(), rel(project)) }
+	return "", fmt.Sprintf(carryTranscriptCopiesFormat, path(ordered[0].project), path(ordered[1].project))
 }
 
-// claudeCopyExtends reports whether the copy of conversation id under longer
-// begins with every byte of the copy under shorter. A copy af cannot read
-// extends nothing.
-func claudeCopyExtends(root carryRoot, id, longer, shorter string) bool {
-	long, longInfo, err := openCarryArtifact(root, filepath.Join(longer, id+".jsonl"))
+// claudeCopyExtends reports whether the file at longer, beneath longRoot,
+// begins with every byte of the file at shorter, beneath shortRoot: the
+// longer one is the shorter one with turns appended. A file af cannot read
+// extends nothing; one file under two names extends itself.
+func claudeCopyExtends(longRoot carryRoot, longer string, shortRoot carryRoot, shorter string) bool {
+	long, longInfo, err := openCarryArtifact(longRoot, longer)
 	if err != nil {
 		return false
 	}
 	defer long.Close()
-	short, shortInfo, err := openCarryArtifact(root, filepath.Join(shorter, id+".jsonl"))
+	short, shortInfo, err := openCarryArtifact(shortRoot, shorter)
 	if err != nil {
 		return false
 	}
 	defer short.Close()
+	if os.SameFile(longInfo, shortInfo) {
+		return true
+	}
 	if longInfo.Size() < shortInfo.Size() {
 		return false
 	}
@@ -134,21 +142,34 @@ func claudeCopyExtends(root carryRoot, id, longer, shorter string) bool {
 
 // claudeTargetReason refuses a carry whose new account already holds the
 // conversation under another spelling of the worktree's path than the one the
-// carry writes (#7207). The copy would leave two there, and the replacement
-// could resume the other one while af reports the conversation carried.
+// carry writes, in a copy its Claude could resume instead of the carried one
+// (#7207): one not older than the carried copy, or one the carried copy does
+// not extend. An older copy the carried one extends is the state the source
+// plan accepts as an older copy Claude has moved past, so it is left in place
+// (#7220 review R3); af deletes nothing from an account's home.
 func (c *conversationCarry) claudeTargetReason() string {
+	carried, carriedInfo, err := openCarryArtifact(c.srcRoot, c.transcript)
+	if err != nil {
+		return carryTargetUncheckedReason
+	}
+	_ = carried.Close()
 	for _, project := range c.claudeProjects {
 		rel := filepath.Join(project, c.id+".jsonl")
 		if rel == c.transcript {
 			continue
 		}
-		present, err := probeCarryArtifact(c.dstRoot, rel)
+		other, otherInfo, err := openCarryArtifact(c.dstRoot, rel)
 		switch {
-		case present:
+		case err == nil:
+			_ = other.Close()
+			if otherInfo.ModTime().Before(carriedInfo.ModTime()) && claudeCopyExtends(c.srcRoot, c.transcript, c.dstRoot, rel) {
+				continue
+			}
 			return fmt.Sprintf(carryTargetOtherCopyFormat, filepath.Join(c.dstHome, rel))
+		case errors.Is(err, fs.ErrNotExist):
 		case carrySymlinkPath(err) != "":
 			return symlinkCarryReason(carrySymlinkPath(err))
-		case err != nil:
+		default:
 			return carryTargetUncheckedReason
 		}
 	}
