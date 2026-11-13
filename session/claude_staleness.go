@@ -4,6 +4,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/sachiniyer/agent-factory/log"
 )
 
 // claudeRecordedVerdict is judgeClaudeRecorded's answer about a recorded
@@ -24,6 +26,10 @@ const (
 	// claudeRecordedUnlisted: a spelling's project directory could not be
 	// listed, so what it holds is unknown.
 	claudeRecordedUnlisted
+	// claudeRecordedVerdicts counts the verdicts above. A new verdict goes
+	// before it, and TestEveryClaudeRecordedVerdictMapsToALaunch requires
+	// recordedClaudeLaunchFor to map it.
+	claudeRecordedVerdicts
 )
 
 // judgeClaudeRecorded is the one staleness rule for a recorded Claude
@@ -145,18 +151,85 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	if err != nil || strings.TrimSpace(configDir) == "" || strings.TrimSpace(launchDir) == "" {
 		return recordedClaudeBlind
 	}
-	switch judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), id, "") {
-	case claudeRecordedMissing:
-		return recordedClaudeStartOn
-	case claudeRecordedStale:
-		if i.newerConversationIsEvidence(launchDir) {
-			return recordedClaudeAbandoned
-		}
-		return recordedClaudeResume
-	case claudeRecordedCurrent, claudeRecordedCopies:
-		return recordedClaudeResume
+	projects := claudeProjectCandidates(launchDir)
+	verdict := judgeClaudeRecorded(configDir, projects, id, "")
+	if verdict == claudeRecordedMissing {
+		verdict = claudeRecordedInOtherStores(configDir, projects, id)
 	}
-	return recordedClaudeBlind
+	launch, ok := recordedClaudeLaunchFor(verdict, func() bool { return i.newerConversationIsEvidence(launchDir) })
+	if !ok {
+		log.ErrorLog.Printf("session %q: recorded claude conversation %s: verdict %d maps to no launch; resuming it", i.Title, id, verdict)
+	}
+	return launch
+}
+
+// recordedClaudeLaunchFor maps each judgeClaudeRecorded verdict to the launch
+// it means, explicitly (#7217 review R2). Only a look that could not list is
+// blind, and a verdict that found the id's transcript never starts on the id:
+// Claude refuses --session-id for an id it holds a transcript for. evidence
+// says whether a newer conversation shows this session moved on. ok is false
+// for a verdict this does not name, which the verdict enumeration test
+// forbids; its answer then is a resume, which never starts on a filed id.
+func recordedClaudeLaunchFor(verdict claudeRecordedVerdict, evidence func() bool) (recordedClaudeVerdict, bool) {
+	switch verdict {
+	case claudeRecordedUnlisted:
+		return recordedClaudeBlind, true
+	case claudeRecordedMissing:
+		return recordedClaudeStartOn, true
+	case claudeRecordedCurrent, claudeRecordedCopies:
+		return recordedClaudeResume, true
+	case claudeRecordedStale:
+		if evidence() {
+			return recordedClaudeAbandoned, true
+		}
+		return recordedClaudeResume, true
+	}
+	return recordedClaudeResume, false
+}
+
+// claudeRecordedInOtherStores is what the other Claude stores af can name hold
+// of an id the launch's own store does not (#7217 review R4): the daemon's own
+// CLAUDE_CONFIG_DIR and $HOME/.claude. A pane whose environment points Claude
+// at one of them files there, and Claude's in-use check reads only its own
+// store, so starting on an id one of them holds would fail every restore of the
+// row. A copy anywhere is a transcript to resume; a store that cannot be listed
+// is a look that did not happen; only an id absent from every store is
+// Missing, and is started on.
+func claudeRecordedInOtherStores(primary string, projects []string, id string) claudeRecordedVerdict {
+	for _, store := range otherClaudeStores(primary) {
+		switch verdict := judgeClaudeRecorded(store, projects, id, ""); verdict {
+		case claudeRecordedMissing:
+			continue
+		case claudeRecordedUnlisted:
+			return claudeRecordedUnlisted
+		default:
+			// Every other verdict found a transcript for the id.
+			return claudeRecordedCurrent
+		}
+	}
+	return claudeRecordedMissing
+}
+
+// otherClaudeStores are the Claude config dirs af can name besides primary:
+// the daemon's own CLAUDE_CONFIG_DIR, then $HOME/.claude.
+func otherClaudeStores(primary string) []string {
+	var stores []string
+	seen := map[string]bool{filepath.Clean(primary): true}
+	add := func(dir string) {
+		if strings.TrimSpace(dir) == "" {
+			return
+		}
+		dir = filepath.Clean(dir)
+		if !seen[dir] {
+			seen[dir] = true
+			stores = append(stores, dir)
+		}
+	}
+	add(os.Getenv("CLAUDE_CONFIG_DIR"))
+	if home, err := os.UserHomeDir(); err == nil {
+		add(filepath.Join(home, ".claude"))
+	}
+	return stores
 }
 
 // recordedClaudeDecline is judgeRecordedClaude for a restore: an id to start on
