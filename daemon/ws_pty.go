@@ -12,6 +12,7 @@ import (
 	"strconv"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/coder/websocket"
@@ -344,16 +345,17 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	defer func() { _ = sub.Close() }()
 
 	inputDelivery := &ptyInputDelivery{}
+	reader := &ptyReaderAvailability{}
 	readerDone := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
-		err := readPTYClient(ctx, binding, conn, inputDelivery)
+		err := readPTYClient(ctx, binding, conn, inputDelivery, reader)
 		readerDone <- err
 		cancel()
 	}()
-	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, keepalive) }()
+	go func() { defer wg.Done(); defer cancel(); keepalivePTY(ctx, conn, keepalive, reader) }()
 
 	writePTYStream(ctx, sub, conn)
 
@@ -491,7 +493,12 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // the agent-server (multi-writer, from any subscriber); a detach control frame or
 // any read error ends the connection. A failed INPUT ends the stream with an
 // error so the client can reconnect rather than silently losing later keys.
-func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery) error {
+//
+// Each frame is applied on this goroutine before it reads again, and it is the
+// only goroutine that reads, so a pong that arrives meanwhile waits unread.
+// reader records each such stretch so the keepalive does not blame the peer
+// for it (#7105).
+func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
 		if err != nil {
@@ -506,7 +513,9 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 			switch msg.Frame.Op {
 			case agentproto.OpInput:
 				inputResult := inputDelivery.begin()
+				reader.away()
 				err := binding.input(msg.Frame.Data)
+				reader.back()
 				if err != nil {
 					err = fmt.Errorf("apply PTY input: %w", err)
 				}
@@ -515,7 +524,9 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 					return err
 				}
 			case agentproto.OpResize:
+				reader.away()
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)
+				reader.back()
 			}
 			continue
 		}
@@ -548,15 +559,24 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 // goroutine's wsWriteTimeout on the next data frame, and a broken transport is
 // torn down by the reader goroutine; retrying write-path failures is therefore
 // bounded by those paths, not by the keepalive.
-func keepalivePTY(ctx context.Context, conn *websocket.Conn, interval time.Duration) {
-	keepaliveLoop(ctx, interval, conn.Ping)
+//
+// Nor may it drop a subscriber because the SERVER was too busy to read its pong
+// (#7105). Conn.Ping does not read; it waits for a Conn.Read to process the
+// pong, and the stream's one reader applies each INPUT/RESIZE frame before it
+// reads again. A paste is one tmux send-keys per chunk, each bounded at 10s, so
+// one frame can outlast the interval. A missed pong counts against the peer
+// only when reader was on Conn.Read for the ping's whole wait; otherwise the
+// ping is retried on the next tick. A nil reader is one that never leaves
+// Conn.Read.
+func keepalivePTY(ctx context.Context, conn *websocket.Conn, interval time.Duration, reader *ptyReaderAvailability) {
+	keepaliveLoop(ctx, interval, conn.Ping, reader)
 }
 
 // keepaliveLoop is keepalivePTY with an injectable ping function so the
 // drop-vs-retry decision is unit-testable without a live *websocket.Conn. The
 // interval is both the ping period and the pong deadline. It is a parameter,
 // not a read of wsKeepaliveInterval, so tests never have to assign the global.
-func keepaliveLoop(ctx context.Context, interval time.Duration, ping func(context.Context) error) {
+func keepaliveLoop(ctx context.Context, interval time.Duration, ping func(context.Context) error, reader *ptyReaderAvailability) {
 	ticker := time.NewTicker(interval)
 	defer ticker.Stop()
 	for {
@@ -564,22 +584,60 @@ func keepaliveLoop(ctx context.Context, interval time.Duration, ping func(contex
 		case <-ctx.Done():
 			return
 		case <-ticker.C:
+			mark := reader.mark()
 			pctx, pcancel := context.WithTimeout(context.Background(), interval)
 			err := ping(pctx)
 			pcancel()
-			switch classifyPingError(err) {
+			switch classifyPing(err, reader.awaySince(mark)) {
 			case keepaliveContinue:
 			case keepaliveDrop:
 				return
 			case keepaliveRetry:
 				// Write-path failure (e.g. the library's hidden 5s write-lock
-				// timeout contending with a slow data-frame write): the peer
-				// may still be alive and reading, so try again on the next
-				// tick instead of dropping. The writer's wsWriteTimeout drops
-				// a wedged client that has actually stopped reading.
+				// timeout contending with a slow data-frame write), or a pong
+				// the reader was too busy to read: the peer may still be alive
+				// and reading, so try again on the next tick instead of
+				// dropping. The writer's wsWriteTimeout drops a wedged client
+				// that has actually stopped reading.
 			}
 		}
 	}
+}
+
+// ptyReaderAvailability records when a stream's one reader is off Conn.Read,
+// applying a client frame, and so cannot process a pong (#7105). It is a
+// counter that only the reader moves: odd while away, even while reading.
+type ptyReaderAvailability struct{ n atomic.Uint64 }
+
+func (a *ptyReaderAvailability) away() { a.n.Add(1) }
+func (a *ptyReaderAvailability) back() { a.n.Add(1) }
+
+// mark opens a ping's wait. awaySince reports whether the reader was off
+// Conn.Read at any moment since that mark: away at the mark, or it left after.
+func (a *ptyReaderAvailability) mark() uint64 {
+	if a == nil {
+		return 0
+	}
+	return a.n.Load()
+}
+
+func (a *ptyReaderAvailability) awaySince(mark uint64) bool {
+	if a == nil {
+		return false
+	}
+	return mark%2 == 1 || a.n.Load() != mark
+}
+
+// classifyPing is classifyPingError for a ping whose pong the reader may not
+// have been free to process. A missed pong while readerAway is the server's
+// delay, not the peer's silence, so it is retried. A closed connection still
+// drops.
+func classifyPing(err error, readerAway bool) keepaliveDecision {
+	decision := classifyPingError(err)
+	if decision == keepaliveDrop && readerAway && !errors.Is(err, net.ErrClosed) {
+		return keepaliveRetry
+	}
+	return decision
 }
 
 // keepaliveDecision is the outcome of classifying one Conn.Ping result.

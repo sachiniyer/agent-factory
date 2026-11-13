@@ -93,7 +93,7 @@ func TestKeepaliveLoopDropsOnMissedPong(t *testing.T) {
 		return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
 	}
 	done := make(chan struct{})
-	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	go func() { keepaliveLoop(ctx, keepalive, ping, nil); close(done) }()
 
 	select {
 	case <-done:
@@ -123,7 +123,7 @@ func TestKeepaliveLoopRetriesWriteLockTimeout(t *testing.T) {
 		return fmt.Errorf("failed to acquire lock: %w", context.DeadlineExceeded)
 	}
 	done := make(chan struct{})
-	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	go func() { keepaliveLoop(ctx, keepalive, ping, nil); close(done) }()
 
 	// Across several ticks the loop must keep retrying, not drop.
 	select {
@@ -149,7 +149,7 @@ func TestKeepaliveLoopDropsOnClosedConnection(t *testing.T) {
 
 	done := make(chan struct{})
 	ping := func(context.Context) error { return net.ErrClosed }
-	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	go func() { keepaliveLoop(ctx, keepalive, ping, nil); close(done) }()
 
 	select {
 	case <-done:
@@ -174,7 +174,7 @@ func TestKeepaliveLoopContinuesOnSuccessThenDropsOnMissedPong(t *testing.T) {
 		return fmt.Errorf("failed to wait for pong: %w", context.DeadlineExceeded)
 	}
 	done := make(chan struct{})
-	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	go func() { keepaliveLoop(ctx, keepalive, ping, nil); close(done) }()
 
 	select {
 	case <-done:
@@ -197,7 +197,7 @@ func TestKeepaliveLoopStopsOnContextDoneBeforeFirstTick(t *testing.T) {
 		return nil
 	}
 	done := make(chan struct{})
-	go func() { keepaliveLoop(ctx, keepalive, ping); close(done) }()
+	go func() { keepaliveLoop(ctx, keepalive, ping, nil); close(done) }()
 	cancel()
 	select {
 	case <-done:
