@@ -106,16 +106,14 @@ func claudeCarryStaleness(configDir string, projects []string, transcript, id st
 // fresh start.
 //
 // It refuses on evidence only: a newer conversation in a directory af owns
-// exclusively (newerConversationIsEvidence). A row in the user's own checkout,
+// exclusively, where Claude actually runs (newerConversationIsEvidence). A row
+// in the user's own checkout or launched outside its worktree,
 // a store af cannot name, a spelling it cannot list, and a recorded transcript
 // it does not find all say nothing about whether this session moved on, so the
 // restore resumes the recorded id as it always has (#7209 review R1, R4).
 func (i *Instance) staleRecordedClaudeDecline(program string, conv AgentConversationData) resumeDecline {
-	if !i.newerConversationIsEvidence() {
-		return resumeDecline{}
-	}
 	configDir, launchDir, err := i.claudeStoreFor(program, i.GetWorktreePath())
-	if err != nil || strings.TrimSpace(configDir) == "" {
+	if err != nil || strings.TrimSpace(configDir) == "" || !i.newerConversationIsEvidence(launchDir) {
 		return resumeDecline{}
 	}
 	if judgeClaudeRecorded(configDir, claudeProjectCandidates(launchDir), conv.ID, "") == claudeRecordedStale {

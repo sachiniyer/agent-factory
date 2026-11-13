@@ -28,16 +28,39 @@ func TestNewerConversationIsEvidenceOnlyInADirectoryAfOwns(t *testing.T) {
 		require.NoError(t, err)
 		return &Instance{Title: "t", gitWorktree: gw}
 	}
-	require.True(t, row(repo, worktree, false).newerConversationIsEvidence(), "a worktree af created for this session")
-	require.False(t, row(repo, worktree, true).newerConversationIsEvidence(), "an adopted external worktree")
-	require.False(t, row(repo, repo, false).newerConversationIsEvidence(), "the repository's own checkout")
+	owned := row(repo, worktree, false)
+	require.True(t, owned.newerConversationIsEvidence(worktree), "a worktree af created for this session")
+	require.True(t, owned.newerConversationIsEvidence(filepath.Join(worktree, "sub")), "a directory inside it")
+	require.False(t, owned.newerConversationIsEvidence(t.TempDir()), "a launch moved outside it (env -C)")
+	require.False(t, owned.newerConversationIsEvidence(worktree+"-sibling"), "a sibling sharing its name as a prefix")
+	require.False(t, owned.newerConversationIsEvidence(""), "a launch directory af cannot prove")
+	require.False(t, row(repo, worktree, true).newerConversationIsEvidence(worktree), "an adopted external worktree")
+	require.False(t, row(repo, repo, false).newerConversationIsEvidence(repo), "the repository's own checkout")
 	inPlace := row(repo, worktree, false)
 	inPlace.inPlace = true
-	require.False(t, inPlace.newerConversationIsEvidence(), "an `af sessions create --here` session")
+	require.False(t, inPlace.newerConversationIsEvidence(worktree), "an `af sessions create --here` session")
 	root := row(repo, worktree, false)
 	root.Title = RootSessionTitle
-	require.False(t, root.newerConversationIsEvidence(), "the root agent")
-	require.False(t, (&Instance{Title: "t"}).newerConversationIsEvidence(), "no worktree")
+	require.False(t, root.newerConversationIsEvidence(worktree), "the root agent")
+	require.False(t, (&Instance{Title: "t"}).newerConversationIsEvidence(worktree), "no worktree")
+}
+
+// Codex review of #7209: a managed worktree whose command launches Claude in
+// a shared directory (`env -C /shared claude`) gets no attribution from what
+// else runs there.
+func TestAClaudeLaunchMovedOutOfItsWorktreeResumesItsRecord(t *testing.T) {
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, shared := t.TempDir(), t.TempDir()
+	project := claudeProjectCandidates(shared)[0]
+	past := time.Now().Add(-time.Hour)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, carryTestID+".jsonl"), "{}\n"), past)
+	setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, newerConversationID+".jsonl"), "{}\n"), past.Add(time.Minute))
+
+	program := "env -C " + shared + " claude"
+	rewritten, ok, decline := prepareExactResumeConversation(claudeRestoreInstance(t, workDir, carryTestID), program)
+	require.True(t, ok, "another Claude process in the shared directory is not this session: %+v", decline)
+	require.Contains(t, rewritten, "--resume "+carryTestID)
 }
 
 // inPlaceRowData is a row working in the user's own checkout, recording

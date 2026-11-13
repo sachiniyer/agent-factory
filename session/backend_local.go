@@ -295,7 +295,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				// A row in the user's own checkout retires nothing on load, for
 				// either agent: a newer conversation there is not this row's
 				// (newerConversationIsEvidence, #7209 review R1).
-				if r.retire && i.newerConversationIsEvidence() {
+				if r.retire && i.newerConversationIsEvidence(LaunchCaptureWorkingDir(resolution.command, i.GetWorktreePath())) {
 					refusedID = r.ID
 					resumeProgram, replacement = planReplacementConversation(resumeProgram)
 				}
