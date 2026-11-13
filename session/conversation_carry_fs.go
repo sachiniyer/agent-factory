@@ -285,24 +285,8 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 	return file, info, nil
 }
 
-// probeCarryArtifact reports whether rel is a regular file beneath home,
-// reachable without following a symlink below home's anchor. Absence is
-// (false, nil); any other failure, such as a refused symlink, is returned.
-func probeCarryArtifact(home carryRoot, rel string) (bool, error) {
-	file, _, err := openCarryArtifact(home, rel)
-	if file != nil {
-		_ = file.Close()
-		return true, nil
-	}
-	if errors.Is(err, fs.ErrNotExist) {
-		return false, nil
-	}
-	return false, err
-}
-
-// openCarryArtifact opens rel beneath home the way probeCarryArtifact checks
-// it: a regular file reached without following a symlink below home's anchor.
-// The caller closes the file.
+// openCarryArtifact opens rel beneath home: a regular file reached without
+// following a symlink below home's anchor. The caller closes the file.
 func openCarryArtifact(home carryRoot, rel string) (*os.File, os.FileInfo, error) {
 	dirs, name, err := splitCarryPath(rel, true)
 	if err != nil {

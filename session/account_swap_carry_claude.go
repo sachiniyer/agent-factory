@@ -72,7 +72,7 @@ func (c *conversationCarry) locateClaude(program, workDir string) string {
 }
 
 // statClaudeCopy reports the copy of conversation id under project in root,
-// reached the way probeCarryArtifact checks it, or nil and why not.
+// reached the way openCarryArtifact opens it, or nil and why not.
 func statClaudeCopy(root carryRoot, project, id string) (*claudeCopy, error) {
 	file, info, err := openCarryArtifact(root, filepath.Join(project, id+".jsonl"))
 	if err != nil {
