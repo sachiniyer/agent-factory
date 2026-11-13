@@ -135,6 +135,23 @@ func (s *apiStream) Recv(ctx context.Context) (termpane.Event, error) {
 				return termpane.Event{Kind: termpane.EventResize, Rows: rm.Rows, Cols: rm.Cols}, nil
 			}
 		}
+		if typ == agentproto.MsgInputAck {
+			// One INPUT frame the daemon applied to the pane. The ack stream is
+			// FIFO, so the pane trims its oldest unconfirmed frame on each one —
+			// never trimming on the WS write alone, which proved only delivery
+			// to the socket (#6848).
+			return termpane.Event{Kind: termpane.EventInputAck}, nil
+		}
+		if typ == agentproto.MsgInputNack {
+			// The daemon failed to apply an INPUT frame; Applied is how many
+			// bytes of it reached the pane before the failure. This is the final
+			// in-band frame before the stream closes, so the pane trims the
+			// applied prefix and re-sends the rest on reconnect.
+			var nm agentproto.InputNackMessage
+			if json.Unmarshal(msg.Text, &nm) == nil {
+				return termpane.Event{Kind: termpane.EventInputNack, Applied: nm.Applied}, nil
+			}
+		}
 		// Other control frames (exit, ...) carry no grid state — wait for the next.
 	}
 }

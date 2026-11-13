@@ -36,6 +36,31 @@ const (
 	// Older clients safely ignore this additive control frame; the repaint also
 	// contains DEC restore bytes for terminal-only consumers.
 	MsgTerminalModes MessageType = "terminal_modes"
+	// MsgInputAck (server → client) confirms ONE INPUT frame was applied to the
+	// pane. The daemon's PTY reader applies INPUT frames strictly in arrival
+	// order and acks each one as it completes, so acks are a FIFO confirmation
+	// stream: the Nth ack settles the Nth INPUT frame the client sent on this
+	// connection, with no per-frame sequence on the wire. A client that only
+	// trims a frame from its input queue on its ack can never silently drop a
+	// byte the daemon applied zero or only a prefix of — a write that returned
+	// nil merely proves the frame reached the socket, not that it was delivered
+	// to the pane (the "drained byte must never be silently discarded"
+	// invariant, #6848). Strictly additive: a client that does not know this
+	// type ignores it and keeps its pre-existing trim-on-write behavior.
+	MsgInputAck MessageType = "input_ack"
+	// MsgInputNack (server → client) reports an INPUT frame the daemon FAILED to
+	// apply, carrying `Applied`: how many bytes of THAT frame reached the pane
+	// before the failure (0 when the first chunk failed; the full chunked
+	// send-keys prefix otherwise). The daemon emits it as the LAST in-band frame
+	// before tearing the stream down with a generic close, so the client knows
+	// exactly how much to retain for re-send: the frame's [Applied:] tail plus
+	// every later INPUT frame it has not yet been acked for. Without it the close
+	// is opaque and the client must conservatively re-send the whole unconfirmed
+	// backlog, duplicating the applied prefix; the applied count keeps that
+	// duplicate bounded to the failing frame's prefix. Strictly additive: an
+	// older client ignores the type and re-sends the whole backlog, which is the
+	// same recovery it had without any accounting.
+	MsgInputNack MessageType = "input_nack"
 )
 
 // ResizeMessage is the server's authoritative size echo (last-resize-wins, §6.2).
@@ -108,6 +133,33 @@ func NewExitMessage(code int) ExitMessage {
 // (#2136). Code 0: a closed tab is an orderly teardown, not a crashed process.
 func NewTabClosedMessage() ExitMessage {
 	return ExitMessage{Type: MsgExit, Code: 0, Reason: ExitReasonTabClosed}
+}
+
+// InputAckMessage confirms one INPUT frame was applied to the pane (server →
+// client). The ack stream is FIFO and in arrival order, so it carries no
+// sequence or byte count: the client pairs each ack with the oldest INPUT frame
+// it has sent on this connection but not yet confirmed.
+type InputAckMessage struct {
+	Type MessageType `json:"type"`
+}
+
+// NewInputAckMessage builds an input-delivery confirmation.
+func NewInputAckMessage() InputAckMessage {
+	return InputAckMessage{Type: MsgInputAck}
+}
+
+// InputNackMessage reports an INPUT frame the daemon failed to apply, with
+// `Applied`: bytes of that frame the pane received before the failure. The
+// daemon sends it once, as the final in-band frame before closing the stream.
+type InputNackMessage struct {
+	Type    MessageType `json:"type"`
+	Applied int         `json:"applied"`
+}
+
+// NewInputNackMessage builds an input-delivery failure notice carrying how many
+// bytes of the failing frame were applied before the failure.
+func NewInputNackMessage(applied int) InputNackMessage {
+	return InputNackMessage{Type: MsgInputNack, Applied: applied}
 }
 
 // DetachMessage is a client's clean-close signal.

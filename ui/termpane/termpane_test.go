@@ -1,6 +1,7 @@
 package termpane
 
 import (
+	"bytes"
 	"context"
 	"fmt"
 	"io"
@@ -21,6 +22,14 @@ import (
 // output, resize echoes) and drops the connection at will, and reads back the
 // INPUT/RESIZE frames the TermPane sent. It stands in for the daemon WS stream so
 // the emulator + reconnect logic is exercised with no real socket or tmux.
+//
+// By default a successful SendInput is followed by an EventInputAck — modeling the
+// daemon confirming delivery, which is what lets the pane trim a frame only once
+// it is applied. Tests that model a daemon-side apply failure (the #6848 bug
+// shape: the write returned nil but the daemon applied 0 bytes or only a prefix
+// then closed) set nackToSend so SendInput emits an EventInputNack carrying that
+// applied byte count and closes the stream instead of acking; tests that model a
+// drop before the ack set noAck so SendInput returns nil without confirming.
 type fakeStream struct {
 	startSeq uint64
 	events   chan Event
@@ -42,6 +51,16 @@ type fakeStream struct {
 	// input pipe keeps draining while a backlog flush is mid-write. Set before
 	// New; never held under s.mu.
 	inputGate func()
+	// noAck, when set, makes a successful SendInput return nil WITHOUT pushing an
+	// EventInputAck — modeling a connection that drops before the daemon's ack
+	// makes it back, so the pane retains the frame for re-send on reconnect.
+	noAck bool
+	// nackToSend, when non-negative, makes the next successful SendInput push an
+	// EventInputNack carrying this applied byte count and then close the stream —
+	// modeling a daemon-side apply failure (write ok, daemon applied nackToSend
+	// bytes, then tore the stream down).
+	nackToSend int
+	hasNack    bool
 }
 
 func newFakeStream(startSeq uint64) *fakeStream {
@@ -54,14 +73,30 @@ func (s *fakeStream) Recv(ctx context.Context) (Event, error) {
 	select {
 	case <-ctx.Done():
 		return Event{}, ctx.Err()
-	case <-s.closed:
-		return Event{}, io.EOF
 	case ev := <-s.events:
 		return ev, nil
+	case <-s.closed:
+		// A close reaches the client only AFTER the in-band frames the server
+		// wrote before it (the real daemon sends a NACK, then closes): drain any
+		// pending event before reporting EOF so a NACK pushed just before the
+		// close is delivered first.
+		select {
+		case ev := <-s.events:
+			return ev, nil
+		default:
+			return Event{}, io.EOF
+		}
 	}
 }
 
 func (s *fakeStream) SendInput(_ context.Context, b []byte) error {
+	// A closed stream rejects further writes, like a real socket: a flush that
+	// races a write against a teardown sees a write error and stops.
+	select {
+	case <-s.closed:
+		return io.ErrClosedPipe
+	default:
+	}
 	if s.inputGate != nil {
 		s.inputGate()
 	}
@@ -69,6 +104,25 @@ func (s *fakeStream) SendInput(_ context.Context, b []byte) error {
 	s.input = append(s.input, b...)
 	s.inputFrames = append(s.inputFrames, append([]byte(nil), b...))
 	s.mu.Unlock()
+	switch {
+	case s.hasNack:
+		// The daemon applied nackToSend bytes of this frame, then tore the
+		// stream down with a NACK carrying that count. Emit it and close so
+		// the pane trims the applied prefix and re-sends the rest.
+		select {
+		case s.events <- Event{Kind: EventInputNack, Applied: s.nackToSend}:
+		default:
+		}
+		s.Close()
+	case s.noAck:
+		// The write succeeded but no delivery confirmation will arrive (the
+		// connection drops before the ack): the pane keeps the frame for re-send.
+	default:
+		select {
+		case s.events <- Event{Kind: EventInputAck}:
+		default:
+		}
+	}
 	return nil
 }
 
@@ -702,6 +756,182 @@ func TestInputAcrossReconnectKeepsByteOrder(t *testing.T) {
 		return s2.sentInput() == "gap-tail"
 	}, 5*time.Second, 10*time.Millisecond,
 		"input queued during the gap must land before anything typed after reconnect")
+}
+
+// enqueueInput appends bytes directly to the input queue (bypassing the
+// emulator's input pipe) and wakes the flush loop. A test that needs an exact
+// frame size — to model a daemon chunk boundary, or a partial-apply NACK —
+// cannot uses SendKey, whose KeyRunes path writes one rune at a time and
+// delivers the last byte nondeterministically relative to the flush. This
+// helper makes the queue contents and the flush's frame boundary deterministic.
+func enqueueInput(t *testing.T, tp *TermPane, b []byte) {
+	t.Helper()
+	tp.inputMu.Lock()
+	tp.inputQueue = append(tp.inputQueue, b...)
+	tp.inputMu.Unlock()
+	tp.kickFlush()
+}
+
+// TestInputSurvivesDaemonSideApplyFailure is the #6848 regression at the heart of
+// this fix: a frame whose WS write returned nil (so the OLD flushLoop trimmed it)
+// but whose delivery the daemon never confirmed — it applied 0 bytes, sent a NACK,
+// and closed. The fix retains a frame until its ack, so the un-acked frame is
+// re-sent in full on reconnect instead of vanishing.
+//
+// Deterministic: the frame is enqueued behind a dial gate so the flush emits one
+// 16 KiB frame; s1 models the failing daemon (write ok, NACK applied=0, close);
+// s2 models a healthy daemon that acks. The pre-fix code trimmed on s1's write,
+// leaving s2 nothing to re-send.
+func TestInputSurvivesDaemonSideApplyFailure(t *testing.T) {
+	gate := make(chan struct{})
+	s1 := newFakeStream(0)
+	s1.hasNack = true
+	s1.nackToSend = 0
+	s2 := newFakeStream(0)
+	var dials atomic.Int64
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		if dials.Add(1) == 1 {
+			select {
+			case <-gate:
+				return s1, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return s2, nil
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	want := bytes.Repeat([]byte("p"), inputFlushChunkSize)
+	enqueueInput(t, tp, want)
+	close(gate) // release the frame onto s1, which fails to apply it
+
+	require.Eventually(t, func() bool { return s1.sentInput() == string(want) },
+		5*time.Second, 10*time.Millisecond, "the frame must be written to the first stream")
+	// s1 nacked (applied 0) and closed; the run loop reconnects to s2, which
+	// receives the retained frame in full — the bytes the daemon applied 0 of are
+	// re-sent, not silently discarded.
+	require.Eventually(t, func() bool { return s2.sentInput() == string(want) },
+		5*time.Second, 10*time.Millisecond,
+		"a frame the daemon applied 0 bytes of must be re-sent on reconnect, not silently lost")
+}
+
+// TestInputNackRetainsOnlyUnappliedTail pins the precise-recovery half: when the
+// daemon applied a PREFIX of the failing frame before the chunk error, the NACK's
+// Applied count trims exactly that prefix and the pane re-sends only the unapplied
+// tail. A whole-frame re-send would duplicate the applied prefix into the pane.
+func TestInputNackRetainsOnlyUnappliedTail(t *testing.T) {
+	gate := make(chan struct{})
+	s1 := newFakeStream(0)
+	s1.hasNack = true
+	s1.nackToSend = 8192 // daemon applied 8192 of the 16384-byte frame, then failed
+	s2 := newFakeStream(0)
+	var dials atomic.Int64
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		if dials.Add(1) == 1 {
+			select {
+			case <-gate:
+				return s1, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return s2, nil
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	frame := bytes.Repeat([]byte("p"), inputFlushChunkSize)
+	enqueueInput(t, tp, frame)
+	close(gate)
+
+	require.Eventually(t, func() bool { return s1.sentInput() == string(frame) },
+		5*time.Second, 10*time.Millisecond, "the full frame must be written to the first stream")
+	// Only the 8192-byte unapplied tail is re-sent; the applied prefix is trimmed
+	// by the NACK and not duplicated onto the pane.
+	tail := frame[8192:]
+	require.Eventually(t, func() bool { return s2.sentInput() == string(tail) },
+		5*time.Second, 10*time.Millisecond,
+		"a partially-applied frame must re-send only the unapplied tail, not the whole frame")
+}
+
+// TestInputRetainedAcrossBacklogAfterNack pins the multi-frame case the report
+// calls out: while the daemon is failing one frame, several LATER frames may
+// already have been written and (pre-fix) trimmed. With ack-based trimming those
+// later frames were never trimmed, so they survive the teardown and re-send on
+// reconnect in order — the backlog does not lose its middle.
+func TestInputRetainedAcrossBacklogAfterNack(t *testing.T) {
+	gate := make(chan struct{})
+	s1 := newFakeStream(0)
+	s1.hasNack = true
+	s1.nackToSend = 0 // the first frame fails (applied 0); the rest must still re-send
+	s2 := newFakeStream(0)
+	var dials atomic.Int64
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		if dials.Add(1) == 1 {
+			select {
+			case <-gate:
+				return s1, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return s2, nil
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	// Two full frames plus a tail — a backlog large enough that the flush would
+	// write a later frame while the daemon is still failing the first.
+	want := bytes.Repeat([]byte("p"), 2*inputFlushChunkSize+7)
+	enqueueInput(t, tp, want)
+	close(gate)
+
+	require.Eventually(t, func() bool { return len(s1.sentFrameSizes()) >= 1 },
+		5*time.Second, 10*time.Millisecond, "the first frame must reach the failing stream")
+	// The whole backlog re-sends onto s2 in order — nothing the flush wrote to s1
+	// but the daemon never confirmed is lost.
+	require.Eventually(t, func() bool { return s2.sentInput() == string(want) },
+		10*time.Second, 20*time.Millisecond,
+		"the whole backlog must re-send on reconnect after a mid-backlog daemon failure")
+}
+
+// TestInputRetainedWhenConnectionDropsBeforeAck pins the bounded-duplicate half
+// of the invariant: a frame whose write succeeded but whose ack never came back
+// (a connection drop between write and ack) is retained and re-sent on reconnect.
+// The daemon may have applied it, so this can duplicate — but it is bounded to the
+// small unconfirmed window and, per the report, vastly preferable to silent loss.
+func TestInputRetainedWhenConnectionDropsBeforeAck(t *testing.T) {
+	gate := make(chan struct{})
+	s1 := newFakeStream(0)
+	s1.noAck = true // write succeeds, no ack ever returns before the drop
+	s2 := newFakeStream(0)
+	var dials atomic.Int64
+	dial := func(ctx context.Context, _ uint64) (Stream, error) {
+		if dials.Add(1) == 1 {
+			select {
+			case <-gate:
+				return s1, nil
+			case <-ctx.Done():
+				return nil, ctx.Err()
+			}
+		}
+		return s2, nil
+	}
+	tp := New(dial, 40, 6)
+	t.Cleanup(func() { _ = tp.Close() })
+
+	want := bytes.Repeat([]byte("p"), inputFlushChunkSize)
+	enqueueInput(t, tp, want)
+	close(gate)
+
+	require.Eventually(t, func() bool { return s1.sentInput() == string(want) },
+		5*time.Second, 10*time.Millisecond, "the frame must be written to the first stream")
+	_ = s1.Close() // drop without an ack
+	require.Eventually(t, func() bool { return s2.sentInput() == string(want) },
+		5*time.Second, 10*time.Millisecond,
+		"a frame written but never acked must be re-sent on reconnect (bounded duplicate, not loss)")
 }
 
 // TestQueuedInputFlushesInServerBoundedChunks pins the flush's per-frame bound:

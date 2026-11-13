@@ -294,6 +294,79 @@ func TestSendRawKeysStopsOnChunkFailure(t *testing.T) {
 	}
 }
 
+// TestSendRawKeysReportsAppliedPrefixOnChunkFailure pins the accounting the
+// daemon's PTY broker forwards to the client as a MsgInputNack so the client
+// re-sends only the unapplied tail: when a chunk fails mid-frame, the returned
+// *PartialInputError carries exactly the bytes the pane already received (the
+// chunks that succeeded before the failing one), and it still unwraps to the
+// underlying tmux error so existing errors.Is classification survives.
+func TestSendRawKeysReportsAppliedPrefixOnChunkFailure(t *testing.T) {
+	boom := errors.New("send-keys refused")
+	calls := 0
+	ex := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			// has-session is the ExistsOrUnknown probe on the error path; let it
+			// answer "exists" so the failure stays a plain send error.
+			if len(c.Args) > 1 && c.Args[1] == "has-session" {
+				return nil
+			}
+			calls++
+			if calls == 2 {
+				return boom
+			}
+			return nil
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+	ts := NewTmuxSessionFromSanitizedNameWithDeps(testPasteSession, "sh", MakePtyFactory(), ex)
+
+	chunk := ts.sendRawKeysChunkSize()
+	payload := bytes.Repeat([]byte("y"), 5*chunk)
+	err := ts.SendRawKeys(payload)
+	if err == nil {
+		t.Fatal("a failed chunk must not report success — that is silent paste truncation")
+	}
+	var pie *PartialInputError
+	if !errors.As(err, &pie) {
+		t.Fatalf("error must be a *PartialInputError carrying the applied prefix, got %T: %v", err, err)
+	}
+	if pie.Applied != chunk {
+		t.Fatalf("Applied = %d, want %d (exactly one chunk applied before the second failed)", pie.Applied, chunk)
+	}
+	if !errors.Is(pie, boom) {
+		t.Fatalf("underlying tmux error must survive the PartialInputError wrap: got %v", pie.Err)
+	}
+}
+
+// TestSendRawKeysAppliedPrefixIsZeroOnFirstChunkFailure pins the 0-byte case: a
+// failure on the very first chunk applied nothing, so the client must re-send the
+// whole frame. Applied must read exactly 0, not the full chunk.
+func TestSendRawKeysAppliedPrefixIsZeroOnFirstChunkFailure(t *testing.T) {
+	boom := errors.New("tmux wedged before the first send-keys")
+	ex := cmd_test.MockCmdExec{
+		RunFunc: func(c *exec.Cmd) error {
+			if len(c.Args) > 1 && c.Args[1] == "has-session" {
+				return nil
+			}
+			return boom
+		},
+		OutputFunc: func(c *exec.Cmd) ([]byte, error) { return nil, nil },
+	}
+	ts := NewTmuxSessionFromSanitizedNameWithDeps(testPasteSession, "sh", MakePtyFactory(), ex)
+
+	err := ts.SendRawKeys(bytes.Repeat([]byte("z"), 3*ts.sendRawKeysChunkSize()))
+	if err == nil {
+		t.Fatal("first-chunk failure must not report success")
+	}
+	var pie *PartialInputError
+	if !errors.As(err, &pie) {
+		t.Fatalf("error must be a *PartialInputError, got %T: %v", err, err)
+	}
+	if pie.Applied != 0 {
+		t.Fatalf("Applied = %d, want 0 (the first chunk failed; nothing reached the pane)", pie.Applied)
+	}
+}
+
 // TestSendRawKeysChunkFitsRealTmux is the guard that keeps sendRawKeysArgvBudget
 // a checked fact rather than an assumption, and it exists because the assumption
 // was wrong once already.

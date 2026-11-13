@@ -100,6 +100,20 @@ const (
 	// longer exist) — a jump our own start + bytes-received arithmetic cannot see, and
 	// which would otherwise make the next reconnect replay already-rendered bytes.
 	EventCursor
+	// EventInputAck confirms ONE INPUT frame the daemon applied to the pane. The
+	// flush loop never trims a written frame until its ack arrives, so a drained
+	// byte the daemon silently dropped (a write that returned nil but the daemon
+	// never applied) is retained and re-sent on reconnect rather than lost. The
+	// ack stream is FIFO — one per INPUT frame, in arrival order — so the pane
+	// pairs each ack with the oldest frame it has sent but not yet confirmed.
+	EventInputAck
+	// EventInputNack reports an INPUT frame the daemon FAILED to apply, carrying
+	// in Applied how many bytes of THAT frame reached the pane before the
+	// failure. It is the daemon's final in-band frame before the stream closes;
+	// the pane trims the applied prefix and re-sends the rest on reconnect (and
+	// on a close with no preceding NACK, the pane keeps the whole unconfirmed
+	// backlog — a duplicate is possible but bounded, and never silent loss).
+	EventInputNack
 )
 
 // RepaintCursorCoverage says whether a mode-bearing repaint authoritatively
@@ -130,6 +144,9 @@ type Event struct {
 	// Seq is the server's authoritative replay cursor, valid only when
 	// Kind == EventCursor.
 	Seq uint64
+	// Applied is the number of bytes of the failing INPUT frame the daemon
+	// applied before the failure, valid only when Kind == EventInputNack.
+	Applied int
 }
 
 // Stream is one open connection to a session tab's PTY stream. The concrete
@@ -213,17 +230,30 @@ type TermPane struct {
 	// the other way round.
 	resizeMu sync.Mutex
 
-	// inputMu guards inputQueue — user input the emulator already accepted but no
-	// stream has carried yet, in encoded order. sendPump appends every drained
-	// pipe write; the flush loop takes each pending prefix under inputMu, so
-	// bytes leave in the order the emulator produced them (#6848: a drained byte
-	// must never be silently discarded just because no stream exists to carry it).
+	// inputMu guards inputQueue — user input the emulator already accepted but the
+	// daemon has not yet CONFIRMED delivered, in encoded order. sendPump appends
+	// every drained pipe write; the flush loop writes the unsent tail to the
+	// stream and, crucially, does NOT trim on the WS write alone — a write that
+	// returned nil only proves the frame reached the socket, not that the daemon
+	// applied it. Bytes are trimmed only on an EventInputAck (one ack per frame,
+	// FIFO), so a post-write daemon-side failure that applied 0 bytes or only a
+	// prefix leaves the unconfirmed tail in the queue for the next stream
+	// (#6848: a drained byte must never be silently discarded).
+	//
+	// inputQueue is split by sentLen: inputQueue[:sentLen] is the sent-but-
+	// unconfirmed prefix (one INPUT frame per entry of frameLens), and
+	// inputQueue[sentLen:] is the unsent tail the flush loop will write next.
+	// On a disconnect the run loop resets sentLen/frameLens so the whole
+	// unconfirmed backlog re-sends from the front of the next stream.
 	inputMu    sync.Mutex
 	inputQueue []byte
+	sentLen    int   // bytes written to the current stream but not yet acked/nacked
+	frameLens  []int // length of each sent-but-unconfirmed INPUT frame, FIFO
 	// flushKick wakes the flush loop — sendPump kicks after every append and the
-	// run loop kicks on each connect. Capacity 1: a pending kick means "the queue
-	// may hold unsent bytes", and a woken flusher drains the whole queue, so
-	// kicks coalesce without losing work.
+	// run loop kicks on each connect and after a connection tears down (so the
+	// retained unconfirmed backlog re-flushes). Capacity 1: a pending kick means
+	// "the queue may hold unsent bytes", and a woken flusher drains the whole
+	// queue, so kicks coalesce without losing work.
 	flushKick chan struct{}
 
 	ctx       context.Context
@@ -360,6 +390,19 @@ func (t *TermPane) run() {
 			t.stream = nil
 		}
 		t.connMu.Unlock()
+		// The stream is gone: nothing this connection was sent is "sent" to the
+		// next one. Drop the sent/unconfirmed split so the flush loop re-sends the
+		// whole unconfirmed backlog (inputQueue) from the front on reconnect.
+		// Acks already trimmed confirmed frames; a NACK already trimmed the
+		// applied prefix of a failing frame; whatever remains the daemon never
+		// confirmed is retained and re-delivered — a duplicate is possible (a
+		// frame the daemon applied but never acked before the close) but bounded,
+		// and never silent loss (#6848).
+		t.inputMu.Lock()
+		t.sentLen = 0
+		t.frameLens = nil
+		t.inputMu.Unlock()
+		t.kickFlush()
 		_ = stream.Close()
 	}
 }
@@ -430,6 +473,44 @@ func (t *TermPane) readStream(stream Stream) {
 			t.gridMu.Lock()
 			t.emu.Resize(int(ev.Cols), int(ev.Rows))
 			t.gridMu.Unlock()
+		case EventInputAck:
+			// The daemon applied the oldest unconfirmed INPUT frame to the pane.
+			// Trim exactly that frame from the front of the queue (acks are
+			// FIFO, so the front of frameLens is the frame this ack settles) and
+			// drop its accounting. This is the only place bytes leave the queue
+			// without the daemon closing the stream — the write that originally
+			// sent the frame is NOT what trimmed it.
+			t.inputMu.Lock()
+			if len(t.frameLens) == 0 {
+				t.inputMu.Unlock()
+				break
+			}
+			n := t.frameLens[0]
+			t.frameLens = t.frameLens[1:]
+			t.inputQueue = t.inputQueue[n:]
+			t.sentLen -= n
+			t.inputMu.Unlock()
+		case EventInputNack:
+			// The daemon failed to apply the oldest unconfirmed INPUT frame;
+			// ev.Applied is how many bytes of it reached the pane before the
+			// failure. Trim only that applied prefix (it is real, in the pane,
+			// and re-sending it would duplicate). The unapplied tail and every
+			// later unconfirmed frame stay in the queue for re-send. The stream
+			// is tearing down (this is the daemon's final in-band frame before
+			// the close), so the run loop's teardown resets sentLen/frameLens
+			// and re-flushes the remainder on reconnect.
+			t.inputMu.Lock()
+			if ev.Applied > 0 {
+				if ev.Applied > len(t.inputQueue) {
+					ev.Applied = len(t.inputQueue)
+				}
+				t.inputQueue = t.inputQueue[ev.Applied:]
+				t.sentLen -= ev.Applied
+				if t.sentLen < 0 {
+					t.sentLen = 0
+				}
+			}
+			t.inputMu.Unlock()
 		}
 	}
 }
@@ -472,14 +553,19 @@ func (t *TermPane) kickFlush() {
 	}
 }
 
-// flushLoop is the sole INPUT sender. On each wake it pushes queued input to the
-// CURRENT stream — re-read per chunk so a mid-flush reconnect switches streams —
-// in FIFO order, keeping whatever a failed write could not deliver: the queue is
-// a byte stream, so re-sending the retained prefix after a dropped or wedged
-// frame preserves order and never turns an unconfirmed partial delivery into
-// shell input (#6848). A slow stream can hold the flusher for writeTimeout per
-// chunk without ever stalling the input reader, and ctx cancellation ends the
-// loop on Close even mid-write.
+// flushLoop is the sole INPUT sender. On each wake it writes the UNSent tail of
+// the queue to the CURRENT stream — re-read per chunk so a mid-flush reconnect
+// switches streams — in FIFO order. A frame is moved from the unsent tail to the
+// sent-but-unconfirmed prefix (sentLen) only when its WS write returned nil, and
+// is trimmed from the queue ONLY when its EventInputAck arrives: a nil write
+// proved the frame reached the socket, not that the daemon applied it, so the
+// pre-fix trim-on-write dropped a frame the daemon never delivered (a
+// post-write daemon-side failure applied 0 bytes or only a prefix then closed),
+// silently losing the already-trimmed tail across reconnects (#6848). The queue
+// is a byte stream, so the retained unconfirmed prefix re-sends in order after a
+// drop and never turns an unconfirmed partial delivery into shell input. A slow
+// stream can hold the flusher for writeTimeout per chunk without ever stalling
+// the input reader, and ctx cancellation ends the loop on Close even mid-write.
 func (t *TermPane) flushLoop() {
 	for {
 		select {
@@ -495,7 +581,22 @@ func (t *TermPane) flushLoop() {
 				break
 			}
 			t.inputMu.Lock()
-			data := append([]byte(nil), t.inputQueue[:min(len(t.inputQueue), inputFlushChunkSize)]...)
+			if t.sentLen >= len(t.inputQueue) {
+				// Everything the queue holds has already been written to this
+				// stream; the rest is the daemon's to confirm (ack) or deny
+				// (nack/close), which re-kicks the loop.
+				t.inputMu.Unlock()
+				break
+			}
+			end := min(t.sentLen+inputFlushChunkSize, len(t.inputQueue))
+			// Pre-register the chunk as sent-but-unconfirmed BEFORE the write so
+			// an ack that arrives the instant the write returns (a fast daemon,
+			// or the in-memory fake) always finds its frame in frameLens,
+			// rather than racing the post-write sentLen advance. On a write
+			// failure the chunk is unregistered back to the unsent tail.
+			data := append([]byte(nil), t.inputQueue[t.sentLen:end]...)
+			t.sentLen += len(data)
+			t.frameLens = append(t.frameLens, len(data))
 			t.inputMu.Unlock()
 			if len(data) == 0 {
 				break
@@ -504,11 +605,25 @@ func (t *TermPane) flushLoop() {
 			err := stream.SendInput(wctx, data)
 			cancel()
 			if err != nil {
+				// The write did not reach the daemon (network drop / wedged
+				// socket): un-register the frame we just marked sent so its
+				// bytes re-send on the next attempt/stream. Acks are FIFO from
+				// the front of frameLens, and this frame is the LAST entry, so
+				// an ack that arrived during the write trimmed an EARLIER frame,
+				// not this one — the last entry is still ours unless this was
+				// the only frame and it was already acked (frameLens empty),
+				// in which case there is nothing to undo.
+				t.inputMu.Lock()
+				if len(t.frameLens) > 0 {
+					t.frameLens = t.frameLens[:len(t.frameLens)-1]
+					t.sentLen -= len(data)
+					if t.sentLen < 0 {
+						t.sentLen = 0
+					}
+				}
+				t.inputMu.Unlock()
 				break
 			}
-			t.inputMu.Lock()
-			t.inputQueue = t.inputQueue[len(data):]
-			t.inputMu.Unlock()
 		}
 	}
 }

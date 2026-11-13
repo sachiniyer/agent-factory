@@ -19,6 +19,7 @@ import (
 	"github.com/sachiniyer/agent-factory/agentproto"
 	"github.com/sachiniyer/agent-factory/log"
 	"github.com/sachiniyer/agent-factory/session"
+	sessiontmux "github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // The daemon's WebSocket PTY stream broker (#1592 Phase 2 PR5) — the data plane
@@ -377,6 +378,22 @@ func servePTYStreamWithKeepalive(binding ptyTabBinding, sub session.PTYSubscript
 	}
 	if readerErr != nil {
 		log.WarningLog.Printf("PTY input delivery failed; closing web stream so the client can reconnect: %v", readerErr)
+		// Tell the client how many bytes of the failing frame the pane actually
+		// received before this error, so its input queue re-sends only the
+		// unapplied tail (and every later unconfirmed frame) on reconnect
+		// instead of silently dropping the already-trimmed bytes (#6848). The
+		// daemon's chunked send-keys is the one place that knows — extract it
+		// from the tmux PartialInputError; an unknown/relayed failure (no
+		// accounting) yields 0, meaning "re-send the whole frame", which is a
+		// bounded duplicate rather than silent loss.
+		applied := 0
+		var pie *sessiontmux.PartialInputError
+		if errors.As(readerErr, &pie) {
+			applied = pie.Applied
+		}
+		nctx, ncancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+		_ = agentproto.WriteControl(nctx, conn, agentproto.NewInputNackMessage(applied))
+		ncancel()
 		closeStatus = websocket.StatusInternalError
 		closeReason = "PTY input delivery failed"
 	}
@@ -498,6 +515,16 @@ func writePTYStream(ctx context.Context, sub session.PTYSubscription, conn *webs
 // only goroutine that reads, so a pong that arrives meanwhile waits unread.
 // reader records each such stretch so the keepalive does not blame the peer
 // for it (#7105).
+//
+// A successfully applied INPUT is confirmed to the client with a MsgInputAck so
+// the client trims ONLY the confirmed frame from its input queue instead of
+// trimming on WS-write success — which proved only that the frame reached this
+// socket, not that the daemon delivered it to the pane. A failed INPUT is
+// reported with a MsgInputNack (issued by servePTYStream during teardown)
+// carrying how many bytes the pane received before the failure, so the client
+// re-sends the unapplied tail rather than the whole backlog. Together they
+// preserve the queue's "a drained byte must never be silently discarded"
+// invariant across a post-write daemon-side failure (#6848).
 func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.Conn, inputDelivery *ptyInputDelivery, reader *ptyReaderAvailability) error {
 	for {
 		msg, err := agentproto.ReadMessage(ctx, conn)
@@ -518,11 +545,20 @@ func readPTYClient(ctx context.Context, binding ptyTabBinding, conn *websocket.C
 				reader.back()
 				if err != nil {
 					err = fmt.Errorf("apply PTY input: %w", err)
-				}
-				inputResult <- err
-				if err != nil {
+					inputResult <- err
 					return err
 				}
+				inputResult <- nil
+				// The frame reached the pane. Tell the client it may trim this
+				// frame. Acks are FIFO (this reader applies one frame at a time, in
+				// arrival order) so the client pairs each ack with its oldest
+				// unconfirmed frame. The write is best-effort: a client that has
+				// already dropped will be torn down by the next read, and a lost
+				// ack leaves the client to re-send the frame on reconnect — a
+				// bounded duplicate, not silent loss.
+				actx, acancel := context.WithTimeout(context.Background(), wsWriteTimeout)
+				_ = agentproto.WriteControl(actx, conn, agentproto.NewInputAckMessage())
+				acancel()
 			case agentproto.OpResize:
 				reader.away()
 				_ = binding.resize(msg.Frame.Rows, msg.Frame.Cols)

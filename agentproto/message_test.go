@@ -24,6 +24,12 @@ func TestControlMessageWireShapes(t *testing.T) {
 		// so no existing client sees a changed wire shape.
 		{"exit_tab_closed", NewTabClosedMessage(), `{"type":"exit","code":0,"reason":"tab_closed"}`},
 		{"detach", NewDetachMessage(), `{"type":"detach"}`},
+		// Input delivery accounting (server → client, additive). The ack carries
+		// no payload beyond the type; the nack carries the applied byte count so
+		// the client can re-send only the unapplied tail of the failing frame.
+		{"input_ack", NewInputAckMessage(), `{"type":"input_ack"}`},
+		{"input_nack", NewInputNackMessage(0), `{"type":"input_nack","applied":0}`},
+		{"input_nack_partial", NewInputNackMessage(8192), `{"type":"input_nack","applied":8192}`},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -101,6 +107,45 @@ func TestMessageTypeOfErrors(t *testing.T) {
 	}
 	if _, err := MessageTypeOf([]byte(`{"rows":24}`)); err == nil {
 		t.Error("MessageTypeOf(no type) = nil error, want error")
+	}
+}
+
+// An input nack carries how many bytes of the failing frame were applied, so the
+// client can re-send only the unapplied tail rather than the whole backlog.
+func TestInputNackRoundTrip(t *testing.T) {
+	want := NewInputNackMessage(4096)
+	raw, err := json.Marshal(want)
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if typ, err := MessageTypeOf(raw); err != nil || typ != MsgInputNack {
+		t.Fatalf("MessageTypeOf = %q, %v; want %q", typ, err, MsgInputNack)
+	}
+	var got InputNackMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Applied != 4096 {
+		t.Fatalf("Applied = %d, want 4096", got.Applied)
+	}
+}
+
+// An input ack acknowledges a single applied frame; it discriminates cleanly and
+// carries nothing beyond its type.
+func TestInputAckRoundTrip(t *testing.T) {
+	raw, err := json.Marshal(NewInputAckMessage())
+	if err != nil {
+		t.Fatalf("marshal: %v", err)
+	}
+	if typ, err := MessageTypeOf(raw); err != nil || typ != MsgInputAck {
+		t.Fatalf("MessageTypeOf = %q, %v; want %q", typ, err, MsgInputAck)
+	}
+	var got InputAckMessage
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatalf("unmarshal: %v", err)
+	}
+	if got.Type != MsgInputAck {
+		t.Fatalf("type = %q, want %q", got.Type, MsgInputAck)
 	}
 }
 
