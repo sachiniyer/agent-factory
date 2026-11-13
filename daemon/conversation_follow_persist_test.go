@@ -390,3 +390,77 @@ func TestFollowPersistFailureLogsTheMoveAsSeenNotRecorded(t *testing.T) {
 	require.Contains(t, logged, "simulated transient fsync failure", "the log carries the write's error")
 	require.Contains(t, logged, "next follow check", "the log says when it is retried")
 }
+
+// holdStartLockForTest takes lock the way a whole-row writer mid-write holds
+// it and returns its release. Cleanup releases it if a failed assertion left
+// it held, then waits for finished, so the writer blocked on it is neither
+// stranded nor still running when the test's earlier cleanups restore hooks.
+// Register it after the hook it must outlive.
+func holdStartLockForTest(t *testing.T, lock *sync.Mutex, finished <-chan struct{}) func() {
+	t.Helper()
+	lock.Lock()
+	var once sync.Once
+	release := func() { once.Do(lock.Unlock) }
+	t.Cleanup(func() {
+		release()
+		select {
+		case <-finished:
+		case <-time.After(30 * time.Second):
+		}
+	})
+	return release
+}
+
+// TestFollowCommitsTheMoveOnlyUnderTheStartLock is the other end of the
+// #7254 review's window: a whole-row writer that already holds the start lock
+// (a poll mid-write) when the follow judges a move. A move committed to memory
+// before the follow takes the lock is one that writer can snapshot and
+// persist, and the follow's failed write would then roll memory back behind a
+// disk that has the move.
+func TestFollowCommitsTheMoveOnlyUnderTheStartLock(t *testing.T) {
+	manager, inst, repoID, key, codexHome := codexLoopTestInstance(t)
+	dir := inst.GetWorktreePath()
+	first := writeHeldTestRollout(t, codexHome, heldMissionThreadID, dir)
+	held := &heldOnly{}
+	held.set(first)
+	inst.SetCodexRuntimeHeldOverrideForTest(held.snapshot)
+	inst.SetAgentConversation(session.AgentConversationData{
+		Agent: tmux.ProgramCodex, ID: heldMissionThreadID,
+		CapturedAt: time.Now(), CaptureKind: session.ConversationCaptureCodexRollout,
+	})
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	second := writeHeldTestRollout(t, codexHome, heldUserThreadID, dir)
+	held.set(second)
+	snap := inst.SessionCodexCaptureScope()
+	token := inst.AgentRuntimeToken()
+
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if conversationBeingPersisted(data).ID == heldUserThreadID {
+			return fmt.Errorf("simulated transient fsync failure")
+		}
+		return nil
+	}
+
+	finished := make(chan struct{})
+	var followErr error
+	release := holdStartLockForTest(t, manager.startLockForRepo(repoID), finished)
+	go func() {
+		defer close(finished)
+		followErr = manager.followAgentConversation(repoID, key, inst, snap, token, inst.AgentConversation())
+	}()
+	require.Never(t, func() bool { return inst.AgentConversation().ID == heldUserThreadID }, 500*time.Millisecond, 5*time.Millisecond,
+		"while another writer holds the start lock the follow must not have moved the record")
+	// The lock holder's whole-row write, as a poll makes it.
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	release()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("the follow never finished once the start lock was released")
+	}
+	require.NoError(t, followErr)
+	require.Equal(t, heldMissionThreadID, inst.AgentConversation().ID, "the failed write rolls the move back")
+	require.Equal(t, heldMissionThreadID, persistedConversationID(t, repoID), "no writer persisted the unsaved move")
+}

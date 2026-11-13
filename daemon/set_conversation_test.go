@@ -2,6 +2,7 @@ package daemon
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -192,4 +193,46 @@ func TestCaptureAgentConversationSkipsARecordedRepair(t *testing.T) {
 	require.NoError(t, manager.captureAgentConversation(repoID, key, inst, snap,
 		inst.AgentRuntimeToken(), 50*time.Millisecond))
 	require.Equal(t, setConversationDaemonID, inst.AgentConversation().ID)
+}
+
+// TestSetConversationCommitsTheRepairOnlyUnderTheStartLock is the follow's
+// #7254 review window on the operator path: a whole-row writer that holds the
+// start lock (a poll mid-write) while a repair is requested. A repair
+// committed to memory before the lock is one that writer can snapshot and
+// persist, and the repair's failed write would then roll memory back behind a
+// disk that has the repair.
+func TestSetConversationCommitsTheRepairOnlyUnderTheStartLock(t *testing.T) {
+	manager, inst, repoID, codexHome := setConversationFixture(t)
+	writeDaemonCodexRolloutFileWithCwd(t, codexHome,
+		"rollout-2026-08-10T10-17-35-"+setConversationDaemonID+".jsonl", inst.Path)
+
+	prev := testHookPersistInstanceData
+	t.Cleanup(func() { testHookPersistInstanceData = prev })
+	testHookPersistInstanceData = func(_ string, data session.InstanceData) error {
+		if conversationBeingPersisted(data).ID == setConversationDaemonID {
+			return fmt.Errorf("simulated transient fsync failure")
+		}
+		return nil
+	}
+
+	finished := make(chan struct{})
+	var setErr error
+	release := holdStartLockForTest(t, manager.startLockForRepo(repoID), finished)
+	go func() {
+		defer close(finished)
+		setErr = manager.setConversation(setConversationReq(inst, repoID, setConversationDaemonID), nil)
+	}()
+	require.Never(t, func() bool { return inst.AgentConversation().ID == setConversationDaemonID }, 500*time.Millisecond, 5*time.Millisecond,
+		"while another writer holds the start lock the repair must not be in memory")
+	// The lock holder's whole-row write, as a poll makes it.
+	require.NoError(t, persistInstanceData(repoID, inst.ToInstanceData()))
+	release()
+	select {
+	case <-finished:
+	case <-time.After(30 * time.Second):
+		t.Fatal("set-conversation never finished once the start lock was released")
+	}
+	require.ErrorContains(t, setErr, "simulated transient fsync failure")
+	require.Empty(t, inst.AgentConversation().ID, "the failed repair rolls back")
+	require.Empty(t, persistedConversationID(t, repoID), "no writer persisted the unsaved repair")
 }
