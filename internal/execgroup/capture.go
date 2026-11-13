@@ -7,6 +7,7 @@ import (
 	"os"
 	"os/exec"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"syscall"
 	"time"
@@ -14,11 +15,11 @@ import (
 	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
-// Output runs cmd and returns its standard output, like (*exec.Cmd).Output.
-// CombinedOutput is the same for (*exec.Cmd).CombinedOutput. Together they are
-// the normal-completion half of the bounded-command contract: a deadline still
-// kills the whole group through KillOnCancel, and these decide what happens to
-// the group when the command finished on its own (#7121).
+// Run starts cmd and waits for it, like (*exec.Cmd).Run. Output and
+// CombinedOutput are Run with its stdout (and stderr) captured. Together they
+// are the normal-completion half of the bounded-command contract: a deadline
+// still kills the whole group through KillOnCancel, and these decide what
+// happens to the group when the command finished on its own (#7121).
 //
 // WHY not os/exec plus Reap. Reap SIGKILLs every member of the group, and on
 // a command that finished on its own the group can hold more than leaks.
@@ -35,25 +36,35 @@ import (
 // What is evidence is a member still holding one of the command's own pipes
 // WaitDelay after the leader exited: that is the straggler a bounded command
 // exists to end (#769, #7108). os/exec cannot say which process that is,
-// because it owns the pipes. These functions own them instead, so they can
-// ask the kernel per process. When a pipe is still open WaitDelay after the
-// leader exited, they SIGKILL each process that is a member of the group cmd's
-// leader leads AND holds that pipe, re-checking each instance at signal time
-// (reapPipeHolders), and signal nothing else. Then they close the pipes, as
-// os/exec does at WaitDelay.
+// because it owns the pipes. Run owns them instead: every stdin, stdout and
+// stderr that is not an *os.File gets a pipe of Run's, copied to or from the
+// caller's reader or writer, so Run can ask the kernel per process. When a
+// pipe is still open WaitDelay after the leader exited, Run SIGKILLs each
+// process that is a member of the group cmd's leader leads AND holds that
+// pipe, re-checking each instance at signal time (reapPipeHolders), and
+// signals nothing else. Then it closes the pipes, as os/exec does at
+// WaitDelay. A caller's *os.File reaches the child directly, as in os/exec,
+// and is not searched.
+//
+// A deadline is not a normal completion. When os/exec called cmd.Cancel, so
+// the context ended the command while its leader still ran, Run sweeps the
+// group once more after the leader has been waited, as Reap did after every
+// command (#7241). On darwin a group kill can miss a child the group was
+// forking, and this second sweep is what caught one that holds no pipe.
 //
 // Everything else follows os/exec:
-//   - cmd.Stdout must be unset, and for CombinedOutput cmd.Stderr too. When
-//     Output finds cmd.Stderr unset, it captures stderr and attaches the
-//     first and last 32 KiB to an *exec.ExitError's Stderr. A cmd.Stderr the
-//     caller set is left to os/exec, so a holder of that pipe is not looked
-//     for.
-//   - A cmd.Stdin that is not an *os.File is copied in through a pipe these
-//     functions own, so a member that holds it unread past WaitDelay is found
-//     the same way. An *os.File reaches the child directly, as in os/exec.
+//   - Stdout and Stderr that are equal share one pipe, so the caller's writer
+//     is never written from two goroutines; different writers get one each.
 //   - The error is cmd.Wait's. When the leader exited 0 but a pipe was still
 //     open at WaitDelay, it is exec.ErrWaitDelay: the output is complete. A
-//     failed copy is reported only when nothing else failed.
+//     failed copy, a caller's writer refusing bytes included, is reported only
+//     when nothing else failed.
+//   - One difference: a writer that refuses bytes gets no more, and the rest
+//     is read and discarded, so the child never blocks on a full pipe. os/exec
+//     closes the read end instead, but Run keeps its own end of every pipe open
+//     while a reap may still be searching for that pipe (see settle). So a
+//     child whose writer refused gets no EPIPE: it runs until it finishes or
+//     its deadline ends it, as RunLimited's cancel on overflow does.
 //   - WaitDelay is counted from the leader's exit. Under KillOnCancel a
 //     deadline kills the leader at once, so that is also, to within the kill,
 //     os/exec's "WaitDelay after the context is done". A zero WaitDelay waits
@@ -67,27 +78,56 @@ import (
 // Known limit: before OpenSSH 8.0 a ControlPersist proxy kept the caller's
 // stderr. It is then a member holding the command's pipe past WaitDelay, the
 // same evidence a wedged helper gives, and it is reaped.
-func Output(cmd *exec.Cmd) ([]byte, error) {
-	return capture(cmd, false)
+func Run(cmd *exec.Cmd) error {
+	return run(cmd)
 }
 
-// CombinedOutput is Output with stderr sent to the same pipe as stdout, like
-// (*exec.Cmd).CombinedOutput.
+// Output is Run with stdout captured and returned, like (*exec.Cmd).Output.
+// cmd.Stdout must be unset. When cmd.Stderr is unset too, stderr is captured
+// and its first and last 32 KiB are attached to an *exec.ExitError's Stderr.
+func Output(cmd *exec.Cmd) ([]byte, error) {
+	if cmd.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+	var stderr *headTail
+	if cmd.Stderr == nil {
+		stderr = &headTail{n: stderrKeep}
+		cmd.Stderr = stderr
+	}
+	err := run(cmd)
+	if ee, ok := err.(*exec.ExitError); ok && stderr != nil {
+		ee.Stderr = stderr.Bytes()
+	}
+	return stdout.Bytes(), err
+}
+
+// CombinedOutput is Run with stdout and stderr captured into one buffer and
+// returned, like (*exec.Cmd).CombinedOutput. Both must be unset.
 func CombinedOutput(cmd *exec.Cmd) ([]byte, error) {
-	return capture(cmd, true)
+	if cmd.Stdout != nil {
+		return nil, errors.New("exec: Stdout already set")
+	}
+	if cmd.Stderr != nil {
+		return nil, errors.New("exec: Stderr already set")
+	}
+	var b bytes.Buffer
+	cmd.Stdout = &b
+	cmd.Stderr = &b
+	err := run(cmd)
+	return b.Bytes(), err
 }
 
 // stderrKeep is how much of each end of stderr Output attaches to an
 // *exec.ExitError, the same 32 KiB os/exec keeps.
 const stderrKeep = 32 << 10
 
-func capture(cmd *exec.Cmd, combined bool) ([]byte, error) {
-	if cmd.Stdout != nil {
-		return nil, errors.New("exec: Stdout already set")
-	}
-	if combined && cmd.Stderr != nil {
-		return nil, errors.New("exec: Stderr already set")
-	}
+// sweepAfterCancel is the second group sweep a deadline gets (see Run), a
+// var so a test can see that it ran.
+var sweepAfterCancel = func(pgid int) { _ = killGroup(pgid) }
+
+func run(cmd *exec.Cmd) error {
 	var pipes []*ownedPipe
 	defer func() {
 		for _, p := range pipes {
@@ -95,41 +135,41 @@ func capture(cmd *exec.Cmd, combined bool) ([]byte, error) {
 		}
 	}()
 
-	var stdout bytes.Buffer
-	out, err := newOutputPipe(&stdout)
-	if err != nil {
-		return nil, err
-	}
-	pipes = append(pipes, out)
-	cmd.Stdout = out.theirs
-
-	var stderr *headTail
-	switch {
-	case combined:
-		cmd.Stderr = out.theirs
-	case cmd.Stderr == nil:
-		stderr = &headTail{n: stderrKeep}
-		errPipe, err := newOutputPipe(stderr)
+	if w := cmd.Stdout; w != nil && !isFile(w) {
+		p, err := newOutputPipe(w)
 		if err != nil {
-			return nil, err
+			return err
 		}
-		pipes = append(pipes, errPipe)
-		cmd.Stderr = errPipe.theirs
+		pipes = append(pipes, p)
+		cmd.Stdout = p.theirs
+		if interfaceEqual(cmd.Stderr, w) {
+			cmd.Stderr = p.theirs
+		}
+	}
+	if w := cmd.Stderr; w != nil && !isFile(w) {
+		p, err := newOutputPipe(w)
+		if err != nil {
+			return err
+		}
+		pipes = append(pipes, p)
+		cmd.Stderr = p.theirs
+	}
+	if src := cmd.Stdin; src != nil && !isFile(src) {
+		p, err := newInputPipe(src)
+		if err != nil {
+			return err
+		}
+		pipes = append(pipes, p)
+		cmd.Stdin = p.theirs
 	}
 
-	if src := cmd.Stdin; src != nil {
-		if _, isFile := src.(*os.File); !isFile {
-			in, err := newInputPipe(src)
-			if err != nil {
-				return nil, err
-			}
-			pipes = append(pipes, in)
-			cmd.Stdin = in.theirs
-		}
-	}
+	// Keyed on Cancel having run, never on ctx.Err(), which also reads true when
+	// the deadline passes during WaitDelay after a clean exit: the ControlPersist
+	// case this file exists for, where a group sweep is exactly the wrong thing.
+	canceled := WatchCancel(cmd)
 
 	if err := cmd.Start(); err != nil {
-		return nil, err
+		return err
 	}
 	// Only the child may hold the child's ends from here on, or a pipe the
 	// child has finished with would never reach EOF.
@@ -138,8 +178,12 @@ func capture(cmd *exec.Cmd, combined bool) ([]byte, error) {
 		go p.run()
 	}
 
-	err = cmd.Wait()
+	err := cmd.Wait()
 	overran := settle(cmd, pipes)
+	// After settle, where base's Reap ran: once Output had returned.
+	if canceled() && leadsOwnGroup(cmd) {
+		sweepAfterCancel(cmd.Process.Pid)
+	}
 	if err == nil {
 		for _, p := range pipes {
 			if p.err != nil {
@@ -151,10 +195,24 @@ func capture(cmd *exec.Cmd, combined bool) ([]byte, error) {
 	if err == nil && overran {
 		err = exec.ErrWaitDelay
 	}
-	if ee, ok := err.(*exec.ExitError); ok && stderr != nil {
-		ee.Stderr = stderr.Bytes()
-	}
-	return stdout.Bytes(), err
+	return err
+}
+
+func isFile(v any) bool {
+	_, ok := v.(*os.File)
+	return ok
+}
+
+// interfaceEqual is os/exec's test for "Stderr is the same writer as
+// Stdout": interface equality, false rather than a panic for values whose
+// dynamic type is not comparable.
+func interfaceEqual(a, b any) (equal bool) {
+	defer func() {
+		if recover() != nil {
+			equal = false
+		}
+	}()
+	return a == b
 }
 
 // settle waits, once the leader has exited, for every pipe to finish: EOF on
@@ -187,13 +245,29 @@ func settle(cmd *exec.Cmd, pipes []*ownedPipe) bool {
 		return false
 	}
 	if leadsOwnGroup(cmd) {
-		ends := make([]proctree.PipeEnd, 0, len(open))
+		// No pipe is searched for once af has closed its own end of it (#7243). On
+		// darwin a pipe's identity is the hash of a kernel address, and af's open
+		// end is what keeps that address from being freed and reused, so a holder
+		// proof read after the close could name a process holding none of the
+		// command's pipes (see proctree.PipeEnd). An end already closed is left
+		// out of the reap. One the copy would close during the reap (stdin, whose
+		// close is its EOF) stays open until the reap returns. The reap signals
+		// nothing after its deadline, so a scan still running past it acts on
+		// nothing it read after the release below.
+		var ends []proctree.PipeEnd
+		var held []*ownedPipe
 		for _, p := range open {
-			ends = append(ends, p.end)
+			if p.holdForReap() {
+				ends = append(ends, p.end)
+				held = append(held, p)
+			}
 		}
-		// Before abandon: each pipe's own end must still be open here while its
-		// holders are looked for (see proctree.PipeEnd).
-		reapPipeHolders(cmd.Process.Pid, ends)
+		if len(ends) > 0 {
+			reapPipeHolders(cmd.Process.Pid, ends)
+		}
+		for _, p := range held {
+			p.releaseAfterReap()
+		}
 	}
 	for _, p := range open {
 		p.abandon()
@@ -215,6 +289,9 @@ func leadsOwnGroup(cmd *exec.Cmd) bool {
 // kept here, theirs the end the child inherits, closed here once it has
 // started. end identifies the pair, so that a process still holding theirs
 // can be found while ours is open.
+//
+// ours is closed only through closeOurs, under mu, so that closing it and
+// searching for the pipe exclude each other (see settle).
 type ownedPipe struct {
 	ours, theirs *os.File
 	end          proctree.PipeEnd
@@ -222,6 +299,11 @@ type ownedPipe struct {
 	done         chan struct{} // closed when copy has returned
 	err          error         // copy's result, valid once done is closed
 	abandoned    atomic.Bool   // set before ours is closed under the copy
+
+	mu       sync.Mutex
+	closed   bool // ours has been closed
+	reaping  bool // a holder reap is searching for this pipe
+	deferred bool // the copy asked to close ours while reaping was set
 }
 
 func newOutputPipe(dst io.Writer) (*ownedPipe, error) {
@@ -232,6 +314,15 @@ func newOutputPipe(dst io.Writer) (*ownedPipe, error) {
 	p := &ownedPipe{ours: r, theirs: w, done: make(chan struct{})}
 	p.copy = func() error {
 		_, err := io.Copy(dst, r)
+		if err != nil {
+			// A writer that refused bytes stops the copy. Keep reading into
+			// io.Discard so the child never blocks on a pipe nobody drains, as
+			// os/exec's close of the read end would also spare it, but without
+			// closing our end: a reap may still be searching for this pipe, and
+			// our end is what makes its answer mean this pipe (#7243). After
+			// abandon has closed it, this returns at once.
+			_, _ = io.Copy(io.Discard, r)
+		}
 		return err
 	}
 	return p, p.identify()
@@ -250,7 +341,11 @@ func newInputPipe(src io.Reader) (*ownedPipe, error) {
 		if errors.Is(err, syscall.EPIPE) {
 			err = nil
 		}
-		if cerr := w.Close(); err == nil {
+		// Closing our end is the child's EOF, so it cannot wait for settle. But
+		// a reap may be searching for this pipe right now, as when it has just
+		// killed the holder that was keeping the copy from finishing, and then
+		// closeOurs leaves the close to releaseAfterReap (#7243).
+		if cerr := p.closeOurs(); err == nil {
 			err = cerr
 		}
 		return err
@@ -295,12 +390,56 @@ func (p *ownedPipe) finished() bool {
 // the copy, which is blocked on it.
 func (p *ownedPipe) abandon() {
 	p.abandoned.Store(true)
-	_ = p.ours.Close()
+	_ = p.closeOurs()
 }
 
 func (p *ownedPipe) closeBoth() {
-	_ = p.ours.Close()
+	_ = p.closeOurs()
 	_ = p.theirs.Close()
+}
+
+// closeOurs closes our end, unless a reap is searching for this pipe, in which
+// case the close waits for releaseAfterReap. Every close of ours goes through
+// here, under mu.
+func (p *ownedPipe) closeOurs() error {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return nil
+	}
+	if p.reaping {
+		p.deferred = true
+		return nil
+	}
+	p.closed = true
+	return p.ours.Close()
+}
+
+// holdForReap marks the pipe as being searched for, so that our end stays open
+// until releaseAfterReap. It reports false, and marks nothing, for a pipe whose
+// end is already closed: that pipe must not be searched for at all.
+func (p *ownedPipe) holdForReap() bool {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.closed {
+		return false
+	}
+	p.reaping = true
+	return true
+}
+
+// releaseAfterReap ends the search, and performs a close the copy asked for
+// during it.
+func (p *ownedPipe) releaseAfterReap() {
+	p.mu.Lock()
+	p.reaping = false
+	closeNow := p.deferred && !p.closed
+	p.deferred = false
+	if closeNow {
+		p.closed = true
+		_ = p.ours.Close()
+	}
+	p.mu.Unlock()
 }
 
 // headTail keeps the first and last n bytes written to it, as os/exec's

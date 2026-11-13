@@ -126,11 +126,19 @@ func procFdPath(pid, fd int) (path string, ok bool, gone bool) {
 	return p, true, false
 }
 
-// procInfoRaw issues the raw proc_info syscall, sharing the calling shape of
-// procInfoCall in proctree_darwin.go for both the pidinfo and pidfdinfo
-// families.
+// procInfoRaw issues the proc_info syscall directly, for both the pidinfo and
+// pidfdinfo families, with the calling shape readCPUTime uses.
+//
+// Syscall6, never RawSyscall6 (#7241). proc_pidinfo and proc_pidfdinfo look the
+// target up with proc_find, which on XNU waits, uninterruptibly, while the
+// target is part-way through an exec (proc_ref_wait_for_exec does an
+// assert_wait with THREAD_UNINT, xnu-11417.140.69 kern_proc.c). A raw syscall
+// never tells the Go scheduler it is in the kernel, so a call parked there pins
+// its P, and every stop-the-world waits for it. A wall-clock bound on the
+// caller bounds the caller, not the runtime. The reap scans exactly the
+// processes most likely to be forking or exec'ing.
 func procInfoRaw(callnum, pid, flavor int, arg uint64, buf unsafe.Pointer, size int32) (int32, error) {
-	r1, _, errno := unix.RawSyscall6(
+	r1, _, errno := unix.Syscall6(
 		unix.SYS_PROC_INFO,
 		uintptr(callnum),
 		uintptr(pid),

@@ -7,6 +7,8 @@ import (
 	"fmt"
 	"os/exec"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/execgroup"
 )
 
 // ErrOutputOverLimit reports that a remote command produced more output than the
@@ -64,14 +66,18 @@ func (p *sandboxProvisioner) RunLimited(timeout time.Duration, script string, li
 	out := &limitWriter{limit: limit, cancel: cancel}
 	var stderr bytes.Buffer
 	cmd.Stdout, cmd.Stderr = out, &boundedBuffer{buf: &stderr, max: 4096}
-	err := cmd.Run()
+	canceled := execgroup.WatchCancel(cmd)
+	// execgroup.Run, not cmd.Run: the same ssh in the same group as runCommand,
+	// so the same straggler. One still holding a pipe past WaitDelay is SIGKILLed,
+	// and only such a one, as runCommand's capture does (#7108, #7121, #7241).
+	err := execgroup.Run(cmd)
 	if out.exceeded {
 		return nil, ErrOutputOverLimit
 	}
 	if errors.Is(err, exec.ErrWaitDelay) {
 		err = nil
 	}
-	if err != nil && ctx.Err() != nil {
+	if err != nil && canceled() {
 		return out.buf.Bytes(), fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
 	}
 	return out.buf.Bytes(), err

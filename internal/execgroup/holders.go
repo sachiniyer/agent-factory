@@ -54,8 +54,12 @@ type holderSignaller func(p proctree.Process, sig syscall.Signal, deadline time.
 // resignalBound in wall-clock time, whatever a read does: it returns by then,
 // and it sends nothing on an answer that arrived after it.
 func reapPipeHolders(pgid int, ends []proctree.PipeEnd) {
-	reapPipeHoldersWith(pgid, ends, scanPipeHolders, signalIfSame, time.Now().Add(resignalBound))
+	reapPipeHoldersWith(pgid, ends, holderScan, signalIfSame, time.Now().Add(resignalBound))
 }
+
+// holderScan is the scanner reapPipeHolders uses, a var so a test can watch
+// what each scan searches for.
+var holderScan holderScanner = scanPipeHolders
 
 // reapPipeHoldersWith is reapPipeHolders with its scan, signal and deadline
 // injected, so every platform's CI can test the loop.
