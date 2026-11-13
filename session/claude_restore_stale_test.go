@@ -271,6 +271,7 @@ func TestRecoverStartsAStaleClaudeSessionFresh(t *testing.T) {
 			require.Equal(t, staleCarryReason, outcome.CarryFailure)
 			require.NotContains(t, agentSpawn, "--resume", "the refused id must not be resumed")
 			require.NotContains(t, agentSpawn, "--continue", "a refused restore starts fresh, not on Claude's latest")
+			requireReplacementRecorded(t, restored, agentSpawn)
 		})
 	}
 }
@@ -336,6 +337,7 @@ func TestLoadRespawnRetiresARefusedClaudeConversation(t *testing.T) {
 			require.NotContains(t, agentSpawn, "--continue")
 			require.NotEqual(t, carryTestID, restored.AgentConversation().ID,
 				"the refused id is retired once the fresh spawn commits")
+			requireReplacementRecorded(t, restored, agentSpawn)
 		})
 	}
 }
@@ -379,4 +381,18 @@ func TestLoadRespawnParksACaptureBaselineTheReplacementCanTake(t *testing.T) {
 	park, current := restored.TakePendingConversationCaptureForRuntime(restored.AgentRuntimeToken())
 	require.True(t, current)
 	require.NotNil(t, park, "the replacement's arm must be able to take the pre-spawn baseline")
+}
+
+// requireReplacementRecorded checks that a fresh Claude spawn after a refusal
+// was launched on a newly minted session id and that the id is recorded:
+// nothing discovers a Claude conversation later, so an unrecorded replacement
+// could never be resumed or carried (#7209 review).
+func requireReplacementRecorded(t *testing.T, inst *Instance, agentSpawn string) {
+	t.Helper()
+	recorded := inst.AgentConversation()
+	require.True(t, recorded.HasID(), "the replacement's conversation is recorded")
+	require.NotEqual(t, carryTestID, recorded.ID)
+	require.Equal(t, tmux.ProgramClaude, recorded.Agent)
+	require.Equal(t, ConversationCaptureInjected, recorded.CaptureKind)
+	require.Contains(t, agentSpawn, "--session-id "+recorded.ID, "the spawn runs the conversation af recorded")
 }

@@ -422,7 +422,7 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 		// this runtime's rollout instead of fencing on the stale record
 		// (#6769 review).
 		if refusedID != "" {
-			i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
+			i.replaceRefusedConversation(refusedID, refusal.replacement, preSpawnCapture)
 		}
 		// af just recreated the missing worktree AND started a fresh agent pane
 		// in it, which is the one event that makes a worktree-missing row
@@ -704,6 +704,9 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 			program = rewritten
 		} else {
 			refusal = i.exactResumeRefusal(decline)
+			if refusal.retire {
+				program, refusal.replacement = planReplacementConversation(program)
+			}
 		}
 	} else {
 		program = prepareLaunchConversation(i, program)
@@ -731,6 +734,10 @@ type resumeRefusal struct {
 	// home, an unreadable store, a header it could not classify — which says
 	// nothing about the id (resumeDecline.retiresRecord, #7122).
 	retire bool
+	// replacement is the conversation the fresh spawn was launched on in the
+	// refused id's place, recorded when the spawn commits; zero when the
+	// agent's launch names none (planReplacementConversation).
+	replacement AgentConversationData
 }
 
 // exactResumeRefusal turns prepareExactResumeConversation's decline into the

@@ -253,6 +253,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 		// recorded, it fences every later capture arm, and each restore refuses
 		// it again and starts fresh again (#7209 review).
 		var refusedID string
+		var replacement AgentConversationData
 		// A row flagged worktree-missing (#5102) has no directory to re-spawn
 		// into, so workDir stays empty: Restore may only REATTACH a session that
 		// is still alive, never re-spawn one. Re-spawning would either fail —
@@ -285,9 +286,6 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			}
 			runtimeProgram = resolution.command
 			resumeProgram, resumed, refusal := prepareExactResumeConversation(i, resolution.command)
-			program := injectSystemPromptWithEnv(resumeProgram, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
-			setLaunchProgram(tmuxSession, program,
-				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			// Logged only if this restore actually re-spawns: a reattach to a
 			// live pane resumes nothing, so a refusal there is not news (#7101).
 			var refused tmux.ExactResumeRefusal
@@ -296,8 +294,12 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 				refused = r.ExactResumeRefusal
 				if r.retire {
 					refusedID = r.ID
+					resumeProgram, replacement = planReplacementConversation(resumeProgram)
 				}
 			}
+			program := injectSystemPromptWithEnv(resumeProgram, resolveSkillTarget(i, resolution.command), i.guidanceCaps(), env)
+			setLaunchProgram(tmuxSession, program,
+				accountLaunchProof(resolution.command, program, resolution.trustBase, nil, ""))
 			tmuxSession.SetExactResumeRefusal(refused)
 			// A re-spawn here resumes the session's own recorded conversation or
 			// starts fresh (#4797), never the latest one on a shared account home.
@@ -347,7 +349,7 @@ func (b *LocalBackend) launch(i *Instance, firstTimeSetup bool, prepared *Create
 			// replacement's deferred arm (TakePendingConversationCaptureForRuntime);
 			// a park stamped after it waits for an advance that never comes.
 			if refusedID != "" {
-				i.RetireConversationForFreshRuntime(refusedID, preSpawnCapture)
+				i.replaceRefusedConversation(refusedID, replacement, preSpawnCapture)
 			}
 			// The persisted delivery verdict and pane age belonged to the process
 			// that disappeared with the old tmux server. A pure reattach preserves

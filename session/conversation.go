@@ -257,11 +257,25 @@ type PendingConversationCapture struct {
 // so the replacement's own rollout — which may already exist — is not
 // excluded from its own discovery.
 func (i *Instance) RetireConversationForFreshRuntime(refusedID string, snap ConversationCaptureSnapshot) {
+	i.replaceRefusedConversation(refusedID, AgentConversationData{}, snap)
+}
+
+// replaceRefusedConversation is RetireConversationForFreshRuntime for a fresh
+// runtime launched on a conversation of its own, replacement, which takes the
+// refused id's place (planReplacementConversation). Nothing discovers a Claude
+// conversation after launch, so a fresh Claude runtime that recorded nothing
+// could never be resumed or carried again (#7209 review). A recorded
+// replacement needs no capture baseline.
+func (i *Instance) replaceRefusedConversation(refusedID string, replacement AgentConversationData, snap ConversationCaptureSnapshot) {
 	i.mu.Lock()
 	defer i.mu.Unlock()
 	if len(i.Tabs) > 0 && i.Tabs[0].Conversation.ID == refusedID && refusedID != "" {
 		i.Tabs[0].Conversation = AgentConversationData{}
 		i.touchLocked()
+		if replacement.HasID() {
+			i.setAgentConversationLocked(replacement)
+			return
+		}
 	}
 	if snap.CapturesCodex() {
 		s := snap
@@ -422,6 +436,14 @@ func planLaunchConversation(instanceID, program string) (string, AgentConversati
 		CaptureKind: ConversationCaptureInjected,
 	}
 	return rewritten, conversation
+}
+
+// planReplacementConversation is the conversation a re-spawn launches on
+// after refusing the recorded one: a newly minted Claude session id, never the
+// instance id a first launch uses, since that may name the very conversation
+// refused. Other agents launch unchanged, and capture records theirs.
+func planReplacementConversation(program string) (string, AgentConversationData) {
+	return planLaunchConversation("", program)
 }
 
 func prepareResumeConversation(i *Instance, program string) string {
