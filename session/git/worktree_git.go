@@ -250,8 +250,9 @@ func (g *GitWorktree) runGitCommandContextWithEnvironment(
 	// the master's ProxyCommand (or ProxyJump's `ssh -W`), which OpenSSH leaves
 	// in this group as the master's transport while the master itself detaches:
 	// a group reap after a successful fetch killed it, and the master with it,
-	// so every later fetch re-authenticated (#7121). A deadline is unchanged:
-	// KillOnCancel still kills the whole group.
+	// so every later fetch re-authenticated (#7121). A deadline still kills the
+	// whole group: KillOnCancel's sweep, then a second once git has been waited,
+	// keyed on the Cancel having run, which is what Reap gave it before (#7241).
 	output, err := execgroup.Output(cmd)
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// git itself exited (successfully — a non-zero exit would surface as an

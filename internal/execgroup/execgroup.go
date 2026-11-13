@@ -43,6 +43,7 @@ import (
 	"errors"
 	"os"
 	"os/exec"
+	"sync/atomic"
 	"syscall"
 	"time"
 )
@@ -81,6 +82,27 @@ func KillOnCancel(cmd *exec.Cmd) {
 		}
 		return killGroup(cmd.Process.Pid)
 	}
+}
+
+// WatchCancel wraps cmd.Cancel and returns a report of whether it ran. os/exec
+// calls Cancel only when the context is done before it has seen the leader
+// exit, so true means the context ended the command while it ran: the one
+// honest meaning of "timed out" (#7241). ctx.Err() is not that. It is also
+// true when the deadline passes while WaitDelay or a straggler reap runs after
+// the leader already exited on its own, with a status of its own to report.
+//
+// Call it after Lead or KillOnCancel, which install the Cancel it wraps, and
+// before Start. A command with no Cancel, one built without a context, never
+// reports true. The report is read after Wait.
+func WatchCancel(cmd *exec.Cmd) func() bool {
+	var ran atomic.Bool
+	if inner := cmd.Cancel; inner != nil {
+		cmd.Cancel = func() error {
+			ran.Store(true)
+			return inner()
+		}
+	}
+	return ran.Load
 }
 
 // Reap SIGKILLs any group member that outlived cmd's leader — a backgrounded

@@ -43,8 +43,10 @@ import (
 // land at the same address and report the same hash. The end this process
 // keeps cannot be freed while it is open, so a descriptor counts only when it
 // is that end's own peer: its pipe_peerhandle equals kept. On Linux both ends
-// share one pipefs inode, which stays allocated while kept is open, so held
-// and kept are the same number and the inode alone is the proof.
+// share one pipefs inode, so held and kept are the same number. That number is
+// not unique, though: it comes from a counter that wraps, so on Linux a match
+// proves "a pipe with this inode number", and a caller that signals on it
+// needs a membership proof besides (see holdsPipeEnd in pipeend_linux.go).
 type PipeEnd struct {
 	held, kept uint64
 }
@@ -96,6 +98,10 @@ func pipeInode(f *os.File) (uint64, error) {
 
 // HoldsPipeEnd reports whether pid holds a descriptor on the held end of any
 // of ends.
+//
+// On Linux the answer is "holds a pipe with this inode number", and inode
+// numbers wrap, so no kill may rest on it without a proof that rules out a
+// pipe older than the command, such as membership of the command's own group.
 //
 // ErrProcessExited (or a process-table miss) means the process is gone. Any
 // other error means it could not be read: a process the kernel will not let

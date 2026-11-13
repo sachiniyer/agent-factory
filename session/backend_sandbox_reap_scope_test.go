@@ -340,3 +340,55 @@ func TestSandboxRunKeepsTheExitStatusWhenTheDeadlinePassesDuringCleanup(t *testi
 	require.True(t, errors.As(err, &exitErr), "the step's own exit status is the error: %v", err)
 	assert.Equal(t, 3, exitErr.ExitCode())
 }
+
+// TestRunLimitedReapsOnlyTheMemberHoldingThePipe: RunLimited is the third
+// runner over the operator's ssh, in the same group as runCommand's, so it has
+// the same straggler (#7241). Under cmd.Run it reaped nothing on any exit, and
+// a member holding its pipe outlived a step reported as a success (#7108). It
+// must reap that member and, as everywhere, spare one holding no pipe.
+func TestRunLimitedReapsOnlyTheMemberHoldingThePipe(t *testing.T) {
+	stub := stubSSHPlanting(t, plantDetachedMember+"\n"+plantPipeHolder, "exit 0")
+	p := &sandboxProvisioner{sshCmd: stub.ssh}
+
+	var (
+		out []byte
+		err error
+	)
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		out, err = p.RunLimited(10*time.Second, "true", 1<<20)
+	}), "RunLimited must return once WaitDelay has passed")
+	pids := stub.planted(t)
+	require.Len(t, pids, 2)
+	detached, holder := pids[0], pids[1]
+
+	require.NoError(t, err, "a step that exits 0 succeeds, whatever held its pipe")
+	assert.Contains(t, string(out), "AF-SANDBOX-ANSWER")
+	assert.True(t, waitProcessGone(holder, 3*time.Second),
+		"the member holding RunLimited's pipe past WaitDelay must be reaped (#7108)")
+	requireStillRunning(t, detached,
+		"RunLimited killed a member holding none of its pipes; under ControlPersist that is the master's transport")
+}
+
+// TestSandboxRunDoesNotCallALeaderThatDiedOnItsOwnATimeout: "timed out" means
+// the deadline ended the step while it ran (#7241, R5). This leader kills
+// itself at once with SIGKILL, a member holds the pipe, and the deadline passes
+// during WaitDelay. Reading "died of a signal" as "the deadline killed it"
+// labelled that a timeout; the Cancel never ran.
+func TestSandboxRunDoesNotCallALeaderThatDiedOnItsOwnATimeout(t *testing.T) {
+	stub := stubSSHPlanting(t, plantPipeHolder, "kill -KILL $$")
+	p := &sandboxProvisioner{sshCmd: stub.ssh}
+
+	timeout := 500 * time.Millisecond
+	require.Less(t, timeout, sandboxTunnelWaitDelay, "the deadline must fall inside WaitDelay for this test to mean anything")
+	var err error
+	require.True(t, returnsWithinExec(sandboxOrphanGuard, func() {
+		_, err = p.Run(timeout, "true", nil, true)
+	}), "runCommand must return once WaitDelay has passed")
+	stub.planted(t)
+
+	require.Error(t, err, "a leader that died of SIGKILL failed")
+	assert.False(t, errors.Is(err, context.DeadlineExceeded),
+		"a leader that killed itself before its deadline must not be reported as timed out: %v", err)
+	var exitErr *exec.ExitError
+	assert.True(t, errors.As(err, &exitErr), "the leader's own death is the error: %v", err)
+}

@@ -13,9 +13,16 @@ import (
 
 // holdsPipeEnd walks /proc/<pid>/fd and reports whether any descriptor links
 // to "pipe:[N]" for the N of one of ends. Both ends of a Linux pipe share that
-// inode, and it stays allocated while the caller keeps its own end open, so
-// the number names that one live pipe. A match is either end; the caller's
-// own end never matches here, because the caller asks about other processes.
+// inode. A match is either end; the caller's own end never matches here,
+// because the caller asks about other processes.
+//
+// What a match proves is "holds a pipe with this inode number", not "holds
+// this pipe" (#7241). pipefs numbers its inodes with get_next_ino(), an
+// unsigned int counter that wraps (62% of the way round on a devbox after 199
+// days of uptime), so after a wrap a new pipe can take the number of one still
+// open. No kill may rest on this answer alone. The holder reap pairs it with
+// membership of a group whose members all got their pipes during the command's
+// own lifetime, which rules out a pipe from 2^32 pipes earlier.
 //
 // The directory is readable only by the process owner, and not at all for a
 // process that made itself non-dumpable, so a refusal is returned as an error

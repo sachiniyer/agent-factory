@@ -489,6 +489,7 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 	// straggler, so the reap names its targets per process instead (#7121). A
 	// step still running at its deadline is different: KillOnCancel tears down
 	// the whole group, members like that included.
+	canceled := execgroup.WatchCancel(cmd)
 	var out []byte
 	var err error
 	if combined {
@@ -496,7 +497,6 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 	} else {
 		out, err = execgroup.Output(cmd)
 	}
-	deadlineErr := ctx.Err()
 	if errors.Is(err, exec.ErrWaitDelay) {
 		// The child exited cleanly (a non-zero exit surfaces as an *exec.ExitError,
 		// not ErrWaitDelay) and only a descendant held a pipe open past
@@ -509,15 +509,14 @@ func (p *sandboxProvisioner) runCommand(timeout time.Duration, script string, st
 		// sentinel-present case into ErrWorkspaceStateUnknown instead of latching.)
 		err = nil
 	}
-	// The timeout label describes the command, not its cleanup. WaitDelay and
+	// The timeout label describes the command, not its cleanup. "Timed out"
+	// means the deadline ended the child while it ran, which is the Cancel
+	// having run (execgroup.WatchCancel). ctx.Err() is not that: WaitDelay and
 	// the straggler reap both run after the child has exited, and a deadline
-	// that passes while they do must not relabel the child's own exit status as
-	// a timeout. A child the deadline killed died of a signal, so it never
-	// reads as having exited on its own.
-	var exitErr *exec.ExitError
-	exitedOnItsOwn := errors.As(err, &exitErr) && exitErr.Exited()
-	if err != nil && deadlineErr != nil && !exitedOnItsOwn {
-		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, deadlineErr)
+	// that passes while they do must not relabel the child's own exit, a status
+	// or a signal it died of before the deadline, as a timeout (#7115, #7241).
+	if err != nil && canceled() {
+		return out, fmt.Errorf("%q timed out after %s: %w", p.sshCmd, timeout, ctx.Err())
 	}
 	return out, err
 }
