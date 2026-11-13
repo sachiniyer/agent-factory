@@ -13,6 +13,7 @@ import (
 
 	"github.com/sachiniyer/agent-factory/config"
 	"github.com/sachiniyer/agent-factory/internal/agentaccount"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -79,7 +80,8 @@ type claudeTranscript struct {
 // claudeProjectTranscripts lists projectDir's direct, regular conversation
 // files. A missing directory has none.
 func claudeProjectTranscripts(projectDir string) ([]claudeTranscript, error) {
-	entries, err := os.ReadDir(projectDir)
+	// Bounded, with each entry's Info read inside the same flight (#7212).
+	entries, err := fsprobe.ReadDirInfo(projectDir)
 	if os.IsNotExist(err) {
 		return nil, nil
 	}
