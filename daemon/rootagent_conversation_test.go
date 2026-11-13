@@ -455,6 +455,10 @@ type plannedCreateBackend struct {
 }
 
 func (b plannedCreateBackend) Start(instance *session.Instance, firstTimeSetup bool) error {
+	// In the real launch's order: binding the agent's tmux session is what
+	// materializes the agent tab, and only then is the planned conversation
+	// committed to it. A commit with no agent tab yet records nothing.
+	instance.SetTmuxSession(tmux.NewTmuxSession(instance.Title, tmux.ProgramClaude))
 	instance.CommitCreateConversationForTest(tmux.ProgramClaude)
 	return b.readyFakeBackend.Start(instance, firstTimeSetup)
 }
