@@ -129,7 +129,9 @@ func TestFirstLaunchJudgesARecordPinByTheRecordedClaudeRule(t *testing.T) {
 			if tc.record {
 				inst.SetResumeRecordedConversation(pin)
 			} else {
-				inst.SetResumeConversation(pin)
+				// The root heal's pin (InstanceOptions.ResumeConversation), judged
+				// where it was set.
+				inst.carriedConversation, inst.carriedIsRecord = pin, false
 			}
 
 			got, conv := planCreateConversation(inst, "claude", freshID)
