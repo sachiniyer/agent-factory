@@ -8,8 +8,6 @@ import (
 	"io"
 	"os"
 	"path/filepath"
-	"sort"
-	"strings"
 
 	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
@@ -221,30 +219,4 @@ func claudeTranscriptOwnership(transcript claudeTranscript, launchDir string) cl
 		}
 	}
 	return claudeOwnedHere
-}
-
-// newestClaudeTranscriptIn picks the most recently written transcript of the
-// worktree launched in launchDir, breaking an exact tie by the greater file
-// name. Candidates are read newest first, so the usual answer costs one read.
-// Another directory's transcript is passed over; one af cannot attribute
-// either way ends the search with no answer, since it may be the worktree's
-// newest, and an older one past it would name a conversation the user left
-// (#7221 review R2).
-func newestClaudeTranscriptIn(transcripts []claudeTranscript, launchDir string) (claudeTranscript, bool) {
-	ordered := append([]claudeTranscript(nil), transcripts...)
-	sort.SliceStable(ordered, func(a, b int) bool {
-		if !ordered[a].modTime.Equal(ordered[b].modTime) {
-			return ordered[a].modTime.After(ordered[b].modTime)
-		}
-		return strings.Compare(ordered[a].name, ordered[b].name) > 0
-	})
-	for _, transcript := range ordered {
-		switch claudeTranscriptOwnership(transcript, launchDir) {
-		case claudeOwnedHere:
-			return transcript, true
-		case claudeOwnershipUnknown:
-			return claudeTranscript{}, false
-		}
-	}
-	return claudeTranscript{}, false
 }

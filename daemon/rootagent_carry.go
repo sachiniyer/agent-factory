@@ -212,17 +212,6 @@ func (m *Manager) rootCommitRefusalLocked(st *rootEnsureState, ticket *rootCreat
 	return nil
 }
 
-// updateRootCarry records what a failed create settled about its carry — a
-// substituted conversation, say — for the next pass, but only while st still
-// holds that carry. It never puts back one that was retired. m.mu not held.
-func (m *Manager) updateRootCarry(st *rootEnsureState, ref *rootCarry, carried reapedRootState) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if ref != nil && st.carry == ref {
-		ref.state = carried
-	}
-}
-
 // retireRootCarries drops every candidate's carry for repoID once a root for
 // it launched. Two root_agents spellings of one repository are two candidates
 // with their own retry state: a root one of them launched is newer than what

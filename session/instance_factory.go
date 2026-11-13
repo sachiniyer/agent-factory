@@ -110,8 +110,11 @@ type InstanceOptions struct {
 	// conversation a previous record held, rather than starting a new one
 	// (#2616). Set only by the daemon's root-agent heal, which replaces the
 	// vanished root's record instead of re-spawning it; every other Lost session
-	// keeps its record and resumes through Recover. Empty for every ordinary
-	// create, which is why the fresh-injection path is unchanged.
+	// keeps its record and resumes through Recover. It is the vanished root's
+	// own record, never a stand-in, and the first launch judges it as any
+	// recorded conversation is judged (planCreateConversation, #7222). Empty
+	// for every ordinary create, which is why the fresh-injection path is
+	// unchanged.
 	ResumeConversation AgentConversationData
 	// ConfigSnapshot, when set, is a RestoreContext primed before the create:
 	// every instance-scoped project-config read the create makes — its launch

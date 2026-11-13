@@ -127,8 +127,8 @@ func TestClaudeCarryRefusesATargetThatHoldsAnotherCopy(t *testing.T) {
 }
 
 // Whether the recorded conversation exists is settled by any spelling af can
-// read; an unreadable spelling withholds only the newest-conversation answer.
-func TestInspectClaudeFindsTheRecordedConversationBesideAnUnlistableSpelling(t *testing.T) {
+// read, whatever another spelling holds (#7207).
+func TestClaudeFiledHereFindsTheRecordedConversationBesideAnUnlistableSpelling(t *testing.T) {
 	if os.Geteuid() == 0 {
 		t.Skip("root reads a mode-000 directory")
 	}
@@ -145,22 +145,14 @@ func TestInspectClaudeFindsTheRecordedConversationBesideAnUnlistableSpelling(t *
 	t.Cleanup(func() { _ = os.Chmod(unlistable, 0o755) })
 
 	const recordedID = "64ea06ed-ed87-4b12-bc2d-2a2102a81ba5"
-	const otherID = "5299e00d-1111-4222-8333-f7045e07a242"
 	program := "CLAUDE_CONFIG_DIR=" + configDir + " claude"
 	recorded := AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID}
 	recordedPath := writeCarryFile(t, configDir, filepath.Join(projects[0], recordedID+".jsonl"), "{}\n")
 
-	state, err := InspectClaudeProjectConversations(program, link, recorded)
-	require.NoError(t, err)
-	require.True(t, state.RecordedExists)
-	require.Equal(t, recordedID, state.Resume.ID)
 	require.True(t, ConversationResumableHere(program, link, recorded),
 		"a headless launch resumes the conversation it can see")
 
 	require.NoError(t, os.Remove(recordedPath))
-	writeCarryFile(t, configDir, filepath.Join(projects[0], otherID+".jsonl"), "{}\n")
-	_, err = InspectClaudeProjectConversations(program, link, recorded)
-	require.Error(t, err, "the newest conversation may be under the spelling af cannot read")
 	require.False(t, ConversationResumableHere(program, link, recorded))
 }
 

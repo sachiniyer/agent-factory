@@ -170,52 +170,6 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 	}
 }
 
-// A restore's substitute for a missing recorded conversation is the newest one
-// in this worktree. A colliding directory's conversation is passed over; one
-// that names no directory af can read may be the newest of this worktree's, so
-// there is no substitute rather than an older one reached past it (#7221
-// review R2).
-func TestInspectClaudeSubstitutesOnlyThisWorktreesConversation(t *testing.T) {
-	configDir := t.TempDir()
-	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
-	require.NoError(t, os.MkdirAll(filepath.Join(real, "a.b"), 0o755))
-	foreign := filepath.Join(real, "a-b")
-	require.NoError(t, os.MkdirAll(foreign, 0o755))
-	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
-	require.NoError(t, os.Symlink(real, link))
-	worktree := filepath.Join(link, "a.b")
-	projects := claudeProjectCandidates(worktree)
-	require.Len(t, projects, 2)
-	resolved := projects[1]
-
-	const recordedID = "64ea06ed-ed87-4b12-bc2d-2a2102a81ba5"
-	const ownID = "5299e00d-1111-4222-8333-f7045e07a242"
-	const foreignID = "7d1c2b3a-4e5f-4a6b-8c7d-9e0f1a2b3c4d"
-	const unnamedID = "01a1ccd0-1111-7222-8333-444455556666"
-	past := time.Now().Add(-time.Hour)
-	write := func(id, content string, at time.Time) {
-		t.Helper()
-		setModTime(t, writeCarryFile(t, configDir, filepath.Join(resolved, id+".jsonl"), content), at)
-	}
-	inspect := func() ClaudeProjectConversationState {
-		t.Helper()
-		state, err := InspectClaudeProjectConversations("CLAUDE_CONFIG_DIR="+configDir+" claude", worktree,
-			AgentConversationData{Agent: tmux.ProgramClaude, ID: recordedID})
-		require.NoError(t, err)
-		require.False(t, state.RecordedExists)
-		return state
-	}
-
-	write(foreignID, claudeRecordLine(t, foreign), past.Add(2*time.Minute))
-	require.False(t, inspect().Resume.HasID(), "a colliding directory's conversation is not this worktree's")
-
-	write(ownID, claudeRecordLine(t, filepath.Join(worktree, "web")), past)
-	require.Equal(t, ownID, inspect().Resume.ID, "this worktree's newest, past a newer colliding one")
-
-	write(unnamedID, `{"type":"summary","summary":"s"}`+"\n", past.Add(3*time.Minute))
-	require.False(t, inspect().Resume.HasID(), "an unattributable newest may be this worktree's: no older substitute past it")
-}
-
 // #7221 review R5: a spelling af cannot list hides what it holds, but the
 // judge still says whether a spelling it could list files the recorded
 // conversation, which the committed re-launch needs: a second --session-id on

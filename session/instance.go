@@ -633,17 +633,14 @@ type Instance struct {
 	// root's record and creates a replacement in place where every other Lost
 	// session is re-spawned on its own surviving record; and an in-sandbox
 	// agent-server handed the tab's record (SetResumeRecordedConversation:
-	// adopted and FirstTimeSetup launches). Not consumed by a launch
+	// adopted and FirstTimeSetup launches). Either way it is the session's own
+	// recorded conversation, and a launch judges it as the tab's record is
+	// judged (#7209 review R2, #7222). Not consumed by a launch
 	// (root-recreate classification reads it afterwards); retired when the
 	// account changes (retireConversationsLocked, #6189). A
 	// REQUEST, not a fact: honored only when the resolved command can express it,
 	// and the session's conversation is whatever the launch committed to Tabs[0].
 	carriedConversation AgentConversationData
-	// carriedIsRecord marks carriedConversation as this session's own recorded
-	// conversation delivered from elsewhere (SetResumeRecordedConversation): the
-	// driving daemon hands an in-sandbox agent-server the tab's record. The
-	// restore guard judges such a pin like the tab's record (#7209 review R2).
-	carriedIsRecord bool
 
 	// reportedConversation is the last conversation a remote agent-server reported
 	// (recordReportedConversationFrom), held until the daemon-side agent tab exists to

@@ -56,27 +56,7 @@ var (
 	// Checked-in and personal project configuration can change outside
 	// ApplyConfig. Re-resolve the command off the poll goroutine on this cadence.
 	rootProgramDriftConfigInspectionInterval = 30 * time.Second
-	// A transcript creation or removal can lag one poll without affecting the
-	// live root. Bound the directory scan instead of statting every historical
-	// transcript on the daemon's default one-second ensure cadence.
-	rootClaudeTranscriptInspectionInterval = 30 * time.Second
 )
-
-// rootClaudeTranscriptInspectBudget bounds how long the poll goroutine will
-// WAIT for one transcript inspection (#3782 item 3).
-//
-// Deliberately NOT rootRepoProbeBudget, even though the value matches and
-// the asymmetry is the same. That budget bounds a git CHILD PROCESS, which
-// a context can kill; this one bounds a wait on os.ReadDir and a stat per
-// entry, which no context can cancel — so it is a bound on the caller, and
-// the read outlives it. Two mechanisms, two names, and a reader who
-// conflates them will reach for a context that cannot help.
-//
-// 2s for the same reason the sibling is 2s: the inspection is advisory
-// while the root is live, so being late costs a resumable conversation id
-// staying stale for one more 30s interval, and #3503 is the standing
-// lesson about stingy budgets on a box whose load baseline is 60-95.
-const rootClaudeTranscriptInspectBudget = 2 * time.Second
 
 // rootEnsureBackoffFor is the shared ensure-cadence backoff curve: base
 // doubling per consecutive failure, capped at max. Used by the per-candidate
@@ -161,18 +141,6 @@ type rootEnsureState struct {
 	// dedupe bits. Runtime evidence is committed separately under the instance
 	// lifecycle lock.
 	programDriftBeforeLatchForTest func()
-	// Claude transcript verification is advisory while the root is live. Keep
-	// its filesystem work and any persistent inspection warning off the hot
-	// one-second ensure path.
-	nextClaudeTranscriptInspection time.Time
-	claudeTranscriptWarning        string
-	// claudeTranscriptInspecting marks one inspection as still running for
-	// this root (#3782 item 3). It is what keeps a bound from turning a sick
-	// transcript store into an accumulating pile of blocked goroutines: the
-	// deadline releases the POLL goroutine, it cannot release the filesystem
-	// read, so without single-flighting, every throttle interval would start
-	// another one that also blocks. Guarded by m.mu.
-	claudeTranscriptInspecting bool
 }
 
 // resolvedRootAgentFor is the single resolution choke point for one repo: every
@@ -561,11 +529,12 @@ func (m *Manager) ensureResolvedRoot(stateKey string, st *rootEnsureState, repo 
 	if inst != nil {
 		if status := inst.GetStatus(); status != session.Dead && status != session.Lost && status != session.Archived {
 			// Adopt, never clobber: a live root — whatever program it runs
-			// and whoever created it — is the root agent. The one mutation is
-			// refreshing a recorded Claude conversation from durable transcript
-			// evidence, so a later outage does not carry a rotated-away id (#3306).
+			// and whoever created it — is the root agent, and its recorded
+			// conversation is left as it is. Claude 2.1 never continues a
+			// conversation under a new id, so no transcript in the checkout
+			// can stand in for it; the newest one there may be the user's own
+			// (#7222).
 			m.checkAdoptedRootProgramDrift(repo, key, workspace, st, resolution.RootAgent, inst, identity)
-			m.refreshRootClaudeConversation(repo.ID, key, workspace, inst, st)
 			m.rootEnsureSucceeded(st)
 			return
 		}

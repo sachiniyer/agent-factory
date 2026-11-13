@@ -214,10 +214,12 @@ func TestExactResumeChecksTheAccountStore(t *testing.T) {
 		"a stale id in the account store is refused, not resumed")
 }
 
-// A carried conversation — the launch pinned before the tab exists — is not the
-// tab's recorded id and is not the restore guard's business: the adopt/swap
-// paths that set it make their own calls about what it names.
-func TestExactResumeDoesNotStaleCheckACarriedConversation(t *testing.T) {
+// A carried conversation — the launch pinned before the tab exists — is the
+// session's own record wherever it was delivered from (an in-sandbox
+// agent-server's, a vanished root's), so the restore guard judges it as it
+// judges the tab's (#7219, #7222): a newer thread refuses it only where af
+// owns the directory the agent runs in.
+func TestExactResumeJudgesACarriedConversationAsTheRecord(t *testing.T) {
 	codexHome := t.TempDir()
 	t.Setenv("CODEX_HOME", codexHome)
 	workDir := t.TempDir()
@@ -225,13 +227,20 @@ func TestExactResumeDoesNotStaleCheckACarriedConversation(t *testing.T) {
 	carried := writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-35-"+carriedID+".jsonl", workDir)
 	writeCodexRolloutFileWithCwd(t, codexHome, "rollout-2026-07-06T10-17-39-029f386f-7206-7fc2-803b-f7045e07a243.jsonl", workDir)
 	markRolloutOlder(t, carried)
+	pinned := func(inst *Instance) *Instance {
+		inst.Tabs = nil
+		inst.carriedConversation = AgentConversationData{Agent: tmux.ProgramCodex, ID: carriedID}
+		return inst
+	}
 
-	inst := staleResumeInstance(t, workDir, AgentConversationData{})
-	inst.Tabs = nil
-	inst.carriedConversation = AgentConversationData{Agent: tmux.ProgramCodex, ID: carriedID}
+	owned := pinned(staleResumeInstance(t, workDir, AgentConversationData{}))
+	assert.Equal(t, owned.Program, prepareResumeConversation(owned, owned.Program),
+		"a newer thread in a worktree af created for the session refuses the pin")
 
-	launched := prepareResumeConversation(inst, inst.Program)
-	assert.Contains(t, launched, "resume "+carriedID)
+	root := pinned(staleResumeInstance(t, workDir, AgentConversationData{}))
+	root.Title, root.inPlace = RootSessionTitle, true
+	assert.Contains(t, prepareResumeConversation(root, root.Program), "resume "+carriedID,
+		"in the user's own checkout a newer thread says nothing about the root")
 }
 
 // The adopted-launch existence check must look in the same store the pane

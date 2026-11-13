@@ -9,6 +9,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/log"
+	sessiongit "github.com/sachiniyer/agent-factory/session/git"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -92,29 +93,24 @@ func TestLoadStartsAnInterruptedHandoffsConversationOnItsID(t *testing.T) {
 }
 
 // #7209 review R2-2: a first launch's pin that is the tab's own record is
-// judged by the same rule; a pin judged where it was set is not judged again.
+// judged by the same rule.
 func TestFirstLaunchJudgesARecordPinByTheRecordedClaudeRule(t *testing.T) {
 	past := time.Now().Add(-time.Hour)
 	const freshID = "0e0e0e0e-1111-4222-8333-444444444444"
 	for _, tc := range []struct {
 		name   string
-		record bool
 		layout func(file func(id string, at time.Time))
 		want   string
 	}{
-		{"an unfiled record pin starts on its id", true, func(func(string, time.Time)) {},
+		{"an unfiled record pin starts on its id", func(func(string, time.Time)) {},
 			"claude --session-id " + carryTestID},
-		{"a current record pin resumes", true, func(file func(string, time.Time)) {
+		{"a current record pin resumes", func(file func(string, time.Time)) {
 			file(carryTestID, past)
 		}, "claude --resume " + carryTestID},
-		{"a record pin a newer conversation superseded starts fresh", true, func(file func(string, time.Time)) {
+		{"a record pin a newer conversation superseded starts fresh", func(file func(string, time.Time)) {
 			file(carryTestID, past)
 			file(newerConversationID, past.Add(time.Minute))
 		}, "claude --session-id " + freshID},
-		{"a pin judged where it was set resumes", false, func(file func(string, time.Time)) {
-			file(carryTestID, past)
-			file(newerConversationID, past.Add(time.Minute))
-		}, "claude --resume " + carryTestID},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
 			configDir := t.TempDir()
@@ -125,18 +121,55 @@ func TestFirstLaunchJudgesARecordPinByTheRecordedClaudeRule(t *testing.T) {
 			})
 			inst := claudeRestoreInstance(t, workDir, carryTestID)
 			inst.Tabs = []*Tab{{}}
-			pin := AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
-			if tc.record {
-				inst.SetResumeRecordedConversation(pin)
-			} else {
-				// The root heal's pin (InstanceOptions.ResumeConversation), judged
-				// where it was set.
-				inst.carriedConversation, inst.carriedIsRecord = pin, false
-			}
+			inst.SetResumeRecordedConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected})
 
 			got, conv := planCreateConversation(inst, "claude", freshID)
 			require.Equal(t, tc.want, got)
 			require.Equal(t, strings.Fields(tc.want)[2], conv.ID, "the launch records the conversation it starts on")
+		})
+	}
+}
+
+// #7222: the root heal carries the vanished root's own record, R, and the
+// replacement's first launch judges it as any recorded conversation is
+// judged. R is the root's whether Claude filed it or not: an unfiled R is
+// started on, never resumed (Claude exits on a --resume of an id it holds no
+// transcript for), and never swapped for the newest conversation in the
+// checkout, which is the user's own claude there, not the root's.
+func TestRootHealsPinIsJudgedAsTheRootsRecord(t *testing.T) {
+	past := time.Now().Add(-time.Hour)
+	const freshID = "0e0e0e0e-1111-4222-8333-444444444444"
+	for _, tc := range []struct {
+		name   string
+		layout func(file func(id string, at time.Time))
+		want   string
+	}{
+		{"an unfiled R beside the user's own conversation is started on", func(file func(string, time.Time)) {
+			file(newerConversationID, past)
+		}, "claude --session-id " + carryTestID},
+		{"a filed R is resumed, though the user's conversation is newer", func(file func(string, time.Time)) {
+			file(carryTestID, past)
+			file(newerConversationID, past.Add(time.Minute))
+		}, "claude --resume " + carryTestID},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			configDir := t.TempDir()
+			t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+			t.Setenv("HOME", t.TempDir())
+			checkout, project, _ := claudeRestoreWorktree(t)
+			tc.layout(func(id string, at time.Time) {
+				setModTime(t, writeCarryFile(t, configDir, filepath.Join(project, id+".jsonl"), claudeRecordLine(t, checkout)), at)
+			})
+			gw, err := sessiongit.NewGitWorktreeFromStorage(checkout, checkout, RootSessionTitle, "main", "", false, true)
+			require.NoError(t, err)
+			root := &Instance{Title: RootSessionTitle, Program: tmux.ProgramClaude, Path: checkout, gitWorktree: gw, inPlace: true,
+				Tabs: []*Tab{{}}}
+			// As NewInstance sets it from InstanceOptions.ResumeConversation.
+			root.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
+
+			got, conv := planCreateConversation(root, "claude", freshID)
+			require.Equal(t, tc.want, got)
+			require.Equal(t, carryTestID, conv.ID, "the root's record stays its conversation")
 		})
 	}
 }
