@@ -32,7 +32,8 @@ export interface DocsEditor {
   /** Moves the cursor to the first question callout of the doc. False if none. */
   goToFirstQuestion(): boolean;
   /** Whether the user can type. Off while a doc is loading, so no keystroke lands
-   *  in the previous doc's text or is dropped when the load completes. */
+   *  in the previous doc's text or is dropped when the load completes. The editor
+   *  stays focusable while off (see `typing`). */
   setEditable(editable: boolean): void;
   focus(): void;
   destroy(): void;
@@ -63,6 +64,17 @@ export function editorExtensions(): Extension[] {
   ];
 }
 
+/** Whether the user can type. Only `readOnly` changes, never `EditorView.editable`:
+ *  a content DOM that is not editable cannot hold focus, so a click on a doc still
+ *  loading left the keyboard on the page, and the app's rail shortcuts took what the
+ *  user typed: t opened a terminal tab, 1 left the proposal view, and Enter attached
+ *  the agent terminal (#7256). A read-only editor keeps the keyboard and takes no
+ *  input (CodeMirror drops DOM changes and its commands refuse while read-only), and
+ *  the typing lands in it once the doc is in. */
+export function typing(canType: boolean): Extension {
+  return EditorState.readOnly.of(!canType);
+}
+
 export function createDocsEditor(parent: HTMLElement, opts: DocsEditorOptions): DocsEditor {
   const editable = new Compartment();
   let isEditable = true;
@@ -71,7 +83,7 @@ export function createDocsEditor(parent: HTMLElement, opts: DocsEditorOptions): 
       doc: text,
       extensions: [
         ...editorExtensions(),
-        editable.of([EditorView.editable.of(isEditable), EditorState.readOnly.of(!isEditable)]),
+        editable.of(typing(isEditable)),
         EditorView.contentAttributes.of({ "aria-label": opts.label, spellcheck: "true" }),
         EditorView.updateListener.of((u) => {
           if (u.docChanged && !u.transactions.some((tr) => tr.annotation(remote))) {
@@ -97,7 +109,7 @@ export function createDocsEditor(parent: HTMLElement, opts: DocsEditorOptions): 
     },
     setEditable(next) {
       isEditable = next;
-      view.dispatch({ effects: editable.reconfigure([EditorView.editable.of(next), EditorState.readOnly.of(!next)]) });
+      view.dispatch({ effects: editable.reconfigure(typing(next)) });
     },
     goToFirstQuestion() {
       return this.goToNextQuestion(true, -1);
