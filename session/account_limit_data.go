@@ -35,7 +35,10 @@ type AccountSwapData struct {
 	Program string `json:"program,omitempty"`
 	// ConversationID is a freshly injected Claude id the replacement starts
 	// with. It never names a carried conversation: restart recovery re-injects
-	// it with --session-id, which would fork a carried one.
+	// it with --session-id while no transcript in the target account's store
+	// holds it, which would fork a carried one. Once Claude has filed it there,
+	// recovery resumes it instead, or, when a newer conversation shows the user
+	// moved on, starts fresh and records that id here in its place (#7214).
 	ConversationID string `json:"conversation_id,omitempty"`
 	// CarriedConversationID is the outgoing conversation a same-agent swap
 	// copied into the incoming account and resumes (#4367). The checkpoint
