@@ -3,6 +3,7 @@ package ui
 import (
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -23,6 +24,11 @@ import (
 // Program and Save stops the title is gone below about 29 rows), so the state
 // cannot live only in the title. Every stop is exercised on a cron task and on
 // a watch task, whose row drops "r run".
+//
+// The pane's clock is pinned. The cron task's "* * * * *" is Custom, so its form
+// shows a "Next run" line read from the clock, and a minute boundary between
+// frames failed the restore comparison below on master (02:31 against 02:32,
+// run 43351208224; #4217).
 func TestTaskPaneEditToggleIsVisibleWhereAdvertised(t *testing.T) {
 	require.NoError(t, keys.ApplyOverrides(nil))
 	t.Cleanup(func() { require.NoError(t, keys.ApplyOverrides(nil)) })
@@ -32,6 +38,8 @@ func TestTaskPaneEditToggleIsVisibleWhereAdvertised(t *testing.T) {
 	watch.ID = "w1"
 	watch.CronExpr = ""
 	watch.WatchCmd = "tail -f log"
+
+	now := time.Date(2026, time.November, 13, 2, 31, 30, 0, time.UTC)
 
 	type size struct{ w, h int }
 	// 34 is the overlay's content width at the 40-column hard minimum; 12
@@ -43,6 +51,7 @@ func TestTaskPaneEditToggleIsVisibleWhereAdvertised(t *testing.T) {
 			advertised := 0
 			for stop := 0; stop < taskFocusCount; stop++ {
 				tp := NewTaskPane()
+				tp.setNowForTest(func() time.Time { return now })
 				tp.SetSize(sz.w, sz.h)
 				tp.SetTasks([]task.Task{base})
 				tp.SetFocus(true)
