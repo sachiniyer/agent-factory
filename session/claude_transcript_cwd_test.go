@@ -27,7 +27,7 @@ func claudeRecordLine(t testing.TB, cwd string) string {
 	return string(line) + "\n"
 }
 
-func TestClaudeTranscriptCwdReadsTheFirstRecordThatNamesOne(t *testing.T) {
+func TestClaudeTranscriptDirReadsWhatClaudesResumeReads(t *testing.T) {
 	dir := t.TempDir()
 	write := func(name, content string) string {
 		t.Helper()
@@ -36,21 +36,36 @@ func TestClaudeTranscriptCwdReadsTheFirstRecordThatNamesOne(t *testing.T) {
 		return path
 	}
 	summary := `{"type":"summary","summary":"earlier work","leafUuid":"x"}` + "\n"
+	read := func(path string) (string, bool) {
+		t.Helper()
+		return claudeTranscriptDir(path)
+	}
 
-	cwd, ok := claudeTranscriptCwd(write("ordered.jsonl", summary+claudeRecordLine(t, "/work/a")+claudeRecordLine(t, "/work/b")))
+	got, ok := read(write("ordered.jsonl", summary+claudeRecordLine(t, "/work/a")+claudeRecordLine(t, "/work/b")))
 	require.True(t, ok)
-	require.Equal(t, "/work/a", cwd, "the first record that names a cwd is where the conversation was launched")
+	require.Equal(t, "/work/a", got, "without a relocation, the first record that names a cwd")
 
-	_, ok = claudeTranscriptCwd(write("none.jsonl", summary+"{}\n"))
+	relocated := claudeRecordLine(t, "/work/a") + `{"type":"relocated","relocatedCwd":"/work/c"}` + "\n" + claudeRecordLine(t, "/work/c")
+	got, ok = read(write("relocated.jsonl", relocated))
+	require.True(t, ok)
+	require.Equal(t, "/work/c", got, "the last relocation names where the conversation now lives")
+
+	// One record longer than af parses (a pasted image) is read past: the
+	// next record names the same directory (#7221 review R2).
+	oversize := `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"},"cwd":"/work/a"}` + "\n"
+	got, ok = read(write("oversize.jsonl", oversize+claudeRecordLine(t, "/work/a")))
+	require.True(t, ok, "an oversize record does not decide unknown")
+	require.Equal(t, "/work/a", got)
+
+	_, ok = read(write("only-oversize.jsonl", oversize))
+	require.False(t, ok, "a record af does not parse names nothing")
+	_, ok = read(write("none.jsonl", summary+"{}\n"))
 	require.False(t, ok)
-	_, ok = claudeTranscriptCwd(write("relative.jsonl", `{"type":"user","cwd":"work"}`+"\n"))
+	_, ok = read(write("relative.jsonl", `{"type":"user","cwd":"work"}`+"\n"))
 	require.False(t, ok, "a relative cwd names no directory")
-	_, ok = claudeTranscriptCwd(write("torn.jsonl", `{"type":"user","cwd":"/work/a"`))
+	_, ok = read(write("torn.jsonl", `{"type":"user","cwd":"/work/a"`))
 	require.False(t, ok, "a record still being written names nothing yet")
-	far := `{"type":"summary","summary":"` + strings.Repeat("x", claudeTranscriptHeadBudget) + `"}` + "\n"
-	_, ok = claudeTranscriptCwd(write("far.jsonl", far+claudeRecordLine(t, "/work/a")))
-	require.False(t, ok, "the read is bounded")
-	_, ok = claudeTranscriptCwd(filepath.Join(dir, "missing.jsonl"))
+	_, ok = read(filepath.Join(dir, "missing.jsonl"))
 	require.False(t, ok)
 }
 
@@ -72,7 +87,16 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 	}{
 		{name: "this worktree's conversation", cwd: "own", verdict: claudeRecordedStale},
 		{name: "this worktree's conversation, recorded resolved", cwd: "own resolved", verdict: claudeRecordedStale},
+		// A message records the session's current cwd, which a persisted cd
+		// moves: a /clear after `cd web` is still this worktree's (#7221 R1).
+		{name: "a /clear after the agent cd'd into a subdirectory", cwd: "subdirectory", verdict: claudeRecordedStale},
+		{name: "a conversation relocated into this worktree", cwd: "relocated in", verdict: claudeRecordedStale},
+		// One oversize record (a pasted screenshot) does not make the
+		// conversation unknown: the next one names the directory (R2).
+		{name: "a /clear whose first record is a pasted image", cwd: "oversize first", verdict: claudeRecordedStale},
+		{name: "a conversation that records the worktree's path before a move", cwd: "before a move", verdict: claudeRecordedStale},
 		{name: "a colliding directory's conversation", cwd: "foreign", verdict: claudeRecordedCurrent},
+		{name: "a colliding directory's conversation relocated there", cwd: "relocated away", verdict: claudeRecordedCurrent},
 		{name: "a conversation that names no directory", cwd: "", verdict: claudeRecordedUncorrelated},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -85,11 +109,17 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 			recordOutgoingConversation(t, inst, tmux.ProgramClaude, carryTestID)
 			source := filepath.Join(home, ".claude")
 			setModTime(t, writeCarryFile(t, source, filepath.Join(recorded, carryTestID+".jsonl"), claudeRecordLine(t, worktree)), past)
+			relocation := func(to string) string { return `{"type":"relocated","relocatedCwd":"` + to + `"}` + "\n" }
 			content := map[string]string{
-				"own":          claudeRecordLine(t, worktree),
-				"own resolved": claudeRecordLine(t, filepath.Join(real, "a.b")),
-				"foreign":      claudeRecordLine(t, foreign),
-				"":             `{"type":"summary","summary":"s"}` + "\n",
+				"own":            claudeRecordLine(t, worktree),
+				"own resolved":   claudeRecordLine(t, filepath.Join(real, "a.b")),
+				"subdirectory":   claudeRecordLine(t, filepath.Join(worktree, "web")),
+				"relocated in":   claudeRecordLine(t, t.TempDir()) + relocation(worktree),
+				"oversize first": `{"type":"user","message":{"content":"` + strings.Repeat("x", claudeTranscriptRecordLimit) + `"}}` + "\n" + claudeRecordLine(t, worktree),
+				"before a move":  claudeRecordLine(t, filepath.Join(t.TempDir(), "old-place")),
+				"foreign":        claudeRecordLine(t, foreign),
+				"relocated away": claudeRecordLine(t, worktree) + relocation(foreign),
+				"":               `{"type":"summary","summary":"s"}` + "\n",
 			}[tc.cwd]
 			setModTime(t, writeCarryFile(t, source, filepath.Join(resolved, otherID+".jsonl"), content), past.Add(time.Minute))
 
@@ -119,8 +149,10 @@ func TestClaudeOwnershipIsTheTranscriptsCwdNotItsProjectName(t *testing.T) {
 }
 
 // A restore's substitute for a missing recorded conversation is the newest one
-// launched in this worktree, never a colliding directory's or one that names
-// no directory.
+// in this worktree. A colliding directory's conversation is passed over; one
+// that names no directory af can read may be the newest of this worktree's, so
+// there is no substitute rather than an older one reached past it (#7221
+// review R2).
 func TestInspectClaudeSubstitutesOnlyThisWorktreesConversation(t *testing.T) {
 	configDir := t.TempDir()
 	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
@@ -153,9 +185,39 @@ func TestInspectClaudeSubstitutesOnlyThisWorktreesConversation(t *testing.T) {
 	}
 
 	write(foreignID, claudeRecordLine(t, foreign), past.Add(2*time.Minute))
-	write(unnamedID, `{"type":"summary","summary":"s"}`+"\n", past.Add(3*time.Minute))
-	require.False(t, inspect().Resume.HasID(), "neither a colliding directory's conversation nor an unnamed one is this worktree's")
+	require.False(t, inspect().Resume.HasID(), "a colliding directory's conversation is not this worktree's")
 
-	write(ownID, claudeRecordLine(t, worktree), past)
-	require.Equal(t, ownID, inspect().Resume.ID, "the newest conversation launched here, though others are newer")
+	write(ownID, claudeRecordLine(t, filepath.Join(worktree, "web")), past)
+	require.Equal(t, ownID, inspect().Resume.ID, "this worktree's newest, past a newer colliding one")
+
+	write(unnamedID, `{"type":"summary","summary":"s"}`+"\n", past.Add(3*time.Minute))
+	require.False(t, inspect().Resume.HasID(), "an unattributable newest may be this worktree's: no older substitute past it")
+}
+
+// #7221 review R5: a spelling af cannot list hides what it holds, but the
+// judge still says whether a spelling it could list files the recorded
+// conversation, which the committed re-launch needs: a second --session-id on
+// a filed id never boots.
+func TestJudgeClaudeRecordedLooksForTheIDBesideAnUnlistableSpelling(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	configDir := t.TempDir()
+	real := filepath.Join(testguard.CanonicalTempDir(t), "real")
+	require.NoError(t, os.MkdirAll(real, 0o700))
+	link := filepath.Join(testguard.CanonicalTempDir(t), "link")
+	require.NoError(t, os.Symlink(real, link))
+	projects := claudeProjectCandidates(link)
+	require.Len(t, projects, 2)
+	unlistable := filepath.Join(configDir, projects[1])
+	require.NoError(t, os.MkdirAll(unlistable, 0o755))
+	require.NoError(t, os.Chmod(unlistable, 0))
+	t.Cleanup(func() { _ = os.Chmod(unlistable, 0o755) })
+	writeCarryFile(t, configDir, filepath.Join(projects[0], carryTestID+".jsonl"), claudeRecordLine(t, link))
+
+	require.Equal(t, claudeRecordedFiledUnlisted, judgeClaudeRecorded(configDir, projects, link, carryTestID, ""))
+	require.Equal(t, claudeRecordedUnlisted, judgeClaudeRecorded(configDir, projects, link, newerConversationID, ""))
+	require.Equal(t, carryTranscriptsUnlistedReason,
+		claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID),
+		"the swap still cannot confirm the carried copy is current")
 }

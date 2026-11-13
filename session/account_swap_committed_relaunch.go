@@ -54,9 +54,12 @@ func (i *Instance) committedConversationLaunch(program, workDir, account, id str
 		return launch, conversation, conversation.HasID()
 	}
 	// id is filed in every one of these: a newer conversation that names no
-	// directory af can read (#7208) is no evidence the session moved on, and a
-	// second --session-id on a filed id never boots, so it resumes too.
-	if verdict == claudeRecordedCurrent || verdict == claudeRecordedStale || verdict == claudeRecordedUncorrelated {
+	// directory af can read (#7208), or a spelling af could not list beside
+	// the one that files it (#7221 review R5), is no evidence the session
+	// moved on, and a second --session-id on a filed id never boots, so it
+	// resumes too.
+	switch verdict {
+	case claudeRecordedCurrent, claudeRecordedStale, claudeRecordedUncorrelated, claudeRecordedFiledUnlisted:
 		if resumed, ok := tmux.ResumeProgramWithConversationID(program, tmux.ProgramClaude, id); ok {
 			return resumed, AgentConversationData{
 				Agent:       tmux.ProgramClaude,

@@ -27,6 +27,10 @@ const (
 	// claudeRecordedUncorrelated: a newer conversation names no directory af
 	// can read, so whether it is this worktree's is unknown (#7208).
 	claudeRecordedUncorrelated
+	// claudeRecordedFiledUnlisted: a spelling could not be listed, but one af
+	// could list files the recorded conversation, so it exists; whether it is
+	// still the newest is unknown (#7221 review R5).
+	claudeRecordedFiledUnlisted
 )
 
 // judgeClaudeRecorded is the one staleness rule for a recorded Claude
@@ -46,6 +50,13 @@ const (
 func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bound string) claudeRecordedVerdict {
 	transcripts, err := claudeWorktreeTranscripts(configDir, projects)
 	if err != nil {
+		// What an unlistable spelling holds is unknown, but the recorded
+		// conversation may be filed under one af could list.
+		for _, transcript := range transcripts {
+			if strings.EqualFold(transcript.id, id) {
+				return claudeRecordedFiledUnlisted
+			}
+		}
 		return claudeRecordedUnlisted
 	}
 	boundDir := ""
@@ -108,7 +119,7 @@ func judgeClaudeRecorded(configDir string, projects []string, launchDir, id, bou
 // that refuses too, rather than carry a copy without the latest turns.
 func claudeCarryStaleness(configDir string, projects []string, launchDir, transcript, id string) string {
 	switch judgeClaudeRecorded(configDir, projects, launchDir, id, filepath.Dir(transcript)) {
-	case claudeRecordedUnlisted:
+	case claudeRecordedUnlisted, claudeRecordedFiledUnlisted:
 		return carryTranscriptsUnlistedReason
 	case claudeRecordedUncorrelated:
 		return carryUncorrelatedReason
