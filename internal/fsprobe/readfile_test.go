@@ -53,7 +53,25 @@ func TestReadFileWith_BoundsAWedgedRead(t *testing.T) {
 		restoreTimeout()
 	}()
 
-	got, err := ReadFileWith(path, func(*os.File) (any, error) { return "read", nil })
+	// The call runs aside, so a read with no bound fails this test at the
+	// deadline instead of hanging it.
+	type answer struct {
+		got any
+		err error
+	}
+	answered := make(chan answer, 1)
+	go func() {
+		got, err := ReadFileWith(path, func(*os.File) (any, error) { return "read", nil })
+		answered <- answer{got, err}
+	}()
+	var got any
+	var err error
+	select {
+	case a := <-answered:
+		got, err = a.got, a.err
+	case <-time.After(5 * time.Second):
+		t.Fatal("a read on a wedged mount must return within its bound")
+	}
 	require.Nil(t, got)
 	require.True(t, errors.Is(err, context.DeadlineExceeded), "a wedged read must surface typed deadline evidence: %v", err)
 	require.True(t, errors.Is(err, ErrProbeTimedOut), "the deadline must carry the fsprobe sentinel: %v", err)
