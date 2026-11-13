@@ -55,7 +55,7 @@ func unknownOnLoad(t *testing.T, title string) *int {
 	t.Helper()
 	loads := 0
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		if d.Title == title {
 			loads++
 			return nil, unknownProjectConfig("/repo/" + title)

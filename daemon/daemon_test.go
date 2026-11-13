@@ -540,7 +540,7 @@ func TestRefreshDaemonInstances_SkipsCorruptedRepoAtStartup(t *testing.T) {
 
 	// Stub the session restore so we don't need a live tmux/PTY backend.
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -602,7 +602,7 @@ func TestRefreshDaemonInstances_BackfillsLegacyIDBeforeMaterialize(t *testing.T)
 	}
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -659,7 +659,7 @@ func TestRefreshDaemonInstances_DoesNotMaterializeUnpersistedLegacyID(t *testing
 	t.Cleanup(func() { persistLegacyInstanceID = prevPersist })
 	materialized := false
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		materialized = true
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
@@ -686,7 +686,7 @@ func TestRefreshDaemonInstances_PreservesExistingForCorruptedRepoOnPoll(t *testi
 	silenceWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -721,7 +721,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingRepoDirectory(t *tes
 	warnBuf := teeWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })

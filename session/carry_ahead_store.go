@@ -66,7 +66,7 @@ func takeCodexStoreSnapshot(codexHome string, now time.Time) *codexStoreSnapshot
 	if codexHome == "" {
 		return snap
 	}
-	snap.err = filepath.WalkDir(filepath.Join(codexHome, "sessions"), func(path string, d os.DirEntry, err error) error {
+	snap.err = walkConversationStore(filepath.Join(codexHome, "sessions"), true, func(path string, d os.DirEntry, err error) error {
 		if err != nil {
 			if errors.Is(err, os.ErrNotExist) {
 				return nil

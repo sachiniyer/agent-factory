@@ -345,6 +345,10 @@ type TmuxSession struct {
 	// is reported as a refusal instead of as "nothing recorded". Guarded by
 	// programMu.
 	exactResumeRefusal ExactResumeRefusal
+	// beforeRespawn runs once, on Restore's re-spawn branch only, after the
+	// session is confirmed gone and immediately before the replacement starts
+	// (SetBeforeRespawn). Guarded by programMu.
+	beforeRespawn func() error
 	// accountLoginEnv holds the NAME=VALUE entries that make an account LOGIN
 	// pane browser-free (#3854), or nil for every other pane. It is a resolved
 	// list rather than a bool because the operator's own pass-through wins: a name

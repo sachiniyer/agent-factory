@@ -28,9 +28,12 @@ func TestRewriteProgramCmdByAf_KeepsTheDeclarationInStepWithResume(t *testing.T)
 		wantAdded string
 	}{
 		{
+			// A program with no conversation selector: one started on an id
+			// (--session-id) is never rewritten, since Claude refuses
+			// --continue beside it (#7217).
 			name:      "claude appends --continue",
-			program:   "claude --session-id sid-1 --plugin-dir " + pluginDir,
-			declared:  []string{"--session-id", "sid-1", "--plugin-dir", pluginDir},
+			program:   "claude --plugin-dir " + pluginDir,
+			declared:  []string{"--plugin-dir", pluginDir},
 			agent:     "claude",
 			wantAdded: "--continue",
 		},

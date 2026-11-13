@@ -60,7 +60,9 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 		layout func(t *testing.T, file func(project, id string, at time.Time), recorded, resolved string)
 		// refusal is the decline's reason; "" means the restore resumes.
 		refusal string
-		why     string
+		// startsOn: the restore starts Claude on the recorded id (#7215).
+		startsOn bool
+		why      string
 	}{
 		{
 			name: "a newer conversation under the same spelling",
@@ -119,7 +121,9 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 			layout: func(t *testing.T, file func(string, string, time.Time), recorded, resolved string) {
 				file(resolved, newerConversationID, past)
 			},
-			why: "a missing transcript says nothing about whether the user moved on, so the restore resumes as it always has",
+			startsOn: true,
+			why: "Claude never filed the recorded id (it files lazily) or its retention deleted it, and --resume of it exits " +
+				"at launch: the restore starts Claude on that id and keeps it recorded (#7215)",
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -133,6 +137,13 @@ func TestExactResumeRefusesAClaudeConversationThatIsNoLongerTheNewest(t *testing
 			inst := claudeRestoreInstance(t, workDir, carryTestID)
 
 			rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+			if tc.startsOn {
+				require.False(t, ok, tc.why)
+				require.Equal(t, "claude --session-id "+carryTestID, rewritten, tc.why)
+				require.True(t, decline.startsOnRecorded, tc.why)
+				require.False(t, inst.exactResumeRefusal(decline).retire, "the started-on id stays the record")
+				return
+			}
 			if tc.refusal == "" {
 				require.True(t, ok, tc.why)
 				require.Equal(t, "claude --resume "+carryTestID, rewritten, tc.why)

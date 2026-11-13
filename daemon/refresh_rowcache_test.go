@@ -76,7 +76,7 @@ func TestRefreshDaemonInstances_FailedRowStillRetriesOnCachedTicks(t *testing.T)
 
 	failures := 0
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		if d.Title == "flaky" {
 			failures++
 			return nil, errors.New("backend not ready")
@@ -132,7 +132,7 @@ func TestRefreshDaemonInstances_ArchivedRowsAreNotReparsed(t *testing.T) {
 func BenchmarkRefreshDaemonInstances_UnchangedTick(b *testing.B) {
 	b.Setenv("AGENT_FACTORY_HOME", b.TempDir())
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{ID: d.ID, Title: d.Title}, nil
 	}
 	defer func() { fromInstanceDataForRefresh = prev }()

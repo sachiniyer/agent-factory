@@ -100,12 +100,21 @@ func retainsInertInstance(err error) bool {
 	return errors.As(err, &unknownScope) || errors.Is(err, tmux.ErrAccountEnvironmentRefresh)
 }
 
+// ErrReplacementNotDurable is a re-spawn refused because the replacement for a
+// refused conversation could not be recorded durably before it started (#7209
+// review R2-1). Nothing was spawned.
+var ErrReplacementNotDurable = errors.New("the replacement for a refused conversation could not be recorded durably before its spawn")
+
 // restoreDeferred reports a restore that was refused so the row can be kept
-// exactly as it was and retried later: a spawn-dir refusal (#5172) or a
-// possibly-live server behind an unverified socket (#4135). Nothing was spawned
-// or torn down under either, so the persisted binding must survive intact.
+// exactly as it was and retried later: a spawn-dir refusal (#5172), a
+// possibly-live server behind an unverified socket (#4135), or a replacement
+// that could not be made durable before its spawn (ErrReplacementNotDurable).
+// Nothing was spawned or torn down under any of them, so the persisted binding
+// must survive intact, and the row loads Lost for Recover, which writes the
+// replacement through its own persist hook.
 func restoreDeferred(err error) bool {
-	return errors.Is(err, tmux.ErrSpawnDirMissing) || errors.Is(err, tmux.ErrSessionSocketUnverified)
+	return errors.Is(err, tmux.ErrSpawnDirMissing) || errors.Is(err, tmux.ErrSessionSocketUnverified) ||
+		errors.Is(err, ErrReplacementNotDurable)
 }
 
 func finishLaunchTabFailure(firstTime bool, tmuxSession *tmux.TmuxSession, err error) error {

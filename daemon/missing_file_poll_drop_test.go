@@ -36,7 +36,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFile(t *tes
 	warnBuf := teeWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -118,7 +118,7 @@ func TestRefreshDaemonInstances_PreservesInstancesAfterInstancesFileRecreatedEmp
 	resetPreservedMissingFileReposForTest()
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -175,7 +175,7 @@ func TestRefreshDaemonInstances_PreservesInstancesForMissingInstancesFileAcrossP
 	silenceWarnings(t)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -225,7 +225,7 @@ func TestRefreshDaemonInstances_DropsInstancesForLegitimatelyEmptyInstancesFile(
 	resetPreservedMissingFileReposForTest()
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -260,7 +260,7 @@ func TestRefreshDaemonInstances_ClearsProvenanceWhenInstancesFileRecovers(t *tes
 	resetPreservedMissingFileReposForTest()
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })

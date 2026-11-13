@@ -39,6 +39,10 @@ func TestResumeProgram(t *testing.T) {
 		{"claude already --continue", "claude --continue", "claude --continue"},
 		{"claude already -c", "claude -c", "claude -c"},
 		{"claude already --resume", "claude --resume foo", "claude --resume foo"},
+		// A launch on a conversation id is a selector too: --continue beside it
+		// would load the latest conversation, and Claude refuses the pair (#7217).
+		{"claude started on an id", "claude --session-id abc", "claude --session-id abc"},
+		{"claude started on an id, attached", "claude --session-id=abc", "claude --session-id=abc"},
 		{"claude already -r", "claude -r abc123", "claude -r abc123"},
 		// Long-option = syntax: claude accepts `--resume=<value>` so the
 		// rewrite must detect it and skip appending `--continue` (regression

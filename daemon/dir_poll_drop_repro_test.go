@@ -50,7 +50,7 @@ func TestRefreshDaemonInstances_DirectoryDeletionPreservedAfterTargetedWrite(t *
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -119,7 +119,7 @@ func TestRefreshDaemonInstances_DirectoryDeletionPreservedAfterEmptyRecreate(t *
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -176,7 +176,7 @@ func TestRefreshDaemonInstances_DirectoryDeletionPreservedAcrossPolls(t *testing
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -223,7 +223,7 @@ func TestRefreshDaemonInstances_DirectoryDeletionLegitimatelyEmptyNotOverPreserv
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -316,7 +316,7 @@ func TestRefreshDaemonInstances_UnreadableRepoNotAccruedAsDirectoryDeletion(t *t
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })
@@ -385,7 +385,7 @@ func TestRestoreMissingRecords_DirectoryDeletionFiresRestoreCheckpoint(t *testin
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prevFromInstance := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prevFromInstance })

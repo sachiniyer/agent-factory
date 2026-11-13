@@ -66,12 +66,15 @@ func resumeProgram(program string) string {
 		// claude`) whose flags can collide with claude's resume flags and
 		// false-positive the already-has-resume check (#742). Mirrors the
 		// position-aware codex check below (#632).
-		for _, tok := range tokens[agentIdx+1:] {
-			if tok == "-c" || tok == "--continue" || tok == "-r" || tok == "--resume" ||
-				strings.HasPrefix(tok, "--resume=") || strings.HasPrefix(tok, "-r=") ||
-				isShortResumeWithAttachedValue(tok) {
-				return program
-			}
+		//
+		// Any conversation selector counts, --session-id included: a program
+		// that starts Claude on a recorded or minted id must not also ask for
+		// the latest conversation in the directory, which after a /clear is the
+		// one the user left, and Claude refuses --session-id beside --continue
+		// outright (#7217 review). claudeConversationSelectorArgs is the one
+		// definition of a Claude selector.
+		if len(claudeConversationSelectorArgs(tokens[agentIdx+1:])) > 0 {
+			return program
 		}
 		return program + " --continue"
 	case ProgramCodex:

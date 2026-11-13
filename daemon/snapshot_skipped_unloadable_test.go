@@ -26,7 +26,7 @@ func failingFromInstanceForRefreshFor(t *testing.T, failTitles ...string) {
 	for _, title := range failTitles {
 		fail[title] = true
 	}
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		if fail[d.Title] {
 			return nil, fmt.Errorf("simulated materialize failure: worktree/session gone")
 		}

@@ -394,6 +394,17 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 	if refusedID != "" && refusal.replacement.HasID() {
 		if undo, staged := i.stageReplacementConversation(refusedID, refusal.replacement); staged {
 			notify := i.relocationSettleNotifyFn()
+			if notify == nil {
+				// Every daemon path that can re-spawn a staged replacement installs
+				// this hook: the Lost restore RPC, the lost-restore loop, the
+				// retry-limit respawn and the archived restore (#7209 review R2-1).
+				// The one launcher without it is the in-sandbox agent-server, which
+				// has no durable store of its own and hands the staged replacement
+				// to the host in its launch response and snapshots. Say so, so a
+				// new caller that forgot the hook is visible.
+				log.InfoLog.Printf("session %q: the replacement for its refused conversation %s is recorded in memory only: this re-spawn has no persist hook",
+					i.Title, refusedID)
+			}
 			if notify != nil {
 				if perr := notify(i); perr != nil {
 					undo()
@@ -413,6 +424,23 @@ func (b *LocalBackend) respawnWithConversation(i *Instance, resume bool, prepare
 					}
 				}
 			}()
+		}
+	}
+	// A committed swap's pending record rewritten in memory since it last
+	// reached disk (a re-minted or demoted conversation, by any re-plan) is
+	// written before the pane can write under its conversation, through the
+	// same hook (#7216 review R2, #7217 review R1). A write that fails starts
+	// nothing and keeps the mark, so the retry writes it again. The daemon's
+	// limit-resume path, the only one that re-plans a committed swap, installs
+	// the hook.
+	if prepared != nil && i.pendingAccountSwapUnwrittenFor(prepared.account) {
+		if notify := i.relocationSettleNotifyFn(); notify == nil {
+			log.InfoLog.Printf("session %q: its re-planned account swap record is in memory only: this re-spawn has no persist hook", i.Title)
+		} else if perr := notify(i); perr != nil {
+			return markRecoverRebuilt(rebuilt, fmt.Errorf(
+				"account swap: session %q: its re-planned conversation could not be recorded durably before the spawn: %w", i.Title, perr))
+		} else {
+			i.markPendingAccountSwapWritten(prepared.account)
 		}
 	}
 	if resume {
@@ -744,9 +772,14 @@ func respawnLaunchProgram(i *Instance, resolvedProgram, declarationBase string,
 	var refusal resumeRefusal
 	if resume {
 		rewritten, ok, decline := prepareExactResumeConversation(i, program)
-		if ok {
+		switch {
+		case ok:
 			program = rewritten
-		} else {
+		case decline.startsOnRecorded:
+			// The recorded id holds no transcript: start Claude on it (#7215).
+			program = rewritten
+			log.InfoLog.Printf("session %q: recorded claude conversation %s: %s", i.Title, i.resumableConversation().ID, decline.reason)
+		default:
 			refusal = i.exactResumeRefusal(decline)
 			if refusal.retire {
 				program, refusal.replacement = planReplacementConversation(program)

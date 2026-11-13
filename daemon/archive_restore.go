@@ -385,7 +385,19 @@ func (m *Manager) restoreArchivedInstance(instance *session.Instance, repoID, ti
 	instance.SetRebuildTeardownRuntimesStop(func(i *session.Instance) error {
 		return m.stopVSCodeForInstance(key, i.ID)
 	})
+	// The respawn's persist hook, as every other daemon re-spawn path installs
+	// it (#7209 review R2-1): a restore that refuses the recorded conversation
+	// (#7206's own route: /clear, archive, restore) makes its replacement
+	// durable before the spawn, and a relocation it settles likewise. The write
+	// is commitRestore's, taken under admission while the runtime call holds it.
+	instance.SetRelocationSettleNotify(func(i *session.Instance) error {
+		if worktreeAdmissionHeld {
+			return m.persistUnderAdmission(repoID, i)
+		}
+		return m.persistInstanceErr(repoID, i)
+	})
 	restoreRuntimeErr := instance.RestoreFromArchiveHeldFenced()
+	instance.SetRelocationSettleNotify(nil)
 	// LocalBackend's Recover can rebuild if the restored path vanishes before it
 	// inspects it. Keep the same admission through that one rebuild choke point,
 	// then release as soon as the runtime call returns; persistence and reporting

@@ -466,12 +466,8 @@ func (i *Instance) LaunchAdopted(conv *AgentConversationData) error {
 // ("instance not started") even with its agent running. A launch that came up
 // marks it started, exactly as a first-time launch does.
 func (i *Instance) launchAdoptedWith(conv *AgentConversationData, respawn func() error) error {
-	if conv != nil && conv.HasID() {
-		if i.conversationResumableHere(i.Program, i.GetWorktreePath(), *conv) {
-			i.SetResumeRecordedConversation(*conv)
-		} else {
-			log.InfoLog.Printf("adopted launch: conversation %s is not in this host's %s store; starting a fresh conversation rather than resuming the latest one", conv.ID, conv.Agent)
-		}
+	if conv != nil && conv.HasID() && !i.PinRecordedConversationForLaunch(i.Program, i.GetWorktreePath(), *conv) {
+		log.InfoLog.Printf("adopted launch: conversation %s is not in this host's %s store; starting a fresh conversation rather than resuming the latest one", conv.ID, conv.Agent)
 	}
 	if err := respawn(); err != nil {
 		return err

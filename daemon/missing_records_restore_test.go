@@ -103,7 +103,9 @@ func TestMissingFile_RestoredThenGenuinelyEmptyIsAuthoritative(t *testing.T) {
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) { return &session.Instance{}, nil }
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
+		return &session.Instance{}, nil
+	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
 
 	repoID := "restore-then-empty-repo"
@@ -185,7 +187,7 @@ func TestMissingFile_InFlightArchiveSurvivesRestoreOfItsRunningSibling(t *testin
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })
@@ -251,7 +253,7 @@ func TestMissingFile_RestoredSessionRemovedLaterStaysRemoved(t *testing.T) {
 	t.Cleanup(resetPreservedMissingFileReposForTest)
 
 	prev := fromInstanceDataForRefresh
-	fromInstanceDataForRefresh = func(d session.InstanceData) (*session.Instance, error) {
+	fromInstanceDataForRefresh = func(d session.InstanceData, rc *session.RestoreContext) (*session.Instance, error) {
 		return &session.Instance{Title: d.Title}, nil
 	}
 	t.Cleanup(func() { fromInstanceDataForRefresh = prev })

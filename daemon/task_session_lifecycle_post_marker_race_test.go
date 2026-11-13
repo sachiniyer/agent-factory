@@ -330,7 +330,7 @@ func TestTaskSessionLifecycle_PostMarkerDeliveryRaceHonestReapWhenDischargeFails
 		var items []session.InstanceData
 		require.NoError(t, json.Unmarshal(rawRows, &items))
 		require.Len(t, items, 1)
-		_, merr := fromInstanceDataForRefresh(items[0])
+		_, merr := fromInstanceDataForRefresh(items[0], nil)
 		t.Fatalf("the marked session must survive the restart (materialization error: %v)", merr)
 	}
 
@@ -434,7 +434,7 @@ func TestTaskSessionLifecycle_PostMarkerDeliveryRaceSurvivesRestartWhenDischarge
 		var items []session.InstanceData
 		require.NoError(t, json.Unmarshal(rawRows, &items))
 		require.Len(t, items, 1)
-		_, merr := fromInstanceDataForRefresh(items[0])
+		_, merr := fromInstanceDataForRefresh(items[0], nil)
 		t.Fatalf("the session must survive the restart (materialization error: %v)", merr)
 	}
 

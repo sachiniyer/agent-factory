@@ -718,6 +718,10 @@ func TestRecover_RebuildsBranchGoneWorktreeFromRecordedBaseAndResumesRecordedCon
 	shellName := agentName + tmuxTabSeparator + shellTabName
 	const conversationID = "019f386f-7206-7fc2-803b-f7045e07a242"
 	worktreePath := filepath.Join(t.TempDir(), "repo-branch-gone")
+	// A fresh rebuild resumes only a conversation Claude filed (#7215).
+	claudeConfigDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", claudeConfigDir)
+	writeCarryFile(t, claudeConfigDir, claudeTranscriptRel(worktreePath, conversationID), "{}\n")
 	branchCreatedByUs := false
 	data := InstanceData{
 		Title:    "branch-gone",
