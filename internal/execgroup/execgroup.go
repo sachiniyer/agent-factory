@@ -18,6 +18,11 @@
 // right delay is per-command, and os/exec documents its semantics at the
 // field.
 //
+// A deadline kills the whole group. What a command that finished on its own
+// leaves behind is decided by how its caller ran it: Reap kills every member
+// left, and Output and CombinedOutput (capture.go) kill only the members still
+// holding one of the command's pipes WaitDelay after the leader exited.
+//
 // Callers must meet two requirements that the types do not enforce:
 //
 //   - The command must be built with exec.CommandContext, not exec.Command.
@@ -85,6 +90,14 @@ func KillOnCancel(cmd *exec.Cmd) {
 // command never started and there is nothing to reap. Like KillOnCancel, it
 // reaches only a group that cmd's child leads, and on darwin it re-signals
 // the same way.
+//
+// It reaches every member, including one that holds none of the command's
+// pipes and is meant to outlive it. A command whose child can open an ssh
+// connection must not be reaped this way: under ControlPersist, OpenSSH
+// leaves the master's ProxyCommand in the caller's group as the master's
+// transport, and this kills it (#7115). Such a command captures its output
+// through Output or CombinedOutput instead, which reap only the members proven
+// to hold one of the command's pipes past WaitDelay (#7121).
 func Reap(cmd *exec.Cmd) {
 	if cmd.Process != nil {
 		_ = killGroup(cmd.Process.Pid)
