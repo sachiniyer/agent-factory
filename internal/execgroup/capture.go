@@ -45,7 +45,9 @@ import (
 // Everything else follows os/exec:
 //   - cmd.Stdout must be unset, and for CombinedOutput cmd.Stderr too. When
 //     Output finds cmd.Stderr unset, it captures stderr and attaches the
-//     first and last 32 KiB to an *exec.ExitError's Stderr.
+//     first and last 32 KiB to an *exec.ExitError's Stderr. A cmd.Stderr the
+//     caller set is left to os/exec, so a holder of that pipe is not looked
+//     for.
 //   - A cmd.Stdin that is not an *os.File is copied in through a pipe these
 //     functions own, so a member that holds it unread past WaitDelay is found
 //     the same way. An *os.File reaches the child directly, as in os/exec.
