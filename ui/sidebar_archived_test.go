@@ -776,8 +776,9 @@ func TestSidebar_ArchiveClearsTabCollapse(t *testing.T) {
 		"precondition: the collapse override suppresses the ▾ marker")
 
 	// Archive in place, the way the reconcile delivers it: the same instance
-	// pointer flips liveness. The cursor clamps onto the Archived header — no
-	// live row takes the push — so the binding keeps pointing at it.
+	// pointer flips liveness. The cursor follows the row into the opened
+	// Archived folder (#7229); an archived row never takes the push, so the
+	// binding keeps pointing at it.
 	inst.SetStatusForTest(session.Archived)
 	s.syncFromStore()
 
@@ -788,9 +789,87 @@ func TestSidebar_ArchiveClearsTabCollapse(t *testing.T) {
 	require.True(t, s.instanceExpanded(inst),
 		"the bound archived row renders its ▾ marker again")
 
-	s.ClickHeaderKind(SectionArchived)
+	// Step the cursor up onto the folder's header, leaving the folder open.
+	for i, it := range s.visibleItems {
+		if it.IsHeader && it.Kind == SectionArchived {
+			s.selectedIdx = i
+			break
+		}
+	}
+	require.True(t, s.GetSelection().IsHeader, "precondition: the cursor rests on the Archived header")
 	assert.Same(t, inst, s.RowVerbTarget(),
 		"the marker-visible bound row resolves on its own header")
+}
+
+// TestSidebar_ArchiveCursorFollowsRow (#7229): archiving the session under the
+// cursor re-homes its row into the Archived folder. The cursor follows the row
+// and the folder opens, wherever the cursor was on the session (its row or one
+// of its tab rows) and whether or not the folder was open before. The rebuild
+// used to keep the cursor's flat index instead, so the landing depended on what
+// sat at that index afterwards: the collapsed folder's header here, or the next
+// session's row, which then took the selection.
+func TestSidebar_ArchiveCursorFollowsRow(t *testing.T) {
+	for _, tc := range []struct {
+		name        string
+		cursorOnTab bool
+	}{
+		{"instance row", false},
+		{"tab row", true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			s := NewSidebar(store.NewProjection())
+			alpha := archTestInstance(t, "alpha", session.Ready)
+			beta := archTestInstance(t, "beta", session.Ready)
+			gamma := archTestInstance(t, "gamma", session.Ready)
+			for _, inst := range []*session.Instance{alpha, beta, gamma} {
+				addAgentShellTabs(inst)
+				addTestInstance(s, inst)
+			}
+			s.SetSize(40, 40)
+
+			s.SelectInstance(beta)
+			if tc.cursorOnTab {
+				s.SelectTabRow("beta", 1)
+			}
+			require.Same(t, beta, s.GetSelectedInstance(), "precondition: the cursor is on beta")
+			require.NotContains(t, s.View(), "Archived", "precondition: nothing is archived yet")
+
+			// The confirm raises the archiving op: beta can no longer expand, so
+			// its tab rows fold away under a cursor that may be on one of them.
+			beta.SetInFlightOpForTest(session.OpArchiving)
+			require.Same(t, beta, s.GetSelectedInstance(),
+				"the archiving op folds beta's tabs, and the cursor stays on beta, not on gamma below it")
+			require.Same(t, beta, s.proj.GetSelectedInstance(), "gamma never takes the selection")
+
+			// The archive commits: the row re-homes into the Archived folder.
+			beta.SetArchived()
+			sel := s.GetSelection()
+			assert.Equal(t, SectionArchived, sel.Kind, "the cursor follows beta into the Archived folder")
+			assert.False(t, sel.IsHeader, "it lands on the archived row, not the folder header")
+			assert.Same(t, beta, s.GetSelectedInstance())
+			assert.Contains(t, s.View(), "▼ Archived (1)", "the folder opens to show the row the cursor is on")
+			assert.Same(t, beta, s.proj.GetSelectedInstance(), "the display binding is unchanged")
+		})
+	}
+}
+
+// TestSidebar_ArchiveOfAnotherRowLeavesCursor: the follow is the cursor's own
+// session only. Archiving a session the cursor is not on moves that row into
+// the Archived folder without opening it or taking the cursor along.
+func TestSidebar_ArchiveOfAnotherRowLeavesCursor(t *testing.T) {
+	s := NewSidebar(store.NewProjection())
+	alpha := archTestInstance(t, "alpha", session.Ready)
+	beta := archTestInstance(t, "beta", session.Ready)
+	addTestInstance(s, alpha)
+	addTestInstance(s, beta)
+	s.SetSize(40, 40)
+
+	s.SelectInstance(alpha)
+	require.Same(t, alpha, s.GetSelectedInstance())
+
+	beta.SetArchived()
+	assert.Same(t, alpha, s.GetSelectedInstance(), "the cursor stays on alpha")
+	assert.Contains(t, s.View(), "▶ Archived (1)", "the folder stays closed")
 }
 
 // TestSidebar_RowVerbTarget_CollapsedMarkerNotAdopted: the header fallback

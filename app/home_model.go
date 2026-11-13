@@ -240,12 +240,17 @@ type home struct {
 	// consume it to start the same transient clear timer normal errors use.
 	pendingPaneAutoHideStatus string
 	// paneAutoHideNoticeID is the transient-notice generation of the currently
-	// displayed "N hidden: terminal too narrow" status, or 0 when none is shown.
-	// relayout clears the notice the moment a resize fits every open pane again,
-	// so the guidance never lingers on screen contradicting the visible panes
-	// (#1557). Tracked by id (not content) so a newer, unrelated notice that
-	// superseded it is never wiped.
+	// displayed "X hidden — too narrow" status, or 0 when none is shown.
+	// relayout clears the notice the moment the pane it names is no longer
+	// hidden, so the guidance never lingers on screen contradicting the visible
+	// panes (#1557, #7229). Tracked by id (not content) so a newer, unrelated
+	// notice that superseded it is never wiped.
 	paneAutoHideNoticeID uint64
+	// paneAutoHidePane is the pane the auto-hide notice names. The notice is a
+	// claim about that one pane, so relayout checks it against the pane set it
+	// is about to paint: once the pane is visible again or closed, the claim is
+	// false and the notice goes in the same update (#7229).
+	paneAutoHidePane *store.OpenPane
 	// restoredPaneBaseline holds the panes reopened from persisted TUI state so
 	// the first real (non-fallback) relayout after launch can detect panes the
 	// terminal is too narrow to fit. The restore-time relayout runs at term
