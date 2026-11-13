@@ -572,12 +572,12 @@ const (
 	// the tab exists (SetResumeRecordedConversation).
 	conversationFromRecordPin
 	// conversationFromPin: a pin whose provenance was checked where it was set
-	// (a swap's plan, the root heal), not judged again.
+	// (the root heal's InstanceOptions.ResumeConversation), not judged again.
 	conversationFromPin
 )
 
 // resumableConversationAndSource distinguishes the tab-recorded id from a
-// carried pin the adopt/swap/heal paths set before the tab exists, and a pin
+// carried pin the adopt and heal paths set before the tab exists, and a pin
 // that is the tab's record from one whose provenance was checked elsewhere.
 func (i *Instance) resumableConversationAndSource() (AgentConversationData, conversationSource) {
 	if conv := i.AgentConversation(); conv.HasID() {

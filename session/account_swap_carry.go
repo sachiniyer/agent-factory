@@ -235,6 +235,14 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 			return nil, reason
 		}
 	}
+	// Checks on the target come after every check on the source, so the live
+	// swap and the source-only check-ahead give the same answer for the same
+	// source state (#7220 review R4).
+	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
+		if reason := carry.claudeTargetReason(); reason != "" {
+			return nil, reason
+		}
+	}
 	carry.srcFiles, carry.srcStore = nil, nil
 	return carry, ""
 }
@@ -283,37 +291,6 @@ func (c *conversationCarry) locate(program, workDir string) string {
 		return c.locateCodex()
 	}
 	return fmt.Sprintf(carryUnsupportedFormat, c.agent)
-}
-
-func (c *conversationCarry) locateClaude(program, workDir string) string {
-	launch, err := tmux.CommandEnvironmentFromCommand(program, workDir)
-	if err != nil || !launch.WorkingDirKnown() {
-		return carryNoClaudeDirReason
-	}
-	var refused string
-	c.claudeProjects = claudeProjectCandidates(launch.WorkingDir)
-	for _, project := range c.claudeProjects {
-		transcript := filepath.Join(project, c.id+".jsonl")
-		roots := []carryRoot{c.srcRoot}
-		if c.committed {
-			roots = append(roots, c.dstRoot)
-		}
-		for _, root := range roots {
-			present, err := probeCarryArtifact(root, transcript)
-			if present {
-				c.transcript = transcript
-				c.aux = filepath.Join(project, c.id)
-				return ""
-			}
-			if path := carrySymlinkPath(err); path != "" && refused == "" {
-				refused = symlinkCarryReason(path)
-			}
-		}
-	}
-	if refused != "" {
-		return refused
-	}
-	return carryTranscriptMissingReason
 }
 
 func (c *conversationCarry) locateCodex() string {

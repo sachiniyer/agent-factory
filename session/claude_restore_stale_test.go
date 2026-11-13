@@ -201,9 +201,10 @@ func TestExactResumeJudgesAnAccountSessionByTheAccountsStore(t *testing.T) {
 	require.Equal(t, staleCarryReason, decline.reason)
 }
 
-// A pin whose provenance was checked where it was set (a swap's plan, the root
-// heal: SetResumeConversation) is not judged again. A pin that is the tab's
-// record delivered from elsewhere is (TestAdoptedRelaunchJudgesTheTabsRecord).
+// A pin whose provenance was checked where it was set (the root heal's
+// InstanceOptions.ResumeConversation) is not judged again. A pin that is the
+// tab's record delivered from elsewhere is
+// (TestAdoptedRelaunchJudgesTheTabsRecord).
 func TestExactResumeLeavesAPinJudgedElsewhereAlone(t *testing.T) {
 	configDir := t.TempDir()
 	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
@@ -214,7 +215,8 @@ func TestExactResumeLeavesAPinJudgedElsewhereAlone(t *testing.T) {
 
 	inst := claudeRestoreInstance(t, workDir, carryTestID)
 	inst.Tabs = []*Tab{{}}
-	inst.SetResumeConversation(AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected})
+	// The root heal's pin, as NewInstance sets it from InstanceOptions.ResumeConversation.
+	inst.carriedConversation = AgentConversationData{Agent: tmux.ProgramClaude, ID: carryTestID, CaptureKind: ConversationCaptureInjected}
 	rewritten, ok, _ := prepareExactResumeConversation(inst, "claude")
 	require.True(t, ok)
 	require.Equal(t, "claude --resume "+carryTestID, rewritten)

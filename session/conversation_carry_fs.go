@@ -289,27 +289,36 @@ func openCarryFileAt(dir *os.File, name string) (*os.File, os.FileInfo, error) {
 // reachable without following a symlink below home's anchor. Absence is
 // (false, nil); any other failure, such as a refused symlink, is returned.
 func probeCarryArtifact(home carryRoot, rel string) (bool, error) {
-	dirs, name, err := splitCarryPath(rel, true)
-	if err != nil {
-		return false, err
-	}
-	root, err := openCarryAnchor(home)
-	if err == nil {
-		defer root.Close()
-		var dir *os.File
-		if dir, err = openCarryDirChain(root, dirs, false); err == nil {
-			defer dir.Close()
-			var file *os.File
-			if file, _, err = openCarryFileAt(dir, name); err == nil {
-				_ = file.Close()
-				return true, nil
-			}
-		}
+	file, _, err := openCarryArtifact(home, rel)
+	if file != nil {
+		_ = file.Close()
+		return true, nil
 	}
 	if errors.Is(err, fs.ErrNotExist) {
 		return false, nil
 	}
 	return false, err
+}
+
+// openCarryArtifact opens rel beneath home the way probeCarryArtifact checks
+// it: a regular file reached without following a symlink below home's anchor.
+// The caller closes the file.
+func openCarryArtifact(home carryRoot, rel string) (*os.File, os.FileInfo, error) {
+	dirs, name, err := splitCarryPath(rel, true)
+	if err != nil {
+		return nil, nil, err
+	}
+	root, err := openCarryAnchor(home)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer root.Close()
+	dir, err := openCarryDirChain(root, dirs, false)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer dir.Close()
+	return openCarryFileAt(dir, name)
 }
 
 // probeCarryDir returns the error, if any, from opening the directory rel

@@ -156,10 +156,10 @@ func TestConversationResumableHere(t *testing.T) {
 	assert.True(t, ConversationResumableHere(program, work, claudeConv), "the transcript is here")
 }
 
-// SetResumeConversation feeds the launch planner the existing carry path.
-func TestSetResumeConversationPlansAResume(t *testing.T) {
+// A pin feeds the launch planner the existing carry path.
+func TestSetResumeRecordedConversationPlansAResume(t *testing.T) {
 	inst := &Instance{ID: "id-1"}
-	inst.SetResumeConversation(claudeConv)
+	inst.SetResumeRecordedConversation(claudeConv)
 	rewritten, conv := planCreateConversation(inst, "claude", inst.ID)
 	assert.Contains(t, rewritten, "--resume "+claudeConv.ID)
 	assert.Equal(t, claudeConv, conv)

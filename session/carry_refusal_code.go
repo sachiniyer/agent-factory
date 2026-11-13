@@ -28,7 +28,8 @@ const (
 	carryStoreUnlistedReason           = "af could not enumerate the Codex rollout store"
 	carrySourceStoreUnlistedReason     = "af could not enumerate the previous account's rollout store"
 	carryTranscriptsUnlistedReason     = "af could not list the conversations in this worktree to confirm the recorded one is current"
-	carryTranscriptCopiesReason        = "Claude holds a newer copy of this conversation under another spelling of the worktree's path than the one af would carry"
+	carryTranscriptCopiesReason        = "Claude wrote a newer copy of this conversation under another spelling of the worktree's path while af planned the carry"
+	carryTargetUncheckedReason         = "af could not check the new account's home for another copy of this conversation"
 	carryUncorrelatedReason            = "af could not confirm the recorded conversation is still the newest one in this worktree"
 	carryRolloutMisplacedReason        = "af could not place the Codex rollout inside its home"
 	carryOtherFormsUnlistedReason      = "af could not check whether its rollout is stored compressed or as a thread/revert rollout"
@@ -45,7 +46,35 @@ const (
 	carryUnsupportedFormat        = "%s conversations cannot be carried"
 	carryDuplicatedFormat         = "%d Codex rollouts record this conversation"
 	carrySymlinkFormat            = "%s is a symbolic link, which af does not follow when carrying a conversation"
+	carryTranscriptCopiesFormat   = "Claude holds two copies of this conversation that diverge, %s and %s, " +
+		"so af cannot tell which line of it Claude would resume"
+	carryTargetOtherCopyFormat = "the new account already holds another copy of this conversation at %s, " +
+		"under another spelling of the worktree's path, which its Claude could resume instead of the carried one"
 )
+
+// A refusal is a statement of what af found. It reaches the replacement
+// agent's brief (MissionBrief: "af tried to carry …, but <reason>, so …"),
+// where an instruction would be addressed to the agent the files concern,
+// after the swap already started it fresh. What a user can do about one goes
+// to the surfaces addressed to the user instead (carryRefusalRemedy, #7220
+// review R2).
+var (
+	carryTranscriptCopiesRE = carryFormatRE(carryTranscriptCopiesFormat)
+	carryTargetOtherCopyRE  = carryFormatRE(carryTargetOtherCopyFormat)
+)
+
+// carryRefusalRemedy is what the user can do about reason before the next
+// swap, for the refusals a user clears by hand; "" for every other one. It is
+// for af's log and the docs, never for the brief.
+func carryRefusalRemedy(reason string) string {
+	switch {
+	case carryTranscriptCopiesRE.MatchString(reason):
+		return "to carry it on the next swap, move aside the copy whose turns you do not want to keep before that swap"
+	case carryTargetOtherCopyRE.MatchString(reason):
+		return "to carry it on the next swap, move that copy aside before that swap"
+	}
+	return ""
+}
 
 // carryOperatorRepairMark is in every refusal of an operator-recorded
 // conversation whose provenance af could not confirm (operatorRepairProvenance).
@@ -68,6 +97,7 @@ var carryRefusalCodeOf = map[string]string{
 	carrySourceStoreUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptsUnlistedReason:     handoff.CarryUnverified,
 	carryTranscriptCopiesReason:        handoff.CarryDuplicated,
+	carryTargetUncheckedReason:         handoff.CarryUnverified,
 	carryUncorrelatedReason:            handoff.CarryUnverified,
 	carryRolloutMisplacedReason:        handoff.CarryUnverified,
 	carryOtherFormsUnlistedReason:      handoff.CarryUnverified,
@@ -90,6 +120,8 @@ var carryRefusalFormats = []struct {
 	{carryFormatRE(carryUnsupportedFormat), handoff.CarryUnsupported},
 	{carryFormatRE(carryDuplicatedFormat), handoff.CarryDuplicated},
 	{carryFormatRE(carrySymlinkFormat), handoff.CarrySymlinked},
+	{carryTranscriptCopiesRE, handoff.CarryDuplicated},
+	{carryTargetOtherCopyRE, handoff.CarryDuplicated},
 }
 
 var carryFormatVerbRE = regexp.MustCompile(`%[sqd]`)
