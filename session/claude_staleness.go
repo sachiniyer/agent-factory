@@ -154,7 +154,7 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	projects := claudeProjectCandidates(launchDir)
 	verdict := judgeClaudeRecorded(configDir, projects, id, "")
 	if verdict == claudeRecordedMissing {
-		verdict = claudeRecordedInOtherStores(configDir, projects, id)
+		verdict = claudeRecordedAnywhere(configDir, id)
 	}
 	launch, ok := recordedClaudeLaunchFor(verdict, func() bool { return i.newerConversationIsEvidence(launchDir) })
 	if !ok {
@@ -187,27 +187,63 @@ func recordedClaudeLaunchFor(verdict claudeRecordedVerdict, evidence func() bool
 	return recordedClaudeResume, false
 }
 
-// claudeRecordedInOtherStores is what the other Claude stores af can name hold
-// of an id the launch's own store does not (#7217 review R4): the daemon's own
-// CLAUDE_CONFIG_DIR and $HOME/.claude. A pane whose environment points Claude
-// at one of them files there, and Claude's in-use check reads only its own
-// store, so starting on an id one of them holds would fail every restore of the
-// row. A copy anywhere is a transcript to resume; a store that cannot be listed
-// is a look that did not happen; only an id absent from every store is
-// Missing, and is started on.
-func claudeRecordedInOtherStores(primary string, projects []string, id string) claudeRecordedVerdict {
-	for _, store := range otherClaudeStores(primary) {
-		switch verdict := judgeClaudeRecorded(store, projects, id, ""); verdict {
-		case claudeRecordedMissing:
-			continue
-		case claudeRecordedUnlisted:
+// claudeRecordedAnywhere is whether any Claude store af can name holds an id
+// the worktree's own project directories do not (#7217 review R4, Codex P1).
+// Claude's --resume <id> looks in the current project, its git worktrees, and
+// then every other project in its store, while its --session-id in-use check
+// reads only <store>/projects/<name(cwd)>/<id>.jsonl. So a transcript under
+// another project (a worktree restored to a new path, as RestoreWorktreePath's
+// collision suffix or an archive move leaves it) is filed: starting on the id
+// would fork a fresh conversation and drop its history, where --resume finds
+// it. The stores are the launch's own, the daemon's CLAUDE_CONFIG_DIR and
+// $HOME/.claude, since a pane pointed at either files there and Claude's
+// checks read only the store the pane uses. A copy in any project of any of
+// them resumes; a store af cannot fully look in is a look that did not
+// happen; only an id no project anywhere holds is Missing, and started on.
+func claudeRecordedAnywhere(primary, id string) claudeRecordedVerdict {
+	for _, store := range append([]string{primary}, otherClaudeStores(primary)...) {
+		held, looked := claudeStoreHoldsID(store, id)
+		if !looked {
 			return claudeRecordedUnlisted
-		default:
-			// Every other verdict found a transcript for the id.
+		}
+		if held {
 			return claudeRecordedCurrent
 		}
 	}
 	return claudeRecordedMissing
+}
+
+// claudeStoreHoldsID reports whether any project directory of the Claude store
+// holds a transcript for id, and whether af could look in every one. A store
+// with no projects directory holds nothing.
+func claudeStoreHoldsID(store, id string) (held, looked bool) {
+	projectsDir := filepath.Join(store, "projects")
+	entries, err := os.ReadDir(projectsDir)
+	if os.IsNotExist(err) {
+		return false, true
+	}
+	if err != nil {
+		return false, false
+	}
+	names := []string{id + ".jsonl"}
+	if lower := strings.ToLower(id); lower != id {
+		names = append(names, lower+".jsonl")
+	}
+	for _, entry := range entries {
+		if !entry.IsDir() {
+			continue
+		}
+		for _, name := range names {
+			info, err := os.Lstat(filepath.Join(projectsDir, entry.Name(), name))
+			switch {
+			case err == nil && info.Mode().IsRegular():
+				return true, true
+			case err != nil && !os.IsNotExist(err):
+				return false, false
+			}
+		}
+	}
+	return false, true
 }
 
 // otherClaudeStores are the Claude config dirs af can name besides primary:
