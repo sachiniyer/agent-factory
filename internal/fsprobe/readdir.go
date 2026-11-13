@@ -12,6 +12,12 @@ var (
 	lstatPath   = os.Lstat
 )
 
+var (
+	readDirFlights     = &flightRegistry{byDir: map[string]*probeFlight{}}
+	readDirInfoFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
+	lstatFlights       = &flightRegistry{byDir: map[string]*probeFlight{}}
+)
+
 // ReadDir lists dir inside the same per-dir bounded flight shape as Stat. A
 // caller that only consults a directory it does not own, an agent's
 // conversation store read on the daemon's poll and at load (#7212), cannot
@@ -22,7 +28,11 @@ var (
 // blocked is refused the same way rather than starting another. A listing that
 // answers returns what os.ReadDir does, ENOENT included.
 func ReadDir(dir string) ([]os.DirEntry, error) {
-	return readDirPath(dir)
+	res, err := runBounded(dir, readDirFlights, "directory listing",
+		"the filesystem did not answer the listing",
+		func() (any, error) { return readDirPath(dir) })
+	entries, _ := res.([]os.DirEntry)
+	return entries, err
 }
 
 // ReadDirInfo is ReadDir with each entry's Info resolved inside the same
@@ -31,20 +41,30 @@ func ReadDir(dir string) ([]os.DirEntry, error) {
 // a caller can read every entry's mode and modification time without touching
 // the filesystem again.
 func ReadDirInfo(dir string) ([]os.DirEntry, error) {
-	entries, err := readDirPath(dir)
-	resolved := make([]os.DirEntry, len(entries))
-	for idx, entry := range entries {
-		info, infoErr := entry.Info()
-		resolved[idx] = resolvedDirEntry{DirEntry: entry, info: info, err: infoErr}
-	}
-	return resolved, err
+	res, err := runBounded(dir, readDirInfoFlights, "directory listing",
+		"the filesystem did not answer the listing",
+		func() (any, error) {
+			entries, err := readDirPath(dir)
+			resolved := make([]os.DirEntry, len(entries))
+			for idx, entry := range entries {
+				info, infoErr := entry.Info()
+				resolved[idx] = resolvedDirEntry{DirEntry: entry, info: info, err: infoErr}
+			}
+			return resolved, err
+		})
+	entries, _ := res.([]os.DirEntry)
+	return entries, err
 }
 
 // Lstat is Stat without following a final symbolic link, in the same bounded
 // flight shape: a walk rooted at path learns whether the root itself is a
 // link, as filepath.WalkDir does, without an unbounded lookup.
 func Lstat(path string) (os.FileInfo, error) {
-	return lstatPath(path)
+	res, err := runBounded(path, lstatFlights, "lstat probe",
+		"the filesystem did not answer the lstat",
+		func() (any, error) { return lstatPath(path) })
+	info, _ := res.(os.FileInfo)
+	return info, err
 }
 
 // resolvedDirEntry is a directory entry whose Info was read inside a flight.
