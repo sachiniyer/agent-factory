@@ -1,6 +1,7 @@
 package session
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -336,20 +337,26 @@ func TestAThreadCodexMovesBetweenFormsWhileAfLooksIsNotMissing(t *testing.T) {
 		require.True(t, ok, "refused: %v (retire=%v)", decline, inst.exactResumeRefusal(decline).retire)
 		require.Contains(t, program, "resume "+formsThreadID)
 	})
-	t.Run("control: a thread removed from every form is missing", func(t *testing.T) {
-		codexHome, workDir := setup(t)
-		writeCompressedCodexRollout(t, codexHome, formsThreadID, "", cold, cold)
-		looks := 0
-		onRecordedCodexRolloutLocated(t, func(path string) {
-			looks++
-			require.NoError(t, os.Remove(path))
+	// The thread's existence is checked wherever a newer thread counts and
+	// wherever it does not: a row in the user's own checkout gets the same
+	// second look and the same refusal (Codex review of #7224).
+	for _, inPlace := range []bool{false, true} {
+		t.Run(fmt.Sprintf("control: a thread removed from every form is missing (in place: %v)", inPlace), func(t *testing.T) {
+			codexHome, workDir := setup(t)
+			writeCompressedCodexRollout(t, codexHome, formsThreadID, "", cold, cold)
+			looks := 0
+			onRecordedCodexRolloutLocated(t, func(path string) {
+				looks++
+				require.NoError(t, os.Remove(path))
+			})
+			inst := staleResumeInstance(t, workDir, codexCaptureRecord(formsThreadID))
+			inst.inPlace = inPlace
+			_, ok, decline := prepareExactResumeConversation(inst, inst.Program)
+			require.False(t, ok)
+			require.Equal(t, codexRolloutMissingReason, decline.reason)
+			require.Equal(t, 1, looks, "the second look finds no form of the thread at all")
 		})
-		inst := staleResumeInstance(t, workDir, codexCaptureRecord(formsThreadID))
-		_, ok, decline := prepareExactResumeConversation(inst, inst.Program)
-		require.False(t, ok)
-		require.Equal(t, codexRolloutMissingReason, decline.reason)
-		require.Equal(t, 1, looks, "the second look finds no form of the thread at all")
-	})
+	}
 }
 
 // #7134 review F-4: the carry's reason names only what it saw. A symlinked
