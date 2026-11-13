@@ -70,6 +70,16 @@ Your script is the only party with an **authentic** channel to that key — it i
 > and it arrived in OpenSSH 7.6 — beneath the `KnownHostsCommand` 8.5 floor — so it
 > costs no version.
 
+> **The port-forward never shares a connection.** Because this command reads your
+> `ssh_config`, a `ControlMaster` there carries af's setup and cleanup steps. The
+> port-forward does not ride it: af runs it with `-o ControlMaster=no -S none`, so
+> it is a connection of its own that af supervises and closes with the session. It
+> logs in fresh each time af connects it, under `BatchMode=yes`, so the machine has
+> to accept a login without a prompt (no MFA push or code, no key passphrase
+> outside an agent) even when your other ssh sessions to it reuse a master. If it
+> cannot, provisioning fails with "the ssh tunnel … never started listening",
+> followed by the last line the tunnel's ssh wrote.
+
 Two ways to get the key, both ordinary practice:
 
 ```bash
