@@ -3,6 +3,7 @@
 package systemdunit
 
 import (
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -52,6 +53,13 @@ func RunningHookLaunchers(prefixes ...string) ([]HookLauncher, error) {
 		return ok && hasHookPrefix(unit, present)
 	})
 	if err != nil {
+		// Two different unknowns, worded for the operator who reads them. One
+		// process we could not classify is not a /proc failure (#7239).
+		var unclassified *proctree.ArgvUnreadableError
+		if errors.As(err, &unclassified) {
+			return nil, fmt.Errorf("cannot rule out a hook launcher under %s: %w",
+				strings.Join(present, ", "), err)
+		}
 		return nil, fmt.Errorf(
 			"cannot read the process table to look for hook launchers under %s: %w",
 			strings.Join(present, ", "), err)

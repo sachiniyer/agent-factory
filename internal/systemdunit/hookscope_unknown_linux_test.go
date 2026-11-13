@@ -90,6 +90,25 @@ func TestStopHookScopesWaitsOutAnUnclassifiableProcess(t *testing.T) {
 	}
 }
 
+// R1's control. An unknown that outlives the whole budget still refuses. The
+// refusal names the process and the time actually spent waiting, so the
+// caller holds off on the same evidence a found-but-unregistered launcher gives.
+func TestStopHookScopesRefusesAnUnclassifiableProcessThatOutlivesTheBudget(t *testing.T) {
+	installSystemctlShim(t, "exit 0\n")
+	shortenLauncherSettle(t, 300*time.Millisecond, 20*time.Millisecond)
+	unknown := startArgvlessProcess(t)
+
+	err := StopHookScopes(HookScopeUnitPrefix("s7239"))
+	var unreadable *proctree.ArgvUnreadableError
+	if !errors.As(err, &unreadable) || unreadable.PID != unknown.Pid {
+		t.Fatalf("err = %v; want a refusal naming the unclassifiable pid %d", err, unknown.Pid)
+	}
+	var unsettled *HookLauncherUnclassifiedError
+	if !errors.As(err, &unsettled) || unsettled.Waited < 300*time.Millisecond {
+		t.Fatalf("err = %v; want a HookLauncherUnclassifiedError carrying the full budget it waited", err)
+	}
+}
+
 // R1 on a REAL exit, the review's shape. A process of ours holding about 1 GiB
 // is SIGKILLed, and the sweep starts while the kernel is still tearing its
 // address space down: present in /proc, state R, same start stamp, and an empty

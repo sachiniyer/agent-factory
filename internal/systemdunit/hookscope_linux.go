@@ -9,6 +9,8 @@ import (
 	"os/exec"
 	"strings"
 	"time"
+
+	"github.com/sachiniyer/agent-factory/internal/proctree"
 )
 
 // ErrManagerUnavailable reports that the systemd user manager could not be
@@ -127,6 +129,15 @@ func RunningHookScopes(prefixes ...string) ([]string, error) {
 // the sweep, this one's callers fail OPEN, because reporting a hook that is not
 // running is worse here than reporting none: the safety ordering belongs to
 // StopHookScopes, which still refuses on the same error.
+//
+// Failing open is exactly why a single process the launcher oracle cannot
+// classify (*proctree.ArgvUnreadableError, #7239) is NOT returned as an error
+// here. It degrades this read to the units-only answer instead. On an error the
+// callers report "none", which would erase a scope the manager still lists: an
+// adopted hook's watcher would call a running hook finished on one poll that
+// landed while some process of ours was exiting, and stop watching for good.
+// The units-only answer is what this read gave before the oracle could report
+// an unknown at all. A process table that cannot be read is still an error.
 func RunningHookPrefixes(prefixes ...string) ([]string, error) {
 	present := nonEmpty(prefixes)
 	if len(present) == 0 {
@@ -134,7 +145,11 @@ func RunningHookPrefixes(prefixes ...string) ([]string, error) {
 	}
 	launchers, err := RunningHookLaunchers(present...)
 	if err != nil {
-		return nil, err
+		var unclassified *proctree.ArgvUnreadableError
+		if !errors.As(err, &unclassified) {
+			return nil, err
+		}
+		launchers = nil
 	}
 	units, err := RunningHookScopes(present...)
 	if err != nil {
@@ -194,6 +209,15 @@ func nonEmpty(values []string) []string {
 // Neither oracle may fail quietly. A systemctl that cannot reach the manager and
 // a process table that cannot be read are both UNKNOWN, and both come back as an
 // error the caller must refuse on.
+//
+// One process of ours that the launcher oracle cannot CLASSIFY is waited on
+// like a launcher it found (#7239). It might be a launcher mid-execve, so it
+// cannot be read as absent. But it is far more often a process mid-exit: a
+// single-threaded process reads present and argv-less for its whole
+// address-space teardown, measured at 114 ms for 1 GiB, and archive runs this
+// sweep exactly while the session's own processes are exiting. So it holds the
+// sweep within the same settle budget, and is refused on (as a
+// *HookLauncherUnclassifiedError) only if it outlives the budget.
 func StopHookScopes(prefixes ...string) error {
 	present := nonEmpty(prefixes)
 	if len(present) == 0 {
@@ -214,7 +238,10 @@ func StopHookScopes(prefixes ...string) error {
 		// list below still sees; reading the units first would let exactly that
 		// hook fall through the gap between them, seen by neither.
 		launchers, err := RunningHookLaunchers(present...)
-		if err != nil {
+		// A process the oracle cannot classify is held like a found launcher,
+		// below. Any other failure is a /proc that cannot be read: refuse.
+		var unclassified *proctree.ArgvUnreadableError
+		if err != nil && !errors.As(err, &unclassified) {
 			return err
 		}
 		units, err := RunningHookScopes(present...)
@@ -232,7 +259,7 @@ func StopHookScopes(prefixes ...string) error {
 				return stopErr
 			}
 		}
-		if len(launchers) == 0 {
+		if len(launchers) == 0 && unclassified == nil {
 			if len(units) == 0 {
 				return nil
 			}
@@ -248,6 +275,9 @@ func StopHookScopes(prefixes ...string) error {
 		// the manager admits the scope exists.
 		waited := time.Since(start) - stopping
 		if waited >= hookLauncherSettleTimeout {
+			if unclassified != nil {
+				return &HookLauncherUnclassifiedError{Unclassified: unclassified, Waited: waited}
+			}
 			return &HookLauncherUnregisteredError{Launchers: launchers, Waited: waited}
 		}
 		time.Sleep(hookLauncherPollInterval)
@@ -266,6 +296,25 @@ type HookLauncherUnregisteredError struct {
 	Launchers []HookLauncher
 	Waited    time.Duration
 }
+
+// HookLauncherUnclassifiedError reports a process of ours that the launcher
+// oracle still could not classify when the sweep's settle budget ran out, and
+// how long the sweep spent WAITING for it (#7239). Such a process might be a
+// launcher mid-execve. Usually it is a process mid-exit or one starting up, and
+// that resolves well inside the budget, so the error means one that did not.
+type HookLauncherUnclassifiedError struct {
+	Unclassified *proctree.ArgvUnreadableError
+	Waited       time.Duration
+}
+
+func (e *HookLauncherUnclassifiedError) Error() string {
+	return fmt.Sprintf(
+		"pid %d stayed unclassifiable for %s of waiting, so it could still be a hook launcher about to start "+
+			"in this worktree; retry, and if it persists inspect it with `ps -o pid,stat,lstart,args -p %d`: %v",
+		e.Unclassified.PID, e.Waited.Round(time.Millisecond), e.Unclassified.PID, e.Unclassified)
+}
+
+func (e *HookLauncherUnclassifiedError) Unwrap() error { return e.Unclassified }
 
 func (e *HookLauncherUnregisteredError) Error() string {
 	return fmt.Sprintf(
