@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/pathutil"
 )
 
@@ -38,20 +39,25 @@ const (
 // cwd, so the tail says where the conversation lives however far back the
 // move was; the head names where it began (#7221 review R1, Codex review). ok
 // is false when no record af can read names an absolute directory, or the file
-// cannot be read.
+// cannot be read. The read runs inside fsprobe's per-path bound (#7223): it is
+// made on the restore loop, at load and on the carry check-ahead, where a
+// transcript on a wedged mount must read as unknown, not stall them.
 func claudeTranscriptDir(path string) (string, bool) {
-	file, err := os.Open(path)
-	if err != nil {
+	got, err := fsprobe.ReadFileWith(path, func(file *os.File) (any, error) {
+		if dir, ok := claudeTranscriptTailDir(file); ok {
+			return dir, nil
+		}
+		if _, err := file.Seek(0, io.SeekStart); err != nil {
+			return "", err
+		}
+		dir, _ := claudeTranscriptHeadCwd(file)
+		return dir, nil
+	})
+	dir, _ := got.(string)
+	if err != nil || dir == "" {
 		return "", false
 	}
-	defer file.Close()
-	if dir, ok := claudeTranscriptTailDir(file); ok {
-		return dir, true
-	}
-	if _, err := file.Seek(0, io.SeekStart); err != nil {
-		return "", false
-	}
-	return claudeTranscriptHeadCwd(file)
+	return dir, true
 }
 
 // claudeTranscriptHeadCwd is the cwd of the first record within the head

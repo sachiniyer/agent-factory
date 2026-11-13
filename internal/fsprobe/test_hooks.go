@@ -41,3 +41,12 @@ func SetReadDirForTest(f func(string) ([]os.DirEntry, error)) func() {
 	readDirPath = f
 	return func() { readDirPath = old }
 }
+
+// SetOpenForTest overrides the open ReadFileWith runs inside its bounded
+// flight, so a test can stand in for a file on a wedged mount (#7221 review
+// R4). Callers must restore the original via the returned function.
+func SetOpenForTest(f func(string) (*os.File, error)) func() {
+	old := openPath
+	openPath = f
+	return func() { openPath = old }
+}

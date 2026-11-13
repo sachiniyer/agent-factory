@@ -11,6 +11,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/sachiniyer/agent-factory/handoff"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/internal/testguard"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
@@ -241,4 +242,30 @@ func TestJudgeClaudeRecordedLooksForTheIDBesideAnUnlistableSpelling(t *testing.T
 	require.Equal(t, carryTranscriptsUnlistedReason,
 		claudeCarryStaleness(configDir, projects, link, filepath.Join(projects[0], carryTestID+".jsonl"), carryTestID),
 		"the swap still cannot confirm the carried copy is current")
+}
+
+// #7221 review R4: the head read runs inside fsprobe's bound, like the store
+// listing (#7223). A transcript on a mount that never answers reads as unknown
+// within the bound instead of stalling the restore loop or the check-ahead.
+func TestClaudeTranscriptDirIsBoundedOnAWedgedMount(t *testing.T) {
+	path := filepath.Join(t.TempDir(), carryTestID+".jsonl")
+	require.NoError(t, os.WriteFile(path, []byte(claudeRecordLine(t, "/work/a")), 0o600))
+	release := make(chan struct{})
+	restoreOpen := fsprobe.SetOpenForTest(func(string) (*os.File, error) {
+		<-release
+		return nil, os.ErrNotExist
+	})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		restoreOpen()
+		restoreTimeout()
+	})
+
+	start := time.Now()
+	_, ok := claudeTranscriptDir(path)
+	require.False(t, ok, "a read that does not answer names no directory")
+	require.Less(t, time.Since(start), 2*time.Second, "the read is bounded")
+	require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(
+		claudeTranscript{dir: filepath.Dir(path), name: filepath.Base(path)}, "/work/a"))
 }
