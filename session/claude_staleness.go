@@ -5,6 +5,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/log"
 )
 
@@ -154,7 +155,8 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	projects := claudeProjectCandidates(launchDir)
 	verdict := judgeClaudeRecorded(configDir, projects, id, "")
 	if verdict == claudeRecordedMissing {
-		verdict = claudeRecordedAnywhere(configDir, id)
+		account, _ := i.AccountSelection()
+		verdict = claudeRecordedAnywhere(configDir, strings.TrimSpace(account) != "", id)
 	}
 	launch, ok := recordedClaudeLaunchFor(verdict, func() bool { return i.newerConversationIsEvidence(launchDir) })
 	if !ok {
@@ -187,21 +189,31 @@ func recordedClaudeLaunchFor(verdict claudeRecordedVerdict, evidence func() bool
 	return recordedClaudeResume, false
 }
 
-// claudeRecordedAnywhere is whether any Claude store af can name holds an id
-// the worktree's own project directories do not (#7217 review R4, Codex P1).
-// Claude's --resume <id> looks in the current project, its git worktrees, and
-// then every other project in its store, while its --session-id in-use check
-// reads only <store>/projects/<name(cwd)>/<id>.jsonl. So a transcript under
-// another project (a worktree restored to a new path, as RestoreWorktreePath's
-// collision suffix or an archive move leaves it) is filed: starting on the id
-// would fork a fresh conversation and drop its history, where --resume finds
-// it. The stores are the launch's own, the daemon's CLAUDE_CONFIG_DIR and
-// $HOME/.claude, since a pane pointed at either files there and Claude's
-// checks read only the store the pane uses. A copy in any project of any of
-// them resumes; a store af cannot fully look in is a look that did not
-// happen; only an id no project anywhere holds is Missing, and started on.
-func claudeRecordedAnywhere(primary, id string) claudeRecordedVerdict {
-	for _, store := range append([]string{primary}, otherClaudeStores(primary)...) {
+// claudeRecordedAnywhere is whether a Claude store the launch can read holds an
+// id the worktree's own project directories do not (#7217 review R4, Codex P1
+// and P2). Claude's --resume <id> looks in the current project, its git
+// worktrees, and then every other project in its store, while its --session-id
+// in-use check reads only <store>/projects/<name(cwd)>/<id>.jsonl. So a
+// transcript under another project (a worktree restored to a new path, as
+// RestoreWorktreePath's collision suffix or an archive move leaves it) is
+// filed: starting on the id would fork a fresh conversation and drop its
+// history, where --resume finds it.
+//
+// Which stores count depends on who chose the pane's store. An account-scoped
+// row's pane runs with CLAUDE_CONFIG_DIR set to the account's directory by af
+// itself, so only that store, every project of it, says anything: a copy in an
+// unrelated root is one the pane cannot resume. A row with no account runs
+// with whatever the environment gives it, so every store af can name counts:
+// its own, the daemon's CLAUDE_CONFIG_DIR and $HOME/.claude. A copy in any
+// project of any counted store resumes; a store af cannot fully look in, a
+// bounded listing that did not answer included, is a look that did not
+// happen; only an id no counted project holds is Missing, and started on.
+func claudeRecordedAnywhere(primary string, scoped bool, id string) claudeRecordedVerdict {
+	stores := []string{primary}
+	if !scoped {
+		stores = append(stores, otherClaudeStores(primary)...)
+	}
+	for _, store := range stores {
 		held, looked := claudeStoreHoldsID(store, id)
 		if !looked {
 			return claudeRecordedUnlisted
@@ -214,11 +226,13 @@ func claudeRecordedAnywhere(primary, id string) claudeRecordedVerdict {
 }
 
 // claudeStoreHoldsID reports whether any project directory of the Claude store
-// holds a transcript for id, and whether af could look in every one. A store
-// with no projects directory holds nothing.
+// holds a transcript for id, and whether af could look in every one. Every
+// read is bounded (fsprobe, #7212): a store on a wedged mount is a look that
+// did not happen, never a store that holds nothing. A store with no projects
+// directory holds nothing.
 func claudeStoreHoldsID(store, id string) (held, looked bool) {
 	projectsDir := filepath.Join(store, "projects")
-	entries, err := os.ReadDir(projectsDir)
+	entries, err := fsprobe.ReadDir(projectsDir)
 	if os.IsNotExist(err) {
 		return false, true
 	}
@@ -234,7 +248,7 @@ func claudeStoreHoldsID(store, id string) (held, looked bool) {
 			continue
 		}
 		for _, name := range names {
-			info, err := os.Lstat(filepath.Join(projectsDir, entry.Name(), name))
+			info, err := fsprobe.Lstat(filepath.Join(projectsDir, entry.Name(), name))
 			switch {
 			case err == nil && info.Mode().IsRegular():
 				return true, true

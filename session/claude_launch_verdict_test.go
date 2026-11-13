@@ -4,8 +4,12 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/require"
+
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
+	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
 // #7217 review R2: every judgeClaudeRecorded verdict maps to a launch
@@ -107,4 +111,65 @@ func TestARecordedIDInAStoreAfCannotFullyListIsResumed(t *testing.T) {
 	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
 	require.True(t, ok, "%+v", decline)
 	require.Equal(t, "claude --resume "+carryTestID, rewritten)
+}
+
+// #7217 Codex P2: an account-scoped row's pane runs with af's own
+// CLAUDE_CONFIG_DIR, the account's directory, so only that store says anything
+// about the id. A copy in an unrelated root ($HOME/.claude here) is one the
+// pane cannot resume: the id is started on. A copy under any project of the
+// account's own store is resumed.
+func TestAnAccountRowJudgesItsIDByTheAccountStoreAlone(t *testing.T) {
+	t.Setenv("AGENT_FACTORY_HOME", t.TempDir())
+	home := t.TempDir()
+	t.Setenv("HOME", home)
+	account := registerAccount(t, tmux.ProgramClaude, "work")
+	workDir, recorded, _ := claudeRestoreWorktree(t)
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	inst.Account = "work"
+
+	writeCarryFile(t, filepath.Join(home, ".claude"), filepath.Join(recorded, carryTestID+".jsonl"), "{}\n")
+	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.False(t, ok)
+	require.True(t, decline.startsOnRecorded, "a copy outside the account's store is not one its pane can resume")
+	require.Equal(t, "claude --session-id "+carryTestID, rewritten)
+
+	writeCarryFile(t, account, claudeTranscriptRel(filepath.Join(t.TempDir(), "old-path"), carryTestID), "{}\n")
+	rewritten, ok, decline = prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "%+v", decline)
+	require.Equal(t, "claude --resume "+carryTestID, rewritten, "a copy under any project of the account's store resumes")
+}
+
+// #7217 (on #7212's bound): the look across a store's projects reads through
+// fsprobe, so a store on a wedged mount answers within the bound as a look that
+// did not happen, and the launch resumes the recorded id.
+func TestAWedgedStoreProjectsListingIsBlind(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, _, _ := claudeRestoreWorktree(t)
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+	projects := filepath.Join(configDir, "projects")
+	require.NoError(t, os.MkdirAll(projects, 0o755))
+
+	release := make(chan struct{})
+	restoreRead := fsprobe.SetReadDirForTest(func(dir string) ([]os.DirEntry, error) {
+		if dir == projects {
+			<-release
+		}
+		return os.ReadDir(dir)
+	})
+	restoreTimeout := fsprobe.SetProbeTimeoutForTest(50 * time.Millisecond)
+	t.Cleanup(func() {
+		close(release)
+		time.Sleep(50 * time.Millisecond)
+		restoreRead()
+		restoreTimeout()
+	})
+
+	got := withinBound(t, func() exactResumeAnswer {
+		program, ok, decline := prepareExactResumeConversation(inst, "claude")
+		return exactResumeAnswer{program, ok, decline}
+	})
+	require.True(t, got.ok, "%+v", got.decline)
+	require.Equal(t, "claude --resume "+carryTestID, got.program, "a look that did not answer resumes, never starts on the id")
 }
