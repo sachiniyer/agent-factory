@@ -1,6 +1,7 @@
 package session
 
 import (
+	"os"
 	"path/filepath"
 	"testing"
 
@@ -63,4 +64,47 @@ func TestARecordedIDNoNameableStoreHoldsIsStartedOn(t *testing.T) {
 	require.False(t, ok)
 	require.True(t, decline.startsOnRecorded)
 	require.Equal(t, "claude --session-id "+carryTestID, rewritten)
+}
+
+// #7217 Codex P1: Claude's --resume <id> looks in the current project, its git
+// worktrees, then every other project in its store, while its --session-id
+// in-use check reads only <store>/projects/<name(cwd)>/<id>.jsonl. A worktree
+// restored to a new path (RestoreWorktreePath's collision suffix, an archive
+// move) leaves its transcript under the old path's project: the id is filed,
+// and starting on it would fork a fresh conversation and drop its history,
+// where --resume finds it.
+func TestARecordedIDFiledUnderTheWorktreesOldPathIsResumedNotStartedOn(t *testing.T) {
+	t.Setenv("HOME", t.TempDir())
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	oldPath := filepath.Join(t.TempDir(), "repo") // where the worktree was when Claude filed it
+	workDir, _, _ := claudeRestoreWorktree(t)     // where it was restored to
+	writeCarryFile(t, configDir, claudeTranscriptRel(oldPath, carryTestID), "{}\n")
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+
+	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "%+v", decline)
+	require.Equal(t, "claude --resume "+carryTestID, rewritten,
+		"an id any project in the store holds is resumed, never started on")
+}
+
+// A store whose projects af cannot all look in says nothing about the id: the
+// launch resumes it, as a restore always has.
+func TestARecordedIDInAStoreAfCannotFullyListIsResumed(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("root reads a mode-000 directory")
+	}
+	t.Setenv("HOME", t.TempDir())
+	configDir := t.TempDir()
+	t.Setenv("CLAUDE_CONFIG_DIR", configDir)
+	workDir, _, _ := claudeRestoreWorktree(t)
+	other := filepath.Join(configDir, "projects", "-elsewhere")
+	require.NoError(t, os.MkdirAll(other, 0o755))
+	require.NoError(t, os.Chmod(other, 0))
+	t.Cleanup(func() { _ = os.Chmod(other, 0o755) })
+	inst := claudeRestoreInstance(t, workDir, carryTestID)
+
+	rewritten, ok, decline := prepareExactResumeConversation(inst, "claude")
+	require.True(t, ok, "%+v", decline)
+	require.Equal(t, "claude --resume "+carryTestID, rewritten)
 }
