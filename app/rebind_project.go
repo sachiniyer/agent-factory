@@ -138,7 +138,7 @@ func (m *home) handleProjectRebound(msg projectReboundMsg) (tea.Model, tea.Cmd) 
 		// client may have rebound the project again since this request committed.
 		// A record that is gone (or unreadable) gets a root-free message.
 		text := fmt.Sprintf("Rebound project '%s'", msg.name)
-		if root, ok := registeredProjectRoot(msg.projectID); ok {
+		if root, _, _, ok := registeredProjectRoot(msg.projectID); ok {
 			text = fmt.Sprintf("Rebound project '%s' to %s", msg.name, root)
 		}
 		notice = m.showTransientMessage(text)
@@ -279,7 +279,7 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	if !m.rebindMovedActiveProject(msg) {
 		return m, nil
 	}
-	root, ok := registeredProjectRoot(msg.projectID)
+	root, repoID, checkoutID, ok := registeredProjectRoot(msg.projectID)
 	// "Did the record move" compares registry to registry: the recorded root
 	// when the rebind was sent against the one now. The row's display root can
 	// come from another source, and an unmoved record would then look moved.
@@ -290,10 +290,25 @@ func (m *home) followActiveRebind(msg projectReboundMsg) (tea.Model, tea.Cmd) {
 	if !ok || samePath(root, recorded) || samePath(root, m.repoRoot) {
 		return m, nil
 	}
-	// A confirmed rebind re-resolved the identity at the new root, so the probe
-	// is authoritative there — pass no recorded identity so the local branch's
-	// mismatch guard does not refuse the move the rebind just made.
-	return m.switchToProjectRoot(root, "", "")
+	// The follow-up probes the root the registry binds NOW, passing the SAME
+	// record's identity the other selection entry points (sidebar Enter, mouse
+	// click, picker Enter) carry. verifyBindingStillCurrent vouches for the
+	// identity only at the write instant — the registry comment says the record
+	// is last-known and drift is repaired by a later rebind, and another client
+	// may even have rebound this record since this request committed — so
+	// between the commit and this probe the checkout at the followed root may
+	// have drifted: de-gitted into an enclosing repo, or replaced by a different
+	// clone (#7109). The record's RepoID/CheckoutID (from the same ListProjects
+	// read above, so root and identity stay consistent even if another client
+	// moved the record between the reply and the follow) arm the local branch's
+	// repo-id and checkout-marker guards, so a root that no longer holds the
+	// registered checkout is refused rather than silently re-scoping sessions,
+	// tasks and the program onto a foreign repo — the exact silent adoption
+	// #7109/#7116 closed on the three row-selection paths but left open on this
+	// one. A rebind writes a real identity (never empty, never invented) and a
+	// checkout marker, so the passed identity matches the probe only at a
+	// healthy root; it fails closed on exactly the drift it should refuse.
+	return m.switchToProjectRoot(root, repoID, checkoutID)
 }
 
 // samePath compares two roots under the #2110 spelling rule; an empty side
@@ -303,19 +318,25 @@ func samePath(a, b string) bool {
 		pathutil.ResolveForCompare(filepath.Clean(a)) == pathutil.ResolveForCompare(filepath.Clean(b))
 }
 
-// registeredProjectRoot returns the root the registry binds project id to now,
-// or false when no readable record has that id.
-func registeredProjectRoot(id string) (string, bool) {
+// registeredProjectRoot returns the root and recorded identity the registry
+// binds project id to now, or ok=false when no readable record has that id. The
+// returned RepoID and CheckoutID are the record's own fields — the same ones
+// the daemon's delete-project cross-check and the local selection guard compare
+// a probe against — so a caller switching to this root arms those guards with
+// the identity the registry actually holds, never one re-derived from the path
+// (#7109/#7116): the registered checkout at that root may have drifted between
+// the root being written and a probe reading it.
+func registeredProjectRoot(id string) (root, repoID, checkoutID string, ok bool) {
 	projects, err := config.ListProjects()
 	if err != nil {
-		return "", false
+		return "", "", "", false
 	}
 	for _, p := range projects {
 		if p.ID == id {
-			return p.Root, true
+			return p.Root, p.RepoID, p.CheckoutID, true
 		}
 	}
-	return "", false
+	return "", "", "", false
 }
 
 // rebindMovedActiveProject reports whether a rebind moved the project the TUI
