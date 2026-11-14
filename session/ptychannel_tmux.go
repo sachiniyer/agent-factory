@@ -42,17 +42,45 @@ type tmuxClientlessChannel struct {
 // it; Read sees the abort latch and discards the whole read, so the byte can
 // never be confused with successful raw PTY output. Successful teardown never
 // injects a control byte.
+//
+// Drain and abort are SEPARATE latches (#7302). Close is always an abort, even
+// after a draining stop: it latches abort and writes its wake byte, through the
+// keeper while it is open and otherwise through a fresh writer on the FIFO,
+// because the drain has already closed the keeper. When one latch served both,
+// the drain spent it, the abort that followed was a no-op, and a read whose EOF
+// never came stayed parked for good: a writer that outlived pipe-pane, or the
+// macOS read that stayed in read(2) after the last writer closed (#4319, #7302).
+// The broker gives the drain a grace to reach EOF before it aborts
+// (ptyBroker.joinCapture), so a healthy teardown still loses no tail.
+//
+// The wake writes only into the FIFO this reader opened, and only while the
+// reader still owns it (see wake). It never blocks: a byte the FIFO cannot take
+// at once is dropped.
 type captureReader struct {
-	f          *os.File
-	keepalive  *os.File
-	dir        string
-	abort      atomic.Bool
-	eof        atomic.Bool
-	stopOnce   sync.Once
-	cleanOnce  sync.Once
-	keeperOnce sync.Once
-	err        error
-	keeperErr  error
+	f         *os.File
+	keepalive *os.File
+	// fifo is the FIFO's path: the route an abort's wake takes once a drain has
+	// closed the keeper. Empty for a reader with no path, which then has no wake
+	// left after a drain. fifoDev and fifoIno identify the FIFO the read end
+	// opened; the wake writes only to a descriptor that is that same FIFO.
+	fifo      string
+	fifoDev   uint64
+	fifoIno   uint64
+	dir       string
+	abort     atomic.Bool
+	eof       atomic.Bool
+	drainOnce sync.Once
+	abortOnce sync.Once
+	cleanOnce sync.Once
+	drainErr  error
+	abortErr  error
+	// keeperMu orders the keeper's single close, and finish's release of the
+	// FIFO, against a wake: a wake never writes to a closed (and possibly reused)
+	// descriptor, and never reaches for the path once finished is latched.
+	keeperMu     sync.Mutex
+	keeperClosed bool
+	keeperErr    error
+	finished     bool
 }
 
 func (r *captureReader) Read(p []byte) (int, error) {
@@ -91,30 +119,108 @@ func (r *captureReader) Close() error {
 // writer, drain=true lets Read consume through the kernel EOF. Otherwise the
 // keeper's failure-only byte prevents an unknown external writer from wedging
 // teardown; Read discards it because abort is already latched.
+//
+// Each mode has its own latch, so a drain never consumes the abort: an abort
+// that follows a drain still runs its wake (#7302).
 func (r *captureReader) stop(drain bool) error {
-	r.stopOnce.Do(func() {
-		if !drain {
-			r.abort.Store(true)
-			if r.keepalive != nil {
-				_, _ = r.keepalive.Write([]byte{0})
-			}
-		}
-		r.err = r.closeKeeper()
+	if drain {
+		r.drainOnce.Do(func() { r.drainErr = r.closeKeeper() })
+		return r.drainErr
+	}
+	r.abortOnce.Do(func() {
+		r.abort.Store(true)
+		r.wake()
+		r.abortErr = r.closeKeeper()
 	})
-	return r.err
+	return r.abortErr
+}
+
+// wake puts one byte where a parked Read will see it; abort is latched first, so
+// Read discards it. It goes through the keeper while the keeper is open, and
+// after a drain has closed the keeper, through a fresh writer on the FIFO.
+//
+// The wake writes only into the FIFO this reader opened, and only while the
+// reader still owns it:
+//
+//   - Never once finish has begun. finish latches finished under keeperMu before
+//     it closes the read end or removes the directory, and this checks it under
+//     the same lock. Until then the directory is this process's own, mode 0700.
+//     After it, the path names nothing this reader owns, and an ordinary
+//     teardown closes every reader after its loop has already finished.
+//   - Never through a link, and never into anything but that FIFO. The path is
+//     opened with O_NOFOLLOW (and O_NOCTTY, so even a device at the path cannot
+//     become a controlling terminal), and the byte is written only if fstat names
+//     a FIFO with the read end's device and inode.
+//
+// It never blocks. Each route makes one nonblocking write attempt and drops a
+// byte the FIFO cannot take at once. That is safe: a full FIFO already holds
+// data for the read to return, and abort is already latched.
+func (r *captureReader) wake() {
+	r.keeperMu.Lock()
+	defer r.keeperMu.Unlock()
+	if r.finished {
+		return
+	}
+	if !r.keeperClosed && r.keepalive != nil {
+		writeWakeByteOnce(r.keepalive)
+		return
+	}
+	if r.fifo == "" {
+		return
+	}
+	fd, err := syscall.Open(r.fifo, syscall.O_WRONLY|syscall.O_NONBLOCK|syscall.O_NOFOLLOW|syscall.O_NOCTTY|syscall.O_CLOEXEC, 0)
+	if err != nil {
+		return // ENXIO: the read end is gone; ELOOP: a link; either way, nothing of ours to wake
+	}
+	defer func() { _ = syscall.Close(fd) }()
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		return
+	}
+	if st.Mode&syscall.S_IFMT != syscall.S_IFIFO || uint64(st.Dev) != r.fifoDev || uint64(st.Ino) != r.fifoIno {
+		return
+	}
+	_, _ = syscall.Write(fd, wakeByte)
+}
+
+// wakeByte is the abort's single wake byte. Read discards it, because abort is
+// latched before it is written.
+var wakeByte = []byte{0}
+
+// writeWakeByteOnce makes ONE write attempt through f and never parks on the
+// netpoller, which a plain f.Write would do on a full FIFO. The keeper is opened
+// O_NONBLOCK, so a FIFO that cannot take the byte refuses it with EAGAIN, and the
+// byte is dropped.
+func writeWakeByteOnce(f *os.File) {
+	rc, err := f.SyscallConn()
+	if err != nil {
+		return
+	}
+	_ = rc.Write(func(fd uintptr) bool {
+		_, _ = syscall.Write(int(fd), wakeByte)
+		return true
+	})
 }
 
 func (r *captureReader) closeKeeper() error {
-	r.keeperOnce.Do(func() {
+	r.keeperMu.Lock()
+	defer r.keeperMu.Unlock()
+	if !r.keeperClosed {
+		r.keeperClosed = true
 		if r.keepalive != nil {
 			r.keeperErr = r.keepalive.Close()
 		}
-	})
+	}
 	return r.keeperErr
 }
 
 func (r *captureReader) finish() {
 	r.cleanOnce.Do(func() {
+		// Latch BEFORE releasing anything: from here on this reader no longer
+		// owns its FIFO's path, so a wake must not reach for it (see wake).
+		r.keeperMu.Lock()
+		r.finished = true
+		r.keeperMu.Unlock()
 		if r.f != nil {
 			_ = r.f.Close()
 		}
@@ -173,6 +279,15 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, fmt.Errorf("make pty stream fifo blocking: %w", err)
 	}
+	// The read end's identity, so a later wake can prove a descriptor it opens
+	// by path is this same FIFO.
+	var st syscall.Stat_t
+	if err := syscall.Fstat(fd, &st); err != nil {
+		_ = keepalive.Close()
+		_ = syscall.Close(fd)
+		_ = os.RemoveAll(dir)
+		return nil, fmt.Errorf("stat pty stream fifo: %w", err)
+	}
 	f := os.NewFile(uintptr(fd), fifo)
 	if err := c.ts.EnablePipePane(pipePaneCommand(fifo)); err != nil {
 		_ = keepalive.Close()
@@ -180,7 +295,7 @@ func (c *tmuxClientlessChannel) StartCapture() (io.ReadCloser, error) {
 		_ = os.RemoveAll(dir)
 		return nil, err
 	}
-	rc := &captureReader{f: f, keepalive: keepalive, dir: dir}
+	rc := &captureReader{f: f, keepalive: keepalive, fifo: fifo, fifoDev: uint64(st.Dev), fifoIno: uint64(st.Ino), dir: dir}
 	c.rc = rc
 	return rc, nil
 }

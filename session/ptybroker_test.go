@@ -1222,6 +1222,9 @@ func TestPTYBrokerStopsCaptureWhenLastSubscriberLeaves(t *testing.T) {
 func TestPTYSubscriptionCloseDoesNotJoinCaptureReader(t *testing.T) {
 	ch := newParkedCaptureChannel()
 	br := newPTYBroker(ch)
+	// The teardown closes the reader once the drain grace lapses (#7302); keep
+	// it short so the close lands well inside the wait below.
+	br.captureDrainGrace = 10 * time.Millisecond
 	sub, err := br.subscribe(0)
 	if err != nil {
 		t.Fatalf("subscribe: %v", err)

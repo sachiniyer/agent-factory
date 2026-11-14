@@ -105,6 +105,10 @@ type ptyBroker struct {
 
 	// paneDeathPoll is the pane-death watcher's tick; set at construction.
 	paneDeathPoll time.Duration
+	// captureDrainGrace and captureJoinTimeout bound a capture teardown's wait on
+	// its read loop (joinCapture, #7302); set at construction.
+	captureDrainGrace  time.Duration
+	captureJoinTimeout time.Duration
 	// watchers tracks live pane-death watchers so close/closeTab can wait for
 	// them: none may outlive its broker. The wait happens AFTER shutdown drops
 	// captureMu, because a watcher mid-recovery needs that lock.
@@ -198,7 +202,12 @@ type ptyBroker struct {
 	// failure count — a dial that succeeds and then dies immediately consumes a
 	// rung, because that is the storm shape (#2450).
 	redialAttempts int
-	closed         bool
+	// abandonedReaders counts the read loops this broker's teardowns gave up
+	// joining, and abandonedReturned how many of those later returned anyway
+	// (#7302). Diagnostics only; nothing gates on them.
+	abandonedReaders  int
+	abandonedReturned int
+	closed            bool
 	// closedCh is closed exactly once, by shutdown, so a recovery goroutine parked
 	// on its backoff wakes immediately instead of sleeping up to redialMaxBackoff
 	// past the teardown. Reading `closed` under mu answers the same question, but
@@ -219,7 +228,9 @@ func newPTYBroker(ch clientlessChannel) *ptyBroker {
 		subs:     make(map[uint64]*ptySub),
 		closedCh: make(chan struct{}),
 
-		paneDeathPoll: defaultPaneDeathPollInterval,
+		paneDeathPoll:      defaultPaneDeathPollInterval,
+		captureDrainGrace:  defaultCaptureDrainGrace,
+		captureJoinTimeout: defaultCaptureJoinTimeout,
 	}
 }
 
@@ -495,7 +506,7 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 	if err != nil {
 		return fmt.Errorf("start clientless pty capture: %w", err)
 	}
-	done := make(chan struct{})
+	run := &captureRun{done: make(chan struct{})}
 	quit := make(chan struct{})
 	b.mu.Lock()
 	b.capturing = true
@@ -524,11 +535,12 @@ func (b *ptyBroker) ensureCaptureStartedLocked() error {
 				log.WarningLog.Printf("pty broker: stop clientless capture: %v", err)
 			}
 		}
-		_ = r.Close()
-		<-done
+		// Close the reader and join its loop, bounded: a stop never holds
+		// captureMu forever, whatever the reader does (#7302).
+		b.joinCapture(run, r)
 	}
 	b.mu.Unlock()
-	go b.readLoop(r, done)
+	go b.readLoop(r, run)
 	b.watchers.Add(1) // under captureMu, which shutdown holds to latch closed
 	go b.watchPaneDeath(quit)
 	return nil
@@ -579,15 +591,30 @@ func (b *ptyBroker) maybeStopCapture() {
 // takes only mu — never captureMu, which a teardown holds while parked on
 // `<-done` (see ensureCaptureStartedLocked, where the reconcile happens).
 //
+// A loop its teardown ABANDONED (joinCapture, #7302) is fenced: the teardown
+// marks it under mu, and from then on it feeds nothing into the ring and its exit
+// touches no broker state. By the time it returns, a newer capture may own
+// `capturing`, and latching captureEnded or handing off to redialLoop would act
+// on that one.
+//
 // The latch alone only makes the dead capture RECOVERABLE — by the next
 // subscribe. With one client attached over a healthy daemon-browser WebSocket
 // there is no next subscribe, so this exit also HANDS OFF to redialLoop, which
 // is what actually brings the pane back (#2450). The hand-off is a goroutine for
 // the same reason the latch is not a teardown: stopCapture ends in `<-done`, so
 // this loop cannot run its own release inline. See ptybroker_recovery.go.
-func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
+func (b *ptyBroker) readLoop(r io.Reader, run *captureRun) {
 	defer func() {
 		b.mu.Lock()
+		if run.abandoned {
+			b.abandonedReturned++
+			late := time.Since(run.abandonedAt)
+			b.mu.Unlock()
+			close(run.done)
+			log.InfoLog.Printf("pty broker: an abandoned capture read loop returned %v after it was abandoned", late)
+			return
+		}
+		run.exited = true
 		b.captureEnded = true
 		// Distinguish "the upstream died under us" from "a teardown stopped us".
 		// Every teardown — maybeStopCapture, recoverCapture, shutdown, and the
@@ -616,7 +643,7 @@ func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 			}
 		}
 		b.mu.Unlock()
-		close(done)
+		close(run.done)
 		// Started AFTER close(done): a teardown parked on `<-done` holds captureMu,
 		// which the recovery needs, so handing off first would just make the new
 		// goroutine wait — and then find `capturing` cleared and do nothing anyway.
@@ -628,7 +655,7 @@ func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 	for {
 		n, err := r.Read(buf)
 		if n > 0 {
-			b.feed(buf[:n])
+			b.feedFrom(run, buf[:n])
 		}
 		if err != nil {
 			return
@@ -638,8 +665,17 @@ func (b *ptyBroker) readLoop(r io.Reader, done chan struct{}) {
 
 // feed appends output bytes to the ring, evicting the oldest bytes past the cap,
 // and wakes every subscriber.
-func (b *ptyBroker) feed(p []byte) {
+func (b *ptyBroker) feed(p []byte) { b.feedFrom(nil, p) }
+
+// feedFrom is feed for a capture's read loop: bytes from a run its teardown
+// abandoned are dropped (#7302). The check is under the same mu hold as the
+// append, so a loop abandoned mid-read can never land a byte afterwards.
+func (b *ptyBroker) feedFrom(run *captureRun, p []byte) {
 	b.mu.Lock()
+	if run != nil && run.abandoned {
+		b.mu.Unlock()
+		return
+	}
 	b.buf = append(b.buf, p...)
 	if len(b.buf) > b.maxBytes {
 		drop := len(b.buf) - b.maxBytes
