@@ -28,6 +28,8 @@ func movableTick(t *testing.T, requireCarry bool, edit func(*SessionInput), chec
 			asked++
 			return check()
 		}
+		// The target side carries unless a test says otherwise.
+		in.CarryCheckTo = func(string) string { return "" }
 	}
 	if edit != nil {
 		edit(&in)
@@ -149,5 +151,101 @@ func TestTickAsksTheLiveCarryOnlyWhenItCanChangeTheVerdict(t *testing.T) {
 	rows, asked = movableTick(t, true, func(in *SessionInput) { in.CarryPossible = false }, never)
 	if asked != 0 || !rowsHold(rows, handoff.EventIgnored, carryRefusedReason) {
 		t.Fatalf("precondition false: asked %d, rows %+v", asked, rows)
+	}
+}
+
+// targetCheck records the targets require_carry's answer against a target
+// was asked for, and answers code.
+func targetCheck(code string, asked *[]string) func(*SessionInput) {
+	return func(in *SessionInput) {
+		in.CarryCheckTo = func(target string) string {
+			*asked = append(*asked, target)
+			return code
+		}
+	}
+}
+
+// moveTarget is the To of the move row, or "".
+func moveTarget(rows []handoff.EventRow) string {
+	for _, row := range rows {
+		if row.Kind == handoff.EventMove {
+			return row.To
+		}
+	}
+	return ""
+}
+
+// The check-ahead names no target, so a refusal only the target's home can
+// show — a copy of the conversation filed elsewhere there, a thread/revert
+// rollout, a copy the carry would refuse — reached the move as a fresh start.
+// require_carry now asks the live plan against the account Decide chose, and a
+// refusal there defers the move with the same carry-refused edge (#7273).
+func TestTickRequireCarryRefusesAMoveTheTargetCarryWouldNotCarry(t *testing.T) {
+	var confirmed []string
+	rows, _ := movableTick(t, true, targetCheck("", &confirmed), checkAnswers(""))
+	to := moveTarget(rows)
+	if to == "" {
+		t.Fatalf("a carry both sides confirm must move: %+v", rows)
+	}
+	if len(confirmed) != 1 || confirmed[0] != to {
+		t.Fatalf("asked the target check for %v, want exactly the move's target %q", confirmed, to)
+	}
+
+	var refused []string
+	rows, asked := movableTick(t, true, targetCheck(handoff.CarryDuplicated, &refused), checkAnswers(""))
+	if rowsHold(rows, handoff.EventMove, "") {
+		t.Fatalf("require_carry moved a session whose carry into the target would start fresh: %+v", rows)
+	}
+	if got := carryRefusedCode(rows); got != handoff.CarryDuplicated {
+		t.Fatalf("carry-refused says carry=%q, want the target check's %q (rows %+v)", got, handoff.CarryDuplicated, rows)
+	}
+	if asked != 1 {
+		t.Fatalf("source check asked %d times, want 1", asked)
+	}
+	// Refuse outright: the next candidate is not tried, so a refusal costs
+	// one target's store read, not one per candidate.
+	if len(refused) != 1 || refused[0] != to {
+		t.Fatalf("asked the target check for %v, want only the chosen target %q", refused, to)
+	}
+}
+
+// A feeder with no answer against a target cannot confirm the carry; the
+// prose of a refusal never reaches the row.
+func TestTickRequireCarryWithoutATargetAnswerIsUnconfirmed(t *testing.T) {
+	rows, _ := movableTick(t, true, func(in *SessionInput) { in.CarryCheckTo = nil }, checkAnswers(""))
+	if rowsHold(rows, handoff.EventMove, "") {
+		t.Fatalf("an unconfirmable target carry moved under require_carry: %+v", rows)
+	}
+	if got := carryRefusedCode(rows); got != handoff.CarryUnconfirmed {
+		t.Fatalf("no target check: carry=%q, want %q", got, handoff.CarryUnconfirmed)
+	}
+	var asked []string
+	rows, _ = movableTick(t, true, targetCheck("the new account already holds /a/path", &asked), checkAnswers(""))
+	if got := carryRefusedCode(rows); got != handoff.CarryUnconfirmed {
+		t.Fatalf("carry=%q reached the row; want %q", got, handoff.CarryUnconfirmed)
+	}
+}
+
+// The target answer reads the target's store, so it is asked only when it can
+// change the verdict: under require_carry, for a move, once the source side
+// has confirmed.
+func TestTickAsksTheTargetCarryOnlyWhenItCanChangeTheVerdict(t *testing.T) {
+	var asked []string
+	rows, _ := movableTick(t, false, targetCheck(handoff.CarryDuplicated, &asked), checkAnswers(""))
+	if len(asked) != 0 || !rowsHold(rows, handoff.EventMove, "") {
+		t.Fatalf("without require_carry: asked %v, rows %+v", asked, rows)
+	}
+	rows, _ = movableTick(t, true, targetCheck("", &asked), checkAnswers(handoff.CarryBacktracked))
+	if len(asked) != 0 || carryRefusedCode(rows) != handoff.CarryBacktracked {
+		t.Fatalf("a source refusal stands without asking the target: asked %v, rows %+v", asked, rows)
+	}
+	_, _ = movableTick(t, true, func(in *SessionInput) {
+		targetCheck("", &asked)(in)
+		in.Parked = false
+		in.Content = "› Ask Codex to do anything\n"
+		in.HomeDir = "/home/codex/cool"
+	}, checkAnswers(""))
+	if len(asked) != 0 {
+		t.Fatalf("asked the target check for %v with no trigger", asked)
 	}
 }

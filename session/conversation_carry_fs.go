@@ -461,60 +461,99 @@ func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carr
 		return carryFileOutcome{}, carryFailureAt("the new account holds something other than a plain file where the conversation belongs", err)
 	}
 
-	if src == nil {
-		if dst != nil && role == carryCommittedTranscript {
-			// A committed re-run whose source account is gone: the landed
-			// copy is kept, but nothing vouches for any byte in it.
-			return keepUnverifiedCarry(dst, dstInfo)
+	verdict, err := judgeCarryFile(src, srcInfo, dst, dstInfo, role)
+	if err != nil {
+		return carryFileOutcome{}, err
+	}
+	switch verdict {
+	case carryKeepUnverified:
+		return keepUnverifiedCarry(dst, dstInfo)
+	case carryKeepSameFile:
+		// The destination IS the source file — every byte in it is the
+		// source account's.
+		return carryFileOutcome{covered: dstInfo.Size()}, nil
+	case carryKeepVerified:
+		// A replacement that already resumed here appended to this copy.
+		// Overwriting it with the shorter source would truncate that work.
+		if err := keepCarryAppendable(dst, dstInfo); err != nil {
+			return carryFileOutcome{}, err
 		}
-		return carryFileOutcome{}, carryFailure(carryTranscriptMissingReason, fs.ErrNotExist)
+		// The verified prefix is the source's; anything past it is the
+		// destination's own append.
+		return carryFileOutcome{covered: srcInfo.Size()}, nil
 	}
 	srcSize := srcInfo.Size()
-	if dst != nil {
-		if os.SameFile(srcInfo, dstInfo) {
-			// The destination IS the source file — every byte in it is the
-			// source account's.
-			return carryFileOutcome{covered: dstInfo.Size()}, nil
-		}
-		if srcSize == 0 && dstInfo.Size() > 0 && role != carryAuxFile {
-			// The source transcript exists but is empty, so a prefix match
-			// would compare zero bytes and authenticate nothing about the
-			// non-empty destination. Kept with covered == 0 it would bypass
-			// the carried-prefix quarantine (#6802), and even an unrelated
-			// conversation's records would slip past the divergence refusal,
-			// which cannot fire on a vacuous comparison. An empty source is
-			// evidence-wise identical to a missing one, so it gets that
-			// branch's answer: a committed re-run keeps the landed copy,
-			// unverified, and a new carry refuses rather than resume a stale
-			// copy as the whole conversation (#7258).
-			if role == carryCommittedTranscript {
-				return keepUnverifiedCarry(dst, dstInfo)
-			}
-			return carryFileOutcome{}, carryFailure(carryTranscriptEmptyReason, nil)
-		}
-		same, err := carryPrefixMatches(src, dst, min(srcSize, dstInfo.Size()))
-		if err != nil {
-			return carryFileOutcome{}, carryFailure("comparing it with the new account's copy failed", err)
-		}
-		if !same {
-			return carryFileOutcome{}, carryFailure("the new account already holds a different copy of this conversation", nil)
-		}
-		if dstInfo.Size() >= srcSize {
-			// A replacement that already resumed here appended to this copy.
-			// Overwriting it with the shorter source would truncate that work.
-			if err := keepCarryAppendable(dst, dstInfo); err != nil {
-				return carryFileOutcome{}, err
-			}
-			// The verified prefix is the source's; anything past it is the
-			// destination's own append.
-			return carryFileOutcome{covered: srcSize}, nil
-		}
-	}
 	displaced, err := replaceCarryFile(dstDir, name, src, srcSize, dst != nil)
 	if err != nil {
 		return carryFileOutcome{}, err
 	}
 	return carryFileOutcome{covered: srcSize, installed: true, displaced: displaced}, nil
+}
+
+// carryVerdict is what carryFileAt does with one file's destination.
+type carryVerdict int
+
+const (
+	// carryInstallSource: the destination lacks source bytes; install them.
+	carryInstallSource carryVerdict = iota
+	// carryKeepVerified: the destination already holds every source byte.
+	carryKeepVerified
+	// carryKeepSameFile: the destination is the source file.
+	carryKeepSameFile
+	// carryKeepUnverified: a committed re-run keeps a copy the source can no
+	// longer vouch for (carryFileOutcome.unverified).
+	carryKeepUnverified
+)
+
+// judgeCarryFile is carryFileAt's decision, made from the two open files
+// without writing anything: what to do with the destination, or the refusal.
+// src is nil when the source file is missing, dst when the destination is. A
+// new carry's plan asks it too, against the target's copy before the outgoing
+// runtime stops, so the plan refuses what the copy would — the property
+// require_carry needs to refuse a move rather than start it fresh (#7273).
+func judgeCarryFile(src *os.File, srcInfo os.FileInfo, dst *os.File, dstInfo os.FileInfo, role carryFileRole) (carryVerdict, error) {
+	if src == nil {
+		if dst != nil && role == carryCommittedTranscript {
+			// A committed re-run whose source account is gone: the landed
+			// copy is kept, but nothing vouches for any byte in it.
+			return carryKeepUnverified, nil
+		}
+		return carryInstallSource, carryFailure(carryTranscriptMissingReason, fs.ErrNotExist)
+	}
+	if dst == nil {
+		return carryInstallSource, nil
+	}
+	if os.SameFile(srcInfo, dstInfo) {
+		return carryKeepSameFile, nil
+	}
+	srcSize, dstSize := srcInfo.Size(), dstInfo.Size()
+	if srcSize == 0 && dstSize > 0 && role != carryAuxFile {
+		// The source transcript exists but is empty, so a prefix match
+		// would compare zero bytes and authenticate nothing about the
+		// non-empty destination. Kept with covered == 0 it would bypass the
+		// carried-prefix quarantine (#6802), and even an unrelated
+		// conversation's records would slip past the divergence refusal,
+		// which cannot fire on a vacuous comparison. An empty source is
+		// evidence-wise identical to a missing one, so it gets that branch's
+		// answer: a committed re-run keeps the landed copy, unverified, and a
+		// new carry refuses rather than resume a stale copy as the whole
+		// conversation (#7258).
+		if role == carryCommittedTranscript {
+			return carryKeepUnverified, nil
+		}
+		return carryInstallSource, carryFailure(carryTranscriptEmptyReason, nil)
+	}
+	same, err := carryPrefixMatches(src, dst, min(srcSize, dstSize))
+	if err != nil {
+		return carryInstallSource, carryFailure("comparing it with the new account's copy failed", err)
+	}
+	if !same {
+		return carryInstallSource, carryFailure(carryTargetDivergesReason, nil)
+	}
+	if dstSize >= srcSize {
+		return carryKeepVerified, nil
+	}
+	return carryInstallSource, nil
 }
 
 // keepCarryAppendable makes a destination copy the carry keeps owner-writable
