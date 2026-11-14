@@ -212,6 +212,11 @@ func (s Snapshot) EffectiveCarriedPrefixes() map[string]int64 {
 // with no entry anywhere is unrecorded — a carry by a binary that kept no
 // watermark, or none at all — and a committed re-run that cannot verify the
 // file covers it whole only then (#7270).
+//
+// A path under an account home whose overflow flag names no single file is
+// unrecorded too, whatever else names it: more than one carry into that home
+// went unrecorded, and af cannot tell which of its files took their source
+// bytes, so no record of this one is complete (#7277).
 func (s Snapshot) CarriedBoundary(path string) (int64, bool) {
 	n, recorded := s.State.CarriedPrefixes[path]
 	widen := func(covered int64) {
@@ -223,12 +228,21 @@ func (s Snapshot) CarriedBoundary(path string) (int64, bool) {
 	if marker, ok := s.Rails.UnrecordedCarries[path]; ok {
 		widen(marker.Covered)
 	}
-	for _, q := range s.Rails.QuarantinedAccounts {
-		if q.Path == path {
+	for home, q := range s.Rails.QuarantinedAccounts {
+		switch {
+		case q.Path == "" && pathUnder(home, path):
+			return 0, false
+		case q.Path == path:
 			widen(q.Covered)
 		}
 	}
 	return n, recorded
+}
+
+// pathUnder reports whether path lies beneath dir.
+func pathUnder(dir, path string) bool {
+	rel, err := filepath.Rel(filepath.Clean(dir), filepath.Clean(path))
+	return err == nil && rel != "." && filepath.IsLocal(rel)
 }
 
 // AccountUntrusted reports whether the account home dir's carry
@@ -286,9 +300,12 @@ func loadSnapshot(loadState func() (State, error), loadRails func() (Rails, erro
 	}
 	snap = Snapshot{State: s2, Rails: r2}
 	for path, n := range s1.CarriedPrefixes {
-		// Presence counts as well as size: a zero watermark is a record
-		// (CarriedBoundary), so either cut's entry stands.
-		if existing, ok := snap.State.CarriedPrefixes[path]; !ok || n > existing {
+		// Worst case by size: an entry only the first cut saw stands when it
+		// excludes something. A zero only it saw does not: a zero record
+		// trusts the whole file to the target, so absence — a whole-file
+		// cover, Claude's whole-file fallback — is the conservative reading
+		// (CarriedBoundary, #7277).
+		if n > snap.State.CarriedPrefixes[path] {
 			if snap.State.CarriedPrefixes == nil {
 				snap.State.CarriedPrefixes = map[string]int64{}
 			}

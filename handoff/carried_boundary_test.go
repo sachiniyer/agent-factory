@@ -116,11 +116,15 @@ func TestRecordCarriedPrefixKeepsAnExplicitZero(t *testing.T) {
 	}
 }
 
-// A zero record one cut sees survives the worst-case merge even when the
-// other cut lacks it — presence is part of the record, not only its size.
-func TestLoadSnapshotKeepsAZeroRecordFromEitherCut(t *testing.T) {
+// The merge is worst-case for presence too. A positive watermark only the
+// first cut saw is kept: it excludes more. A zero only the first cut saw is
+// dropped: a zero record trusts the whole file to the target, so absence —
+// a whole-file cover on a re-run, Claude's whole-file fallback — is the more
+// conservative reading (#7277). No writer deletes an entry, so only an
+// outside delete between the reads gets here.
+func TestLoadSnapshotDropsAZeroRecordOnlyTheFirstCutSaw(t *testing.T) {
 	states := []State{
-		{CarriedPrefixes: map[string]int64{"/r.jsonl": 0}},
+		{CarriedPrefixes: map[string]int64{"/zero.jsonl": 0, "/twelve.jsonl": 12}},
 		{},
 	}
 	si := 0
@@ -130,7 +134,46 @@ func TestLoadSnapshotKeepsAZeroRecordFromEitherCut(t *testing.T) {
 	if stateErr != nil || railsErr != nil {
 		t.Fatalf("errs: %v %v", stateErr, railsErr)
 	}
-	if n, recorded := snap.CarriedBoundary("/r.jsonl"); n != 0 || !recorded {
-		t.Fatalf("CarriedBoundary = (%d, %v), want (0, true): the merge dropped a zero record", n, recorded)
+	if n, recorded := snap.CarriedBoundary("/zero.jsonl"); recorded {
+		t.Fatalf("CarriedBoundary = (%d, true): a zero only the stale cut saw must not trust the file", n)
+	}
+	if n, recorded := snap.CarriedBoundary("/twelve.jsonl"); n != 12 || !recorded {
+		t.Fatalf("CarriedBoundary = (%d, %v), want (12, true): the wider span either cut saw stands", n, recorded)
+	}
+}
+
+// An account overflow flag that names no single file says more than one
+// carry into that home went unrecorded, and af cannot tell which files took
+// them. No record of a file under that home is complete, so a committed
+// re-run must cover it whole rather than narrow to an older watermark
+// (#7277, probe F). The flag of another home, or one naming another file,
+// leaves the record alone.
+func TestCarriedBoundaryUnderAnUntrackableFlagIsUnrecorded(t *testing.T) {
+	const path = "/af/accounts/codex/work/sessions/r.jsonl"
+	marked := time.Date(2026, 11, 13, 9, 0, 0, 0, time.UTC)
+	state := State{CarriedPrefixes: map[string]int64{path: 12}}
+	for _, tc := range []struct {
+		name         string
+		flags        map[string]AccountQuarantine
+		want         int64
+		wantRecorded bool
+	}{
+		{name: "its home's untrackable flag", want: 0, wantRecorded: false,
+			flags: map[string]AccountQuarantine{"/af/accounts/codex/work": {At: marked}}},
+		{name: "another home's untrackable flag", want: 12, wantRecorded: true,
+			flags: map[string]AccountQuarantine{"/af/accounts/codex/other": {At: marked}}},
+		{name: "a home whose name extends its home's", want: 12, wantRecorded: true,
+			flags: map[string]AccountQuarantine{"/af/accounts/codex/wor": {At: marked}}},
+		{name: "its home's flag naming another file", want: 12, wantRecorded: true,
+			flags: map[string]AccountQuarantine{"/af/accounts/codex/work": {
+				At: marked, Path: "/af/accounts/codex/work/sessions/other.jsonl", Covered: 30}}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			snap := Snapshot{State: state, Rails: Rails{QuarantinedAccounts: tc.flags}}
+			got, recorded := snap.CarriedBoundary(path)
+			if got != tc.want || recorded != tc.wantRecorded {
+				t.Fatalf("CarriedBoundary = (%d, %v), want (%d, %v)", got, recorded, tc.want, tc.wantRecorded)
+			}
+		})
 	}
 }
