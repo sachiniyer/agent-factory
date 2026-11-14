@@ -201,3 +201,71 @@ func TestCaptureArmedOnAnUnresolvableLaunchDirDecidesNothing(t *testing.T) {
 	require.False(t, conv.HasID(), "an unresolved scope adopts nothing")
 	require.True(t, errors.Is(err, ErrCodexCaptureChannelUnavailable), "and says it could not look: %v", err)
 }
+
+// danglingCodexLaunchDir is #7295's layout: the launch dir is a symlink to the
+// kernel's directory, which the returned func removes, leaving the link
+// dangling.
+func danglingCodexLaunchDir(t *testing.T) (launchDir, kernel string, dangle func()) {
+	t.Helper()
+	root := testguard.CanonicalTempDir(t)
+	kernel = filepath.Join(root, "store", "repo")
+	require.NoError(t, os.MkdirAll(kernel, 0o755))
+	require.NoError(t, os.MkdirAll(filepath.Join(root, "wt"), 0o755))
+	launchDir = filepath.Join(root, "wt", "repo")
+	require.NoError(t, os.Symlink(kernel, launchDir))
+	return launchDir, kernel, func() { require.NoError(t, os.RemoveAll(kernel)) }
+}
+
+// Independent review of #7297, R1, the Codex sibling of #7290 item 1. The
+// operator-repair provenance reason covers a lookup that failed as well as one
+// that did not answer. A dangling launch dir and an EIO are both lookups that
+// failed, with no timeout anywhere: the decline is unverified, and its reason
+// claims no timeout.
+func TestOperatorRepairProvenanceClaimsNoTimeoutWhenALookupFails(t *testing.T) {
+	for _, tc := range []struct {
+		name  string
+		fault func(t *testing.T, launchDir string, dangle func())
+	}{
+		{"a dangling launch dir", func(t *testing.T, _ string, dangle func()) { dangle() }},
+		{"an EIO", func(t *testing.T, launchDir string, _ func()) { failLaunchDirLookups(t, launchDir) }},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			launchDir, kernel, dangle := danglingCodexLaunchDir(t)
+			path := writeCodexRolloutFileWithCwd(t, t.TempDir(), codexBoundRolloutName(codexBoundRecordedID), kernel)
+			require.Equal(t, resumeDecline{}, operatorRepairProvenance(path, launchDir), "precondition: the repair is this session's")
+
+			tc.fault(t, launchDir, dangle)
+			got := operatorRepairProvenance(path, launchDir)
+			require.True(t, got.unverified, "a lookup that failed is unverified, never another directory: %+v", got)
+			require.Equal(t, operatorRepairUnresolvedReason, got.reason)
+			for _, claim := range []string{"in time", "timed out", "did not answer"} {
+				require.NotContains(t, got.reason, claim, "nothing timed out")
+			}
+		})
+	}
+}
+
+// #7297's two Codex fixes on a dangling launch dir, pinned. The staleness
+// judge, which the restore guard and the carry share, reads Unresolved, not
+// Current: Current would carry an older rollout past a newer one of this
+// worktree. Operator-repair provenance reads unverified, not "another
+// directory", which would retire the repair.
+func TestCodexStalenessOnADanglingLaunchDir(t *testing.T) {
+	launchDir, kernel, dangle := danglingCodexLaunchDir(t)
+	home := t.TempDir()
+	recorded := writeCodexRolloutFileWithCwd(t, home, codexBoundRolloutName(codexBoundRecordedID), kernel)
+	newer := writeCodexRolloutFileWithCwd(t, home, codexBoundRolloutName(codexBoundNewerID), kernel)
+	now := time.Now()
+	setModTime(t, recorded, now.Add(-2*time.Hour))
+	setModTime(t, newer, now.Add(-time.Hour))
+	files := map[string]struct{}{recorded: {}, newer: {}}
+	require.Equal(t, codexRolloutStale, checkCodexRecordedStaleness(recorded, files, boundedLaunchDir(launchDir), operatorRepairWindow{}),
+		"precondition: the newer rollout is this worktree's")
+
+	dangle()
+	require.Equal(t, codexRolloutUnresolved, checkCodexRecordedStaleness(recorded, files, boundedLaunchDir(launchDir), operatorRepairWindow{}),
+		"a dangling launch dir correlates nothing: unresolved, never current")
+	got := operatorRepairProvenance(recorded, launchDir)
+	require.True(t, got.unverified, "the repair is unverified, never another directory's: %+v", got)
+	require.NotContains(t, got.reason, "another directory")
+}
