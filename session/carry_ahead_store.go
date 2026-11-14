@@ -136,8 +136,8 @@ func (s *codexStoreSnapshot) holdsRevertSince(codexHome, id string, floor time.T
 	return false
 }
 
-// codexStoreCache shares source store snapshots between require_carry's
-// check-ahead answers. It holds its lock across a walk: the engine asks one
+// codexStoreCache shares store snapshots between require_carry's answers: the
+// source home's, and the target's when an answer names one. It holds its lock across a walk: the engine asks one
 // session at a time, and a second asker for the same home must wait for that
 // walk rather than start its own.
 type codexStoreCache struct {
@@ -228,4 +228,28 @@ func (c *conversationCarry) sourceHoldsRevert(floor time.Time) (bool, error) {
 		return false, c.srcStore.err
 	}
 	return c.srcStore.holdsRevertSince(c.srcHome, c.id, floor), nil
+}
+
+// codexTargetRelPath is codexSourceRelPath for the target store: the thread's
+// one plain rollout there, "" when it holds none, or why af cannot tell. It
+// reads the plan's target snapshot when it has one.
+func (c *conversationCarry) codexTargetRelPath() (string, string) {
+	if c.dstStore != nil {
+		if c.dstStore.err != nil {
+			return "", carryStoreUnlistedReason
+		}
+		return codexRolloutRelPathOf(c.dstHome, c.dstStore.plainOf(c.id))
+	}
+	return codexRolloutRelPath(c.dstHome, c.id)
+}
+
+// targetHoldsRevert is sourceHoldsRevert for the target store.
+func (c *conversationCarry) targetHoldsRevert(floor time.Time) (bool, error) {
+	switch {
+	case c.dstStore == nil:
+		return codexHoldsRevertRollout(c.dstHome, c.id, floor)
+	case c.dstStore.err != nil:
+		return false, c.dstStore.err
+	}
+	return c.dstStore.holdsRevertSince(c.dstHome, c.id, floor), nil
 }

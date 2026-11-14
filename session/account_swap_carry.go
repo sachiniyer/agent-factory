@@ -63,6 +63,9 @@ type conversationCarry struct {
 	// source checks read it instead of walking the store. The live swap never
 	// sets it, and the plan clears it before it returns.
 	srcStore *codexStoreSnapshot
+	// dstStore is srcStore for the target's store, set when require_carry
+	// asks against a target (AccountSwapCarryRefusalTo).
+	dstStore *codexStoreSnapshot
 	// newerIsEvidence is the session's newerConversationCountsAgainstCarry:
 	// whether a newer conversation in a launch directory shows the session
 	// moved on from the carried one, counting a directory af could not resolve
@@ -243,6 +246,9 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	carry.srcRoot = srcRoot
 	if req.stores != nil && carry.agent == tmux.ProgramCodex {
 		carry.srcStore = req.stores.snapshot(carry.srcHome, req.outgoing.CapturedAt)
+		if !req.sourceOnly {
+			carry.dstStore = req.stores.snapshot(carry.dstHome, req.outgoing.CapturedAt)
+		}
 	}
 	if reason := carry.locate(req.program, req.workDir); reason != "" {
 		if sourceReason != "" {
@@ -261,12 +267,12 @@ func planAccountSwapCarry(req accountSwapCarryRequest) (*conversationCarry, stri
 	// Checks on the target come after every check on the source, so the live
 	// swap and the source-only check-ahead give the same answer for the same
 	// source state (#7220 review R4).
-	if !req.sourceOnly && !carry.committed && carry.agent == tmux.ProgramClaude {
-		if reason := carry.claudeTargetReason(); reason != "" {
+	if !req.sourceOnly && !carry.committed {
+		if reason := carry.targetReason(); reason != "" {
 			return nil, reason
 		}
 	}
-	carry.srcFiles, carry.srcStore = nil, nil
+	carry.srcFiles, carry.srcStore, carry.dstStore = nil, nil, nil
 	return carry, ""
 }
 
@@ -321,7 +327,7 @@ func (c *conversationCarry) locateCodex() string {
 	if reason != "" {
 		return reason
 	}
-	existing, reason := codexRolloutRelPath(c.dstHome, c.id)
+	existing, reason := c.codexTargetRelPath()
 	if reason != "" {
 		return reason
 	}
