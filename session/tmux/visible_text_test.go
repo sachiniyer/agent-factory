@@ -7,8 +7,8 @@ import (
 )
 
 // visibleTextOf removes every escape capture-pane -e emits — SGR and OSC 8,
-// terminated by ST or by BEL — and nothing a person reading the pane would see
-// (#7271).
+// terminated by ST or by BEL, and the SO/SI shifts around ACS cells — and
+// nothing a person reading the pane would see (#7271, #7280).
 func TestVisibleTextOf(t *testing.T) {
 	for _, tt := range []struct{ name, capture, want string }{
 		{"plain text is unchanged", "Yes, I trust this folder\n", "Yes, I trust this folder\n"},
@@ -18,6 +18,10 @@ func TestVisibleTextOf(t *testing.T) {
 		{"OSC 8 terminated by ST", "Learn more in the \x1b]8;id=c415zw;https://code.claude.com/docs/en/mcp\x1b\\MCP documentation\x1b]8;;\x1b\\.",
 			"Learn more in the MCP documentation."},
 		{"OSC 8 terminated by BEL", "Yes, I \x1b]8;;https://example.invalid/\atrust\x1b]8;;\a this folder", "Yes, I trust this folder"},
+		// tmux shifts into the line-drawing set around ACS cells (the #7275
+		// review measured it on tmux 3.4; #7280). The shifts are not visible
+		// text.
+		{"SO and SI around ACS cells", "\x0eqqqq\x0f Yes, I trust this folder", "qqqq Yes, I trust this folder"},
 		{"OSC 8 inside a styled word", "\x1b[38;5;153m\x1b]8;;https://example.invalid/\x1b\\trust\x1b]8;;\x1b\\\x1b[39m", "trust"},
 		// An OSC never spans a row: one with no terminator on its row stays,
 		// rather than swallowing the composer painted below it.

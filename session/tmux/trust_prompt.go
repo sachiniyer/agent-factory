@@ -99,7 +99,7 @@ func (t *TmuxSession) CheckAndHandleTrustPrompt() bool {
 		case claudeFolderTrustPartial:
 			return true
 		case claudeFolderTrustUnreadable:
-			t.refuseTrustPicker(claudeFolderTrustPicker, errClaudeFolderTrustUnreadable)
+			t.refuseTrustPicker(claudeFolderTrustPicker, claudeFolderTrustUnreadableWhy(screen))
 			return true
 		}
 		// The legacy folder-trust dialog is not atomic either: Claude Code
