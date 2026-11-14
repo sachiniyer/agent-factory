@@ -36,7 +36,7 @@ var errClaudeFolderTrustUnreadable = errors.New(
 // question off, but a quote with no composer painted below it yet reads the
 // same way.
 var errClaudeFolderTrustQuestionOffScreen = errors.New(
-	"its options and footer are on screen but its question is not, so af cannot tell it from a quote of it (if the pane is too short for the dialog, make it taller; or answer the dialog in the session)")
+	"the question is not on screen, only the options and footer, so af cannot tell the dialog from a quote of it (if the pane is too short for the dialog, make it taller; or answer the dialog in the session)")
 
 // claudeFolderTrustUnreadableWhy says what af saw of a dialog
 // claudeFolderTrustDialogOf reads as unreadable.
