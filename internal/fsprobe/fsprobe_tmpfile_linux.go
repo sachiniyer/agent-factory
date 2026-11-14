@@ -16,10 +16,13 @@ import (
 // kernel without support fails with a normal errno (EOPNOTSUPP et al.) and the
 // caller falls back to the named-probe path; supported targets cover tmpfs,
 // ext4, xfs, btrfs, and overlayfs.
-var openAnonymousProbeFile = func(dir string) (*os.File, error) {
+//
+// It is a seam, atomic like every other (seam): the probe body that reads it
+// runs inside a flight a wedged filesystem can leave running past its test.
+var openAnonymousProbeFile = newSeam(func(dir string) (*os.File, error) {
 	fd, err := unix.Open(dir, unix.O_TMPFILE|unix.O_RDWR|unix.O_CLOEXEC, 0o600)
 	if err != nil {
 		return nil, err
 	}
 	return os.NewFile(uintptr(fd), "af-add-probe"), nil
-}
+})

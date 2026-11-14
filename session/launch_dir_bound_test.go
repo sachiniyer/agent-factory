@@ -62,8 +62,8 @@ func wedgeLaunchDirResolution(t *testing.T, root string) {
 }
 
 // failLaunchDirResolution makes every symlink resolution of root or a path
-// under it fail at once, as an unreadable ancestor does: the answer a timed-out
-// resolution must give.
+// under it fail at once, as an unreadable ancestor does: a lookup that did not
+// happen, the same as one that timed out (#7286).
 func failLaunchDirResolution(t *testing.T, root string) func() {
 	t.Helper()
 	return fsprobe.SetEvalSymlinksForTest(func(path string) (string, error) {
@@ -75,36 +75,33 @@ func failLaunchDirResolution(t *testing.T, root string) func() {
 }
 
 // The ownership check's launch side resolves the launch dir. A resolution that
-// fails with an answer (an unreadable ancestor) leaves the launch dir's
-// spelling to decide, as it always has. One that does not answer within the
-// bound is a look that did not happen: ownership is unknown, never another
-// directory's, which a carry would read as leave to carry the recorded
-// conversation (#7278 review R1). It never needs the mount.
+// does not answer within the bound, or whose lookup fails for any reason but
+// absence (an unreadable ancestor), is a look that did not happen: ownership
+// is unknown, never another directory's, which a carry would read as leave to
+// carry the recorded conversation (#7278 review R1, #7286). It never needs the
+// mount.
 func TestClaudeTranscriptOwnershipDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 	for _, tc := range []struct {
 		name string
 		// recorded is the directory the transcript records, relative to the
 		// layout's base; it is never under the wedged spelling.
 		recorded string
-		// resolved is the answer when the launch dir resolves; failed when its
-		// resolution fails with an answer, and only its spelling can decide.
-		resolved, failed claudeOwnership
+		// resolved is the answer when the launch dir resolves.
+		resolved claudeOwnership
 	}{
 		{
 			name:     "the transcript records the launch dir's resolved spelling",
 			recorded: filepath.Join("real", "repo"),
 			resolved: claudeOwnedHere,
-			failed:   claudeOwnedHere,
 		},
 		{
 			// link.repo and link/repo file under one project name, and both
 			// reach real/repo: only the resolution proves they are one
-			// directory. Without it the spelling reads the collision as
+			// directory. Without it the spelling would read the collision as
 			// another directory's.
 			name:     "a spelling that collides with the launch dir's and resolves to it",
 			recorded: "link.repo",
 			resolved: claudeOwnedHere,
-			failed:   claudeOwnedElsewhere,
 		},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
@@ -125,7 +122,7 @@ func TestClaudeTranscriptOwnershipDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 
 			require.Equal(t, tc.resolved, claudeTranscriptOwnership(transcript, launchDir), "precondition: the answer with the launch dir resolved")
 			restore := failLaunchDirResolution(t, link)
-			require.Equal(t, tc.failed, claudeTranscriptOwnership(transcript, launchDir), "a resolution that failed with an answer leaves the spelling to decide")
+			require.Equal(t, claudeOwnershipUnknown, claudeTranscriptOwnership(transcript, launchDir), "a lookup that failed is a look that did not happen")
 			restore()
 
 			wedgeLaunchDirResolution(t, link)

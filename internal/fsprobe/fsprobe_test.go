@@ -32,9 +32,7 @@ func TestWriteSpaceProbe_RealWrite(t *testing.T) {
 // named-tempfile fallback runs: the file must be unlinked before the payload
 // writes, leaving nothing stageable.
 func TestWriteSpaceProbe_NamedFallback(t *testing.T) {
-	old := openAnonymousProbeFile
-	openAnonymousProbeFile = func(string) (*os.File, error) { return nil, syscall.EOPNOTSUPP }
-	defer func() { openAnonymousProbeFile = old }()
+	defer openAnonymousProbeFile.replace(func(string) (*os.File, error) { return nil, syscall.EOPNOTSUPP })()
 
 	dir := t.TempDir()
 	if err := writeSpaceProbe.load()(dir); err != nil {

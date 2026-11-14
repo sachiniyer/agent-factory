@@ -205,8 +205,15 @@ func (i *Instance) judgeRecordedClaude(program, workDir, id string) recordedClau
 	if err != nil || strings.TrimSpace(configDir) == "" || strings.TrimSpace(launchDir) == "" {
 		return recordedClaudeBlind
 	}
-	projects := claudeProjectCandidates(launchDir)
+	projects, complete := claudeProjectSpellings(launchDir)
 	verdict := judgeClaudeRecorded(configDir, projects, launchDir, id, "")
+	if !complete && verdict == claudeRecordedStale {
+		// A listing that missed a spelling can hide a newer copy of the id
+		// itself, so a newer conversation it found is no evidence the session
+		// moved on: at most uncorrelated, which resumes, as Missing defers to
+		// claudeRecordedAnywhere below (#7286).
+		verdict = claudeRecordedUncorrelated
+	}
 	if verdict == claudeRecordedMissing {
 		account, _ := i.AccountSelection()
 		verdict = claudeRecordedAnywhere(configDir, strings.TrimSpace(account) != "", id)

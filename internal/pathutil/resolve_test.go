@@ -1,8 +1,10 @@
 package pathutil
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
+	"syscall"
 	"testing"
 )
 
@@ -63,5 +65,44 @@ func TestResolveForCompare_FallsBackToCleaned(t *testing.T) {
 	in := filepath.Join(string(filepath.Separator), "definitely", "not", "here", "..", "here", "x")
 	if got, want := ResolveForCompare(in), filepath.Clean(in); got != want {
 		t.Errorf("ResolveForCompare(%q) = %q, want cleaned %q", in, got, want)
+	}
+}
+
+// TestResolveForCompareWith_ReportsALookupThatDidNotHappen pins #7286: the walk
+// falls back past a missing component as it always has, and that is an answer;
+// falling back past any other failure (EIO from a soft NFS mount, EACCES) still
+// returns the same path ResolveForCompare does, but reports the failure, since
+// the path past it is a guess.
+func TestResolveForCompareWith_ReportsALookupThatDidNotHappen(t *testing.T) {
+	path := filepath.Join(string(filepath.Separator), "mnt", "share", "repo")
+	for _, tc := range []struct {
+		name   string
+		fail   error
+		answer bool
+	}{
+		{"absent", &os.PathError{Op: "lstat", Path: path, Err: syscall.ENOENT}, true},
+		{"not a directory", &os.PathError{Op: "lstat", Path: path, Err: syscall.ENOTDIR}, true},
+		{"an I/O error", &os.PathError{Op: "lstat", Path: path, Err: syscall.EIO}, false},
+		{"a stale handle", &os.PathError{Op: "lstat", Path: path, Err: syscall.ESTALE}, false},
+		{"permission denied", &os.PathError{Op: "lstat", Path: path, Err: syscall.EACCES}, false},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			eval := func(p string) (string, error) {
+				if p == path {
+					return "", tc.fail
+				}
+				return p, nil
+			}
+			got, err := ResolveForCompareWith(path, eval)
+			if got != path {
+				t.Errorf("the walk's path is unchanged: got %q, want %q", got, path)
+			}
+			if tc.answer && err != nil {
+				t.Errorf("a missing component is an answer, got %v", err)
+			}
+			if !tc.answer && !errors.Is(err, tc.fail) {
+				t.Errorf("a failed lookup is reported: got %v, want %v", err, tc.fail)
+			}
+		})
 	}
 }

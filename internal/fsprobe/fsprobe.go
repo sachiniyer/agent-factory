@@ -124,7 +124,7 @@ var writeSpaceProbe = newSeam(func(dir string) error {
 // workspace content; the leftover's path is surfaced in the error so an
 // operator can remove it by hand (#5295 review).
 func openProbeFile(dir string) (*os.File, error) {
-	if f, err := openAnonymousProbeFile(dir); err == nil {
+	if f, err := openAnonymousProbeFile.load()(dir); err == nil {
 		return f, nil
 	}
 	f, err := os.CreateTemp(dir, ".af-add-probe-*")
@@ -187,9 +187,10 @@ func Write(dir string) error {
 // flight shape as Write: a mount that stops answering metadata calls would
 // otherwise wedge the synchronous error path it informs (#5295 review).
 func Full(dir string) (bool, error) {
+	statfs := statfsFn.load() // in the caller, as Stat's
 	res, err := runBounded(dir, fullnessFlights, "fullness probe",
 		"the filesystem did not answer the statfs",
-		func() (any, error) { return fsFull(dir, false) })
+		func() (any, error) { return fsFull(statfs, dir, false) })
 	full, _ := res.(bool)
 	return full, err
 }
@@ -202,9 +203,10 @@ func Full(dir string) (bool, error) {
 // unprivileged answers legitimately differ on the same filesystem (the
 // reserved-blocks window), so the two probe kinds must never share a result.
 func FullUnprivileged(dir string) (bool, error) {
+	statfs := statfsFn.load() // in the caller, as Stat's
 	res, err := runBounded(dir, unprivilegedFullnessFlights, "fullness probe",
 		"the filesystem did not answer the statfs",
-		func() (any, error) { return fsFull(dir, true) })
+		func() (any, error) { return fsFull(statfs, dir, true) })
 	full, _ := res.(bool)
 	return full, err
 }
