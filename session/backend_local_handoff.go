@@ -64,6 +64,9 @@ func prepareAgentSwapFrom(i *Instance, target, resolved string) (AgentSwapPlan, 
 			captureWorkingDir = launch.WorkingDir
 		}
 		capture = beginConversationCaptureAtCodexHomeAndWorkingDir(codexHome, captureWorkingDir)
+		if err := capture.ScopeErr(); err != nil {
+			return AgentSwapPlan{}, worktreeLookupError(i.Title, workDir, err)
+		}
 	}
 	return AgentSwapPlan{
 		target: target, baseProgram: resolved, program: program, conversation: conversation, conversationCapture: capture,

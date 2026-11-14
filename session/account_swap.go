@@ -535,6 +535,9 @@ func (i *Instance) validateAccountSwapPlan(name, agent string, crossAgent, manua
 		}
 		conversationCapture = beginConversationCaptureAtCodexHomeAndWorkingDir(
 			accountScope.Dir, captureWorkingDir)
+		if err := conversationCapture.ScopeErr(); err != nil {
+			return worktreeLookupError(i.Title, workDir, err)
+		}
 		if path := carry.carriedCodexRolloutPath(); path != "" {
 			conversationCapture.expectCarriedCodexRollout(conversation, path)
 		}

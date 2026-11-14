@@ -50,6 +50,15 @@ func TestCheckCommandAtDoesNotStallOnAWedgedLaunchDir(t *testing.T) {
 	case err := <-done:
 		require.True(t, errors.Is(err, fsprobe.ErrProbeTimedOut), "the preflight names the bounded probe: %v", err)
 		require.True(t, errors.Is(err, context.DeadlineExceeded), "and its deadline: %v", err)
+		// #7292: off the swap paths (session create, doctor, the config
+		// agent) the message a user reads is ProgramError's. A launch
+		// directory that did not answer is no fault of the program: the
+		// lead names the directory and the mount.
+		msg := ProgramError("claude", exe, err).Error()
+		require.Contains(t, msg, "the launch directory "+dir+" did not answer", "the lead names the directory")
+		require.Contains(t, msg, "mount", "and the mount")
+		require.NotContains(t, msg, "could not be started", "never that the program failed")
+		require.NotContains(t, msg, "not installed", "or is missing")
 	case <-time.After(3 * time.Second):
 		t.Fatal("a preflight in a launch directory on a wedged mount stalled the caller")
 	}

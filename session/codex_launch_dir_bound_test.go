@@ -204,11 +204,11 @@ func TestCodexCarryRefusesWhenTheLaunchDirDoesNotResolve(t *testing.T) {
 	wedgeLaunchDirResolution(t, inst.GetWorktreePath())
 	require.Equal(t, carryRefusalCode(carryUncorrelatedReason), withinBound(t, inst.AccountSwapCarryRefusal),
 		"require_carry's check-ahead defers the move")
-	require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
-	if carry := inst.accountSwapLaunch.carry; carry != nil {
-		t.Fatalf("a look that did not happen carried %s", carry.transcript)
-	}
-	require.Equal(t, carryUncorrelatedReason, inst.accountSwapLaunch.carryFallback, "the swap states why it starts fresh")
+	// The live swap then arms conversation capture on the same launch dir,
+	// which refuses the whole swap before anything is torn down (#7292):
+	// nothing is carried, and no fresh start is planned on a dir af cannot
+	// see.
+	requireSwapRefusedOnTheWorktree(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }), true)
 }
 
 // With nothing newer than the carried rollout there is nothing to correlate,
@@ -220,8 +220,9 @@ func TestCodexCarryWithNothingNewerCarriesOnAWedgedLaunchDir(t *testing.T) {
 
 	wedgeLaunchDirResolution(t, inst.GetWorktreePath())
 	require.Empty(t, withinBound(t, inst.AccountSwapCarryRefusal), "the check-ahead does not refuse on a lookup it never needed")
-	require.NoError(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }))
-	require.NotNil(t, inst.accountSwapLaunch.carry, "the live swap carries: %q", inst.accountSwapLaunch.carryFallback)
+	// The live swap arms conversation capture on the launch dir, which does
+	// need it: that refuses the swap before teardown (#7292), not the carry.
+	requireSwapRefusedOnTheWorktree(t, withinBound(t, func() error { return inst.ValidateAccountSwap("work") }), true)
 }
 
 // Operator-repair provenance compares the directory the repaired rollout

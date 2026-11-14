@@ -6,7 +6,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/sachiniyer/agent-factory/internal/pathutil"
+	"github.com/sachiniyer/agent-factory/internal/fsprobe"
 	"github.com/sachiniyer/agent-factory/session/tmux"
 )
 
@@ -84,7 +84,15 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 		return AgentConversationData{}, fmt.Errorf(
 			"session %q's launch working directory cannot be determined, so a rollout cannot be proven to belong to it", i.Title)
 	}
-	launchDir = pathutil.ResolveForCompare(launchDir)
+	// Bounded (#7292): the launch dir may sit on a mount that no longer
+	// answers, and a lookup that did not answer or failed proves nothing
+	// either way, so the repair is refused with what to do.
+	resolvedLaunch, err := fsprobe.ResolveForCompare(launchDir)
+	if err != nil {
+		return AgentConversationData{}, fmt.Errorf(
+			"af could not resolve session %q's launch directory %s, so a rollout cannot be proven to belong to it; check that its mount (NFS, FUSE, sshfs) is responding, then retry: %w", i.Title, launchDir, err)
+	}
+	launchDir = resolvedLaunch
 	files, err := codexRolloutFiles(home)
 	if err != nil {
 		return AgentConversationData{}, fmt.Errorf(
@@ -118,7 +126,13 @@ func ValidateSettableConversation(i *Instance, id string) (AgentConversationData
 	case subagent:
 		return AgentConversationData{}, fmt.Errorf(
 			"rollout %s is a Codex sub-agent thread, not the session's own top-level conversation", id)
-	case pathutil.ResolveForCompare(cwd) != launchDir:
+	}
+	switch resolvedCwd, err := fsprobe.ResolveForCompare(cwd); {
+	case err != nil:
+		return AgentConversationData{}, fmt.Errorf(
+			"af could not resolve %s, the directory rollout %s was launched in, so it cannot be proven to belong to session %q; check that its mount (NFS, FUSE, sshfs) is responding, then retry: %w",
+			cwd, id, i.Title, err)
+	case resolvedCwd != launchDir:
 		return AgentConversationData{}, fmt.Errorf(
 			"rollout %s launched in %s, not in session %q's working directory %s — it belongs to a different session",
 			id, cwd, i.Title, launchDir)
