@@ -335,10 +335,47 @@ func probeCarryDir(home carryRoot, rel string) error {
 // install left beside the file when it replaced existing content — the
 // caller restores it on a failed commit and discards it on success, so a
 // failed carry leaves the destination exactly as it was.
+//
+// unverified marks a committed re-run that kept the landed destination
+// without the source vouching for it — the source is missing, or empty. Its
+// covered is then the whole destination, the most a re-run could attribute
+// to the source; the caller narrows it to the boundary af durably recorded
+// for the file (conversationCarry.recordedBoundary), because the watermark
+// only grows and the target's own appends past that boundary must not become
+// source provenance for good (#7270).
 type carryFileOutcome struct {
-	covered   int64
-	installed bool
-	displaced string
+	covered    int64
+	installed  bool
+	unverified bool
+	displaced  string
+}
+
+// carryFileRole is what carryFileAt is copying, which decides what a source
+// that cannot vouch for the destination means.
+type carryFileRole int
+
+const (
+	// carryNewTranscript is a new carry's conversation file: the source must
+	// vouch for every byte the replacement resumes, so a missing or empty
+	// source beside a destination copy refuses.
+	carryNewTranscript carryFileRole = iota
+	// carryCommittedTranscript is a committed carry's re-run: its pre-commit
+	// copy already landed, so a destination the source can no longer vouch
+	// for is kept, as unverified provenance.
+	carryCommittedTranscript
+	// carryAuxFile is one of Claude's per-session files (tool results,
+	// subagent transcripts): detail beside the conversation, never the
+	// conversation itself. An empty source keeps whatever the destination
+	// holds, as any shorter source does.
+	carryAuxFile
+)
+
+// transcriptCarryRole is the role of a carry's conversation file.
+func transcriptCarryRole(requireSource bool) carryFileRole {
+	if requireSource {
+		return carryNewTranscript
+	}
+	return carryCommittedTranscript
 }
 
 // carryConversationFile is the error-only form: callers that copy without
@@ -390,15 +427,16 @@ func carryConversationFileOutcome(srcHome, dstHome carryRoot, rel string, requir
 	default:
 		return carryFileOutcome{}, carryFailureAt("the conversation could not be read safely from the previous account", err)
 	}
-	return carryFileAt(srcDir, dstDir, name, requireSource)
+	return carryFileAt(srcDir, dstDir, name, transcriptCarryRole(requireSource))
 }
 
 // carryFileAt applies the superset rule to one file. srcDir may be nil when the
 // source directory does not exist. The covered length it reports is the
 // carried-prefix watermark: every leading destination byte the source is
 // responsible for, whether this call copied it or only verified it was
-// already there.
-func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carryFileOutcome, error) {
+// already there. A missing or empty source cannot vouch for a destination
+// copy; role says what that means for this file.
+func carryFileAt(srcDir, dstDir *os.File, name string, role carryFileRole) (carryFileOutcome, error) {
 	var src *os.File
 	var srcInfo os.FileInfo
 	if srcDir != nil {
@@ -424,14 +462,12 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carr
 	}
 
 	if src == nil {
-		if dst != nil && !requireSource {
-			// A committed re-run whose source account is gone: every byte in
-			// the landed copy is unverifiable provenance — cover all of it
-			// rather than letting records af did not write count as this
-			// account's.
-			return carryFileOutcome{covered: dstInfo.Size()}, nil
+		if dst != nil && role == carryCommittedTranscript {
+			// A committed re-run whose source account is gone: the landed
+			// copy is kept, but nothing vouches for any byte in it.
+			return keepUnverifiedCarry(dst, dstInfo)
 		}
-		return carryFileOutcome{}, carryFailure("its transcript is missing from the previous account's home", fs.ErrNotExist)
+		return carryFileOutcome{}, carryFailure(carryTranscriptMissingReason, fs.ErrNotExist)
 	}
 	srcSize := srcInfo.Size()
 	if dst != nil {
@@ -439,6 +475,22 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carr
 			// The destination IS the source file — every byte in it is the
 			// source account's.
 			return carryFileOutcome{covered: dstInfo.Size()}, nil
+		}
+		if srcSize == 0 && dstInfo.Size() > 0 && role != carryAuxFile {
+			// The source transcript exists but is empty, so a prefix match
+			// would compare zero bytes and authenticate nothing about the
+			// non-empty destination. Kept with covered == 0 it would bypass
+			// the carried-prefix quarantine (#6802), and even an unrelated
+			// conversation's records would slip past the divergence refusal,
+			// which cannot fire on a vacuous comparison. An empty source is
+			// evidence-wise identical to a missing one, so it gets that
+			// branch's answer: a committed re-run keeps the landed copy,
+			// unverified, and a new carry refuses rather than resume a stale
+			// copy as the whole conversation (#7258).
+			if role == carryCommittedTranscript {
+				return keepUnverifiedCarry(dst, dstInfo)
+			}
+			return carryFileOutcome{}, carryFailure(carryTranscriptEmptyReason, nil)
 		}
 		same, err := carryPrefixMatches(src, dst, min(srcSize, dstInfo.Size()))
 		if err != nil {
@@ -448,34 +500,10 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carr
 			return carryFileOutcome{}, carryFailure("the new account already holds a different copy of this conversation", nil)
 		}
 		if dstInfo.Size() >= srcSize {
-			if srcSize == 0 && dstInfo.Size() > 0 {
-				// The source transcript exists but is empty, so the prefix
-				// match above compared zero bytes and authenticated nothing
-				// about the non-empty stale destination it just "matched".
-				// Kept wholesale with covered == 0 it would bypass the
-				// carried-prefix quarantine (#6802): the destination resumed
-				// unverified, its records counted as the target account's
-				// usage evidence, and even an unrelated conversation's
-				// records would slip past the divergence refusal, which
-				// cannot fire when the comparison is vacuous. An empty source
-				// is evidence-wise identical to a missing one, so mirror that
-				// branch: a committed re-run keeps the landed copy but covers
-				// every byte as the source account's unverifiable provenance,
-				// and a new carry refuses rather than resume a stale copy as
-				// the whole conversation.
-				if !requireSource {
-					return carryFileOutcome{covered: dstInfo.Size()}, nil
-				}
-				return carryFileOutcome{}, carryFailure("its transcript is empty in the previous account's home", nil)
-			}
 			// A replacement that already resumed here appended to this copy.
 			// Overwriting it with the shorter source would truncate that work.
-			// It is kept, so it must stay appendable: the resumed provider
-			// writes its next turn into this file.
-			if dstInfo.Mode().Perm()&0o200 == 0 {
-				if err := dst.Chmod(carryFileMode); err != nil {
-					return carryFileOutcome{}, carryFailure("the new account's copy of this conversation is not writable", err)
-				}
+			if err := keepCarryAppendable(dst, dstInfo); err != nil {
+				return carryFileOutcome{}, err
 			}
 			// The verified prefix is the source's; anything past it is the
 			// destination's own append.
@@ -487,6 +515,31 @@ func carryFileAt(srcDir, dstDir *os.File, name string, requireSource bool) (carr
 		return carryFileOutcome{}, err
 	}
 	return carryFileOutcome{covered: srcSize, installed: true, displaced: displaced}, nil
+}
+
+// keepCarryAppendable makes a destination copy the carry keeps owner-writable
+// again: the resumed provider writes its next turn into that file (#4504).
+// Only the branches that hand the copy back call it; a refusal leaves the
+// destination exactly as it found it.
+func keepCarryAppendable(dst *os.File, info os.FileInfo) error {
+	if info.Mode().Perm()&0o200 != 0 {
+		return nil
+	}
+	if err := dst.Chmod(carryFileMode); err != nil {
+		return carryFailure("the new account's copy of this conversation is not writable", err)
+	}
+	return nil
+}
+
+// keepUnverifiedCarry is a committed re-run's answer when the source can no
+// longer vouch for the copy that already landed: keep it, appendable, and
+// report every byte as possibly the source's for the caller to narrow to the
+// boundary af recorded (carryFileOutcome.unverified).
+func keepUnverifiedCarry(dst *os.File, info os.FileInfo) (carryFileOutcome, error) {
+	if err := keepCarryAppendable(dst, info); err != nil {
+		return carryFileOutcome{}, err
+	}
+	return carryFileOutcome{covered: info.Size(), unverified: true}, nil
 }
 
 // openCarryOutcomeDir reopens the directory a carry file landed in so a
@@ -737,7 +790,7 @@ func copyCarryTree(src, dst *os.File, depth int, budget *int) error {
 			// transcript would watermark is meaningless here. An aux copy has
 			// no commit step after install, so the displaced backup's only
 			// remaining job is done — remove it.
-			outcome, err := carryFileAt(src, dst, name, true)
+			outcome, err := carryFileAt(src, dst, name, carryAuxFile)
 			if err == nil && outcome.displaced != "" {
 				_ = unix.Unlinkat(int(dst.Fd()), outcome.displaced, 0)
 			}
