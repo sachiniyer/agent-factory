@@ -719,7 +719,7 @@ var claudeFolderTrustPicker = trustPicker{
 		case claudeFolderTrustComplete:
 			return parseClaudeFolderTrustDialog(screen)
 		case claudeFolderTrustUnreadable:
-			return claudeFolderTrustDialog{}, errClaudeFolderTrustUnreadable
+			return claudeFolderTrustDialog{}, claudeFolderTrustUnreadableWhy(screen)
 		case claudeFolderTrustPartial:
 			return claudeFolderTrustDialog{}, errors.New("the folder-trust dialog is not fully painted")
 		}

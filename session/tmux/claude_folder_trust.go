@@ -28,7 +28,29 @@ const claudeFolderTrustMinLabelStart = len("Yes, I")
 // errClaudeFolderTrustUnreadable is why af refuses a folder-trust dialog it can
 // see but cannot read as rows.
 var errClaudeFolderTrustUnreadable = errors.New(
-	"its rows do not read as the dialog af knows (a pane too narrow wraps them, or one too short scrolls its question off; resize the pane or answer the dialog in the session)")
+	"its rows do not read as the dialog af knows (a pane too narrow for them wraps them; widen the pane or answer the dialog in the session)")
+
+// errClaudeFolderTrustQuestionOffScreen is why af refuses a folder-trust
+// dialog whose options and footer it can see but whose question it cannot. It
+// says what af saw, not why (#7284 review, R4): a pane too short scrolls the
+// question off, but a quote with no composer painted below it yet reads the
+// same way.
+var errClaudeFolderTrustQuestionOffScreen = errors.New(
+	"its options and footer are on screen but its question is not, so af cannot tell it from a quote of it (if the pane is too short for the dialog, make it taller; or answer the dialog in the session)")
+
+// claudeFolderTrustUnreadableWhy says what af saw of a dialog
+// claudeFolderTrustDialogOf reads as unreadable.
+func claudeFolderTrustUnreadableWhy(screen visibleText) error {
+	lines := screen.lines()
+	rows := make([]claudeTrustRow, len(lines))
+	for i, line := range lines {
+		rows[i] = claudeTrustRowOf(line)
+	}
+	if _, _, ok := claudeFolderTrustQuestionRows(rows); !ok {
+		return errClaudeFolderTrustQuestionOffScreen
+	}
+	return errClaudeFolderTrustUnreadable
+}
 
 // claudeFolderTrustVerdict is what one capture says about the dialog.
 type claudeFolderTrustVerdict int
@@ -147,7 +169,9 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 		switch phase {
 		case inBody:
 			switch {
-			case rule || footerRow(i):
+			case rule || claudeTrustIsFooter(row.label):
+				// A row that reads as the footer, ❯ or not, before any option
+				// breaks the grammar (#7284 review, R1).
 				return broken(i)
 			case row.blank:
 			case claudeFolderTrustOptionStarts(rows, i, i == lastPainted):
@@ -167,6 +191,12 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 				phase = afterOptions
 			case footerRow(i):
 				phase, footer = inFooter, i
+			case claudeTrustIsFooter(row.label):
+				// A ❯ row that reads as the footer is neither the footer nor
+				// an option row: it breaks the grammar, as on master, rather
+				// than taking the affirmative's run for an option af would
+				// steer away from (#7284 review, R1).
+				return broken(i)
 			case phase == inOptions:
 				// Another option row.
 			case i == lastPainted && strings.HasPrefix(claudeTrustAffordancePrefix, row.label):
@@ -218,9 +248,10 @@ func claudeFolderTrustRegionOf(lines []string, rows []claudeTrustRow, first, las
 
 // claudeFolderTrustBroken decides a region that breaks the dialog's grammar at
 // row from (#7275 review, R1). It is no dialog only when a row from there down
-// is the working agent's composer and no row of the dialog's options is painted
-// below it: the composer of a working agent is the last thing in its pane, so
-// it is what shows that the dialog's text above is output being quoted. Any
+// is the working agent's composer and no row the dialog paints — an option row
+// or its footer — is painted below it (#7284 review, R2): the composer of a
+// working agent is the last thing in its pane, so it is what shows that the
+// dialog's text above is output being quoted. Any
 // other row the grammar does not know — a swapped footer, a notice, a tip, a
 // stray line — or a frame rule on its own, which is the dialog's own chrome
 // too, is no evidence that an agent is working. The region holds as partial.
@@ -230,7 +261,7 @@ func claudeFolderTrustBroken(lines []string, rows []claudeTrustRow, from, lastPa
 		switch {
 		case claudeFolderTrustComposerRow(lines, rows, i, i == lastPainted):
 			composer = i
-		case rows[i].selected || claudeFolderTrustOptionLabel(rows[i].label):
+		case rows[i].selected || claudeFolderTrustOptionLabel(rows[i].label) || claudeTrustIsFooter(rows[i].label):
 			option = i
 		}
 	}
@@ -252,8 +283,9 @@ func claudeFolderTrustBroken(lines []string, rows []claudeTrustRow, from, lastPa
 //     draw ("╭───╮" over "│ > … │").
 //
 // A ❯ row holding one of the dialog's own labels, or cut short of one, in a run
-// of nothing but such rows is never one. A ❯ row between two rules always is.
-// A frame rule alone is not one: the dialog's closing frame is a rule too.
+// of nothing but such rows is never one. A ❯ row between the composer's two
+// plain rules always is. A frame rule alone is not one: the dialog's closing
+// frame is a rule too.
 func claudeFolderTrustComposerRow(lines []string, rows []claudeTrustRow, i int, lastPainted bool) bool {
 	if rows[i].selected {
 		switch {
@@ -262,9 +294,9 @@ func claudeFolderTrustComposerRow(lines []string, rows []claudeTrustRow, i int, 
 			// run of nothing else: the dialog's, whatever is around it
 			// (#7280). The empty ❯ is not one.
 			return false
-		case i > 0 && i+1 < len(lines) && claudeTrustFrameRule(lines[i-1]) && claudeTrustFrameRule(lines[i+1]):
-			// Between two rules, the way the composer frames its prompt, even
-			// as the last row painted (#7280).
+		case i > 0 && i+1 < len(lines) && claudeComposerRule(lines[i-1]) && claudeComposerRule(lines[i+1]):
+			// Between the composer's two rules, the way it frames its prompt,
+			// even as the last row painted (#7280).
 			return true
 		}
 		return !claudeFolderTrustOptionStarts(rows, i, lastPainted)
@@ -385,6 +417,16 @@ func claudeFolderTrustLabelRead(rows []claudeTrustRow, options, question, footer
 		labels = append(labels, rows[i].label)
 	}
 	return false, strings.Contains(strings.Join(labels, " "), claudeTrustAffirmativeLabel)
+}
+
+// claudeComposerRule reports whether line is a rule of the kind Claude Code
+// draws above and below its composer: horizontal strokes and nothing else
+// (testdata/claude_2_1_322_composer_after_mcp_decline.ansi). A box's corners
+// and tees ("╭──╮", "├──┤", "╰──╯") are a framed dialog's edges, not the
+// composer's (#7284 review, R5).
+func claudeComposerRule(line string) bool {
+	line = strings.TrimSpace(line)
+	return line != "" && strings.Trim(line, "─━═┄┈") == ""
 }
 
 // claudeFolderTrustOwnRun reports whether every row of the unbroken run holding
