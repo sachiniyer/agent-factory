@@ -1,0 +1,532 @@
+package session
+
+import (
+	"fmt"
+	"time"
+)
+
+// transitionKind enumerates the lifecycle events Transition accepts. Each maps
+// to exactly one guarded edge (family) in transitionTable.
+type transitionKind int
+
+const (
+	tkBeginCreate transitionKind = iota
+	tkConfirmLive
+	tkObserveLiveness
+	tkBeginKill
+	tkRevertKill
+	tkBeginArchive
+	tkCancelArchive
+	tkCommitArchive
+	tkAbortArchiveToLost
+	tkBeginRestore
+	tkAbortRestoreToLost
+	tkMarkRestoring
+	tkBeginRestoreFenced
+	tkBeginHandoff
+	tkCommitHandoff
+	tkParkHandoff
+	tkAbortHandoff
+	tkClearOp
+	tkBeginRespawn
+	numTransitionKinds
+)
+
+func (k transitionKind) String() string {
+	switch k {
+	case tkBeginCreate:
+		return "BeginCreate"
+	case tkConfirmLive:
+		return "ConfirmLive"
+	case tkObserveLiveness:
+		return "ObserveLiveness"
+	case tkBeginKill:
+		return "BeginKill"
+	case tkRevertKill:
+		return "RevertKill"
+	case tkBeginArchive:
+		return "BeginArchive"
+	case tkCancelArchive:
+		return "CancelArchive"
+	case tkCommitArchive:
+		return "CommitArchive"
+	case tkAbortArchiveToLost:
+		return "AbortArchiveToLost"
+	case tkBeginRestore:
+		return "BeginRestore"
+	case tkAbortRestoreToLost:
+		return "AbortRestoreToLost"
+	case tkMarkRestoring:
+		return "MarkRestoring"
+	case tkBeginRestoreFenced:
+		return "BeginRestoreUnderHeldFence"
+	case tkBeginHandoff:
+		return "BeginHandoff"
+	case tkCommitHandoff:
+		return "CommitHandoff"
+	case tkParkHandoff:
+		return "ParkHandoff"
+	case tkAbortHandoff:
+		return "AbortHandoff"
+	case tkClearOp:
+		return "ClearOp"
+	case tkBeginRespawn:
+		return "BeginRespawn"
+	}
+	return fmt.Sprintf("transitionKind(%d)", int(k))
+}
+
+// TransitionEvent is a lifecycle event handed to Instance.Transition. Construct
+// one with the exported constructors below; lv is meaningful only for
+// ObserveLiveness. epoch/epochScoped are set only by AtEpoch.
+type TransitionEvent struct {
+	kind         transitionKind
+	lv           Liveness
+	resetAt      time.Time
+	evidence     string
+	banner       LimitBanner
+	freshRuntime bool
+	epoch        uint64
+	epochScoped  bool
+	churnOnly    bool
+}
+
+// ChurnOnly marks a Running observation as inferred from pane churn alone, with
+// no in-turn indicator from the agent. A repainted composer (a typed draft) churns
+// the pane too, so such an observation moves the liveness but is not the agent
+// starting work, and it must not count as the user's answer to an attention
+// request. Use it only for an agent whose indicator the daemon can read
+// (task.PublishesWorkingContent); the evidence is reported separately through
+// AttentionAnsweredByWork.
+func (ev TransitionEvent) ChurnOnly() TransitionEvent {
+	ev.churnOnly = true
+	return ev
+}
+
+// AtEpoch scopes an event to the state epoch its decision was made at (#2135):
+// Transition applies it only while the instance is still at that epoch, and
+// silently DROPS it once a newer authoritative transition has moved the state on.
+// Use it wherever the event is a conclusion drawn from an observation taken
+// earlier — the daemon poll settling liveness from pane content it captured a
+// moment ago — so a decision about a state the session has already left cannot
+// overwrite the one it moved to. Events constructed without it are unscoped and
+// apply unconditionally, exactly as before. See session/state_epoch.go.
+func (ev TransitionEvent) AtEpoch(epoch uint64) TransitionEvent {
+	ev.epoch = epoch
+	ev.epochScoped = true
+	return ev
+}
+
+// BeginRespawn raises the OpRespawning fence for a limit resume re-spawning an
+// established session's runtime (#2997). Liveness is preserved.
+func BeginRespawn() TransitionEvent { return TransitionEvent{kind: tkBeginRespawn} }
+
+// BeginCreate overlays OpCreating for an optimistic create (was SetStatus(Loading)).
+func BeginCreate() TransitionEvent { return TransitionEvent{kind: tkBeginCreate} }
+
+// ConfirmLive marks a completed create/recover live — Running, op cleared (was
+// MarkLive). It YIELDS (no-op) when a kill/archive op is in flight, so a
+// completing spawn never resurrects a session a teardown owns.
+func ConfirmLive() TransitionEvent { return TransitionEvent{kind: tkConfirmLive} }
+
+// ObserveLiveness applies the daemon's authoritative liveness (was SetLiveness).
+// It is the unconditional daemon-truth edge: it sets liveness and preserves the
+// op axis, and never rejects — which is what keeps the #1187 strand impossible.
+func ObserveLiveness(lv Liveness) TransitionEvent {
+	return TransitionEvent{kind: tkObserveLiveness, lv: lv}
+}
+
+// BeginKill overlays OpKilling for an optimistic kill. It is always legal — a
+// kill is the terminal user intent and supersedes any in-flight op. I1
+// (tombstone-before-teardown) is NOT enforced here: the tombstone is a daemon-
+// side field the client optimistic overlay never has, and the daemon's
+// KillSession enforces I1 by ordering (MarkUserKilled before Instance.Kill)
+// while setting NO op (the snapshot stays pure liveness for out-of-band kills).
+func BeginKill() TransitionEvent { return TransitionEvent{kind: tkBeginKill} }
+
+// RevertKill clears an optimistic kill overlay (kill aborted / reverted).
+func RevertKill() TransitionEvent { return TransitionEvent{kind: tkRevertKill} }
+
+// BeginArchive raises the OpArchiving fence over an archive teardown+move (I4).
+func BeginArchive() TransitionEvent { return TransitionEvent{kind: tkBeginArchive} }
+
+// CancelArchive clears an archive fence before teardown changed the runtime or
+// worktree, preserving the liveness that was present when the fence was raised.
+func CancelArchive() TransitionEvent { return TransitionEvent{kind: tkCancelArchive} }
+
+// CommitArchive flips the session to the inert Archived state, started=false, on
+// a successful archive move (the daemon path). Reachable ONLY from the OpArchiving
+// fence (I2). The TUI's finalize is a separate unconditional projection-mirror
+// (SetArchived), not this fenced commit — it copies the daemon's already-committed
+// Archived state onto the read-only row, so it is not subject to I2.
+func CommitArchive() TransitionEvent { return TransitionEvent{kind: tkCommitArchive} }
+
+// AbortArchiveToLost rolls a failed archive move back to Lost so the restore
+// loop heals the agent in place.
+func AbortArchiveToLost() TransitionEvent { return TransitionEvent{kind: tkAbortArchiveToLost} }
+
+// BeginRestore enters the restore fence for a restorable session (I3): Lost +
+// OpRestoring (replaces RestoreFromArchive's "park in Lost" head).
+func BeginRestore() TransitionEvent { return TransitionEvent{kind: tkBeginRestore} }
+
+// BeginRestoreUnderHeldFence is BeginRestore for a caller that ALREADY holds the
+// restore fence over a longer interval than the re-spawn — the daemon's local
+// archived-restore route, which raises MarkRestoring at the top so the fence
+// covers the worktree relocate in front of it (#3596).
+//
+// It is a separate edge rather than a relaxed allowedFrom on tkBeginRestore
+// because that guard is doing real work: `op == OpNone` is what makes a
+// double-restore impossible (I3), and widening it to admit OpRestoring would
+// admit any restore already in flight, not merely this operation's own fence.
+// Naming the two entries separately keeps the strict edge strict.
+//
+// The target is identical — {LiveLost, OpRestoring} with started set — because
+// this IS BeginRestore; only the op it is entered from differs. The liveness edge
+// is still Archived -> Lost and still happens here, after the worktree is home,
+// so the #1203 reconcile rebuild keys on the same transition it always did.
+func BeginRestoreUnderHeldFence() TransitionEvent {
+	return TransitionEvent{kind: tkBeginRestoreFenced}
+}
+
+// AbortRestoreToLost drops a failed restore's fence to a plain Lost so the
+// #1108 loop retries against the now-restored worktree.
+func AbortRestoreToLost() TransitionEvent { return TransitionEvent{kind: tkAbortRestoreToLost} }
+
+// MarkRestoring overlays OpRestoring WITHOUT touching liveness — the TUI's
+// optimistic restore action. It keeps whatever liveness the row had (the target
+// is {s.liveness, OpRestoring}), unlike BeginRestore, the daemon edge, which
+// flips to Lost. For the common archived→restore that means liveness stays
+// Archived, so the reconcile still sees the Archived→live transition and rebuilds
+// the row (#1203) while ShownArchived re-homes it into the live section eagerly
+// (#1210). handleRestore also offers `r` on Lost/Dead rows, where this preserves
+// that liveness instead.
+func MarkRestoring() TransitionEvent { return TransitionEvent{kind: tkMarkRestoring} }
+
+// BeginHandoff raises the OpReplacing fence before the outgoing pane is touched.
+func BeginHandoff() TransitionEvent { return TransitionEvent{kind: tkBeginHandoff} }
+
+// CommitHandoff settles a successfully launched incoming agent as Running.
+func CommitHandoff() TransitionEvent { return TransitionEvent{kind: tkCommitHandoff} }
+
+// ParkHandoff settles an incoming agent that launched but reached its own usage
+// limit before the takeover mission could be delivered. evidence is the reset
+// phrase the detector consumed to produce resetAt (#6765): the send-path park's
+// parse is the first parse of the banner, so its phrase must accompany its
+// reset to keep the daemon's first poll from re-parsing against a later clock.
+// banner is the sighting's anchor (#6823), recorded so a later clipped re-read
+// of this banner is told apart from a wall printed after it.
+func ParkHandoff(resetAt time.Time, evidence string, banner LimitBanner) TransitionEvent {
+	return TransitionEvent{kind: tkParkHandoff, resetAt: resetAt, evidence: evidence, banner: banner}
+}
+
+// OnFreshRuntime marks the handoff park's sighting as read off a pane the row
+// had never seen before — the just-spawned incoming runtime, not the pane a
+// retry re-reads. A fresh pane's emission is new wall evidence no recorded
+// claim may veto (#6959): the parked wall's shadow still names the retired
+// runtime's banner, and a coincidentally identical phrase at the same anchor
+// on the new pane is the wall's current claim, not a stale re-parse. The
+// plain constructor stays for the same-pane retry and the stored-claim
+// re-park, whose sighting IS the recorded wall's re-read.
+func (ev TransitionEvent) OnFreshRuntime() TransitionEvent {
+	ev.freshRuntime = true
+	return ev
+}
+
+// AbortHandoff drops a replacement fence whose runtime swap did not complete.
+func AbortHandoff() TransitionEvent { return TransitionEvent{kind: tkAbortHandoff} }
+
+// ClearOp drops any in-flight optimistic op back to None, leaving liveness
+// untouched — the client-projection bookkeeping for when an optimistic op's
+// outcome is confirmed by the reconcile or the op's RPC failed and the overlay
+// must revert to the underlying daemon liveness.
+func ClearOp() TransitionEvent { return TransitionEvent{kind: tkClearOp} }
+
+// stateAxes is the two-axis lifecycle state a transition reads and writes.
+type stateAxes struct {
+	liveness Liveness
+	op       InFlightOp
+}
+
+// startedEffect is a transition's effect on the started flag: most transitions
+// leave it to the teardown/spawn machinery, but two own it — CommitArchive
+// clears it (the inert Archived state has no tmux behind it) and BeginRestore
+// sets it (mirroring RestoreFromArchive, whose head flips started=true before
+// Recover so the re-spawn is eligible — Recover's !Started() gate would
+// otherwise short-circuit and the restore would silently never start).
+type startedEffect int
+
+const (
+	startedUnchanged startedEffect = iota
+	startedSet                     // started = true (BeginRestore)
+	startedClear                   // started = false (CommitArchive)
+)
+
+// runEffect is a transition's effect on the task-run marker (#1892):
+// Instance.taskRunActive, "is the run this session was spawned for still in
+// flight?", which is the one fact the watch-task concurrency cap counts.
+//
+// It is declared PER TRANSITION, in the table, rather than derived from the
+// resulting state — and that is the whole point. The marker has been wrong four
+// times, each time at a transition nobody had asked the question about:
+// completion, archive-failure, the Lost→Running race, and archive-commit. Every
+// one was the same question — "at THIS transition, does the run still own a
+// slot?" — and the answer kept being reconstructed from whatever neighbouring
+// state was nearby. A fact only helps if its lifecycle covers every edge the thing
+// can take, so every kind names its effect here and the exhaustiveness test
+// (TestTransitionTable_EveryKindHasSpec) rejects a row that does not. A new
+// transition cannot be added without answering the question.
+//
+// The zero value is deliberately INVALID: omission must fail loudly, not default
+// to "keep" and become door number five.
+type runEffect int
+
+const (
+	// runEffectUnset is the zero value: no answer given. Always a bug.
+	runEffectUnset runEffect = iota
+	// runKeep: this transition says nothing about whether the run is in flight.
+	// The marker carries whatever it already held.
+	runKeep
+	// runEndsOnIdleEdge: this transition ends the run IF it settles the AGENT idle.
+	// Only the daemon-truth edge (ObserveLiveness) can do that — every other kind
+	// either targets a fixed non-Ready liveness or leaves liveness alone.
+	//
+	// The EDGE is what matters, not the resulting state: a session is born
+	// LiveReady before its agent has ever run, so "liveness == LiveReady" alone
+	// would end the run at birth. It ends only on a transition INTO Ready from
+	// somewhere else, which is the agent finishing its turn.
+	//
+	// Deliberately keyed on the LIVENESS axis and not on ClassifyActivity: an
+	// agent that goes idle while the daemon happens to be archiving it is idle —
+	// its run is over — even though ClassifyActivity calls the in-flight op
+	// pending. That conflation is what let a finished run reclaim a slot through
+	// the archive door.
+	runEndsOnIdleEdge
+	// runEnds: this transition ends the run outright, whatever the agent was doing.
+	// CommitArchive only: a committed archive is the user deliberately shelving the
+	// session. Its slot is already released (an Archived session is not restorable
+	// in place), and the run must not come back — otherwise a later RestoreArchived
+	// re-enters via BeginRestore/ConfirmLive, the old run counts again, and the cap
+	// is exceeded by however many events took its slot in the meantime.
+	//
+	// The distinction against AbortArchiveToLost is exact: teardown that SUCCEEDS
+	// ends the run; teardown that FAILS leaves the run exactly as interrupted as it
+	// was, for the restore loop to heal in place.
+	runEnds
+)
+
+type limitResetEffect int
+
+const (
+	limitResetKeep limitResetEffect = iota
+	limitResetClear
+	limitResetFromEvent
+)
+
+// edgeSpec is one row of the allowed-edge table: which from-states an event is
+// legal from, the resulting state, and the event's side effects.
+type edgeSpec struct {
+	// allowedFrom reports whether the event is legal from state s.
+	allowedFrom func(s stateAxes) bool
+	// target computes the resulting state (ev carries ObserveLiveness's lv).
+	target func(s stateAxes, ev TransitionEvent) stateAxes
+	// started is the transition's effect on the started flag (default: leave it
+	// to the teardown/spawn machinery).
+	started startedEffect
+	// run is the transition's effect on the task-run marker (#1892). Required —
+	// the zero value is invalid and the exhaustiveness test rejects it, so a new
+	// transition must state whether the run it lands in is still in flight.
+	run runEffect
+	// limitReset owns reset metadata only on edges that replace the provider
+	// state it described. Most transitions preserve the hidden value;
+	// LimitResetAt exposes it only while LiveLimitReached.
+	limitReset limitResetEffect
+	// yieldWhenBlocked makes an out-of-set from-state a silent no-op instead of a
+	// rejection — for the daemon-truth edge (ObserveLiveness is always allowed)
+	// and ConfirmLive (yields to an in-flight teardown rather than fighting it).
+	yieldWhenBlocked bool
+}
+
+// transitionTable is the allowed-edge table — the single declarative source of
+// truth for which (liveness, op) → (liveness, op) transitions are legal. Every
+// enforcement of I1–I4 lives here as a from-state predicate, not as a guard
+// scattered across the daemon/app call sites.
+var transitionTable = map[transitionKind]edgeSpec{
+	// A limit resume re-spawning an established session's runtime (#2997). It
+	// preserves liveness — the session is still the limit-blocked one the resume
+	// validated against, and the resume's own precondition must survive its own
+	// operation — and requires OpNone so it cannot start under a teardown.
+	tkBeginRespawn: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpRespawning} },
+		// Re-spawning a runtime continues the session's run; it neither opens nor
+		// closes one.
+		run: runKeep,
+	},
+	tkBeginCreate: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpCreating} },
+		// The run is beginning, not ending. NewInstance already opened it.
+		run: runKeep,
+	},
+	tkConfirmLive: {
+		allowedFrom: func(s stateAxes) bool {
+			return s.op == OpNone || s.op == OpCreating || s.op == OpRestoring || s.op == OpRespawning
+		},
+		target: func(s stateAxes, _ TransitionEvent) stateAxes {
+			if s.op == OpRespawning {
+				// A limit resume is NOT over when its runtime comes up (#2997). It still has
+				// to re-park this episode's limit window and deliver the queued prompt, and
+				// clearing the fence here would unfence exactly that stretch: the poll would
+				// see a freshly spawned, still-idle agent, settle it Ready, and END THE TASK
+				// RUN — taskRunActive only ever goes true→false — so the prompt would land on
+				// a session no longer counted against the watch-task concurrency cap. The
+				// resume's own EndLimitResume lowers it once the prompt has landed.
+				return stateAxes{LiveRunning, OpRespawning}
+			}
+			return stateAxes{LiveRunning, OpNone}
+		},
+		yieldWhenBlocked: true,
+		// A spawn completing says the agent is up, not that its work is done. It
+		// cannot REOPEN a finished run either: the marker only ever goes true→false,
+		// so a restored archive (whose commit ended the run) stays ended here.
+		run: runKeep,
+	},
+	tkObserveLiveness: {
+		allowedFrom: func(stateAxes) bool { return true },
+		target:      func(s stateAxes, ev TransitionEvent) stateAxes { return stateAxes{ev.lv, s.op} },
+		// The ONLY kind that can settle the agent idle, and therefore the only one
+		// that can end a run naturally. Running/LimitReached/Lost → Ready ends it;
+		// every other observed liveness (Running, LimitReached, Lost, Dead) leaves it
+		// alone — Lost in particular must not decide anything, since a finished and an
+		// interrupted run are indistinguishable once lost.
+		run: runEndsOnIdleEdge,
+	},
+	tkBeginKill: {
+		// Always legal: a kill supersedes any in-flight op (see BeginKill doc). I1
+		// is enforced by the daemon KillSession ordering, not this overlay.
+		allowedFrom: func(stateAxes) bool { return true },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpKilling} },
+		// A kill is an optimistic overlay that can be REVERTED (RevertKill), so it
+		// must not end the run — a reverted kill would otherwise leave a live run
+		// permanently uncounted. The slot is released anyway while the kill is on
+		// record (the tombstone fences canAutoRestoreLostSession) and for good when
+		// the record is deleted, so nothing is over-held.
+		run: runKeep,
+	},
+	tkRevertKill: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpKilling },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		// The kill was called off: the run is whatever it was before it.
+		run: runKeep,
+	},
+	tkBeginArchive: {
+		// Any non-archived session with no op in flight may be archived — matching
+		// the daemon's guards, which reject only an already-archived or busy
+		// session (a Lost / LimitReached session is archivable: shelving it tears
+		// down whatever tmux remains and moves the worktree out). I4 is the fence
+		// itself, not a liveness restriction.
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone && s.liveness != LiveArchived },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpArchiving} },
+		// Raising the fence decides nothing: the archive may still commit (run ends)
+		// or abort back to Lost (run continues). Only the outcome answers.
+		run: runKeep,
+	},
+	tkCancelArchive: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		// Nothing behind the archive fence changed, so the task run remains
+		// exactly what it was before the attempted archive.
+		run: runKeep,
+	},
+	tkCommitArchive: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveArchived, OpNone} },
+		started:     startedClear,
+		// The archive SUCCEEDED: the user shelved this session and its slot is gone.
+		// End the run permanently, or a later RestoreArchived re-enters through
+		// BeginRestore/ConfirmLive and the old run counts again — on top of whatever
+		// events already took its slot.
+		run: runEnds,
+	},
+	tkAbortArchiveToLost: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpArchiving },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpNone} },
+		// The archive FAILED and the restore loop will heal the agent in place, so
+		// the run is exactly as interrupted as it was when the archive began — no
+		// more, no less. If it had already finished, the marker is already false and
+		// this must not resurrect it.
+		run: runKeep,
+	},
+	tkBeginRestore: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone && s.liveness == LiveArchived },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpRestoring} },
+		// started=true mirrors RestoreFromArchive: Recover's !Started() gate would
+		// otherwise short-circuit and the restore would never start (Greptile #1314).
+		started: startedSet,
+		// Only reachable from Archived, whose commit already ended the run. Un-shelving
+		// a session gives the user their workspace back; it does not re-open the task's
+		// run, and must not re-take the task's slot.
+		run: runKeep,
+	},
+	tkBeginRestoreFenced: {
+		// The held-fence entry (#3596). Same edge as tkBeginRestore in every respect
+		// but the op it is legal from: the caller raised OpRestoring before the
+		// worktree relocate, so the row arrives here already fenced.
+		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveArchived },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpRestoring} },
+		started:     startedSet,
+		run:         runKeep,
+	},
+	tkAbortRestoreToLost: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpRestoring && s.liveness == LiveLost },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLost, OpNone} },
+		// A failed restore changes nothing about the run it was trying to bring back.
+		run: runKeep,
+	},
+	tkMarkRestoring: {
+		// Optimistic restore overlay: op None -> OpRestoring, liveness UNCHANGED
+		// (the reconcile keys its rebuild on the still-Archived liveness, #1203).
+		allowedFrom: func(s stateAxes) bool { return s.op == OpNone },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpRestoring} },
+		// A TUI-side optimistic overlay on a read-only projection. It owns no durable
+		// state and the daemon never counts caps off it.
+		run: runKeep,
+	},
+	tkBeginHandoff: {
+		allowedFrom: func(s stateAxes) bool {
+			return s.op == OpNone && (s.liveness == LiveRunning || s.liveness == LiveReady || s.liveness == LiveLimitReached)
+		},
+		target: func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpReplacing} },
+		// Replacement continues the same task run under another agent.
+		run: runKeep,
+	},
+	tkCommitHandoff: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpReplacing },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveRunning, OpNone} },
+		run:         runKeep,
+		limitReset:  limitResetClear,
+	},
+	tkParkHandoff: {
+		allowedFrom: func(s stateAxes) bool { return s.op == OpReplacing },
+		target:      func(stateAxes, TransitionEvent) stateAxes { return stateAxes{LiveLimitReached, OpNone} },
+		// The incoming runtime exists but cannot accept its mission yet. Parking
+		// continues the same task run; resume will deliver the pending mission.
+		run:        runKeep,
+		limitReset: limitResetFromEvent,
+	},
+	tkAbortHandoff: {
+		allowedFrom:      func(s stateAxes) bool { return s.op == OpReplacing },
+		target:           func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		yieldWhenBlocked: true, // a terminal kill may supersede the replacement
+		run:              runKeep,
+	},
+	tkClearOp: {
+		// Clearing an optimistic overlay back to None is always valid — it never
+		// resurrects or teardown-clobbers (liveness is untouched).
+		allowedFrom: func(stateAxes) bool { return true },
+		target:      func(s stateAxes, _ TransitionEvent) stateAxes { return stateAxes{s.liveness, OpNone} },
+		// Dropping an overlay reveals the liveness underneath; it does not change what
+		// the agent was doing.
+		run: runKeep,
+	},
+}
