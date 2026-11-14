@@ -44,6 +44,24 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the footer cut short", question + options + "\nEnter to con\n", claudeFolderTrustPartial},
 		{"the question quoted with prose below and no composer", "The docs ask: \"Is this a project you created or one you trust?\"\nHere is a summary.\n", claudeFolderTrustPartial},
 
+		// Partial too: a repaint after af's own Down caught half done, with the
+		// footer still painted (#7280, item 1).
+		{"the affirmative row erased mid-repaint", question + "❯ No, exit\n\n" + footer, claudeFolderTrustPartial},
+		{"the affirmative row erased with the cursor", question + "  No, exit\n\n" + footer, claudeFolderTrustPartial},
+		{"the ❯ row half-written mid-repaint", question + "  No, exit\n❯ Yes, I tr\n" + footer, claudeFolderTrustPartial},
+
+		// Partial too: a ❯ above the question is not the agent's composer
+		// below the dialog, so the dialog holds and is never answered
+		// (#7280, item A).
+		{"a ❯ above the question", "❯ hello\n" + question + options + footer, claudeFolderTrustPartial},
+		{"a composer above the dialog", composer + question + options + footer, claudeFolderTrustPartial},
+
+		// Partial too: a ❯ row cut short of one of the dialog's own labels is
+		// the dialog's, never a composer (#7280, item B).
+		{"a ❯ row cut short of an option label below the options", question + options + "\n❯ No, ex\n" + footer, claudeFolderTrustPartial},
+		// A ❯ draft that reads like the footer is no footer (#7280, item D).
+		{"a ❯ draft reading like the footer, straight under the options", question + options + "❯ Enter to confirm · Esc to cancel\n", claudeFolderTrustPartial},
+
 		// Partial too: a row the dialog does not paint, in or below its footer
 		// slot, with no composer below to show a working agent. The live
 		// dialog can paint one (#7275 review, R1).
@@ -68,6 +86,12 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"the affirmative label wrapped", question + "❯ No, exit\n  Yes, I trust this\n  folder\n" + footer, claudeFolderTrustUnreadable},
 		{"the cursor on the wrapped label", question + "  No, exit\n❯ Yes, I trust this\n  folder\n" + footer, claudeFolderTrustUnreadable},
 		{"the footer wrapped", question + options + "\nEnter to confirm · Esc to\ncancel\n", claudeFolderTrustUnreadable},
+		// Unreadable too: the question scrolled off the top of a pane too
+		// short for the dialog, its own option block and footer the last
+		// content (#7280, item 2).
+		{"the question scrolled off the top", "  your own code, a well-known open source project.\n\n  Claude Code'll be able to read files here.\n\n" + options + footer, claudeFolderTrustUnreadable},
+		{"the question scrolled off, the box closed above the footer", "│ your own code. │\n│ │\n│ ❯ 1. No, exit │\n│   2. Yes, I trust this folder │\n│ │\n╰──────────╯\n   Enter to confirm · Esc to exit\n", claudeFolderTrustUnreadable},
+		{"only the options and the footer on screen", options + footer, claudeFolderTrustUnreadable},
 
 		// None: the agent's composer below the dialog's text — its ❯ prompt
 		// row, or the boxed composer's "> " row under its rule — or no dialog
@@ -79,11 +103,24 @@ func TestClaudeFolderTrustDialogOf(t *testing.T) {
 		{"quoted with the composer straight below the footer", question + options + "\nEnter to confirm · Esc to cancel\n❯ draft\n", claudeFolderTrustNone},
 		{"the question above a composer draft", question + "❯ I will select \"Yes, I trust this folder\" for you\n", claudeFolderTrustNone},
 		{"the question above the composer's rule", question + composer, claudeFolderTrustNone},
-		{"a ❯ above the question", "❯ hello\n" + question + options + footer, claudeFolderTrustNone},
+		{"a composer above and below the dialog", composer + question + options + footer + composer, claudeFolderTrustNone},
+		{"an empty ❯ row below the options is still the composer", question + options + "\n❯\n" + footer, claudeFolderTrustNone},
+		// #7280, item C: a ❯ row between two rules is the composer, even as the
+		// last row painted.
+		{"a quote ending in the composer between its rules", question + options + footer + "────────\n❯ \n────────\n", claudeFolderTrustNone},
+		// #7280, item D: a ❯ row is never the footer, so the rule above it is
+		// no closing frame, and the row between rules is the composer.
+		{"a ❯ draft reading like the footer, between rules", question + options + "\n────────\n❯ Enter to confirm · Esc to cancel\n────────\n", claudeFolderTrustNone},
+		// #7280, item 2: a pane without the question holds only on the
+		// dialog's own rows, with nothing above them that the dialog does not
+		// paint.
+		{"the question scrolled off, quoted above the composer", "  your own code.\n\n" + options + footer + composer, claudeFolderTrustNone},
+		{"the question scrolled off, a ❯ above the options", "❯ hello\n  your own code.\n\n" + options + footer, claudeFolderTrustNone},
+		{"the question scrolled off, a rule above the options", "────────\n  your own code.\n\n" + options + footer, claudeFolderTrustNone},
+		{"options and a footer without the affirmative", "  some text\n\n❯ No, exit\n  No, and don't ask again\n" + footer, claudeFolderTrustNone},
 		{"the question in a composer draft", "────\n❯ Is this a project you created or one you trust?\n  Yes, I trust this folder\n────\n", claudeFolderTrustNone},
 		{"another dialog's options under the question", question + "❯ Use this MCP server\n  Continue without using this MCP server\n" + footer, claudeFolderTrustNone},
 		{"the legacy dialog", "Do you trust the files in this folder?\n❯ Yes  No\n", claudeFolderTrustNone},
-		{"no question", options + footer, claudeFolderTrustNone},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			require.Equal(t, tt.want, claudeFolderTrustDialogOf(visibleTextOf(tt.content)), "\n%s", tt.content)

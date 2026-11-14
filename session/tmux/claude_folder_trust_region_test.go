@@ -58,8 +58,34 @@ type syntheticFolderTrustFrame struct {
 	// the footer's first row.
 	cursorRow, footerRow int
 	// readable is whether every row af reads by — the question, each option,
-	// the footer — fits on one pane row at this width.
+	// the footer — fits on one pane row at this width, and is on screen.
 	readable bool
+	// contentRows is how many rows the dialog paints, before the pane's blank
+	// rows below it.
+	contentRows int
+}
+
+// syntheticPane fits a frame into a pane height rows tall, the way a terminal
+// shows output taller than itself: the dialog's last rows stay at the bottom
+// and its top scrolls off (#7280). A shorter dialog keeps its blank rows below.
+// readable then also requires the question to be on screen.
+func syntheticPane(frame syntheticFolderTrustFrame, height int) syntheticFolderTrustFrame {
+	lines := strings.Split(strings.TrimSuffix(frame.text, "\n"), "\n")[:frame.contentRows]
+	if over := len(lines) - height; over > 0 {
+		lines = lines[over:]
+		frame.cursorRow -= over
+		frame.footerRow -= over
+	}
+	for len(lines) < height {
+		lines = append(lines, "")
+	}
+	frame.text = strings.Join(lines, "\n") + "\n"
+	var visible []string
+	for _, line := range lines {
+		visible = append(visible, strings.TrimSpace(syntheticTerminalEscape.ReplaceAllString(line, "")))
+	}
+	frame.readable = frame.readable && strings.Contains(strings.Join(visible, " "), syntheticFolderTrustQuestion)
+	return frame
 }
 
 // syntheticWrap breaks text into rows of at most width cells at spaces, the
@@ -183,6 +209,7 @@ func renderSyntheticClaudeFolderTrust(width int, options []string, selected int,
 	for _, row := range footer {
 		emit("  " + styled(row, "\x1b[3m\x1b[38;5;246m", "\x1b[0m"))
 	}
+	frame.contentRows = len(lines)
 	// The measured captures end in the pane's blank rows, with no reset.
 	for len(lines) < 24 {
 		lines = append(lines, "")
@@ -236,13 +263,116 @@ func TestSyntheticClaudeWrapMatchesMeasuredCaptures(t *testing.T) {
 	}
 }
 
+// The model carries each styled row's last close onto the start of the NEXT
+// painted row, as tmux serializes it, so the stripped text is not the only
+// thing the model gets right (#7280, item 3). The measured 2.1.322 capture
+// opens its title row with the rule's close, its first body row with the
+// title's, and its footer with the ❯ row's.
+func TestSyntheticClaudeCarriedSGRMatchesMeasuredCapture(t *testing.T) {
+	opening := regexp.MustCompile(`^(?:\x1b\[[0-?]*[ -/]*[@-~])*`)
+	footerOf := func(lines []string) int {
+		for i, line := range lines {
+			if strings.Contains(syntheticTerminalEscape.ReplaceAllString(line, ""), "Enter to confirm") {
+				return i
+			}
+		}
+		return -1
+	}
+	measured := strings.Split(readTrustFixture(t, mcpServerDialogFixture), "\n")
+	frame := renderSyntheticClaudeFolderTrust(80, []string{claudeTrustNoLabel, claudeTrustYesLabel}, 1, "")
+	synthetic := strings.Split(frame.text, "\n")
+	for _, tt := range []struct {
+		name string
+		row  func([]string) int
+		want string
+	}{
+		{"the rule's close opens the title row", func([]string) int { return 2 }, "\x1b[39m"},
+		{"the title's close opens the next painted row", func([]string) int { return 4 }, "\x1b[0m"},
+		{"the ❯ row's close opens the footer", footerOf, "\x1b[39m"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			require.Equal(t, tt.want, opening.FindString(measured[tt.row(measured)]), "precondition: the measured capture")
+			require.Equal(t, tt.want, opening.FindString(synthetic[tt.row(synthetic)]), "the synthetic model")
+		})
+	}
+}
+
+// Frames from #7280 that read clear where master held, or held where the
+// agent's composer shows a working agent. Every one sends no key: the ones in
+// the way hold, and only a composer below the dialog's options reads clear.
+func TestCheckAndHandleTrustPrompt_FolderTrustOddFrames(t *testing.T) {
+	frame := renderSyntheticClaudeFolderTrust(80, []string{claudeTrustNoLabel, claudeTrustYesLabel}, 0, "")
+	lines := strings.Split(frame.text, "\n")
+	through := func(row int) string { return strings.Join(lines[:row], "\n") + "\n" }
+	from := func(row int) string { return strings.Join(lines[row:], "\n") }
+	dialog := strings.TrimRight(frame.text, "\n") + "\n"
+	const composer = "\x1b[38;5;244m────────────────────────────────────────\n\x1b[39m❯\u00a0\x1b[7m \n\x1b[0m\x1b[38;5;244m────────────────────────────────────────\n"
+	for _, tt := range []struct {
+		name, content string
+		inTheWay      bool
+	}{
+		// Item 1: af's Down caught mid-repaint, the footer still painted.
+		{"the affirmative row erased", through(frame.cursorRow+1) + "\n" + from(frame.cursorRow+2), true},
+		{"the ❯ row half-written", through(frame.cursorRow) + "    No, exit\n  \x1b[38;5;153m❯\x1b[39m \x1b[38;5;153mYes,\x1b[39m \x1b[38;5;153mI\x1b[39m \x1b[38;5;153mtr\n" + from(frame.cursorRow+2), true},
+		// Item A: a ❯ above the question is no composer below the dialog.
+		{"a composer above the dialog", composer + "  ? for shortcuts\n" + dialog, true},
+		{"a composer above and below the dialog", composer + "  ? for shortcuts\n" + dialog + composer + "  ? for shortcuts\n", false},
+		// Item B: a ❯ row cut short of an option label is the dialog's.
+		{"a ❯ row cut short of an option label", through(frame.footerRow) + "  ❯ No, ex\n\n" + from(frame.footerRow), true},
+		{"an empty ❯ row is still the composer", through(frame.footerRow) + "  ❯\n\n" + from(frame.footerRow), false},
+		// Item C: a ❯ between two rules is the composer, last row or not.
+		{"a quote ending in the composer between its rules", dialog + composer, false},
+		// Item D: a ❯ row is no footer, so the rule above it is no closing frame.
+		{"a ❯ draft reading like the footer, between rules", through(frame.footerRow) + "────────\n❯ Enter to confirm · Esc to cancel\n────────\n", false},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handled, cmds := pollStaticPane(t, tt.content, 4)
+			require.Equal(t, tt.inTheWay, handled, "\n%s", syntheticTerminalEscape.ReplaceAllString(tt.content, ""))
+			require.Empty(t, sentKeystrokes(cmds), "no key may be sent; got %v", cmds)
+		})
+	}
+}
+
 // Every width af can be given, from a phone client's narrow pane to a wide
-// terminal: a dialog whose rows fit is answered by label, and one whose rows
-// wrap is held — reported in the way, sent nothing, and its refusal logged once.
-// Before #7271, every width that wraps the question failed open: the check
-// reported the pane clear and the create typed the prompt into the modal.
+// terminal, in a pane 24 rows tall: a dialog whose rows fit is answered by
+// label, and one whose rows wrap — or whose question a narrow pane pushes off
+// the top (#7280) — is held: reported in the way, sent nothing, and its refusal
+// logged once. Before #7271, every width that wraps the question failed open:
+// the check reported the pane clear and the create typed the prompt into the
+// modal.
 func TestCheckAndHandleTrustPrompt_FolderTrustAtEveryPaneWidthIsAnsweredOrHeld(t *testing.T) {
-	for width := 24; width <= 120; width++ {
+	requireFolderTrustAnsweredOrHeld(t, func(yield func(width, height int) bool) {
+		for width := 24; width <= 120; width++ {
+			if !yield(width, 24) {
+				return
+			}
+		}
+	})
+}
+
+// A pane too short for the dialog scrolls its question off the top — a phone
+// in landscape with its keyboard up is about 11 rows (#7280). The dialog still
+// owns the pane: its own option block and footer are the last content, which a
+// quote never has, since its composer is below. So it holds, and its refusal
+// is logged once; a pane tall enough to show the question is answered.
+func TestCheckAndHandleTrustPrompt_FolderTrustInAShortPaneIsAnsweredOrHeld(t *testing.T) {
+	requireFolderTrustAnsweredOrHeld(t, func(yield func(width, height int) bool) {
+		for _, width := range []int{80, 120} {
+			for height := 5; height <= 24; height++ {
+				if !yield(width, height) {
+					return
+				}
+			}
+		}
+	})
+}
+
+// requireFolderTrustAnsweredOrHeld drives the synthetic dialog at each pane
+// size: answered by label when every row af reads by is on screen whole, held
+// otherwise, and never reported clear.
+func requireFolderTrustAnsweredOrHeld(t *testing.T, sizes func(yield func(width, height int) bool)) {
+	t.Helper()
+	for width, height := range sizes {
 		for _, tt := range []struct {
 			name     string
 			selected int
@@ -252,9 +382,9 @@ func TestCheckAndHandleTrustPrompt_FolderTrustAtEveryPaneWidthIsAnsweredOrHeld(t
 			{"Yes selected", 1, []string{"Enter"}},
 		} {
 			options := []string{claudeTrustNoLabel, claudeTrustYesLabel}
-			frame := renderSyntheticClaudeFolderTrust(width, options, tt.selected, "")
-			t.Run(fmt.Sprintf("%d columns, %s", width, tt.name), func(t *testing.T) {
-				pane := &claudeFolderTrustPane{options: options, selected: tt.selected, width: width}
+			frame := syntheticPane(renderSyntheticClaudeFolderTrust(width, options, tt.selected, ""), height)
+			t.Run(fmt.Sprintf("%dx%d, %s", width, height, tt.name), func(t *testing.T) {
+				pane := &claudeFolderTrustPane{options: options, selected: tt.selected, width: width, height: height}
 				if frame.readable {
 					keys := driveClaudeTrustPane(t, pane, 6)
 					require.Equal(t, []string{claudeTrustYesLabel}, pane.committedLabels(),

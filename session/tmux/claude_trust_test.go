@@ -69,6 +69,9 @@ type claudeFolderTrustPane struct {
 	// layout at that pane width instead (renderSyntheticClaudeFolderTrust),
 	// wrapping its rows the way Claude Code's renderer does in a narrow pane.
 	width int
+	// height, with width, fits that layout into a pane this many rows tall
+	// (syntheticPane): a dialog taller than the pane scrolls its top off.
+	height int
 	// link wraps one word of the question and one of the affirmative label in
 	// an OSC 8 hyperlink terminated by this sequence (ST or BEL), in the width
 	// layout only.
@@ -107,7 +110,11 @@ func (p *claudeFolderTrustPane) freeze(frozen bool) {
 
 func (p *claudeFolderTrustPane) render() string {
 	if p.width > 0 {
-		return renderSyntheticClaudeFolderTrust(p.width, p.options, p.selected, p.link).text
+		frame := renderSyntheticClaudeFolderTrust(p.width, p.options, p.selected, p.link)
+		if p.height > 0 {
+			frame = syntheticPane(frame, p.height)
+		}
+		return frame.text
 	}
 	var b strings.Builder
 	write := func(line string) {
