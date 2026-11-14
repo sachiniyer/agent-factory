@@ -93,7 +93,13 @@ func TestResolveForCompareWith_ReportsALookupThatDidNotHappen(t *testing.T) {
 				}
 				return p, nil
 			}
-			got, err := ResolveForCompareWith(path, eval)
+			lstat := func(p string) (os.FileInfo, error) {
+				if p == path {
+					return nil, &os.PathError{Op: "lstat", Path: p, Err: syscall.ENOENT}
+				}
+				return nil, nil
+			}
+			got, err := ResolveForCompareWith(path, eval, lstat)
 			if got != path {
 				t.Errorf("the walk's path is unchanged: got %q, want %q", got, path)
 			}
@@ -104,5 +110,50 @@ func TestResolveForCompareWith_ReportsALookupThatDidNotHappen(t *testing.T) {
 				t.Errorf("a failed lookup is reported: got %v, want %v", err, tc.fail)
 			}
 		})
+	}
+}
+
+// TestResolveForCompareWith_ADanglingComponentIsNoAnswer pins #7295: a symlink
+// whose target is gone resolves as absent, but the link is still there, and
+// the kernel spelled the path through its target, not its lexical name. So the
+// rejoin past it is reported, for a dangling leaf and a dangling middle
+// component alike. A component proven absent is still an answer. A link
+// removed outright leaves nothing to see, and is the documented residual.
+func TestResolveForCompareWith_ADanglingComponentIsNoAnswer(t *testing.T) {
+	base, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	store := filepath.Join(base, "store")
+	wt := filepath.Join(base, "wt")
+	for _, dir := range []string{store, wt} {
+		if err := os.Mkdir(dir, 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// wt/leaf -> store/leaf and wt/mid -> store/mid, both targets missing.
+	for _, name := range []string{"leaf", "mid"} {
+		if err := os.Symlink(filepath.Join(store, name), filepath.Join(wt, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	for _, path := range []string{filepath.Join(wt, "leaf"), filepath.Join(wt, "mid", "repo")} {
+		got, err := ResolveForCompareWith(path, filepath.EvalSymlinks, os.Lstat)
+		if !errors.Is(err, ErrUnresolvedComponent) {
+			t.Errorf("ResolveForCompareWith(%q) err = %v, want ErrUnresolvedComponent", path, err)
+		}
+		if got != path {
+			t.Errorf("the walk's path is unchanged: got %q, want %q", got, path)
+		}
+	}
+	if _, err := ResolveForCompareWith(filepath.Join(wt, "gone", "repo"), filepath.EvalSymlinks, os.Lstat); err != nil {
+		t.Errorf("components proven absent are an answer, got %v", err)
+	}
+	// The residual: remove the link, and nothing tells the walk it was there.
+	if err := os.Remove(filepath.Join(wt, "leaf")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ResolveForCompareWith(filepath.Join(wt, "leaf"), filepath.EvalSymlinks, os.Lstat); err != nil {
+		t.Errorf("a removed link leaves nothing to see, got %v", err)
 	}
 }

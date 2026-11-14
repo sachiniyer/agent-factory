@@ -23,16 +23,18 @@ var resolveForCompareFlights = &flightRegistry{byDir: map[string]*probeFlight{}}
 // gives, and a retry while the stuck walk is still blocked is refused the same
 // way. A walk that answered but fell back past a lookup that failed for any
 // reason other than absence (pathutil.ResolveForCompareWith: EIO, ESTALE,
-// EACCES…) is no resolution either, and returns that error (#7286). Either way
+// EACCES…), or past a component that is still there such as a dangling
+// symlink (#7295), is no resolution either, and returns that error. Either way
 // it is "could not look", never a resolution: the caller chooses its own
 // fallback, and the resolved string is empty.
 func ResolveForCompare(path string) (string, error) {
 	path = filepath.Clean(path)
 	resolve := evalSymlinksPath.load() // in the caller, as ReadDir's
+	lstat := lstatPath.load()
 	res, err := runBounded(path, resolveForCompareFlights, "path resolution",
 		"the filesystem did not answer the symlink resolution",
 		func() (any, error) {
-			resolved, err := pathutil.ResolveForCompareWith(path, resolve)
+			resolved, err := pathutil.ResolveForCompareWith(path, resolve, lstat)
 			if err != nil {
 				return nil, fmt.Errorf("resolving %s: a lookup failed, so the walk past it is a guess: %w", path, err)
 			}
